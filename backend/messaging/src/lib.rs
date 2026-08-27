@@ -232,6 +232,80 @@ pub fn configured_channels_for_kind(app_config: &Arc<AppConfig>, kind: MsgKind) 
         None => Vec::new(),
     }
 }
+/// One channel's result from a test send.
+pub struct TestOutcome {
+    pub channel: String,
+    /// `delivered`, `skipped`, `retry`, `permanent`, or `preview`.
+    pub outcome: String,
+    pub reason: Option<String>,
+    /// Exactly what the channel was asked to send.
+    pub rendered: String,
+    pub templated: bool,
+}
+
+/// A representative event for `id`, for testing a channel or a template.
+///
+/// Carries a plausible payload so a template that walks `event.fields`
+/// renders something recognisable rather than blank.
+#[must_use]
+pub fn test_event(id: EventId) -> NotificationEvent {
+    let description = shared::model::notification::registry::describe(id)
+        .map_or("Test notification", |descriptor| descriptor.description);
+    NotificationEvent::new(
+        id,
+        format!("Test: {id}"),
+        format!("{description}\n\nThis is a test notification from tuliprox."),
+    )
+    .with_fields(&serde_json::json!({ "test": true }))
+}
+
+/// Render `event` for each requested channel, and send unless `preview`.
+///
+/// Bypasses `notify_on` and the suppression window deliberately: the
+/// operator asked for this one explicitly, and a test that silently does
+/// nothing because of a dedup window would be worse than useless.
+pub async fn render_and_send_test(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    event: &NotificationEvent,
+    only_channel: Option<&str>,
+    preview: bool,
+) -> Vec<TestOutcome> {
+    let cfg = app_config.config.load();
+    let Some(messaging) = cfg.messaging.as_ref() else {
+        return Vec::new();
+    };
+    let set = channels::channels(app_config, messaging);
+    let mut results = Vec::with_capacity(set.len());
+    for channel in set.iter().filter(|c| only_channel.is_none_or(|want| c.id() == want)) {
+        let msg = render_for(app_config, client, channel.as_ref(), event).await;
+        if preview {
+            results.push(TestOutcome {
+                channel: channel.id().to_string(),
+                outcome: "preview".to_string(),
+                reason: None,
+                rendered: msg.body.clone(),
+                templated: msg.templated,
+            });
+            continue;
+        }
+        let (outcome, reason) = match channel.send(&msg).await {
+            Delivery::Delivered => ("delivered".to_string(), None),
+            Delivery::Skipped => ("skipped".to_string(), None),
+            Delivery::Retry { reason, .. } => ("retry".to_string(), Some(reason)),
+            Delivery::Permanent { reason } => ("permanent".to_string(), Some(reason)),
+        };
+        results.push(TestOutcome {
+            channel: channel.id().to_string(),
+            outcome,
+            reason,
+            rendered: msg.body.clone(),
+            templated: msg.templated,
+        });
+    }
+    results
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

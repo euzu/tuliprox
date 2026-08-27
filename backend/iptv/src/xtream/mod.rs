@@ -4,9 +4,9 @@ use shared::{
     concat_string,
     error::TuliproxError,
     model::{
-        InputType, PlaylistEntry, PlaylistGroup, ProxyUserStatus, SeriesStreamProperties, StreamProperties,
-        VideoStreamProperties, XtreamCluster, XtreamLoginInfo, XtreamPlaylistItem, XtreamSeriesInfo, XtreamVideoInfo,
-        XtreamVideoInfoDoc,
+        notification::registry, InputType, PlaylistEntry, PlaylistGroup, ProxyUserStatus, SeriesStreamProperties,
+        StreamProperties, VideoStreamProperties, XtreamCluster, XtreamLoginInfo, XtreamPlaylistItem, XtreamSeriesInfo,
+        XtreamVideoInfo, XtreamVideoInfoDoc,
     },
     utils::{
         extract_extension_from_url, get_i64_from_serde_value, get_string_from_serde_value, sanitize_sensitive_info,
@@ -17,11 +17,11 @@ use std::{collections::HashMap, io::Error, str::FromStr, sync::Arc};
 use tuliprox_core::{
     model::{
         is_input_expired, xtream_mapping_option_from_target_options, AppConfig, ConfigInput, ConfigInputFlags,
-        ConfigTarget, InputSource, MessageContent, ProxyUserCredentials, XtreamTargetOutput,
+        ConfigTarget, InputSource, NotificationEvent, ProxyUserCredentials, XtreamTargetOutput,
     },
     utils::request,
 };
-use tuliprox_messaging::send_message;
+use tuliprox_messaging::send_event;
 use tuliprox_parser::{xtream, xtream::parse_xtream_series_info};
 use tuliprox_repository::{
     get_input_storage_path, get_target_id_mapping, get_target_storage_path, persist_input_vod_info,
@@ -403,10 +403,20 @@ pub async fn xtream_login(
                     login_info.status = Some(cur_status);
                     if !matches!(cur_status, ProxyUserStatus::Active | ProxyUserStatus::Trial) {
                         warn!("User status for user {username} is {cur_status:?}");
-                        send_message(
+                        let text = format!("User status for user {username} is {cur_status:?}");
+                        send_event(
                             app_config,
                             client,
-                            MessageContent::Error(format!("User status for user {username} is {cur_status:?}")),
+                            NotificationEvent::new(registry::PROVIDER_ACCOUNT_STATUS, text.clone(), text)
+                                // One status change is one piece of news,
+                                // however many times the playlist refreshes.
+                                .with_dedup_key(format!("provider.account.status:{}:{username}", input.name))
+                                .with_fields(&AccountFields {
+                                    username: username.to_string(),
+                                    provider: input.name.to_string(),
+                                    status: Some(format!("{cur_status:?}")),
+                                    expires_at: None,
+                                }),
                         )
                         .await;
                     }
@@ -429,6 +439,17 @@ pub async fn xtream_login(
     }
 }
 
+/// Template payload for the provider account events.
+#[derive(serde::Serialize)]
+struct AccountFields {
+    username: String,
+    provider: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_at: Option<i64>,
+}
+
 pub async fn notify_account_expire(
     exp_date: Option<i64>,
     app_config: &Arc<AppConfig>,
@@ -445,20 +466,39 @@ pub async fn notify_account_expire(
                 if let Some(datetime) = DateTime::<Utc>::from_timestamp(expiration_timestamp, 0) {
                     let formatted = datetime.format("%Y-%m-%d %H:%M:%S").to_string();
                     warn!("User account for user {username} expires {formatted}");
-                    send_message(
+                    let text = format!("User account for user {username} expires {formatted}");
+                    send_event(
                         app_config,
                         client,
-                        MessageContent::Info(format!("User account for user {username} expires {formatted}")),
+                        NotificationEvent::new(registry::PROVIDER_ACCOUNT_EXPIRING, text.clone(), text)
+                            // Re-checked on every refresh; without a dedup key
+                            // this would notify on every playlist update for
+                            // the three days before expiry.
+                            .with_dedup_key(format!("provider.account.expiring:{input_name}:{username}"))
+                            .with_fields(&AccountFields {
+                                username: username.to_string(),
+                                provider: input_name.to_string(),
+                                status: None,
+                                expires_at: Some(expiration_timestamp),
+                            }),
                     )
                     .await;
                 }
             }
         } else {
             warn!("User account for user {username} is expired");
-            send_message(
+            let text = format!("User account for user {username} for provider {input_name} is expired");
+            send_event(
                 app_config,
                 client,
-                MessageContent::Info(format!("User account for user {username} for provider {input_name} is expired")),
+                NotificationEvent::new(registry::PROVIDER_ACCOUNT_EXPIRED, text.clone(), text)
+                    .with_dedup_key(format!("provider.account.expired:{input_name}:{username}"))
+                    .with_fields(&AccountFields {
+                        username: username.to_string(),
+                        provider: input_name.to_string(),
+                        status: None,
+                        expires_at: Some(expiration_timestamp),
+                    }),
             )
             .await;
         }

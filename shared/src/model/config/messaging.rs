@@ -4,6 +4,12 @@ use crate::{
     utils::{is_blank_optional_str, is_blank_optional_string},
 };
 
+/// Placeholder substituted for a channel secret on the way out to a client.
+///
+/// A client that sends it back unchanged means "keep what is stored"; see
+/// [`MessagingConfigDto::restore_redacted_secrets`].
+pub const REDACTED_SECRET: &str = "********";
+
 /// Per-channel routing.
 ///
 /// Without this every enabled event went to every configured channel, so
@@ -288,6 +294,60 @@ impl MessagingConfigDto {
             && (self.discord.is_none() || self.discord.as_ref().is_some_and(DiscordMessagingConfigDto::is_empty))
     }
 
+    /// Replace channel secrets with [`REDACTED_SECRET`].
+    ///
+    /// The config GET returns `config.yml` in full to any client with
+    /// `ConfigRead`, which included the Telegram bot token, the Pushover
+    /// token and user key, and any `Authorization` header configured on the
+    /// REST channel.
+    pub fn redact_secrets(&mut self) {
+        if let Some(telegram) = self.telegram.as_mut() {
+            redact(&mut telegram.bot_token);
+        }
+        if let Some(pushover) = self.pushover.as_mut() {
+            redact(&mut pushover.token);
+            redact(&mut pushover.user);
+        }
+        if let Some(rest) = self.rest.as_mut() {
+            for header in &mut rest.headers {
+                // `Name: value` - keep the name, mask the value.
+                if let Some((name, _)) = header.split_once(':') {
+                    if is_sensitive_header(name) {
+                        *header = format!("{name}: {REDACTED_SECRET}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Put back any secret the client returned still redacted.
+    ///
+    /// Without this a round-trip through the UI would overwrite the stored
+    /// token with the mask, silently breaking the channel.
+    pub fn restore_redacted_secrets(&mut self, current: &Self) {
+        if let (Some(incoming), Some(stored)) = (self.telegram.as_mut(), current.telegram.as_ref()) {
+            restore(&mut incoming.bot_token, &stored.bot_token);
+        }
+        if let (Some(incoming), Some(stored)) = (self.pushover.as_mut(), current.pushover.as_ref()) {
+            restore(&mut incoming.token, &stored.token);
+            restore(&mut incoming.user, &stored.user);
+        }
+        if let (Some(incoming), Some(stored)) = (self.rest.as_mut(), current.rest.as_ref()) {
+            for header in &mut incoming.headers {
+                let Some((name, value)) = header.split_once(':') else { continue };
+                if value.trim() != REDACTED_SECRET {
+                    continue;
+                }
+                let name = name.to_string();
+                if let Some(original) =
+                    stored.headers.iter().find(|h| h.split_once(':').is_some_and(|(n, _)| n.trim() == name.trim()))
+                {
+                    *header = original.clone();
+                }
+            }
+        }
+    }
+
     pub fn clean(&mut self) {
         if self.telegram.as_ref().is_some_and(TelegramMessagingConfigDto::is_empty) {
             self.telegram = None;
@@ -340,6 +400,25 @@ impl MessagingConfigDto {
             }
         }
     }
+}
+
+fn redact(value: &mut String) {
+    if !value.trim().is_empty() {
+        *value = REDACTED_SECRET.to_string();
+    }
+}
+
+fn restore(incoming: &mut String, stored: &str) {
+    if incoming.trim() == REDACTED_SECRET {
+        *incoming = stored.to_string();
+    }
+}
+
+/// Header names whose value is a credential.
+fn is_sensitive_header(name: &str) -> bool {
+    const SENSITIVE: &[&str] = &["authorization", "x-api-key", "x-auth-token", "proxy-authorization", "cookie"];
+    let name = name.trim();
+    SENSITIVE.iter().any(|candidate| name.eq_ignore_ascii_case(candidate))
 }
 
 #[cfg(test)]
@@ -396,6 +475,94 @@ mod tests {
         };
         messaging.prepare(false).expect("prepare");
         assert_eq!(messaging.notify_on, vec!["recording.*", "!system.info", "*"]);
+    }
+
+    #[test]
+    fn redaction_masks_every_channel_secret() {
+        let mut messaging = MessagingConfigDto {
+            telegram: Some(TelegramMessagingConfigDto { bot_token: "real-token".to_string(), ..Default::default() }),
+            pushover: Some(PushoverMessagingConfigDto {
+                token: "real-app".to_string(),
+                user: "real-user".to_string(),
+                ..Default::default()
+            }),
+            rest: Some(RestMessagingConfigDto {
+                url: "https://example.test".to_string(),
+                headers: vec!["Authorization: Bearer secret".to_string(), "X-Trace: keep-me".to_string()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        messaging.redact_secrets();
+        assert_eq!(messaging.telegram.as_ref().expect("telegram").bot_token, REDACTED_SECRET);
+        assert_eq!(messaging.pushover.as_ref().expect("pushover").token, REDACTED_SECRET);
+        assert_eq!(messaging.pushover.as_ref().expect("pushover").user, REDACTED_SECRET);
+        let headers = &messaging.rest.as_ref().expect("rest").headers;
+        assert!(headers.contains(&format!("Authorization: {REDACTED_SECRET}")), "auth header not masked: {headers:?}");
+        // A non-credential header keeps its value; masking everything would
+        // make the config unreadable for no gain.
+        assert!(headers.contains(&"X-Trace: keep-me".to_string()), "harmless header was masked: {headers:?}");
+    }
+
+    #[test]
+    fn an_empty_secret_is_not_replaced_by_a_mask() {
+        // Otherwise an unconfigured channel would look configured.
+        let mut messaging =
+            MessagingConfigDto { telegram: Some(TelegramMessagingConfigDto::default()), ..Default::default() };
+        messaging.redact_secrets();
+        assert_eq!(messaging.telegram.as_ref().expect("telegram").bot_token, "");
+    }
+
+    #[test]
+    fn a_returned_mask_restores_the_stored_secret() {
+        // Without this the UI round-trip would overwrite the real token with
+        // the mask and silently break the channel.
+        let stored = MessagingConfigDto {
+            telegram: Some(TelegramMessagingConfigDto { bot_token: "real-token".to_string(), ..Default::default() }),
+            ..Default::default()
+        };
+        let mut incoming = MessagingConfigDto {
+            telegram: Some(TelegramMessagingConfigDto { bot_token: REDACTED_SECRET.to_string(), ..Default::default() }),
+            ..Default::default()
+        };
+        incoming.restore_redacted_secrets(&stored);
+        assert_eq!(incoming.telegram.as_ref().expect("telegram").bot_token, "real-token");
+    }
+
+    #[test]
+    fn a_genuinely_changed_secret_is_written_through() {
+        let stored = MessagingConfigDto {
+            telegram: Some(TelegramMessagingConfigDto { bot_token: "old".to_string(), ..Default::default() }),
+            ..Default::default()
+        };
+        let mut incoming = MessagingConfigDto {
+            telegram: Some(TelegramMessagingConfigDto { bot_token: "new".to_string(), ..Default::default() }),
+            ..Default::default()
+        };
+        incoming.restore_redacted_secrets(&stored);
+        assert_eq!(incoming.telegram.as_ref().expect("telegram").bot_token, "new");
+    }
+
+    #[test]
+    fn a_returned_masked_header_restores_the_stored_one() {
+        let stored = MessagingConfigDto {
+            rest: Some(RestMessagingConfigDto {
+                url: "https://example.test".to_string(),
+                headers: vec!["Authorization: Bearer secret".to_string()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut incoming = MessagingConfigDto {
+            rest: Some(RestMessagingConfigDto {
+                url: "https://example.test".to_string(),
+                headers: vec![format!("Authorization: {REDACTED_SECRET}")],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        incoming.restore_redacted_secrets(&stored);
+        assert_eq!(incoming.rest.as_ref().expect("rest").headers, vec!["Authorization: Bearer secret".to_string()]);
     }
 
     #[test]
