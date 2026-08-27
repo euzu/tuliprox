@@ -19,7 +19,7 @@ blake3.workspace = true
 chrono.workspace = true
 jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }
 log.workspace = true
-rand = "0.9.4"
+rand = "0.9.5"
 rust-argon2 = "3.0.0"
 serde_json = { workspace = true, features = ["raw_value", "preserve_order"] }
 rpassword = "7.5.4"

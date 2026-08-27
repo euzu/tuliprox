@@ -25,33 +25,33 @@ missing_errors_doc      = "allow"
 large_futures           = "allow"
 
 [workspace.dependencies]
-serde         = { version = "1.0.228", features = ["derive", "rc"] }
-serde_json    = { version = "1.0.150" }
-regex         = "1.12.3"
-log           = "0.4.32"
+serde         = { version = "1.0.229", features = ["derive", "rc"] }
+serde_json    = { version = "1.0.151" }
+regex         = "1.13.1"
+log           = "0.4.34"
 chrono        = "0.4.45"
-bytes         = "1.11.1"
+bytes         = "1.12.1"
 base64        = "0.23.1"
-blake3        = "1.8.5"
-fastrand      = "2.4.1"
+blake3        = "1.8.7"
+fastrand      = "2.5.0"
 lz4_flex      = "0.14.0"
-brotli        = "8.0.3"
+brotli        = "8.0.4"
 indexmap      = "2.14.0"
 dashmap       = "6.2.1"
-arc-swap      = "1.9.1"
+arc-swap      = "1.9.2"
 paste         = "1.0.15"
-pest          = "2.8.6"
-pest_derive   = "2.8.6"
-zeroize       = "1.8.2"
+pest          = "2.9.0"
+pest_derive   = "2.9.0"
+zeroize       = "1.9.0"
 deunicode     = "1.6.2"
 path-clean    = "1.0.1"
 url           = "2.5.8"
 cron          = "0.17.0"
-futures       = "0.3.32"
+futures       = "0.3.34"
 serde-saphyr  = "0.0.26"
 sha2          = "0.11.0"
-thiserror     = "2.0.18"
-tokio         = { version = "1.52.3" }
+thiserror     = "2.0.20"
+tokio         = { version = "1.53.1" }
 strum = "0.28.0"
 strum_macros = "0.28.0"
 

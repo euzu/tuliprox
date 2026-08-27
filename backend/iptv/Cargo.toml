@@ -25,7 +25,7 @@ serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value", "preserve_order"] }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "macros"] }
-tokio-util = { version = "0.7.18", features = ["io", "io-util"] }
+tokio-util = { version = "0.7.19", features = ["io", "io-util"] }
 url.workspace = true
 
 [dev-dependencies]

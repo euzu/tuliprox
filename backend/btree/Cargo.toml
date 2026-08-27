@@ -17,7 +17,7 @@ workspace = true
 test-support = []
 
 [dependencies]
-crc32fast = "1.5.0"
+crc32fast = "1.5.1"
 fs2 = "0.4.3"
 log.workspace = true
 lz4_flex.workspace = true
@@ -25,11 +25,11 @@ memmap2 = "0.9.11"
 parking_lot = "0.12.5"
 rmp-serde = "1.3.1"
 serde.workspace = true
-smallvec = "1.15.1"
+smallvec = "1.15.2"
 # `tempfile` and `uuid` are production dependencies here, not test-only: the v3
 # migration path stages its output through a uniquely named temporary file.
 tempfile = "3.27.0"
-uuid = { version = "1.23.3", features = ["v4"] }
+uuid = { version = "1.26.0", features = ["v4"] }
 
 [dev-dependencies]
-rand = "0.9.4"
+rand = "0.9.5"

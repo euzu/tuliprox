@@ -13,7 +13,7 @@ shared = { version = "3", path = "../../shared" }
 tuliprox-core = { version = "3", path = "../core" }
 arc-swap.workspace = true
 chrono.workspace = true
-handlebars = "6.4.1"
+handlebars = "6.4.4"
 log.workspace = true
 mime = "0.3.17"
 reqwest = { version = "0.13.4", features = ["json", "stream", "rustls", "socks", "form", "query"] }

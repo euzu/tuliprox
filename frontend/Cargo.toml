@@ -16,9 +16,9 @@ yew-hooks = "0.6.4"
 i18nrs = "0.1.9"
 serde_json.workspace = true
 serde.workspace = true
-wasm-bindgen = {version = "0.2.123", features = ["serde-serialize"]}
+wasm-bindgen = {version = "0.2.127", features = ["serde-serialize"]}
 #anyhow = "1.0.102"
-thiserror = "2.0.18"
+thiserror = "2.0.20"
 reqwasm = {version = "0.5", features = ["json"]}
 log.workspace = true
 wasm-logger = "0.2.0"
@@ -29,8 +29,8 @@ gloo-timers = { version = "0", features = ["futures"] }
 #implicit-clone = "0.6.0"
 futures-signals = "0.3.34"
 futures.workspace = true
-wasm-bindgen-futures = "0.4.73"
-js-sys = "0.3.100"
+wasm-bindgen-futures = "0.4.77"
+js-sys = "0.3.104"
 bytes.workspace = true
 regex.workspace = true
 base64.workspace = true
@@ -42,9 +42,9 @@ strum.workspace = true
 strum_macros.workspace = true
 
 [dependencies.web-sys]
-version = "0.3.100"
+version = "0.3.104"
 features = ["Document", "Element", "Node", "Window", "HtmlCollection", "HtmlImageElement", "HtmlInputElement", "DomRect", "HtmlDialogElement", "CssStyleDeclaration", "Event", "BeforeUnloadEvent", "MutationObserver", "MutationObserverInit", "WebGlRenderingContext", "WebGlProgram", "WebGlShader", "WebGlBuffer", "WebGlUniformLocation", "HtmlCanvasElement", "HtmlSelectElement", "DomTokenList", "Selection"]
 
 [dev-dependencies]
-wasm-bindgen-test = "0.3.73"
+wasm-bindgen-test = "0.3.77"
 gloo-utils = "0.2.0"

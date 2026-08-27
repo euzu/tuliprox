@@ -22,10 +22,10 @@ regex.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value", "preserve_order"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "macros"] }
-tokio-util = { version = "0.7.18", features = ["io", "io-util"] }
+tokio-util = { version = "0.7.19", features = ["io", "io-util"] }
 url.workspace = true
 
 [dev-dependencies]
-rand = "0.9.4"
+rand = "0.9.5"
 tempfile = "3.27.0"
 tokio = { workspace = true, features = ["test-util", "macros"] }

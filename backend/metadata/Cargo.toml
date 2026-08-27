@@ -24,9 +24,9 @@ reqwest = { version = "0.13.4", features = ["json", "stream", "rustls", "socks",
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "macros", "sync"] }
-tokio-util = { version = "0.7.18", features = ["io", "io-util"] }
+tokio-util = { version = "0.7.19", features = ["io", "io-util"] }
 
 [dev-dependencies]
-tempfile = "3.24.0"
+tempfile = "3.27.0"
 rmp-serde = "1.3.1"
 tokio = { workspace = true, features = ["test-util", "macros"] }
