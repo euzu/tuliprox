@@ -8,26 +8,11 @@ use std::{borrow::Cow, sync::Arc};
 macro_rules! set_genre {
     ($header:ident, $value:ident) => {
         if let Some(ref mut additional_properties) = $header.additional_properties {
-            match additional_properties {
-                $crate::model::StreamProperties::Video(v) => {
-                    if let Some(details) = &mut v.details {
-                        details.genre = Some($value.intern());
-                        true
-                    } else {
-                        v.details = Some($crate::model::VideoStreamDetailProperties {
-                            genre: Some($value.intern()),
-                            ..$crate::model::VideoStreamDetailProperties::default()
-                        });
-                        true
-                    }
-                }
-                $crate::model::StreamProperties::Series(s) => {
-                    s.genre = Some($value.intern());
-                    true
-                }
-                $crate::model::StreamProperties::Live(_) | $crate::model::StreamProperties::Episode(_) => false,
-            }
+            // The four-arm match lives on StreamProperties now.
+            $crate::model::StreamProperties::set_genre(additional_properties, $value)
         } else {
+            // No properties yet: build them from the header. This half stays here
+            // because it needs the header, not just the properties.
             let empty_str = "".intern();
             match $header.item_type {
                 $crate::model::PlaylistItemType::LocalVideo | $crate::model::PlaylistItemType::Video => {
@@ -86,34 +71,6 @@ macro_rules! set_genre {
     };
 }
 
-#[macro_export]
-macro_rules! get_genre {
-    ($header:ident) => {
-        $header.additional_properties.as_ref().and_then(|props| match props {
-            $crate::model::StreamProperties::Video(v) => {
-                v.details.as_ref().and_then(|details| details.genre.as_ref().map(::std::sync::Arc::clone))
-            }
-            $crate::model::StreamProperties::Series(s) => s.genre.as_ref().map(::std::sync::Arc::clone),
-            $crate::model::StreamProperties::Live(_) | $crate::model::StreamProperties::Episode(_) => None,
-        })
-    };
-}
-
-/// Borrowing sibling of [`get_genre`]: yields `Option<&Arc<str>>` so a genre
-/// read can be a borrow rather than a refcount bump.
-#[macro_export]
-macro_rules! genre_ref {
-    ($header:expr) => {
-        $header.additional_properties.as_ref().and_then(|props| match props {
-            $crate::model::StreamProperties::Video(v) => v.details.as_ref().and_then(|details| details.genre.as_ref()),
-            $crate::model::StreamProperties::Series(s) => s.genre.as_ref(),
-            $crate::model::StreamProperties::Live(_) | $crate::model::StreamProperties::Episode(_) => None,
-        })
-    };
-}
-
-pub use genre_ref;
-pub use get_genre;
 pub use set_genre;
 
 /// Canonical list of `ItemField` variants that map 1:1 to a simple `Arc<str>` slot on
@@ -142,7 +99,11 @@ pub fn get_field_value(pli: &PlaylistItem, field: ItemField) -> Arc<str> {
         ($($variant:ident => $prop:ident),+ $(,)?) => {
             match field {
                 $(ItemField::$variant => Arc::clone(&header.$prop),)+
-                ItemField::Genre => get_genre!(header).unwrap_or_else(|| "".intern()),
+                ItemField::Genre => header
+                    .additional_properties
+                    .as_ref()
+                    .and_then(StreamProperties::genre)
+                    .map_or_else(|| "".intern(), Arc::clone),
                 ItemField::Type => header.item_type.interned_label(),
                 ItemField::EpgId => header.epg_channel_id.clone().unwrap_or_else(|| "".intern()),
                 ItemField::Chno => header.chno.to_string().intern(),
@@ -214,11 +175,7 @@ impl ValueProvider<'_> {
             ItemField::Group => header.group.as_ref(),
             ItemField::Name => header.name.as_ref(),
             ItemField::Title => header.title.as_ref(),
-            ItemField::Genre => match header.additional_properties.as_ref()? {
-                StreamProperties::Video(video) => video.details.as_ref()?.genre.as_deref()?,
-                StreamProperties::Series(series) => series.genre.as_deref()?,
-                StreamProperties::Live(_) | StreamProperties::Episode(_) => return None,
-            },
+            ItemField::Genre => header.additional_properties.as_ref().and_then(StreamProperties::genre)?.as_ref(),
             ItemField::Url => header.url.as_ref(),
             ItemField::Input => header.input_name.as_ref(),
             ItemField::Type => header.item_type.as_str(),

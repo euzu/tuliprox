@@ -503,6 +503,47 @@ impl StreamProperties {
         }
     }
 
+    /// The genre, wherever this variant happens to keep it.
+    ///
+    /// Video keeps it under `details`, Series keeps it inline, and Live and
+    /// Episode do not have one. That four-arm match was written out at every
+    /// read site and in three macros; this is the single copy.
+    #[must_use]
+    pub fn genre(&self) -> Option<&Arc<str>> {
+        match self {
+            Self::Video(video) => video.details.as_ref().and_then(|details| details.genre.as_ref()),
+            Self::Series(series) => series.genre.as_ref(),
+            Self::Live(_) | Self::Episode(_) => None,
+        }
+    }
+
+    /// Sets the genre, creating Video `details` if absent.
+    ///
+    /// Returns `false` for the variants that have no genre. Does **not** create
+    /// the `StreamProperties` itself -- that needs the header to build from, so
+    /// it stays with the caller.
+    pub fn set_genre(&mut self, value: &str) -> bool {
+        match self {
+            Self::Video(video) => {
+                match &mut video.details {
+                    Some(details) => details.genre = Some(value.intern()),
+                    None => {
+                        video.details = Some(VideoStreamDetailProperties {
+                            genre: Some(value.intern()),
+                            ..VideoStreamDetailProperties::default()
+                        });
+                    }
+                }
+                true
+            }
+            Self::Series(series) => {
+                series.genre = Some(value.intern());
+                true
+            }
+            Self::Live(_) | Self::Episode(_) => false,
+        }
+    }
+
     pub fn has_details(&self) -> bool {
         match self {
             StreamProperties::Video(video) => video.details.is_some(),
@@ -1095,6 +1136,35 @@ mod tests {
     use super::*;
     use crate::model::{PlaylistItemType, XtreamCluster, XtreamPlaylistItem};
     use serde_json::json;
+
+    #[test]
+    fn genre_reads_from_wherever_the_variant_keeps_it() {
+        let mut video = StreamProperties::Video(Box::default());
+        assert_eq!(video.genre(), None, "video with no details has no genre");
+        assert!(video.set_genre("Action"), "video accepts a genre");
+        assert_eq!(video.genre().map(Arc::as_ref), Some("Action"), "video keeps it under details");
+        // Setting again goes through the existing details rather than replacing them.
+        assert!(video.set_genre("Drama"));
+        assert_eq!(video.genre().map(Arc::as_ref), Some("Drama"));
+
+        let mut series = StreamProperties::Series(Box::default());
+        assert_eq!(series.genre(), None);
+        assert!(series.set_genre("Comedy"), "series accepts a genre");
+        assert_eq!(series.genre().map(Arc::as_ref), Some("Comedy"), "series keeps it inline");
+    }
+
+    #[test]
+    fn live_and_episode_have_no_genre_and_refuse_to_take_one() {
+        // EpisodeStreamProperties has no Default impl, but every field is
+        // #[serde(default)], so an empty object builds one.
+        let episode: EpisodeStreamProperties =
+            serde_json::from_value(json!({})).expect("episode properties default from an empty object");
+        for mut props in [StreamProperties::Live(Box::default()), StreamProperties::Episode(Box::new(episode))] {
+            assert_eq!(props.genre(), None);
+            assert!(!props.set_genre("Action"), "this variant has no genre to set");
+            assert_eq!(props.genre(), None);
+        }
+    }
 
     fn sample_video_info(tmdb_id: &str) -> XtreamVideoInfo {
         serde_json::from_value(json!({

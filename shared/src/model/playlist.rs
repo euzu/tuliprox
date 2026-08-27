@@ -531,7 +531,9 @@ impl crate::model::FieldGet for crate::model::PlaylistItemHeader {
             HeaderField::Type => Some(FieldRef::Str(self.item_type.as_str())),
             HeaderField::EpgChannelId => self.epg_channel_id.as_ref().map(FieldRef::Shared),
             HeaderField::Chno => Some(FieldRef::Num(self.chno)),
-            HeaderField::Genre => crate::genre_ref!(self).map(FieldRef::Shared),
+            HeaderField::Genre => {
+                self.additional_properties.as_ref().and_then(StreamProperties::genre).map(FieldRef::Shared)
+            }
             // Not carried by the header.
             HeaderField::ProviderId => None,
         }
