@@ -782,6 +782,12 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
         );
     }
 
+    // Bridge the in-process event bus onto the notification pipeline, so
+    // the fourteen `EventMessage` variants that previously reached only the
+    // Web UI can also reach a configured channel. Everything defaults to
+    // unsubscribed, so this is inert until `notify_on` asks for it.
+    crate::api::tasks::spawn_notification_bridge(&app_state, &app_state.cancel_tokens.load().downloads);
+
     if let Some(download_cfg) = cfg.video.as_ref().and_then(|video| video.download.as_ref()) {
         resume_downloads_after_bind(&app_state, download_cfg).await;
     }

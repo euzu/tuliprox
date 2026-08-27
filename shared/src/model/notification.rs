@@ -203,6 +203,27 @@ pub mod registry {
     pub const PROVIDER_ACCOUNT_EXPIRING: EventId = EventId::new("provider.account.expiring");
     pub const PROVIDER_ACCOUNT_EXPIRED: EventId = EventId::new("provider.account.expired");
 
+    // ---- config ---------------------------------------------------------
+    pub const CONFIG_CHANGED: EventId = EventId::new("config.changed");
+    pub const CONFIG_RELOAD_FAILED: EventId = EventId::new("config.reload_failed");
+
+    // ---- library --------------------------------------------------------
+    pub const LIBRARY_SCAN_COMPLETED: EventId = EventId::new("library.scan.completed");
+
+    // ---- metadata -------------------------------------------------------
+    pub const METADATA_UPDATE_STARTED: EventId = EventId::new("metadata.update.started");
+    pub const METADATA_UPDATE_COMPLETED: EventId = EventId::new("metadata.update.completed");
+
+    // ---- users and connections ------------------------------------------
+    /// High frequency. Subscribe deliberately.
+    pub const USER_CONNECTION_CHANGED: EventId = EventId::new("user.connection.changed");
+    /// High frequency. Subscribe deliberately.
+    pub const PROVIDER_CONNECTIONS_CHANGED: EventId = EventId::new("provider.connections.changed");
+
+    // ---- dvr ------------------------------------------------------------
+    pub const RECORDING_QUEUE_CHANGED: EventId = EventId::new("recording.queue.changed");
+    pub const RECORDING_RULES_CHANGED: EventId = EventId::new("recording.rules.changed");
+
     // ---- notification self-reporting ------------------------------------
     /// A notification was permanently lost. Must never route back through
     /// the channel that dropped it.
@@ -259,6 +280,51 @@ pub mod registry {
             id: PROVIDER_ACCOUNT_EXPIRED,
             severity: Severity::Error,
             description: "A provider account has expired.",
+        },
+        EventDescriptor {
+            id: CONFIG_CHANGED,
+            severity: Severity::Info,
+            description: "A configuration file was changed and reloaded.",
+        },
+        EventDescriptor {
+            id: CONFIG_RELOAD_FAILED,
+            severity: Severity::Error,
+            description: "A configuration file changed but could not be reloaded.",
+        },
+        EventDescriptor {
+            id: LIBRARY_SCAN_COMPLETED,
+            severity: Severity::Info,
+            description: "A local library scan finished.",
+        },
+        EventDescriptor {
+            id: METADATA_UPDATE_STARTED,
+            severity: Severity::Info,
+            description: "A metadata update started for an input.",
+        },
+        EventDescriptor {
+            id: METADATA_UPDATE_COMPLETED,
+            severity: Severity::Info,
+            description: "A metadata update finished for an input.",
+        },
+        EventDescriptor {
+            id: USER_CONNECTION_CHANGED,
+            severity: Severity::Info,
+            description: "A user connected or disconnected. High frequency - subscribe deliberately.",
+        },
+        EventDescriptor {
+            id: PROVIDER_CONNECTIONS_CHANGED,
+            severity: Severity::Info,
+            description: "A provider's active connection count changed. High frequency - subscribe deliberately.",
+        },
+        EventDescriptor {
+            id: RECORDING_QUEUE_CHANGED,
+            severity: Severity::Info,
+            description: "The recording queue changed.",
+        },
+        EventDescriptor {
+            id: RECORDING_RULES_CHANGED,
+            severity: Severity::Info,
+            description: "The recording rule set changed.",
         },
         EventDescriptor {
             id: NOTIFICATION_DEAD_LETTERED,
