@@ -1,8 +1,7 @@
 use crate::{
     error::TuliproxError,
     foundation::{apply_templates_to_pattern, get_filter, Filter},
-    handle_tuliprox_error_result_list,
-    model::{ItemField, PatternTemplate, Prepare, TemplateValue},
+    model::{ItemField, PatternTemplate, Prepare, PrepareAll, TemplateValue},
 };
 use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -178,7 +177,8 @@ impl Prepare for ConfigSortDto {
     type Ctx<'a> = Option<&'a [PatternTemplate]>;
 
     fn prepare(&mut self, templates: Self::Ctx<'_>) -> Result<(), TuliproxError> {
-        handle_tuliprox_error_result_list!(self.rules.iter_mut().map(|rule| rule.prepare(templates)));
-        Ok(())
+        // prepare_all, not prepare: a user with three bad rules should hear about
+        // all three in one pass.
+        self.rules.prepare_all(templates)
     }
 }

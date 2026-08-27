@@ -29,20 +29,6 @@ macro_rules! get_errors_notify_message {
 
 pub use get_errors_notify_message;
 
-#[macro_export]
-macro_rules! handle_tuliprox_error_result_list {
-    ($result: expr) => {
-        let errors = $result
-            .filter_map(|result| if let Err(err) = result { Some(err.to_string()) } else { None })
-            .collect::<Vec<String>>();
-        if !errors.is_empty() {
-            return Err($crate::error::TuliproxError::Errors(errors.join("\n")));
-        }
-    };
-}
-
-pub use handle_tuliprox_error_result_list;
-
 // #[macro_export]
 // macro_rules! handle_tuliprox_error_result {
 //     ($result: expr) => {

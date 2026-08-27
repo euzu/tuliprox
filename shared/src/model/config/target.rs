@@ -5,10 +5,9 @@ use crate::{
     },
     error::TuliproxError,
     foundation::{get_filter, Filter},
-    handle_tuliprox_error_result_list,
     model::{
         ClusterFlags, ConfigFavouritesDto, ConfigRenameDto, ConfigSortDto, HdHomeRunDeviceOverview, PatternTemplate,
-        Prepare, ProcessingOrder, StrmExportStyle, TargetType, TraktConfigDto,
+        Prepare, PrepareAll, ProcessingOrder, StrmExportStyle, TargetType, TraktConfigDto,
     },
     utils::is_blank_optional_string,
 };
@@ -523,9 +522,7 @@ impl ConfigTargetDto {
             Ok(fltr) => {
                 // debug!("Filter: {}", fltr);
                 self.t_filter = Some(fltr);
-                if let Some(renames) = self.rename.as_mut() {
-                    handle_tuliprox_error_result_list!(renames.iter_mut().map(|cr| cr.prepare(templates)));
-                }
+                self.rename.prepare_all(templates)?;
                 if let Some(sort) = self.sort.as_mut() {
                     sort.prepare(templates)?;
                 }
