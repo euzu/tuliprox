@@ -4592,7 +4592,6 @@ dependencies = [
  "tuliprox-core",
  "tuliprox-messaging",
  "tuliprox-repository",
- "tuliprox-session",
  "url",
  "windows-sys 0.61.2",
 ]

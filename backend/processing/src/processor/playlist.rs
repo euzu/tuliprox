@@ -2842,7 +2842,10 @@ mod tests {
             target
         }
 
-        fn processing_context<E: EventSink + Clone + 'static>() -> PlaylistProcessingContext<E> {
+        /// Pinned to `NoopSink` rather than staying generic: these tests
+        /// exercise the pipeline, not the bus, and an inferred sink type
+        /// would just make every call site name one.
+        fn processing_context() -> PlaylistProcessingContext<shared::model::NoopSink> {
             let paths = ConfigPaths {
                 home_path: String::new(),
                 config_path: String::new(),
