@@ -137,6 +137,14 @@ fn websocket_can_receive_runtime_events(mem: &ProtocolHandlerMemory, event: &Eve
     mem.permissions.contains(event.required_permission())
 }
 
+/// The payload itself, cloned only if this session is not the last holder.
+///
+/// The bus keeps the large payloads behind `Arc` so that subscribers who do
+/// not serialize them - the notification bridge, say - pay a refcount bump
+/// instead of a deep copy. Only here, at the wire boundary, is the value
+/// itself needed.
+fn unwrap_or_clone<T: Clone>(value: Arc<T>) -> T { Arc::try_unwrap(value).unwrap_or_else(|shared| (*shared).clone()) }
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum MainEventReceiveErrorAction {
     Continue,
@@ -473,7 +481,7 @@ async fn handle_event_message(
                     EventMessage::SystemInfoUpdate(system_info) => {
                         send_event_response(
                             socket,
-                            ProtocolMessage::SystemInfoResponse(system_info),
+                            ProtocolMessage::SystemInfoResponse(unwrap_or_clone(system_info)),
                             "System info event",
                         )
                         .await?;
@@ -487,8 +495,12 @@ async fn handle_event_message(
                         .await?;
                     }
                     EventMessage::DownloadsUpdate(downloads) => {
-                        send_event_response(socket, ProtocolMessage::DownloadsResponse(downloads), "Downloads event")
-                            .await?;
+                        send_event_response(
+                            socket,
+                            ProtocolMessage::DownloadsResponse(unwrap_or_clone(downloads)),
+                            "Downloads event",
+                        )
+                        .await?;
                     }
                     EventMessage::DownloadsDeltaUpdate(delta) => {
                         send_event_response(
@@ -647,6 +659,7 @@ mod tests {
         TaskKindDto, TaskPriorityDto, TransferStatusDto, UserId, UserRole, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL,
         PROTOCOL_VERSION, ROLE_ADMIN, TOKEN_NO_AUTH,
     };
+    use std::sync::Arc;
     use tokio::sync::broadcast::error::RecvError;
 
     #[test]
@@ -833,11 +846,11 @@ mod tests {
 
         assert!(websocket_can_receive_runtime_events(
             &mem,
-            &EventMessage::DownloadsUpdate(DownloadsResponse {
+            &EventMessage::DownloadsUpdate(Arc::new(DownloadsResponse {
                 queue: Vec::new(),
                 finished: Vec::new(),
                 active: Vec::new(),
-            })
+            }))
         ));
     }
 
@@ -849,11 +862,11 @@ mod tests {
 
         assert!(!websocket_can_receive_runtime_events(
             &mem,
-            &EventMessage::DownloadsUpdate(DownloadsResponse {
+            &EventMessage::DownloadsUpdate(Arc::new(DownloadsResponse {
                 queue: Vec::new(),
                 finished: Vec::new(),
                 active: Vec::new(),
-            })
+            }))
         ));
     }
 

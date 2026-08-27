@@ -20,7 +20,7 @@
 
 use crate::api::model::AppState;
 use log::{debug, warn};
-use shared::model::{notification::registry, EventMessage, PlaylistUpdateState};
+use shared::model::{notification::registry, EventKind, EventKindMask, EventMessage, PlaylistUpdateState};
 use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
@@ -28,7 +28,7 @@ use tuliprox_core::model::NotificationEvent;
 
 /// Subscribe to the event bus and forward what the config asks for.
 pub fn spawn_notification_bridge(app_state: &Arc<AppState>, cancel_token: &CancellationToken) {
-    let mut receiver = app_state.event_manager.get_event_channel();
+    let mut receiver = app_state.event_manager.subscribe_filtered(NOTIFIABLE_KINDS);
     let app_state = Arc::clone(app_state);
     let cancel_token = cancel_token.clone();
     tokio::spawn(async move {
@@ -55,6 +55,27 @@ pub fn spawn_notification_bridge(app_state: &Arc<AppState>, cancel_token: &Cance
         debug!("Notification bridge stopped");
     });
 }
+
+/// The kinds this bridge can turn into a notification.
+///
+/// The four high-frequency kinds are deliberately absent rather than
+/// filtered inside `to_notification`: excluding them here means the bus
+/// never wakes this task for a progress tick at all, which under a playlist
+/// refresh is most of the traffic on the channel.
+///
+/// Keep in step with the `None` arms below - the test at the bottom of this
+/// file asserts they agree.
+const NOTIFIABLE_KINDS: EventKindMask = EventKindMask::new()
+    .with(EventKind::ServerError)
+    .with(EventKind::PlaylistUpdate)
+    .with(EventKind::ConfigChange)
+    .with(EventKind::LibraryScanProgress)
+    .with(EventKind::InputMetadataUpdatesStarted)
+    .with(EventKind::InputMetadataUpdatesCompleted)
+    .with(EventKind::ActiveUser)
+    .with(EventKind::ActiveProvider)
+    .with(EventKind::RecordingChanged)
+    .with(EventKind::RecordingRulesChanged);
 
 /// Map a bus event onto a notification, or `None` to ignore it.
 ///
@@ -147,8 +168,78 @@ fn first_line(s: &str) -> String { s.lines().next().unwrap_or(s).trim().to_strin
 
 #[cfg(test)]
 mod tests {
-    use super::{to_notification, EventMessage, PlaylistUpdateState};
-    use shared::model::{notification::registry, ConfigType};
+    use super::{to_notification, EventMessage, PlaylistUpdateState, NOTIFIABLE_KINDS};
+    use shared::model::{
+        notification::{registry, Severity},
+        ActiveUserConnectionChange, ConfigType, DownloadsResponse, EventKind, LibraryScanProgressEvent,
+        LibraryScanSummary, LibraryScanSummaryStatus, PlaylistUpdateProgressEvent, SystemInfo,
+    };
+    use std::sync::Arc;
+
+    /// The subscription mask and the mapping must agree. If they drift, the
+    /// bridge either wakes for events it will drop, or - worse - silently
+    /// stops delivering a kind that `to_notification` still handles.
+    #[test]
+    fn notifiable_mask_matches_the_mapped_variants() {
+        for (message, kind) in sample_of_every_kind() {
+            let mapped = to_notification(&message).is_some();
+            assert_eq!(
+                NOTIFIABLE_KINDS.contains(kind),
+                mapped,
+                "{kind:?}: mask says {}, to_notification says {mapped}",
+                NOTIFIABLE_KINDS.contains(kind),
+            );
+        }
+    }
+
+    /// One `EventMessage` per `EventKind`, so the test above cannot miss a
+    /// variant added later.
+    fn sample_of_every_kind() -> Vec<(EventMessage, EventKind)> {
+        let empty_downloads = DownloadsResponse { queue: Vec::new(), finished: Vec::new(), active: Vec::new() };
+        let samples = vec![
+            EventMessage::ServerError("x".to_string()),
+            EventMessage::ActiveUser(ActiveUserConnectionChange::Connections(0, 0)),
+            EventMessage::ActiveProvider("p".into(), 1),
+            EventMessage::ConfigChange(ConfigType::Config),
+            EventMessage::PlaylistUpdate(PlaylistUpdateState::Success),
+            EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
+                target: String::new(),
+                message: String::new(),
+            }),
+            EventMessage::SystemInfoUpdate(Arc::new(SystemInfo {
+                cpu_usage: 0.0,
+                memory_usage: 0,
+                memory_total: 0,
+                net_rx_bytes_per_sec: 0.0,
+                net_tx_bytes_per_sec: 0.0,
+                net_rx_bytes_total: 0,
+                net_tx_bytes_total: 0,
+                disk_total_bytes: 0,
+                disk_free_bytes: 0,
+            })),
+            EventMessage::LibraryScanProgress(LibraryScanProgressEvent {
+                summary: LibraryScanSummary {
+                    status: LibraryScanSummaryStatus::Success,
+                    message: String::new(),
+                    result: None,
+                },
+            }),
+            EventMessage::DownloadsUpdate(Arc::new(empty_downloads)),
+            EventMessage::DownloadsDeltaUpdate(shared::model::TransfersDelta::ActiveCleared),
+            EventMessage::RecordingChanged,
+            EventMessage::RecordingRulesChanged,
+            EventMessage::InputMetadataUpdatesStarted("a".into()),
+            EventMessage::InputMetadataUpdatesCompleted("a".into()),
+        ];
+        assert_eq!(samples.len(), EventKind::ALL.len(), "add the new variant to this list");
+        samples
+            .into_iter()
+            .map(|message| {
+                let kind = message.kind();
+                (message, kind)
+            })
+            .collect()
+    }
 
     #[test]
     fn high_frequency_variants_are_not_notifiable() {

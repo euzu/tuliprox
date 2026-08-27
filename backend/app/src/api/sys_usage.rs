@@ -174,7 +174,7 @@ pub fn exec_system_usage(app_state: &Arc<AppState>) -> tokio::task::JoinHandle<(
 
             let Some(info) = sampler.sample() else { continue };
             if has_receivers {
-                state.event_manager.send_system_info(info);
+                state.event_manager.send_system_info(Arc::new(info));
             }
 
             // Disk-alert check is gated on (1) disk info being available, and

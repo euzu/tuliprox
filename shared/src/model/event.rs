@@ -27,9 +27,9 @@ pub enum EventMessage {
     ConfigChange(ConfigType),
     PlaylistUpdate(PlaylistUpdateState),
     PlaylistUpdateProgress(PlaylistUpdateProgressEvent),
-    SystemInfoUpdate(SystemInfo),
+    SystemInfoUpdate(Arc<SystemInfo>),
     LibraryScanProgress(LibraryScanProgressEvent),
-    DownloadsUpdate(DownloadsResponse),
+    DownloadsUpdate(Arc<DownloadsResponse>),
     DownloadsDeltaUpdate(DownloadsDelta),
     RecordingChanged,
     RecordingRulesChanged,
@@ -253,4 +253,47 @@ impl EventMessage {
     /// See [`EventKind::is_high_frequency`].
     #[must_use]
     pub const fn is_high_frequency(&self) -> bool { self.kind().is_high_frequency() }
+}
+
+/// A set of [`EventKind`]s, as one word.
+///
+/// `get_event_channel` handed every subscriber the firehose, and each one
+/// filtered afterwards - after the broadcast channel had already cloned the
+/// message for it. A subscriber that wants two kinds should not pay for the
+/// other twelve.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct EventKindMask(u32);
+
+impl EventKindMask {
+    /// Nothing.
+    pub const NONE: Self = Self(0);
+
+    /// Everything, including kinds added after this mask was written.
+    pub const ALL: Self = Self(u32::MAX);
+
+    /// An empty mask to build on.
+    #[must_use]
+    pub const fn new() -> Self { Self::NONE }
+
+    /// This mask plus `kind`.
+    #[must_use]
+    pub const fn with(self, kind: EventKind) -> Self { Self(self.0 | kind.bit()) }
+
+    /// Is `kind` in this mask?
+    #[must_use]
+    pub const fn contains(self, kind: EventKind) -> bool { self.0 & kind.bit() != 0 }
+
+    /// Is this mask empty? A subscriber with nothing selected should not be
+    /// spawned at all.
+    #[must_use]
+    pub const fn is_empty(self) -> bool { self.0 == 0 }
+
+    /// The union of two masks - how a plugin host builds one mask covering
+    /// every loaded plugin's subscriptions.
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self { Self(self.0 | other.0) }
+}
+
+impl FromIterator<EventKind> for EventKindMask {
+    fn from_iter<I: IntoIterator<Item = EventKind>>(iter: I) -> Self { iter.into_iter().fold(Self::NONE, Self::with) }
 }

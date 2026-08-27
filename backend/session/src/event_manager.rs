@@ -1,6 +1,6 @@
 use crate::{MeterReading, StreamMeterHandle};
 use log::trace;
-use shared::model::{EventMessage, StreamMeterEntry, SystemInfo};
+use shared::model::{EventKindMask, EventMessage, StreamMeterEntry, SystemInfo};
 use std::{
     collections::HashMap,
     sync::{
@@ -85,6 +85,18 @@ impl EventManager {
 
     pub fn get_event_channel(&self) -> tokio::sync::broadcast::Receiver<EventMessage> { self.channel_tx.subscribe() }
 
+    /// Subscribe to `mask` only.
+    ///
+    /// The filtering still happens receiver-side - a broadcast channel has
+    /// one buffer for everyone, so there is nowhere else to put it - but it
+    /// happens before the subscriber's own work, and a subscriber that wants
+    /// two kinds no longer wakes for the other twelve. `Lagged` is still
+    /// reported: a gap the subscriber did not want to know about is still a
+    /// gap in the ones it did.
+    pub fn subscribe_filtered(&self, mask: EventKindMask) -> FilteredEventReceiver {
+        FilteredEventReceiver { inner: self.channel_tx.subscribe(), mask }
+    }
+
     pub fn get_meter_channel(&self) -> tokio::sync::broadcast::Receiver<Vec<StreamMeterEntry>> {
         self.meter_channel_tx.subscribe()
     }
@@ -104,7 +116,7 @@ impl EventManager {
         }
     }
 
-    pub fn send_system_info(&self, system_info: SystemInfo) {
+    pub fn send_system_info(&self, system_info: Arc<SystemInfo>) {
         if !self.send_event(EventMessage::SystemInfoUpdate(system_info)) {
             trace!("Failed to send system info");
         }
@@ -254,6 +266,35 @@ impl EventManager {
             let _ = self.meter_channel_tx.send(entries);
         }
     }
+}
+
+/// A [`EventMessage`] subscription narrowed to some [`EventKindMask`].
+///
+/// A concrete type rather than a `Stream` adaptor: the call site is a
+/// `tokio::select!` arm awaiting `recv()`, which is what this offers, and a
+/// boxed stream would put a virtual call on every event.
+pub struct FilteredEventReceiver {
+    inner: tokio::sync::broadcast::Receiver<EventMessage>,
+    mask: EventKindMask,
+}
+
+impl FilteredEventReceiver {
+    /// The next event this subscription asked for.
+    ///
+    /// Errors pass through unchanged, so `Lagged` and `Closed` are handled
+    /// exactly as they are on a raw receiver.
+    pub async fn recv(&mut self) -> Result<EventMessage, tokio::sync::broadcast::error::RecvError> {
+        loop {
+            let event = self.inner.recv().await?;
+            if self.mask.contains(event.kind()) {
+                return Ok(event);
+            }
+        }
+    }
+
+    /// The mask this subscription was opened with.
+    #[must_use]
+    pub fn mask(&self) -> EventKindMask { self.mask }
 }
 
 async fn sample_meter_entries(meter_registry: &RwLock<MeterRegistry>) -> Vec<StreamMeterEntry> {
