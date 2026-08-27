@@ -47,6 +47,7 @@ pub fn spawn_notification_bridge(app_state: &Arc<AppState>, cancel_token: &Cance
                 // Capacity is 10. Falling behind must not kill the bridge -
                 // report the gap and keep going.
                 Err(RecvError::Lagged(skipped)) => {
+                    app_state.event_manager.stats().record_lag(skipped);
                     warn!("Notification bridge fell behind and skipped {skipped} event(s)");
                 }
                 Err(RecvError::Closed) => break,

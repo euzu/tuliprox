@@ -1,15 +1,15 @@
 use crate::{
     defaults::{
         default_as_true, default_connect_timeout_secs, default_custom_stream_response_error_status,
-        default_custom_stream_response_path, default_default_user_agent, default_interner_gc_interval_secs,
-        default_interner_gc_min_pool_size, default_main_backup_dir, default_main_mapping_path,
-        default_main_storage_dir, default_main_template_path, default_main_user_config_dir,
+        default_custom_stream_response_path, default_default_user_agent, default_event_channel_capacity,
+        default_interner_gc_interval_secs, default_interner_gc_min_pool_size, default_main_backup_dir,
+        default_main_mapping_path, default_main_storage_dir, default_main_template_path, default_main_user_config_dir,
         default_supported_video_extensions, is_blank_or_default_backup_dir,
         is_blank_or_default_custom_stream_response_path, is_blank_or_default_mapping_path,
         is_blank_or_default_storage_dir, is_blank_or_default_template_path, is_blank_or_default_user_config_dir,
         is_default_connect_timeout_secs, is_default_custom_stream_response_error_status,
-        is_default_interner_gc_interval_secs, is_default_interner_gc_min_pool_size, is_false,
-        is_none_or_empty_metadata_update, is_none_or_empty_video, is_true, is_zero_u32,
+        is_default_event_channel_capacity, is_default_interner_gc_interval_secs, is_default_interner_gc_min_pool_size,
+        is_false, is_none_or_empty_metadata_update, is_none_or_empty_video, is_true, is_zero_u32,
         normalize_optional_config_file_path, normalize_optional_dir, DEFAULT_BACKUP_DIR,
         DEFAULT_CUSTOM_STREAM_RESPONSE_PATH, DEFAULT_STORAGE_DIR, DEFAULT_USER_CONFIG_DIR, MAPPING_FILE, TEMPLATE_FILE,
     },
@@ -87,6 +87,8 @@ pub struct ConfigDto {
         skip_serializing_if = "is_default_interner_gc_min_pool_size"
     )]
     pub interner_gc_min_pool_size: u32,
+    #[serde(default = "default_event_channel_capacity", skip_serializing_if = "is_default_event_channel_capacity")]
+    pub event_channel_capacity: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sleep_timer_mins: Option<u32>,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -135,6 +137,7 @@ impl Default for ConfigDto {
             user_access_control: false,
             connect_timeout_secs: default_connect_timeout_secs(),
             interner_gc_interval_secs: default_interner_gc_interval_secs(),
+            event_channel_capacity: default_event_channel_capacity(),
             interner_gc_min_pool_size: default_interner_gc_min_pool_size(),
             sleep_timer_mins: None,
             update_on_boot: false,
@@ -197,6 +200,8 @@ pub struct MainConfigDto {
         skip_serializing_if = "is_default_interner_gc_min_pool_size"
     )]
     pub interner_gc_min_pool_size: u32,
+    #[serde(default = "default_event_channel_capacity", skip_serializing_if = "is_default_event_channel_capacity")]
+    pub event_channel_capacity: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sleep_timer_mins: Option<u32>,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -225,6 +230,7 @@ impl Default for MainConfigDto {
             user_access_control: false,
             connect_timeout_secs: default_connect_timeout_secs(),
             interner_gc_interval_secs: default_interner_gc_interval_secs(),
+            event_channel_capacity: default_event_channel_capacity(),
             interner_gc_min_pool_size: default_interner_gc_min_pool_size(),
             sleep_timer_mins: None,
             update_on_boot: false,
@@ -252,6 +258,7 @@ impl From<&ConfigDto> for MainConfigDto {
             user_access_control: config.user_access_control,
             connect_timeout_secs: config.connect_timeout_secs,
             interner_gc_interval_secs: config.interner_gc_interval_secs,
+            event_channel_capacity: config.event_channel_capacity,
             interner_gc_min_pool_size: config.interner_gc_min_pool_size,
             sleep_timer_mins: config.sleep_timer_mins,
             update_on_boot: config.update_on_boot,

@@ -335,7 +335,7 @@ async fn create_shared_data(
     };
 
     let cache = create_cache(&config);
-    let event_manager = Arc::new(EventManager::new());
+    let event_manager = Arc::new(EventManager::with_capacity(config.event_channel_capacity as usize));
     let active_provider = Arc::new(ActiveProviderManager::new(app_config, &event_manager));
     let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
     let rewrite_secret =

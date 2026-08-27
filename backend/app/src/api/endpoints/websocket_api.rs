@@ -573,6 +573,7 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<AppState>, auth_req
                     }
                     Err(error) => {
                         if let tokio::sync::broadcast::error::RecvError::Lagged(skipped) = &error {
+                            app_state.event_manager.stats().record_lag(*skipped);
                             trace!("Main websocket event receiver lagged by {skipped} messages");
                         }
                         match main_event_receive_error_action(&handler, &error) {

@@ -16,6 +16,7 @@ default_eq_fns!(
     default_interner_gc_interval_secs, is_default_interner_gc_interval_secs, u32, 180;
     default_interner_gc_min_pool_size, is_default_interner_gc_min_pool_size, u32, 100;
     default_custom_stream_response_error_status, is_default_custom_stream_response_error_status, u16, 502;
+    default_event_channel_capacity, is_default_event_channel_capacity, u32, 256;
 );
 
 pub const fn default_resource_retry_backoff_multiplier() -> f64 { 1.0 }

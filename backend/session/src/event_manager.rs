@@ -12,20 +12,93 @@ use crate::{
     StreamMeterHandle,
 };
 use log::trace;
-use shared::model::{EventKindMask, EventMessage, EventSink, StreamMeterEntry, SystemInfo};
-use std::sync::Arc;
+use shared::model::{EventKind, EventKindMask, EventMessage, EventSink, StreamMeterEntry, SystemInfo};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
+
+/// Buffer depth used when no configuration is available - tests, and the
+/// composition root before the config is resolved.
+pub const DEFAULT_EVENT_CHANNEL_CAPACITY: usize = 256;
+
+/// What the bus has carried, and what it has dropped.
+///
+/// `send_event` returned a `bool` that ~80 call sites discarded with
+/// `let _ =`, so an event nobody received and an event nobody was listening
+/// for were equally invisible. Counting here rather than at the call sites
+/// means one place to read, and the plugin system's promised drop counters
+/// have somewhere to come from.
+#[derive(Debug, Default)]
+pub struct EventBusStats {
+    emitted: [AtomicU64; EventKind::ALL.len()],
+    no_subscribers: AtomicU64,
+    lagged: AtomicU64,
+}
+
+impl EventBusStats {
+    fn record_emit(&self, kind: EventKind, delivered: bool) {
+        self.emitted[kind as usize].fetch_add(1, Ordering::Relaxed);
+        if !delivered {
+            self.no_subscribers.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// A subscriber reporting the gap it was told about.
+    ///
+    /// Subscribers call this from their `Lagged` arm; the send side cannot
+    /// see a lag, because a broadcast channel drops for the slow receiver
+    /// and not for the sender.
+    pub fn record_lag(&self, skipped: u64) { self.lagged.fetch_add(skipped, Ordering::Relaxed); }
+
+    /// Events published, per kind, since start.
+    #[must_use]
+    pub fn emitted(&self) -> Vec<(EventKind, u64)> {
+        EventKind::ALL.into_iter().map(|kind| (kind, self.emitted[kind as usize].load(Ordering::Relaxed))).collect()
+    }
+
+    /// Events published while nothing was subscribed. Not a fault - the Web
+    /// UI is usually closed - but a non-zero count beside "I never saw that
+    /// notification" is the answer.
+    #[must_use]
+    pub fn no_subscribers(&self) -> u64 { self.no_subscribers.load(Ordering::Relaxed) }
+
+    /// Events a subscriber was told it had missed. Non-zero means the buffer
+    /// is too shallow for the emit rate, or a subscriber is too slow.
+    #[must_use]
+    pub fn lagged(&self) -> u64 { self.lagged.load(Ordering::Relaxed) }
+
+    /// Total across all kinds.
+    #[must_use]
+    pub fn total_emitted(&self) -> u64 { self.emitted.iter().map(|c| c.load(Ordering::Relaxed)).sum() }
+}
 
 pub struct EventManager {
     channel_tx: tokio::sync::broadcast::Sender<EventMessage>,
     meters: StreamMeterRegistry,
+    stats: Arc<EventBusStats>,
 }
 
 impl EventManager {
     #[must_use]
-    pub fn new() -> Self {
-        let (channel_tx, _channel_rx) = tokio::sync::broadcast::channel(10);
-        Self { channel_tx, meters: StreamMeterRegistry::new() }
+    pub fn new() -> Self { Self::with_capacity(DEFAULT_EVENT_CHANNEL_CAPACITY) }
+
+    /// A bus buffering `capacity` events per subscriber.
+    ///
+    /// Capacity 10 - the old fixed value - was routinely outrun: a playlist
+    /// refresh emits progress ticks in a loop, and any subscriber that
+    /// awaits I/O per event falls behind within one target. Both the
+    /// notification bridge's `Lagged` arm and the websocket's resync path
+    /// exist because of it.
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
+        let (channel_tx, _channel_rx) = tokio::sync::broadcast::channel(capacity.max(1));
+        Self { channel_tx, meters: StreamMeterRegistry::new(), stats: Arc::new(EventBusStats::default()) }
     }
+
+    /// Counters for what this bus has carried.
+    #[must_use]
+    pub fn stats(&self) -> &Arc<EventBusStats> { &self.stats }
 
     /// The metering subsystem.
     #[must_use]
@@ -46,12 +119,16 @@ impl EventManager {
     }
 
     pub fn send_event(&self, event: EventMessage) -> bool {
-        if let Err(err) = self.channel_tx.send(event) {
-            trace!("Failed to send event: {err}");
-            false
-        } else {
-            true
-        }
+        let kind = event.kind();
+        let delivered = match self.channel_tx.send(event) {
+            Ok(_) => true,
+            Err(err) => {
+                trace!("Failed to send event: {err}");
+                false
+            }
+        };
+        self.stats.record_emit(kind, delivered);
+        delivered
     }
 
     pub fn send_provider_event(&self, provider: &Arc<str>, connection_count: usize) {
@@ -277,5 +354,53 @@ mod tests {
         manager.register_meter_client(91, 32).await;
 
         assert!(meter_events.try_recv().is_err(), "shared meters must not emit carried totals during reassignment");
+    }
+}
+
+#[cfg(test)]
+mod bus_stats_tests {
+    use super::{EventManager, DEFAULT_EVENT_CHANNEL_CAPACITY};
+    use shared::model::{ConfigType, EventKind, EventMessage};
+
+    #[test]
+    fn emitting_with_no_subscribers_is_counted_not_silent() {
+        let manager = EventManager::new();
+        manager.send_event(EventMessage::RecordingChanged);
+        manager.send_event(EventMessage::ConfigChange(ConfigType::Config));
+
+        let stats = manager.stats();
+        assert_eq!(stats.total_emitted(), 2);
+        assert_eq!(stats.no_subscribers(), 2, "nothing was listening, and that is now visible");
+    }
+
+    #[tokio::test]
+    async fn a_delivered_event_does_not_count_as_dropped() {
+        let manager = EventManager::new();
+        let _rx = manager.get_event_channel();
+        manager.send_event(EventMessage::RecordingChanged);
+
+        assert_eq!(manager.stats().no_subscribers(), 0);
+        let per_kind = manager.stats().emitted();
+        let recording = per_kind.iter().find(|(kind, _)| *kind == EventKind::RecordingChanged).map(|(_, n)| *n);
+        assert_eq!(recording, Some(1));
+    }
+
+    #[tokio::test]
+    async fn capacity_is_deep_enough_that_a_refresh_burst_does_not_lag_a_subscriber() {
+        // The old fixed capacity was 10; a playlist refresh emits progress
+        // ticks in a loop and outran it within one target.
+        let manager = EventManager::new();
+        let mut rx = manager.get_event_channel();
+        for _ in 0..DEFAULT_EVENT_CHANNEL_CAPACITY {
+            manager.send_event(EventMessage::RecordingChanged);
+        }
+        assert!(rx.try_recv().is_ok(), "a full buffer must not have already dropped the oldest event");
+    }
+
+    #[test]
+    fn zero_capacity_is_clamped_rather_than_panicking() {
+        let manager = EventManager::with_capacity(0);
+        manager.send_event(EventMessage::RecordingChanged);
+        assert_eq!(manager.stats().total_emitted(), 1);
     }
 }
