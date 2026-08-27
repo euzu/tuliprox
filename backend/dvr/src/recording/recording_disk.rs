@@ -140,16 +140,14 @@ pub fn filesystem_capacity_for(path: &Path) -> Option<(u64, u64)> {
         let mut total_bytes: u64 = 0;
         let mut total_free_bytes: u64 = 0;
         // SAFETY: `wide` is a NUL-terminated UTF-16 path; the three output
-        // pointers alias `ULARGE_INTEGER` (which is a `u64` newtype on
-        // the winapi crate). `&raw mut` gives us a stable raw pointer
-        // to each `u64`; `.cast()` widens it to the `*mut ULARGE_INTEGER`
-        // the FFI expects.
+        // pointers alias writable `u64` slots (windows-sys types them as
+        // `*mut u64`). `&raw mut` gives us a stable raw pointer to each.
         let ok = unsafe {
-            winapi::um::fileapi::GetDiskFreeSpaceExW(
+            windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
                 wide.as_ptr(),
-                (&raw mut free_bytes_available).cast(),
-                (&raw mut total_bytes).cast(),
-                (&raw mut total_free_bytes).cast(),
+                &mut free_bytes_available,
+                &mut total_bytes,
+                &mut total_free_bytes,
             )
         };
         if ok == 0 {
@@ -196,15 +194,14 @@ pub fn free_bytes_for(path: &Path) -> Option<u64> {
         let mut free_bytes_available: u64 = 0;
         let mut total_bytes: u64 = 0;
         let mut total_free_bytes: u64 = 0;
-        // SAFETY: see `filesystem_capacity_for` — the three output
-        // pointers alias `ULARGE_INTEGER` (`u64` newtype); `&raw mut`
-        // + `.cast()` produces the right raw pointer type.
+        // SAFETY: see `filesystem_capacity_for` — the three output pointers
+        // alias writable `u64` slots (windows-sys types them as `*mut u64`).
         let ok = unsafe {
-            winapi::um::fileapi::GetDiskFreeSpaceExW(
+            windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
                 wide.as_ptr(),
-                (&raw mut free_bytes_available).cast(),
-                (&raw mut total_bytes).cast(),
-                (&raw mut total_free_bytes).cast(),
+                &mut free_bytes_available,
+                &mut total_bytes,
+                &mut total_free_bytes,
             )
         };
         if ok == 0 {

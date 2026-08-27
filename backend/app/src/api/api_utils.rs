@@ -3198,7 +3198,7 @@ async fn same_windows_file_identity(opened_file: &tokio::fs::File, canonical_pat
 #[cfg(windows)]
 fn windows_file_identity(file: &tokio::fs::File) -> std::io::Result<(u32, u32, u32)> {
     use std::os::windows::io::AsRawHandle;
-    use winapi::um::fileapi::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION};
+    use windows_sys::Win32::Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION};
 
     let mut info = unsafe { std::mem::zeroed::<BY_HANDLE_FILE_INFORMATION>() };
     // SAFETY: `file.as_raw_handle()` is a live file handle for the duration of

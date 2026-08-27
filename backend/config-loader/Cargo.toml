@@ -23,4 +23,4 @@ tokio = { workspace = true, features = ["rt-multi-thread", "fs", "macros"] }
 url.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
-winapi = { version = "0.3", features = ["psapi", "minwindef", "processthreadsapi", "sysinfoapi", "fileapi", "winbase"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }

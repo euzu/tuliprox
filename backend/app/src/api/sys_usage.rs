@@ -114,13 +114,14 @@ impl DiskProbe {
             let mut total_bytes: u64 = 0;
             let mut total_free_bytes: u64 = 0;
             // SAFETY: `self.path.0` is a NUL-terminated UTF-16 string built from
-            // the CWD; the three output pointers alias ULARGE_INTEGER (= u64).
+            // the CWD; the three output pointers alias writable `u64` slots
+            // (windows-sys types them as `*mut u64`).
             let ok = unsafe {
-                winapi::um::fileapi::GetDiskFreeSpaceExW(
+                windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
                     self.path.0.as_ptr(),
-                    (&raw mut free_bytes_available).cast(),
-                    (&raw mut total_bytes).cast(),
-                    (&raw mut total_free_bytes).cast(),
+                    &mut free_bytes_available,
+                    &mut total_bytes,
+                    &mut total_free_bytes,
                 )
             };
             if ok == 0 {
@@ -554,18 +555,18 @@ mod platform {
 mod platform {
     use super::{CpuTracker, DiskProbe, SystemInfo};
     use std::mem::size_of;
-    use winapi::{
-        shared::minwindef::FILETIME,
-        um::{
-            processthreadsapi::{GetCurrentProcess, GetProcessTimes},
-            psapi::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS},
-            sysinfoapi::{GlobalMemoryStatusEx, MEMORYSTATUSEX},
+    use windows_sys::Win32::{
+        Foundation::FILETIME,
+        System::{
+            ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS},
+            SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX},
+            Threading::{GetCurrentProcess, GetProcessTimes},
         },
     };
 
     /// Pseudo-handle from `GetCurrentProcess` is process-wide and safe across threads.
     #[derive(Clone, Copy)]
-    struct ProcessHandle(winapi::um::winnt::HANDLE);
+    struct ProcessHandle(windows_sys::Win32::Foundation::HANDLE);
     // SAFETY: only stores the current-process pseudo-handle (-1), not an owned HANDLE.
     unsafe impl Send for ProcessHandle {}
 
@@ -624,7 +625,7 @@ mod platform {
         (ok != 0).then_some(status.ullTotalPhys)
     }
 
-    fn query_process_memory_usage(process: winapi::um::winnt::HANDLE) -> Option<u64> {
+    fn query_process_memory_usage(process: windows_sys::Win32::Foundation::HANDLE) -> Option<u64> {
         let mut counters = PROCESS_MEMORY_COUNTERS {
             cb: u32::try_from(size_of::<PROCESS_MEMORY_COUNTERS>()).ok()?,
             ..unsafe { std::mem::zeroed() }
@@ -636,7 +637,7 @@ mod platform {
     }
 
     #[allow(clippy::cast_precision_loss)]
-    fn query_process_cpu_time_secs(process: winapi::um::winnt::HANDLE) -> Option<f64> {
+    fn query_process_cpu_time_secs(process: windows_sys::Win32::Foundation::HANDLE) -> Option<f64> {
         let mut created = unsafe { std::mem::zeroed::<FILETIME>() };
         let mut exited = unsafe { std::mem::zeroed::<FILETIME>() };
         let mut kernel = unsafe { std::mem::zeroed::<FILETIME>() };

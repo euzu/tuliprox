@@ -736,9 +736,8 @@ where
 
 #[cfg(windows)]
 fn replace_file_windows(source: &Path, target: &Path) -> std::io::Result<()> {
-    use std::io;
-    use std::os::windows::ffi::OsStrExt;
-    use winapi::um::winbase::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
+    use std::{io, os::windows::ffi::OsStrExt};
+    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
 
     let mut source_wide: Vec<u16> = source.as_os_str().encode_wide().collect();
     source_wide.push(0);
