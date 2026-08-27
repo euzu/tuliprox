@@ -4,15 +4,16 @@ use crate::{
         ensure_distinct_sidecar_lock_domains, publish_staged_database, BPlusTree, BPlusTreeError, BPlusTreeQuery,
         BPlusTreeStagingArtifacts, BPlusTreeUpdate, FlushPolicy,
     },
-    open_playlist_reader,
+    playlist_backend::{ensure_storage_path, iter_raw_playlist, PlaylistBackend, Xtream},
     playlist_scratch::PlaylistScratch,
     storage::{
-        ensure_input_storage_path, ensure_target_storage_subpath, get_file_path_for_db_index, get_input_storage_path,
-        get_target_id_mapping_file, get_target_storage_path, XtreamRefreshGenerationGuard,
+        ensure_input_storage_path, get_input_storage_path, get_target_id_mapping_file, get_target_storage_path,
+        XtreamRefreshGenerationGuard,
     },
     storage_const,
     target_id_mapping::VirtualIdRecord,
     xtream_playlist_iterator::XtreamPlaylistJsonIterator,
+    LockedReceiverStream,
 };
 use bytes::Bytes;
 use fs2::FileExt;
@@ -38,8 +39,6 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
 use tuliprox_core::{
     model::{
         AppConfig, Config, ConfigInput, ConfigTarget, PlaylistXtreamCategory, ProxyUserCredentials, XtreamCategory,
@@ -85,9 +84,9 @@ pub fn get_series_cat_collection_path(path: &Path) -> PathBuf {
     get_collection_path(path, storage_const::COL_CAT_SERIES)
 }
 
+#[inline]
 pub async fn ensure_xtream_storage_path(cfg: &Config, target_name: &str) -> Result<PathBuf, TuliproxError> {
-    ensure_target_storage_subpath(cfg, target_name, "xtream", xtream_get_storage_path, TuliproxError::RepositoryXtream)
-        .await
+    ensure_storage_path::<Xtream>(cfg, target_name).await
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -289,9 +288,9 @@ async fn load_old_category_ids(path: &Path) -> (u32, HashMap<CategoryKey, u32>) 
     .unwrap_or_else(|_| (0, HashMap::new()))
 }
 
+#[inline]
 pub fn xtream_get_storage_path(cfg: &Config, target_name: &str) -> Option<PathBuf> {
-    get_target_storage_path(cfg, target_name)
-        .map(|target_path| target_path.join(PathBuf::from(storage_const::PATH_XTREAM)))
+    Xtream::storage_path(cfg, target_name)
 }
 
 pub fn xtream_get_epg_file_path_for_target(path: &Path) -> PathBuf {
@@ -690,87 +689,27 @@ pub async fn iter_raw_xtream_target_playlist(
     app_config: &AppConfig,
     target: &ConfigTarget,
     cluster: XtreamCluster,
-) -> Option<ReceiverStream<Result<XtreamPlaylistItem, TuliproxError>>> {
+) -> Option<LockedReceiverStream<Result<XtreamPlaylistItem, TuliproxError>>> {
     let config = app_config.config.load();
     let storage_path = xtream_get_storage_path(&config, target.name.as_str())?;
     let xtream_path = xtream_get_file_path(&storage_path, cluster);
-    iter_raw_xtream_playlist(app_config, &xtream_path).await
+
+    // Xtream partitions by cluster at the file level, so every item in this
+    // database already belongs to `cluster` and no per-item filter is needed.
+    iter_raw_playlist::<Xtream, u32, _>(app_config, &xtream_path, |_| true).await
 }
 
 pub async fn iter_raw_xtream_input_playlist(
     app_config: &AppConfig,
     input: &ConfigInput,
     cluster: XtreamCluster,
-) -> Option<ReceiverStream<Result<XtreamPlaylistItem, TuliproxError>>> {
+) -> Option<LockedReceiverStream<Result<XtreamPlaylistItem, TuliproxError>>> {
     let config = app_config.config.load();
     let storage_dir = &config.storage_dir;
     let storage_path = get_input_storage_path(&input.name, storage_dir).await.ok()?;
     let xtream_path = xtream_get_file_path(&storage_path, cluster);
 
-    iter_raw_xtream_playlist(app_config, &xtream_path).await
-}
-
-async fn iter_raw_xtream_playlist(
-    app_config: &AppConfig,
-    xtream_path: &Path,
-) -> Option<ReceiverStream<Result<XtreamPlaylistItem, TuliproxError>>> {
-    if !file_exists_async(xtream_path).await {
-        return None;
-    }
-    let bg_lock = app_config.file_locks.read_lock(xtream_path).await;
-
-    let xtream_path = xtream_path.to_path_buf();
-    let index_path = get_file_path_for_db_index(&xtream_path);
-    let (tx, rx) = mpsc::channel::<Result<XtreamPlaylistItem, TuliproxError>>(256);
-
-    let xtream_path_for_log = xtream_path.clone();
-    let index_path_for_log = index_path.clone();
-    let join_error_tx = tx.clone();
-    let handle = tokio::task::spawn_blocking(move || {
-        let _guard = bg_lock;
-        let reader = match open_playlist_reader::<u32, XtreamPlaylistItem, u32>(&xtream_path, &index_path, None) {
-            Ok(reader) => reader,
-            Err(err) => {
-                error!(
-                    "Failed to open Xtream playlist reader {} (index {}): {err}",
-                    xtream_path.display(),
-                    index_path.display()
-                );
-                let _ = tx.blocking_send(Err(err));
-                return;
-            }
-        };
-
-        for entry in reader {
-            let item = match entry {
-                Ok((_, item)) => item,
-                Err(err) => {
-                    error!("Skipping unreadable Xtream playlist entry: {err}");
-                    continue;
-                }
-            };
-            if tx.blocking_send(Ok(item)).is_err() {
-                break;
-            }
-        }
-    });
-    tokio::spawn(async move {
-        if let Err(err) = handle.await {
-            error!(
-                "Xtream playlist producer task failed for {} (index {}): {err}",
-                xtream_path_for_log.display(),
-                index_path_for_log.display()
-            );
-            let _ = join_error_tx
-                .send(Err(TuliproxError::RepositoryXtream(format!(
-                    "Xtream playlist producer task failed for {}: {err}",
-                    xtream_path_for_log.display()
-                ))))
-                .await;
-        }
-    });
-
-    Some(ReceiverStream::new(rx))
+    iter_raw_playlist::<Xtream, u32, _>(app_config, &xtream_path, |_| true).await
 }
 
 pub fn playlist_iter_to_stream<I, P>(channels: Option<(FileReadGuard, I)>) -> impl Stream<Item = Result<Bytes, String>>

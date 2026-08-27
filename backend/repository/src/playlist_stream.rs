@@ -73,6 +73,17 @@ impl<T> LockedReceiverStream<T> {
     /// is semantically empty from the start, for example
     /// `XtreamPlaylistIterator::empty()`.
     pub fn new_empty(rx: mpsc::Receiver<T>) -> Self { Self { rx: ReceiverStream::new(rx), _guard: None } }
+
+    /// Creates a stream that holds `guard` for its whole lifetime when `Some`.
+    ///
+    /// `None` is only correct when the producer's own guard already covers every
+    /// read it performs, so the consumer never reads through this stream after
+    /// that guard is released. Backends differ on this (see
+    /// `PlaylistBackend::HOLD_ITER_LOCK`), which is why the choice is a
+    /// parameter rather than baked in.
+    pub fn with_optional_guard(rx: mpsc::Receiver<T>, guard: Option<FileReadGuard>) -> Self {
+        Self { rx: ReceiverStream::new(rx), _guard: guard }
+    }
 }
 
 impl<T> Stream for LockedReceiverStream<T> {
