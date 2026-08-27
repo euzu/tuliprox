@@ -1,7 +1,7 @@
 use crate::{
     error::TuliproxError,
     foundation::{apply_templates_to_pattern_single, get_filter, prepare_templates, Filter, MapperScript},
-    model::PatternTemplate,
+    model::{HeaderField, PatternTemplate},
 };
 use log::trace;
 use strum_macros::{AsRefStr, Display, EnumIter, EnumString};
@@ -100,7 +100,8 @@ pub struct MappingCounterDefinition {
 #[derive(Debug, Clone)]
 pub struct MappingCounter {
     pub filter: Filter,
-    pub field: String,
+    /// Parsed once here rather than re-parsed per channel in the counter loop.
+    pub field: HeaderField,
     pub concat: String,
     pub modifier: CounterModifier,
     pub start: u32,
@@ -226,11 +227,14 @@ impl MappingDto {
                 if !valid_property!(def.field.as_str(), COUNTER_FIELDS) {
                     return Err(TuliproxError::Config(format!("Invalid counter field {}", def.field)));
                 }
+                let Some(field) = HeaderField::parse(&def.field) else {
+                    return Err(TuliproxError::Config(format!("Invalid counter field {}", def.field)));
+                };
                 {
                     let flt = get_filter(&def.filter, templates)?;
                     counters.push(MappingCounter {
                         filter: flt,
-                        field: def.field.clone(),
+                        field,
                         concat: def.concat.clone(),
                         modifier: def.modifier,
                         start: def.value,

@@ -3,7 +3,7 @@ use log::{debug, info, trace, warn};
 use shared::{
     error::TuliproxError,
     model::{
-        FieldGetAccessor, FieldSetAccessor, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemType,
+        FieldGet, FieldSet, HeaderField, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemType,
         TraktContentType, UUIDType, XtreamCluster,
     },
     utils::{hash_string, Internable, CONSTANTS},
@@ -221,7 +221,9 @@ fn clone_item_for_trakt_category(item: &PlaylistItem, category_name: &str, group
     };
 
     with!(mut modified_item.header => header {
-        let title = header.get_field("caption").unwrap_or_else(|| Arc::clone(&header.title));
+        let title = header
+            .get(HeaderField::Caption)
+            .map_or_else(|| Arc::clone(&header.title), |value| value.to_arc());
         if extract_quality(&title).is_none() {
             if let Some(quality) = extract_quality(&header.group) {
                 let mut caption = String::with_capacity(title.len() + 6);
@@ -229,7 +231,7 @@ fn clone_item_for_trakt_category(item: &PlaylistItem, category_name: &str, group
                 caption.push_str(quality);
                 caption.push_str("] ");
                 caption.push_str(&title);
-                header.set_field("caption", &caption);
+                header.set(HeaderField::Caption, &caption);
             }
         }
         header.group = group_title.clone();

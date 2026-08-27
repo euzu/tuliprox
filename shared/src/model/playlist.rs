@@ -274,9 +274,65 @@ impl PlaylistItemTypeSet {
     pub fn bits(self) -> u16 { self.0 }
 }
 
+/// A field's value, borrowed where possible.
+///
+/// The point of the enum is that reading a field never forces an allocation:
+/// the `&str`-keyed accessor had to return `Arc<str>`, so `chno` and `type`
+/// went through `.to_string().intern()` — a heap allocation *and* an interner
+/// write lock — on every read, per item, per rule.
+pub enum FieldRef<'a> {
+    /// An interned field. Cloning is a refcount bump.
+    Shared(&'a Arc<str>),
+    /// A borrowed string that is not interned, e.g. `item_type.as_str()`.
+    Str(&'a str),
+    /// A numeric field, kept numeric.
+    Num(u32),
+}
+
+impl FieldRef<'_> {
+    /// Borrow as a string, formatting a numeric field into an owned buffer only
+    /// when there is one.
+    pub fn as_cow(&self) -> std::borrow::Cow<'_, str> {
+        match self {
+            Self::Shared(value) => std::borrow::Cow::Borrowed(value.as_ref()),
+            Self::Str(value) => std::borrow::Cow::Borrowed(value),
+            Self::Num(value) => std::borrow::Cow::Owned(value.to_string()),
+        }
+    }
+
+    /// Materialise as an interned `Arc<str>`.
+    ///
+    /// This is what the `&str` compatibility shims call, so their behaviour —
+    /// including interning numbers — is bit-for-bit what it was before.
+    pub fn to_arc(&self) -> Arc<str> {
+        match self {
+            Self::Shared(value) => Arc::clone(value),
+            Self::Str(value) => value.intern(),
+            Self::Num(value) => value.to_string().intern(),
+        }
+    }
+}
+
+/// Read a field by typed key. Matches on a discriminant rather than walking a
+/// chain of case-insensitive string comparisons.
+pub trait FieldGet {
+    fn get(&self, field: crate::model::HeaderField) -> Option<FieldRef<'_>>;
+}
+
+/// Write a field by typed key.
+pub trait FieldSet {
+    fn set(&mut self, field: crate::model::HeaderField, value: &str) -> bool;
+}
+
+/// Read a field by name.
+///
+/// Retained for callers whose field name genuinely arrives as a string (the M3U
+/// resource endpoint, for one). Implemented as a shim over [`FieldGet`].
 pub trait FieldGetAccessor {
     fn get_field(&self, field: &str) -> Option<Arc<str>>;
 }
+
+/// Write a field by name. Shim over [`FieldSet`].
 pub trait FieldSetAccessor {
     fn set_field(&mut self, field: &str, value: &str) -> bool;
 }
@@ -454,87 +510,102 @@ macro_rules! to_m3u_resource_non_empty_fields {
     };
 }
 
+/// Generates the typed accessors for `PlaylistItemHeader`, plus the `&str`
+/// shims that delegate to them.
+///
+/// `$prop` names the fields whose `HeaderField` variant is the PascalCase of the
+/// field name and whose value is a plain interned `Arc<str>`; everything with a
+/// different shape (caption, chno, genre, ...) is spelled out below.
 macro_rules! generate_field_accessor_impl_for_playlist_item_header {
-    ($($prop:ident),*;) => {
-        impl crate::model::FieldGetAccessor for crate::model::PlaylistItemHeader {
-            fn get_field(&self, field: &str) -> Option<Arc<str>> {
-                let bytes = field.as_bytes();
-
-                $(
-                    {
-                        let target = stringify!($prop).as_bytes();
-                        if bytes.eq_ignore_ascii_case(target) {
-                            return Some(Arc::clone(&self.$prop));
-                        }
-                    }
-                )*
-
-                if bytes.eq_ignore_ascii_case(b"group") {
-                        Some(Arc::clone(&self.group))
-                } else if bytes.eq_ignore_ascii_case(b"caption") {
-                    Some(if self.title.is_empty() {
-                        Arc::clone(&self.name)
+    ($(($variant:ident, $prop:ident)),*;) => {
+        impl crate::model::FieldGet for crate::model::PlaylistItemHeader {
+            fn get(&self, field: crate::model::HeaderField) -> Option<crate::model::FieldRef<'_>> {
+                use crate::model::{FieldRef, HeaderField};
+                match field {
+                    $(HeaderField::$variant => Some(FieldRef::Shared(&self.$prop)),)*
+                    HeaderField::Group => Some(FieldRef::Shared(&self.group)),
+                    HeaderField::Caption => Some(FieldRef::Shared(if self.title.is_empty() {
+                        &self.name
                     } else {
-                        Arc::clone(&self.title)
-                    })
-                } else if bytes.eq_ignore_ascii_case(b"input") {
-                    Some(Arc::clone(&self.input_name))
-                } else if bytes.eq_ignore_ascii_case(b"type") {
-                    Some(self.item_type.as_str().intern())
-                } else if bytes.eq_ignore_ascii_case(b"epg_channel_id") || bytes.eq_ignore_ascii_case(b"epg_id") {
-                    self.epg_channel_id.as_ref().map(Arc::clone)
-                } else if bytes.eq_ignore_ascii_case(b"chno") {
-                    Some(self.chno.to_string().intern())
-                } else if bytes.eq_ignore_ascii_case(b"genre") {
-                    crate::get_genre!(self)
-                } else {
-                    None
+                        &self.title
+                    })),
+                    HeaderField::Input => Some(FieldRef::Shared(&self.input_name)),
+                    HeaderField::Type => Some(FieldRef::Str(self.item_type.as_str())),
+                    HeaderField::EpgChannelId => self.epg_channel_id.as_ref().map(FieldRef::Shared),
+                    HeaderField::Chno => Some(FieldRef::Num(self.chno)),
+                    HeaderField::Genre => crate::genre_ref!(self).map(FieldRef::Shared),
+                    // Not carried by the header.
+                    HeaderField::ProviderId => None,
                 }
             }
-         }
+        }
 
-         impl crate::model::FieldSetAccessor for crate::model::PlaylistItemHeader {
-            fn set_field(&mut self, field: &str, value: &str) -> bool {
-                let bytes = field.as_bytes();
-                $(
-                    {
-                        let target = stringify!($prop).as_bytes();
-                        if bytes.eq_ignore_ascii_case(target) {
-                            self.$prop = value.intern();
-                            return true;
-                        }
-                    }
-                )*
-
-                if bytes.eq_ignore_ascii_case(b"group") {
-                    self.group = value.intern();
-                    true
-                } else if bytes.eq_ignore_ascii_case(b"caption") {
-                    let interned = value.intern();
-                    self.title = Arc::clone(&interned);
-                    self.name = interned;
-                    true
-                } else if bytes.eq_ignore_ascii_case(b"epg_channel_id") || bytes.eq_ignore_ascii_case(b"epg_id") {
-                    self.epg_channel_id = Some(value.intern());
-                    true
-                } else if bytes.eq_ignore_ascii_case(b"chno") {
-                    if let Ok(parsed) = value.parse::<u32>() {
-                        self.chno = parsed;
+        impl crate::model::FieldSet for crate::model::PlaylistItemHeader {
+            fn set(&mut self, field: crate::model::HeaderField, value: &str) -> bool {
+                use crate::model::HeaderField;
+                match field {
+                    $(HeaderField::$variant => {
+                        self.$prop = value.intern();
                         true
-                    } else {
-                        false
+                    })*
+                    HeaderField::Group => {
+                        self.group = value.intern();
+                        true
                     }
-                } else if bytes.eq_ignore_ascii_case(b"genre") {
-                    return crate::set_genre!(self, value);
-                } else {
-                    false
+                    HeaderField::Caption => {
+                        let interned = value.intern();
+                        self.title = Arc::clone(&interned);
+                        self.name = interned;
+                        true
+                    }
+                    HeaderField::EpgChannelId => {
+                        self.epg_channel_id = Some(value.intern());
+                        true
+                    }
+                    HeaderField::Chno => match value.parse::<u32>() {
+                        Ok(parsed) => {
+                            self.chno = parsed;
+                            true
+                        }
+                        Err(_) => false,
+                    },
+                    HeaderField::Genre => crate::set_genre!(self, value),
+                    // Read-only or not carried by the header.
+                    HeaderField::Input | HeaderField::Type | HeaderField::ProviderId => false,
                 }
+            }
+        }
+
+        impl crate::model::FieldGetAccessor for crate::model::PlaylistItemHeader {
+            #[inline]
+            fn get_field(&self, field: &str) -> Option<Arc<str>> {
+                use crate::model::{FieldGet, HeaderField};
+                self.get(HeaderField::parse(field)?).map(|value| value.to_arc())
+            }
+        }
+
+        impl crate::model::FieldSetAccessor for crate::model::PlaylistItemHeader {
+            #[inline]
+            fn set_field(&mut self, field: &str, value: &str) -> bool {
+                use crate::model::{FieldSet, HeaderField};
+                HeaderField::parse(field).is_some_and(|field| self.set(field, value))
             }
         }
     }
 }
 
-generate_field_accessor_impl_for_playlist_item_header!(id, /*virtual_id,*/ title, name, logo, logo_small, parent_code, audio_track, time_shift, rec, url;);
+generate_field_accessor_impl_for_playlist_item_header!(
+    (Id, id),
+    (Title, title),
+    (Name, name),
+    (Logo, logo),
+    (LogoSmall, logo_small),
+    (ParentCode, parent_code),
+    (AudioTrack, audio_track),
+    (TimeShift, time_shift),
+    (Rec, rec),
+    (Url, url);
+);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct M3uPlaylistItem {

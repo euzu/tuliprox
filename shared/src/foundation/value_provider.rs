@@ -1,5 +1,5 @@
 use crate::{
-    model::{FieldGetAccessor, ItemField, PlaylistItem, StreamProperties},
+    model::{FieldGet, FieldGetAccessor, ItemField, PlaylistItem, StreamProperties},
     utils::{deunicode_string, Internable},
 };
 use std::{borrow::Cow, sync::Arc};
@@ -99,6 +99,20 @@ macro_rules! get_genre {
     };
 }
 
+/// Borrowing sibling of [`get_genre`]: yields `Option<&Arc<str>>` so a genre
+/// read can be a borrow rather than a refcount bump.
+#[macro_export]
+macro_rules! genre_ref {
+    ($header:expr) => {
+        $header.additional_properties.as_ref().and_then(|props| match props {
+            $crate::model::StreamProperties::Video(v) => v.details.as_ref().and_then(|details| details.genre.as_ref()),
+            $crate::model::StreamProperties::Series(s) => s.genre.as_ref(),
+            $crate::model::StreamProperties::Live(_) | $crate::model::StreamProperties::Episode(_) => None,
+        })
+    };
+}
+
+pub use genre_ref;
 pub use get_genre;
 pub use set_genre;
 
@@ -220,6 +234,23 @@ impl ValueProvider<'_> {
         };
 
         Some(if self.match_as_ascii { deunicode_string(value) } else { Cow::Borrowed(value) })
+    }
+
+    /// Typed sibling of [`Self::get`], for callers that already hold an
+    /// `ItemField`.
+    ///
+    /// Skips the name parse and the string-comparison chain entirely: the
+    /// header read becomes a match on a discriminant.
+    pub fn get_typed(&self, field: ItemField) -> Option<Arc<str>> {
+        // Virtual field: quality tier derived from the caption, not stored.
+        if field == ItemField::Quality {
+            return Some(header_quality_rank(&self.pli.header).to_string().intern());
+        }
+        let value = self.pli.header.get(field.header_field()?)?;
+        if self.match_as_ascii {
+            return Some(deunicode_string(value.as_cow().as_ref()).into_owned().into());
+        }
+        Some(value.to_arc())
     }
 
     pub fn get(&self, field: &str) -> Option<Arc<str>> {

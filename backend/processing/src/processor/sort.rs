@@ -181,7 +181,7 @@ fn build_rule_cache_entry(
         return RuleCacheEntry { filter_pass: false, value: None, sequence_match: None };
     }
 
-    let value = provider.get(rule.rule.field.as_ref());
+    let value = provider.get_typed(rule.rule.field);
     let sequence_match = match (&rule.sequence_plan, value.as_deref()) {
         (Some(sequence_plan), Some(value)) => Some(evaluate_sequence(sequence_plan, value)),
         _ => None,

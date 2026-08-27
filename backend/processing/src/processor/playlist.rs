@@ -21,9 +21,9 @@ use shared::{
     error::{get_errors_notify_message, TuliproxError},
     foundation::{get_field_value, set_field_value, Filter, ValueAccessor, ValueProvider},
     model::{
-        ClusterFlags, CounterModifier, FieldGetAccessor, FieldSetAccessor, InputStats, InputType, ItemField,
-        MappingStage, PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistStats, PlaylistUpdateProgressEvent,
-        ProcessingOrder, SourceStats, StreamProperties, TargetStats, UUIDType, XtreamCluster,
+        ClusterFlags, CounterModifier, FieldGet, FieldSet, InputStats, InputType, ItemField, MappingStage,
+        PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistStats, PlaylistUpdateProgressEvent, ProcessingOrder,
+        SourceStats, StreamProperties, TargetStats, UUIDType, XtreamCluster,
     },
     utils::{create_alias_uuid, interner_gc, Internable},
 };
@@ -327,15 +327,15 @@ fn map_playlist_counter(target: &ConfigTarget, playlist: &mut [PlaylistGroup]) {
                                 } else {
                                     let value = channel
                                         .header
-                                        .get_field(&counter.field)
-                                        .map_or_else(String::new, |field_value| field_value.to_string());
+                                        .get(counter.field)
+                                        .map_or_else(String::new, |field_value| field_value.as_cow().into_owned());
                                     if counter.modifier == CounterModifier::Suffix {
                                         format!("{value}{}{padded_cntval}", counter.concat)
                                     } else {
                                         format!("{padded_cntval}{}{value}", counter.concat)
                                     }
                                 };
-                                channel.header.set_field(&counter.field, new_value.as_str());
+                                channel.header.set(counter.field, new_value.as_str());
                             }
                         }
                     }
@@ -2094,9 +2094,9 @@ mod tests {
     use shared::{
         foundation::{get_filter, MapperScript, ValueProvider},
         model::{
-            ClusterFlags, ConfigInputDto, ConfigRenameDto, ConfigTargetDto, ConfigTargetOptions, M3uPlaylistItem,
-            MappingStage, PlaylistEntry, PlaylistItem, PlaylistItemHeader, PlaylistItemType, XtreamCluster,
-            XtreamPlaylistItem,
+            ClusterFlags, ConfigInputDto, ConfigRenameDto, ConfigTargetDto, ConfigTargetOptions, FieldSetAccessor,
+            M3uPlaylistItem, MappingStage, PlaylistEntry, PlaylistItem, PlaylistItemHeader, PlaylistItemType,
+            XtreamCluster, XtreamPlaylistItem,
         },
         utils::Internable,
     };
