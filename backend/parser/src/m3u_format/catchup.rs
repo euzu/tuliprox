@@ -58,16 +58,6 @@ fn mode_alias(mode: &str) -> &str {
     }
 }
 
-fn effective_catchup_mode(catchup: &CatchupProperties) -> &str {
-    catchup
-        .mode
-        .as_deref()
-        .map(str::trim)
-        .filter(|mode| !mode.is_empty())
-        .or_else(|| catchup.catchup_type.as_deref().map(str::trim).filter(|mode| !mode.is_empty()))
-        .unwrap_or_default()
-}
-
 fn parse_template(template: &str) -> Vec<TemplateSegment> {
     let mut segments = Vec::new();
     let mut current = String::new();
@@ -247,7 +237,7 @@ fn archive_discriminator_from_resolved_url(url: &str) -> Option<String> {
 }
 
 fn derived_template_for_mode<'a>(source_url: &'a str, catchup: &'a CatchupProperties) -> Option<Cow<'a, str>> {
-    let mode = effective_catchup_mode(catchup);
+    let mode = catchup.effective_mode().unwrap_or_default();
     if let Some(source) = catchup.source.as_deref().filter(|source| !source.is_empty()) {
         return Some(if is_append_like_query_source(mode, source) {
             append_query_template(source_url, source).map(Cow::Owned)?
@@ -422,7 +412,7 @@ pub fn build_m3u_catchup_rewrite(
         .source
         .as_deref()
         .filter(|source| !source.is_empty())
-        .is_some_and(|source| is_append_like_query_source(effective_catchup_mode(catchup), source));
+        .is_some_and(|source| is_append_like_query_source(catchup.effective_mode().unwrap_or_default(), source));
 
     let source = build_local_source(base_url, "", &token, &placeholders, append_mode);
     let mode = if append_mode { "append" } else { "default" };
@@ -537,7 +527,7 @@ pub fn resolve_m3u_catchup_url(
     // after append/shift query params are stripped from rewritten HLS segment URLs.
     let discriminator = archive_discriminator_from_resolved_url(&url).unwrap_or_else(|| {
         let mut discriminator = url::form_urlencoded::Serializer::new(String::new());
-        let mode = effective_catchup_mode(catchup);
+        let mode = catchup.effective_mode().unwrap_or_default();
         discriminator.append_pair("mode", if mode.is_empty() { "default" } else { mode });
         for (idx, value) in &collectors {
             discriminator.append_pair(&format!("{COLLECTOR_PREFIX}{idx}"), value);
@@ -968,6 +958,45 @@ mod tests {
         .expect("valid Flussonic template");
         assert_eq!(resolved.url, "http://provider.example/channel/video-1704067200-3600.m3u8");
         assert!(!resolved.discriminator.is_empty());
+    }
+
+    #[test]
+    fn catchup_type_flussonic_wins_over_stale_append_mode() {
+        let catchup = CatchupProperties {
+            mode: Some("append".intern()),
+            catchup_type: Some("flussonic".intern()),
+            ..CatchupProperties::default()
+        };
+
+        assert!(is_xtream_m3u_catchup_supported("http://provider.example/channel/index.m3u8", &catchup));
+        let resolved = resolve_xtream_m3u_catchup_url(
+            "http://provider.example/channel/index.m3u8",
+            &catchup,
+            "2024-01-01:00-00",
+            "60",
+        )
+        .expect("catchup-type must select the Flussonic template");
+
+        assert_eq!(resolved.url, "http://provider.example/channel/timeshift_abs-1704067200.m3u8");
+    }
+
+    #[test]
+    fn catchup_type_shift_wins_over_stale_flussonic_mode() {
+        let catchup = CatchupProperties {
+            mode: Some("flussonic".intern()),
+            catchup_type: Some("shift".intern()),
+            ..CatchupProperties::default()
+        };
+
+        let resolved = resolve_m3u_catchup_url(
+            "http://provider.example/live/42.ts",
+            &catchup,
+            Some("utc=1704067200&lutc=1704070800"),
+        )
+        .expect("shift catchup resolution must succeed")
+        .expect("catchup-type must select the shift template");
+
+        assert_eq!(resolved.url, "http://provider.example/live/42.ts?utc=1704067200&lutc=1704070800");
     }
 
     #[test]

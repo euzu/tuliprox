@@ -48,6 +48,16 @@ impl CatchupProperties {
             && self.extra_attributes.is_empty()
     }
 
+    /// Prefer `catchup-type` when both fields are present because providers may leave
+    /// a stale `catchup` mode alongside the authoritative player type.
+    pub fn effective_mode(&self) -> Option<&str> {
+        self.catchup_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| self.mode.as_deref().map(str::trim).filter(|value| !value.is_empty()))
+    }
+
     fn is_flussonic_mode_str(mode: Option<&str>) -> bool {
         mode.is_some_and(|m| {
             matches!(m.trim().to_ascii_lowercase().as_str(), "flussonic" | "flussonic-hls" | "flussonic-ts" | "fs")
@@ -56,24 +66,13 @@ impl CatchupProperties {
 
     /// Prefer `catchup-type` when both are set so a leftover `catchup="shift"`/`append`
     /// from a provider cannot steal Flussonic path-rewrite channels (v3.3.81 behavior).
-    pub fn is_flussonic(&self) -> bool {
-        if let Some(ct) = self.catchup_type.as_deref().filter(|v| !v.is_empty()) {
-            return Self::is_flussonic_mode_str(Some(ct));
-        }
-        Self::is_flussonic_mode_str(self.mode.as_deref())
-    }
+    pub fn is_flussonic(&self) -> bool { Self::is_flussonic_mode_str(self.effective_mode()) }
 
     pub fn native_flussonic_player_mode(&self) -> Option<&'static str> {
         if !self.is_flussonic() {
             return None;
         }
-        let raw = self
-            .catchup_type
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .or_else(|| self.mode.as_deref().map(str::trim).filter(|value| !value.is_empty()))
-            .unwrap_or("flussonic");
+        let raw = self.effective_mode().unwrap_or("flussonic");
         if raw.eq_ignore_ascii_case("flussonic-ts") {
             Some("flussonic-ts")
         } else {
@@ -86,11 +85,7 @@ impl CatchupProperties {
         if self.native_flussonic_player_mode().is_some() {
             return None;
         }
-        if let Some(catchup_type) = self.catchup_type.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
-            return catchup_type.eq_ignore_ascii_case("append").then_some("append");
-        }
-        let mode = self.mode.as_deref().map(str::trim).filter(|value| !value.is_empty())?;
-        mode.eq_ignore_ascii_case("append").then_some("append")
+        self.effective_mode()?.eq_ignore_ascii_case("append").then_some("append")
     }
 }
 
@@ -1331,6 +1326,7 @@ mod tests {
             catchup_type: Some("flussonic".into()),
             ..CatchupProperties::default()
         };
+        assert_eq!(conflicting.effective_mode(), Some("flussonic"));
         assert!(conflicting.is_flussonic());
         assert_eq!(conflicting.native_flussonic_player_mode(), Some("flussonic"));
 
@@ -1339,8 +1335,17 @@ mod tests {
             catchup_type: Some("shift".into()),
             ..CatchupProperties::default()
         };
+        assert_eq!(shift_type_wins.effective_mode(), Some("shift"));
         assert!(!shift_type_wins.is_flussonic());
         assert_eq!(shift_type_wins.native_flussonic_player_mode(), None);
+
+        let whitespace_type = CatchupProperties {
+            mode: Some("append".into()),
+            catchup_type: Some("  ".into()),
+            ..CatchupProperties::default()
+        };
+        assert_eq!(whitespace_type.effective_mode(), Some("append"));
+        assert_eq!(whitespace_type.append_player_type(), Some("append"));
     }
 
     #[test]
