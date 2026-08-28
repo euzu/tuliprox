@@ -1461,6 +1461,7 @@ mod tests {
             identity_registry: Arc::new(tuliprox_repository::identity_registry::IdentityRegistry::empty(
                 std::path::PathBuf::new(),
             )),
+            login_throttle: Arc::new(crate::auth::LoginThrottle::new()),
             manual_update_sender,
         })
     }

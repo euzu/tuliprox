@@ -11,12 +11,13 @@ use crate::{
 };
 use axum::{body::Body, http::Request, response::IntoResponse};
 use base64::Engine;
-use log::{debug, error};
+use log::{debug, error, warn};
 use lol_html::{element, RewriteStrSettings};
 use rand::{rngs::OsRng, RngCore, TryRngCore};
 use serde_json::json;
 use shared::{
     model::{TokenResponse, UserCredential, TOKEN_NO_AUTH},
+    utils::sanitize_sensitive_info,
     utils::{concat_path_leading_slash, CONSTANTS},
 };
 use std::{
@@ -61,8 +62,19 @@ async fn api_subject_id(app_state: &Arc<AppState>, username: &str) -> Option<sha
     }
 }
 
+/// A 429 carrying the wait, so a client backs off instead of hammering.
+fn too_many_attempts(retry_after: std::time::Duration) -> axum::response::Response {
+    let seconds = retry_after.as_secs().max(1);
+    axum::http::Response::builder()
+        .status(axum::http::StatusCode::TOO_MANY_REQUESTS)
+        .header(axum::http::header::RETRY_AFTER, seconds.to_string())
+        .body(axum::body::Body::empty())
+        .unwrap_or_else(|_| axum::http::StatusCode::TOO_MANY_REQUESTS.into_response())
+}
+
 async fn token(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    fingerprint: crate::auth::Fingerprint,
     axum::extract::Json(mut req): axum::extract::Json<UserCredential>,
 ) -> impl axum::response::IntoResponse + Send {
     let config = &app_state.app_config.config.load();
@@ -74,6 +86,20 @@ async fn token(
             }
             let username = req.username.as_str();
             let password = req.password.as_str();
+
+            // Before the argon2 verify, not after: the point is to stop a
+            // password list, and an attacker who can still force the hash on
+            // every attempt has not been stopped.
+            if let Some(retry_after) = app_state.login_throttle.retry_after(username, &fingerprint.client_ip) {
+                warn!(
+                    "Sign-in throttled for '{}' from {}; {}s remaining",
+                    sanitize_sensitive_info(username),
+                    fingerprint.client_ip,
+                    retry_after.as_secs()
+                );
+                req.zeroize();
+                return too_many_attempts(retry_after);
+            }
 
             if !(username.is_empty() || password.is_empty()) {
                 if let Some(hash) = web_auth.get_user_password(username) {
@@ -100,6 +126,7 @@ async fn token(
                             create_jwt_web_user(web_auth, username, permissions, pwd_version, subject_id)
                         };
                         if let Ok(token) = token_result {
+                            app_state.login_throttle.record_success(&req.username, &fingerprint.client_ip);
                             req.zeroize();
                             return axum::Json(TokenResponse { token, username: req.username.clone() }).into_response();
                         }
@@ -116,6 +143,7 @@ async fn token(
                             return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
                         };
                         if let Ok(token) = create_jwt_api_user(web_auth, username, subject_id) {
+                            app_state.login_throttle.record_success(&req.username, &fingerprint.client_ip);
                             req.zeroize();
                             return axum::Json(TokenResponse { token, username: req.username.clone() }).into_response();
                         }
@@ -123,6 +151,8 @@ async fn token(
                 }
             }
 
+            app_state.login_throttle.record_failure(&req.username, &fingerprint.client_ip);
+            warn!("Sign-in rejected for '{}' from {}", sanitize_sensitive_info(&req.username), fingerprint.client_ip);
             req.zeroize();
             axum::http::StatusCode::UNAUTHORIZED.into_response()
         }

@@ -449,6 +449,11 @@ pub struct AppState {
     /// the subject from the username - `web:<name>` / `api:<name>` - and a
     /// rename silently reassigned everything the old subject owned.
     pub identity_registry: Arc<IdentityRegistry>,
+    /// Backoff for repeated failed sign-ins.
+    ///
+    /// `/auth/token` used to answer 401 and forget, so a password list could
+    /// be worked against it as fast as argon2 allows.
+    pub login_throttle: Arc<crate::auth::LoginThrottle>,
     /// Bounded channel (capacity 1) for manual playlist update requests.
     /// `try_send` deduplicates rapid clicks: if an update is already pending
     /// or the channel is full, the request is silently dropped so at most one
@@ -524,6 +529,7 @@ pub(crate) fn create_test_app_state(config: Config) -> Arc<AppState> {
         identity_registry: Arc::new(tuliprox_repository::identity_registry::IdentityRegistry::empty(
             std::path::PathBuf::new(),
         )),
+        login_throttle: Arc::new(crate::auth::LoginThrottle::new()),
         manual_update_sender,
     })
 }
