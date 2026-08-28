@@ -505,7 +505,6 @@ async fn activate_session_before_stream_open(
             let current_session =
                 app_state.active_users.get_and_update_user_session(&user.username, session_token).await;
             classify_playback_request(PlaybackRequestFacts {
-                item_type,
                 existing_session: current_session.as_ref(),
                 prepare_only: false,
                 terminate: false,
@@ -516,7 +515,6 @@ async fn activate_session_before_stream_open(
     } else {
         let existing_session = app_state.active_users.get_and_update_user_session(&user.username, session_token).await;
         classify_playback_request(PlaybackRequestFacts {
-            item_type,
             existing_session: existing_session.as_ref(),
             prepare_only: false,
             terminate: false,
@@ -5402,7 +5400,6 @@ mod tests {
     #[test]
     fn classify_playback_request_marks_adaptive_playlist_request_as_prepare() {
         let request_class = classify_playback_request(PlaybackRequestFacts {
-            item_type: PlaylistItemType::LiveHls,
             existing_session: None,
             prepare_only: true,
             terminate: false,
@@ -5420,7 +5417,6 @@ mod tests {
         );
 
         let request_class = classify_playback_request(PlaybackRequestFacts {
-            item_type: PlaylistItemType::LiveHls,
             existing_session: Some(&session),
             prepare_only: false,
             terminate: false,
@@ -5435,7 +5431,6 @@ mod tests {
             create_test_session("tok-active", PlaylistItemType::LiveHls, crate::api::model::PlaybackLifecycle::Active);
 
         let request_class = classify_playback_request(PlaybackRequestFacts {
-            item_type: PlaylistItemType::LiveHls,
             existing_session: Some(&session),
             prepare_only: false,
             terminate: false,
@@ -5466,7 +5461,6 @@ mod tests {
         );
 
         let request_class = classify_playback_request(PlaybackRequestFacts {
-            item_type: PlaylistItemType::LiveHls,
             existing_session: Some(&session),
             prepare_only: false,
             terminate: false,
@@ -5498,7 +5492,6 @@ mod tests {
         session.lifecycle = crate::api::model::PlaybackLifecycle::Prepared;
 
         let request_class = classify_playback_request(PlaybackRequestFacts {
-            item_type: PlaylistItemType::LiveHls,
             existing_session: Some(&session),
             prepare_only: false,
             terminate: false,
@@ -5521,7 +5514,6 @@ mod tests {
         );
 
         let request_class = classify_playback_request(PlaybackRequestFacts {
-            item_type: PlaylistItemType::LiveHls,
             existing_session: Some(&session),
             prepare_only: false,
             terminate: false,
@@ -5544,7 +5536,6 @@ mod tests {
         session.lifecycle = crate::api::model::PlaybackLifecycle::Prepared;
 
         let request_class = classify_playback_request(PlaybackRequestFacts {
-            item_type: PlaylistItemType::LiveHls,
             existing_session: Some(&session),
             prepare_only: false,
             terminate: false,
@@ -5946,7 +5937,6 @@ mod tests {
             &app_state.admission_ctx(),
             &user,
             &fingerprint,
-            PlaylistItemType::LiveHls,
             None,
             "tok-prepare-only",
             false,
@@ -6012,7 +6002,6 @@ mod tests {
             &app_state.admission_ctx(),
             &user,
             &fingerprint,
-            PlaylistItemType::LiveHls,
             before.as_ref(),
             session_token,
             false,
@@ -6035,7 +6024,6 @@ mod tests {
     #[test]
     fn classify_playback_request_returns_terminate_when_flag_set() {
         let request_class = classify_playback_request(PlaybackRequestFacts {
-            item_type: PlaylistItemType::Live,
             existing_session: None,
             prepare_only: false,
             terminate: true,
@@ -8835,7 +8823,6 @@ mod tests {
             &app_state.admission_ctx(),
             &user,
             &ts_fingerprint,
-            PlaylistItemType::Live,
             None,
             &ts_token,
             false,

@@ -23,7 +23,8 @@ use shared::{
     model::{
         ClusterFlags, CounterModifier, EventMessage, EventSink, FieldGet, FieldSet, InputStats, InputType, ItemField,
         MappingStage, PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistStats, PlaylistUpdateProgressEvent,
-        PlaylistUpdateSummary, ProcessingOrder, SourceStats, StreamProperties, TargetStats, UUIDType, XtreamCluster,
+        PlaylistUpdateSummary, ProcessingOrder, SourceStats, StreamProperties, TargetStats, UUIDType, WatchDisabled,
+        WatchDisabledReason, WatchUnmatched, XtreamCluster,
     },
     utils::{create_alias_uuid, interner_gc, Internable},
 };
@@ -1248,7 +1249,9 @@ async fn process_sources<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
         // We're using the file lock this way on purpose
         let source_lock_path = PathBuf::from(concat_string!("source_", &index.to_string()));
         let Ok(update_lock) = processing_ctx.config.file_locks.try_write_lock(&source_lock_path).await else {
-            warn!("The update operation for the source at index {index} was skipped because an update is already in progress.");
+            warn!(
+                "The update operation for the source at index {index} was skipped because an update is already in progress."
+            );
             continue;
         };
 
@@ -1755,7 +1758,12 @@ async fn playlist_probe<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
                                     };
                                     debug!(
                                         "[Task] Creating ProbeLive task for input {}: id={}, last_probed_ts={:?}, cutoff_ts={}, interval={}s, title=\"{}\"",
-                                        input_name, provider_id, last_probed, cutoff_ts, interval_secs, item.header.title
+                                        input_name,
+                                        provider_id,
+                                        last_probed,
+                                        cutoff_ts,
+                                        interval_secs,
+                                        item.header.title
                                     );
                                 }
                                 Arc::clone(mgr).queue_task_background(input_name.clone(), task);
@@ -1824,7 +1832,9 @@ async fn playlist_probe<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
     }
 
     if queued_live_count > 0 || queued_stream_count > 0 {
-        info!("Queued probe tasks for input {input_name} (live_interval={queued_live_count}, generic={queued_stream_count})");
+        info!(
+            "Queued probe tasks for input {input_name} (live_interval={queued_live_count}, generic={queued_stream_count})"
+        );
     }
 }
 
@@ -1890,25 +1900,71 @@ async fn process_watch<E: EventSink>(
     target: &ConfigTarget,
     new_playlist: &[PlaylistGroup],
 ) -> bool {
-    if let Some(watches) = &target.watch {
-        if default_as_default().eq_ignore_ascii_case(&target.name) {
-            error!("can't watch a target with no unique name");
-            return false;
-        }
+    let Some(watches) = &target.watch else {
+        return false;
+    };
 
-        futures::stream::iter(
-            new_playlist
-                .iter()
-                .filter(|pl| watches.iter().any(|r| r.is_match(&pl.title)))
-                .map(|pl| process_group_watch(app_config, events, &target.name, pl)),
-        )
-        .for_each_concurrent(16, |f| f)
-        .await;
-
-        true
-    } else {
-        false
+    // Configured, but every pattern failed to compile. Silently doing
+    // nothing here is what made a typo in `watch` indistinguishable from a
+    // playlist that never changes.
+    if watches.is_empty() {
+        error!("target '{}' configured watch patterns but none of them compiled", target.name);
+        events.emit(EventMessage::PlaylistWatchDisabled(WatchDisabled::new(
+            target.name.to_string(),
+            WatchDisabledReason::InvalidPatterns,
+        )));
+        return false;
     }
+
+    if default_as_default().eq_ignore_ascii_case(&target.name) {
+        error!("can't watch a target with no unique name");
+        events.emit(EventMessage::PlaylistWatchDisabled(WatchDisabled::new(
+            target.name.to_string(),
+            WatchDisabledReason::UnnamedTarget,
+        )));
+        return false;
+    }
+
+    let mut matched = vec![false; watches.len()];
+    let mut watched_groups = Vec::new();
+    for group in new_playlist {
+        let mut any = false;
+        for (index, pattern) in watches.iter().enumerate() {
+            if pattern.is_match(&group.title) {
+                matched[index] = true;
+                any = true;
+            }
+        }
+        if any {
+            watched_groups.push(group);
+        }
+    }
+
+    // A pattern that matches nothing looks exactly like a group that has not
+    // changed. `EventKindMask::from_wire_names` already reports unmatched
+    // subscription names for the same reason: a typo must surface.
+    let unmatched: Vec<String> = watches
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !matched[*index])
+        .map(|(_, pattern)| pattern.as_str().to_string())
+        .collect();
+    if !unmatched.is_empty() {
+        warn!("target '{}' has {} watch pattern(s) matching no group", target.name, unmatched.len());
+        events.emit(EventMessage::PlaylistWatchUnmatched(WatchUnmatched::new(
+            target.name.to_string(),
+            unmatched,
+            new_playlist.len(),
+        )));
+    }
+
+    futures::stream::iter(
+        watched_groups.into_iter().map(|pl| process_group_watch(app_config, events, &target.name, pl)),
+    )
+    .for_each_concurrent(16, |f| f)
+    .await;
+
+    true
 }
 
 /// Work the composition root runs once the playlist lock is held, before the

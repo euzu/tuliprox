@@ -24,6 +24,7 @@ use shared::model::{
     notification::{EventId, Severity},
     AuthAuditEvent, AuthAuditOutcome, EventKind, EventKindMask, EventMessage, LibraryScanSummaryStatus,
     ServerLifecycleState, StreamProbeFailure, StreamProbeFailureReason, UserLifecycleEvent, UserLifecycleState,
+    WatchDisabledReason,
 };
 use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
@@ -74,6 +75,8 @@ const NOTIFIABLE_KINDS: EventKindMask = EventKindMask::new()
     .with(EventKind::DiskAlert)
     .with(EventKind::ConfigReloadFailed)
     .with(EventKind::PlaylistWatchChanged)
+    .with(EventKind::PlaylistWatchDisabled)
+    .with(EventKind::PlaylistWatchUnmatched)
     .with(EventKind::ProviderAccountStatus)
     .with(EventKind::ProviderAccountExpiring)
     .with(EventKind::ProviderAccountExpired)
@@ -222,6 +225,29 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
         EventMessage::PlaylistWatchChanged(changes) => {
             Some(NotificationEvent::from_content(&MessageContent::Watch(changes.clone())))
         }
+        EventMessage::PlaylistWatchDisabled(disabled) => {
+            let what = match disabled.reason {
+                WatchDisabledReason::InvalidPatterns => "no watch pattern compiled".to_string(),
+                WatchDisabledReason::UnnamedTarget => "the target has no unique name".to_string(),
+                WatchDisabledReason::StorageFailure => disabled.group.as_ref().map_or_else(
+                    || "watch state is unreadable".to_string(),
+                    |group| format!("watch state for {group} is unreadable"),
+                ),
+            };
+            let title = format!("Watch is not running for {}: {what}", disabled.target);
+            let body = disabled.detail.as_ref().map_or_else(|| title.clone(), |detail| format!("{title}\n\n{detail}"));
+            Some(NotificationEvent::new(id, title, body).with_severity(message.severity()).with_fields(disabled))
+        }
+        EventMessage::PlaylistWatchUnmatched(unmatched) => {
+            let title = format!(
+                "{} watch pattern(s) for {} matched none of its {} group(s)",
+                unmatched.patterns.len(),
+                unmatched.target,
+                unmatched.groups_seen
+            );
+            let body = format!("{title}\n\n{}", unmatched.patterns.join("\n"));
+            Some(NotificationEvent::new(id, title, body).with_severity(message.severity()).with_fields(unmatched))
+        }
         // Deliberately not notified from here. Recording notifications are
         // at-most-once: a durable marker is persisted inside the
         // queue-mutation boundary *before* delivery, and the outbox retries
@@ -346,6 +372,7 @@ mod tests {
         MsgKind, NotificationDeadLetter, PlaylistUpdateProgressEvent, PlaylistUpdateState, PlaylistUpdateSummary,
         ProviderAccountEvent, ProviderAccountState, RecordingLifecycleMessage, ServerLifecycleEvent,
         StreamProbeFailure, StreamProbeFailureReason, SystemInfo, UserLifecycleEvent, UserLifecycleState, WatchChanges,
+        WatchDisabled, WatchDisabledReason, WatchUnmatched,
     };
     use std::sync::Arc;
 
@@ -430,6 +457,11 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
             )),
+            EventMessage::PlaylistWatchDisabled(WatchDisabled::new(
+                "t".to_string(),
+                WatchDisabledReason::InvalidPatterns,
+            )),
+            EventMessage::PlaylistWatchUnmatched(WatchUnmatched::new("t".to_string(), vec!["x".to_string()], 0)),
             recording_lifecycle(MsgKind::RecordingStarted),
             recording_lifecycle(MsgKind::RecordingCompleted),
             recording_lifecycle(MsgKind::RecordingFailed),

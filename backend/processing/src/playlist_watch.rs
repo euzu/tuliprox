@@ -1,5 +1,5 @@
 use log::error;
-use shared::model::{EventMessage, EventSink, PlaylistGroup, WatchChanges};
+use shared::model::{EventMessage, EventSink, PlaylistGroup, WatchChanges, WatchDisabled, WatchDisabledReason};
 use std::{collections::BTreeSet, path::Path, sync::Arc};
 use tuliprox_core::{
     model::AppConfig,
@@ -47,6 +47,16 @@ pub async fn process_group_watch<E: EventSink>(
                     }
                 } else {
                     error!("failed to load watch_file {}", path.to_str().unwrap_or_default());
+                    // The baseline is unreadable, so this refresh re-baselines
+                    // and the diff it should have produced is gone. Silently
+                    // doing that leaves the operator believing the group is
+                    // being watched.
+                    emit_watch_disabled(
+                        events,
+                        target_name,
+                        &pl.title,
+                        format!("could not read watch state at {}", path.to_str().unwrap_or_default()),
+                    );
                     changed = true;
                 }
             } else {
@@ -57,14 +67,39 @@ pub async fn process_group_watch<E: EventSink>(
                     Ok(()) => {}
                     Err(err) => {
                         error!("failed to write watch_file {}: {err}", save_path.to_str().unwrap_or_default());
+                        emit_watch_disabled(
+                            events,
+                            target_name,
+                            &pl.title,
+                            format!("could not write watch state at {}: {err}", save_path.to_str().unwrap_or_default()),
+                        );
                     }
                 }
             }
         }
         None => {
             error!("failed to write watch_file {watch_filename}");
+            emit_watch_disabled(
+                events,
+                target_name,
+                &pl.title,
+                format!("could not resolve a storage path for {watch_filename}"),
+            );
         }
     }
+}
+
+/// Report that a group's watch state could not be read or written.
+///
+/// Each of these paths used to log once and carry on, which leaves the group
+/// either silently re-baselining - losing the change it should have reported
+/// - or not tracked at all.
+fn emit_watch_disabled<E: EventSink>(events: &E, target_name: &str, group_name: &str, detail: String) {
+    events.emit(EventMessage::PlaylistWatchDisabled(
+        WatchDisabled::new(target_name.to_string(), WatchDisabledReason::StorageFailure)
+            .with_group(group_name.to_string())
+            .with_detail(detail),
+    ));
 }
 
 /// Turn a group's membership delta into an event.

@@ -308,9 +308,15 @@ impl From<&ConfigTargetDto> for ConfigTarget {
             mapping: Arc::new(ArcSwapOption::new(None)),
             favourites: dto.favourites.as_ref().map(|f| f.iter().map(Into::into).collect()),
             processing_order: dto.processing_order,
-            watch: dto.watch.as_ref().and_then(|list| {
-                let compiled: Vec<_> = list
-                    .iter()
+            // An empty `Some` is deliberate and load-bearing: it means the
+            // operator configured `watch` and every pattern failed to
+            // compile, which is different from not configuring it at all.
+            // Collapsing both to `None` is how the feature used to turn
+            // itself off on a typo with nothing but one `warn!` to show for
+            // it - `process_watch` now reports the empty case as
+            // `playlist.watch.disabled`.
+            watch: dto.watch.as_ref().map(|list| {
+                list.iter()
                     .filter_map(|s| match shared::model::REGEX_CACHE.get_or_compile(s) {
                         Ok(re) => Some(re),
                         Err(e) => {
@@ -318,12 +324,7 @@ impl From<&ConfigTargetDto> for ConfigTarget {
                             None
                         }
                     })
-                    .collect();
-                if compiled.is_empty() {
-                    None
-                } else {
-                    Some(compiled)
-                }
+                    .collect()
             }),
             use_memory_cache: dto.use_memory_cache,
         }

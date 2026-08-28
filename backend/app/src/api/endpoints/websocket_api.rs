@@ -486,6 +486,8 @@ fn to_protocol_message(event: EventMessage) -> Option<(ProtocolMessage, &'static
         | EventMessage::DiskAlert(_)
         | EventMessage::ConfigReloadFailed(_)
         | EventMessage::PlaylistWatchChanged(_)
+        | EventMessage::PlaylistWatchDisabled(_)
+        | EventMessage::PlaylistWatchUnmatched(_)
         | EventMessage::RecordingLifecycle(_)
         | EventMessage::ProviderAccount(_)
         // The panel already knows it just saved a user - it made the
@@ -654,7 +656,8 @@ mod tests {
         LibraryScanProgressEvent, LibraryScanSummary, LibraryScanSummaryStatus, MetadataUpdateFailure, MsgKind,
         Permission, PlaylistUpdateProgressEvent, ProtocolHandler, ProtocolHandlerMemory, ProviderAccountEvent,
         ProviderAccountState, RecordingLifecycleMessage, RoleSet, TaskKindDto, TaskPriorityDto, TransferStatusDto,
-        UserId, UserRole, WatchChanges, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, PROTOCOL_VERSION, TOKEN_NO_AUTH,
+        UserId, UserRole, WatchChanges, WatchDisabled, WatchDisabledReason, WatchUnmatched,
+        CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, PROTOCOL_VERSION, TOKEN_NO_AUTH,
     };
     use std::sync::Arc;
     use tokio::sync::broadcast::error::RecvError;
@@ -689,7 +692,9 @@ mod tests {
         // every notification-only kind against `expected = true` and the
         // test failed on `DiskAlert` - it has been red since the lifecycle
         // events joined the bus.
-        const NOT_ON_THE_WIRE: [EventKind; 17] = [
+        const NOT_ON_THE_WIRE: [EventKind; 19] = [
+            EventKind::PlaylistWatchDisabled,
+            EventKind::PlaylistWatchUnmatched,
             EventKind::NotificationDeadLettered,
             EventKind::ServerStarted,
             EventKind::ServerShutdown,
@@ -791,6 +796,11 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
             )),
+            EventMessage::PlaylistWatchDisabled(WatchDisabled::new(
+                "t".to_string(),
+                WatchDisabledReason::InvalidPatterns,
+            )),
+            EventMessage::PlaylistWatchUnmatched(WatchUnmatched::new("t".to_string(), vec!["x".to_string()], 0)),
             recording_lifecycle(MsgKind::RecordingStarted),
             recording_lifecycle(MsgKind::RecordingCompleted),
             recording_lifecycle(MsgKind::RecordingFailed),

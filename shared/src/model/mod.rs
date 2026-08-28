@@ -59,6 +59,7 @@ mod user_command;
 mod user_lifecycle;
 mod uuidtype;
 pub mod view_type;
+mod watch_health;
 pub mod web_socket;
 mod xtream;
 pub mod xtream_const;
@@ -72,8 +73,8 @@ pub use self::{
     regex_cache::*, search_fields::*, search_request::*, server_lifecycle::*, short_epg::*, stalker::*,
     stalker_item::*, stats::*, status_check::*, stream_history::*, stream_history_record::*, stream_info::*,
     stream_meter::*, stream_probe_failure::*, stream_properties::*, strm_export_style::*, system_info::*,
-    target_type::*, transfer::*, ui_playlist_item::*, user_command::*, user_lifecycle::*, uuidtype::*, web_socket::*,
-    xtream::*,
+    target_type::*, transfer::*, ui_playlist_item::*, user_command::*, user_lifecycle::*, uuidtype::*, watch_health::*,
+    web_socket::*, xtream::*,
 };
 pub use ids::*;
 pub use prepare::*;

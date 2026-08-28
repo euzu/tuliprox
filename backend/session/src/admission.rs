@@ -17,7 +17,7 @@ use crate::{
     connection_manager::ConnectionManager,
 };
 use log::debug;
-use shared::model::{AdmissionStrategy, PlaylistItemType, UserConnectionPermission, VirtualId};
+use shared::model::{AdmissionStrategy, UserConnectionPermission, VirtualId};
 use std::sync::Arc;
 use tuliprox_core::model::{AppConfig, Fingerprint, ProxyUserCredentials};
 
@@ -52,7 +52,6 @@ pub enum PlaybackRequestClass {
 
 #[derive(Clone, Copy)]
 pub struct PlaybackRequestFacts<'a> {
-    pub item_type: PlaylistItemType,
     pub existing_session: Option<&'a UserSession>,
     pub prepare_only: bool,
     pub terminate: bool,
@@ -73,7 +72,6 @@ pub fn classify_playback_request(facts: PlaybackRequestFacts<'_>) -> PlaybackReq
             return PlaybackRequestClass::FollowUp;
         }
     }
-    let _ = facts.item_type;
     PlaybackRequestClass::Activate
 }
 
@@ -82,7 +80,6 @@ pub async fn resolve_playback_request_admission(
     adm: &AdmissionCtx,
     user: &ProxyUserCredentials,
     fingerprint: &Fingerprint,
-    item_type: PlaylistItemType,
     user_session: Option<&UserSession>,
     session_token: &str,
     activate_unbound_session: bool,
@@ -91,7 +88,6 @@ pub async fn resolve_playback_request_admission(
     terminate: bool,
 ) -> (crate::ConnectionAdmission, Option<crate::GraceMode>, PlaybackRequestClass) {
     let request_class = classify_playback_request(PlaybackRequestFacts {
-        item_type,
         existing_session: user_session,
         prepare_only,
         terminate,

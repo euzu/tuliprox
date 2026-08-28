@@ -17,7 +17,7 @@ use crate::model::{
     LibraryScanProgressEvent, LibraryScanSummaryStatus, MetadataUpdateFailure, MsgKind, NotificationDeadLetter,
     Permission, PlaylistUpdateProgressEvent, PlaylistUpdateState, ProviderAccountEvent, ProviderAccountState,
     RecordingLifecycleMessage, ServerLifecycleEvent, ServerLifecycleState, StreamProbeFailure, SystemInfo,
-    UserLifecycleEvent, UserLifecycleState, WatchChanges,
+    UserLifecycleEvent, UserLifecycleState, WatchChanges, WatchDisabled, WatchUnmatched,
 };
 use std::sync::Arc;
 
@@ -62,6 +62,10 @@ pub enum EventMessage {
     ConfigReloadFailed(ConfigReloadFailure),
     /// A target's `watch` config saw its group membership change.
     PlaylistWatchChanged(WatchChanges),
+    /// A target's `watch` config is configured but not working.
+    PlaylistWatchDisabled(WatchDisabled),
+    /// `watch` patterns that matched no group in the refreshed playlist.
+    PlaylistWatchUnmatched(WatchUnmatched),
     /// A recording started, finished or failed. One variant, three kinds -
     /// see [`EventMessage::kind`] - so a subscriber can ask for failures
     /// alone.
@@ -170,6 +174,8 @@ pub enum EventKind {
     DiskAlert,
     ConfigReloadFailed,
     PlaylistWatchChanged,
+    PlaylistWatchDisabled,
+    PlaylistWatchUnmatched,
     RecordingStarted,
     RecordingCompleted,
     RecordingFailed,
@@ -192,7 +198,7 @@ impl EventKind {
     ///
     /// The mask type below indexes into this, so the order is load-bearing:
     /// it is the bit order, not just a listing.
-    pub const ALL: [Self; 36] = [
+    pub const ALL: [Self; 38] = [
         Self::ServerError,
         Self::ServerStarted,
         Self::ServerShutdown,
@@ -214,6 +220,8 @@ impl EventKind {
         Self::DiskAlert,
         Self::ConfigReloadFailed,
         Self::PlaylistWatchChanged,
+        Self::PlaylistWatchDisabled,
+        Self::PlaylistWatchUnmatched,
         Self::RecordingStarted,
         Self::RecordingCompleted,
         Self::RecordingFailed,
@@ -253,9 +261,11 @@ impl EventKind {
             | Self::RecordingStarted
             | Self::RecordingCompleted
             | Self::RecordingFailed => Permission::RecordingRead,
-            Self::PlaylistUpdate | Self::PlaylistUpdateProgress | Self::PlaylistWatchChanged => {
-                Permission::PlaylistWrite
-            }
+            Self::PlaylistUpdate
+            | Self::PlaylistUpdateProgress
+            | Self::PlaylistWatchChanged
+            | Self::PlaylistWatchDisabled
+            | Self::PlaylistWatchUnmatched => Permission::PlaylistWrite,
             Self::LibraryScanProgress | Self::LibraryScanFailed => Permission::LibraryWrite,
             // Who may hear that an account was created is the same question
             // as who may list accounts.
@@ -368,6 +378,8 @@ impl EventKind {
             Self::DiskAlert => "system.disk.alert",
             Self::ConfigReloadFailed => "config.reload.failed",
             Self::PlaylistWatchChanged => "playlist.watch.changed",
+            Self::PlaylistWatchDisabled => "playlist.watch.disabled",
+            Self::PlaylistWatchUnmatched => "playlist.watch.unmatched",
             Self::RecordingStarted => "recording.started",
             Self::RecordingCompleted => "recording.completed",
             Self::RecordingFailed => "recording.failed",
@@ -425,6 +437,8 @@ impl EventMessage {
             Self::DiskAlert(_) => EventKind::DiskAlert,
             Self::ConfigReloadFailed(_) => EventKind::ConfigReloadFailed,
             Self::PlaylistWatchChanged(_) => EventKind::PlaylistWatchChanged,
+            Self::PlaylistWatchDisabled(_) => EventKind::PlaylistWatchDisabled,
+            Self::PlaylistWatchUnmatched(_) => EventKind::PlaylistWatchUnmatched,
             // One payload, three kinds: a subscriber that only cares about
             // failures should not be woken for every completed recording.
             Self::RecordingLifecycle(msg) => match msg.event {
@@ -512,6 +526,8 @@ impl EventMessage {
             Self::DiskAlert(_) => registry::SYSTEM_DISK_ALERT,
             Self::ConfigReloadFailed(_) => registry::CONFIG_RELOAD_FAILED,
             Self::PlaylistWatchChanged(_) => registry::PLAYLIST_WATCH_CHANGED,
+            Self::PlaylistWatchDisabled(_) => registry::PLAYLIST_WATCH_DISABLED,
+            Self::PlaylistWatchUnmatched(_) => registry::PLAYLIST_WATCH_UNMATCHED,
             Self::RecordingLifecycle(msg) => match msg.event {
                 MsgKind::RecordingStarted => registry::RECORDING_STARTED,
                 MsgKind::RecordingCompleted => registry::RECORDING_COMPLETED,
@@ -586,6 +602,8 @@ impl EventMessage {
             Self::DiskAlert(alert) => encode(alert),
             Self::ConfigReloadFailed(failure) => encode(failure),
             Self::PlaylistWatchChanged(changes) => encode(changes),
+            Self::PlaylistWatchDisabled(disabled) => encode(disabled),
+            Self::PlaylistWatchUnmatched(unmatched) => encode(unmatched),
             Self::RecordingLifecycle(msg) => encode(msg),
             Self::ProviderAccount(event) => encode(event),
             Self::UserLifecycle(event) => encode(event),

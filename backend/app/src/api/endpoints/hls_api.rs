@@ -4990,7 +4990,6 @@ async fn try_reserve_hls_virtual_entry_origin_account_for_redirect(
         &app_state.admission_ctx(),
         user,
         fingerprint,
-        PlaylistItemType::LiveHls,
         None,
         &session_token,
         false,
@@ -7510,7 +7509,6 @@ async fn admit_recovered_archive_stream(
         &app_state.admission_ctx(),
         user,
         fingerprint,
-        PlaylistItemType::Catchup,
         Some(&session),
         &session.token,
         true,
@@ -7778,11 +7776,6 @@ async fn hls_api_stream_resolved(
                 &app_state.admission_ctx(),
                 &user,
                 &fingerprint,
-                if is_m3u_catchup_session_token(&session.token) || archive_reference.is_some() {
-                    PlaylistItemType::Catchup
-                } else {
-                    PlaylistItemType::LiveHls
-                },
                 Some(session),
                 &session.token,
                 true,

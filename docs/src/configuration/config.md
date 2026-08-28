@@ -455,6 +455,8 @@ negative pattern does, so `["*", "!system.info"]` reads the way it looks.
 | `playlist.update.completed` | info | A playlist update finished; carries per-source statistics. |
 | `playlist.update.failed` | error | A playlist update failed. |
 | `playlist.watch.changed` | info | Channels were added to or removed from a watched group. |
+| `playlist.watch.disabled` | warn | A target's watch configuration is set but not working. |
+| `playlist.watch.unmatched` | warn | Watch patterns matched no group in the refreshed playlist. |
 | `recording.started` | info | A recording started. |
 | `recording.completed` | info | A recording completed. |
 | `recording.failed` | error | A recording failed. |

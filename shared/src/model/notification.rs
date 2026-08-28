@@ -192,6 +192,8 @@ pub mod registry {
     pub const PLAYLIST_UPDATE_COMPLETED: EventId = EventId::new("playlist.update.completed");
     pub const PLAYLIST_UPDATE_FAILED: EventId = EventId::new("playlist.update.failed");
     pub const PLAYLIST_WATCH_CHANGED: EventId = EventId::new("playlist.watch.changed");
+    pub const PLAYLIST_WATCH_DISABLED: EventId = EventId::new("playlist.watch.disabled");
+    pub const PLAYLIST_WATCH_UNMATCHED: EventId = EventId::new("playlist.watch.unmatched");
 
     // ---- recording ------------------------------------------------------
     pub const RECORDING_STARTED: EventId = EventId::new("recording.started");
@@ -278,6 +280,16 @@ pub mod registry {
             id: PLAYLIST_WATCH_CHANGED,
             severity: Severity::Info,
             description: "Channels were added to or removed from a watched group.",
+        },
+        EventDescriptor {
+            id: PLAYLIST_WATCH_DISABLED,
+            severity: Severity::Warn,
+            description: "A target's watch configuration is set but not working.",
+        },
+        EventDescriptor {
+            id: PLAYLIST_WATCH_UNMATCHED,
+            severity: Severity::Warn,
+            description: "Watch patterns matched no group in the refreshed playlist.",
         },
         EventDescriptor { id: RECORDING_STARTED, severity: Severity::Info, description: "A recording started." },
         EventDescriptor { id: RECORDING_COMPLETED, severity: Severity::Info, description: "A recording completed." },
