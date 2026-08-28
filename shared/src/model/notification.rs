@@ -239,6 +239,12 @@ pub mod registry {
     pub const USER_UPDATED: EventId = EventId::new("user.updated");
     pub const USER_DELETED: EventId = EventId::new("user.deleted");
 
+    // ---- authentication --------------------------------------------------
+    pub const AUTH_SIGN_IN_SUCCEEDED: EventId = EventId::new("auth.sign_in.succeeded");
+    pub const AUTH_SIGN_IN_FAILED: EventId = EventId::new("auth.sign_in.failed");
+    pub const AUTH_SIGN_IN_THROTTLED: EventId = EventId::new("auth.sign_in.throttled");
+    pub const AUTH_PERMISSION_DENIED: EventId = EventId::new("auth.permission.denied");
+
     // ---- streams ---------------------------------------------------------
     pub const STREAM_PROBE_FAILED: EventId = EventId::new("stream.probe.failed");
 
@@ -352,6 +358,26 @@ pub mod registry {
             id: USER_DELETED,
             severity: Severity::Warn,
             description: "An API-proxy user account was deleted.",
+        },
+        EventDescriptor {
+            id: AUTH_SIGN_IN_SUCCEEDED,
+            severity: Severity::Info,
+            description: "A principal signed in and was issued a token.",
+        },
+        EventDescriptor {
+            id: AUTH_SIGN_IN_FAILED,
+            severity: Severity::Warn,
+            description: "A sign-in was rejected. Deduplicated per principal and address, so a password-guessing run notifies once rather than per attempt.",
+        },
+        EventDescriptor {
+            id: AUTH_SIGN_IN_THROTTLED,
+            severity: Severity::Warn,
+            description: "A sign-in was refused without checking credentials because the caller is backing off after repeated failures.",
+        },
+        EventDescriptor {
+            id: AUTH_PERMISSION_DENIED,
+            severity: Severity::Warn,
+            description: "An authenticated principal asked for something its permissions do not cover.",
         },
         EventDescriptor {
             id: STREAM_PROBE_FAILED,

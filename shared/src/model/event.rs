@@ -10,6 +10,7 @@
 //! stream-meter registry it feeds also lives.
 
 use crate::model::{
+    auth_audit::{AuthAuditEvent, AuthAuditOutcome},
     notification::{registry, EventId, Severity},
     stats::SourceStats,
     ActiveUserConnectionChange, ConfigReloadFailure, ConfigType, DiskAlert, DownloadsDelta, DownloadsResponse,
@@ -65,6 +66,12 @@ pub enum EventMessage {
     /// A stream probe returned no metadata. There is no success
     /// counterpart; see [`StreamProbeFailure`].
     StreamProbeFailed(StreamProbeFailure),
+
+    /// An authentication decision: a sign-in, a rejected sign-in, a
+    /// throttled attempt, or a permission denial. One variant, four kinds -
+    /// see [`EventMessage::kind`] - so a subscriber can ask for the failures
+    /// without being woken by every successful sign-in.
+    AuthAudit(AuthAuditEvent),
 }
 
 /// Somewhere an [`EventMessage`] can be published.
@@ -154,6 +161,10 @@ pub enum EventKind {
     UserUpdated,
     UserDeleted,
     StreamProbeFailed,
+    AuthSignInSucceeded,
+    AuthSignInFailed,
+    AuthSignInThrottled,
+    AuthPermissionDenied,
 }
 
 impl EventKind {
@@ -161,7 +172,7 @@ impl EventKind {
     ///
     /// The mask type below indexes into this, so the order is load-bearing:
     /// it is the bit order, not just a listing.
-    pub const ALL: [Self; 27] = [
+    pub const ALL: [Self; 31] = [
         Self::ServerError,
         Self::ActiveUser,
         Self::ActiveProvider,
@@ -189,6 +200,10 @@ impl EventKind {
         Self::UserUpdated,
         Self::UserDeleted,
         Self::StreamProbeFailed,
+        Self::AuthSignInSucceeded,
+        Self::AuthSignInFailed,
+        Self::AuthSignInThrottled,
+        Self::AuthPermissionDenied,
     ];
 
     /// This kind's bit position.
@@ -222,6 +237,13 @@ impl EventKind {
             // Who may hear that an account was created is the same question
             // as who may list accounts.
             Self::UserCreated | Self::UserUpdated | Self::UserDeleted => Permission::UserRead,
+            // Who signed in, who failed to, and who was refused: the same
+            // question as who may read the user list, and strictly narrower
+            // than the system-wide read the other operational events take.
+            Self::AuthSignInSucceeded
+            | Self::AuthSignInFailed
+            | Self::AuthSignInThrottled
+            | Self::AuthPermissionDenied => Permission::UserRead,
             Self::ServerError
             | Self::ActiveUser
             | Self::ActiveProvider
@@ -327,6 +349,10 @@ impl EventKind {
             Self::UserUpdated => "user.updated",
             Self::UserDeleted => "user.deleted",
             Self::StreamProbeFailed => "stream.probe.failed",
+            Self::AuthSignInSucceeded => "auth.sign_in.succeeded",
+            Self::AuthSignInFailed => "auth.sign_in.failed",
+            Self::AuthSignInThrottled => "auth.sign_in.throttled",
+            Self::AuthPermissionDenied => "auth.permission.denied",
         }
     }
 
@@ -381,6 +407,12 @@ impl EventMessage {
                 UserLifecycleState::Deleted => EventKind::UserDeleted,
             },
             Self::StreamProbeFailed(_) => EventKind::StreamProbeFailed,
+            Self::AuthAudit(event) => match event.outcome {
+                AuthAuditOutcome::SignInSucceeded => EventKind::AuthSignInSucceeded,
+                AuthAuditOutcome::SignInFailed => EventKind::AuthSignInFailed,
+                AuthAuditOutcome::SignInThrottled => EventKind::AuthSignInThrottled,
+                AuthAuditOutcome::PermissionDenied => EventKind::AuthPermissionDenied,
+            },
         }
     }
 
@@ -445,6 +477,12 @@ impl EventMessage {
                 UserLifecycleState::Deleted => registry::USER_DELETED,
             },
             Self::StreamProbeFailed(_) => registry::STREAM_PROBE_FAILED,
+            Self::AuthAudit(event) => match event.outcome {
+                AuthAuditOutcome::SignInSucceeded => registry::AUTH_SIGN_IN_SUCCEEDED,
+                AuthAuditOutcome::SignInFailed => registry::AUTH_SIGN_IN_FAILED,
+                AuthAuditOutcome::SignInThrottled => registry::AUTH_SIGN_IN_THROTTLED,
+                AuthAuditOutcome::PermissionDenied => registry::AUTH_PERMISSION_DENIED,
+            },
             Self::ActiveUser(_) => registry::USER_CONNECTION_CHANGED,
             Self::ActiveProvider(_, _) => registry::PROVIDER_CONNECTIONS_CHANGED,
             Self::RecordingChanged => registry::RECORDING_QUEUE_CHANGED,
@@ -498,6 +536,7 @@ impl EventMessage {
             Self::ProviderAccount(event) => encode(event),
             Self::UserLifecycle(event) => encode(event),
             Self::StreamProbeFailed(failure) => encode(failure),
+            Self::AuthAudit(event) => encode(event),
         }
     }
 

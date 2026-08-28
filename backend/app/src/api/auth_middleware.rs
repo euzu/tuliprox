@@ -13,7 +13,7 @@ use axum::{extract::FromRequestParts, http::request::Parts};
 use log::warn;
 use shared::model::{
     permission::{permission_to_name, Permission, PermissionSet},
-    Claims,
+    AuthAuditEvent, Claims, EventMessage, EventSink,
 };
 use std::sync::Arc;
 
@@ -168,14 +168,19 @@ pub async fn require_permission<const P: u32>(
         Ok(claims) => claims,
         Err(err) => return rejection_for(err),
     };
-    if let Err(err) = check_permission::<P>(&app_state, &claims) {
+    let client_ip = audit_client_ip(request.headers());
+    if let Err(err) = check_permission::<P>(&app_state, &claims, client_ip.as_deref()) {
         return rejection_for(err);
     }
     request.extensions_mut().insert(VerifiedClaims(claims));
     next.run(request).await
 }
 
-fn check_permission<const P: u32>(app_state: &Arc<AppState>, claims: &Claims) -> Result<(), AuthError> {
+fn check_permission<const P: u32>(
+    app_state: &Arc<AppState>,
+    claims: &Claims,
+    client_ip: Option<&str>,
+) -> Result<(), AuthError> {
     // `P` is a discriminant, not a bit. Recovering the variant is a constant
     // fold at each monomorphisation; `None` cannot happen for a `P` the
     // `permission_layer!` macro produced.
@@ -185,9 +190,30 @@ fn check_permission<const P: u32>(app_state: &Arc<AppState>, claims: &Claims) ->
     if !effective_permissions(app_state, claims).contains(permission) {
         let denied_permission = permission_to_name(permission).unwrap_or("unknown");
         warn!("User '{}' denied permission '{denied_permission}'", claims.username);
+        // A denial went to `warn!` and nowhere else, so nothing that
+        // subscribes to the bus could see it.
+        app_state.event_manager.emit(EventMessage::AuthAudit(AuthAuditEvent::permission_denied(
+            Arc::from(claims.username.as_str()),
+            Arc::from(client_ip.unwrap_or("unknown")),
+            Arc::from(denied_permission),
+        )));
         return Err(AuthError::Forbidden);
     }
     Ok(())
+}
+
+/// The client address for an audit record, best-effort.
+///
+/// The forwarding headers are read directly rather than through the
+/// `Fingerprint` extractor: an audit record is not worth failing a request
+/// over when the peer address is unavailable.
+fn audit_client_ip(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get("x-real-ip")
+        .or_else(|| headers.get("x-forwarded-for"))
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(|value| value.trim().to_string())
 }
 
 /// A handler-signature permission requirement.
@@ -246,7 +272,8 @@ impl<const P: u32> AuthorizedClaims<P> {
             parts.extensions.insert(VerifiedClaims(claims.clone()));
             claims
         };
-        check_permission::<P>(app_state, &claims).map_err(AuthorizeRejection::Token)?;
+        let client_ip = audit_client_ip(&parts.headers);
+        check_permission::<P>(app_state, &claims, client_ip.as_deref()).map_err(AuthorizeRejection::Token)?;
         Ok(Self(claims))
     }
 }

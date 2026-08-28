@@ -496,7 +496,11 @@ fn to_protocol_message(event: EventMessage) -> Option<(ProtocolMessage, &'static
         // request - and nothing in the Web UI subscribes to probe
         // failures yet. Both are on the bus for operators and plugins.
         | EventMessage::UserLifecycle(_)
-        | EventMessage::StreamProbeFailed(_) => return None,
+        | EventMessage::StreamProbeFailed(_)
+        // Auth decisions reach notification channels and plugins, not the
+        // Web UI socket: there is no panel that renders them, and pushing
+        // every sign-in to every connected admin is noise.
+        | EventMessage::AuthAudit(_) => return None,
     })
 }
 

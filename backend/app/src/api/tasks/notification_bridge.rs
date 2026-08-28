@@ -22,8 +22,8 @@ use crate::api::model::AppState;
 use log::{debug, warn};
 use shared::model::{
     notification::{EventId, Severity},
-    EventKind, EventKindMask, EventMessage, StreamProbeFailure, StreamProbeFailureReason, UserLifecycleEvent,
-    UserLifecycleState,
+    AuthAuditEvent, AuthAuditOutcome, EventKind, EventKindMask, EventMessage, StreamProbeFailure,
+    StreamProbeFailureReason, UserLifecycleEvent, UserLifecycleState,
 };
 use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
@@ -90,7 +90,11 @@ const NOTIFIABLE_KINDS: EventKindMask = EventKindMask::new()
     .with(EventKind::UserCreated)
     .with(EventKind::UserUpdated)
     .with(EventKind::UserDeleted)
-    .with(EventKind::StreamProbeFailed);
+    .with(EventKind::StreamProbeFailed)
+    .with(EventKind::AuthSignInSucceeded)
+    .with(EventKind::AuthSignInFailed)
+    .with(EventKind::AuthSignInThrottled)
+    .with(EventKind::AuthPermissionDenied);
 
 /// Map a bus event onto a notification, or `None` to ignore it.
 ///
@@ -200,6 +204,8 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
         EventMessage::UserLifecycle(event) => Some(user_lifecycle_notification(id, event, message.severity())),
         EventMessage::StreamProbeFailed(failure) => Some(probe_failure_notification(id, failure, message.severity())),
 
+        EventMessage::AuthAudit(event) => Some(auth_audit_notification(id, event, message.severity())),
+
         EventMessage::ConfigReloadFailed(failure) => {
             let title = format!("Configuration reload failed: {}", failure.paths);
             Some(
@@ -237,6 +243,29 @@ fn user_lifecycle_notification(id: EventId, event: &UserLifecycleEvent, severity
     let title = format!("User {} {action} on target {}", event.username, event.target);
     NotificationEvent::new(id, title.clone(), title)
         .with_severity(severity)
+        .with_dedup_key(event.dedup_key())
+        .with_fields(event)
+}
+
+/// Word an authentication decision.
+fn auth_audit_notification(id: EventId, event: &AuthAuditEvent, severity: Severity) -> NotificationEvent {
+    let title = match event.outcome {
+        AuthAuditOutcome::SignInSucceeded => format!("{} signed in from {}", event.username, event.client_ip),
+        AuthAuditOutcome::SignInFailed => format!("Sign-in rejected for {} from {}", event.username, event.client_ip),
+        AuthAuditOutcome::SignInThrottled => {
+            format!("Sign-in throttled for {} from {}", event.username, event.client_ip)
+        }
+        AuthAuditOutcome::PermissionDenied => format!(
+            "{} was denied '{}' from {}",
+            event.username,
+            event.permission.as_deref().unwrap_or("unknown"),
+            event.client_ip
+        ),
+    };
+    NotificationEvent::new(id, title.clone(), title)
+        .with_severity(severity)
+        // A password-guessing run is one piece of news, not one per attempt -
+        // which is exactly the case that generates the most events.
         .with_dedup_key(event.dedup_key())
         .with_fields(event)
 }
