@@ -62,16 +62,15 @@ video:
     - mpeg
     - divx
     - mov
-  download:
+  recording:
     headers:
       Accept: video/*
       User-Agent: |
         Mozilla/5.0 (AppleTV; U; CPU OS 14_2 like Mac OS X; en-us) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0.1 Safari/605.1.15
-    directory: ${env:TULIPROX_HOME}/downloads
+    directory: ${env:TULIPROX_HOME}/recordings
     organize_into_directories: false
     episode_pattern: .*(?P<episode>[Ss]\d{1,2}(.*?)[Ee]\d{1,2}).*
-    download_priority: 1
-    recording_priority: 0
+    priority: 1
     reserve_slots_for_users: 1
     max_background_per_provider: 1
     retry_backoff_initial_secs: 3
@@ -79,52 +78,34 @@ video:
     retry_backoff_max_secs: 30
     retry_backoff_jitter_percent: 20
     retry_max_attempts: 5
-    # DVR. Every field below is optional and shown at its default value;
-    # see docs/src/operator/dvr.md for the full reference.
-    # recording:
-    #   # Master switch. `false` stops reconciliation, retention, and the
-    #   # notification outbox, and the DVR routes stop doing work.
-    #   enabled: true
-    #   # Muxer ffmpeg writes: mpegts | matroska | mp4. mpegts survives
-    #   # truncation, so a recording killed mid-stream still plays.
-    #   container_format: mpegts
-    #   directory: ${env:TULIPROX_HOME}/downloads/recordings
-    #   timezone: UTC                  # IANA zone; used for rule timeslots
-    #   filename_template: "{channel}_{program_title}_{start_time}"
-    #   default_pre_roll_secs: 0
-    #   max_pre_roll_secs: 900         # 15 min
-    #   default_post_roll_secs: 0
-    #   max_post_roll_secs: 1800       # 30 min
-    #   # Estimated size for an unknown-bitrate recording, used for the
-    #   # quota reservation before any bytes are measured.
-    #   fallback_bytes_per_minute: 8388608   # 8 MiB/min
-    #   retention:
-    #     # Both policies are off when unset. Retention is the only thing
-    #     # bounding recording disk use, so set at least one on a shared box.
-    #     keep_last_per_channel: 10
-    #     delete_after_days: 30
-    #     sweep_interval_secs: 3600    # age/count sweep cadence
-    #   disk:
-    #     # Used-space percentages on the recording root's filesystem. When
-    #     # used >= high, oldest completed recordings are deleted until
-    #     # used <= low. Active recordings are never touched.
-    #     high_water_percent: 85
-    #     low_water_percent: 70
-    #     cleanup_interval_secs: 3600  # watermark-check cadence
-    #     safety_bytes: 1073741824     # 1 GiB kept free at all times
-    #   quota:
-    #     # Unset means unlimited. Charged by task state; see the operator doc.
-    #     default_private_bytes: 53687091200    # 50 GiB per user
-    #     shared_bytes: 536870912000            # 500 GiB for shared recordings
-    #     per_user_bytes:
-    #       "web:user-uuid-1": 107374182400     # 100 GiB override
-    #   notifications:
-    #     # Lifecycle notifications are delivered by a durable outbox that
-    #     # retries per channel. outbox_buffer is fixed at startup.
-    #     outbox_buffer: 1024
-    #     max_attempts: 6
-    #     backoff_initial_secs: 5
-    #     backoff_max_secs: 900
+    enabled: true
+    container_format: mpegts
+    timezone: UTC
+    filename_template: "{channel}_{program_title}_{start_time}"
+    default_pre_roll_secs: 0
+    max_pre_roll_secs: 900
+    default_post_roll_secs: 0
+    max_post_roll_secs: 1800
+    fallback_bytes_per_minute: 8388608
+    retention:
+      keep_last_per_channel: 10
+      delete_after_days: 30
+      sweep_interval_secs: 3600
+    disk:
+      high_water_percent: 85
+      low_water_percent: 70
+      cleanup_interval_secs: 3600
+      safety_bytes: 1073741824
+    quota:
+      default_private_bytes: 53687091200
+      shared_bytes: 536870912000
+      per_user_bytes:
+        "web:user-uuid-1": 107374182400
+    notifications:
+      outbox_buffer: 1024
+      max_attempts: 6
+      backoff_initial_secs: 5
+      backoff_max_secs: 900
 
 reverse_proxy:
   resource_retry:

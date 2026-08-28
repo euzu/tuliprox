@@ -19,6 +19,7 @@ generate_form_reducer!(
     action_name: RecordingConfigFormAction,
     fields {
         Enabled => enabled: bool,
+        Priority => priority: i8,
         ContainerFormat => container_format: RecordingContainerFormat,
         Directory => directory: Option<String>,
         Timezone => timezone: Option<String>,
@@ -159,7 +160,7 @@ pub const RECORDING_CARDS: [RecordingCardDescriptor; 5] = [
 
 pub const RECORDING_FIELDS: [RecordingFieldDescriptor; 25] = [
     RecordingFieldDescriptor { id: "enabled", label: "LABEL.RECORDING_ENABLED", card: 0 },
-    RecordingFieldDescriptor { id: "recording_priority", label: "LABEL.PRIORITY", card: 0 },
+    RecordingFieldDescriptor { id: "priority", label: "LABEL.PRIORITY", card: 0 },
     RecordingFieldDescriptor { id: "container_format", label: "LABEL.CONTAINER", card: 0 },
     RecordingFieldDescriptor { id: "directory", label: "LABEL.DIRECTORY", card: 0 },
     RecordingFieldDescriptor { id: "timezone", label: "LABEL.TIMEZONE", card: 0 },
@@ -201,11 +202,9 @@ pub fn recording_container_from_id(id: &str) -> Option<RecordingContainerFormat>
 #[derive(Properties, Clone, PartialEq)]
 pub struct RecordingConfigCardsProps {
     pub recording: RecordingConfigDto,
-    pub recording_priority: i8,
     pub reload_generation: u64,
     pub edit_mode: bool,
     pub on_change: Callback<(bool, RecordingConfigDto)>,
-    pub on_recording_priority_change: Callback<i8>,
     pub on_error: Callback<String>,
 }
 
@@ -300,7 +299,7 @@ pub fn RecordingConfigCards(props: &RecordingConfigCardsProps) -> Html {
     let render_view_field = |field: &RecordingFieldDescriptor| {
         let label = translate.t(field.label);
         let value = match field.id {
-            "recording_priority" => props.recording_priority.to_string(),
+            "priority" => direct_state.form.priority.to_string(),
             "container_format" => recording_container_id(direct_state.form.container_format).to_string(),
             "directory" => direct_state.form.directory.clone().unwrap_or_default(),
             "timezone" => direct_state.form.timezone.clone().unwrap_or_default(),
@@ -375,9 +374,9 @@ pub fn RecordingConfigCards(props: &RecordingConfigCardsProps) -> Html {
                 let state = direct_state.clone();
                 html! { <div class="tp__form-field tp__form-field__bool"><ToggleSwitch value={state.form.enabled} readonly={false} on_change={Callback::from(move |value| state.dispatch(RecordingConfigFormAction::Enabled(value)))} /><FieldLabel label={label} field_id={field.id} /></div> }
             }
-            "recording_priority" => {
-                let callback = props.on_recording_priority_change.clone();
-                html! { <crate::app::components::number_input::NumberInput name={field.id} label={Some(label)} value={Some(i64::from(props.recording_priority))} min_i64={Some(i64::from(i8::MIN))} max_i64={Some(i64::from(i8::MAX))} on_change={Callback::from(move |value: Option<i64>| { if let Some(value) = value.and_then(|value| i8::try_from(value).ok()) { callback.emit(value); } })} /> }
+            "priority" => {
+                let state = direct_state.clone();
+                html! { <crate::app::components::number_input::NumberInput name={field.id} label={Some(label)} value={Some(i64::from(state.form.priority))} min_i64={Some(i64::from(i8::MIN))} max_i64={Some(i64::from(i8::MAX))} on_change={Callback::from(move |value: Option<i64>| { if let Some(value) = value.and_then(|value| i8::try_from(value).ok()) { state.dispatch(RecordingConfigFormAction::Priority(value)); } })} /> }
             }
             "container_format" => {
                 let state = direct_state.clone();
@@ -852,7 +851,7 @@ mod tests {
         let actual = RECORDING_FIELDS.iter().map(|field| field.id).collect::<std::collections::HashSet<_>>();
         let expected = std::collections::HashSet::from([
             "enabled",
-            "recording_priority",
+            "priority",
             "container_format",
             "directory",
             "timezone",
@@ -984,11 +983,9 @@ mod browser_tests {
                     <DialogProvider>
                         <RecordingConfigCards
                             recording={props.recording.clone()}
-                            recording_priority={props.priority}
                             reload_generation={props.generation}
                             edit_mode={props.edit_mode}
                             on_change={Callback::from(move |value| emissions.borrow_mut().push(value))}
-                            on_recording_priority_change={Callback::noop()}
                             on_error={Callback::noop()}
                         />
                     </DialogProvider>
@@ -1002,7 +999,14 @@ mod browser_tests {
         let edit_mode = use_state(|| true);
         let emissions = Rc::clone(&props.emissions);
         let config = shared::model::AppConfigDto {
-            config: shared::model::ConfigDto { recording: Some(props.recording.clone()), ..Default::default() },
+            config: shared::model::ConfigDto {
+                video: Some(shared::model::VideoConfigDto {
+                    extensions: Vec::new(),
+                    web_search: None,
+                    recording: Some(props.recording.clone()),
+                }),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let config_ctx = ConfigContext { config: Some(Rc::new(config)), api_proxy: None };
@@ -1212,13 +1216,16 @@ mod browser_tests {
         emissions.borrow_mut().clear();
 
         set_input(&input(&root, "timezone")?, "UTC")?;
-        set_input(&input(&root, "recording_priority")?, "9")?;
+        set_input(&input(&root, "priority")?, "9")?;
         settle().await;
         let last = emissions.borrow().last().cloned();
 
         assert!(last.is_some_and(|form| match form {
-            ConfigForm::Recording(modified, recording) => {
-                modified && recording.priority == 9 && recording.timezone.as_deref() == Some("UTC")
+            ConfigForm::Recording(modified, video) => {
+                modified
+                    && video.recording.as_ref().is_some_and(|recording| {
+                        recording.priority == 9 && recording.timezone.as_deref() == Some("UTC")
+                    })
             }
             _ => false,
         }));

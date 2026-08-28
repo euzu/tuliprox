@@ -13,7 +13,7 @@ use shared::{
     model::{
         ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigPaths, HdHomeRunConfigDto, HdHomeRunDeviceConfigDto,
         LibraryConfigDto, LibraryMetadataConfigDto, LibraryMetadataReadConfigDto, LibraryPlaylistConfigDto,
-        LogConfigDto, RecordingConfigDto, RuntimeConfigReportFormat, ThumbnailConfigDto,
+        LogConfigDto, RuntimeConfigReportFormat, ThumbnailConfigDto, VideoConfigDto,
     },
 };
 use tuliprox_core::model::{AppConfig, Config, HdHomeRunConfig, HdHomeRunFlags, LibraryConfig};
@@ -50,7 +50,7 @@ async fn render_runtime_config_report(
     let report = build_runtime_config_report(app_config).await?;
     let mut value = serde_json::to_value(&report)
         .map_err(|err| TuliproxError::Config(format!("Failed to convert runtime config report to value: {err}")))?;
-    redact_value(None, None, &mut value);
+    redact_value(None, None, None, &mut value);
     serialize_report_value(&value, format)
 }
 
@@ -79,8 +79,7 @@ fn runtime_config_to_dto(config: &Config) -> ConfigDto {
         custom_stream_response_timeout_secs: config.custom_stream_response_timeout_secs,
         custom_stream_response_enabled: config.custom_stream_response_enabled,
         custom_stream_response_error_status: config.custom_stream_response_error_status,
-        recording: config.recording.as_ref().map(RecordingConfigDto::from),
-        video: None,
+        video: config.video.as_ref().map(VideoConfigDto::from),
         metadata_update: config.metadata_update.as_ref().map(shared::model::MetadataUpdateConfigDto::from),
         schedules: config
             .schedules
@@ -183,20 +182,20 @@ fn serialize_report_value(value: &Value, format: RuntimeConfigReportFormat) -> R
     }
 }
 
-fn redact_value(current_key: Option<&str>, parent_key: Option<&str>, value: &mut Value) {
+fn redact_value(current_key: Option<&str>, parent_key: Option<&str>, grandparent_key: Option<&str>, value: &mut Value) {
     match value {
         Value::Object(map) => {
             for (key, child) in map {
-                redact_value(Some(key.as_str()), current_key, child);
+                redact_value(Some(key.as_str()), current_key, parent_key, child);
             }
         }
         Value::Array(items) => {
             for item in items {
-                redact_value(None, current_key, item);
+                redact_value(None, current_key, parent_key, item);
             }
         }
         Value::String(text) => {
-            if should_redact_field(current_key, parent_key) {
+            if should_redact_field(current_key, parent_key, grandparent_key) {
                 *text = "***".to_string();
             } else if should_redact_as_url(current_key) {
                 *text = redact_url_like_value(text);
@@ -206,7 +205,7 @@ fn redact_value(current_key: Option<&str>, parent_key: Option<&str>, value: &mut
     }
 }
 
-fn should_redact_field(current_key: Option<&str>, parent_key: Option<&str>) -> bool {
+fn should_redact_field(current_key: Option<&str>, parent_key: Option<&str>, grandparent_key: Option<&str>) -> bool {
     let Some(key) = current_key.map(str::to_ascii_lowercase) else {
         return false;
     };
@@ -225,6 +224,12 @@ fn should_redact_field(current_key: Option<&str>, parent_key: Option<&str>) -> b
             | "proxy-authorization"
             | "access_token"
     ) {
+        return true;
+    }
+
+    if parent_key.is_some_and(|parent| parent.eq_ignore_ascii_case("headers"))
+        && grandparent_key.is_some_and(|parent| parent.eq_ignore_ascii_case("recording"))
+    {
         return true;
     }
 
@@ -336,12 +341,23 @@ sources:
             "url": "http://example.com/get.php?username=alice&password=secret"
         });
 
-        redact_value(None, None, &mut value);
+        redact_value(None, None, None, &mut value);
 
         assert_eq!(value["password"], "***");
         assert_eq!(value["secret"], "***");
         assert_eq!(value["headers"]["Authorization"], "***");
         assert_eq!(value["url"], "http://***/get.php?username=***&password=***");
+    }
+
+    #[test]
+    fn runtime_config_report_redacts_every_recording_header() {
+        let mut value = serde_json::json!({
+            "video": { "recording": { "headers": { "X-Upstream-Key": "custom-secret" } } }
+        });
+
+        redact_value(None, None, None, &mut value);
+
+        assert_eq!(value["video"]["recording"]["headers"]["X-Upstream-Key"], "***");
     }
 
     #[tokio::test]
@@ -366,7 +382,7 @@ sources:
     }
 
     #[tokio::test]
-    async fn runtime_config_report_emits_canonical_recording_from_runtime_config() {
+    async fn runtime_config_report_emits_recording_from_runtime_video_config() {
         let make_recording = |dir: &str| {
             tuliprox_core::model::RecordingConfig::from(&shared::model::RecordingConfigDto {
                 enabled: true,
@@ -374,16 +390,23 @@ sources:
                 ..shared::model::RecordingConfigDto::default()
             })
         };
-        let mut config = tuliprox_core::model::Config::default();
-        config.recording = Some(make_recording("/canonical/recordings"));
+        let config = tuliprox_core::model::Config {
+            video: Some(tuliprox_core::model::VideoConfig {
+                extensions: vec![".ts".to_string()],
+                web_search: None,
+                recording: Some(make_recording("/canonical/recordings")),
+            }),
+            ..tuliprox_core::model::Config::default()
+        };
 
         let dto = super::runtime_config_to_dto(&config);
 
-        let recording = dto.recording.as_ref().expect("report must carry canonical recording");
+        let video = dto.video.as_ref().expect("report must carry video");
+        let recording = video.recording.as_ref().expect("report must carry recording");
         assert_eq!(
             recording.directory.as_deref(),
             Some("/canonical/recordings"),
-            "report must read from Config.recording, not the legacy compat shadow"
+            "report must read from Config.video.recording"
         );
     }
 }

@@ -10,14 +10,14 @@ use crate::{
         is_default_connect_timeout_secs, is_default_custom_stream_response_error_status,
         is_default_interner_gc_interval_secs, is_default_interner_gc_min_pool_size, is_false,
         is_none_or_empty_metadata_update, is_true, is_zero_u32, normalize_optional_config_file_path,
-        normalize_optional_dir, DEFAULT_BACKUP_DIR, DEFAULT_CUSTOM_STREAM_RESPONSE_PATH, DEFAULT_DOWNLOAD_DIR,
-        DEFAULT_STORAGE_DIR, DEFAULT_USER_CONFIG_DIR, MAPPING_FILE, TEMPLATE_FILE,
+        normalize_optional_dir, DEFAULT_BACKUP_DIR, DEFAULT_CUSTOM_STREAM_RESPONSE_PATH, DEFAULT_STORAGE_DIR,
+        DEFAULT_USER_CONFIG_DIR, MAPPING_FILE, TEMPLATE_FILE,
     },
     error::TuliproxError,
     model::{
         ConfigApiDto, HdHomeRunConfigDto, IpCheckConfigDto, LibraryConfigDto, LogConfigDto, MessagingConfigDto,
-        MetadataUpdateConfigDto, ProxyConfigDto, RecordingConfigDto, ReverseProxyConfigDto, ScheduleConfigDto,
-        VideoConfigDto, WebUiConfigDto,
+        MetadataUpdateConfigDto, ProxyConfigDto, ReverseProxyConfigDto, ScheduleConfigDto, VideoConfigDto,
+        WebUiConfigDto,
     },
     utils::is_blank_optional_string,
 };
@@ -64,22 +64,7 @@ pub struct ConfigDto {
         skip_serializing_if = "is_default_custom_stream_response_error_status"
     )]
     pub custom_stream_response_error_status: u16,
-    /// Canonical top-level DVR configuration. The split is intentional:
-    /// download-side fields (`headers`, `extensions`, `episode_pattern`,
-    /// `retry_backoff_*`, ...) stay on
-    /// [`VideoDownloadConfigDto`] for the live/VOD download pipeline;
-    /// this block owns the DVR-only fields (directory, timezone,
-    /// retention, disk, quota, notifications). The legacy
-    /// `VideoDownloadConfigDto::recording` carrier remains populated
-    /// in memory while the compat shadow is consumed by readers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recording: Option<RecordingConfigDto>,
-    /// Compat shadow of the legacy `video:` block. Populated on
-    /// deserialize so frontend forms still see what they expect, but
-    /// `skip_serializing` so canonical saves emit no `video:` key
-    /// (`web_search` and the legacy nested `recording:` ride along).
-    /// Remove in Task 11 once the frontend has moved off it.
-    #[serde(default, skip_serializing)]
     pub video: Option<VideoConfigDto>,
     #[serde(default, skip_serializing_if = "is_none_or_empty_metadata_update")]
     pub metadata_update: Option<MetadataUpdateConfigDto>,
@@ -142,7 +127,6 @@ impl Default for ConfigDto {
             custom_stream_response_timeout_secs: 0,
             custom_stream_response_enabled: true,
             custom_stream_response_error_status: default_custom_stream_response_error_status(),
-            recording: None,
             video: None,
             metadata_update: None,
             schedules: None,
@@ -167,12 +151,8 @@ impl Default for ConfigDto {
     }
 }
 
-// Hand-written `Deserialize` to enforce the recording-unification contract:
-// * both `recording:` AND `video.download.recording:` set with non-empty
-//   content is rejected as ambiguous (the plan's fail-closed case).
-// `Serialize` is derived: `#[serde(skip_serializing)]` on the `video`
-// compat shadow keeps `web_search` and the legacy nested recording out
-// of canonical output without hand-rolling a shadow struct.
+// Hand-written deserialization keeps the top-level schema strict while
+// preserving the project-specific defaults used by the configuration form.
 impl<'de> serde::Deserialize<'de> for ConfigDto {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(serde::Deserialize)]
@@ -201,8 +181,6 @@ impl<'de> serde::Deserialize<'de> for ConfigDto {
             custom_stream_response_enabled: bool,
             #[serde(default = "default_custom_stream_response_error_status")]
             custom_stream_response_error_status: u16,
-            #[serde(default)]
-            recording: Option<RecordingConfigDto>,
             #[serde(default)]
             video: Option<VideoConfigDto>,
             #[serde(default)]
@@ -247,22 +225,6 @@ impl<'de> serde::Deserialize<'de> for ConfigDto {
 
         let raw = Raw::deserialize(deserializer)?;
 
-        // Ambiguity guard: if both canonical and legacy nested
-        // recording blocks carry non-empty content, fail closed.
-        // Empty legacy `recording: {}` is allowed (frontend
-        // round-trips sometimes emit empty blocks).
-        if raw.recording.is_some() && raw.video.is_some() {
-            return Err(serde::de::Error::custom(
-                "ambiguous canonical `recording:` and legacy `video:` blocks; remove the legacy block",
-            ));
-        }
-
-        // Derive the canonical recording block:
-        //  * explicit `recording:` wins (canonical or empty)
-        //  * otherwise lift `video.download.recording` into canonical
-        //  * otherwise leave None (the default form has no recording)
-        let recording = raw.recording.or_else(|| raw.video.as_ref().map(migrate_legacy_video));
-
         Ok(Self {
             process_parallel: raw.process_parallel,
             api: raw.api,
@@ -276,7 +238,6 @@ impl<'de> serde::Deserialize<'de> for ConfigDto {
             custom_stream_response_timeout_secs: raw.custom_stream_response_timeout_secs,
             custom_stream_response_enabled: raw.custom_stream_response_enabled,
             custom_stream_response_error_status: raw.custom_stream_response_error_status,
-            recording,
             video: raw.video,
             metadata_update: raw.metadata_update,
             schedules: raw.schedules,
@@ -299,35 +260,6 @@ impl<'de> serde::Deserialize<'de> for ConfigDto {
             library: raw.library,
         })
     }
-}
-
-fn migrate_legacy_video(video: &VideoConfigDto) -> RecordingConfigDto {
-    let Some(download) = video.download.as_ref() else {
-        return RecordingConfigDto {
-            enabled: false,
-            extensions: video.extensions.clone(),
-            ..RecordingConfigDto::default()
-        };
-    };
-
-    let mut recording = download.recording.clone().unwrap_or_default();
-    recording.headers.clone_from(&download.headers);
-    recording.extensions.clone_from(&video.extensions);
-    recording.organize_into_directories = download.organize_into_directories;
-    recording.episode_pattern.clone_from(&download.episode_pattern);
-    recording.priority = download.recording_priority;
-    recording.reserve_slots_for_users = download.reserve_slots_for_users;
-    recording.max_background_per_provider = download.max_background_per_provider;
-    recording.retry_backoff_initial_secs = download.retry_backoff_initial_secs;
-    recording.retry_backoff_multiplier = download.retry_backoff_multiplier;
-    recording.retry_backoff_max_secs = download.retry_backoff_max_secs;
-    recording.retry_backoff_jitter_percent = download.retry_backoff_jitter_percent;
-    recording.retry_max_attempts = download.retry_max_attempts;
-    if recording.directory.is_none() {
-        let download_dir = download.directory.as_deref().unwrap_or(DEFAULT_DOWNLOAD_DIR);
-        recording.directory = Some(crate::model::default_recording_directory(download_dir));
-    }
-    recording
 }
 
 // This MainConfigDto is a copy of ConfigDto simple fields for form editing.
@@ -559,37 +491,14 @@ impl ConfigDto {
             None => {
                 self.video = Some(VideoConfigDto {
                     extensions: default_supported_video_extensions(),
-                    download: None,
                     web_search: None,
+                    recording: None,
                 });
             }
             Some(video) => match video.prepare() {
                 Ok(()) => {}
                 Err(err) => return Err(err),
             },
-        }
-
-        // Also prepare the canonical top-level `recording` block. When
-        // the user has only a `video.extensions` (no download, no nested
-        // recording), the canonical recording is silently disabled —
-        // there is no directory to record from. When `video.download`
-        // is present but no nested recording, the canonical recording defaults
-        // to enabled (the recording default).
-        let download_dir = self.video.as_ref().and_then(|v| v.download.as_ref()).and_then(|d| d.directory.clone());
-        let has_download = self.video.as_ref().and_then(|v| v.download.as_ref()).is_some();
-        let fallback_dir = download_dir.as_deref().unwrap_or(DEFAULT_DOWNLOAD_DIR);
-        if let Some(recording) = self.recording.as_mut() {
-            super::video_download::prepare_recording_config(recording, fallback_dir)?;
-        } else {
-            let mut recording = if has_download {
-                RecordingConfigDto::default()
-            } else {
-                RecordingConfigDto { enabled: false, ..RecordingConfigDto::default() }
-            };
-            super::video_download::prepare_recording_config(&mut recording, fallback_dir)?;
-            if !recording.is_empty() || has_download {
-                self.recording = Some(recording);
-            }
         }
 
         Ok(())
@@ -615,8 +524,8 @@ impl ConfigDto {
         }
 
         if let Some(video) = &self.video {
-            if let Some(download) = &video.download {
-                if let Some(episode_pattern) = &download.episode_pattern {
+            if let Some(recording) = &video.recording {
+                if let Some(episode_pattern) = &recording.episode_pattern {
                     if !episode_pattern.is_empty() {
                         let re = crate::model::REGEX_CACHE.get_or_compile(episode_pattern);
                         if re.is_err() {
@@ -673,7 +582,7 @@ impl ConfigDto {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::defaults::{default_supported_video_extensions, CONFIG_PATH};
+    use crate::defaults::CONFIG_PATH;
     use serde_json::json;
 
     #[test]
@@ -714,43 +623,6 @@ mod tests {
         let mut cfg = ConfigDto { custom_stream_response_error_status: 0, ..ConfigDto::default() };
         cfg.prepare(false).expect("zero must be silently clamped, not rejected");
         assert_eq!(cfg.custom_stream_response_error_status, 502);
-    }
-
-    #[test]
-    fn serializing_skips_video_for_default_values() {
-        let cfg = ConfigDto {
-            video: Some(VideoConfigDto {
-                extensions: default_supported_video_extensions(),
-                download: None,
-                web_search: None,
-            }),
-            ..ConfigDto::default()
-        };
-
-        let serialized = serde_json::to_string(&cfg).expect("config serialization should succeed");
-        assert!(!serialized.contains("\"video\""), "expected no video field, got: {serialized}");
-    }
-
-    #[test]
-    fn serializing_omits_video_compat_shadow_even_when_populated() {
-        // The compat `video:` shadow is no longer emitted on
-        // serialization (the `skip_serializing` contract). Frontend
-        // forms keep populating it programmatically; canonical saves
-        // never re-emit it.
-        let cfg = ConfigDto {
-            video: Some(VideoConfigDto {
-                extensions: default_supported_video_extensions(),
-                download: None,
-                web_search: Some("https://example.org?q={}".to_string()),
-            }),
-            ..ConfigDto::default()
-        };
-
-        let serialized = serde_json::to_string(&cfg).expect("config serialization should succeed");
-        assert!(
-            !serialized.contains("\"video\""),
-            "video is a compat shadow and must not be re-emitted, got: {serialized}"
-        );
     }
 
     #[test]
@@ -979,324 +851,5 @@ reverse_proxy:
 
         assert!(cfg.reverse_proxy.is_some());
         assert!(cfg.reverse_proxy.as_ref().and_then(|rp| rp.stream_history.as_ref()).is_none());
-    }
-
-    // --- Recording schema-lift tests ---
-    //
-    // These tests pin the additive contract: `recording:` lives at the
-    // top of the config going forward, while the legacy
-    // `video.download.recording:` path keeps working until the compat
-    // shadow is removed.
-    // The custom deserializer in this module is responsible for
-    // populating BOTH fields during the compatibility window.
-
-    #[test]
-    fn recording_top_level_deserializes_and_serializes_as_recording_only() {
-        // Top-level `recording:` populates only the canonical field.
-        let raw = r#"
-api:
-  host: 127.0.0.1
-  port: 8901
-  web_root: ./web
-recording:
-  enabled: true
-  directory: /var/recordings
-  timezone: Europe/Berlin
-"#;
-
-        let cfg: ConfigDto = serde_saphyr::from_str(raw).expect("canonical recording deserializes");
-        let recording = cfg.recording.as_ref().expect("recording should be Some");
-        assert!(recording.enabled);
-        assert_eq!(recording.directory.as_deref(), Some("/var/recordings"));
-        assert_eq!(recording.timezone.as_deref(), Some("Europe/Berlin"));
-
-        // Round-trip: serialize → parse, then assert actual field values.
-        let serialized = serde_json::to_string(&cfg).expect("serialize");
-        let roundtrip: ConfigDto = serde_json::from_str(&serialized).expect("round-trip parse");
-        let rtp_recording = roundtrip.recording.as_ref().expect("round-trip recording preserved");
-        assert!(rtp_recording.enabled, "round-trip recording.enabled must remain true");
-        assert_eq!(rtp_recording.directory.as_deref(), Some("/var/recordings"));
-        assert_eq!(rtp_recording.timezone.as_deref(), Some("Europe/Berlin"));
-        assert!(!serialized.contains("\"video\""), "video compat shadow must not be re-emitted, got: {serialized}");
-    }
-
-    #[test]
-    fn recording_legacy_video_download_nested_recording_migrates_without_losing_fields() {
-        // Legacy nested `video.download.recording:` populates BOTH the
-        // compat shadow and the canonical top-level field, without
-        // dropping any DVR setting.
-        let raw = r#"
-api:
-  host: 127.0.0.1
-  port: 8901
-  web_root: ./web
-video:
-  extensions: [".mp4"]
-  download:
-    directory: /data/downloads
-    recording:
-      enabled: true
-      directory: /data/recordings
-      timezone: Europe/London
-      filename_template: "{channel}_{program_title}_{start_time}"
-"#;
-
-        let cfg: ConfigDto = serde_saphyr::from_str(raw).expect("legacy config deserializes");
-
-        // Compat shadow populated from the raw input.
-        let legacy = cfg
-            .video
-            .as_ref()
-            .and_then(|v| v.download.as_ref())
-            .and_then(|d| d.recording.as_ref())
-            .expect("legacy video.download.recording must round-trip");
-        assert_eq!(legacy.directory.as_deref(), Some("/data/recordings"));
-        assert_eq!(legacy.timezone.as_deref(), Some("Europe/London"));
-
-        // Canonical top-level field carries the migrated values.
-        let canonical = cfg.recording.as_ref().expect("canonical recording must be populated");
-        assert!(canonical.enabled);
-        assert_eq!(canonical.directory.as_deref(), Some("/data/recordings"));
-        assert_eq!(canonical.timezone.as_deref(), Some("Europe/London"));
-        assert_eq!(canonical.filename_template.as_deref(), Some("{channel}_{program_title}_{start_time}"));
-    }
-
-    #[test]
-    fn recording_canonical_directory_wins_over_download_directory_default() {
-        // `recording.directory` set explicitly takes precedence over
-        // the `<download.directory>/recordings` default.
-        let raw = r#"
-api:
-  host: 127.0.0.1
-  port: 8901
-  web_root: ./web
-video:
-  download:
-    directory: /data/downloads
-    recording:
-      directory: /srv/recordings
-"#;
-
-        let mut cfg: ConfigDto = serde_saphyr::from_str(raw).expect("config deserializes");
-        cfg.prepare(false).expect("prepare should succeed");
-
-        let canonical = cfg.recording.as_ref().expect("recording should be present");
-        assert_eq!(canonical.directory.as_deref(), Some("/srv/recordings"));
-    }
-
-    #[test]
-    fn recording_canonical_directory_defaults_to_download_directory_recordings() {
-        // When `recording.directory` is absent, it falls back to
-        // `<download.directory>/recordings`. This is the only place
-        // the canonical field depends on the legacy `download`.
-        let raw = r#"
-api:
-  host: 127.0.0.1
-  port: 8901
-  web_root: ./web
-video:
-  download:
-    directory: /data/downloads
-    recording: {}
-"#;
-
-        let mut cfg: ConfigDto = serde_saphyr::from_str(raw).expect("config deserializes");
-        cfg.prepare(false).expect("prepare should succeed");
-
-        let canonical = cfg.recording.as_ref().expect("recording should be present");
-        assert_eq!(canonical.directory.as_deref(), Some("/data/downloads/recordings"));
-    }
-
-    #[test]
-    fn recording_only_extensions_yields_disabled_canonical_recording() {
-        // `video.extensions` alone — no `download`, no nested
-        // recording — produces a canonical `recording` with
-        // `enabled: false`. There is no directory to record from.
-        let raw = r#"
-api:
-  host: 127.0.0.1
-  port: 8901
-  web_root: ./web
-video:
-  extensions: [".ts"]
-"#;
-
-        let mut cfg: ConfigDto = serde_saphyr::from_str(raw).expect("config deserializes");
-        cfg.prepare(false).expect("prepare should succeed");
-
-        let canonical = cfg.recording.as_ref().expect("recording should be present");
-        assert!(!canonical.enabled, "extensions-only video must yield a disabled recording");
-    }
-
-    #[test]
-    fn recording_download_without_nested_recording_preserves_enabled_default() {
-        // `video.download` with no nested recording block keeps the
-        // RecordingConfigDto default (`enabled: true`). The presence
-        // of a download directory is a signal that DVR is in scope.
-        let raw = r#"
-api:
-  host: 127.0.0.1
-  port: 8901
-  web_root: ./web
-video:
-  download:
-    directory: /data/downloads
-"#;
-
-        let mut cfg: ConfigDto = serde_saphyr::from_str(raw).expect("config deserializes");
-        cfg.prepare(false).expect("prepare should succeed");
-
-        let canonical = cfg.recording.as_ref().expect("recording should be present");
-        assert!(canonical.enabled, "video.download without nested recording preserves the default");
-    }
-
-    #[test]
-    fn recording_canonical_and_legacy_nested_recording_both_non_empty_is_ambiguous() {
-        // Both `recording:` AND `video.download.recording:` set with
-        // conflicting content must be rejected. We can't safely pick
-        // one; this is the fail-closed contract from the plan.
-        let raw = r#"
-api:
-  host: 127.0.0.1
-  port: 8901
-  web_root: ./web
-recording:
-  enabled: true
-  directory: /var/recordings
-video:
-  extensions: [".mp4"]
-  download:
-    directory: /data/downloads
-    recording:
-      enabled: true
-      directory: /data/recordings
-"#;
-
-        let err = serde_saphyr::from_str::<ConfigDto>(raw)
-            .expect_err("canonical + legacy nested recording must be rejected as ambiguous");
-        let msg = format!("{err}");
-        assert!(msg.contains("ambiguous") || msg.contains("recording"), "unexpected error: {msg}");
-    }
-
-    #[test]
-    fn recording_web_search_is_accepted_from_legacy_input_but_never_serialized() {
-        // `video.web_search` round-trips in-memory (frontend uses it)
-        // but the canonical config never re-emits it.
-        let raw = r#"
-api:
-  host: 127.0.0.1
-  port: 8901
-  web_root: ./web
-video:
-  extensions: [".mp4"]
-  web_search: "https://example.org/?q={query}"
-"#;
-
-        let cfg: ConfigDto = serde_saphyr::from_str(raw).expect("config deserializes");
-        let web_search = cfg.video.as_ref().and_then(|v| v.web_search.as_ref()).expect("web_search present");
-        assert_eq!(web_search, "https://example.org/?q={query}");
-
-        let serialized = serde_json::to_string(&cfg).expect("serialize");
-        assert!(!serialized.contains("web_search"), "web_search must never be serialized, got: {serialized}");
-    }
-
-    #[test]
-    fn recording_round_trips_full_canonical_block_via_canonical_field() {
-        // All four DVR sub-blocks populated at once — the canonical
-        // path must preserve retention/disk/quota/notifications
-        // bit-for-bit across serialize → deserialize.
-        use crate::model::{
-            RecordingDiskConfigDto, RecordingNotificationConfigDto, RecordingQuotaConfigDto,
-            RecordingRetentionConfigDto,
-        };
-        use std::collections::HashMap;
-
-        let original = RecordingConfigDto {
-            enabled: true,
-            directory: Some("/srv/recordings".to_string()),
-            timezone: Some("Asia/Tokyo".to_string()),
-            filename_template: Some("{channel}_{program_title}_{start_time}".to_string()),
-            default_pre_roll_secs: Some(30),
-            max_pre_roll_secs: 600,
-            default_post_roll_secs: Some(60),
-            max_post_roll_secs: 1200,
-            retention: Some(RecordingRetentionConfigDto {
-                keep_last_per_channel: Some(7),
-                delete_after_days: Some(14),
-                sweep_interval_secs: 1800,
-            }),
-            disk: Some(RecordingDiskConfigDto {
-                high_water_percent: Some(90),
-                low_water_percent: Some(70),
-                cleanup_interval_secs: Some(900),
-                safety_bytes: Some(2 * 1024 * 1024 * 1024),
-            }),
-            quota: Some(RecordingQuotaConfigDto {
-                default_private_bytes: Some(50 * 1024 * 1024 * 1024),
-                per_user_bytes: HashMap::from([("alice".to_string(), 100 * 1024 * 1024 * 1024)]),
-                shared_bytes: Some(200 * 1024 * 1024 * 1024),
-            }),
-            notifications: Some(RecordingNotificationConfigDto {
-                outbox_buffer: 2048,
-                max_attempts: 8,
-                backoff_initial_secs: 7,
-                backoff_max_secs: 1200,
-            }),
-            ..RecordingConfigDto::default()
-        };
-
-        let mut cfg = ConfigDto { recording: Some(original.clone()), ..ConfigDto::default() };
-        cfg.prepare(false).expect("prepare should succeed");
-
-        let serialized = serde_json::to_string(&cfg).expect("serialize");
-        let roundtrip: ConfigDto = serde_json::from_str(&serialized).expect("round-trip parse");
-
-        let rtp = roundtrip.recording.as_ref().expect("recording preserved");
-        assert_eq!(rtp.directory.as_deref(), Some("/srv/recordings"));
-        assert_eq!(rtp.timezone.as_deref(), Some("Asia/Tokyo"));
-        let retention = rtp.retention.as_ref().expect("retention preserved");
-        assert_eq!(retention.keep_last_per_channel, Some(7));
-        assert_eq!(retention.delete_after_days, Some(14));
-        let disk = rtp.disk.as_ref().expect("disk preserved");
-        assert_eq!(disk.high_water_percent, Some(90));
-        assert_eq!(disk.low_water_percent, Some(70));
-        let quota = rtp.quota.as_ref().expect("quota preserved");
-        assert_eq!(quota.shared_bytes, Some(200 * 1024 * 1024 * 1024));
-        let notifications = rtp.notifications.as_ref().expect("notifications preserved");
-        assert_eq!(notifications.outbox_buffer, 2048);
-    }
-
-    #[test]
-    fn config_dto_default_recording_is_none_before_prepare_and_some_disabled_after() {
-        // Pin: `ConfigDto::default()` has no canonical recording
-        // block (frontend reads `None` until the operator populates
-        // anything). After `prepare(false)` with no `video.download`,
-        // the canonical block is created in disabled form — there is
-        // nothing to record from.
-        let mut cfg = ConfigDto::default();
-        assert!(cfg.recording.is_none(), "default ConfigDto has no recording block");
-        cfg.prepare(false).expect("prepare on default should succeed");
-        let recording = cfg.recording.as_ref().expect("prepare creates a disabled canonical recording");
-        assert!(!recording.enabled, "no download directory implies recording is disabled");
-    }
-
-    #[test]
-    fn is_none_or_empty_video_deletion_does_not_change_video_serialization() {
-        // The dead `is_none_or_empty_video` was the only thing
-        // referenced by the old `skip_serializing_if` on `video:`.
-        // After its removal the field is `skip_serializing`. This
-        // test pins that the behavior — never emitting `video:` — is
-        // preserved regardless of which underlying predicate the
-        // derive sees.
-        let cfg = ConfigDto {
-            video: Some(VideoConfigDto {
-                extensions: vec![".mp4".to_string()],
-                download: None,
-                web_search: Some("https://example.org/?q={query}".to_string()),
-            }),
-            ..ConfigDto::default()
-        };
-        let serialized = serde_json::to_string(&cfg).expect("serialize");
-        assert!(!serialized.contains("\"video\""), "video compat shadow is never emitted: {serialized}");
     }
 }

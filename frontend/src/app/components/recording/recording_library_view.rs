@@ -8,8 +8,8 @@ use crate::{
 };
 use shared::{
     model::{
-        DownloadsDelta, DownloadsResponse, FileDownloadDto, Permission, ProtocolMessage, RecordingTypeDto, SortOrder,
-        TransferStatusDto,
+        DownloadsDelta, DownloadsResponse, Permission, ProtocolMessage, RecordingTypeDto, SortOrder, TransferStatusDto,
+        TransferTaskDto,
     },
     utils::unix_ts_to_str,
 };
@@ -45,9 +45,9 @@ struct DownloadActionAvailability {
 
 fn normalize_download_tab(
     current: &DownloadTab,
-    queue: &[FileDownloadDto],
-    finished: &[FileDownloadDto],
-    active: &[Rc<FileDownloadDto>],
+    queue: &[TransferTaskDto],
+    finished: &[TransferTaskDto],
+    active: &[Rc<TransferTaskDto>],
 ) -> DownloadTab {
     match current {
         DownloadTab::Finished if finished.is_empty() && (!active.is_empty() || !queue.is_empty()) => DownloadTab::Queue,
@@ -57,13 +57,13 @@ fn normalize_download_tab(
 
 fn collect_downloads_for_tab(
     tab: &DownloadTab,
-    queue: &Rc<Vec<FileDownloadDto>>,
-    finished: &Rc<Vec<FileDownloadDto>>,
-    active: &Rc<Vec<Rc<FileDownloadDto>>>,
-) -> Vec<Rc<FileDownloadDto>> {
+    queue: &Rc<Vec<TransferTaskDto>>,
+    finished: &Rc<Vec<TransferTaskDto>>,
+    active: &Rc<Vec<Rc<TransferTaskDto>>>,
+) -> Vec<Rc<TransferTaskDto>> {
     match tab {
         DownloadTab::Queue => {
-            let mut items: Vec<Rc<FileDownloadDto>> = active.iter().cloned().collect();
+            let mut items: Vec<Rc<TransferTaskDto>> = active.iter().cloned().collect();
             items.extend(queue.iter().cloned().map(Rc::new));
             items
         }
@@ -71,7 +71,7 @@ fn collect_downloads_for_tab(
     }
 }
 
-fn sort_download_items(items: &mut [Rc<FileDownloadDto>], sort: Option<(usize, SortOrder)>) {
+fn sort_download_items(items: &mut [Rc<TransferTaskDto>], sort: Option<(usize, SortOrder)>) {
     if let Some((col, order)) = sort {
         items.sort_by(|a, b| match order {
             SortOrder::Asc => compare_downloads(a, b, col),
@@ -83,11 +83,11 @@ fn sort_download_items(items: &mut [Rc<FileDownloadDto>], sort: Option<(usize, S
 
 fn collect_sorted_downloads_for_tab(
     tab: &DownloadTab,
-    queue: &Rc<Vec<FileDownloadDto>>,
-    finished: &Rc<Vec<FileDownloadDto>>,
-    active: &Rc<Vec<Rc<FileDownloadDto>>>,
+    queue: &Rc<Vec<TransferTaskDto>>,
+    finished: &Rc<Vec<TransferTaskDto>>,
+    active: &Rc<Vec<Rc<TransferTaskDto>>>,
     sort: Option<(usize, SortOrder)>,
-) -> Vec<Rc<FileDownloadDto>> {
+) -> Vec<Rc<TransferTaskDto>> {
     let mut items = collect_downloads_for_tab(tab, queue, finished, active);
     sort_download_items(&mut items, sort);
     items
@@ -102,7 +102,7 @@ fn format_download_kind(translate: &crate::i18n::YewI18n, kind: RecordingTypeDto
     }
 }
 
-fn format_download_progress(download: &FileDownloadDto) -> String {
+fn format_download_progress(download: &TransferTaskDto) -> String {
     if let Some(total) = download.total_bytes {
         if total > 0 {
             let percent = ((download.downloaded_bytes as f64 / total as f64) * 100.0).round() as u32;
@@ -112,7 +112,7 @@ fn format_download_progress(download: &FileDownloadDto) -> String {
     format_bytes(download.downloaded_bytes)
 }
 
-fn render_download_progress(download: &FileDownloadDto) -> Html {
+fn render_download_progress(download: &TransferTaskDto) -> Html {
     let text = format_download_progress(download);
     let bar = download.total_bytes.filter(|total| *total > 0).map(|total| {
         html! {
@@ -130,11 +130,11 @@ fn render_download_progress(download: &FileDownloadDto) -> Html {
     }
 }
 
-fn format_download_start(download: &FileDownloadDto) -> String {
+fn format_download_start(download: &TransferTaskDto) -> String {
     download.scheduled_start_at.and_then(unix_ts_to_str).unwrap_or_default()
 }
 
-fn format_download_duration(download: &FileDownloadDto) -> String {
+fn format_download_duration(download: &TransferTaskDto) -> String {
     download
         .duration_secs
         .map(|seconds| {
@@ -149,7 +149,7 @@ fn format_download_duration(download: &FileDownloadDto) -> String {
         .unwrap_or_default()
 }
 
-fn format_download_error_parts(download: &FileDownloadDto, attempt_label: &str, next_retry_label: &str) -> String {
+fn format_download_error_parts(download: &TransferTaskDto, attempt_label: &str, next_retry_label: &str) -> String {
     let mut parts = Vec::new();
     if let Some(error) = download.error.as_ref().filter(|error| !error.is_empty()) {
         parts.push(error.clone());
@@ -163,11 +163,11 @@ fn format_download_error_parts(download: &FileDownloadDto, attempt_label: &str, 
     parts.join(" | ")
 }
 
-fn format_download_error(translate: &crate::i18n::YewI18n, download: &FileDownloadDto) -> String {
+fn format_download_error(translate: &crate::i18n::YewI18n, download: &TransferTaskDto) -> String {
     format_download_error_parts(download, &translate.t("LABEL.ATTEMPT"), &translate.t("LABEL.NEXT_RETRY"))
 }
 
-fn compare_downloads(a: &FileDownloadDto, b: &FileDownloadDto, col: usize) -> Ordering {
+fn compare_downloads(a: &TransferTaskDto, b: &TransferTaskDto, col: usize) -> Ordering {
     match col {
         1 => a.title.cmp(&b.title),
         2 => a.kind.cmp(&b.kind),
@@ -183,17 +183,22 @@ fn compare_downloads(a: &FileDownloadDto, b: &FileDownloadDto, col: usize) -> Or
 
 fn is_sortable(col: usize) -> bool { (1..=8).contains(&col) }
 
-fn download_action_availability(can_write: bool, dto: &FileDownloadDto) -> DownloadActionAvailability {
+fn download_action_availability(can_write: bool, dto: &TransferTaskDto) -> DownloadActionAvailability {
     if !can_write {
         return DownloadActionAvailability::default();
     }
 
+    // Live recordings cannot be paused/resumed: stopping ffmpeg loses
+    // an unrecoverable part of the broadcast. All other recording
+    // kinds follow the same state machine as a normal transfer.
+    let is_live = matches!(dto.recording_type, RecordingTypeDto::Live);
     DownloadActionAvailability {
-        pause: matches!(
-            dto.status,
-            TransferStatusDto::Running | TransferStatusDto::WaitingForCapacity | TransferStatusDto::RetryWaiting
-        ),
-        resume: dto.status == TransferStatusDto::Paused,
+        pause: !is_live
+            && matches!(
+                dto.status,
+                TransferStatusDto::Running | TransferStatusDto::WaitingForCapacity | TransferStatusDto::RetryWaiting
+            ),
+        resume: !is_live && dto.status == TransferStatusDto::Paused,
         cancel: matches!(
             dto.status,
             TransferStatusDto::Running
@@ -212,7 +217,7 @@ fn download_action_availability(can_write: bool, dto: &FileDownloadDto) -> Downl
 }
 
 fn optimistic_active_delta(
-    active: &Rc<Vec<Rc<FileDownloadDto>>>,
+    active: &Rc<Vec<Rc<TransferTaskDto>>>,
     uuid: &str,
     status: TransferStatusDto,
 ) -> Option<DownloadsDelta> {
@@ -221,6 +226,54 @@ fn optimistic_active_delta(
         updated.status = status;
         DownloadsDelta::ActivePatched(updated)
     })
+}
+
+/// Split a flat per-user recording snapshot into the (queue, finished,
+/// active) view the table renders. The recording WebSocket delivers a
+/// single `Vec<TransferTaskDto>` filtered by the session; the table
+/// still wants the three buckets the Downloads-WS used to ship.
+fn partition_recording_tasks(
+    tasks: &[TransferTaskDto],
+) -> (Vec<TransferTaskDto>, Vec<TransferTaskDto>, Vec<Rc<TransferTaskDto>>) {
+    let mut queue = Vec::new();
+    let mut finished = Vec::new();
+    let mut active = Vec::new();
+    for task in tasks {
+        match task.status {
+            TransferStatusDto::Running
+            | TransferStatusDto::Paused
+            | TransferStatusDto::WaitingForCapacity
+            | TransferStatusDto::RetryWaiting => active.push(Rc::new(task.clone())),
+            TransferStatusDto::Completed | TransferStatusDto::Failed | TransferStatusDto::Cancelled => {
+                finished.push(task.clone())
+            }
+            TransferStatusDto::Queued | TransferStatusDto::Scheduled => queue.push(task.clone()),
+        }
+    }
+    (queue, finished, active)
+}
+
+fn split_recording_snapshot(
+    tasks: &Rc<Vec<TransferTaskDto>>,
+    queue_state: &UseStateHandle<Rc<Vec<TransferTaskDto>>>,
+    finished_state: &UseStateHandle<Rc<Vec<TransferTaskDto>>>,
+    active_state: &UseStateHandle<Rc<Vec<Rc<TransferTaskDto>>>>,
+) {
+    let (queue, finished, active) = partition_recording_tasks(tasks);
+    queue_state.set(Rc::new(queue));
+    finished_state.set(Rc::new(finished));
+    active_state.set(Rc::new(active));
+}
+
+fn apply_recording_delta(
+    tasks: &Rc<Vec<TransferTaskDto>>,
+    queue_state: &UseStateHandle<Rc<Vec<TransferTaskDto>>>,
+    finished_state: &UseStateHandle<Rc<Vec<TransferTaskDto>>>,
+    active_state: &UseStateHandle<Rc<Vec<Rc<TransferTaskDto>>>>,
+) {
+    // Server-reconciled full snapshot over the same revision. Cheap to
+    // re-partition; keeps the split logic in one place.
+    split_recording_snapshot(tasks, queue_state, finished_state, active_state);
 }
 
 fn handle_download_action_result(
@@ -247,9 +300,9 @@ fn handle_download_action_result(
 
 fn apply_download_snapshot(
     response: &DownloadsResponse,
-    queue_state: &UseStateHandle<Rc<Vec<FileDownloadDto>>>,
-    finished_state: &UseStateHandle<Rc<Vec<FileDownloadDto>>>,
-    active_download: &UseStateHandle<Rc<Vec<Rc<FileDownloadDto>>>>,
+    queue_state: &UseStateHandle<Rc<Vec<TransferTaskDto>>>,
+    finished_state: &UseStateHandle<Rc<Vec<TransferTaskDto>>>,
+    active_download: &UseStateHandle<Rc<Vec<Rc<TransferTaskDto>>>>,
 ) {
     queue_state.set(Rc::new(response.queue.clone()));
     finished_state.set(Rc::new(response.finished.clone()));
@@ -258,16 +311,16 @@ fn apply_download_snapshot(
 
 fn apply_download_delta(
     delta: &DownloadsDelta,
-    queue_state: &UseStateHandle<Rc<Vec<FileDownloadDto>>>,
-    finished_state: &UseStateHandle<Rc<Vec<FileDownloadDto>>>,
-    active_download: &UseStateHandle<Rc<Vec<Rc<FileDownloadDto>>>>,
+    queue_state: &UseStateHandle<Rc<Vec<TransferTaskDto>>>,
+    finished_state: &UseStateHandle<Rc<Vec<TransferTaskDto>>>,
+    active_download: &UseStateHandle<Rc<Vec<Rc<TransferTaskDto>>>>,
 ) {
     match delta {
         DownloadsDelta::SnapshotReset(response) => {
             apply_download_snapshot(response, queue_state, finished_state, active_download);
         }
         DownloadsDelta::ActivePatched(download) => {
-            let mut active_items: Vec<Rc<FileDownloadDto>> = active_download.iter().cloned().collect();
+            let mut active_items: Vec<Rc<TransferTaskDto>> = active_download.iter().cloned().collect();
             if let Some(existing) = active_items.iter_mut().find(|item| item.id == download.id) {
                 *existing = Rc::new(download.clone());
             } else {
@@ -294,10 +347,10 @@ pub fn recording_library_view() -> Html {
     let dialog = use_context::<DialogService>().expect("Dialog service not found");
     let has_download_write = services.auth.has_permission(Permission::RecordingWrite);
     let active_tab = use_state(|| DownloadTab::Queue);
-    let queue_state = use_state(|| Rc::new(Vec::<FileDownloadDto>::new()));
-    let finished_state = use_state(|| Rc::new(Vec::<FileDownloadDto>::new()));
-    let active_download = use_state(|| Rc::new(Vec::<Rc<FileDownloadDto>>::new()));
-    let table_items = use_state(|| None::<Rc<Vec<Rc<FileDownloadDto>>>>);
+    let queue_state = use_state(|| Rc::new(Vec::<TransferTaskDto>::new()));
+    let finished_state = use_state(|| Rc::new(Vec::<TransferTaskDto>::new()));
+    let active_download = use_state(|| Rc::new(Vec::<Rc<TransferTaskDto>>::new()));
+    let table_items = use_state(|| None::<Rc<Vec<Rc<TransferTaskDto>>>>);
     let sort_state = use_state(|| None::<(usize, SortOrder)>);
     // Distinguishes "still waiting for the first snapshot" from "queue is empty"
     let initial_loaded = use_state(|| false);
@@ -305,7 +358,7 @@ pub fn recording_library_view() -> Html {
     let request_downloads = {
         let services = services.clone();
         Callback::from(move |()| {
-            let _ = services.websocket.send_message(ProtocolMessage::DownloadsRequest);
+            let _ = services.websocket.send_message(ProtocolMessage::RecordingSnapshotRequest);
         })
     };
 
@@ -319,13 +372,13 @@ pub fn recording_library_view() -> Html {
         use_effect_with((), move |()| {
             request_downloads_effect.emit(());
             let sub_id = services.event.subscribe(move |msg| match msg {
-                crate::model::EventMessage::DownloadsUpdate(snapshot) => {
+                crate::model::EventMessage::RecordingSnapshot { tasks, .. } => {
                     initial_loaded.set(true);
-                    apply_download_snapshot(&snapshot, &queue_state, &finished_state, &active_download);
+                    split_recording_snapshot(&tasks, &queue_state, &finished_state, &active_download);
                 }
-                crate::model::EventMessage::DownloadsDeltaUpdate(delta) => {
+                crate::model::EventMessage::RecordingDelta { tasks, .. } => {
                     initial_loaded.set(true);
-                    apply_download_delta(&delta, &queue_state, &finished_state, &active_download);
+                    apply_recording_delta(&tasks, &queue_state, &finished_state, &active_download);
                 }
                 crate::model::EventMessage::WebSocketStatus(true) => {
                     request_downloads_effect.emit(());
@@ -510,8 +563,8 @@ pub fn recording_library_view() -> Html {
         let handle_cancel = handle_cancel.clone();
         let handle_remove = handle_remove.clone();
         let handle_retry = handle_retry.clone();
-        Callback::<(usize, usize, Rc<FileDownloadDto>), Html>::from(
-            move |(_row, col, dto): (usize, usize, Rc<FileDownloadDto>)| match col {
+        Callback::<(usize, usize, Rc<TransferTaskDto>), Html>::from(
+            move |(_row, col, dto): (usize, usize, Rc<TransferTaskDto>)| match col {
                 0 => {
                     let actions = download_action_availability(has_download_write, &dto);
                     let retry_label = if dto.status == TransferStatusDto::Cancelled { "Resume" } else { "Retry" };
@@ -578,7 +631,7 @@ pub fn recording_library_view() -> Html {
         })
     };
 
-    let table_definition = Rc::new(TableDefinition::<FileDownloadDto> {
+    let table_definition = Rc::new(TableDefinition::<TransferTaskDto> {
         items: (*table_items).clone(),
         num_cols: HEADERS.len(),
         is_sortable: Callback::from(is_sortable),
@@ -615,7 +668,7 @@ pub fn recording_library_view() -> Html {
                     </div>
                     <div class="tp__downloads-list__body tp__list-list__body">
                         if *initial_loaded {
-                            <Table::<FileDownloadDto> definition={table_definition} />
+                            <Table::<TransferTaskDto> definition={table_definition} />
                         } else {
                             <LoadingIndicator loading={true} />
                         }
@@ -632,11 +685,11 @@ mod tests {
         collect_downloads_for_tab, collect_sorted_downloads_for_tab, download_action_availability,
         format_download_error_parts, is_sortable, normalize_download_tab, optimistic_active_delta, DownloadTab,
     };
-    use shared::model::{DownloadsDelta, FileDownloadDto, RecordingTypeDto, SortOrder, TaskKindDto, TransferStatusDto};
+    use shared::model::{DownloadsDelta, RecordingTypeDto, SortOrder, TaskKindDto, TransferStatusDto, TransferTaskDto};
     use std::rc::Rc;
 
-    fn download(id: &str, status: TransferStatusDto) -> FileDownloadDto {
-        FileDownloadDto {
+    fn download(id: &str, status: TransferStatusDto) -> TransferTaskDto {
+        TransferTaskDto {
             id: id.to_string(),
             title: format!("{id}.mp4"),
             kind: TaskKindDto::Download,
@@ -684,7 +737,7 @@ mod tests {
     fn finished_tab_stays_when_has_items() {
         let queue = vec![];
         let finished = vec![download("done", TransferStatusDto::Completed)];
-        let active: Rc<Vec<Rc<FileDownloadDto>>> = Rc::new(Vec::new());
+        let active: Rc<Vec<Rc<TransferTaskDto>>> = Rc::new(Vec::new());
 
         assert_eq!(
             normalize_download_tab(&DownloadTab::Finished, &queue, &finished, active.as_ref()),
@@ -696,7 +749,7 @@ mod tests {
     fn finished_tab_falls_back_to_queue_when_empty() {
         let queue = vec![download("q1", TransferStatusDto::Queued)];
         let finished = vec![];
-        let active: Rc<Vec<Rc<FileDownloadDto>>> = Rc::new(Vec::new());
+        let active: Rc<Vec<Rc<TransferTaskDto>>> = Rc::new(Vec::new());
 
         assert_eq!(
             normalize_download_tab(&DownloadTab::Finished, &queue, &finished, active.as_ref()),
@@ -705,13 +758,13 @@ mod tests {
     }
 
     fn apply_active_delta(
-        active: &Rc<Vec<Rc<FileDownloadDto>>>,
+        active: &Rc<Vec<Rc<TransferTaskDto>>>,
         delta: &DownloadsDelta,
-    ) -> Rc<Vec<Rc<FileDownloadDto>>> {
+    ) -> Rc<Vec<Rc<TransferTaskDto>>> {
         match delta {
             DownloadsDelta::SnapshotReset(response) => Rc::new(response.active.iter().cloned().map(Rc::new).collect()),
             DownloadsDelta::ActivePatched(download) => {
-                let mut active_items: Vec<Rc<FileDownloadDto>> = active.iter().cloned().collect();
+                let mut active_items: Vec<Rc<TransferTaskDto>> = active.iter().cloned().collect();
                 if let Some(existing) = active_items.iter_mut().find(|item| item.id == download.id) {
                     *existing = Rc::new(download.clone());
                 } else {
@@ -821,7 +874,7 @@ mod tests {
 
     #[test]
     fn cancelled_recordings_do_not_offer_retry_semantics() {
-        let dto = FileDownloadDto {
+        let dto = TransferTaskDto {
             id: "rec".to_string(),
             title: "rec.ts".to_string(),
             kind: TaskKindDto::Recording,
@@ -846,7 +899,7 @@ mod tests {
 
     #[test]
     fn download_actions_hide_retry_for_cancelled_recordings() {
-        let dto = FileDownloadDto {
+        let dto = TransferTaskDto {
             id: "rec".to_string(),
             title: "rec.ts".to_string(),
             kind: TaskKindDto::Recording,

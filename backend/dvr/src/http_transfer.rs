@@ -100,7 +100,7 @@ pub struct ResumeValidator {
     /// Byte offset we asked for with `Range: bytes=START-`.
     pub expected_offset: u64,
     /// Optional ETag captured at partial-open time. Reject a resume
-    /// whose response carries a different ETag: the resource was
+    /// whose response carries a different `ETag`: the resource was
     /// replaced mid-recording.
     pub expected_etag: Option<String>,
     /// Optional `Last-Modified` captured at partial-open time. Same
@@ -123,7 +123,7 @@ pub enum ResumeValidationError {
     StartMismatch { expected: u64, got: u64 },
     /// `Content-Range` total does not match what we recorded.
     TotalMismatch { expected: u64, got: u64 },
-    /// ETag changed between partial open and resume. The resource
+    /// `ETag` changed between partial open and resume. The resource
     /// was replaced — do not append.
     ETagMismatch { expected: String, got: String },
     /// `Last-Modified` changed between partial open and resume.

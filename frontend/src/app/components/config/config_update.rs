@@ -128,7 +128,12 @@ pub fn update_config(config: &mut ConfigDto, forms: Vec<ConfigForm>) {
                     config.schedules = schedules_cfg.schedules.clone();
                 }
             }
-            ConfigForm::Recording(_, mut recording_cfg) => set_config_field!(config, recording_cfg, recording),
+            ConfigForm::Recording(_, mut video_cfg) => {
+                if let Some(recording) = video_cfg.recording.as_mut() {
+                    recording.clean();
+                }
+                config.video = Some(video_cfg);
+            }
             ConfigForm::MetadataUpdate(_, mut metadata_update_cfg) => {
                 set_config_field!(config, metadata_update_cfg, metadata_update);
             }
@@ -161,7 +166,7 @@ mod tests {
         HdHomeRunDeviceConfigDto, LibraryConfigDto, LibraryScanDirectoryDto, MessagingConfigDto,
         MetadataUpdateConfigDto, MsgKind, ProxyConfigDto, RecordingConfigDto, RecordingDiskConfigDto,
         RecordingNotificationConfigDto, RecordingQuotaConfigDto, RecordingRetentionConfigDto, StreamInfoConfigDto,
-        WebAuthConfigDto, WebUiConfigDto,
+        VideoConfigDto, WebAuthConfigDto, WebUiConfigDto,
     };
 
     #[test]
@@ -586,7 +591,13 @@ mod tests {
         };
         let mut config = ConfigDto::default();
 
-        update_config(&mut config, vec![ConfigForm::Recording(true, recording)]);
+        update_config(
+            &mut config,
+            vec![ConfigForm::Recording(
+                true,
+                VideoConfigDto { extensions: vec!["ts".to_string()], web_search: None, recording: Some(recording) },
+            )],
+        );
 
         let serialized = serde_json::to_string(&config);
         assert!(serialized.is_ok(), "config should serialize");
@@ -594,7 +605,7 @@ mod tests {
         let config: Result<ConfigDto, _> = serde_json::from_str(&serialized);
         assert!(config.is_ok(), "config should deserialize");
         let Ok(config) = config else { return };
-        let recording = config.recording.as_ref();
+        let recording = config.video.as_ref().and_then(|video| video.recording.as_ref());
         assert!(recording.is_some(), "explicit recording block should round-trip");
         let Some(recording) = recording else { return };
         assert!(recording.retention.is_none());
@@ -607,7 +618,17 @@ mod tests {
     fn update_config_round_trips_explicit_empty_recording() {
         let mut config = ConfigDto::default();
 
-        update_config(&mut config, vec![ConfigForm::Recording(true, RecordingConfigDto::default())]);
+        update_config(
+            &mut config,
+            vec![ConfigForm::Recording(
+                true,
+                VideoConfigDto {
+                    extensions: vec!["ts".to_string()],
+                    web_search: None,
+                    recording: Some(RecordingConfigDto::default()),
+                },
+            )],
+        );
 
         let serialized = serde_json::to_string(&config);
         assert!(serialized.is_ok(), "config should serialize");
@@ -615,7 +636,7 @@ mod tests {
         let config: Result<ConfigDto, _> = serde_json::from_str(&serialized);
         assert!(config.is_ok(), "config should deserialize");
         let Ok(config) = config else { return };
-        let recording = config.recording.as_ref();
+        let recording = config.video.as_ref().and_then(|video| video.recording.as_ref());
         assert!(recording.is_some(), "explicit recording block should round-trip");
         let Some(recording) = recording else { return };
         assert!(recording.enabled);
@@ -630,7 +651,13 @@ mod tests {
         };
         let mut config = ConfigDto::default();
 
-        let result = apply_and_prepare_config(&mut config, vec![ConfigForm::Recording(true, invalid_recording)]);
+        let result = apply_and_prepare_config(
+            &mut config,
+            vec![ConfigForm::Recording(
+                true,
+                VideoConfigDto { extensions: Vec::new(), web_search: None, recording: Some(invalid_recording) },
+            )],
+        );
 
         assert!(result.is_err(), "invalid recording config must be rejected");
         let Err(error) = result else { return };

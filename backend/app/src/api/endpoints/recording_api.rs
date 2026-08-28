@@ -240,7 +240,7 @@ async fn create_http_recording_task(
         return error_response(StatusCode::BAD_REQUEST, "recording_invalid_source");
     };
     let config = app_state.app_config.config.load();
-    let Some(recording_config) = config.recording.as_ref() else {
+    let Some(recording_config) = config.recording() else {
         return error_response(StatusCode::NOT_IMPLEMENTED, "recording_disabled");
     };
     let filename = format!("{}.{}", resolved.title, extension.trim_start_matches('.'));
@@ -569,7 +569,7 @@ pub async fn get_recording_quota(
     let tasks = all_recording_tasks(&app_state).await;
     let totals = recording_quota::compute_totals(&tasks);
     let config = app_state.app_config.config.load();
-    let limits = quota_limits_from_config(config.recording.as_ref().and_then(|recording| recording.quota.as_ref()));
+    let limits = quota_limits_from_config(config.recording().and_then(|recording| recording.quota.as_ref()));
     let quota = recording_quota::regular_user_dto(subject_id, &totals, &limits, &tasks);
     Json(RecordingQuotaResponse {
         private_used_bytes: quota.private.measured_bytes.saturating_add(quota.private.reserved_bytes),
@@ -608,7 +608,7 @@ pub async fn get_recording_health(
     }
     let health = crate::api::model::recording::recording_supervisor::supervisor_health();
     let config = app_state.app_config.config.load();
-    let recording = config.recording.as_ref();
+    let recording = config.recording();
     Json(RecordingHealthResponse {
         enabled: recording.is_none_or(|cfg| cfg.enabled),
         server_time: chrono::Utc::now().timestamp(),
@@ -1201,7 +1201,11 @@ mod tests {
         let recording_dto = shared::model::RecordingConfigDto { enabled: true, ..Default::default() };
         let recording_runtime = crate::model::RecordingConfig::from(&recording_dto);
         crate::api::model::create_test_app_state(crate::model::Config {
-            recording: Some(recording_runtime),
+            video: Some(crate::model::VideoConfig {
+                extensions: Vec::new(),
+                web_search: None,
+                recording: Some(recording_runtime),
+            }),
             ..crate::model::Config::default()
         })
     }

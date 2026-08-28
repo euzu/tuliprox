@@ -245,7 +245,7 @@ fn start_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
         spawn_download_services(app_state, &app_state.cancel_tokens.load().downloads);
         spawn_recording_rule_scheduler(&app_state.recording_ctx(), &app_state.cancel_tokens.load().downloads);
         let config = app_state.app_config.config.load();
-        if let Some(download_cfg) = config.recording.as_ref().cloned() {
+        if let Some(download_cfg) = config.recording().cloned() {
             let app_state = Arc::clone(app_state);
             tokio::spawn(async move {
                 for _ in 0..50 {
@@ -647,8 +647,11 @@ impl AppState {
         let geoip_enabled_old = old_config.is_geoip_enabled();
         let changed_storage_dir = old_config.storage_dir != config.storage_dir;
         let changed_qos_aggregation = qos_aggregation_changed(&old_config, config);
-        let changed_video_download =
-            change_detect!(recording_changed, old_config.recording.as_ref(), config.recording.as_ref());
+        let changed_recording = change_detect!(
+            recording_changed,
+            old_config.video.as_ref().and_then(|video| video.recording.as_ref()),
+            config.video.as_ref().and_then(|video| video.recording.as_ref())
+        );
 
         let mut changes = UpdateChanges { flags: UpdateChangesFlagsSet::new(), targets: None };
         changes.set_flag_if(
@@ -660,7 +663,7 @@ impl AppState {
         changes.set_flag_if(geoip_enabled != geoip_enabled_old, UpdateChangesFlags::Geoip);
         changes.set_flag_if(changed_storage_dir, UpdateChangesFlags::Metadata);
         changes.set_flag_if(changed_qos_aggregation || changed_storage_dir, UpdateChangesFlags::QosAggregation);
-        changes.set_flag_if(changed_video_download, UpdateChangesFlags::Downloads);
+        changes.set_flag_if(changed_recording, UpdateChangesFlags::Downloads);
         changes
     }
 

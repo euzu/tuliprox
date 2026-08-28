@@ -7,42 +7,41 @@ consume.
 
 ## 1. Configuration reference
 
-All new fields live under `video.download.recording` in the config file. Every field is optional;
+All fields live under `video.recording` in the config file. Every field is optional;
 defaults match the recommended values.
 
 ```yaml
 video:
-  download:
-    recording:
-      enabled: true                   # default: true; false stops every DVR supervisor
-      container_format: mpegts        # mpegts (default) | matroska | mp4
-      directory: recordings/          # default: <download-dir>/recordings
-      timezone: Europe/Berlin         # default: UTC (IANA required)
-      filename_template: "{channel}_{program_title}_{start_time}"
-      default_pre_roll_secs: 0        # 0..=max_pre_roll_secs
-      max_pre_roll_secs: 900          # ≤ 900 (15 min)
-      default_post_roll_secs: 0       # 0..=max_post_roll_secs
-      max_post_roll_secs: 1800        # ≤ 1800 (30 min)
-      retention:
+  recording:
+    enabled: true                   # default: true; false stops every DVR supervisor
+    container_format: mpegts        # mpegts (default) | matroska | mp4
+    directory: recordings/          # default: recordings
+    timezone: Europe/Berlin         # default: UTC (IANA required)
+    filename_template: "{channel}_{program_title}_{start_time}"
+    default_pre_roll_secs: 0        # 0..=max_pre_roll_secs
+    max_pre_roll_secs: 900          # ≤ 900 (15 min)
+    default_post_roll_secs: 0       # 0..=max_post_roll_secs
+    max_post_roll_secs: 1800        # ≤ 1800 (30 min)
+    retention:
         keep_last_per_channel: 10     # > 0 when set
         delete_after_days: 30         # > 0 when set
         sweep_interval_secs: 3600     # default 3600; age/count sweep cadence
-      disk:
+    disk:
         high_water_percent: 85        # 0..=100
         low_water_percent: 70         # 0..=100 and < high_water_percent
         cleanup_interval_secs: 3600   # > 0; watermark-check cadence
         safety_bytes: 1073741824      # > 0 (1 GiB)
-      quota:
+    quota:
         default_private_bytes: 53687091200   # 50 GiB
         per_user_bytes:
           "web:user-uuid-1": 107374182400    # 100 GiB
         shared_bytes: 536870912000           # 500 GiB
-      notifications:
+    notifications:
         outbox_buffer: 1024           # default 1024; in-memory queue depth
         max_attempts: 6               # default 6; then dead-lettered
         backoff_initial_secs: 5       # default 5
         backoff_max_secs: 900         # default 900 (15 min)
-      fallback_bytes_per_minute: 8388608     # 8 MiB/min, > 0
+    fallback_bytes_per_minute: 8388608     # 8 MiB/min, > 0
 ```
 
 | Field                                | Default  | Range                       | Restart required | Effect                                                                                                                                                                                                                                                              |
@@ -74,8 +73,8 @@ delete recordings you expected to keep.
 
 Before restarting after a configuration change:
 
-1. **Read back your effective policy.** Check `video.download.recording.retention` and
-   `video.download.recording.disk` in `config.yml`.
+1. **Read back your effective policy.** Check `video.recording.retention` and
+   `video.recording.disk` in `config.yml`.
 2. **Work out what would be deleted.** `keep_last_per_channel: N` keeps the *N most recent*
    recordings per (owner, channel) and deletes the rest. `delete_after_days: N` deletes anything
    whose `completed_at` is more than N days old. The two are a **union**, not an intersection —
@@ -667,9 +666,8 @@ The DVR is a feature flag, so a rollback does not require a binary downgrade:
 
 ```yaml
 video:
-  download:
-    recording:
-      enabled: false
+  recording:
+    enabled: false
 ```
 
 That stops the supervisors and the rule scheduler, answers `501 recording_disabled` on the

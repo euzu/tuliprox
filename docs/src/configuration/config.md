@@ -643,8 +643,8 @@ Optional video-related behaviors, mostly utilized by the Web UI.
 video:
   web_search: "https://www.imdb.com/search/title/?title={}"
   extensions: [ "mkv", "mp4", "avi", "ts", "webm" ]
-  download:
-    directory: /tmp/tuliprox_downloads
+  recording:
+    directory: /tmp/tuliprox_recordings
     headers:
       User-Agent: "AppleTV/tvOS/9.1.1"
       Accept: "video/*"
@@ -654,17 +654,15 @@ video:
 
 * `web_search`: A template URL used in the Web UI to quickly search for a movie title (replaces `{}` with the title).
 * `extensions`: Defines which file endings Tuliprox categorizes as VOD/Video content when transforming M3U to Xtream.
-* `download`: Configuration for the Web UI download and recording manager.
-  * `directory`: Where downloaded files and recordings are saved.
+* `recording`: Configuration for the DVR.
+  * `directory`: Where recordings are saved.
   * `headers` (optional): Custom HTTP headers used for the download request. This is useful for bypassing basic
     user-agent filters or setting specific media types.
   * `organize_into_directories`: If true, Tuliprox automatically creates neat subfolders for series.
   * `episode_pattern`: Crucial for the directory organization. It uses the mandatory Named Capture Group
     `(?P<episode>...)` in the Regex to identify and strip the episode identifier (e.g., `S01E01`)
     from the filename, ensuring all episodes of a show land in the same base-show folder.
-  * `download_priority`: Default provider priority for VOD/series/episode downloads. Lower values mean higher
-    priority.
-  * `recording_priority`: Default provider priority for live recordings. Lower values mean higher priority.
+  * `priority`: Provider priority for recordings. Lower values mean higher priority.
   * `reserve_slots_for_users`: Keeps provider headroom for normal foreground users before background-priority
     transfers
     may consume the last slots.
@@ -681,7 +679,7 @@ Tuliprox handles these transfers like provider-bound background streams:
 * They respect provider limits, user priorities, and connection preemption instead of bypassing normal stream capacity.
 * Waiting for provider capacity is notify-based, not polling-based.
 * The Web UI loads an initial transfer snapshot and then stays synchronized through websocket updates.
-* Changes to `video.download` participate in hot config reloads. The background scheduler restarts and active transfers
+* Changes to `video.recording` participate in hot config reloads. The background scheduler restarts and active transfers
   are  
   re-queued so they continue under the updated download configuration.
 * RBAC integration is explicit:

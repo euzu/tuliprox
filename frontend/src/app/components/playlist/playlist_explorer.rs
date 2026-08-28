@@ -159,10 +159,18 @@ pub fn PlaylistExplorer() -> Html {
     let can_write_downloads = service_ctx.auth.has_permission(Permission::RecordingWrite);
     let can_write_recordings = service_ctx.auth.has_permission(Permission::RecordingWrite);
     let is_admin_role = service_ctx.auth.is_admin();
-    let default_download_priority =
-        config_ctx.config.as_ref().and_then(|cfg| cfg.config.recording.as_ref()).map(|recording| recording.priority);
+    let default_dvr_priority = config_ctx
+        .config
+        .as_ref()
+        .and_then(|cfg| cfg.config.video.as_ref())
+        .and_then(|video| video.recording.as_ref())
+        .map(|recording| recording.priority);
     let recording_padding = {
-        let rec = config_ctx.config.as_ref().and_then(|cfg| cfg.config.recording.as_ref());
+        let rec = config_ctx
+            .config
+            .as_ref()
+            .and_then(|cfg| cfg.config.video.as_ref())
+            .and_then(|video| video.recording.as_ref());
         PaddingBounds {
             default_pre_roll_secs: rec.and_then(|c| c.default_pre_roll_secs).unwrap_or(0),
             max_pre_roll_secs: rec.map_or(900, |c| c.max_pre_roll_secs),
@@ -426,7 +434,7 @@ pub fn PlaylistExplorer() -> Html {
                             let services = services.clone();
                             let translate_clone = translate_clone.clone();
                             let playlist_request = (*playlist_ctx.playlist_request).clone();
-                            let default_download_priority = default_download_priority;
+                            let default_dvr_priority = default_dvr_priority;
                             let selected = dto.clone();
                             spawn_local(async move {
                                 let resolved_url = if !selected.url.is_empty() {
@@ -467,9 +475,9 @@ pub fn PlaylistExplorer() -> Html {
 
                                 let default_filename = build_download_filename(&selected.title, &resolved_url);
                                 let filename_value = Rc::new(RefCell::new(default_filename.clone()));
-                                let default_download_priority_value =
-                                    default_download_priority.map_or_else(String::new, |priority| priority.to_string());
-                                let priority_value = Rc::new(RefCell::new(default_download_priority_value.clone()));
+                                let default_dvr_priority_value =
+                                    default_dvr_priority.map_or_else(String::new, |priority| priority.to_string());
+                                let priority_value = Rc::new(RefCell::new(default_dvr_priority_value.clone()));
                                 let actions = DialogActions {
                                     left: Some(vec![DialogAction::new(
                                         "cancel",
@@ -513,7 +521,7 @@ pub fn PlaylistExplorer() -> Html {
                                                             min="-127"
                                                             max="127"
                                                             step="1"
-                                                            value={default_download_priority_value.clone()}
+                                                            value={default_dvr_priority_value.clone()}
                                                             oninput={Callback::from(move |event: InputEvent| {
                                                                 let input: HtmlInputElement = event.target_unchecked_into();
                                                                 *priority_value_input.borrow_mut() = input.value();

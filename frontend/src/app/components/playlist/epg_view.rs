@@ -243,7 +243,6 @@ pub fn EpgView() -> Html {
             .config
             .as_ref()
             .and_then(|cfg| cfg.config.video.as_ref())
-            .and_then(|video| video.download.as_ref())
             .and_then(|video| video.recording.as_ref());
         Rc::new(PaddingBounds {
             default_pre_roll_secs: rec.and_then(|c| c.default_pre_roll_secs).unwrap_or(0),

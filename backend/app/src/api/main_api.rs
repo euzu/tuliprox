@@ -761,7 +761,7 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
         .await
         .map_err(|err| TuliproxError::Server(format!("Failed to bind to {host}:{port}, {err}")))?;
 
-    if let Some(download_cfg) = cfg.recording.as_ref() {
+    if let Some(download_cfg) = cfg.recording() {
         resume_downloads_after_bind(&app_state, download_cfg).await;
     }
 

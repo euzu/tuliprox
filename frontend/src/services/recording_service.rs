@@ -300,8 +300,8 @@ pub enum RecordingError {
     /// recording that has not finished yet.
     NotTerminal,
     /// `recording_disabled` — the DVR cannot run on this server:
-    /// either the `video.download` block is missing from the
-    /// configuration, or `video.download.recording.enabled` is
+    /// either the `video.recording` block is missing from the
+    /// configuration, or `video.recording.enabled` is
     /// `false`.
     Disabled,
     /// Catch-all for unrecognised codes so the frontend does not
@@ -479,8 +479,6 @@ impl RecordingService {
         Ok(())
     }
 
-    /// POST /recording/tasks/{id}/cancel
-
     /// POST /recording/tasks/{id}/pause
     pub async fn pause_task(&self, id: &str) -> Result<(), RecordingError> {
         let req = RecordingTaskId { id: id.to_string() };
@@ -525,13 +523,10 @@ impl RecordingService {
 
     /// DELETE /recording/tasks/{id}/remove
     pub async fn remove_task(&self, id: &str) -> Result<(), RecordingError> {
-        let _ = request_delete::<serde_json::Value>(
-            &format!("{}/remove", self.task_path(id)),
-            None,
-            Some(Encoding::Json),
-        )
-        .await
-        .map_err(network)?;
+        let _ =
+            request_delete::<serde_json::Value>(&format!("{}/remove", self.task_path(id)), None, Some(Encoding::Json))
+                .await
+                .map_err(network)?;
         Ok(())
     }
 

@@ -2,8 +2,8 @@ use shared::{
     error::TuliproxError,
     model::{
         ApiProxyConfigDto, ConfigApiDto, HdHomeRunConfigDto, IpCheckConfigDto, LibraryConfigDto, LogConfigDto,
-        MainConfigDto, MessagingConfigDto, MetadataUpdateConfigDto, ProxyConfigDto, RecordingConfigDto,
-        ReverseProxyConfigDto, SchedulesConfigDto, SourcesConfigDto, WebUiConfigDto,
+        MainConfigDto, MessagingConfigDto, MetadataUpdateConfigDto, ProxyConfigDto, ReverseProxyConfigDto,
+        SchedulesConfigDto, SourcesConfigDto, VideoConfigDto, WebUiConfigDto,
     },
 };
 use std::{fmt, str::FromStr};
@@ -109,7 +109,7 @@ pub enum ConfigForm {
     ApiProxy(bool, ApiProxyConfigDto),
     Log(bool, LogConfigDto),
     Schedules(bool, SchedulesConfigDto),
-    Recording(bool, RecordingConfigDto),
+    Recording(bool, VideoConfigDto),
     MetadataUpdate(bool, MetadataUpdateConfigDto),
     Messaging(bool, MessagingConfigDto),
     WebUi(bool, WebUiConfigDto),

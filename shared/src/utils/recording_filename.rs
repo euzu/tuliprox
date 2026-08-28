@@ -111,9 +111,7 @@ impl fmt::Display for RecordingFilenameError {
 impl std::error::Error for RecordingFilenameError {}
 
 /// Validate a recording filename template. Returns `Ok(())` when the
-/// template is acceptable. Mirrors the validation in
-/// `video_download.rs::prepare_recording_config` so the two cannot
-/// diverge.
+/// template is acceptable.
 pub fn validate_recording_template(template: &str) -> Result<(), RecordingFilenameError> {
     if template.is_empty() {
         return Err(RecordingFilenameError::Empty);

@@ -5,7 +5,7 @@ use shared::model::{
     default_recording_notification_backoff_initial_secs, default_recording_notification_backoff_max_secs,
     default_recording_notification_max_attempts, default_recording_notification_outbox_buffer, RecordingConfigDto,
     RecordingContainerFormat, RecordingDiskConfigDto, RecordingNotificationConfigDto, RecordingQuotaConfigDto,
-    RecordingRetentionConfigDto,
+    RecordingRetentionConfigDto, VideoConfigDto,
 };
 use std::{collections::HashMap, sync::Arc};
 
@@ -13,7 +13,6 @@ use std::{collections::HashMap, sync::Arc};
 #[derive(Debug, Clone)]
 pub struct RecordingConfig {
     pub headers: HashMap<String, String>,
-    pub extensions: Vec<String>,
     pub organize_into_directories: bool,
     pub episode_pattern: Option<Arc<Regex>>,
     pub priority: i8,
@@ -38,6 +37,34 @@ pub struct RecordingConfig {
     pub quota: Option<RecordingQuotaConfig>,
     pub notifications: RecordingNotificationConfig,
     pub fallback_bytes_per_minute: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct VideoConfig {
+    pub extensions: Vec<String>,
+    pub web_search: Option<String>,
+    pub recording: Option<RecordingConfig>,
+}
+
+macros::from_impl!(VideoConfig);
+impl From<&VideoConfigDto> for VideoConfig {
+    fn from(dto: &VideoConfigDto) -> Self {
+        Self {
+            extensions: dto.extensions.clone(),
+            web_search: dto.web_search.clone(),
+            recording: dto.recording.as_ref().map(Into::into),
+        }
+    }
+}
+
+impl From<&VideoConfig> for VideoConfigDto {
+    fn from(instance: &VideoConfig) -> Self {
+        Self {
+            extensions: instance.extensions.clone(),
+            web_search: instance.web_search.clone(),
+            recording: instance.recording.as_ref().map(RecordingConfigDto::from),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -128,7 +155,6 @@ impl From<&RecordingConfigDto> for RecordingConfig {
             .unwrap_or_else(|| "UTC".parse::<Tz>().expect("UTC must parse"));
         Self {
             headers: dto.headers.clone(),
-            extensions: dto.extensions.clone(),
             organize_into_directories: dto.organize_into_directories,
             episode_pattern: dto.episode_pattern.as_ref().and_then(|pattern| {
                 shared::model::REGEX_CACHE
@@ -166,7 +192,6 @@ impl From<&RecordingConfig> for RecordingConfigDto {
     fn from(instance: &RecordingConfig) -> Self {
         Self {
             headers: instance.headers.clone(),
-            extensions: instance.extensions.clone(),
             organize_into_directories: instance.organize_into_directories,
             episode_pattern: instance.episode_pattern.as_ref().map(std::string::ToString::to_string),
             priority: instance.priority,

@@ -229,7 +229,14 @@ mod tests {
     fn config_with_recording_enabled(enabled: bool) -> Config {
         let recording_dto = shared::model::RecordingConfigDto { enabled, ..Default::default() };
         let recording_runtime = RecordingConfig::from(&recording_dto);
-        Config { recording: Some(recording_runtime), ..Config::default() }
+        Config {
+            video: Some(tuliprox_core::model::VideoConfig {
+                extensions: Vec::new(),
+                web_search: None,
+                recording: Some(recording_runtime),
+            }),
+            ..Config::default()
+        }
     }
 
     fn config_with_recording_and_web_auth(recording_enabled: bool) -> Config {

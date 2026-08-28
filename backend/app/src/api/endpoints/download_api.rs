@@ -1403,7 +1403,7 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                     };
                                     let progress_path = recording_partial_path(&execution_download.file_path);
                                     let container_format =
-                                        app_config.config.load().recording.as_ref().map_or_else(
+                                        app_config.config.load().recording().map_or_else(
                                             shared::model::RecordingContainerFormat::default,
                                             |recording| recording.container_format,
                                         );
@@ -1833,7 +1833,7 @@ pub(in crate::api) fn start_download_scheduler(
 
 pub(in crate::api) fn spawn_download_services(app_state: &AppState, cancel_token: &CancellationToken) {
     let config = app_state.app_config.config.load();
-    let Some(download_cfg) = config.recording.as_ref().cloned() else {
+    let Some(download_cfg) = config.recording().cloned() else {
         return;
     };
 
@@ -1874,11 +1874,11 @@ pub async fn queue_download_file(
     let app_config = &*app_state.app_config;
 
     let config = app_config.config.load();
-    if let Some(download_cfg) = config.recording.as_ref() {
+    if let Some(download_cfg) = config.recording() {
         if download_cfg.directory.is_empty() {
             return (
                 axum::http::StatusCode::BAD_REQUEST,
-                axum::Json(json!({"error": "Server config missing video.download.directory configuration"})),
+                axum::Json(json!({"error": "Server config missing video.recording.directory configuration"})),
             )
                 .into_response();
         }
@@ -1971,11 +1971,11 @@ pub async fn queue_recording_file(
             .into_response();
     }
 
-    if let Some(download_cfg) = config.recording.as_ref() {
+    if let Some(download_cfg) = config.recording() {
         if download_cfg.directory.is_empty() {
             return (
                 axum::http::StatusCode::BAD_REQUEST,
-                axum::Json(json!({"error": "Server config missing video.download.directory configuration"})),
+                axum::Json(json!({"error": "Server config missing video.recording.directory configuration"})),
             )
                 .into_response();
         }
@@ -2056,7 +2056,7 @@ pub async fn resume_download(
 ) -> impl axum::response::IntoResponse + Send {
     match app_state.downloads.resume_active(&req.uuid).await {
         Ok(true) => {
-            let download_cfg = app_state.app_config.config.load().recording.as_ref().cloned();
+            let download_cfg = app_state.app_config.config.load().recording().cloned();
             if let Some(download_cfg) = download_cfg {
                 let app_state = Arc::clone(&app_state);
                 tokio::spawn(async move {
@@ -2099,7 +2099,7 @@ pub async fn cancel_download(
         Ok(Some(was_paused)) => {
             if was_paused {
                 let config = app_state.app_config.config.load();
-                if let Some(download_cfg) = config.recording.as_ref() {
+                if let Some(download_cfg) = config.recording() {
                     if let Err(err) = ensure_download_worker_running(
                         &app_state.app_config,
                         download_cfg,
@@ -2165,7 +2165,7 @@ pub async fn retry_download(
         // Start the queue if not running
         let app_config = &app_state.app_config;
         let config = app_config.config.load();
-        if let Some(download_cfg) = config.recording.as_ref() {
+        if let Some(download_cfg) = config.recording() {
             if app_state.downloads.active.read().await.is_none() {
                 let _ = ensure_download_worker_running(
                     app_config,

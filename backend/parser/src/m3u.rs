@@ -24,8 +24,7 @@ use tuliprox_core::{
 /// The default is wrapped in `Arc<Regex>` once via `LazyLock` so repeated
 /// `build_series_info` calls do not re-clone the regex.
 fn resolve_episode_pattern(cfg: &Config) -> Arc<Regex> {
-    cfg.recording
-        .as_ref()
+    cfg.recording()
         .and_then(|recording| recording.episode_pattern.as_ref().map(Arc::clone))
         .unwrap_or_else(default_episode_pattern_arc)
 }
@@ -521,7 +520,7 @@ pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInp
     let mut default_catchup_correction: Option<Arc<str>> = None;
     let input_name = &input.name;
 
-    let video_suffixes = match cfg.recording.as_ref() {
+    let video_suffixes = match cfg.video.as_ref() {
         Some(config) => config.extensions.clone(),
         None => default_supported_video_extensions(),
     };
@@ -1235,10 +1234,11 @@ https://example.test/series/user/pass/episode-2
     #[tokio::test]
     async fn consume_m3u_respects_custom_recording_extensions_when_present() {
         let cfg = Config {
-            recording: Some(tuliprox_core::model::RecordingConfig::from(&shared::model::RecordingConfigDto {
+            video: Some(tuliprox_core::model::VideoConfig {
                 extensions: vec!["mp4".to_string()],
-                ..Default::default()
-            })),
+                web_search: None,
+                recording: None,
+            }),
             ..Config::default()
         };
         let content = concat!("#EXTM3U\n", "#EXTINF:-1,Channel 1\n", "http://provider.example/v.mp4\n",);

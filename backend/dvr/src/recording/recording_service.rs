@@ -110,7 +110,7 @@ pub enum ServiceError {
     /// The recording cannot fit on disk; reservation would exceed
     /// available space.
     DiskFull,
-    /// The server has no download engine: the `video.download` block
+    /// The server has no download engine: the `video.recording` block
     /// is missing from the configuration. Distinct from
     /// `InvalidSource` because the caller's identifiers may be
     /// perfectly valid — nothing on the server can execute them.
@@ -287,7 +287,7 @@ impl RecordingService {
             return Err(ServiceError::Disabled);
         }
         let config = self.app_config.config.load();
-        let Some(recording_cfg) = config.recording.as_ref() else {
+        let Some(recording_cfg) = config.recording() else {
             return Err(ServiceError::Disabled);
         };
         recording_edit::validate_padding(
@@ -399,7 +399,7 @@ impl RecordingService {
         // helper falls back to the shared-model defaults, so a
         // configured-without-recording deployment still validates
         // edits.
-        let recording_cfg = config.recording.as_ref();
+        let recording_cfg = config.recording();
         let bounds = padding_bounds(recording_cfg);
         let fallback_bytes_per_minute = recording_cfg.map_or(8 * 1024 * 1024, |cfg| cfg.fallback_bytes_per_minute);
         let quota_limits = quota_limits_from_config(recording_cfg.and_then(|cfg| cfg.quota.as_ref()));
@@ -600,7 +600,6 @@ impl RecordingService {
     /// occurrences, then delete the rule) that cannot be made atomic, so
     /// it keeps these to undo the queue side if the rule store fails —
     /// see [`Self::restore_cancelled_rule_recordings`].
-
     pub async fn pause_recording(&self, claims: &shared::model::Claims, uuid: &str) -> Result<(), ServiceError> {
         let owner_id = Self::subject_id(claims)?;
         let active = self.downloads.active.read().await.clone();
@@ -636,7 +635,11 @@ impl RecordingService {
         Err(ServiceError::UnknownRecording)
     }
 
-    pub async fn remove_recording_task(&self, claims: &shared::model::Claims, uuid: &str) -> Result<bool, ServiceError> {
+    pub async fn remove_recording_task(
+        &self,
+        claims: &shared::model::Claims,
+        uuid: &str,
+    ) -> Result<bool, ServiceError> {
         let owner_id = Self::subject_id(claims)?;
         // Just remove, but we should check permissions.
         // We'll fetch from queue or finished to get the meta.
@@ -789,7 +792,7 @@ impl RecordingService {
         // Reject malformed input up front so the analyzer never sees
         // garbage. The endpoint enforces the same bounds; this is the
         // service-layer defense in depth.
-        let bounds = padding_bounds(self.app_config.config.load().recording.as_ref());
+        let bounds = padding_bounds(self.app_config.config.load().recording());
         recording_edit::validate_padding(request.pre_roll_secs, request.post_roll_secs, bounds)
             .map_err(|error: EditError| map_edit_validation_error(&error))?;
         if request.padded_start >= request.padded_end {
@@ -1229,8 +1232,8 @@ pub struct ConflictPreviewRequest {
 fn effective_capacity_from_config(
     config: &tuliprox_core::model::Config,
 ) -> crate::recording_conflict::EffectiveCapacity {
-    let background_slots = config.recording.as_ref().map_or(0, |cfg| u32::from(cfg.max_background_per_provider));
-    let reserved = config.recording.as_ref().map_or(0, |cfg| u32::from(cfg.reserve_slots_for_users));
+    let background_slots = config.recording().map_or(0, |cfg| u32::from(cfg.max_background_per_provider));
+    let reserved = config.recording().map_or(0, |cfg| u32::from(cfg.reserve_slots_for_users));
     crate::recording_conflict::EffectiveCapacity { background_slots, reserved_interactive_slots: reserved }
 }
 
@@ -1660,7 +1663,6 @@ mod tests {
         };
         let rec_cfg = RecordingConfig {
             headers: HashMap::new(),
-            extensions: Vec::new(),
             organize_into_directories: false,
             episode_pattern: None,
             priority: 0,
@@ -1687,7 +1689,11 @@ mod tests {
             fallback_bytes_per_minute: 60,
         };
         let config = tuliprox_core::model::Config {
-            recording: Some(rec_cfg.clone()),
+            video: Some(tuliprox_core::model::VideoConfig {
+                extensions: Vec::new(),
+                web_search: None,
+                recording: Some(rec_cfg.clone()),
+            }),
             ..tuliprox_core::model::Config::default()
         };
         let app_config = Arc::new(AppConfig {
@@ -1781,7 +1787,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_recording_without_download_config_reports_disabled() {
-        // A missing `video.download` block means the server has no
+        // A missing `video.recording` block means the server has no
         // download engine at all — the caller's source identifiers are
         // not wrong. Reporting `InvalidSource` here sent clients
         // hunting for a misconfiguration that does not exist.
@@ -2017,7 +2023,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_recording_rejects_absent_recording_config() {
-        let config = tuliprox_core::model::Config { recording: None, ..tuliprox_core::model::Config::default() };
+        let config = tuliprox_core::model::Config::default();
         let app_config = Arc::new(AppConfig {
             config: Arc::new(arc_swap::ArcSwap::from_pointee(config)),
             sources: Arc::new(arc_swap::ArcSwap::from_pointee(tuliprox_core::model::SourcesConfig::default())),

@@ -2,7 +2,7 @@ use crate::{
     model::{
         macros, ConfigApi, HdHomeRunConfig, HdHomeRunFlags, IpCheckConfig, LibraryConfig, LogConfig, MessagingConfig,
         MetadataUpdateConfig, ProxyConfig, RecordingConfig, ReverseProxyConfig, ReverseProxyDisabledHeaderConfig,
-        ScheduleConfig, WebUiConfig,
+        ScheduleConfig, VideoConfig, WebUiConfig,
     },
     utils,
     utils::get_default_path_for_home,
@@ -12,7 +12,7 @@ use path_clean::PathClean;
 use shared::{
     defaults::{
         default_grace_period_millis, default_grace_period_timeout_secs, DEFAULT_BACKUP_DIR, DEFAULT_CACHE_DIR,
-        DEFAULT_DOWNLOAD_DIR, DEFAULT_STORAGE_DIR, DEFAULT_STORAGE_TEMP_DIR, DEFAULT_USER_CONFIG_DIR,
+        DEFAULT_RECORDING_DIR, DEFAULT_STORAGE_DIR, DEFAULT_STORAGE_TEMP_DIR, DEFAULT_USER_CONFIG_DIR,
     },
     error::TuliproxError,
     model::{ConfigDto, GeoIpUnavailablePolicy, HdHomeRunDeviceOverview},
@@ -29,7 +29,7 @@ fn create_directories(cfg: &Config, temp_path: &Path) {
         Some(cfg.storage_dir.clone()),
         cfg.backup_dir.clone(),
         cfg.user_config_dir.clone(),
-        cfg.recording.as_ref().map(|recording| recording.directory.clone()),
+        cfg.video.as_ref().and_then(|video| video.recording.as_ref()).map(|recording| recording.directory.clone()),
         cfg.reverse_proxy
             .as_ref()
             .and_then(|r| r.cache.as_ref().and_then(|c| if c.enabled { Some(c.directory.clone()) } else { None })),
@@ -89,7 +89,7 @@ pub struct Config {
     pub custom_stream_response_timeout_secs: u32,
     pub custom_stream_response_enabled: bool,
     pub custom_stream_response_error_status: u16,
-    pub recording: Option<RecordingConfig>,
+    pub video: Option<VideoConfig>,
     pub metadata_update: Option<MetadataUpdateConfig>,
     pub schedules: Option<Vec<ScheduleConfig>>,
     pub log: Option<LogConfig>,
@@ -112,6 +112,10 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn recording(&self) -> Option<&RecordingConfig> {
+        self.video.as_ref().and_then(|video| video.recording.as_ref())
+    }
+
     fn lexical_normalize(path: &Path) -> PathBuf { path.components().collect::<PathBuf>() }
 
     fn normalize_storage_path(
@@ -173,10 +177,10 @@ impl Config {
             messaging.prepare(config_path);
         }
 
-        if let Some(recording) = self.recording.as_mut() {
+        if let Some(recording) = self.video.as_mut().and_then(|video| video.recording.as_mut()) {
             let directory = PathBuf::from(&recording.directory);
             if recording.directory.trim().is_empty() {
-                recording.directory = get_default_path_for_home(Path::new(home_path), DEFAULT_DOWNLOAD_DIR)
+                recording.directory = get_default_path_for_home(Path::new(home_path), DEFAULT_RECORDING_DIR)
                     .clean()
                     .to_string_lossy()
                     .to_string();
@@ -314,7 +318,7 @@ impl From<&ConfigDto> for Config {
             custom_stream_response_timeout_secs: dto.custom_stream_response_timeout_secs,
             custom_stream_response_enabled: dto.custom_stream_response_enabled,
             custom_stream_response_error_status: dto.custom_stream_response_error_status,
-            recording: dto.recording.as_ref().map(Into::into),
+            video: dto.video.as_ref().map(Into::into),
             metadata_update: dto.metadata_update.as_ref().map(Into::into),
             schedules: dto.schedules.as_ref().map(|s| s.iter().map(Into::into).collect()),
             log: dto.log.as_ref().map(Into::into),
@@ -340,7 +344,7 @@ impl From<&ConfigDto> for Config {
 #[cfg(test)]
 mod tests {
     use super::Config;
-    use shared::model::{ConfigDto, GeoIpUnavailablePolicy, RecordingConfigDto};
+    use shared::model::{ConfigDto, GeoIpUnavailablePolicy, RecordingConfigDto, VideoConfigDto};
     use tempfile::tempdir;
 
     #[test]
@@ -453,70 +457,26 @@ mod tests {
         assert_eq!(config.get_geoip_unavailable_policy(), GeoIpUnavailablePolicy::Allow);
     }
 
-    // --- Runtime `Config` reader tests ---
-    //
-    // The runtime `Config` mirrors the shared `ConfigDto`: a canonical
-    // top-level `recording: Option<RecordingConfig>` populated from the
-    // DTO's `recording` field, replacing the legacy
-    // `video.download.recording` path as the DVR reader site.
-    // Download-pipeline sites keep using `config.video.download.*`.
-
     #[test]
-    fn recording_runtime_config_from_dto_canonical_top_level_field() {
-        // Canonical `recording:` on the DTO must populate the runtime
-        // `Config.recording` field directly. This is the migration
-        // target every DVR reader site relies on.
+    fn recording_runtime_config_from_video_dto() {
         let dto = ConfigDto {
-            recording: Some(RecordingConfigDto {
-                enabled: true,
-                directory: Some("/srv/recordings".to_string()),
-                ..RecordingConfigDto::default()
+            video: Some(VideoConfigDto {
+                extensions: vec![".mp4".to_string()],
+                web_search: Some("https://example.test/search".to_string()),
+                recording: Some(RecordingConfigDto {
+                    enabled: true,
+                    directory: Some("/srv/recordings".to_string()),
+                    ..RecordingConfigDto::default()
+                }),
             }),
             ..ConfigDto::default()
         };
         let config = Config::from(&dto);
-        let recording = config.recording.as_ref().expect("runtime config must expose canonical recording");
+        let video = config.video.as_ref().expect("runtime config must expose video");
+        let recording = video.recording.as_ref().expect("runtime config must expose recording");
         assert!(recording.enabled, "recording.enabled must round-trip from DTO");
         assert_eq!(recording.directory, "/srv/recordings");
-    }
-
-    #[test]
-    fn recording_runtime_config_legacy_video_download_after_prepare_yields_enabled_canonical() {
-        // End-to-end: a YAML config that only sets `video.download` (no
-        // canonical `recording:`) flows through the shared deserializer
-        // (which lifts legacy into canonical) and `prepare()` (which
-        // normalizes). After both, `Config.recording` must carry an
-        // enabled block because `video.download` is present.
-        let yaml = r#"
-api:
-  host: 127.0.0.1
-  port: 8901
-  web_root: ./web
-video:
-  extensions: [".mp4"]
-  download:
-    directory: /data/downloads
-"#;
-        let mut dto: ConfigDto = serde_saphyr::from_str(yaml).expect("legacy config deserializes");
-        dto.prepare(false).expect("prepare should succeed");
-        let config = Config::from(&dto);
-        let recording = config.recording.as_ref().expect("runtime config must expose the lifted canonical recording");
-        assert!(recording.enabled, "video.download present implies DVR is enabled by default");
-        assert_eq!(recording.directory, "/data/downloads/recordings");
-    }
-
-    #[test]
-    fn recording_runtime_config_default_has_disabled_canonical_block_after_prepare() {
-        // Default DTO after `prepare()` has a canonical `recording` in
-        // disabled form (no `video.download` block). The runtime
-        // `Config::from(&dto)` must surface it as `Some(RecordingConfig)`
-        // so the supervisor's `recording_enabled` predicate can read
-        // the canonical value directly.
-        let mut dto = ConfigDto::default();
-        dto.prepare(false).expect("prepare on default");
-        let config = Config::from(&dto);
-        let recording =
-            config.recording.as_ref().expect("default DTO after prepare must carry disabled canonical block");
-        assert!(!recording.enabled, "no download block implies recording is disabled");
+        assert_eq!(video.extensions, [".mp4"]);
+        assert_eq!(video.web_search.as_deref(), Some("https://example.test/search"));
     }
 }

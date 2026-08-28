@@ -6,7 +6,7 @@ use crate::{
                 config_page::LABEL_RECORDING_CONFIG, config_view_context::ConfigViewContext, use_emit_mapped,
                 RecordingConfigCards,
             },
-            Card, Chip, KeyValueEditor,
+            Card, KeyValueEditor,
         },
         context::ConfigContext,
     },
@@ -16,7 +16,7 @@ use crate::{
     i18n::use_translation,
     use_default_form_reducer,
 };
-use shared::model::RecordingConfigDto;
+use shared::model::{RecordingConfigDto, VideoConfigDto};
 use std::collections::HashMap;
 use yew::prelude::*;
 
@@ -39,12 +39,10 @@ generate_form_reducer!(
     state: RecordingConfigFormState { form: RecordingConfigDto },
     action_name: RecordingConfigFormAction,
     fields {
-        Extensions => extensions: Vec<String>,
         OrganizeIntoDirectories => organize_into_directories: bool,
         Directory => directory: Option<String>,
         EpisodePattern => episode_pattern: Option<String>,
         Headers => headers: HashMap<String, String>,
-        Priority => priority: i8,
         ReserveSlotsForUsers => reserve_slots_for_users: u8,
         MaxBackgroundPerProvider => max_background_per_provider: u8,
         RetryBackoffInitialSecs => retry_backoff_initial_secs: u64,
@@ -52,6 +50,14 @@ generate_form_reducer!(
         RetryBackoffMaxSecs => retry_backoff_max_secs: u64,
         RetryBackoffJitterPercent => retry_backoff_jitter_percent: u8,
         RetryMaxAttempts => retry_max_attempts: u8,
+    }
+);
+
+generate_form_reducer!(
+    state: VideoConfigFormState { form: VideoConfigDto },
+    action_name: VideoConfigFormAction,
+    fields {
+        Extensions => extensions: Vec<String>,
     }
 );
 
@@ -63,16 +69,23 @@ pub fn RecordingConfigView() -> Html {
     let config_view_ctx = use_context::<ConfigViewContext>().expect("ConfigViewContext not found");
     let state: UseReducerHandle<RecordingConfigFormState> =
         use_default_form_reducer!(RecordingConfigFormState { form: RecordingConfigDto::default() });
+    let video_state: UseReducerHandle<VideoConfigFormState> =
+        use_default_form_reducer!(VideoConfigFormState { form: VideoConfigDto::default() });
     let reload_generation = use_state(|| 0_u64);
 
     {
         let state = state.clone();
+        let video_state = video_state.clone();
         let reload_generation = reload_generation.clone();
-        let recording = config_ctx.config.as_ref().and_then(|config| config.config.recording.clone());
+        let video = config_ctx.config.as_ref().and_then(|config| config.config.video.as_ref()).cloned();
         let edit_mode = *config_view_ctx.edit_mode;
-        use_effect_with((recording, edit_mode), move |(recording, _)| {
+        use_effect_with((video, edit_mode), move |(video, _)| {
+            video_state.dispatch(VideoConfigFormAction::SetAll(video.clone().unwrap_or_default()));
             state.dispatch(RecordingConfigFormAction::SetAll(
-                recording.clone().unwrap_or_else(|| RecordingConfigDto { enabled: false, ..Default::default() }),
+                video
+                    .as_ref()
+                    .and_then(|video| video.recording.clone())
+                    .unwrap_or_else(|| RecordingConfigDto { enabled: false, ..Default::default() }),
             ));
             reload_generation.set((*reload_generation).wrapping_add(1));
             || ()
@@ -80,9 +93,12 @@ pub fn RecordingConfigView() -> Html {
     }
 
     use_emit_mapped(
-        (state.form.clone(), state.modified),
+        (state.form.clone(), video_state.form.clone(), state.modified || video_state.modified),
         config_view_ctx.on_form_change.clone(),
-        |(form, modified)| ConfigForm::Recording(modified, form),
+        |(recording, mut video, modified)| {
+            video.recording = Some(recording);
+            ConfigForm::Recording(modified, video)
+        },
     );
 
     let handle_headers = {
@@ -93,16 +109,11 @@ pub fn RecordingConfigView() -> Html {
         let state = state.clone();
         Callback::from(move |(_, recording)| state.dispatch(RecordingConfigFormAction::SetAll(recording)))
     };
-    let handle_priority = {
-        let state = state.clone();
-        Callback::from(move |priority| state.dispatch(RecordingConfigFormAction::Priority(priority)))
-    };
-
     let transfer_view = html! {
         <>
             <Card>
                 { config_field_child!(translate.t(LABEL_EXTENSIONS), "RECORDING_CONFIG.EXTENSIONS", {
-                    html! { <div class="tp__config-view__tags">{ for state.form.extensions.iter().map(|extension| html! { <Chip label={extension.clone()} /> }) }</div> }
+                    html! { <div class="tp__config-view__tags">{ for video_state.form.extensions.iter().map(|extension| html! { <span>{extension}</span> }) }</div> }
                 }) }
             </Card>
             <Card class="tp__config-view__card">
@@ -128,7 +139,7 @@ pub fn RecordingConfigView() -> Html {
 
     let transfer_edit = html! {
         <>
-            <Card>{ edit_field_list!(state, translate.t(LABEL_EXTENSIONS), extensions, RecordingConfigFormAction::Extensions, translate.t(LABEL_ADD_EXTENSION)) }</Card>
+            <Card>{ edit_field_list!(video_state, translate.t(LABEL_EXTENSIONS), extensions, VideoConfigFormAction::Extensions, translate.t(LABEL_ADD_EXTENSION)) }</Card>
             <Card class="tp__config-view__card">
                 { edit_field_bool!(state, translate.t(LABEL_ORGANIZE_INTO_DIRECTORIES), organize_into_directories, RecordingConfigFormAction::OrganizeIntoDirectories) }
                 { edit_field_text_option!(state, translate.t(LABEL_DIRECTORY), directory, RecordingConfigFormAction::Directory) }
@@ -155,11 +166,9 @@ pub fn RecordingConfigView() -> Html {
                 { if *config_view_ctx.edit_mode { transfer_edit } else { transfer_view } }
                 <RecordingConfigCards
                     recording={state.form.clone()}
-                    recording_priority={state.form.priority}
                     reload_generation={*reload_generation}
                     edit_mode={*config_view_ctx.edit_mode}
                     on_change={handle_recording}
-                    on_recording_priority_change={handle_priority}
                     on_error={{ let toastr = services.toastr.clone(); Callback::from(move |message| toastr.error(message)) }}
                 />
             </div>
