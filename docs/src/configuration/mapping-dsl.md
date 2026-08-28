@@ -115,6 +115,11 @@ Merge groups -> Sort -> Assign channel numbers -> Mapping counters -> Watches ->
 `after_epg` is a separate stage outside that configurable pipe. Mapping counters are also outside the pipe and always
 run on the consolidated target playlist after merging, sorting, and initial channel-number assignment.
 
+The configured order and mapping-stage indexes are compiled when configuration is loaded. During a refresh, the F/R/M
+pipe materializes each input into one item buffer, preserves the historical grouping order between stages, and rebuilds
+playlist groups once when the pipe completes. Resolved series episodes use the same runner and therefore the same stage
+semantics.
+
 | Parameter            | Type   | Description                                                                                                                                                                                                                                                            |
 |:---------------------|:-------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | **`id`**             | String | **Mandatory.** The unique identifier of the mapping.                                                                                                                                                                                                                   |

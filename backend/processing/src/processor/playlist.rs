@@ -21,10 +21,10 @@ use shared::{
     error::{get_errors_notify_message, TuliproxError},
     foundation::{get_field_value, set_field_value, Filter, ValueAccessor, ValueProvider},
     model::{
-        ClusterFlags, CounterModifier, EventMessage, EventSink, FieldGet, FieldSet, InputStats, InputType, ItemField,
-        MappingStage, PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistStats, PlaylistUpdateProgressEvent,
-        PlaylistUpdateSummary, ProcessingOrder, ProviderFetchFailure, SourceStats, StreamProperties, TargetStats,
-        UUIDType, WatchDisabled, WatchDisabledReason, WatchUnmatched, XtreamCluster,
+        ClusterFlags, CounterModifier, EventMessage, EventSink, FieldGet, FieldSet, InputStats, InputType,
+        MappingStage, PipelineStats, PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistStats,
+        PlaylistUpdateProgressEvent, PlaylistUpdateSummary, ProviderFetchFailure, SourceStats, StreamProperties,
+        TargetStats, UUIDType, WatchDisabled, WatchDisabledReason, WatchUnmatched, XtreamCluster,
     },
     utils::{create_alias_uuid, interner_gc, sanitize_sensitive_info, Internable},
 };
@@ -43,7 +43,7 @@ use tuliprox_core::{
     model::{
         is_valid, AppConfig, CompiledMapping, ConfigFavourites, ConfigInput, ConfigInputFlags, ConfigInputOptions,
         ConfigRename, ConfigTarget, Epg, MappingProgram, ProcessTargets, ProviderIdType, ResolveReason,
-        ReverseProxyDisabledHeaderConfig, UpdateGuard, UpdateTask,
+        ReverseProxyDisabledHeaderConfig, TransformStage, UpdateGuard, UpdateTask,
     },
     utils::{debug_if_enabled, log_memory_snapshot, trace_if_enabled, StepMeasure, StepMeasureCallback},
 };
@@ -157,21 +157,6 @@ pub fn apply_filter_to_source(source: &mut PlaylistSource, filter: &Filter) -> O
     retain_playlist_items(source, |item| is_valid(item, filter, false)).0
 }
 
-fn apply_target_filter(
-    source: &mut PlaylistSource,
-    target: &ConfigTarget,
-) -> (Option<Vec<PlaylistGroup>>, FilterOutcome) {
-    retain_playlist_items(source, |item| {
-        let provider = ValueProvider { pli: item, match_as_ascii: false };
-        target.filter(&provider)
-    })
-}
-
-fn filter_playlist(source: &mut PlaylistSource, target: &ConfigTarget) -> Option<Vec<PlaylistGroup>> {
-    let (groups, _outcome) = apply_target_filter(source, target);
-    groups
-}
-
 fn assign_channel_no_playlist(new_playlist: &mut [PlaylistGroup]) {
     let assigned_chnos: HashSet<u32> =
         new_playlist.iter().flat_map(|g| &g.channels).filter(|c| c.header.chno != 0).map(|c| c.header.chno).collect();
@@ -189,7 +174,61 @@ fn assign_channel_no_playlist(new_playlist: &mut [PlaylistGroup]) {
     }
 }
 
-fn exec_rename(pli: &mut PlaylistItem, rename: Option<&Vec<ConfigRename>>) {
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RenameOutcome {
+    pub inspected: usize,
+    pub changed_items: usize,
+    pub changed_fields: usize,
+}
+
+#[derive(Debug, Default)]
+pub struct PipelineOutcome {
+    pub filter: Option<FilterOutcome>,
+    pub rename: Option<RenameOutcome>,
+    pub mapping: Option<MappingStageOutcome>,
+}
+
+impl PipelineOutcome {
+    fn merge(&mut self, other: Self) {
+        if let Some(value) = other.filter {
+            let outcome = self.filter.get_or_insert_with(FilterOutcome::default);
+            outcome.inspected += value.inspected;
+            outcome.retained += value.retained;
+            outcome.removed += value.removed;
+        }
+        if let Some(value) = other.rename {
+            let outcome = self.rename.get_or_insert_with(RenameOutcome::default);
+            outcome.inspected += value.inspected;
+            outcome.changed_items += value.changed_items;
+            outcome.changed_fields += value.changed_fields;
+        }
+        if let Some(value) = other.mapping {
+            let outcome = self.mapping.get_or_insert_with(MappingStageOutcome::default);
+            outcome.inspected += value.inspected;
+            outcome.matched_rules += value.matched_rules;
+            outcome.emitted_items += value.emitted_items;
+            outcome.changed_fields.extend(value.changed_fields);
+            outcome.diagnostics += value.diagnostics;
+            outcome.reported_diagnostics += value.reported_diagnostics;
+        }
+    }
+
+    fn to_stats(&self) -> PipelineStats {
+        PipelineStats {
+            inspected: self.filter.as_ref().map_or(0, |outcome| outcome.inspected),
+            retained: self.filter.as_ref().map_or(0, |outcome| outcome.retained),
+            removed: self.filter.as_ref().map_or(0, |outcome| outcome.removed),
+            renamed_items: self.rename.as_ref().map_or(0, |outcome| outcome.changed_items),
+            renamed_fields: self.rename.as_ref().map_or(0, |outcome| outcome.changed_fields),
+            matched_mapping_rules: self.mapping.as_ref().map_or(0, |outcome| outcome.matched_rules),
+            emitted_items: self.mapping.as_ref().map_or(0, |outcome| outcome.emitted_items),
+            mapping_diagnostics: self.mapping.as_ref().map_or(0, |outcome| outcome.diagnostics),
+        }
+    }
+}
+
+fn exec_rename(pli: &mut PlaylistItem, rename: Option<&Vec<ConfigRename>>) -> usize {
+    let mut changed_fields = 0;
     if let Some(renames) = rename {
         if !renames.is_empty() {
             let result = pli;
@@ -199,46 +238,13 @@ fn exec_rename(pli: &mut PlaylistItem, rename: Option<&Vec<ConfigRename>>) {
                 if log_enabled!(log::Level::Debug) && *value != *cap {
                     trace_if_enabled!("Renamed {}={value} to {cap}", &r.field);
                 }
-                set_field_value(result, r.field, cap.as_ref());
-            }
-        }
-    }
-}
-
-fn rename_playlist(source: &mut PlaylistSource, target: &ConfigTarget) -> Option<Vec<PlaylistGroup>> {
-    match &target.rename {
-        Some(renames) if !renames.is_empty() => {
-            let mut groups: IndexMap<(XtreamCluster, Arc<str>), PlaylistGroup> = IndexMap::new();
-            for mut pli in source.into_items() {
-                // Handle group rename first if it's in the renames
-                for r in renames {
-                    if matches!(r.field, ItemField::Group) {
-                        let value = &*pli.header.group;
-                        let cap = r.pattern.replace_all(value, &r.new_name);
-                        if *value != cap {
-                            pli.header.group = cap.intern();
-                        }
-                    }
+                if *value != *cap && set_field_value(result, r.field, cap.as_ref()) {
+                    changed_fields += 1;
                 }
-                exec_rename(&mut pli, Some(renames));
-                let group_title = pli.header.group.clone();
-                let cluster = pli.header.xtream_cluster;
-                let cat_id = pli.header.category_id;
-                groups
-                    .entry((cluster, group_title.clone()))
-                    .or_insert_with(|| PlaylistGroup {
-                        id: cat_id,
-                        title: group_title,
-                        channels: vec![],
-                        xtream_cluster: cluster,
-                    })
-                    .channels
-                    .push(pli);
             }
-            Some(groups.into_values().collect())
         }
-        _ => None,
     }
+    changed_fields
 }
 
 struct ChannelMappingOutcome {
@@ -251,14 +257,14 @@ struct ChannelMappingOutcome {
 
 const MAPPING_DIAGNOSTIC_LIMIT: usize = 10;
 
-#[derive(Default)]
-struct MappingStageOutcome {
-    inspected: usize,
-    matched_rules: usize,
-    emitted_items: usize,
-    changed_fields: HashSet<String>,
-    diagnostics: usize,
-    reported_diagnostics: usize,
+#[derive(Debug, Default)]
+pub struct MappingStageOutcome {
+    pub inspected: usize,
+    pub matched_rules: usize,
+    pub emitted_items: usize,
+    pub changed_fields: HashSet<String>,
+    pub diagnostics: usize,
+    pub reported_diagnostics: usize,
 }
 
 impl MappingStageOutcome {
@@ -316,26 +322,41 @@ fn map_channel(mut channel: PlaylistItem, mapping: &CompiledMapping) -> ChannelM
     ChannelMappingOutcome { channel, virtual_items, matched_rules, changed_fields, diagnostics }
 }
 
-fn map_playlist(source: &mut PlaylistSource, target: &ConfigTarget) -> Option<Vec<PlaylistGroup>> {
-    map_playlist_at_stage(source, target, MappingStage::Processing, None)
-}
-
 fn map_playlist_at_stage(
     source: &mut PlaylistSource,
     target: &ConfigTarget,
     stage: MappingStage,
     duplicates: Option<&mut HashSet<UUIDType>>,
 ) -> Option<Vec<PlaylistGroup>> {
+    if !has_mapping_stage(target, stage) {
+        return None;
+    }
+    let items = source.into_items().collect::<Vec<_>>();
+    let (mapped_items, _outcome) = map_items_at_stage(items, target, stage, duplicates)?;
+    Some(group_mapped_items(mapped_items))
+}
+
+fn has_mapping_stage(target: &ConfigTarget, stage: MappingStage) -> bool {
+    target.mapping.load().as_ref().is_some_and(|mappings| !mappings.for_stage(stage).is_empty())
+}
+
+fn map_items_at_stage(
+    mut mapped_items: Vec<PlaylistItem>,
+    target: &ConfigTarget,
+    stage: MappingStage,
+    duplicates: Option<&mut HashSet<UUIDType>>,
+) -> Option<(Vec<PlaylistItem>, MappingStageOutcome)> {
     let mapping_binding = target.mapping.load();
     let mappings = mapping_binding.as_ref()?;
-    let mut valid_mappings = mappings.iter().filter(|m| m.stage == stage && !m.rules.is_empty()).peekable();
-    valid_mappings.peek()?;
+    let valid_mappings = mappings.for_stage(stage);
+    if valid_mappings.is_empty() {
+        return None;
+    }
     let original_ids = if duplicates.is_some() {
-        Some(source.items().map(|item| *item.header.get_uuid()).collect::<HashSet<_>>())
+        Some(mapped_items.iter().map(|item| *item.header.get_uuid()).collect::<HashSet<_>>())
     } else {
         None
     };
-    let mut mapped_items = source.into_items().collect::<Vec<_>>();
     let mut stage_outcome = MappingStageOutcome::default();
     for mapping in valid_mappings {
         let mut next_items = Vec::with_capacity(mapped_items.len());
@@ -360,37 +381,36 @@ fn map_playlist_at_stage(
     if suppressed > 0 {
         warn!("Mapping stage {stage:?} suppressed {suppressed} additional diagnostics");
     }
-    let mut next_groups: IndexMap<CategoryKey, PlaylistGroup> = IndexMap::new();
-    let mut grp_id: u32 = 0;
-    for channel in mapped_items {
+    if let (Some(original_ids), Some(duplicates)) = (original_ids, duplicates) {
+        mapped_items.retain(|item| {
+            let uuid = *item.header.get_uuid();
+            original_ids.contains(&uuid) || duplicates.insert(uuid)
+        });
+    }
+    Some((mapped_items, stage_outcome))
+}
+
+fn group_mapped_items(items: Vec<PlaylistItem>) -> Vec<PlaylistGroup> {
+    let mut groups: IndexMap<CategoryKey, PlaylistGroup> = IndexMap::new();
+    let mut group_id = 0;
+    for channel in items {
         let group_title = channel.header.group.clone();
         let cluster = channel.header.xtream_cluster;
-        next_groups
+        groups
             .entry((cluster, group_title.clone()))
             .or_insert_with(|| {
-                grp_id += 1;
-                PlaylistGroup { id: grp_id, title: group_title, channels: Vec::new(), xtream_cluster: cluster }
+                group_id += 1;
+                PlaylistGroup { id: group_id, title: group_title, channels: Vec::new(), xtream_cluster: cluster }
             })
             .channels
             .push(channel);
     }
-
-    let mut groups = next_groups.into_values().collect::<Vec<_>>();
-    if let (Some(original_ids), Some(duplicates)) = (original_ids, duplicates) {
-        for group in &mut groups {
-            group.channels.retain(|item| {
-                let uuid = *item.header.get_uuid();
-                original_ids.contains(&uuid) || duplicates.insert(uuid)
-            });
-        }
-    }
-    Some(groups)
+    groups.into_values().collect()
 }
 
 fn map_playlist_counter(target: &ConfigTarget, playlist: &mut [PlaylistGroup]) {
     if let Some(guard) = &*target.mapping.load() {
-        let mappings = guard.as_ref();
-        for mapping in mappings {
+        for mapping in &guard.all {
             for counter in &mapping.counters {
                 // fresh per target/call. No shared atomic, no cross-refresh carry-over.
                 let mut current = counter.start;
@@ -781,6 +801,7 @@ struct TargetJobResult {
     name: String,
     result: Result<(), Vec<TuliproxError>>,
     errors: Vec<TuliproxError>,
+    processing: PipelineStats,
 }
 
 fn collect_target_task_result(
@@ -823,12 +844,13 @@ async fn process_targets<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
                 prepare_playlist_for_target(ctx, playlists, target, input_stats, errors, consume_input_source).await;
             match result {
                 Ok(prepared) => {
+                    let processing = prepared.processing.clone();
                     let (result, mut finalization_errors) = finalize_prepared_target(Arc::clone(ctx), prepared).await;
                     errors.append(&mut finalization_errors);
                     match result {
-                        Ok(()) => target_stats.push(TargetStats::success(&target.name)),
+                        Ok(()) => target_stats.push(TargetStats::success_with_processing(&target.name, processing)),
                         Err(mut target_errors) => {
-                            target_stats.push(TargetStats::failure(&target.name));
+                            target_stats.push(TargetStats::failure_with_processing(&target.name, processing));
                             errors.append(&mut target_errors);
                         }
                     }
@@ -863,6 +885,7 @@ async fn process_targets<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
 
         match prepare_playlist_for_target(ctx, playlists, target, input_stats, errors, false).await {
             Ok(prepared) => {
+                let processing = prepared.processing.clone();
                 let task_ctx = Arc::clone(ctx);
                 let target_name = target.name.clone();
                 tasks.spawn(async move {
@@ -875,7 +898,9 @@ async fn process_targets<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
                         std::panic::AssertUnwindSafe(finalize_prepared_target(task_ctx, prepared)).catch_unwind().await;
                     completion.send_replace(true);
                     match finalized {
-                        Ok((result, errors)) => TargetJobResult { index, name: target_name, result, errors },
+                        Ok((result, errors)) => {
+                            TargetJobResult { index, name: target_name, result, errors, processing }
+                        }
                         Err(_) => TargetJobResult {
                             index,
                             name: target_name.clone(),
@@ -883,6 +908,7 @@ async fn process_targets<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
                                 "Target '{target_name}' finalization panicked"
                             ))]),
                             errors: Vec::new(),
+                            processing,
                         },
                     }
                 });
@@ -894,6 +920,7 @@ async fn process_targets<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
                     name: target.name.clone(),
                     result: Err(target_errors),
                     errors: Vec::new(),
+                    processing: PipelineStats::default(),
                 });
             }
         }
@@ -908,9 +935,11 @@ async fn process_targets<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
     for mut target_result in results {
         errors.append(&mut target_result.errors);
         match target_result.result {
-            Ok(()) => target_stats.push(TargetStats::success(&target_result.name)),
+            Ok(()) => {
+                target_stats.push(TargetStats::success_with_processing(&target_result.name, target_result.processing));
+            }
             Err(mut target_errors) => {
-                target_stats.push(TargetStats::failure(&target_result.name));
+                target_stats.push(TargetStats::failure_with_processing(&target_result.name, target_result.processing));
                 errors.append(&mut target_errors);
             }
         }
@@ -1400,13 +1429,6 @@ async fn process_sources<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
     (stats, errors)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransformStage {
-    Filter,
-    Rename,
-    Map,
-}
-
 pub type ProcessingPipe = Vec<TransformStage>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1426,27 +1448,138 @@ const FINALIZATION_ORDER: [FinalizationStage; 5] = [
     FinalizationStage::AssignCounters,
 ];
 
-fn get_processing_pipe(target: &ConfigTarget) -> ProcessingPipe {
-    match &target.processing_order {
-        ProcessingOrder::Frm => vec![TransformStage::Filter, TransformStage::Rename, TransformStage::Map],
-        ProcessingOrder::Fmr => vec![TransformStage::Filter, TransformStage::Map, TransformStage::Rename],
-        ProcessingOrder::Rfm => vec![TransformStage::Rename, TransformStage::Filter, TransformStage::Map],
-        ProcessingOrder::Rmf => vec![TransformStage::Rename, TransformStage::Map, TransformStage::Filter],
-        ProcessingOrder::Mfr => vec![TransformStage::Map, TransformStage::Filter, TransformStage::Rename],
-        ProcessingOrder::Mrf => vec![TransformStage::Map, TransformStage::Rename, TransformStage::Filter],
-    }
+fn get_processing_pipe(target: &ConfigTarget) -> ProcessingPipe { target.execution_plan.transform_stages.clone() }
+
+#[derive(Clone, Copy)]
+enum GroupingPolicy {
+    NormalizedCategory,
+    ExactCategory,
+    ExactSequential,
 }
 
-pub(super) fn execute_transform_stage(
-    stage: TransformStage,
-    source: &mut PlaylistSource,
-    target: &ConfigTarget,
-) -> Option<Vec<PlaylistGroup>> {
-    match stage {
-        TransformStage::Filter => filter_playlist(source, target),
-        TransformStage::Rename => rename_playlist(source, target),
-        TransformStage::Map => map_playlist(source, target),
+struct TransformBuffer {
+    items: Vec<PlaylistItem>,
+    grouping: GroupingPolicy,
+}
+
+impl TransformBuffer {
+    fn new(items: Vec<PlaylistItem>) -> Self { Self { items, grouping: GroupingPolicy::ExactCategory } }
+
+    fn apply_filter(&mut self, target: &ConfigTarget) -> FilterOutcome {
+        let mut outcome = FilterOutcome::default();
+        self.items.retain(|item| {
+            outcome.inspected += 1;
+            let provider = ValueProvider { pli: item, match_as_ascii: false };
+            if target.filter(&provider) {
+                outcome.retained += 1;
+                true
+            } else {
+                outcome.removed += 1;
+                false
+            }
+        });
+        self.grouping = GroupingPolicy::NormalizedCategory;
+        self.reorder_for_grouping();
+        outcome
     }
+
+    fn apply_rename(&mut self, target: &ConfigTarget) -> Option<RenameOutcome> {
+        let renames = target.rename.as_ref().filter(|renames| !renames.is_empty())?;
+        let mut outcome = RenameOutcome::default();
+        for item in &mut self.items {
+            outcome.inspected += 1;
+            let changed_fields = exec_rename(item, Some(renames));
+            outcome.changed_fields += changed_fields;
+            outcome.changed_items += usize::from(changed_fields > 0);
+        }
+        self.grouping = GroupingPolicy::ExactCategory;
+        self.reorder_for_grouping();
+        Some(outcome)
+    }
+
+    fn apply_mapping(&mut self, target: &ConfigTarget, stage: MappingStage) -> Option<MappingStageOutcome> {
+        if !has_mapping_stage(target, stage) {
+            return None;
+        }
+        let items = std::mem::take(&mut self.items);
+        let (items, outcome) = map_items_at_stage(items, target, stage, None)
+            .expect("mapping stage applicability was checked before consuming the buffer");
+        self.items = items;
+        self.grouping = GroupingPolicy::ExactSequential;
+        self.reorder_for_grouping();
+        Some(outcome)
+    }
+
+    fn reorder_for_grouping(&mut self) {
+        let mut buckets: IndexMap<CategoryKey, Vec<PlaylistItem>> = IndexMap::new();
+        for item in std::mem::take(&mut self.items) {
+            let title = item.header.group.clone();
+            let key_title = match self.grouping {
+                GroupingPolicy::NormalizedCategory => shared::utils::deunicode_string(&title).to_lowercase().intern(),
+                GroupingPolicy::ExactCategory | GroupingPolicy::ExactSequential => title,
+            };
+            buckets.entry((item.header.xtream_cluster, key_title)).or_default().push(item);
+        }
+        self.items = buckets.into_values().flatten().collect();
+    }
+
+    fn into_groups(self) -> Vec<PlaylistGroup> { group_items(self.items, self.grouping) }
+}
+
+fn group_items(items: Vec<PlaylistItem>, policy: GroupingPolicy) -> Vec<PlaylistGroup> {
+    let mut groups: IndexMap<CategoryKey, PlaylistGroup> = IndexMap::new();
+    let mut next_group_id = 0;
+    for item in items {
+        let title = item.header.group.clone();
+        let cluster = item.header.xtream_cluster;
+        let key_title = match policy {
+            GroupingPolicy::NormalizedCategory => shared::utils::deunicode_string(&title).to_lowercase().intern(),
+            GroupingPolicy::ExactCategory | GroupingPolicy::ExactSequential => title.clone(),
+        };
+        groups
+            .entry((cluster, key_title))
+            .or_insert_with(|| {
+                let id = match policy {
+                    GroupingPolicy::ExactSequential => {
+                        next_group_id += 1;
+                        next_group_id
+                    }
+                    GroupingPolicy::NormalizedCategory | GroupingPolicy::ExactCategory => item.header.category_id,
+                };
+                PlaylistGroup { id, title, channels: Vec::new(), xtream_cluster: cluster }
+            })
+            .channels
+            .push(item);
+    }
+    groups.into_values().collect()
+}
+
+fn execute_pipeline_on_items(
+    items: Vec<PlaylistItem>,
+    target: &ConfigTarget,
+    pipe: &[TransformStage],
+) -> (Vec<PlaylistGroup>, PipelineOutcome) {
+    let mut buffer = TransformBuffer::new(items);
+    let mut outcome = PipelineOutcome::default();
+    for stage in pipe {
+        match stage {
+            TransformStage::Filter => outcome.filter = Some(buffer.apply_filter(target)),
+            TransformStage::Rename => outcome.rename = buffer.apply_rename(target),
+            TransformStage::Map => outcome.mapping = buffer.apply_mapping(target, MappingStage::Processing),
+        }
+    }
+    (buffer.into_groups(), outcome)
+}
+
+pub(super) fn execute_pipeline_on_groups(
+    groups: Vec<PlaylistGroup>,
+    target: &ConfigTarget,
+    pipe: &[TransformStage],
+) -> (Vec<PlaylistGroup>, PipelineOutcome) {
+    if pipe.is_empty() {
+        return (groups, PipelineOutcome::default());
+    }
+    execute_pipeline_on_items(groups.into_iter().flat_map(|group| group.channels).collect(), target, pipe)
 }
 
 fn execute_pipe<'a>(
@@ -1455,7 +1588,7 @@ fn execute_pipe<'a>(
     fpl: &mut FetchedPlaylist<'a>,
     duplicates: &mut HashSet<UUIDType>,
     consume_source: bool,
-) -> Result<FetchedPlaylist<'a>, TuliproxError> {
+) -> Result<(FetchedPlaylist<'a>, PipelineOutcome), TuliproxError> {
     let source = if consume_source {
         if fpl.is_memory() {
             MemoryPlaylistSource::new(fpl.source.take_groups()).into_source()
@@ -1474,20 +1607,14 @@ fn execute_pipe<'a>(
             item.header.freeze_input_stream_id();
         }
     }
-    if target.options.as_ref().is_some_and(|opt| opt.remove_duplicates) {
+    if target.execution_plan.pre_transform_identity_dedup {
         new_fpl.deduplicate(duplicates);
     }
 
-    for stage in pipe {
-        if let Some(groups) = execute_transform_stage(*stage, &mut new_fpl.source, target) {
-            new_fpl.source = MemoryPlaylistSource::new(groups).into_source();
-        }
-    }
-    // Ensure source is memory-based for downstream mutable processing (VOD/series resolution)
-    if !new_fpl.is_memory() {
-        new_fpl.source = MemoryPlaylistSource::new(new_fpl.source.take_groups()).into_source();
-    }
-    Ok(new_fpl)
+    let items = new_fpl.source.into_items().collect();
+    let (groups, outcome) = execute_pipeline_on_items(items, target, pipe);
+    new_fpl.source = MemoryPlaylistSource::new(groups).into_source();
+    Ok((new_fpl, outcome))
 }
 
 // This method is needed, because of duplicate group names in different inputs.
@@ -1520,6 +1647,7 @@ struct PreparedTarget {
     target: ConfigTarget,
     playlist: Vec<PlaylistGroup>,
     epg: Vec<Epg>,
+    processing: PipelineStats,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1537,6 +1665,7 @@ async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, M: Metadata
     let mut duplicates: HashSet<UUIDType> = HashSet::new();
     let mut new_epg = vec![];
     let mut new_playlist: Vec<PlaylistGroup> = vec![];
+    let mut aggregate_outcome = PipelineOutcome::default();
 
     debug!("Executing processing pipes");
     let broadcast_step = create_broadcast_callback(&ctx.events);
@@ -1548,8 +1677,11 @@ async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, M: Metadata
             format!("target '{}' input '{}' before_pipe", target.name, provider_fpl.input.name).as_str(),
         );
         step.broadcast("Executing transformations on '{}' playlist", &target.name);
-        let mut processed_fpl = execute_pipe(target, &pipe, provider_fpl, &mut duplicates, consume_input_source)
-            .map_err(|err| vec![err])?;
+        let (mut processed_fpl, input_outcome) =
+            execute_pipe(target, &pipe, provider_fpl, &mut duplicates, consume_input_source)
+                .map_err(|err| vec![err])?;
+        debug!("Target '{}' input '{}' pipeline outcome: {input_outcome:?}", target.name, provider_fpl.input.name);
+        aggregate_outcome.merge(input_outcome);
         log_memory_snapshot(
             format!("target '{}' input '{}' after_pipe", target.name, provider_fpl.input.name).as_str(),
         );
@@ -1562,7 +1694,7 @@ async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, M: Metadata
         log_memory_snapshot(
             format!("target '{}' input '{}' after_epg_apply", target.name, processed_fpl.input.name).as_str(),
         );
-        let deduplicate = target.options.as_ref().is_some_and(|options| options.remove_duplicates);
+        let deduplicate = target.execution_plan.pre_transform_identity_dedup;
         if let Some(groups) = map_playlist_at_stage(
             &mut processed_fpl.source,
             target,
@@ -1584,7 +1716,12 @@ async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, M: Metadata
     step.tick("filter rename map + epg");
     log_memory_snapshot(format!("target '{}' after_filter_rename_map_epg", target.name).as_str());
     step.stop("Preparing playlist");
-    Ok(PreparedTarget { target: target.clone(), playlist: new_playlist, epg: new_epg })
+    Ok(PreparedTarget {
+        target: target.clone(),
+        playlist: new_playlist,
+        epg: new_epg,
+        processing: aggregate_outcome.to_stats(),
+    })
 }
 
 /// Spill each `Epg` source to a temp `BPlusTree` and merge them. Extracted
@@ -1661,8 +1798,7 @@ async fn finalize_prepared_target<E: EventSink + Clone + 'static, M: MetadataUpd
             match stage {
                 FinalizationStage::Merge => unreachable!("merge is completed before post-merge finalization"),
                 FinalizationStage::Deduplicate => {
-                    if let Some(dedup_config) = target.options.as_ref().and_then(|options| options.deduplicate.as_ref())
-                    {
+                    if let Some(dedup_config) = target.execution_plan.post_merge_content_dedup.as_ref() {
                         let removed =
                             crate::processor::deduplicate::deduplicate_playlist(*dedup_config, &mut flat_new_playlist);
                         if removed > 0 {
@@ -2452,12 +2588,12 @@ mod tests {
         foundation::{get_filter, MapperScript, ValueProvider},
         model::{
             ClusterFlags, ConfigInputDto, ConfigRenameDto, ConfigTargetDto, ConfigTargetOptions, FieldSetAccessor,
-            M3uPlaylistItem, MappingStage, PlaylistEntry, PlaylistItem, PlaylistItemHeader, PlaylistItemType,
-            XtreamCluster, XtreamPlaylistItem,
+            ItemField, M3uPlaylistItem, MappingStage, PlaylistEntry, PlaylistItem, PlaylistItemHeader,
+            PlaylistItemType, XtreamCluster, XtreamPlaylistItem,
         },
         utils::Internable,
     };
-    use tuliprox_core::model::{CompiledMappingRule, Config};
+    use tuliprox_core::model::{CompiledMappingRule, CompiledTargetMappings, Config};
 
     fn serialize_without_trailing_fields<T: serde::Serialize>(value: &T, trailing_fields: &[u8]) -> Vec<u8> {
         let mut encoded = rmp_serde::to_vec(value).expect("playlist item should serialize");
@@ -2608,7 +2744,7 @@ mod tests {
         let mut duplicates = HashSet::new();
         let target = ConfigTarget::from(&ConfigTargetDto::default());
 
-        let mut processed = execute_pipe(&target, &vec![], &mut fetched, &mut duplicates, false)
+        let (mut processed, _outcome) = execute_pipe(&target, &vec![], &mut fetched, &mut duplicates, false)
             .expect("target processing should succeed");
         let mut groups = processed.source.take_groups();
 
@@ -2949,6 +3085,51 @@ mod tests {
     }
 
     #[test]
+    fn filter_stage_can_remove_every_item() {
+        let groups = vec![PlaylistGroup {
+            id: 1,
+            title: "Test Group".intern(),
+            channels: vec![make_test_item("Denied", PlaylistItemType::Live)],
+            xtream_cluster: XtreamCluster::Live,
+        }];
+        let mut target = ConfigTarget::from(&ConfigTargetDto::default());
+        target.filter = get_filter(r#"name ~ "Allowed""#, None).expect("filter should parse");
+
+        let (groups, outcome) = execute_pipeline_on_groups(groups, &target, &[TransformStage::Filter]);
+
+        assert!(groups.is_empty());
+        assert_eq!(outcome.filter, Some(FilterOutcome { inspected: 1, retained: 0, removed: 1 }));
+    }
+
+    #[test]
+    fn pipeline_reports_filter_and_rename_outcomes() {
+        let groups = vec![PlaylistGroup {
+            id: 1,
+            title: "Test Group".intern(),
+            channels: vec![
+                make_test_item("Allowed", PlaylistItemType::Live),
+                make_test_item("Denied", PlaylistItemType::Live),
+            ],
+            xtream_cluster: XtreamCluster::Live,
+        }];
+        let mut target = ConfigTarget::from(&ConfigTargetDto::default());
+        target.filter = get_filter(r#"name ~ "Allowed""#, None).expect("filter should parse");
+        target.rename = Some(vec![ConfigRename::from(&ConfigRenameDto {
+            field: ItemField::Name,
+            pattern: "Allowed".to_string(),
+            new_name: "Renamed".to_string(),
+            t_pattern: None,
+        })]);
+
+        let (groups, outcome) =
+            execute_pipeline_on_groups(groups, &target, &[TransformStage::Filter, TransformStage::Rename]);
+
+        assert_eq!(groups[0].channels[0].header.name.as_ref(), "Renamed");
+        assert_eq!(outcome.filter, Some(FilterOutcome { inspected: 2, retained: 1, removed: 1 }));
+        assert_eq!(outcome.rename, Some(RenameOutcome { inspected: 1, changed_items: 1, changed_fields: 1 }));
+    }
+
+    #[test]
     fn assign_channel_no_playlist_preserves_non_zero_chno() {
         let mut groups = vec![
             PlaylistGroup {
@@ -3137,7 +3318,13 @@ mod tests {
                 maximum.fetch_max(current, Ordering::SeqCst);
                 tokio::time::sleep(Duration::from_millis(10)).await;
                 active.fetch_sub(1, Ordering::SeqCst);
-                TargetJobResult { index, name: format!("target-{index}"), result: Ok(()), errors: Vec::new() }
+                TargetJobResult {
+                    index,
+                    name: format!("target-{index}"),
+                    result: Ok(()),
+                    errors: Vec::new(),
+                    processing: PipelineStats::default(),
+                }
             });
         }
         while let Some(result) = tasks.join_next().await {
@@ -3220,8 +3407,9 @@ mod tests {
                 ..Default::default()
             };
             let mut target = ConfigTarget::from(&dto);
-            target.mapping =
-                Arc::new(ArcSwapOption::from(Some(Arc::new(mappings.into_iter().map(Arc::new).collect()))));
+            target.mapping = Arc::new(ArcSwapOption::from(Some(Arc::new(CompiledTargetMappings::new(
+                mappings.into_iter().map(Arc::new).collect(),
+            )))));
             target
         }
 
@@ -3311,7 +3499,7 @@ mod tests {
             let target = build_target(vec![processing, after_epg], false);
 
             let mut source = memory_source(vec![make_channel("Alpha")]);
-            let groups = map_playlist(&mut source, &target).expect("processing mapping should run");
+            let (groups, _) = execute_pipeline_on_groups(source.take_groups(), &target, &[TransformStage::Map]);
             assert_eq!(groups[0].channels[0].header.name.as_ref(), "Alpha-P");
 
             let mut source = MemoryPlaylistSource::new(groups).into_source();
@@ -3449,7 +3637,7 @@ match {
             let mut fetched =
                 FetchedPlaylist { input: &input, source: memory_source(vec![channel.clone(), channel]), epg: None };
             let mut duplicates = HashSet::new();
-            let mut processed =
+            let (mut processed, _outcome) =
                 execute_pipe(&target, &get_processing_pipe(&target), &mut fetched, &mut duplicates, false)
                     .expect("processing pipe must run");
             assert_eq!(processed.get_channel_count(), 1, "processing pipe must remove the duplicate");

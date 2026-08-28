@@ -1252,6 +1252,7 @@ mod tests {
                     mapping: Arc::default(),
                     favourites: None,
                     processing_order: ProcessingOrder::default(),
+                    execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
                     watch: None,
                     use_memory_cache: false,
                 })],
@@ -1360,6 +1361,7 @@ mod tests {
                 mapping: Arc::default(),
                 favourites: None,
                 processing_order: ProcessingOrder::default(),
+                execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
                 watch: None,
                 use_memory_cache: false,
             })
@@ -1571,6 +1573,7 @@ mod tests {
             mapping: Arc::default(),
             favourites: None,
             processing_order: ProcessingOrder::default(),
+            execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
             watch: None,
             use_memory_cache: false,
         });
@@ -1635,6 +1638,7 @@ mod tests {
             mapping: Arc::default(),
             favourites: None,
             processing_order: ProcessingOrder::default(),
+            execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
             watch: None,
             use_memory_cache: false,
         });
@@ -1685,6 +1689,7 @@ mod tests {
             mapping: Arc::default(),
             favourites: None,
             processing_order: ProcessingOrder::default(),
+            execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
             watch: None,
             use_memory_cache: false,
         });

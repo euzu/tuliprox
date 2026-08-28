@@ -690,6 +690,9 @@ The legacy keys below continue to work exactly as before, so existing templates 
     * **Error Tracking:** `errors` provides a count of failed items or connection issues during that specific phase.
     * **Filtering Delta:** Compare `raw` counts (total items received from the provider) vs. `processed` counts (
       items that survived your Mapping DSL and filters) to monitor your "Red Thread" efficiency.
+    * **Target Processing:** A target may include a `processing` object with exact filter inspected/retained/removed
+      counts, renamed item/field counts, matched mapping rules, emitted virtual items, and mapping diagnostics. The
+      object is omitted when no processing work was recorded, so existing templates remain compatible.
 * `{{processing}}`: **Engine State & Telemetry.** Provides insight into the *internal execution environment* during the
   task. It includes data on memory allocation peaks, active worker threads, and non-blocking diagnostic warnings.
   * **Access:** Access properties directly via dot-notation (e.g., `{{processing.memory_peak_mb}}`). Use this to

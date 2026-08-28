@@ -1,8 +1,8 @@
 use crate::{
     model::{
-        ApiProxyConfig, ApiProxyServerInfo, CompiledMappings, Config, ConfigInput, ConfigInputOptions, ConfigTarget,
-        CustomStreamResponse, GracePeriodOptions, HdHomeRunConfig, HdHomeRunFlags, MediaToolCapabilities,
-        ProxyUserCredentials, ReverseProxyDisabledHeaderConfig, SourcesConfig, TargetOutput,
+        ApiProxyConfig, ApiProxyServerInfo, CompiledMappings, CompiledTargetMappings, Config, ConfigInput,
+        ConfigInputOptions, ConfigTarget, CustomStreamResponse, GracePeriodOptions, HdHomeRunConfig, HdHomeRunFlags,
+        MediaToolCapabilities, ProxyUserCredentials, ReverseProxyDisabledHeaderConfig, SourcesConfig, TargetOutput,
     },
     utils,
 };
@@ -123,7 +123,7 @@ impl AppConfig {
                     target.mapping.store(if target_mappings.is_empty() {
                         None
                     } else {
-                        Some(Arc::new(target_mappings))
+                        Some(Arc::new(CompiledTargetMappings::new(target_mappings)))
                     });
                 }
             }
@@ -629,6 +629,7 @@ mod tests {
             mapping: Arc::new(ArcSwapOption::default()),
             favourites: None,
             processing_order: ProcessingOrder::Frm,
+            execution_plan: crate::model::TargetExecutionPlan::default(),
             watch: None,
             use_memory_cache: false,
         })

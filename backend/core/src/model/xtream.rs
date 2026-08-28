@@ -197,6 +197,7 @@ mod tests {
             mapping: Arc::new(ArcSwapOption::default()),
             favourites: None,
             processing_order: ProcessingOrder::Frm,
+            execution_plan: crate::model::TargetExecutionPlan::default(),
             watch: None,
             use_memory_cache: false,
         };
