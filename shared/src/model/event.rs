@@ -10,9 +10,10 @@
 //! stream-meter registry it feeds also lives.
 
 use crate::model::{
-    notification::{EventId, Severity},
-    ActiveUserConnectionChange, ConfigType, DownloadsDelta, DownloadsResponse, LibraryScanProgressEvent, Permission,
-    PlaylistUpdateProgressEvent, PlaylistUpdateState, SystemInfo,
+    notification::{registry, EventId, Severity},
+    ActiveUserConnectionChange, ConfigReloadFailure, ConfigType, DiskAlert, DownloadsDelta, DownloadsResponse,
+    LibraryScanProgressEvent, MsgKind, Permission, PlaylistUpdateProgressEvent, PlaylistUpdateState,
+    ProviderAccountEvent, ProviderAccountState, RecordingLifecycleMessage, SystemInfo, WatchChanges,
 };
 use std::sync::Arc;
 
@@ -36,6 +37,24 @@ pub enum EventMessage {
     RecordingRulesChanged,
     InputMetadataUpdatesCompleted(Arc<str>),
     InputMetadataUpdatesStarted(Arc<str>),
+
+    // The lifecycle events below reached the notification pipeline directly,
+    // never the bus, so nothing that subscribes here could see them. Each is
+    // low-frequency, and each already had a registered notification id.
+    /// Disk usage crossed the warn or critical threshold.
+    DiskAlert(DiskAlert),
+    /// A watched config file could not be reloaded. Distinct from
+    /// `ServerError`: a plugin or operator can subscribe to "my config
+    /// stopped loading" without taking every server error.
+    ConfigReloadFailed(ConfigReloadFailure),
+    /// A target's `watch` config saw its group membership change.
+    PlaylistWatchChanged(WatchChanges),
+    /// A recording started, finished or failed. One variant, three kinds -
+    /// see [`EventMessage::kind`] - so a subscriber can ask for failures
+    /// alone.
+    RecordingLifecycle(RecordingLifecycleMessage),
+    /// A provider account changed status, is about to expire, or has.
+    ProviderAccount(ProviderAccountEvent),
 }
 
 /// Somewhere an [`EventMessage`] can be published.
@@ -108,6 +127,15 @@ pub enum EventKind {
     RecordingRulesChanged,
     InputMetadataUpdatesCompleted,
     InputMetadataUpdatesStarted,
+    DiskAlert,
+    ConfigReloadFailed,
+    PlaylistWatchChanged,
+    RecordingStarted,
+    RecordingCompleted,
+    RecordingFailed,
+    ProviderAccountStatus,
+    ProviderAccountExpiring,
+    ProviderAccountExpired,
 }
 
 impl EventKind {
@@ -115,7 +143,7 @@ impl EventKind {
     ///
     /// The mask type below indexes into this, so the order is load-bearing:
     /// it is the bit order, not just a listing.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 23] = [
         Self::ServerError,
         Self::ActiveUser,
         Self::ActiveProvider,
@@ -130,6 +158,15 @@ impl EventKind {
         Self::RecordingRulesChanged,
         Self::InputMetadataUpdatesCompleted,
         Self::InputMetadataUpdatesStarted,
+        Self::DiskAlert,
+        Self::ConfigReloadFailed,
+        Self::PlaylistWatchChanged,
+        Self::RecordingStarted,
+        Self::RecordingCompleted,
+        Self::RecordingFailed,
+        Self::ProviderAccountStatus,
+        Self::ProviderAccountExpiring,
+        Self::ProviderAccountExpired,
     ];
 
     /// This kind's bit position.
@@ -145,8 +182,14 @@ impl EventKind {
     pub const fn required_permission(self) -> Permission {
         match self {
             Self::DownloadsUpdate | Self::DownloadsDeltaUpdate => Permission::DownloadRead,
-            Self::RecordingChanged | Self::RecordingRulesChanged => Permission::RecordingRead,
-            Self::PlaylistUpdate | Self::PlaylistUpdateProgress => Permission::PlaylistWrite,
+            Self::RecordingChanged
+            | Self::RecordingRulesChanged
+            | Self::RecordingStarted
+            | Self::RecordingCompleted
+            | Self::RecordingFailed => Permission::RecordingRead,
+            Self::PlaylistUpdate | Self::PlaylistUpdateProgress | Self::PlaylistWatchChanged => {
+                Permission::PlaylistWrite
+            }
             Self::LibraryScanProgress => Permission::LibraryWrite,
             Self::ServerError
             | Self::ActiveUser
@@ -154,7 +197,12 @@ impl EventKind {
             | Self::ConfigChange
             | Self::SystemInfoUpdate
             | Self::InputMetadataUpdatesCompleted
-            | Self::InputMetadataUpdatesStarted => Permission::SystemRead,
+            | Self::InputMetadataUpdatesStarted
+            | Self::DiskAlert
+            | Self::ConfigReloadFailed
+            | Self::ProviderAccountStatus
+            | Self::ProviderAccountExpiring
+            | Self::ProviderAccountExpired => Permission::SystemRead,
         }
     }
 
@@ -231,6 +279,15 @@ impl EventKind {
             Self::RecordingRulesChanged => "recording.rules.changed",
             Self::InputMetadataUpdatesCompleted => "metadata.update.completed",
             Self::InputMetadataUpdatesStarted => "metadata.update.started",
+            Self::DiskAlert => "system.disk.alert",
+            Self::ConfigReloadFailed => "config.reload.failed",
+            Self::PlaylistWatchChanged => "playlist.watch.changed",
+            Self::RecordingStarted => "recording.started",
+            Self::RecordingCompleted => "recording.completed",
+            Self::RecordingFailed => "recording.failed",
+            Self::ProviderAccountStatus => "provider.account.status",
+            Self::ProviderAccountExpiring => "provider.account.expiring",
+            Self::ProviderAccountExpired => "provider.account.expired",
         }
     }
 
@@ -259,6 +316,24 @@ impl EventMessage {
             Self::RecordingRulesChanged => EventKind::RecordingRulesChanged,
             Self::InputMetadataUpdatesCompleted(_) => EventKind::InputMetadataUpdatesCompleted,
             Self::InputMetadataUpdatesStarted(_) => EventKind::InputMetadataUpdatesStarted,
+            Self::DiskAlert(_) => EventKind::DiskAlert,
+            Self::ConfigReloadFailed(_) => EventKind::ConfigReloadFailed,
+            Self::PlaylistWatchChanged(_) => EventKind::PlaylistWatchChanged,
+            // One payload, three kinds: a subscriber that only cares about
+            // failures should not be woken for every completed recording.
+            Self::RecordingLifecycle(msg) => match msg.event {
+                MsgKind::RecordingStarted => EventKind::RecordingStarted,
+                MsgKind::RecordingCompleted => EventKind::RecordingCompleted,
+                // `RecordingLifecycleMessage::event` is typed as the whole
+                // `MsgKind`; anything that is not a start or a completion is
+                // reported as a failure rather than silently miscategorised.
+                _ => EventKind::RecordingFailed,
+            },
+            Self::ProviderAccount(event) => match event.state {
+                ProviderAccountState::StatusChanged => EventKind::ProviderAccountStatus,
+                ProviderAccountState::Expiring => EventKind::ProviderAccountExpiring,
+                ProviderAccountState::Expired => EventKind::ProviderAccountExpired,
+            },
         }
     }
 
@@ -267,12 +342,15 @@ impl EventMessage {
     /// Depends on the payload, not just the kind: a playlist update that
     /// failed is an error and one that succeeded is not.
     #[must_use]
-    pub const fn severity(&self) -> Severity {
+    pub fn severity(&self) -> Severity {
         match self {
-            Self::ServerError(_) => Severity::Error,
-            Self::PlaylistUpdate(PlaylistUpdateState::Failure) => Severity::Error,
+            // The only case the registry cannot answer: a partial refresh
+            // and a clean one share `PLAYLIST_UPDATE_COMPLETED`, but a
+            // partial one is not a clean success.
             Self::PlaylistUpdate(PlaylistUpdateState::Partial) => Severity::Warn,
-            _ => Severity::Info,
+            // Everything else takes the severity its registered event
+            // declares, so there is no second severity table to drift.
+            _ => self.notification_id().map_or(Severity::Info, registry::default_severity),
         }
     }
 
@@ -291,7 +369,6 @@ impl EventMessage {
     /// news.
     #[must_use]
     pub const fn notification_id(&self) -> Option<EventId> {
-        use crate::model::notification::registry;
         Some(match self {
             Self::ServerError(_) => registry::SYSTEM_ERROR,
             Self::PlaylistUpdate(PlaylistUpdateState::Success | PlaylistUpdateState::Partial) => {
@@ -302,6 +379,19 @@ impl EventMessage {
             Self::LibraryScanProgress(_) => registry::LIBRARY_SCAN_COMPLETED,
             Self::InputMetadataUpdatesStarted(_) => registry::METADATA_UPDATE_STARTED,
             Self::InputMetadataUpdatesCompleted(_) => registry::METADATA_UPDATE_COMPLETED,
+            Self::DiskAlert(_) => registry::SYSTEM_DISK_ALERT,
+            Self::ConfigReloadFailed(_) => registry::CONFIG_RELOAD_FAILED,
+            Self::PlaylistWatchChanged(_) => registry::PLAYLIST_WATCH_CHANGED,
+            Self::RecordingLifecycle(msg) => match msg.event {
+                MsgKind::RecordingStarted => registry::RECORDING_STARTED,
+                MsgKind::RecordingCompleted => registry::RECORDING_COMPLETED,
+                _ => registry::RECORDING_FAILED,
+            },
+            Self::ProviderAccount(event) => match event.state {
+                ProviderAccountState::StatusChanged => registry::PROVIDER_ACCOUNT_STATUS,
+                ProviderAccountState::Expiring => registry::PROVIDER_ACCOUNT_EXPIRING,
+                ProviderAccountState::Expired => registry::PROVIDER_ACCOUNT_EXPIRED,
+            },
             Self::ActiveUser(_) => registry::USER_CONNECTION_CHANGED,
             Self::ActiveProvider(_, _) => registry::PROVIDER_CONNECTIONS_CHANGED,
             Self::RecordingChanged => registry::RECORDING_QUEUE_CHANGED,
@@ -348,6 +438,11 @@ impl EventMessage {
             Self::InputMetadataUpdatesStarted(input) | Self::InputMetadataUpdatesCompleted(input) => {
                 serde_json::json!({ "input": input.as_ref() })
             }
+            Self::DiskAlert(alert) => encode(alert),
+            Self::ConfigReloadFailed(failure) => encode(failure),
+            Self::PlaylistWatchChanged(changes) => encode(changes),
+            Self::RecordingLifecycle(msg) => encode(msg),
+            Self::ProviderAccount(event) => encode(event),
         }
     }
 

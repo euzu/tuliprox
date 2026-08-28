@@ -1,19 +1,18 @@
 use log::error;
-use shared::model::PlaylistGroup;
+use shared::model::{EventMessage, EventSink, PlaylistGroup, WatchChanges};
 use std::{collections::BTreeSet, path::Path, sync::Arc};
 use tuliprox_core::{
-    model::{AppConfig, MessageContent, WatchChanges},
+    model::AppConfig,
     utils,
     utils::{binary_deserialize, binary_serialize, file_exists_async},
 };
-use tuliprox_messaging::send_message;
 
 const WATCH_NOTIFICATION_LIST_LIMIT: usize = 120;
 const WATCH_NOTIFICATION_SUMMARY_THRESHOLD: usize = 500;
 
-pub async fn process_group_watch(
+pub async fn process_group_watch<E: EventSink>(
     app_config: &Arc<AppConfig>,
-    client: &reqwest::Client,
+    events: &E,
     target_name: &str,
     pl: &PlaylistGroup,
 ) {
@@ -39,14 +38,12 @@ pub async fn process_group_watch(
                     if !added_difference.is_empty() || !removed_difference.is_empty() {
                         changed = true;
                         handle_watch_notification(
-                            app_config,
-                            client,
+                            events,
                             &added_difference,
                             &removed_difference,
                             target_name,
                             &pl.title,
-                        )
-                        .await;
+                        );
                     }
                 } else {
                     error!("failed to load watch_file {}", path.to_str().unwrap_or_default());
@@ -70,9 +67,8 @@ pub async fn process_group_watch(
     }
 }
 
-async fn handle_watch_notification(
-    app_config: &Arc<AppConfig>,
-    client: &reqwest::Client,
+fn handle_watch_notification<E: EventSink>(
+    events: &E,
     added: &BTreeSet<Arc<str>>,
     removed: &BTreeSet<Arc<str>>,
     target_name: &str,
@@ -115,7 +111,7 @@ async fn handle_watch_notification(
 
         let changes = WatchChanges { target: target_name.to_string(), group: group_name.to_string(), added, removed };
 
-        send_message(app_config, client, MessageContent::Watch(changes)).await;
+        events.emit(EventMessage::PlaylistWatchChanged(changes));
     }
 }
 

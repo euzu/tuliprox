@@ -872,6 +872,7 @@ fn rollback_last_recording_marker(fd: &mut FileDownload, kind: &shared::model::r
 fn spawn_recording_notification_after_persist(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
+    event_manager: &Arc<EventManager>,
     plan: RecordingNotificationPlan,
     persisted: bool,
 ) {
@@ -881,6 +882,14 @@ fn spawn_recording_notification_after_persist(
     let Some(message) = plan.message else {
         return;
     };
+    // Also publish on the bus, so plugins and other subscribers can see
+    // recording lifecycle transitions. The notification bridge deliberately
+    // ignores this kind: operator delivery stays on the durable path below,
+    // because the bus may drop for a lagging subscriber and the marker has
+    // already been persisted.
+    if let MessageContent::RecordingLifecycle(lifecycle) = &message {
+        event_manager.send_event(EventMessage::RecordingLifecycle(lifecycle.clone()));
+    }
     // A full or closed outbox hands the event back; fall through to the
     // direct send rather than dropping it outright.
     let event = tuliprox_core::model::NotificationEvent::from_content(&message);
@@ -1258,6 +1267,7 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                         spawn_recording_notification_after_persist(
                                             &app_config,
                                             &client,
+                                            &event_manager,
                                             notification,
                                             true,
                                         );
@@ -1439,6 +1449,7 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                         spawn_recording_notification_after_persist(
                                             &app_config,
                                             &client,
+                                            &event_manager,
                                             notification,
                                             true,
                                         );
@@ -1534,6 +1545,7 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                         spawn_recording_notification_after_persist(
                                             &app_config,
                                             &client,
+                                            &event_manager,
                                             notification,
                                             true,
                                         );
@@ -1657,6 +1669,7 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                         spawn_recording_notification_after_persist(
                                             &app_config,
                                             &client,
+                                            &event_manager,
                                             notification,
                                             true,
                                         );

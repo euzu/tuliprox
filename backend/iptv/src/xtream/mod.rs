@@ -4,9 +4,9 @@ use shared::{
     concat_string,
     error::TuliproxError,
     model::{
-        notification::registry, InputType, PlaylistEntry, PlaylistGroup, ProxyUserStatus, SeriesStreamProperties,
-        StreamProperties, VideoStreamProperties, XtreamCluster, XtreamLoginInfo, XtreamPlaylistItem, XtreamSeriesInfo,
-        XtreamVideoInfo, XtreamVideoInfoDoc,
+        EventMessage, EventSink, InputType, PlaylistEntry, PlaylistGroup, ProviderAccountEvent, ProviderAccountState,
+        ProxyUserStatus, SeriesStreamProperties, StreamProperties, VideoStreamProperties, XtreamCluster,
+        XtreamLoginInfo, XtreamPlaylistItem, XtreamSeriesInfo, XtreamVideoInfo, XtreamVideoInfoDoc,
     },
     utils::{
         extract_extension_from_url, get_i64_from_serde_value, get_string_from_serde_value, sanitize_sensitive_info,
@@ -17,11 +17,10 @@ use std::{collections::HashMap, io::Error, str::FromStr, sync::Arc};
 use tuliprox_core::{
     model::{
         is_input_expired, xtream_mapping_option_from_target_options, AppConfig, ConfigInput, ConfigInputFlags,
-        ConfigTarget, InputSource, NotificationEvent, ProxyUserCredentials, XtreamTargetOutput,
+        ConfigTarget, InputSource, ProxyUserCredentials, XtreamTargetOutput,
     },
     utils::request,
 };
-use tuliprox_messaging::send_event;
 use tuliprox_parser::{xtream, xtream::parse_xtream_series_info};
 use tuliprox_repository::{
     get_input_storage_path, get_target_id_mapping, get_target_storage_path, persist_input_vod_info,
@@ -374,9 +373,10 @@ const ACTIONS: [(XtreamCluster, &str, &str); 3] = [
     ),
 ];
 
-pub async fn xtream_login(
+pub async fn xtream_login<E: EventSink>(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
+    events: &E,
     input: &InputSource,
     username: &str,
 ) -> Result<Option<XtreamLoginInfo>, TuliproxError> {
@@ -404,21 +404,14 @@ pub async fn xtream_login(
                     if !matches!(cur_status, ProxyUserStatus::Active | ProxyUserStatus::Trial) {
                         warn!("User status for user {username} is {cur_status:?}");
                         let text = format!("User status for user {username} is {cur_status:?}");
-                        send_event(
-                            app_config,
-                            client,
-                            NotificationEvent::new(registry::PROVIDER_ACCOUNT_STATUS, text.clone(), text)
-                                // One status change is one piece of news,
-                                // however many times the playlist refreshes.
-                                .with_dedup_key(format!("provider.account.status:{}:{username}", input.name))
-                                .with_fields(&AccountFields {
-                                    username: username.to_string(),
-                                    provider: input.name.to_string(),
-                                    status: Some(format!("{cur_status:?}")),
-                                    expires_at: None,
-                                }),
-                        )
-                        .await;
+                        events.emit(EventMessage::ProviderAccount(ProviderAccountEvent {
+                            state: ProviderAccountState::StatusChanged,
+                            username: username.to_string(),
+                            provider: input.name.to_string(),
+                            status: Some(format!("{cur_status:?}")),
+                            expires_at: None,
+                            message: text,
+                        }));
                     }
                 }
             }
@@ -427,7 +420,7 @@ pub async fn xtream_login(
         if let Some(exp_value) = user_info.get("exp_date") {
             if let Some(expiration_timestamp) = get_i64_from_serde_value(exp_value) {
                 login_info.exp_date = Some(expiration_timestamp);
-                notify_account_expire(login_info.exp_date, app_config, client, username, &input.name).await;
+                notify_account_expire(login_info.exp_date, events, username, &input.name);
             }
         }
     }
@@ -439,24 +432,11 @@ pub async fn xtream_login(
     }
 }
 
-/// Template payload for the provider account events.
-#[derive(serde::Serialize)]
-struct AccountFields {
-    username: String,
-    provider: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    expires_at: Option<i64>,
-}
-
-pub async fn notify_account_expire(
-    exp_date: Option<i64>,
-    app_config: &Arc<AppConfig>,
-    client: &reqwest::Client,
-    username: &str,
-    input_name: &str,
-) {
+/// Publish the account-expiry state for `username` on `input_name`.
+///
+/// Emitting is synchronous and non-blocking, so this no longer awaits: the
+/// notification is delivered by whoever subscribes to the bus.
+pub fn notify_account_expire<E: EventSink>(exp_date: Option<i64>, events: &E, username: &str, input_name: &str) {
     if let Some(expiration_timestamp) = exp_date {
         let now_secs = Utc::now().timestamp(); // UTC-Time
         if expiration_timestamp > now_secs {
@@ -467,40 +447,31 @@ pub async fn notify_account_expire(
                     let formatted = datetime.format("%Y-%m-%d %H:%M:%S").to_string();
                     warn!("User account for user {username} expires {formatted}");
                     let text = format!("User account for user {username} expires {formatted}");
-                    send_event(
-                        app_config,
-                        client,
-                        NotificationEvent::new(registry::PROVIDER_ACCOUNT_EXPIRING, text.clone(), text)
-                            // Re-checked on every refresh; without a dedup key
-                            // this would notify on every playlist update for
-                            // the three days before expiry.
-                            .with_dedup_key(format!("provider.account.expiring:{input_name}:{username}"))
-                            .with_fields(&AccountFields {
-                                username: username.to_string(),
-                                provider: input_name.to_string(),
-                                status: None,
-                                expires_at: Some(expiration_timestamp),
-                            }),
-                    )
-                    .await;
+                    // The suppression key lives on `ProviderAccountEvent`;
+                    // re-checked on every refresh, this would otherwise
+                    // notify on each playlist update for the three days
+                    // before expiry.
+                    events.emit(EventMessage::ProviderAccount(ProviderAccountEvent {
+                        state: ProviderAccountState::Expiring,
+                        username: username.to_string(),
+                        provider: input_name.to_string(),
+                        status: None,
+                        expires_at: Some(expiration_timestamp),
+                        message: text,
+                    }));
                 }
             }
         } else {
             warn!("User account for user {username} is expired");
             let text = format!("User account for user {username} for provider {input_name} is expired");
-            send_event(
-                app_config,
-                client,
-                NotificationEvent::new(registry::PROVIDER_ACCOUNT_EXPIRED, text.clone(), text)
-                    .with_dedup_key(format!("provider.account.expired:{input_name}:{username}"))
-                    .with_fields(&AccountFields {
-                        username: username.to_string(),
-                        provider: input_name.to_string(),
-                        status: None,
-                        expires_at: Some(expiration_timestamp),
-                    }),
-            )
-            .await;
+            events.emit(EventMessage::ProviderAccount(ProviderAccountEvent {
+                state: ProviderAccountState::Expired,
+                username: username.to_string(),
+                provider: input_name.to_string(),
+                status: None,
+                expires_at: Some(expiration_timestamp),
+                message: text,
+            }));
         }
     }
 }
@@ -519,9 +490,10 @@ pub fn requested_clusters(requested: Option<&[XtreamCluster]>, skip_cluster: &[X
 }
 
 /// Downloads xtream clusters from a single source (either main input or staged input).
-async fn download_xtream_from_source(
+async fn download_xtream_from_source<E: EventSink>(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
+    events: &E,
     input: &ConfigInput,
     input_source: &InputSource,
     source_input_type: InputType,
@@ -543,7 +515,7 @@ async fn download_xtream_from_source(
     let base_url = get_xtream_stream_url_base(&base_input_url, username, password);
     let input_source_login = input_source.with_url(base_url.clone());
 
-    if let Err(err) = xtream_login(app_config, client, &input_source_login, username).await {
+    if let Err(err) = xtream_login(app_config, client, events, &input_source_login, username).await {
         error!("Could not log in with xtream user {username} for provider {}. {err}", input.name);
         return (Vec::new(), vec![err], false);
     }
@@ -617,9 +589,10 @@ async fn download_xtream_from_source(
     (playlist_groups, errors, use_disk_based_processing)
 }
 
-pub async fn download_xtream_playlist(
+pub async fn download_xtream_playlist<E: EventSink>(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
+    events: &E,
     input: &ConfigInput,
     clusters: Option<&[XtreamCluster]>,
 ) -> (Vec<PlaylistGroup>, Vec<TuliproxError>, bool) {
@@ -631,10 +604,11 @@ pub async fn download_xtream_playlist(
     let mut any_disk = false;
 
     if !main_clusters.is_empty() {
-        check_alias_user_state(app_config, client, input).await;
+        check_alias_user_state(events, input);
         let source: InputSource = input.into();
         let (g, e, d) =
-            download_xtream_from_source(app_config, client, input, &source, input.input_type, &main_clusters).await;
+            download_xtream_from_source(app_config, client, events, input, &source, input.input_type, &main_clusters)
+                .await;
         all_groups.extend(g);
         all_errors.extend(e);
         any_disk |= d;
@@ -647,18 +621,16 @@ pub async fn download_xtream_playlist(
     (all_groups, all_errors, any_disk)
 }
 
-async fn check_alias_user_state(app_config: &Arc<AppConfig>, client: &reqwest::Client, input: &ConfigInput) {
+fn check_alias_user_state<E: EventSink>(events: &E, input: &ConfigInput) {
     if let Some(aliases) = input.aliases.as_ref() {
         for alias in aliases {
             if is_input_expired(alias.exp_date) {
                 notify_account_expire(
                     alias.exp_date,
-                    app_config,
-                    client,
+                    events,
                     alias.username.as_ref().map_or("", |s| s.as_str()),
                     &alias.name,
-                )
-                .await;
+                );
             }
         }
     }

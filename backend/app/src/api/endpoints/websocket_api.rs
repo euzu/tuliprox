@@ -469,9 +469,19 @@ fn to_protocol_message(event: EventMessage) -> Option<(ProtocolMessage, &'static
         // Handled by `handle_event_message`, not translatable here:
         // `RecordingChanged` needs a per-session snapshot re-fetch, and the
         // metadata events are internal.
+        //
+        // The lifecycle events are notification-side only: they reach
+        // operators through the messaging pipeline and plugins through the
+        // bus, and adding them to the wire would need a `ProtocolMessage`
+        // variant and frontend handling that nothing asks for yet.
         EventMessage::RecordingChanged
         | EventMessage::InputMetadataUpdatesCompleted(_)
-        | EventMessage::InputMetadataUpdatesStarted(_) => return None,
+        | EventMessage::InputMetadataUpdatesStarted(_)
+        | EventMessage::DiskAlert(_)
+        | EventMessage::ConfigReloadFailed(_)
+        | EventMessage::PlaylistWatchChanged(_)
+        | EventMessage::RecordingLifecycle(_)
+        | EventMessage::ProviderAccount(_) => return None,
     })
 }
 
@@ -622,10 +632,12 @@ mod tests {
     };
     use crate::api::model::EventMessage;
     use shared::model::{
-        Claims, DownloadsDelta, DownloadsResponse, FileDownloadDto, LibraryScanProgressEvent, LibraryScanSummary,
-        LibraryScanSummaryStatus, Permission, PlaylistUpdateProgressEvent, ProtocolHandler, ProtocolHandlerMemory,
-        TaskKindDto, TaskPriorityDto, TransferStatusDto, UserId, UserRole, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL,
-        PROTOCOL_VERSION, ROLE_ADMIN, TOKEN_NO_AUTH,
+        Claims, ConfigReloadFailure, DiskAlert, DiskAlertLevel, DownloadsDelta, DownloadsResponse, FileDownloadDto,
+        LibraryScanProgressEvent, LibraryScanSummary, LibraryScanSummaryStatus, MsgKind, Permission,
+        PlaylistUpdateProgressEvent, ProtocolHandler, ProtocolHandlerMemory, ProviderAccountEvent,
+        ProviderAccountState, RecordingLifecycleMessage, TaskKindDto, TaskPriorityDto, TransferStatusDto, UserId,
+        UserRole, WatchChanges, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, PROTOCOL_VERSION, ROLE_ADMIN,
+        TOKEN_NO_AUTH,
     };
     use std::sync::Arc;
     use tokio::sync::broadcast::error::RecvError;
@@ -693,6 +705,29 @@ mod tests {
             EventMessage::RecordingRulesChanged,
             EventMessage::InputMetadataUpdatesCompleted("a".into()),
             EventMessage::InputMetadataUpdatesStarted("a".into()),
+            EventMessage::DiskAlert(DiskAlert {
+                level: DiskAlertLevel::Warn,
+                total_bytes: 100,
+                free_bytes: 5,
+                used_bytes: 95,
+                percent: 95.0,
+            }),
+            EventMessage::ConfigReloadFailed(ConfigReloadFailure {
+                paths: "config.yml".to_string(),
+                error: "boom".to_string(),
+            }),
+            EventMessage::PlaylistWatchChanged(WatchChanges {
+                target: "t".to_string(),
+                group: "g".to_string(),
+                added: Vec::new(),
+                removed: Vec::new(),
+            }),
+            recording_lifecycle(MsgKind::RecordingStarted),
+            recording_lifecycle(MsgKind::RecordingCompleted),
+            recording_lifecycle(MsgKind::RecordingFailed),
+            provider_account(ProviderAccountState::StatusChanged),
+            provider_account(ProviderAccountState::Expiring),
+            provider_account(ProviderAccountState::Expired),
         ];
         assert_eq!(samples.len(), EventKind::ALL.len(), "add the new variant to this list");
         samples
@@ -936,5 +971,29 @@ mod tests {
                 recording: None,
             }))
         ));
+    }
+
+    fn recording_lifecycle(event: MsgKind) -> EventMessage {
+        EventMessage::RecordingLifecycle(RecordingLifecycleMessage {
+            event,
+            programme_title: None,
+            channel: None,
+            effective_start: None,
+            effective_end: None,
+            visibility: None,
+            output_filename: None,
+            failure_reason: None,
+        })
+    }
+
+    fn provider_account(state: ProviderAccountState) -> EventMessage {
+        EventMessage::ProviderAccount(ProviderAccountEvent {
+            state,
+            username: "u".to_string(),
+            provider: "p".to_string(),
+            status: None,
+            expires_at: None,
+            message: "m".to_string(),
+        })
     }
 }

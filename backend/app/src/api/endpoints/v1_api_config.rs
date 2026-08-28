@@ -577,7 +577,9 @@ async fn get_xtream_login_info(
         }
     };
     let http_client = app_state.http_client.load();
-    match xtream_login(&app_state.app_config, &http_client, &input_source, &request.username).await {
+    match xtream_login(&app_state.app_config, &http_client, &app_state.event_manager, &input_source, &request.username)
+        .await
+    {
         Ok(login_info) => axum::Json(login_info.unwrap_or_default()).into_response(),
         Err(err) => {
             error!("Failed to get xtream login info: {err}");

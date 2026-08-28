@@ -50,7 +50,6 @@ normal tuliprox -> tuliprox-library
 normal tuliprox -> tuliprox-iptv
 normal tuliprox-iptv -> shared
 normal tuliprox-iptv -> tuliprox-core
-normal tuliprox-iptv -> tuliprox-messaging
 normal tuliprox-iptv -> tuliprox-parser
 normal tuliprox-iptv -> tuliprox-repository
 normal tuliprox -> tuliprox-messaging

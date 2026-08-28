@@ -144,3 +144,91 @@ mod tests {
         }
     }
 }
+
+/// Group membership changes a target's `watch` config detected on refresh.
+///
+/// Lives here rather than in `tuliprox-core` because it is an event payload:
+/// `EventMessage::PlaylistWatchChanged` carries it, and `shared` is the one
+/// crate every emitter and every subscriber can name.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WatchChanges {
+    pub target: String,
+    pub group: String,
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+}
+
+/// One recording's lifecycle transition.
+///
+/// `event` says which transition: `MsgKind::Recording{Started,Completed,Failed}`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RecordingLifecycleMessage {
+    pub event: MsgKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub programme_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_start: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_end: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_filename: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
+}
+
+/// Which provider-account transition an event describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ProviderAccountState {
+    /// The account left the `Active`/`Trial` states.
+    StatusChanged,
+    /// The account expires within three days.
+    Expiring,
+    /// The account has expired.
+    Expired,
+}
+
+/// A provider account changing state, as observed during an Xtream login.
+///
+/// Carries the fields the notification templates already render, so moving
+/// this onto the bus changes nothing an operator receives.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProviderAccountEvent {
+    pub state: ProviderAccountState,
+    pub username: String,
+    pub provider: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+    /// Human-readable summary, used as both notification title and body.
+    pub message: String,
+}
+
+impl ProviderAccountEvent {
+    /// The suppression key for this account transition.
+    ///
+    /// These are re-evaluated on every playlist refresh; without it an
+    /// expiring account would notify on each one for the three days before
+    /// expiry.
+    #[must_use]
+    pub fn dedup_key(&self) -> String {
+        let prefix = match self.state {
+            ProviderAccountState::StatusChanged => "provider.account.status",
+            ProviderAccountState::Expiring => "provider.account.expiring",
+            ProviderAccountState::Expired => "provider.account.expired",
+        };
+        format!("{prefix}:{}:{}", self.provider, self.username)
+    }
+}
+
+/// A config file that failed to reload.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ConfigReloadFailure {
+    /// The formatted path list the watcher reported.
+    pub paths: String,
+    pub error: String,
+}

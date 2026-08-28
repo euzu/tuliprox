@@ -24,7 +24,7 @@ use shared::model::{EventKind, EventKindMask, EventMessage};
 use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
-use tuliprox_core::model::NotificationEvent;
+use tuliprox_core::model::{MessageContent, NotificationEvent};
 
 /// Subscribe to the event bus and forward what the config asks for.
 pub fn spawn_notification_bridge(app_state: &Arc<AppState>, cancel_token: &CancellationToken) {
@@ -67,6 +67,12 @@ pub fn spawn_notification_bridge(app_state: &Arc<AppState>, cancel_token: &Cance
 /// Keep in step with the `None` arms below - the test at the bottom of this
 /// file asserts they agree.
 const NOTIFIABLE_KINDS: EventKindMask = EventKindMask::new()
+    .with(EventKind::DiskAlert)
+    .with(EventKind::ConfigReloadFailed)
+    .with(EventKind::PlaylistWatchChanged)
+    .with(EventKind::ProviderAccountStatus)
+    .with(EventKind::ProviderAccountExpiring)
+    .with(EventKind::ProviderAccountExpired)
     .with(EventKind::ServerError)
     .with(EventKind::PlaylistUpdate)
     .with(EventKind::ConfigChange)
@@ -84,6 +90,11 @@ const NOTIFIABLE_KINDS: EventKindMask = EventKindMask::new()
 /// ticks and download deltas fire many times per operation and carry
 /// nothing an operator wants pushed to a phone. Their terminal counterparts
 /// are what get through.
+// Two arms return `None` for different reasons - one because delivery is
+// owned by the durable recording path, one because the event declared itself
+// non-notifiable. Merging them would collapse that distinction into a list of
+// variants with no way to tell which is which.
+#[allow(clippy::match_same_arms)]
 #[must_use]
 pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
     // Which notification an event *is* belongs to the event; this function
@@ -146,6 +157,44 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
             Some(NotificationEvent::new(id, title.clone(), title))
         }
 
+        // The three that already have a `MessageContent` shape reuse it:
+        // `from_content` is what built their title, body and template fields
+        // before, and rebuilding that here by hand would be a second copy
+        // free to drift from the templates that render it.
+        EventMessage::DiskAlert(alert) => {
+            Some(NotificationEvent::from_content(&MessageContent::DiskAlert(alert.clone())))
+        }
+        EventMessage::PlaylistWatchChanged(changes) => {
+            Some(NotificationEvent::from_content(&MessageContent::Watch(changes.clone())))
+        }
+        // Deliberately not notified from here. Recording notifications are
+        // at-most-once: a durable marker is persisted inside the
+        // queue-mutation boundary *before* delivery, and the outbox retries
+        // per channel. The bus is a lossy broadcast - a lagging subscriber
+        // misses events - so routing that path through it would let a
+        // recording be marked delivered and then never sent. The event is on
+        // the bus for plugins and subscribers; `download_api` still owns
+        // operator delivery.
+        EventMessage::RecordingLifecycle(_) => None,
+
+        EventMessage::ConfigReloadFailed(failure) => {
+            let title = format!("Configuration reload failed: {}", failure.paths);
+            Some(
+                NotificationEvent::new(id, title, failure.error.clone())
+                    .with_severity(message.severity())
+                    .with_fields(failure),
+            )
+        }
+
+        EventMessage::ProviderAccount(event) => Some(
+            NotificationEvent::new(id, event.message.clone(), event.message.clone())
+                .with_severity(message.severity())
+                // Re-evaluated on every playlist refresh; without this an
+                // expiring account notifies on each one for three days.
+                .with_dedup_key(event.dedup_key())
+                .with_fields(event),
+        ),
+
         // Unreachable: `notification_id` already returned `None` for these,
         // which is the single place that decision is made.
         EventMessage::PlaylistUpdateProgress(_)
@@ -169,8 +218,10 @@ mod tests {
     use super::{to_notification, EventMessage, NOTIFIABLE_KINDS};
     use shared::model::{
         notification::{registry, Severity},
-        ActiveUserConnectionChange, ConfigType, DownloadsResponse, EventKind, LibraryScanProgressEvent,
-        LibraryScanSummary, LibraryScanSummaryStatus, PlaylistUpdateProgressEvent, PlaylistUpdateState, SystemInfo,
+        ActiveUserConnectionChange, ConfigReloadFailure, ConfigType, DiskAlert, DiskAlertLevel, DownloadsResponse,
+        EventKind, LibraryScanProgressEvent, LibraryScanSummary, LibraryScanSummaryStatus, MsgKind,
+        PlaylistUpdateProgressEvent, PlaylistUpdateState, ProviderAccountEvent, ProviderAccountState,
+        RecordingLifecycleMessage, SystemInfo, WatchChanges,
     };
     use std::sync::Arc;
 
@@ -228,6 +279,29 @@ mod tests {
             EventMessage::RecordingRulesChanged,
             EventMessage::InputMetadataUpdatesStarted("a".into()),
             EventMessage::InputMetadataUpdatesCompleted("a".into()),
+            EventMessage::DiskAlert(DiskAlert {
+                level: DiskAlertLevel::Warn,
+                total_bytes: 100,
+                free_bytes: 5,
+                used_bytes: 95,
+                percent: 95.0,
+            }),
+            EventMessage::ConfigReloadFailed(ConfigReloadFailure {
+                paths: "config.yml".to_string(),
+                error: "boom".to_string(),
+            }),
+            EventMessage::PlaylistWatchChanged(WatchChanges {
+                target: "t".to_string(),
+                group: "g".to_string(),
+                added: Vec::new(),
+                removed: Vec::new(),
+            }),
+            recording_lifecycle(MsgKind::RecordingStarted),
+            recording_lifecycle(MsgKind::RecordingCompleted),
+            recording_lifecycle(MsgKind::RecordingFailed),
+            provider_account(ProviderAccountState::StatusChanged),
+            provider_account(ProviderAccountState::Expiring),
+            provider_account(ProviderAccountState::Expired),
         ];
         assert_eq!(samples.len(), EventKind::ALL.len(), "add the new variant to this list");
         samples
@@ -330,5 +404,29 @@ mod tests {
             let event = to_notification(&message).expect("mapped");
             assert!(registry::describe(event.id).is_some(), "unregistered id {}", event.id);
         }
+    }
+
+    fn recording_lifecycle(event: MsgKind) -> EventMessage {
+        EventMessage::RecordingLifecycle(RecordingLifecycleMessage {
+            event,
+            programme_title: None,
+            channel: None,
+            effective_start: None,
+            effective_end: None,
+            visibility: None,
+            output_filename: None,
+            failure_reason: None,
+        })
+    }
+
+    fn provider_account(state: ProviderAccountState) -> EventMessage {
+        EventMessage::ProviderAccount(ProviderAccountEvent {
+            state,
+            username: "u".to_string(),
+            provider: "p".to_string(),
+            status: None,
+            expires_at: None,
+            message: "m".to_string(),
+        })
     }
 }

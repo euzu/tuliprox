@@ -475,9 +475,10 @@ fn apply_staged_overlay_groups(
 fn should_apply_staged_overlay(download_result: &PlaylistDownloadResult) -> bool { !download_result.was_cached }
 
 #[allow(clippy::too_many_lines)]
-async fn playlist_download_from_input(
+async fn playlist_download_from_input<E: EventSink>(
     client: &reqwest::Client,
     app_config: &Arc<AppConfig>,
+    events: &E,
     input: &ConfigInput,
     stalker_refresh_mode: StalkerRefreshMode,
 ) -> PlaylistDownloadResult {
@@ -536,6 +537,7 @@ async fn playlist_download_from_input(
                 let (p, e, persisted) = xtream::download_xtream_playlist(
                     app_config,
                     client,
+                    events,
                     input,
                     Some(xtream_clusters_to_download.as_slice()),
                 )
@@ -1058,7 +1060,7 @@ async fn download_input<E: EventSink + Clone + 'static>(
             PlaylistDownloadResult::new(vec![], vec![], true, false)
         } else {
             mark_as_processed = true;
-            playlist_download_from_input(&ctx.client, &ctx.config, input, ctx.stalker_refresh_mode).await
+            playlist_download_from_input(&ctx.client, &ctx.config, &ctx.events, input, ctx.stalker_refresh_mode).await
         }
     } else {
         PlaylistDownloadResult::new(vec![], vec![], true, false)
@@ -1091,8 +1093,14 @@ async fn download_input<E: EventSink + Clone + 'static>(
                         input.name
                     );
                     invalidate_input_cache_status(ctx, input).await;
-                    playlist_download_result =
-                        playlist_download_from_input(&ctx.client, &ctx.config, input, ctx.stalker_refresh_mode).await;
+                    playlist_download_result = playlist_download_from_input(
+                        &ctx.client,
+                        &ctx.config,
+                        &ctx.events,
+                        input,
+                        ctx.stalker_refresh_mode,
+                    )
+                    .await;
                 }
             }
         } else {
@@ -1551,7 +1559,7 @@ async fn finalize_prepared_target<E: EventSink + Clone + 'static>(
         step.tick("assigning channel counter");
         log_memory_snapshot(format!("target '{}' after_assign_channel_counter", target.name).as_str());
 
-        if process_watch(&ctx.config, &ctx.client, target, &flat_new_playlist).await {
+        if process_watch(&ctx.config, &ctx.events, target, &flat_new_playlist).await {
             step.tick("group watches");
             log_memory_snapshot(format!("target '{}' after_group_watches", target.name).as_str());
         }
@@ -1899,9 +1907,9 @@ async fn trakt_playlist(
     true
 }
 
-async fn process_watch(
+async fn process_watch<E: EventSink>(
     app_config: &Arc<AppConfig>,
-    client: &reqwest::Client,
+    events: &E,
     target: &ConfigTarget,
     new_playlist: &[PlaylistGroup],
 ) -> bool {
@@ -1915,7 +1923,7 @@ async fn process_watch(
             new_playlist
                 .iter()
                 .filter(|pl| watches.iter().any(|r| r.is_match(&pl.title)))
-                .map(|pl| process_group_watch(app_config, client, &target.name, pl)),
+                .map(|pl| process_group_watch(app_config, events, &target.name, pl)),
         )
         .for_each_concurrent(16, |f| f)
         .await;

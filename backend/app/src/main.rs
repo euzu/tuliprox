@@ -64,7 +64,6 @@ use tuliprox_core::{model, utils};
 use tuliprox_iptv as iptv;
 use tuliprox_library::library;
 use tuliprox_media_server as media_server;
-use tuliprox_messaging as messaging;
 use tuliprox_mpegts as mpegts;
 use tuliprox_processing as processing;
 use tuliprox_repository as repository;
