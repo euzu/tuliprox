@@ -25,7 +25,6 @@ chrono.workspace = true
 crc32fast = "1.5.1"
 env_logger = "0.11.11"
 filetime = "0.2.29"
-fs2 = "0.4.3"
 futures.workspace = true
 indexmap.workspace = true
 log.workspace = true

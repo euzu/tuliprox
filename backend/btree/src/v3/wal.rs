@@ -3,7 +3,6 @@ use super::{
     page::SlottedPage,
 };
 use crate::common::sidecar_lock_path;
-use fs2::FileExt as _;
 use log::info;
 use std::{
     collections::HashSet,
@@ -939,7 +938,7 @@ pub(crate) struct ExclusiveSidecarGuard {
 impl ExclusiveSidecarGuard {
     pub(crate) fn acquire(database: &Path) -> io::Result<Self> {
         let file = open_sidecar(database)?;
-        file.lock_exclusive()?;
+        file.lock()?;
         Ok(Self { _file: file })
     }
 
@@ -949,17 +948,17 @@ impl ExclusiveSidecarGuard {
         on_contention: impl FnOnce() -> io::Result<()>,
     ) -> io::Result<Self> {
         let file = open_sidecar(database)?;
-        match file.try_lock_exclusive() {
+        match file.try_lock() {
             Ok(()) => Err(io::Error::other(format!(
                 "expected final B+Tree sidecar lock contention for {}",
                 database.display()
             ))),
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            Err(std::fs::TryLockError::WouldBlock) => {
                 on_contention()?;
-                file.lock_exclusive()?;
+                file.lock()?;
                 Ok(Self { _file: file })
             }
-            Err(error) => Err(error),
+            Err(std::fs::TryLockError::Error(error)) => Err(error),
         }
     }
 }

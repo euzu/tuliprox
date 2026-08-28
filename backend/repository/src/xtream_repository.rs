@@ -16,7 +16,6 @@ use crate::{
     LockedReceiverStream,
 };
 use bytes::Bytes;
-use fs2::FileExt;
 use futures::{stream, Stream, StreamExt};
 use indexmap::IndexMap;
 use log::error;
@@ -1384,7 +1383,7 @@ struct LockedCategoryFile {
 impl LockedCategoryFile {
     fn create(path: &Path) -> io::Result<Self> {
         let file = File::create(path)?;
-        file.lock_exclusive()?;
+        file.lock()?;
         Ok(Self { file, path: path.to_path_buf() })
     }
 
@@ -1393,7 +1392,7 @@ impl LockedCategoryFile {
 
 impl Drop for LockedCategoryFile {
     fn drop(&mut self) {
-        if let Err(error) = fs2::FileExt::unlock(&self.file) {
+        if let Err(error) = self.file.unlock() {
             log::warn!(
                 "Failed to unlock staging category file {}: {error}; the OS will release it on close",
                 self.path.display()
@@ -1936,7 +1935,6 @@ mod tests {
         refresh_generation_guard_path, BPlusTreeQuery, BPlusTreeUpdate,
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
-    use fs2::FileExt;
     use shared::{
         model::{
             CatchupProperties, ConfigPaths, InputType, LiveStreamProperties, SeriesStreamProperties, StreamProperties,
@@ -2530,8 +2528,8 @@ mod tests {
 
         let between_batch_probe =
             fs::OpenOptions::new().read(true).write(true).open(&sidecar).expect("open staging sidecar");
-        between_batch_probe.try_lock_exclusive().expect("staging sidecar should be unlocked between batches");
-        fs2::FileExt::unlock(&between_batch_probe).expect("release between-batch probe");
+        between_batch_probe.try_lock().expect("staging sidecar should be unlocked between batches");
+        between_batch_probe.unlock().expect("release between-batch probe");
         drop(between_batch_probe);
 
         cleanup_orphaned_staging_artifacts(dir.path(), Duration::ZERO);

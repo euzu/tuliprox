@@ -14,7 +14,6 @@ use crate::{
     storage_const,
     target_id_mapping::VirtualIdRecord,
 };
-use fs2::FileExt as _;
 use log::{info, trace, warn};
 use shared::model::{
     ClusterFlags, ConfigPaths, EpgChannel, M3uPlaylistItem, NetworkAccessDto, ProxyType, ProxyUserStatus, UUIDType,
@@ -330,12 +329,12 @@ impl BPlusTreeStartupMigrator {
         }
 
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
-        if let Err(err) = file.try_lock_exclusive() {
-            if err.kind() == io::ErrorKind::WouldBlock {
+        if let Err(err) = file.try_lock() {
+            if matches!(err, std::fs::TryLockError::WouldBlock) {
                 warn!("Skipping B+Tree migration for locked file {}: {}", path.display(), err);
                 return Ok(FileMigrationOutcome::Locked);
             }
-            return Err(err);
+            return Err(err.into());
         }
 
         // Re-read header after lock to guard against concurrent updates between
@@ -1187,13 +1186,13 @@ mod tests {
         let path = write_legacy_geoip(temp.path(), 2)?;
         let before = std::fs::read(&path)?;
         let file = OpenOptions::new().read(true).write(true).open(&path)?;
-        file.lock_exclusive()?;
+        file.lock()?;
 
         let stats = migrate_bplustree_databases(&[temp.path().to_path_buf()])?;
         assert_eq!(stats.bplustree_files, 1);
         assert_eq!(stats.migrated_files, 0);
         assert_eq!(std::fs::read(&path)?, before);
-        fs2::FileExt::unlock(&file)?;
+        file.unlock()?;
         Ok(())
     }
 
