@@ -266,7 +266,6 @@ async fn evaluate_admission_strategy_loop<'a, F>(
     strategies: &'a [shared::model::AdmissionStrategy],
     base_idx: usize,
     admission: crate::ConnectionAdmission,
-    _kind_for_exhausted: Option<crate::ConnectionKind>,
     build_grace_ctx: F,
 ) -> Option<AdmissionStrategyResolution>
 where
@@ -453,7 +452,6 @@ pub async fn resolve_admission_with_strategies(
         &strategies,
         0,
         admission,
-        admission.kind,
         build_grace_ctx,
     )
     .await
@@ -473,9 +471,10 @@ pub async fn resolve_admission_with_strategies(
 /// - Only `grace_context.strategies[(strategy_index + 1)..]` are evaluated
 /// - `NoMatch` -> continue to next strategy
 /// - `Evict` -> kick target, retry admission
-/// - `Grace` -> technically possible under current config (only one grace allowed), but handled
-/// - `Deny` -> final exhausted
-/// - Empty remaining slice -> final exhausted
+/// - `Grace` -> granted again if the user is eligible; the resolution then carries a
+///   `GraceResolutionContext` whose `strategy_index` points at this later strategy, so a
+///   second failure resumes past it rather than replaying it
+/// - Every strategy exhausted, or an empty remaining slice -> final exhausted
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub async fn evaluate_remaining_strategies_after_grace(
     adm: &AdmissionCtx,
@@ -507,9 +506,10 @@ pub async fn evaluate_remaining_strategies_after_grace(
         };
     }
 
-    // admission.kind is used only inside build_grace_ctx for the Grace case's
-    // GraceResolutionContext.kind. Both paths (helper early-return and caller
-    // exhausted construction) use original_kind, so this is safe.
+    // `admission` only carries `kind` into the loop: the Grace arm copies it onto the
+    // returned `ConnectionAdmission`, and `build_grace_ctx` copies it onto the
+    // `GraceResolutionContext`. Seeding it with `original_kind` keeps every exit from this
+    // function reporting the kind the original admission decided.
     let admission = crate::ConnectionAdmission { permission: UserConnectionPermission::Exhausted, kind: original_kind };
     let build_grace_ctx = |global_idx: usize| GraceResolutionContext {
         strategy_index: global_idx,
@@ -533,7 +533,6 @@ pub async fn evaluate_remaining_strategies_after_grace(
         &strategies[remaining..],
         remaining,
         admission,
-        original_kind,
         build_grace_ctx,
     )
     .await
