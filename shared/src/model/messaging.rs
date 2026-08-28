@@ -41,9 +41,7 @@ impl MsgKind {
         }
     }
 
-    pub fn template_filename(&self, prefix: &str) -> String {
-        concat_string!(prefix, "_", self.wire_name(), ".templ")
-    }
+    pub fn template_filename(&self, prefix: &str) -> String { concat_string!(prefix, "_", self.wire_name(), ".templ") }
 
     /// `true` for the recording lifecycle kinds.
     pub fn is_recording_lifecycle(&self) -> bool {
@@ -156,8 +154,39 @@ mod tests {
 pub struct WatchChanges {
     pub target: String,
     pub group: String,
+    /// Channel titles added, as a sample. Shorter than [`Self::added_total`]
+    /// when [`Self::truncated`] is set, and empty when the change was too
+    /// large to list at all - but never anything except channel titles.
     pub added: Vec<String>,
+    /// Channel titles removed. Same sampling rule as [`Self::added`].
     pub removed: Vec<String>,
+    /// How many channels were added, whatever the list above carries.
+    ///
+    /// The lists used to absorb their own truncation notice: a synthesised
+    /// `"... 42 more added entries omitted"` pushed in beside real channel
+    /// titles. That was legible to the text template and to nothing else -
+    /// [`crate::model::EventMessage::payload`] serialises this struct straight
+    /// to JSON for plugins, and a plugin cannot tell a sentinel from a channel
+    /// actually named that. The counts live here so the lists stay honest.
+    #[serde(default)]
+    pub added_total: usize,
+    /// How many channels were removed. See [`Self::added_total`].
+    #[serde(default)]
+    pub removed_total: usize,
+    /// Whether the lists are a sample rather than the whole change.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+impl WatchChanges {
+    /// A complete change set, nothing sampled.
+    ///
+    /// The totals follow the lists, so a caller that is not truncating cannot
+    /// get them out of step.
+    #[must_use]
+    pub fn new(target: String, group: String, added: Vec<String>, removed: Vec<String>) -> Self {
+        Self { target, group, added_total: added.len(), removed_total: removed.len(), added, removed, truncated: false }
+    }
 }
 
 /// One recording's lifecycle transition.

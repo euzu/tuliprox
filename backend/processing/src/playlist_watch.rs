@@ -67,6 +67,11 @@ pub async fn process_group_watch<E: EventSink>(
     }
 }
 
+/// Turn a group's membership delta into an event.
+///
+/// Large changes are sampled rather than listed in full, but the sampling is
+/// reported in [`WatchChanges::added_total`] / [`WatchChanges::removed_total`]
+/// and [`WatchChanges::truncated`] rather than written into the lists as prose.
 fn handle_watch_notification<E: EventSink>(
     events: &E,
     added: &BTreeSet<Arc<str>>,
@@ -74,45 +79,42 @@ fn handle_watch_notification<E: EventSink>(
     target_name: &str,
     group_name: &str,
 ) {
-    let added_count = added.len();
-    let removed_count = removed.len();
-    let total_changed = added_count.saturating_add(removed_count);
+    let added_total = added.len();
+    let removed_total = removed.len();
+    let total_changed = added_total.saturating_add(removed_total);
+    if total_changed == 0 {
+        return;
+    }
 
-    let mut added = added.iter().map(std::string::ToString::to_string).collect::<Vec<String>>();
-    let mut removed = removed.iter().map(std::string::ToString::to_string).collect::<Vec<String>>();
-    if !added.is_empty() || !removed.is_empty() {
-        if total_changed > WATCH_NOTIFICATION_SUMMARY_THRESHOLD {
-            added = if added_count > 0 {
-                vec![format!(
-                    "{added_count} entries added. Detailed list suppressed for large update ({total_changed} total changes)."
-                )]
-            } else {
-                vec![]
-            };
-            removed = if removed_count > 0 {
-                vec![format!(
-                    "{removed_count} entries removed. Detailed list suppressed for large update ({total_changed} total changes)."
-                )]
-            } else {
-                vec![]
-            };
-        } else {
-            if added.len() > WATCH_NOTIFICATION_LIST_LIMIT {
-                let omitted = added.len() - WATCH_NOTIFICATION_LIST_LIMIT;
-                added.truncate(WATCH_NOTIFICATION_LIST_LIMIT);
-                added.push(format!("... {omitted} more added entries omitted"));
-            }
-            if removed.len() > WATCH_NOTIFICATION_LIST_LIMIT {
-                let omitted = removed.len() - WATCH_NOTIFICATION_LIST_LIMIT;
-                removed.truncate(WATCH_NOTIFICATION_LIST_LIMIT);
-                removed.push(format!("... {omitted} more removed entries omitted"));
+    let mut added: Vec<String> = added.iter().map(std::string::ToString::to_string).collect();
+    let mut removed: Vec<String> = removed.iter().map(std::string::ToString::to_string).collect();
+    let mut truncated = false;
+
+    if total_changed > WATCH_NOTIFICATION_SUMMARY_THRESHOLD {
+        // A whole-provider reshuffle. Nobody reads ten thousand titles, and
+        // every channel routing this pays for the bytes, so send the counts
+        // alone.
+        added.clear();
+        removed.clear();
+        truncated = true;
+    } else {
+        for list in [&mut added, &mut removed] {
+            if list.len() > WATCH_NOTIFICATION_LIST_LIMIT {
+                list.truncate(WATCH_NOTIFICATION_LIST_LIMIT);
+                truncated = true;
             }
         }
-
-        let changes = WatchChanges { target: target_name.to_string(), group: group_name.to_string(), added, removed };
-
-        events.emit(EventMessage::PlaylistWatchChanged(changes));
     }
+
+    events.emit(EventMessage::PlaylistWatchChanged(WatchChanges {
+        target: target_name.to_string(),
+        group: group_name.to_string(),
+        added,
+        removed,
+        added_total,
+        removed_total,
+        truncated,
+    }));
 }
 
 async fn load_watch_tree(path: &Path) -> Option<BTreeSet<Arc<str>>> {
@@ -127,4 +129,83 @@ async fn save_watch_tree(path: &Path, tree: &BTreeSet<Arc<str>>) -> std::io::Res
     }
     let encoded: Vec<u8> = binary_serialize(&tree)?;
     tokio::fs::write(path, encoded).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{handle_watch_notification, WATCH_NOTIFICATION_LIST_LIMIT, WATCH_NOTIFICATION_SUMMARY_THRESHOLD};
+    use shared::model::{EventMessage, EventSink, WatchChanges};
+    use std::{
+        collections::BTreeSet,
+        sync::{Arc, Mutex},
+    };
+
+    #[derive(Default)]
+    struct CollectSink(Mutex<Vec<WatchChanges>>);
+
+    impl EventSink for CollectSink {
+        fn emit(&self, event: EventMessage) {
+            if let EventMessage::PlaylistWatchChanged(changes) = event {
+                self.0.lock().unwrap().push(changes);
+            }
+        }
+    }
+
+    fn titles(count: usize) -> BTreeSet<Arc<str>> {
+        // Zero-padded so the `BTreeSet` order matches the numeric order, which
+        // keeps the truncation assertions readable.
+        (0..count).map(|i| Arc::from(format!("Channel {i:05}").as_str())).collect()
+    }
+
+    fn emit(added: usize, removed: usize) -> WatchChanges {
+        let sink = CollectSink::default();
+        handle_watch_notification(&sink, &titles(added), &titles(removed), "target", "group");
+        let mut captured = sink.0.lock().unwrap();
+        assert_eq!(captured.len(), 1, "expected exactly one event");
+        captured.pop().unwrap()
+    }
+
+    #[test]
+    fn an_unchanged_group_emits_nothing() {
+        let sink = CollectSink::default();
+        handle_watch_notification(&sink, &BTreeSet::new(), &BTreeSet::new(), "target", "group");
+        assert!(sink.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_small_change_lists_every_title() {
+        let changes = emit(3, 2);
+        assert_eq!(changes.added.len(), 3);
+        assert_eq!(changes.removed.len(), 2);
+        assert_eq!(changes.added_total, 3);
+        assert_eq!(changes.removed_total, 2);
+        assert!(!changes.truncated);
+    }
+
+    /// The regression this whole field set exists for: the lists used to carry
+    /// a synthesised "... N more entries omitted" string beside real channel
+    /// titles, which a plugin reading the JSON payload could not distinguish
+    /// from a channel actually named that.
+    #[test]
+    fn a_truncated_list_carries_only_channel_titles() {
+        let added = WATCH_NOTIFICATION_LIST_LIMIT + 40;
+        let changes = emit(added, 0);
+
+        assert_eq!(changes.added.len(), WATCH_NOTIFICATION_LIST_LIMIT);
+        assert_eq!(changes.added_total, added, "the total must survive the truncation");
+        assert!(changes.truncated);
+        for title in &changes.added {
+            assert!(title.starts_with("Channel "), "list carries prose, not a channel title: {title}");
+        }
+    }
+
+    #[test]
+    fn a_very_large_change_reports_counts_only() {
+        let added = WATCH_NOTIFICATION_SUMMARY_THRESHOLD + 100;
+        let changes = emit(added, 0);
+
+        assert!(changes.added.is_empty(), "a change this size should not list titles at all");
+        assert_eq!(changes.added_total, added);
+        assert!(changes.truncated);
+    }
 }

@@ -51,15 +51,11 @@ impl std::error::Error for WebSocketApiError {
 }
 
 impl From<axum::Error> for WebSocketApiError {
-    fn from(value: axum::Error) -> Self {
-        Self::Transport(value)
-    }
+    fn from(value: axum::Error) -> Self { Self::Transport(value) }
 }
 
 impl From<io::Error> for WebSocketApiError {
-    fn from(value: io::Error) -> Self {
-        Self::Protocol(value)
-    }
+    fn from(value: io::Error) -> Self { Self::Protocol(value) }
 }
 
 // WebSocket upgrade handler
@@ -147,9 +143,7 @@ fn websocket_can_receive_runtime_events(mem: &ProtocolHandlerMemory, event: &Eve
 /// not serialize them - the notification bridge, say - pay a refcount bump
 /// instead of a deep copy. Only here, at the wire boundary, is the value
 /// itself needed.
-fn unwrap_or_clone<T: Clone>(value: Arc<T>) -> T {
-    Arc::try_unwrap(value).unwrap_or_else(|shared| (*shared).clone())
-}
+fn unwrap_or_clone<T: Clone>(value: Arc<T>) -> T { Arc::try_unwrap(value).unwrap_or_else(|shared| (*shared).clone()) }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum MainEventReceiveErrorAction {
@@ -771,12 +765,12 @@ mod tests {
                 paths: "config.yml".to_string(),
                 error: "boom".to_string(),
             }),
-            EventMessage::PlaylistWatchChanged(WatchChanges {
-                target: "t".to_string(),
-                group: "g".to_string(),
-                added: Vec::new(),
-                removed: Vec::new(),
-            }),
+            EventMessage::PlaylistWatchChanged(WatchChanges::new(
+                "t".to_string(),
+                "g".to_string(),
+                Vec::new(),
+                Vec::new(),
+            )),
             recording_lifecycle(MsgKind::RecordingStarted),
             recording_lifecycle(MsgKind::RecordingCompleted),
             recording_lifecycle(MsgKind::RecordingFailed),

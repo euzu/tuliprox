@@ -104,9 +104,7 @@ pub fn invalidate_cache() {
     }
 }
 
-fn file_mtime(path: &str) -> Option<std::time::SystemTime> {
-    std::fs::metadata(path).ok()?.modified().ok()
-}
+fn file_mtime(path: &str) -> Option<std::time::SystemTime> { std::fs::metadata(path).ok()?.modified().ok() }
 
 /// Resolve a template value to its body, using the cache where possible.
 async fn resolve(app_config: &Arc<AppConfig>, client: &reqwest::Client, template: &str) -> Arc<str> {
@@ -416,12 +414,12 @@ mod tests {
 
     #[test]
     fn legacy_watch_key_still_resolves() {
-        let event = NotificationEvent::from_content(&MessageContent::Watch(WatchChanges {
-            target: "T".to_string(),
-            group: "G".to_string(),
-            added: vec!["A".to_string()],
-            removed: vec![],
-        }));
+        let event = NotificationEvent::from_content(&MessageContent::Watch(WatchChanges::new(
+            "T".to_string(),
+            "G".to_string(),
+            vec!["A".to_string()],
+            vec![],
+        )));
         let ctx = context_for(&event);
         assert_eq!(ctx["kind"], "Watch");
         assert_eq!(ctx["watch"]["target"], "T");

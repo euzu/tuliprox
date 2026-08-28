@@ -293,9 +293,7 @@ struct ConfigTypeField {
     config_type: String,
 }
 
-fn first_line(s: &str) -> String {
-    s.lines().next().unwrap_or(s).trim().to_string()
-}
+fn first_line(s: &str) -> String { s.lines().next().unwrap_or(s).trim().to_string() }
 
 #[cfg(test)]
 mod tests {
@@ -375,12 +373,12 @@ mod tests {
                 paths: "config.yml".to_string(),
                 error: "boom".to_string(),
             }),
-            EventMessage::PlaylistWatchChanged(WatchChanges {
-                target: "t".to_string(),
-                group: "g".to_string(),
-                added: Vec::new(),
-                removed: Vec::new(),
-            }),
+            EventMessage::PlaylistWatchChanged(WatchChanges::new(
+                "t".to_string(),
+                "g".to_string(),
+                Vec::new(),
+                Vec::new(),
+            )),
             recording_lifecycle(MsgKind::RecordingStarted),
             recording_lifecycle(MsgKind::RecordingCompleted),
             recording_lifecycle(MsgKind::RecordingFailed),

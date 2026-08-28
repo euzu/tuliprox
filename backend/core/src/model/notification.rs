@@ -182,7 +182,9 @@ fn title_for(content: &MessageContent) -> String {
     match content {
         MessageContent::Info(s) | MessageContent::Error(s) => first_line(s),
         MessageContent::Watch(w) => {
-            format!("{} channel(s) added, {} removed in {}/{}", w.added.len(), w.removed.len(), w.target, w.group)
+            // The totals, not the list lengths: a large change ships a sample
+            // and the subject line must still report what actually happened.
+            format!("{} channel(s) added, {} removed in {}/{}", w.added_total, w.removed_total, w.target, w.group)
         }
         MessageContent::ProcessingStats(stats) => match (&stats.stats, &stats.errors) {
             (None, Some(_)) => "Playlist update failed".to_string(),
@@ -206,6 +208,30 @@ fn title_for(content: &MessageContent) -> String {
     }
 }
 
+/// One direction of a watch change, rendered for a plain-text channel.
+///
+/// `names` may be a sample of `total` - or empty, when the change was too
+/// large to list - so the omission is spelled out here rather than smuggled
+/// into the list itself.
+fn push_watch_section(out: &mut String, label: &str, names: &[String], total: usize) {
+    if total == 0 {
+        return;
+    }
+    let _ = write!(out, "\n\n{label} ({total}):");
+    if names.is_empty() {
+        out.push_str("\n(list suppressed for a large update)");
+        return;
+    }
+    for name in names {
+        out.push('\n');
+        out.push_str(name);
+    }
+    let omitted = total.saturating_sub(names.len());
+    if omitted > 0 {
+        let _ = write!(out, "\n... {omitted} more not listed");
+    }
+}
+
 /// The plain-text rendering used when a channel has no template.
 ///
 /// Preserves the legacy `default_text_for` output for the string and disk
@@ -215,14 +241,8 @@ fn body_for(content: &MessageContent) -> String {
         MessageContent::Info(s) | MessageContent::Error(s) => s.clone(),
         MessageContent::Watch(w) => {
             let mut out = format!("Watched group {}/{} changed.", w.target, w.group);
-            if !w.added.is_empty() {
-                out.push_str("\n\nAdded:\n");
-                out.push_str(&w.added.join("\n"));
-            }
-            if !w.removed.is_empty() {
-                out.push_str("\n\nRemoved:\n");
-                out.push_str(&w.removed.join("\n"));
-            }
+            push_watch_section(&mut out, "Added", &w.added, w.added_total);
+            push_watch_section(&mut out, "Removed", &w.removed, w.removed_total);
             out
         }
         MessageContent::ProcessingStats(stats) => {
@@ -356,12 +376,12 @@ mod tests {
     fn watch_body_lists_added_and_removed_instead_of_dumping_json() {
         // Regression: the legacy default text for a watch change was a raw
         // `serde_json` dump, which is what Pushover received.
-        let content = MessageContent::Watch(super::super::messaging::WatchChanges {
-            target: "T".to_string(),
-            group: "G".to_string(),
-            added: vec!["Channel A".to_string()],
-            removed: vec!["Channel B".to_string()],
-        });
+        let content = MessageContent::Watch(super::super::messaging::WatchChanges::new(
+            "T".to_string(),
+            "G".to_string(),
+            vec!["Channel A".to_string()],
+            vec!["Channel B".to_string()],
+        ));
         let event = NotificationEvent::from_content(&content);
         assert!(event.body.contains("Channel A"), "body missing added channel: {}", event.body);
         assert!(event.body.contains("Channel B"), "body missing removed channel: {}", event.body);
