@@ -40,7 +40,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tuliprox_hls::api::HlsProxyManager;
 use tuliprox_metadata::manager::MetadataUpdateManager;
-use tuliprox_repository::identity_registry::IdentityRegistry;
+use tuliprox_repository::{identity_registry::IdentityRegistry, token_revocations::TokenRevocations};
 use tuliprox_session::{provider_dns_manager::exec_provider_dns, qos_aggregation_manager::exec_qos_aggregation};
 
 macro_rules! cancel_service {
@@ -454,6 +454,11 @@ pub struct AppState {
     /// `/auth/token` used to answer 401 and forget, so a password list could
     /// be worked against it as fast as argon2 allows.
     pub login_throttle: Arc<crate::auth::LoginThrottle>,
+    /// Revocation watermarks for already-issued tokens.
+    ///
+    /// The tokens this server mints are stateless, so nothing could take one
+    /// back: a leak stayed valid until it expired.
+    pub token_revocations: Arc<TokenRevocations>,
     /// Bounded channel (capacity 1) for manual playlist update requests.
     /// `try_send` deduplicates rapid clicks: if an update is already pending
     /// or the channel is full, the request is silently dropped so at most one
@@ -530,6 +535,9 @@ pub(crate) fn create_test_app_state(config: Config) -> Arc<AppState> {
             std::path::PathBuf::new(),
         )),
         login_throttle: Arc::new(crate::auth::LoginThrottle::new()),
+        token_revocations: Arc::new(tuliprox_repository::token_revocations::TokenRevocations::empty(
+            std::path::PathBuf::new(),
+        )),
         manual_update_sender,
     })
 }

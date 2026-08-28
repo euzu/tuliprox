@@ -32,7 +32,19 @@ pub struct VerifiedClaims(pub Claims);
 /// schema version and subject id, and finally the principal's password
 /// version. That last check is why a password change now invalidates live
 /// tokens instead of leaving them valid until expiry.
-fn authenticate(app_state: &Arc<AppState>, token: &str) -> Result<Claims, AuthError> {
+async fn authenticate(app_state: &Arc<AppState>, token: &str) -> Result<Claims, AuthError> {
+    let claims = verify_claims(app_state, token)?;
+    // Last, because it is the only check that touches shared state: a token
+    // that fails any of the cheap checks above never reaches it.
+    if app_state.token_revocations.is_revoked(&claims).await {
+        return Err(AuthError::Revoked);
+    }
+    Ok(claims)
+}
+
+/// Everything about a token that can be decided from the token and the config
+/// alone.
+fn verify_claims(app_state: &Arc<AppState>, token: &str) -> Result<Claims, AuthError> {
     let config = app_state.app_config.config.load();
     let Some(web_auth_config) = config.web_ui.as_ref().and_then(|c| c.auth.as_ref()) else {
         return Err(AuthError::InvalidToken);
@@ -102,13 +114,13 @@ fn rejection_for(err: AuthError) -> axum::response::Response {
 /// `role_fn` is a plain `fn` pointer - static dispatch, no closure. It reads
 /// the claims this function already decoded; it used to be a
 /// `fn(&str, &[u8]) -> bool` that decoded the token all over again.
-fn authorize_role(
+async fn authorize_role(
     app_state: &Arc<AppState>,
     token: &str,
     request: &mut axum::extract::Request,
     role_fn: fn(&Claims) -> bool,
 ) -> Result<(), AuthError> {
-    let claims = authenticate(app_state, token)?;
+    let claims = authenticate(app_state, token).await?;
     if !role_fn(&claims) {
         return Err(AuthError::Forbidden);
     }
@@ -122,7 +134,7 @@ pub async fn validator_admin(
     mut request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    match authorize_role(&app_state, &token, &mut request, Claims::is_admin) {
+    match authorize_role(&app_state, &token, &mut request, Claims::is_admin).await {
         Ok(()) => next.run(request).await,
         Err(err) => rejection_for(err),
     }
@@ -134,7 +146,7 @@ pub async fn validator_api_user(
     mut request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    let claims = match authenticate(&app_state, &token) {
+    let claims = match authenticate(&app_state, &token).await {
         Ok(claims) => claims,
         Err(err) => return rejection_for(err),
     };
@@ -164,7 +176,7 @@ pub async fn require_permission<const P: u32>(
     mut request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    let claims = match authenticate(&app_state, &token) {
+    let claims = match authenticate(&app_state, &token).await {
         Ok(claims) => claims,
         Err(err) => return rejection_for(err),
     };
@@ -251,24 +263,13 @@ impl axum::response::IntoResponse for AuthorizeRejection {
 impl<const P: u32> FromRequestParts<Arc<AppState>> for AuthorizedClaims<P> {
     type Rejection = AuthorizeRejection;
 
-    // The whole check is synchronous once the request parts are in hand, so
-    // this is a ready future rather than an `async fn` - the same shape the
-    // `AuthBearer` and `AuthBasic` extractors use.
-    fn from_request_parts(
-        parts: &mut Parts,
-        app_state: &Arc<AppState>,
-    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
-        std::future::ready(Self::extract(parts, app_state))
-    }
-}
-
-impl<const P: u32> AuthorizedClaims<P> {
-    fn extract(parts: &mut Parts, app_state: &Arc<AppState>) -> Result<Self, AuthorizeRejection> {
+    async fn from_request_parts(parts: &mut Parts, app_state: &Arc<AppState>) -> Result<Self, Self::Rejection> {
         let claims = if let Some(VerifiedClaims(claims)) = parts.extensions.get::<VerifiedClaims>() {
+            // A layer already authenticated this request, revocation included.
             claims.clone()
         } else {
             let AuthBearer(token) = AuthBearer::from_headers(&parts.headers).map_err(AuthorizeRejection::Header)?;
-            let claims = authenticate(app_state, &token).map_err(AuthorizeRejection::Token)?;
+            let claims = authenticate(app_state, &token).await.map_err(AuthorizeRejection::Token)?;
             parts.extensions.insert(VerifiedClaims(claims.clone()));
             claims
         };

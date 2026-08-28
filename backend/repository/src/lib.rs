@@ -31,6 +31,7 @@ mod startup_migration;
 pub mod storage_const;
 mod stream_history;
 mod strm_repository;
+pub mod token_revocations;
 mod user_repository;
 mod xtream_playlist_iterator;
 mod xtream_repository;

@@ -171,6 +171,9 @@ pub enum AuthError {
     /// the principal must authenticate again; a refresh cannot help, because
     /// the refresh endpoint applies the same check.
     PasswordChanged,
+    /// Token signature is valid but it was issued before a revocation that
+    /// covers it - the principal was signed out, or every session was.
+    Revoked,
     /// Token signature is valid but the principal has the wrong
     /// role/permission for the requested endpoint.
     Forbidden,
@@ -192,6 +195,7 @@ impl std::fmt::Display for AuthError {
             Self::StaleSchema => f.write_str("token was issued for an older permission schema; refresh required"),
             Self::MissingSubject => f.write_str("token is missing a subject_id; refresh required"),
             Self::PasswordChanged => f.write_str("token was issued for a different password; sign in again"),
+            Self::Revoked => f.write_str("token has been revoked; sign in again"),
             Self::Forbidden => f.write_str("principal does not have the required role"),
         }
     }

@@ -68,7 +68,10 @@ use tower_http::{
     services::ServeDir,
 };
 use tuliprox_hls::api::{exec_hls_cache_gc, exec_hls_lifecycle, HlsProxyManager};
-use tuliprox_repository::identity_registry::{BootstrapOutcome, IdentityRegistry};
+use tuliprox_repository::{
+    identity_registry::{BootstrapOutcome, IdentityRegistry},
+    token_revocations::TokenRevocations,
+};
 
 const METADATA_TRIGGER_WAIT_CYCLE_LIMIT: u32 = 900;
 static CORRUPT_DOWNLOADS_STATE_SUFFIX: AtomicU64 = AtomicU64::new(1);
@@ -423,6 +426,12 @@ async fn create_shared_data(
 
     let (manual_update_sender, manual_update_rx) = mpsc::channel::<ManualPlaylistUpdateRequest>(1);
     let identity_registry = bootstrap_identity_registry(&config, app_config).await?;
+    let revocations_path = std::path::PathBuf::from(&config.storage_dir).join("token_revocations.json");
+    let token_revocations = Arc::new(TokenRevocations::load(revocations_path).await.map_err(|err| {
+        // Reading a corrupt file as "nothing is revoked" would silently
+        // reinstate every revoked session.
+        TuliproxError::Server(format!("Cannot load token revocations: {err}"))
+    })?);
 
     let app_state = AppState {
         forced_targets: Arc::new(ArcSwap::new(Arc::clone(forced_targets))),
@@ -446,6 +455,7 @@ async fn create_shared_data(
         metadata_manager,
         identity_registry,
         login_throttle: Arc::new(crate::auth::LoginThrottle::new()),
+        token_revocations,
         manual_update_sender,
     };
 
@@ -1196,6 +1206,9 @@ mod tests {
                     std::path::PathBuf::new(),
                 )),
                 login_throttle: Arc::new(crate::auth::LoginThrottle::new()),
+                token_revocations: Arc::new(tuliprox_repository::token_revocations::TokenRevocations::empty(
+                    std::path::PathBuf::new(),
+                )),
                 manual_update_sender,
             })
         }

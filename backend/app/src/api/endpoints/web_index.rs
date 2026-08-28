@@ -1,4 +1,5 @@
 use crate::{
+    api::auth_middleware::AuthorizedClaims,
     api::{
         api_utils::{serve_file, try_unwrap_body},
         model::AppState,
@@ -216,6 +217,60 @@ async fn token(
     axum::http::StatusCode::UNAUTHORIZED.into_response()
 }
 
+/// The permission required to end somebody else's sessions.
+const REVOKE_PERMISSION: u32 = shared::model::permission::Permission::UserWrite as u32;
+
+/// Revoke every token already issued to one principal.
+///
+/// The requirement is in the signature rather than a router layer, because the
+/// `/auth` routes are mounted before any state is available to build one.
+async fn revoke_user_tokens(
+    AuthorizedClaims(actor): AuthorizedClaims<REVOKE_PERMISSION>,
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    axum::extract::Path(username): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse + Send {
+    // Both namespaces: an operator names a principal, not a namespace, and a
+    // username can exist in either.
+    let subjects: Vec<_> = [
+        app_state.identity_registry.lookup_by_username(&username).await,
+        app_state.identity_registry.lookup_api_by_username(&username).await,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    if subjects.is_empty() {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    for subject in &subjects {
+        if let Err(err) = app_state.token_revocations.revoke_subject(subject, now).await {
+            error!("Cannot persist token revocation for '{username}': {err}");
+            return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    }
+    warn!("'{}' revoked every token issued to '{username}'", actor.username);
+    axum::http::StatusCode::NO_CONTENT.into_response()
+}
+
+/// Revoke every token issued to every principal.
+///
+/// The response to a compromise. Short of rotating the signing secret this was
+/// not possible at all, and rotating the secret is not reversible or auditable.
+async fn revoke_all_tokens(
+    AuthorizedClaims(actor): AuthorizedClaims<REVOKE_PERMISSION>,
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+) -> impl axum::response::IntoResponse + Send {
+    let now = chrono::Utc::now().timestamp();
+    if let Err(err) = app_state.token_revocations.revoke_all(now).await {
+        error!("Cannot persist a global token revocation: {err}");
+        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    warn!("'{}' revoked every token issued to every principal", actor.username);
+    axum::http::StatusCode::NO_CONTENT.into_response()
+}
+
 async fn token_refresh(
     AuthBearer(token): AuthBearer,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
@@ -231,6 +286,11 @@ async fn token_refresh(
             let maybe_token_data = verify_token(&token, secret_key, &web_auth.issuer);
             if let Some(token_data) = maybe_token_data {
                 let claims = token_data.claims;
+                // A revoked token must not be exchangeable for a fresh one -
+                // that would make revocation a formality.
+                if app_state.token_revocations.is_revoked(&claims).await {
+                    return axum::http::StatusCode::UNAUTHORIZED.into_response();
+                }
                 let username = claims.username.as_str();
 
                 if claims.is_api_user() {
@@ -462,7 +522,9 @@ pub fn index_register_without_path(web_dir_path: &Path) -> axum::Router<Arc<AppS
             "/auth",
             axum::Router::new()
                 .route("/token", axum::routing::post(token))
-                .route("/refresh", axum::routing::post(token_refresh)),
+                .route("/refresh", axum::routing::post(token_refresh))
+                .route("/revoke/{username}", axum::routing::post(revoke_user_tokens))
+                .route("/revoke", axum::routing::post(revoke_all_tokens)),
         )
         .merge(
             axum::Router::new()
@@ -527,7 +589,9 @@ pub fn index_register_with_path(web_dir_path: &Path, web_ui_path: &str) -> axum:
 
     let auth_router = axum::Router::new()
         .route("/token", axum::routing::post(token))
-        .route("/refresh", axum::routing::post(token_refresh));
+        .route("/refresh", axum::routing::post(token_refresh))
+        .route("/revoke/{username}", axum::routing::post(revoke_user_tokens))
+        .route("/revoke", axum::routing::post(revoke_all_tokens));
 
     let web_ui_path_clone = web_ui_path.to_string();
     axum::Router::new()
