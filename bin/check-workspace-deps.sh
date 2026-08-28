@@ -76,7 +76,6 @@ normal tuliprox-processing -> tuliprox-core
 normal tuliprox-processing -> tuliprox-iptv
 normal tuliprox-processing -> tuliprox-library
 normal tuliprox-processing -> tuliprox-media-server
-normal tuliprox-processing -> tuliprox-messaging
 normal tuliprox-processing -> tuliprox-parser
 normal tuliprox-processing -> tuliprox-repository
 normal tuliprox-processing -> tuliprox-session
