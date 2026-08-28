@@ -31,7 +31,6 @@ use std::{
     collections::{HashMap, HashSet},
     future::Future,
     path::PathBuf,
-    pin::Pin,
     sync::{Arc, Weak},
     time::{Duration, Instant},
 };
@@ -1940,7 +1939,33 @@ async fn process_watch<E: EventSink>(
 ///
 /// This was an `Option<Arc<AppState>>` used for exactly one call. Passing the
 /// call instead of the state keeps `processing` from naming the server state.
-pub type PlaylistUpdateBootstrap = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+///
+/// It was then an
+/// `Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>`:
+/// two layers of erasure and a heap allocation for a future that is awaited
+/// exactly once per update, and every call site had to spell out both
+/// coercions. As a trait it is one type parameter, monomorphised, with the
+/// future returned by value.
+pub trait UpdateBootstrap: Send + Sync + 'static {
+    fn run(&self) -> impl Future<Output = ()> + Send;
+}
+
+impl<F, Fut> UpdateBootstrap for F
+where
+    F: Fn() -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()> + Send,
+{
+    fn run(&self) -> impl Future<Output = ()> + Send {
+        self()
+    }
+}
+
+/// The bootstrap type parameter of a run that has no bootstrap.
+///
+/// A function pointer rather than a unit struct: it satisfies the blanket
+/// `Fn` impl above, so no second impl - and no coherence problem - is needed.
+/// A value of this type is never constructed; the field is always `None`.
+pub type NoBootstrap = fn() -> std::future::Ready<()>;
 
 /// Everything one playlist update run needs.
 ///
@@ -1952,12 +1977,12 @@ pub type PlaylistUpdateBootstrap = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = (
 /// Four of the twelve are always present, so they are constructor arguments.
 /// The rest are optional in fact as well as in type, and a call site names the
 /// ones it actually sets.
-pub struct ProcessingRun<E: EventSink + Clone + 'static> {
+pub struct ProcessingRun<E: EventSink + Clone + 'static, B: UpdateBootstrap = NoBootstrap> {
     client: reqwest::Client,
     app_config: Arc<AppConfig>,
     targets: Arc<ProcessTargets>,
     events: E,
-    bootstrap: Option<PlaylistUpdateBootstrap>,
+    bootstrap: Option<B>,
     playlist_state: Option<Arc<PlaylistStorageState>>,
     update_guard: Option<UpdateGuard>,
     disabled_headers: Option<ReverseProxyDisabledHeaderConfig>,
@@ -1967,7 +1992,7 @@ pub struct ProcessingRun<E: EventSink + Clone + 'static> {
     acquired_permit: Option<tuliprox_core::model::UpdateGuardPermit>,
 }
 
-impl<E: EventSink + Clone + 'static> ProcessingRun<E> {
+impl<E: EventSink + Clone + 'static> ProcessingRun<E, NoBootstrap> {
     pub fn new(client: reqwest::Client, app_config: Arc<AppConfig>, targets: Arc<ProcessTargets>, events: E) -> Self {
         Self {
             client,
@@ -1984,13 +2009,29 @@ impl<E: EventSink + Clone + 'static> ProcessingRun<E> {
             acquired_permit: None,
         }
     }
+}
 
+impl<E: EventSink + Clone + 'static, B: UpdateBootstrap> ProcessingRun<E, B> {
     /// Work the composition root runs once the lock is held, before the update
     /// proper starts.
+    ///
+    /// Changes the run's bootstrap type, so it rebuilds rather than mutates.
     #[must_use]
-    pub fn with_bootstrap(mut self, bootstrap: impl Into<Option<PlaylistUpdateBootstrap>>) -> Self {
-        self.bootstrap = bootstrap.into();
-        self
+    pub fn with_bootstrap<B2: UpdateBootstrap>(self, bootstrap: B2) -> ProcessingRun<E, B2> {
+        ProcessingRun {
+            client: self.client,
+            app_config: self.app_config,
+            targets: self.targets,
+            events: self.events,
+            bootstrap: Some(bootstrap),
+            playlist_state: self.playlist_state,
+            update_guard: self.update_guard,
+            disabled_headers: self.disabled_headers,
+            provider_manager: self.provider_manager,
+            metadata_manager: self.metadata_manager,
+            pre_processed_inputs: self.pre_processed_inputs,
+            acquired_permit: self.acquired_permit,
+        }
     }
 
     #[must_use]
@@ -2043,7 +2084,7 @@ impl<E: EventSink + Clone + 'static> ProcessingRun<E> {
 }
 
 #[allow(clippy::too_many_lines)]
-pub async fn exec_processing<E: EventSink + Clone + 'static>(run: ProcessingRun<E>) {
+pub async fn exec_processing<E: EventSink + Clone + 'static, B: UpdateBootstrap>(run: ProcessingRun<E, B>) {
     let ProcessingRun {
         client,
         app_config,
@@ -2078,7 +2119,7 @@ pub async fn exec_processing<E: EventSink + Clone + 'static>(run: ProcessingRun<
 
     if playlist_guard.is_some() {
         if let Some(bootstrap) = bootstrap.as_ref() {
-            if tokio::time::timeout(max_update_duration, bootstrap()).await.is_err() {
+            if tokio::time::timeout(max_update_duration, bootstrap.run()).await.is_err() {
                 error!(
                     "Playlist update bootstrap timed out after {PLAYLIST_UPDATE_MAX_DURATION_SECS} secs while holding playlist lock",
                 );

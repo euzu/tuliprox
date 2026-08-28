@@ -34,7 +34,7 @@ use crate::{
         },
     },
     model::{AppConfig, Config, HdHomeRunFlags, Healthcheck, ProcessTargets, RateLimitConfig},
-    processing::processor::{exec_processing, PlaylistUpdateBootstrap, ProcessingRun},
+    processing::processor::{exec_processing, ProcessingRun},
     repository::{get_geoip_path, GeoIp},
     utils::{exec_file_lock_prune, get_default_web_root_path},
     VERSION,
@@ -216,11 +216,10 @@ fn spawn_metadata_trigger_update(
                             )
                             .with_bootstrap({
                                 let state = Arc::clone(&app_state_clone);
-                                std::sync::Arc::new(move || {
+                                move || {
                                     let state = Arc::clone(&state);
-                                    Box::pin(async move { sync_panel_api_exp_dates(&state).await })
-                                        as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
-                                }) as PlaylistUpdateBootstrap
+                                    async move { sync_panel_api_exp_dates(&state).await }
+                                }
                             })
                             .with_playlist_state(Arc::clone(&playlist_state))
                             .with_update_guard(update_guard.clone())
@@ -418,11 +417,10 @@ async fn run_manual_update_worker(
             )
             .with_bootstrap({
                 let state = Arc::clone(&app_state);
-                std::sync::Arc::new(move || {
+                move || {
                     let state = Arc::clone(&state);
-                    Box::pin(async move { sync_panel_api_exp_dates(&state).await })
-                        as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
-                }) as PlaylistUpdateBootstrap
+                    async move { sync_panel_api_exp_dates(&state).await }
+                }
             })
             .with_playlist_state(Arc::clone(&app_state.playlists))
             .with_update_guard(app_state.update_guard.clone())
@@ -498,11 +496,10 @@ fn exec_update_on_boot(client: &reqwest::Client, app_state: &Arc<AppState>, targ
                 ProcessingRun::new(client, app_config_clone, targets_clone, event_manager)
                     .with_bootstrap({
                         let state = Arc::clone(&app_state_clone);
-                        std::sync::Arc::new(move || {
+                        move || {
                             let state = Arc::clone(&state);
-                            Box::pin(async move { sync_panel_api_exp_dates(&state).await })
-                                as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
-                        }) as PlaylistUpdateBootstrap
+                            async move { sync_panel_api_exp_dates(&state).await }
+                        }
                     })
                     .with_playlist_state(playlist_state)
                     .with_update_guard(update_guard)

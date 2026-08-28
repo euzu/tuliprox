@@ -6,7 +6,7 @@ use crate::{
     model::{AppConfig, ProcessTargets, ScheduleConfig},
     processing::{
         geoip::{update_geoip_db, GeoIpUpdateError},
-        processor::{exec_processing, PlaylistUpdateBootstrap, ProcessingRun},
+        processor::{exec_processing, ProcessingRun},
     },
     utils::exit,
 };
@@ -192,11 +192,10 @@ async fn run_playlist_update_inner(
         )
         .with_bootstrap({
             let state = Arc::clone(app_state);
-            std::sync::Arc::new(move || {
+            move || {
                 let state = Arc::clone(&state);
-                Box::pin(async move { crate::api::sync_panel_api_exp_dates(&state).await })
-                    as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
-            }) as PlaylistUpdateBootstrap
+                async move { crate::api::sync_panel_api_exp_dates(&state).await }
+            }
         })
         .with_playlist_state(app_state.playlists.clone())
         .with_update_guard(app_state.update_guard.clone())
