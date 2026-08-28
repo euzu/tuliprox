@@ -1,5 +1,4 @@
 use crate::{
-    epg,
     fetched_playlist::FetchedPlaylist,
     input_cache,
     input_cache::ClusterState,
@@ -46,8 +45,9 @@ use tuliprox_core::{
     },
     utils::{debug_if_enabled, log_memory_snapshot, trace_if_enabled, StepMeasure, StepMeasureCallback},
 };
-use super::providers::{LibraryProvider, PlexProvider, StalkerProvider};
+use super::providers::{LibraryProvider, PlexProvider, StalkerProvider, XmltvEpgProvider};
 use tuliprox_iptv::{
+    epg::{CountingEpgSink, EpgFetchRequest, EpgProvider},
     provider::{
         BatchContainerProvider, M3uProvider, PlaylistFetch, PlaylistFetchRequest, PlaylistProvider,
         UnsupportedProvider, XtreamProvider,
@@ -934,15 +934,24 @@ async fn download_input_epg<E: EventSink + Clone + 'static, M: MetadataUpdateSin
     input: &Arc<ConfigInput>,
     error_list: &mut Vec<TuliproxError>,
 ) -> Option<TVGuide> {
-    // Download epg for input
-    let (tvguide, mut tvguide_errors) = if error_list.is_empty() {
-        let storage_dir = &ctx.config.config.load().storage_dir;
-        epg::get_xmltv(ctx, input, None, storage_dir).await
-    } else {
-        (None, vec![])
-    };
-    error_list.append(&mut tvguide_errors);
-    tvguide
+    // A failed playlist download makes the EPG moot: the channels it would annotate are
+    // not there.
+    if !error_list.is_empty() {
+        return None;
+    }
+    let provider = XmltvEpgProvider::new(ctx);
+    // The XMLTV path produces documents, not programme records, so nothing reaches the
+    // sink. It is here because the same call answers for a record-streaming provider.
+    let mut discarded = CountingEpgSink::new();
+    let outcome = provider.fetch(&EpgFetchRequest::new(input), &mut discarded).await;
+    error_list.extend(provider.take_errors());
+    match outcome {
+        Ok(outcome) => outcome.into_guide(),
+        Err(err) => {
+            error_list.push(err);
+            None
+        }
+    }
 }
 
 /// `invalidate_input_cache_status` performs a non-atomic file I/O sequence

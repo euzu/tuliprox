@@ -11,13 +11,17 @@ use super::{
     stalker::download_stalker_playlist,
     stalker_refresh::StalkerRefreshMode,
 };
-use shared::{error::TuliproxError, model::PlaylistGroup};
+use crate::{metadata_sink::MetadataUpdateSink, parser::xmltv::TVGuide, processor::PlaylistProcessingContext};
+use shared::{error::TuliproxError, model::EventSink, model::PlaylistGroup};
 use tuliprox_core::model::ConfigInput;
 use tuliprox_media_server::{
     media_server_catalog_snapshot_to_playlist, refresh_media_server_catalog_complete_before_publish,
     MediaServerCatalogRefreshPolicy, MediaServerHttpClient,
 };
-use tuliprox_iptv::provider::{PlaylistFetch, PlaylistFetchRequest, PlaylistProvider};
+use tuliprox_iptv::{
+    epg::{EpgFetchRequest, EpgOutcome, EpgProvider, EpgRecordSink},
+    provider::{PlaylistFetch, PlaylistFetchRequest, PlaylistProvider},
+};
 
 /// Stalker/Ministra portal. Carries the refresh mode and whether the fetched generation
 /// should be published immediately, both of which only this provider has.
@@ -107,5 +111,56 @@ async fn download_plex_media_server_playlist(
     match refresh_media_server_catalog_complete_before_publish(&plex_client, policy).await {
         Ok(snapshot) => (media_server_catalog_snapshot_to_playlist(&snapshot), vec![]),
         Err(error) => (vec![], vec![TuliproxError::Download(error.to_string())]),
+    }
+}
+
+
+/// XMLTV/ICS EPG for M3U, Xtream and library inputs.
+///
+/// The counterpart to `tuliprox_iptv::epg::StalkerEpgProvider`: this one downloads whole
+/// documents and hands back a [`TVGuide`] over the files, rather than streaming programme
+/// records. Which of the two happened is exactly what
+/// [`EpgOutcome`](tuliprox_iptv::epg::EpgOutcome) exists to say - forcing a
+/// several-hundred-megabyte XMLTV document through a record sink would mean materialising
+/// all of it in memory to answer a question nobody asked.
+pub struct XmltvEpgProvider<'a, E: EventSink + Clone + 'static, M: MetadataUpdateSink> {
+    ctx: &'a PlaylistProcessingContext<E, M>,
+    errors: parking_lot::Mutex<Vec<TuliproxError>>,
+}
+
+impl<'a, E: EventSink + Clone + 'static, M: MetadataUpdateSink> XmltvEpgProvider<'a, E, M> {
+    pub fn new(ctx: &'a PlaylistProcessingContext<E, M>) -> Self {
+        Self { ctx, errors: parking_lot::Mutex::new(Vec::new()) }
+    }
+
+    /// The per-source failures collected during the fetch.
+    ///
+    /// EPG download is per-source and partial by nature: three sources where one 404s
+    /// still yields a usable guide from the other two, so the failures travel alongside
+    /// the outcome rather than replacing it.
+    pub fn take_errors(&self) -> Vec<TuliproxError> {
+        std::mem::take(&mut *self.errors.lock())
+    }
+}
+
+impl<E: EventSink + Clone + 'static, M: MetadataUpdateSink> EpgProvider for XmltvEpgProvider<'_, E, M> {
+    type Guide = TVGuide;
+
+    fn name(&self) -> &'static str {
+        "xmltv"
+    }
+
+    async fn fetch(
+        &self,
+        request: &EpgFetchRequest<'_>,
+        _sink: &mut impl EpgRecordSink,
+    ) -> Result<EpgOutcome<TVGuide>, TuliproxError> {
+        if request.input.epg.is_none() {
+            return Ok(EpgOutcome::NotConfigured);
+        }
+        let storage_dir = { self.ctx.config.config.load().storage_dir.clone() };
+        let (guide, errors) = crate::epg::get_xmltv(self.ctx, request.input, None, &storage_dir).await;
+        self.errors.lock().extend(errors);
+        Ok(guide.map_or(EpgOutcome::NotConfigured, EpgOutcome::Guide))
     }
 }
