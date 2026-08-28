@@ -479,6 +479,7 @@ fn to_protocol_message(event: EventMessage) -> Option<(ProtocolMessage, &'static
         // bus, and adding them to the wire would need a `ProtocolMessage`
         // variant and frontend handling that nothing asks for yet.
         EventMessage::RecordingChanged
+        | EventMessage::ServerLifecycle(_)
         | EventMessage::InputMetadataUpdatesCompleted(_)
         | EventMessage::InputMetadataUpdatesStarted(_)
         | EventMessage::InputMetadataUpdatesFailed(_)
@@ -685,7 +686,9 @@ mod tests {
         // every notification-only kind against `expected = true` and the
         // test failed on `DiskAlert` - it has been red since the lifecycle
         // events joined the bus.
-        const NOT_ON_THE_WIRE: [EventKind; 14] = [
+        const NOT_ON_THE_WIRE: [EventKind; 16] = [
+            EventKind::ServerStarted,
+            EventKind::ServerShutdown,
             EventKind::InputMetadataUpdatesFailed,
             EventKind::DiskAlert,
             EventKind::ConfigReloadFailed,
@@ -714,7 +717,8 @@ mod tests {
     fn sample_event_of_every_kind() -> Vec<(EventMessage, shared::model::EventKind)> {
         use shared::model::{
             ActiveUserConnectionChange, ConfigType, EventKind, PlaylistUpdateState, PlaylistUpdateSummary,
-            StreamProbeFailure, StreamProbeFailureReason, SystemInfo, UserLifecycleEvent, UserLifecycleState,
+            ServerLifecycleEvent, StreamProbeFailure, StreamProbeFailureReason, SystemInfo, UserLifecycleEvent,
+            UserLifecycleState,
         };
 
         fn user_lifecycle(state: UserLifecycleState) -> EventMessage {
@@ -724,6 +728,8 @@ mod tests {
         let downloads = DownloadsResponse { queue: Vec::new(), finished: Vec::new(), active: Vec::new() };
         let samples = vec![
             EventMessage::ServerError("x".to_string()),
+            EventMessage::ServerLifecycle(ServerLifecycleEvent::started("1".into(), "h:1".into())),
+            EventMessage::ServerLifecycle(ServerLifecycleEvent::shutting_down("1".into(), "SIGTERM".into())),
             EventMessage::ActiveUser(ActiveUserConnectionChange::Connections(0, 0)),
             EventMessage::ActiveProvider("p".into(), 1),
             EventMessage::ConfigChange(ConfigType::Config),

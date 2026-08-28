@@ -16,7 +16,8 @@ use crate::model::{
     ActiveUserConnectionChange, ConfigReloadFailure, ConfigType, DiskAlert, DownloadsDelta, DownloadsResponse,
     LibraryScanProgressEvent, LibraryScanSummaryStatus, MetadataUpdateFailure, MsgKind, Permission,
     PlaylistUpdateProgressEvent, PlaylistUpdateState, ProviderAccountEvent, ProviderAccountState,
-    RecordingLifecycleMessage, StreamProbeFailure, SystemInfo, UserLifecycleEvent, UserLifecycleState, WatchChanges,
+    RecordingLifecycleMessage, ServerLifecycleEvent, ServerLifecycleState, StreamProbeFailure, SystemInfo,
+    UserLifecycleEvent, UserLifecycleState, WatchChanges,
 };
 use std::sync::Arc;
 
@@ -27,6 +28,9 @@ use std::sync::Arc;
 #[derive(Clone, Debug, PartialEq)]
 pub enum EventMessage {
     ServerError(String),
+    /// The server finished starting, or is stopping. One variant, two kinds -
+    /// see [`EventMessage::kind`].
+    ServerLifecycle(ServerLifecycleEvent),
     ActiveUser(ActiveUserConnectionChange),
     ActiveProvider(Arc<str>, usize),
     ConfigChange(ConfigType),
@@ -137,6 +141,8 @@ impl<T: EventSink> EventSink for &T {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum EventKind {
     ServerError,
+    ServerStarted,
+    ServerShutdown,
     ActiveUser,
     ActiveProvider,
     ConfigChange,
@@ -178,8 +184,10 @@ impl EventKind {
     ///
     /// The mask type below indexes into this, so the order is load-bearing:
     /// it is the bit order, not just a listing.
-    pub const ALL: [Self; 33] = [
+    pub const ALL: [Self; 35] = [
         Self::ServerError,
+        Self::ServerStarted,
+        Self::ServerShutdown,
         Self::ActiveUser,
         Self::ActiveProvider,
         Self::ConfigChange,
@@ -251,6 +259,8 @@ impl EventKind {
             | Self::AuthSignInThrottled
             | Self::AuthPermissionDenied => Permission::UserRead,
             Self::ServerError
+            | Self::ServerStarted
+            | Self::ServerShutdown
             | Self::ActiveUser
             | Self::ActiveProvider
             | Self::ConfigChange
@@ -328,6 +338,8 @@ impl EventKind {
     pub const fn as_wire_name(self) -> &'static str {
         match self {
             Self::ServerError => "server.error",
+            Self::ServerStarted => "system.started",
+            Self::ServerShutdown => "system.shutdown",
             Self::ActiveUser => "user.connection.changed",
             Self::ActiveProvider => "provider.connection.changed",
             Self::ConfigChange => "config.changed",
@@ -375,6 +387,10 @@ impl EventMessage {
     pub const fn kind(&self) -> EventKind {
         match self {
             Self::ServerError(_) => EventKind::ServerError,
+            Self::ServerLifecycle(event) => match event.state {
+                ServerLifecycleState::Started => EventKind::ServerStarted,
+                ServerLifecycleState::ShuttingDown => EventKind::ServerShutdown,
+            },
             Self::ActiveUser(_) => EventKind::ActiveUser,
             Self::ActiveProvider(_, _) => EventKind::ActiveProvider,
             Self::ConfigChange(_) => EventKind::ConfigChange,
@@ -462,6 +478,10 @@ impl EventMessage {
     pub const fn notification_id(&self) -> Option<EventId> {
         Some(match self {
             Self::ServerError(_) => registry::SYSTEM_ERROR,
+            Self::ServerLifecycle(event) => match event.state {
+                ServerLifecycleState::Started => registry::SYSTEM_STARTED,
+                ServerLifecycleState::ShuttingDown => registry::SYSTEM_SHUTDOWN,
+            },
             Self::PlaylistUpdate(summary) => match summary.state {
                 PlaylistUpdateState::Success | PlaylistUpdateState::Partial => registry::PLAYLIST_UPDATE_COMPLETED,
                 PlaylistUpdateState::Failure => registry::PLAYLIST_UPDATE_FAILED,
@@ -531,6 +551,7 @@ impl EventMessage {
         }
         match self {
             Self::ServerError(error) => serde_json::json!({ "error": error }),
+            Self::ServerLifecycle(event) => encode(event),
             Self::ActiveUser(change) => encode(change),
             Self::ActiveProvider(name, connections) => {
                 serde_json::json!({ "provider": name.as_ref(), "connections": connections })

@@ -165,7 +165,7 @@ impl Args {
     }
 }
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD_TIMESTAMP: &str = env!("VERGEN_BUILD_TIMESTAMP");
 
 // #[cfg(not(target_env = "msvc"))]

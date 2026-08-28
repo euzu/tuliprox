@@ -23,7 +23,7 @@ use log::{debug, warn};
 use shared::model::{
     notification::{EventId, Severity},
     AuthAuditEvent, AuthAuditOutcome, EventKind, EventKindMask, EventMessage, LibraryScanSummaryStatus,
-    StreamProbeFailure, StreamProbeFailureReason, UserLifecycleEvent, UserLifecycleState,
+    ServerLifecycleState, StreamProbeFailure, StreamProbeFailureReason, UserLifecycleEvent, UserLifecycleState,
 };
 use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
@@ -78,6 +78,8 @@ const NOTIFIABLE_KINDS: EventKindMask = EventKindMask::new()
     .with(EventKind::ProviderAccountExpiring)
     .with(EventKind::ProviderAccountExpired)
     .with(EventKind::ServerError)
+    .with(EventKind::ServerStarted)
+    .with(EventKind::ServerShutdown)
     .with(EventKind::PlaylistUpdate)
     .with(EventKind::ConfigChange)
     .with(EventKind::LibraryScanProgress)
@@ -159,6 +161,20 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
                 LibraryScanSummaryStatus::Error => format!("Library scan failed: {}", summary.message),
             };
             Some(NotificationEvent::new(id, title.clone(), title).with_fields(summary))
+        }
+
+        EventMessage::ServerLifecycle(event) => {
+            let title = match event.state {
+                ServerLifecycleState::Started => event.address.as_ref().map_or_else(
+                    || format!("Server {} started", event.version),
+                    |addr| format!("Server {} started on {addr}", event.version),
+                ),
+                ServerLifecycleState::ShuttingDown => event
+                    .reason
+                    .as_ref()
+                    .map_or_else(|| "Server shutting down".to_string(), |why| format!("Server shutting down ({why})")),
+            };
+            Some(NotificationEvent::new(id, title.clone(), title).with_fields(event))
         }
 
         EventMessage::InputMetadataUpdatesStarted(input) => {
@@ -318,8 +334,8 @@ mod tests {
         ActiveUserConnectionChange, ConfigReloadFailure, ConfigType, DiskAlert, DiskAlertLevel, DownloadsResponse,
         EventKind, LibraryScanProgressEvent, LibraryScanSummary, LibraryScanSummaryStatus, MetadataUpdateFailure,
         MsgKind, PlaylistUpdateProgressEvent, PlaylistUpdateState, PlaylistUpdateSummary, ProviderAccountEvent,
-        ProviderAccountState, RecordingLifecycleMessage, StreamProbeFailure, StreamProbeFailureReason, SystemInfo,
-        UserLifecycleEvent, UserLifecycleState, WatchChanges,
+        ProviderAccountState, RecordingLifecycleMessage, ServerLifecycleEvent, StreamProbeFailure,
+        StreamProbeFailureReason, SystemInfo, UserLifecycleEvent, UserLifecycleState, WatchChanges,
     };
     use std::sync::Arc;
 
@@ -345,6 +361,8 @@ mod tests {
         let empty_downloads = DownloadsResponse { queue: Vec::new(), finished: Vec::new(), active: Vec::new() };
         let samples = vec![
             EventMessage::ServerError("x".to_string()),
+            EventMessage::ServerLifecycle(ServerLifecycleEvent::started("1".into(), "h:1".into())),
+            EventMessage::ServerLifecycle(ServerLifecycleEvent::shutting_down("1".into(), "SIGTERM".into())),
             EventMessage::ActiveUser(ActiveUserConnectionChange::Connections(0, 0)),
             EventMessage::ActiveProvider("p".into(), 1),
             EventMessage::ConfigChange(ConfigType::Config),

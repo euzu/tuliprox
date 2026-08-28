@@ -49,6 +49,7 @@ use dashmap::DashSet;
 use log::{debug, error, info, warn};
 use shared::{
     error::TuliproxError,
+    model::ServerLifecycleEvent,
     utils::{concat_path_leading_slash, sanitize_sensitive_info},
 };
 use std::{
@@ -852,6 +853,15 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
     // unsubscribed, so this is inert until `notify_on` asks for it.
     crate::api::tasks::spawn_notification_bridge(&app_state, &app_state.cancel_tokens.load().downloads);
 
+    // Emitted here rather than at the top of `main`: the bridge above is what
+    // turns a bus event into a notification, and a `system.started` published
+    // before it subscribes reaches nobody. The listener is already bound at
+    // this point, so the address is real.
+    let _ = app_state.event_manager.send_event(EventMessage::ServerLifecycle(ServerLifecycleEvent::started(
+        crate::VERSION.into(),
+        format!("{host}:{port}").into(),
+    )));
+
     if let Some(download_cfg) = cfg.video.as_ref().and_then(|video| video.download.as_ref()) {
         resume_downloads_after_bind(&app_state, download_cfg).await;
     }
@@ -864,6 +874,11 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
         match wait_for_shutdown_signal().await {
             Ok(signal_name) => {
                 info!("Received shutdown signal ({signal_name}), cancelling all background services");
+                // Before `cancel_all_service_tokens`, which stops the outbox
+                // that would carry this to a channel.
+                let _ = app_state_signal.event_manager.send_event(EventMessage::ServerLifecycle(
+                    ServerLifecycleEvent::shutting_down(crate::VERSION.into(), signal_name.into()),
+                ));
                 server_cancel_token_signal.cancel();
                 cancel_all_service_tokens(&app_state_signal).await;
             }
