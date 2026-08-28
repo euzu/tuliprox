@@ -25,6 +25,7 @@ pub mod cmd_parser;
 pub mod cookie_jar;
 pub mod epg;
 pub mod error;
+pub mod pagination;
 pub mod parser;
 pub mod playback;
 pub mod presets;
