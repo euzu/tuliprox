@@ -205,6 +205,8 @@ pub mod registry {
     pub const PROVIDER_ACCOUNT_STATUS: EventId = EventId::new("provider.account.status_changed");
     pub const PROVIDER_ACCOUNT_EXPIRING: EventId = EventId::new("provider.account.expiring");
     pub const PROVIDER_ACCOUNT_EXPIRED: EventId = EventId::new("provider.account.expired");
+    pub const PROVIDER_POOL_EXHAUSTED: EventId = EventId::new("provider.pool.exhausted");
+    pub const PROVIDER_PRIORITY_FALLBACK: EventId = EventId::new("provider.priority.fallback");
 
     // ---- config ---------------------------------------------------------
     pub const CONFIG_CHANGED: EventId = EventId::new("config.changed");
@@ -314,6 +316,16 @@ pub mod registry {
             id: PROVIDER_ACCOUNT_EXPIRED,
             severity: Severity::Error,
             description: "A provider account has expired.",
+        },
+        EventDescriptor {
+            id: PROVIDER_POOL_EXHAUSTED,
+            severity: Severity::Warn,
+            description: "Every provider behind an input was at capacity.",
+        },
+        EventDescriptor {
+            id: PROVIDER_PRIORITY_FALLBACK,
+            severity: Severity::Warn,
+            description: "An input started being served from a different provider priority group.",
         },
         EventDescriptor {
             id: CONFIG_CHANGED,

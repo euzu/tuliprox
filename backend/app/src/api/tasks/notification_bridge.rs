@@ -81,6 +81,8 @@ const NOTIFIABLE_KINDS: EventKindMask = EventKindMask::new()
     .with(EventKind::ProviderAccountStatus)
     .with(EventKind::ProviderAccountExpiring)
     .with(EventKind::ProviderAccountExpired)
+    .with(EventKind::ProviderPoolExhausted)
+    .with(EventKind::ProviderPriorityFallback)
     .with(EventKind::ServerError)
     .with(EventKind::ServerStarted)
     .with(EventKind::ServerShutdown)
@@ -293,6 +295,32 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
         // that broke. Plugins and the status endpoint see it on the bus.
         EventMessage::NotificationDeadLettered(_) => None,
 
+        EventMessage::ProviderPoolExhausted(exhausted) => {
+            let title =
+                format!("All {} provider(s) for {} are at capacity", exhausted.providers.len(), exhausted.input);
+            let mut body = title.clone();
+            for entry in &exhausted.providers {
+                let _ = write!(
+                    body,
+                    "\n{}: {}/{}{}",
+                    entry.name,
+                    entry.current_connections,
+                    entry.max_connections,
+                    if entry.expired { " (expired)" } else { "" }
+                );
+            }
+            Some(NotificationEvent::new(id, title, body).with_severity(message.severity()).with_fields(exhausted))
+        }
+        EventMessage::ProviderPriorityFallback(fallback) => {
+            let direction = if fallback.is_recovery() { "moved back to" } else { "fell back to" };
+            let title = format!(
+                "{} {direction} provider priority group {} of {}",
+                fallback.input, fallback.group_index, fallback.group_count
+            );
+            let body = format!("{title}\n\nNow served by {}", fallback.provider);
+            Some(NotificationEvent::new(id, title, body).with_severity(message.severity()).with_fields(fallback))
+        }
+
         EventMessage::UserLifecycle(event) => Some(user_lifecycle_notification(id, event, message.severity())),
         EventMessage::StreamProbeFailed(failure) => Some(probe_failure_notification(id, failure, message.severity())),
 
@@ -395,9 +423,10 @@ mod tests {
         ActiveUserConnectionChange, ConfigReloadFailure, ConfigType, DiskAlert, DiskAlertLevel, DownloadsResponse,
         EventKind, LibraryScanProgressEvent, LibraryScanSummary, LibraryScanSummaryStatus, MetadataUpdateFailure,
         MsgKind, NotificationDeadLetter, PlaylistGroupsChanged, PlaylistUpdateProgressEvent, PlaylistUpdateState,
-        PlaylistUpdateSummary, ProviderAccountEvent, ProviderAccountState, RecordingLifecycleMessage,
-        ServerLifecycleEvent, StreamProbeFailure, StreamProbeFailureReason, SystemInfo, UserLifecycleEvent,
-        UserLifecycleState, WatchChanges, WatchDisabled, WatchDisabledReason, WatchUnmatched,
+        PlaylistUpdateSummary, ProviderAccountEvent, ProviderAccountState, ProviderPoolExhausted,
+        ProviderPriorityFallback, RecordingLifecycleMessage, ServerLifecycleEvent, StreamProbeFailure,
+        StreamProbeFailureReason, SystemInfo, UserLifecycleEvent, UserLifecycleState, WatchChanges, WatchDisabled,
+        WatchDisabledReason, WatchUnmatched,
     };
     use std::sync::Arc;
 
@@ -491,6 +520,14 @@ mod tests {
             recording_lifecycle(MsgKind::RecordingStarted),
             recording_lifecycle(MsgKind::RecordingCompleted),
             recording_lifecycle(MsgKind::RecordingFailed),
+            EventMessage::ProviderPoolExhausted(ProviderPoolExhausted::new("i".into(), Vec::new())),
+            EventMessage::ProviderPriorityFallback(ProviderPriorityFallback::new(
+                "i".into(),
+                "p".into(),
+                1,
+                2,
+                Some(0),
+            )),
             provider_account(ProviderAccountState::StatusChanged),
             provider_account(ProviderAccountState::Expiring),
             provider_account(ProviderAccountState::Expired),

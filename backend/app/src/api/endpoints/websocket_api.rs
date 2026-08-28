@@ -491,6 +491,8 @@ fn to_protocol_message(event: EventMessage) -> Option<(ProtocolMessage, &'static
         | EventMessage::PlaylistWatchUnmatched(_)
         | EventMessage::RecordingLifecycle(_)
         | EventMessage::ProviderAccount(_)
+        | EventMessage::ProviderPoolExhausted(_)
+        | EventMessage::ProviderPriorityFallback(_)
         // The panel already knows it just saved a user - it made the
         // request - and nothing in the Web UI subscribes to probe
         // failures yet. Both are on the bus for operators and plugins.
@@ -656,9 +658,10 @@ mod tests {
         Claims, ConfigReloadFailure, DiskAlert, DiskAlertLevel, DownloadsDelta, DownloadsResponse, FileDownloadDto,
         LibraryScanProgressEvent, LibraryScanSummary, LibraryScanSummaryStatus, MetadataUpdateFailure, MsgKind,
         Permission, PlaylistGroupsChanged, PlaylistUpdateProgressEvent, ProtocolHandler, ProtocolHandlerMemory,
-        ProviderAccountEvent, ProviderAccountState, RecordingLifecycleMessage, RoleSet, TaskKindDto, TaskPriorityDto,
-        TransferStatusDto, UserId, UserRole, WatchChanges, WatchDisabled, WatchDisabledReason, WatchUnmatched,
-        CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, PROTOCOL_VERSION, TOKEN_NO_AUTH,
+        ProviderAccountEvent, ProviderAccountState, ProviderPoolExhausted, ProviderPriorityFallback,
+        RecordingLifecycleMessage, RoleSet, TaskKindDto, TaskPriorityDto, TransferStatusDto, UserId, UserRole,
+        WatchChanges, WatchDisabled, WatchDisabledReason, WatchUnmatched, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL,
+        PROTOCOL_VERSION, TOKEN_NO_AUTH,
     };
     use std::sync::Arc;
     use tokio::sync::broadcast::error::RecvError;
@@ -693,7 +696,9 @@ mod tests {
         // every notification-only kind against `expected = true` and the
         // test failed on `DiskAlert` - it has been red since the lifecycle
         // events joined the bus.
-        const NOT_ON_THE_WIRE: [EventKind; 20] = [
+        const NOT_ON_THE_WIRE: [EventKind; 22] = [
+            EventKind::ProviderPoolExhausted,
+            EventKind::ProviderPriorityFallback,
             EventKind::PlaylistGroupsChanged,
             EventKind::PlaylistWatchDisabled,
             EventKind::PlaylistWatchUnmatched,
@@ -807,6 +812,14 @@ mod tests {
             recording_lifecycle(MsgKind::RecordingStarted),
             recording_lifecycle(MsgKind::RecordingCompleted),
             recording_lifecycle(MsgKind::RecordingFailed),
+            EventMessage::ProviderPoolExhausted(ProviderPoolExhausted::new("i".into(), Vec::new())),
+            EventMessage::ProviderPriorityFallback(ProviderPriorityFallback::new(
+                "i".into(),
+                "p".into(),
+                1,
+                2,
+                Some(0),
+            )),
             provider_account(ProviderAccountState::StatusChanged),
             provider_account(ProviderAccountState::Expiring),
             provider_account(ProviderAccountState::Expired),

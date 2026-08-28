@@ -464,6 +464,8 @@ negative pattern does, so `["*", "!system.info"]` reads the way it looks.
 | `provider.account.status_changed` | warn | A provider reported a changed account status. |
 | `provider.account.expiring` | warn | A provider account is approaching its expiry date. |
 | `provider.account.expired` | error | A provider account has expired. |
+| `provider.pool.exhausted` | warn | Every provider behind an input was at capacity. |
+| `provider.priority.fallback` | warn | An input started being served from a different provider priority group. |
 | `config.changed` | info | A configuration file was changed and reloaded. |
 | `config.reload_failed` | error | A configuration file changed but could not be reloaded. |
 | `library.scan.completed` | info | A local library scan finished. |

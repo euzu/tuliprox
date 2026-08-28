@@ -16,8 +16,9 @@ use crate::model::{
     ActiveUserConnectionChange, ConfigReloadFailure, ConfigType, DiskAlert, DownloadsDelta, DownloadsResponse,
     LibraryScanProgressEvent, LibraryScanSummaryStatus, MetadataUpdateFailure, MsgKind, NotificationDeadLetter,
     Permission, PlaylistGroupsChanged, PlaylistUpdateProgressEvent, PlaylistUpdateState, ProviderAccountEvent,
-    ProviderAccountState, RecordingLifecycleMessage, ServerLifecycleEvent, ServerLifecycleState, StreamProbeFailure,
-    SystemInfo, UserLifecycleEvent, UserLifecycleState, WatchChanges, WatchDisabled, WatchUnmatched,
+    ProviderAccountState, ProviderPoolExhausted, ProviderPriorityFallback, RecordingLifecycleMessage,
+    ServerLifecycleEvent, ServerLifecycleState, StreamProbeFailure, SystemInfo, UserLifecycleEvent, UserLifecycleState,
+    WatchChanges, WatchDisabled, WatchUnmatched,
 };
 use std::sync::Arc;
 
@@ -74,6 +75,10 @@ pub enum EventMessage {
     RecordingLifecycle(RecordingLifecycleMessage),
     /// A provider account changed status, is about to expire, or has.
     ProviderAccount(ProviderAccountEvent),
+    /// Every provider behind an input was at capacity.
+    ProviderPoolExhausted(ProviderPoolExhausted),
+    /// An input started being served from a different priority group.
+    ProviderPriorityFallback(ProviderPriorityFallback),
 
     /// An API-proxy user was created, changed or removed. One variant,
     /// three kinds - see [`EventMessage::kind`] - so a subscriber can ask
@@ -185,6 +190,8 @@ pub enum EventKind {
     ProviderAccountStatus,
     ProviderAccountExpiring,
     ProviderAccountExpired,
+    ProviderPoolExhausted,
+    ProviderPriorityFallback,
     UserCreated,
     UserUpdated,
     UserDeleted,
@@ -201,7 +208,7 @@ impl EventKind {
     ///
     /// The mask type below indexes into this, so the order is load-bearing:
     /// it is the bit order, not just a listing.
-    pub const ALL: [Self; 39] = [
+    pub const ALL: [Self; 41] = [
         Self::ServerError,
         Self::ServerStarted,
         Self::ServerShutdown,
@@ -232,6 +239,8 @@ impl EventKind {
         Self::ProviderAccountStatus,
         Self::ProviderAccountExpiring,
         Self::ProviderAccountExpired,
+        Self::ProviderPoolExhausted,
+        Self::ProviderPriorityFallback,
         Self::UserCreated,
         Self::UserUpdated,
         Self::UserDeleted,
@@ -297,6 +306,8 @@ impl EventKind {
             | Self::ProviderAccountStatus
             | Self::ProviderAccountExpiring
             | Self::ProviderAccountExpired
+            | Self::ProviderPoolExhausted
+            | Self::ProviderPriorityFallback
             // Sits with the metadata-update events it is produced by.
             | Self::StreamProbeFailed
             | Self::NotificationDeadLettered => Permission::SystemRead,
@@ -392,6 +403,8 @@ impl EventKind {
             Self::ProviderAccountStatus => "provider.account.status",
             Self::ProviderAccountExpiring => "provider.account.expiring",
             Self::ProviderAccountExpired => "provider.account.expired",
+            Self::ProviderPoolExhausted => "provider.pool.exhausted",
+            Self::ProviderPriorityFallback => "provider.priority.fallback",
             Self::UserCreated => "user.created",
             Self::UserUpdated => "user.updated",
             Self::UserDeleted => "user.deleted",
@@ -461,6 +474,8 @@ impl EventMessage {
                 ProviderAccountState::Expiring => EventKind::ProviderAccountExpiring,
                 ProviderAccountState::Expired => EventKind::ProviderAccountExpired,
             },
+            Self::ProviderPoolExhausted(_) => EventKind::ProviderPoolExhausted,
+            Self::ProviderPriorityFallback(_) => EventKind::ProviderPriorityFallback,
             Self::UserLifecycle(event) => match event.state {
                 UserLifecycleState::Created => EventKind::UserCreated,
                 UserLifecycleState::Updated => EventKind::UserUpdated,
@@ -546,6 +561,8 @@ impl EventMessage {
                 ProviderAccountState::Expiring => registry::PROVIDER_ACCOUNT_EXPIRING,
                 ProviderAccountState::Expired => registry::PROVIDER_ACCOUNT_EXPIRED,
             },
+            Self::ProviderPoolExhausted(_) => registry::PROVIDER_POOL_EXHAUSTED,
+            Self::ProviderPriorityFallback(_) => registry::PROVIDER_PRIORITY_FALLBACK,
             Self::UserLifecycle(event) => match event.state {
                 UserLifecycleState::Created => registry::USER_CREATED,
                 UserLifecycleState::Updated => registry::USER_UPDATED,
@@ -615,6 +632,8 @@ impl EventMessage {
             Self::PlaylistWatchUnmatched(unmatched) => encode(unmatched),
             Self::RecordingLifecycle(msg) => encode(msg),
             Self::ProviderAccount(event) => encode(event),
+            Self::ProviderPoolExhausted(exhausted) => encode(exhausted),
+            Self::ProviderPriorityFallback(fallback) => encode(fallback),
             Self::UserLifecycle(event) => encode(event),
             Self::StreamProbeFailed(failure) => encode(failure),
             Self::NotificationDeadLettered(dead_letter) => encode(dead_letter),
