@@ -276,9 +276,14 @@ where
     use shared::model::UserConnectionPermission;
     let mut candidates = adm.active_users.get_eviction_candidates(username, client_ip).await;
     let ctx = StrategyContext { username, client_ip };
-    let mut idx = 0usize;
 
-    for strategy in strategies {
+    // `enumerate` rather than a manual counter: the suppressed-eviction arm below
+    // uses `continue`, which used to skip a trailing `idx += 1` and hand every
+    // later strategy an index one too low. A grace admitted after a suppressed
+    // eviction then recorded a `strategy_index` pointing at an earlier strategy,
+    // so `evaluate_remaining_strategies_after_grace` replayed the grace itself
+    // instead of resuming past it.
+    for (idx, strategy) in strategies.iter().enumerate() {
         match evaluate_strategy(*strategy, &ctx, &candidates) {
             AdmissionDecision::NoMatch => {}
             AdmissionDecision::Grace(mode) => {
@@ -339,7 +344,6 @@ where
                 candidates = adm.active_users.get_eviction_candidates(username, client_ip).await;
             }
         }
-        idx += 1;
     }
 
     // All strategies returned NoMatch — caller constructs the final exhausted result.
