@@ -81,6 +81,7 @@ const NOTIFIABLE_KINDS: EventKindMask = EventKindMask::new()
     .with(EventKind::ProviderAccountStatus)
     .with(EventKind::ProviderAccountExpiring)
     .with(EventKind::ProviderAccountExpired)
+    .with(EventKind::ProviderFetchFailed)
     .with(EventKind::ProviderPoolExhausted)
     .with(EventKind::ProviderPriorityFallback)
     .with(EventKind::ServerError)
@@ -295,6 +296,23 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
         // that broke. Plugins and the status endpoint see it on the bus.
         EventMessage::NotificationDeadLettered(_) => None,
 
+        EventMessage::ProviderFetchFailed(failure) => {
+            let title = format!(
+                "{} playlist fetch failed for {} ({})",
+                failure.provider,
+                failure.input,
+                failure.kind.as_wire_name()
+            );
+            let mut body =
+                failure.message.as_ref().map_or_else(|| title.clone(), |detail| format!("{title}\n\n{detail}"));
+            if failure.error_count > 1 {
+                let _ = write!(body, "\n\n{} error(s) in total.", failure.error_count);
+            }
+            if failure.partial {
+                body.push_str("\n\nSome of the playlist was fetched anyway.");
+            }
+            Some(NotificationEvent::new(id, title, body).with_severity(message.severity()).with_fields(failure))
+        }
         EventMessage::ProviderPoolExhausted(exhausted) => {
             let title =
                 format!("All {} provider(s) for {} are at capacity", exhausted.providers.len(), exhausted.input);
@@ -423,10 +441,10 @@ mod tests {
         ActiveUserConnectionChange, ConfigReloadFailure, ConfigType, DiskAlert, DiskAlertLevel, DownloadsResponse,
         EventKind, LibraryScanProgressEvent, LibraryScanSummary, LibraryScanSummaryStatus, MetadataUpdateFailure,
         MsgKind, NotificationDeadLetter, PlaylistGroupsChanged, PlaylistUpdateProgressEvent, PlaylistUpdateState,
-        PlaylistUpdateSummary, ProviderAccountEvent, ProviderAccountState, ProviderPoolExhausted,
-        ProviderPriorityFallback, RecordingLifecycleMessage, ServerLifecycleEvent, StreamProbeFailure,
-        StreamProbeFailureReason, SystemInfo, UserLifecycleEvent, UserLifecycleState, WatchChanges, WatchDisabled,
-        WatchDisabledReason, WatchUnmatched,
+        PlaylistUpdateSummary, ProviderAccountEvent, ProviderAccountState, ProviderFailureKind, ProviderFetchFailure,
+        ProviderPoolExhausted, ProviderPriorityFallback, RecordingLifecycleMessage, ServerLifecycleEvent,
+        StreamProbeFailure, StreamProbeFailureReason, SystemInfo, UserLifecycleEvent, UserLifecycleState, WatchChanges,
+        WatchDisabled, WatchDisabledReason, WatchUnmatched,
     };
     use std::sync::Arc;
 
@@ -448,6 +466,19 @@ mod tests {
 
     /// One `EventMessage` per `EventKind`, so the test above cannot miss a
     /// variant added later.
+
+    fn provider_fetch_failure() -> ProviderFetchFailure {
+        ProviderFetchFailure {
+            input: "i".into(),
+            provider: "m3u".into(),
+            kind: ProviderFailureKind::Transient,
+            error_count: 1,
+            message: None,
+            retryable: true,
+            needs_operator: false,
+            partial: false,
+        }
+    }
     fn sample_of_every_kind() -> Vec<(EventMessage, EventKind)> {
         let empty_downloads = DownloadsResponse { queue: Vec::new(), finished: Vec::new(), active: Vec::new() };
         let samples = vec![
@@ -520,6 +551,7 @@ mod tests {
             recording_lifecycle(MsgKind::RecordingStarted),
             recording_lifecycle(MsgKind::RecordingCompleted),
             recording_lifecycle(MsgKind::RecordingFailed),
+            EventMessage::ProviderFetchFailed(provider_fetch_failure()),
             EventMessage::ProviderPoolExhausted(ProviderPoolExhausted::new("i".into(), Vec::new())),
             EventMessage::ProviderPriorityFallback(ProviderPriorityFallback::new(
                 "i".into(),

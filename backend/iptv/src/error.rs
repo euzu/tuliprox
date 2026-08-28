@@ -35,6 +35,22 @@ pub enum ProviderErrorKind {
     Config,
 }
 
+/// The serializable form carried on the event bus.
+///
+/// Exhaustive on purpose: a new [`ProviderErrorKind`] variant must decide what
+/// it looks like to a subscriber rather than defaulting into one.
+impl From<ProviderErrorKind> for shared::model::ProviderFailureKind {
+    fn from(kind: ProviderErrorKind) -> Self {
+        match kind {
+            ProviderErrorKind::Transient => Self::Transient,
+            ProviderErrorKind::Protocol => Self::Protocol,
+            ProviderErrorKind::Capacity => Self::Capacity,
+            ProviderErrorKind::Auth => Self::Auth,
+            ProviderErrorKind::Config => Self::Config,
+        }
+    }
+}
+
 impl ProviderErrorKind {
     /// Whether repeating the same call could plausibly succeed.
     ///

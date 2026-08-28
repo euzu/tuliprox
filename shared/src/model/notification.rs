@@ -205,6 +205,7 @@ pub mod registry {
     pub const PROVIDER_ACCOUNT_STATUS: EventId = EventId::new("provider.account.status_changed");
     pub const PROVIDER_ACCOUNT_EXPIRING: EventId = EventId::new("provider.account.expiring");
     pub const PROVIDER_ACCOUNT_EXPIRED: EventId = EventId::new("provider.account.expired");
+    pub const PROVIDER_FETCH_FAILED: EventId = EventId::new("provider.fetch.failed");
     pub const PROVIDER_POOL_EXHAUSTED: EventId = EventId::new("provider.pool.exhausted");
     pub const PROVIDER_PRIORITY_FALLBACK: EventId = EventId::new("provider.priority.fallback");
 
@@ -316,6 +317,11 @@ pub mod registry {
             id: PROVIDER_ACCOUNT_EXPIRED,
             severity: Severity::Error,
             description: "A provider account has expired.",
+        },
+        EventDescriptor {
+            id: PROVIDER_FETCH_FAILED,
+            severity: Severity::Error,
+            description: "An input's playlist could not be fetched.",
         },
         EventDescriptor {
             id: PROVIDER_POOL_EXHAUSTED,

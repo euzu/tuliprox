@@ -16,9 +16,9 @@ use crate::model::{
     ActiveUserConnectionChange, ConfigReloadFailure, ConfigType, DiskAlert, DownloadsDelta, DownloadsResponse,
     LibraryScanProgressEvent, LibraryScanSummaryStatus, MetadataUpdateFailure, MsgKind, NotificationDeadLetter,
     Permission, PlaylistGroupsChanged, PlaylistUpdateProgressEvent, PlaylistUpdateState, ProviderAccountEvent,
-    ProviderAccountState, ProviderPoolExhausted, ProviderPriorityFallback, RecordingLifecycleMessage,
-    ServerLifecycleEvent, ServerLifecycleState, StreamProbeFailure, SystemInfo, UserLifecycleEvent, UserLifecycleState,
-    WatchChanges, WatchDisabled, WatchUnmatched,
+    ProviderAccountState, ProviderFetchFailure, ProviderPoolExhausted, ProviderPriorityFallback,
+    RecordingLifecycleMessage, ServerLifecycleEvent, ServerLifecycleState, StreamProbeFailure, SystemInfo,
+    UserLifecycleEvent, UserLifecycleState, WatchChanges, WatchDisabled, WatchUnmatched,
 };
 use std::sync::Arc;
 
@@ -75,6 +75,8 @@ pub enum EventMessage {
     RecordingLifecycle(RecordingLifecycleMessage),
     /// A provider account changed status, is about to expire, or has.
     ProviderAccount(ProviderAccountEvent),
+    /// An input's playlist fetch failed.
+    ProviderFetchFailed(ProviderFetchFailure),
     /// Every provider behind an input was at capacity.
     ProviderPoolExhausted(ProviderPoolExhausted),
     /// An input started being served from a different priority group.
@@ -190,6 +192,7 @@ pub enum EventKind {
     ProviderAccountStatus,
     ProviderAccountExpiring,
     ProviderAccountExpired,
+    ProviderFetchFailed,
     ProviderPoolExhausted,
     ProviderPriorityFallback,
     UserCreated,
@@ -208,7 +211,7 @@ impl EventKind {
     ///
     /// The mask type below indexes into this, so the order is load-bearing:
     /// it is the bit order, not just a listing.
-    pub const ALL: [Self; 41] = [
+    pub const ALL: [Self; 42] = [
         Self::ServerError,
         Self::ServerStarted,
         Self::ServerShutdown,
@@ -239,6 +242,7 @@ impl EventKind {
         Self::ProviderAccountStatus,
         Self::ProviderAccountExpiring,
         Self::ProviderAccountExpired,
+        Self::ProviderFetchFailed,
         Self::ProviderPoolExhausted,
         Self::ProviderPriorityFallback,
         Self::UserCreated,
@@ -306,6 +310,7 @@ impl EventKind {
             | Self::ProviderAccountStatus
             | Self::ProviderAccountExpiring
             | Self::ProviderAccountExpired
+            | Self::ProviderFetchFailed
             | Self::ProviderPoolExhausted
             | Self::ProviderPriorityFallback
             // Sits with the metadata-update events it is produced by.
@@ -403,6 +408,7 @@ impl EventKind {
             Self::ProviderAccountStatus => "provider.account.status",
             Self::ProviderAccountExpiring => "provider.account.expiring",
             Self::ProviderAccountExpired => "provider.account.expired",
+            Self::ProviderFetchFailed => "provider.fetch.failed",
             Self::ProviderPoolExhausted => "provider.pool.exhausted",
             Self::ProviderPriorityFallback => "provider.priority.fallback",
             Self::UserCreated => "user.created",
@@ -474,6 +480,7 @@ impl EventMessage {
                 ProviderAccountState::Expiring => EventKind::ProviderAccountExpiring,
                 ProviderAccountState::Expired => EventKind::ProviderAccountExpired,
             },
+            Self::ProviderFetchFailed(_) => EventKind::ProviderFetchFailed,
             Self::ProviderPoolExhausted(_) => EventKind::ProviderPoolExhausted,
             Self::ProviderPriorityFallback(_) => EventKind::ProviderPriorityFallback,
             Self::UserLifecycle(event) => match event.state {
@@ -499,6 +506,9 @@ impl EventMessage {
     #[must_use]
     pub fn severity(&self) -> Severity {
         match self {
+            // The registry cannot answer this either: whether a fetch failure
+            // needs a human is a property of the classification, not the id.
+            Self::ProviderFetchFailed(failure) if !failure.needs_operator => Severity::Warn,
             // The only case the registry cannot answer: a partial refresh
             // and a clean one share `PLAYLIST_UPDATE_COMPLETED`, but a
             // partial one is not a clean success.
@@ -561,6 +571,7 @@ impl EventMessage {
                 ProviderAccountState::Expiring => registry::PROVIDER_ACCOUNT_EXPIRING,
                 ProviderAccountState::Expired => registry::PROVIDER_ACCOUNT_EXPIRED,
             },
+            Self::ProviderFetchFailed(_) => registry::PROVIDER_FETCH_FAILED,
             Self::ProviderPoolExhausted(_) => registry::PROVIDER_POOL_EXHAUSTED,
             Self::ProviderPriorityFallback(_) => registry::PROVIDER_PRIORITY_FALLBACK,
             Self::UserLifecycle(event) => match event.state {
@@ -632,6 +643,7 @@ impl EventMessage {
             Self::PlaylistWatchUnmatched(unmatched) => encode(unmatched),
             Self::RecordingLifecycle(msg) => encode(msg),
             Self::ProviderAccount(event) => encode(event),
+            Self::ProviderFetchFailed(failure) => encode(failure),
             Self::ProviderPoolExhausted(exhausted) => encode(exhausted),
             Self::ProviderPriorityFallback(fallback) => encode(fallback),
             Self::UserLifecycle(event) => encode(event),

@@ -31,6 +31,7 @@ mod playlist_request;
 mod prepare;
 mod processing_order;
 mod progress;
+mod provider_fetch_failure;
 mod provider_pool;
 pub mod provider_saturation;
 pub mod recording;
@@ -72,11 +73,11 @@ pub use self::{
     library_request::*, log::*, mapping::*, media_properties::*, messaging::*, metadata_update_failure::*,
     notification::*, notification_dead_letter::*, pagination::*, playlist::*, playlist_categories::*,
     playlist_groups_changed::*, playlist_info_document::*, playlist_request::*, processing_order::*, progress::*,
-    provider_pool::*, recording::*, recording_math::*, regex_cache::*, search_fields::*, search_request::*,
-    server_lifecycle::*, short_epg::*, stalker::*, stalker_item::*, stats::*, status_check::*, stream_history::*,
-    stream_history_record::*, stream_info::*, stream_meter::*, stream_probe_failure::*, stream_properties::*,
-    strm_export_style::*, system_info::*, target_type::*, transfer::*, ui_playlist_item::*, user_command::*,
-    user_lifecycle::*, uuidtype::*, watch_health::*, web_socket::*, xtream::*,
+    provider_fetch_failure::*, provider_pool::*, recording::*, recording_math::*, regex_cache::*, search_fields::*,
+    search_request::*, server_lifecycle::*, short_epg::*, stalker::*, stalker_item::*, stats::*, status_check::*,
+    stream_history::*, stream_history_record::*, stream_info::*, stream_meter::*, stream_probe_failure::*,
+    stream_properties::*, strm_export_style::*, system_info::*, target_type::*, transfer::*, ui_playlist_item::*,
+    user_command::*, user_lifecycle::*, uuidtype::*, watch_health::*, web_socket::*, xtream::*,
 };
 pub use ids::*;
 pub use prepare::*;

@@ -23,10 +23,10 @@ use shared::{
     model::{
         ClusterFlags, CounterModifier, EventMessage, EventSink, FieldGet, FieldSet, InputStats, InputType, ItemField,
         MappingStage, PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistStats, PlaylistUpdateProgressEvent,
-        PlaylistUpdateSummary, ProcessingOrder, SourceStats, StreamProperties, TargetStats, UUIDType, WatchDisabled,
-        WatchDisabledReason, WatchUnmatched, XtreamCluster,
+        PlaylistUpdateSummary, ProcessingOrder, ProviderFetchFailure, SourceStats, StreamProperties, TargetStats,
+        UUIDType, WatchDisabled, WatchDisabledReason, WatchUnmatched, XtreamCluster,
     },
-    utils::{create_alias_uuid, interner_gc, Internable},
+    utils::{create_alias_uuid, interner_gc, sanitize_sensitive_info, Internable},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -49,6 +49,7 @@ use tuliprox_core::{
 };
 use tuliprox_iptv::{
     epg::{CountingEpgSink, EpgFetchRequest, EpgProvider},
+    error::ProviderErrorKind,
     provider::{
         BatchContainerProvider, M3uProvider, PlaylistFetch, PlaylistFetchRequest, PlaylistProvider,
         UnsupportedProvider, XtreamProvider,
@@ -540,6 +541,28 @@ async fn playlist_download_from_input<E: EventSink>(
             .await
         }
     };
+    // `ProviderErrorKind` has always been able to answer "is this worth
+    // retrying, and does it need a human" - `needs_operator()` is exactly that
+    // question - and nothing consumed the answer. Every fetch failure was
+    // counted, logged and treated identically.
+    if let Some(kind) = fetch.error_kind() {
+        let worst = fetch
+            .errors
+            .iter()
+            .max_by_key(|error| ProviderErrorKind::of_tuliprox(error))
+            .map(|error| sanitize_sensitive_info(&error.to_string()).into_owned());
+        events.emit(EventMessage::ProviderFetchFailed(ProviderFetchFailure {
+            input: sanitize_sensitive_info(&input.name).into_owned().into(),
+            provider: download_input_type.to_string().into(),
+            kind: kind.into(),
+            error_count: fetch.errors.len(),
+            message: worst,
+            retryable: kind.is_retryable(),
+            needs_operator: kind.needs_operator(),
+            partial: fetch.partial,
+        }));
+    }
+
     let PlaylistFetch { groups: playlist, errors, persisted, partial } = fetch;
 
     // Update Status
