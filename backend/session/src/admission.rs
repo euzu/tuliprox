@@ -388,13 +388,34 @@ pub async fn resolve_admission_with_strategies(
         return AdmissionStrategyResolution { admission, grace_mode: None, grace_context: None };
     }
 
+    let _admission_guard = adm.active_users.acquire_user_admission(username).await;
+
+    // Re-read admission now that the gate is held. The first read above happened
+    // before we queued on the gate, so a request ahead of us may have released
+    // the very slot we are about to evict somebody for. Walking the strategies on
+    // the stale snapshot kicks a live connection to free a slot that is already
+    // free.
+    let admission = get_admission_for_request(
+        adm,
+        username,
+        max_connections,
+        soft_connections,
+        use_session_admission,
+        session_token,
+        activate_unbound_session,
+    )
+    .await;
+
+    if admission.permission != UserConnectionPermission::Exhausted {
+        debug!("Admission became available while waiting on the admission gate for user {username}");
+        return AdmissionStrategyResolution { admission, grace_mode: None, grace_context: None };
+    }
+
     let build_grace_ctx = |global_idx: usize| GraceResolutionContext {
         strategy_index: global_idx,
         strategies: strategies.clone(),
         kind: admission.kind,
     };
-
-    let _admission_guard = adm.active_users.acquire_user_admission(username).await;
 
     if let Some(resolution) = evaluate_admission_strategy_loop(
         adm,
