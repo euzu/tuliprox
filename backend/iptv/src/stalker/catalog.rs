@@ -1,7 +1,7 @@
 use crate::stalker::{
     client::StalkerApiClient,
     error::{safe_stalker_url, StalkerError, StalkerResult},
-    pagination::{CatalogPage, PageMeta},
+    pagination::{BatchSink, CatalogPage, CatalogSink, CollectSink, PageMeta},
     profile::StalkerHandshake,
     recipes::recipe_spec_for,
     url_factory::StalkerLoadUrl,
@@ -368,15 +368,26 @@ fn collect_categories(value: &Value, out: &mut Vec<StalkerCategory>) {
     }
 }
 
-async fn get_paginated_items<T>(
+/// Walk a paginated catalog endpoint, handing each page to `sink`.
+///
+/// Endpoint candidates are tried in order; a mid-pagination failure abandons the candidate
+/// and restarts on the next one, but only while the sink says that is still sound (see
+/// [`CatalogSink::can_restart`]). Once a streaming sink has released a page, a later
+/// failure is returned as-is rather than silently retried, so no caller can mistake a
+/// truncated catalog for a complete one.
+///
+/// Returns the number of rows delivered.
+async fn drive_catalog_pages<T, S>(
     client: &StalkerApiClient,
     handshake: &StalkerHandshake,
     portal_type: &'static str,
     action: &'static str,
     parse_page: impl Fn(&Value) -> (Vec<T>, PageMeta),
-) -> StalkerResult<Vec<T>>
+    sink: &mut S,
+) -> StalkerResult<u64>
 where
-    T: for<'de> Deserialize<'de> + Clone,
+    T: for<'de> Deserialize<'de>,
+    S: CatalogSink<T>,
 {
     let spec = recipe_spec_for(handshake.profile.bootstrap_recipe);
     let page_limit = client.catalog_max_pages();
@@ -387,7 +398,7 @@ where
         // truncated catalog from one endpoint into the attempt against the next one.
         let mut page: u32 = 1;
         let mut pages_fetched: u32 = 0;
-        let mut all: Vec<T> = Vec::new();
+        let mut delivered: u64 = 0;
         loop {
             let mut builder = client.http().get(&load_url.load_url).headers(client.common_headers(&load_url)).query(&[
                 ("type", portal_type),
@@ -399,28 +410,30 @@ where
             builder = client.apply_mac_query(builder);
             builder = client.apply_bearer(builder, Some(&handshake.session), spec.token_in_query);
             let value: Value = match client.send_json::<Value>(builder, action).await {
-                Ok(v) => v,
+                Ok(value) => value,
                 Err(err) => {
-                    // Never return a truncated catalog as Ok — retry from scratch on
-                    // the next endpoint candidate instead.
+                    if !sink.can_restart() {
+                        return Err(err);
+                    }
+                    sink.restart();
                     last_err = Some(err);
                     continue 'candidates;
                 }
             };
-            let (mut items, meta) = parse_page(&value);
+            let (items, meta) = parse_page(&value);
             let page_len = items.len();
             if page_len == 0 {
                 break;
             }
             pages_fetched = pages_fetched.saturating_add(1);
-            all.append(&mut items);
-            if meta.is_terminal(page_len, page, all.len()) {
+            delivered = delivered.saturating_add(page_len as u64);
+            sink.accept(items).await?;
+            if meta.is_terminal(page_len, page, usize::try_from(delivered).unwrap_or(usize::MAX)) {
                 break;
             }
             if page >= page_limit {
                 warn!(
-                    "Stalker {portal_type}/{action} stopped at configured page limit {page_limit} with {} items fetched",
-                    all.len()
+                    "Stalker {portal_type}/{action} stopped at configured page limit {page_limit} with {delivered} items fetched"
                 );
                 return Err(StalkerError::CatalogIncomplete {
                     portal_type,
@@ -430,10 +443,27 @@ where
             page += 1;
         }
         // An empty result from a healthy endpoint is a legitimate empty catalog.
-        info!("Stalker {portal_type}/{action} fetched {} items across {pages_fetched} pages", all.len());
-        return Ok(all);
+        info!("Stalker {portal_type}/{action} fetched {delivered} items across {pages_fetched} pages");
+        return Ok(delivered);
     }
     Err(last_err.unwrap_or_else(|| StalkerError::EmptyBody { action: action.to_string() }))
+}
+
+/// Accumulating variant of [`drive_catalog_pages`], for callers that want the whole
+/// catalog in one `Vec`.
+async fn get_paginated_items<T>(
+    client: &StalkerApiClient,
+    handshake: &StalkerHandshake,
+    portal_type: &'static str,
+    action: &'static str,
+    parse_page: impl Fn(&Value) -> (Vec<T>, PageMeta),
+) -> StalkerResult<Vec<T>>
+where
+    T: for<'de> Deserialize<'de> + Send,
+{
+    let mut sink = CollectSink::new();
+    drive_catalog_pages(client, handshake, portal_type, action, parse_page, &mut sink).await?;
+    Ok(sink.into_rows())
 }
 
 fn extract_items_array(value: &Value) -> &Value {
@@ -614,6 +644,49 @@ pub async fn get_series_list_paginated(
     handshake: &StalkerHandshake,
 ) -> StalkerResult<Vec<StalkerRawSeriesItem>> {
     get_paginated_items(client, handshake, "series", "get_ordered_list", parse_series_page).await
+}
+
+/// Stream the live catalog one page at a time. See [`drive_catalog_pages`] for the
+/// endpoint-fallback caveat that comes with not buffering.
+pub async fn stream_live_streams<F, Fut>(
+    client: &StalkerApiClient,
+    handshake: &StalkerHandshake,
+    on_batch: F,
+) -> StalkerResult<u64>
+where
+    F: FnMut(Vec<StalkerRawItem>) -> Fut + Send,
+    Fut: std::future::Future<Output = StalkerResult<()>> + Send,
+{
+    let mut sink = BatchSink::new(on_batch);
+    drive_catalog_pages(client, handshake, "itv", "get_ordered_list", parse_items_page, &mut sink).await
+}
+
+/// Stream the VOD catalog one page at a time.
+pub async fn stream_vod_streams<F, Fut>(
+    client: &StalkerApiClient,
+    handshake: &StalkerHandshake,
+    on_batch: F,
+) -> StalkerResult<u64>
+where
+    F: FnMut(Vec<StalkerRawItem>) -> Fut + Send,
+    Fut: std::future::Future<Output = StalkerResult<()>> + Send,
+{
+    let mut sink = BatchSink::new(on_batch);
+    drive_catalog_pages(client, handshake, "vod", "get_ordered_list", parse_items_page, &mut sink).await
+}
+
+/// Stream the series catalog one page at a time.
+pub async fn stream_series_list<F, Fut>(
+    client: &StalkerApiClient,
+    handshake: &StalkerHandshake,
+    on_batch: F,
+) -> StalkerResult<u64>
+where
+    F: FnMut(Vec<StalkerRawSeriesItem>) -> Fut + Send,
+    Fut: std::future::Future<Output = StalkerResult<()>> + Send,
+{
+    let mut sink = BatchSink::new(on_batch);
+    drive_catalog_pages(client, handshake, "series", "get_ordered_list", parse_series_page, &mut sink).await
 }
 
 pub async fn get_series_details(

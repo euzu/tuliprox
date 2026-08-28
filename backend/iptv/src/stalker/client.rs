@@ -230,6 +230,39 @@ impl StalkerApiClient {
         catalog::get_series_details(self, handshake, series_id).await
     }
 
+    /// Stream the live catalog to `on_batch` one page at a time, instead of buffering the
+    /// whole thing like [`Self::get_live_streams`]. An `Err` means the batches already
+    /// delivered are an incomplete prefix and must be discarded.
+    pub async fn stream_live_streams<F, Fut>(
+        &self,
+        handshake: &StalkerHandshake,
+        on_batch: F,
+    ) -> StalkerResult<u64>
+    where
+        F: FnMut(Vec<catalog::StalkerRawItem>) -> Fut + Send,
+        Fut: std::future::Future<Output = StalkerResult<()>> + Send,
+    {
+        catalog::stream_live_streams(self, handshake, on_batch).await
+    }
+
+    /// Stream the VOD catalog. See [`Self::stream_live_streams`] for the error contract.
+    pub async fn stream_vod_streams<F, Fut>(&self, handshake: &StalkerHandshake, on_batch: F) -> StalkerResult<u64>
+    where
+        F: FnMut(Vec<catalog::StalkerRawItem>) -> Fut + Send,
+        Fut: std::future::Future<Output = StalkerResult<()>> + Send,
+    {
+        catalog::stream_vod_streams(self, handshake, on_batch).await
+    }
+
+    /// Stream the series catalog. See [`Self::stream_live_streams`] for the error contract.
+    pub async fn stream_series_list<F, Fut>(&self, handshake: &StalkerHandshake, on_batch: F) -> StalkerResult<u64>
+    where
+        F: FnMut(Vec<catalog::StalkerRawSeriesItem>) -> Fut + Send,
+        Fut: std::future::Future<Output = StalkerResult<()>> + Send,
+    {
+        catalog::stream_series_list(self, handshake, on_batch).await
+    }
+
     pub async fn get_short_epg(
         &self,
         handshake: &StalkerHandshake,

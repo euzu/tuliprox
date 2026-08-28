@@ -7,6 +7,7 @@
 //! [`super::catalog`], the two `parse_*_catalog_page` helpers, and the `apply_page_limit`
 //! guard. This module is the single copy.
 
+use crate::stalker::error::StalkerResult;
 use serde_json::Value;
 
 /// The pagination hints a portal advertises alongside a page of rows. Every field is
@@ -86,6 +87,104 @@ fn as_usize(value: u32) -> usize { usize::try_from(value).unwrap_or(usize::MAX) 
 /// Unwrap the `js` envelope Stalker portals wrap every response in, falling back to the
 /// document itself for the portals that do not.
 pub fn catalog_js(value: &Value) -> &Value { value.as_object().and_then(|map| map.get("js")).unwrap_or(value) }
+
+/// Where a catalog fetch delivers its rows.
+///
+/// The Stalker client tries several endpoint candidates in turn, and a failure part-way
+/// through pagination means abandoning that candidate and starting over on the next one.
+/// That retry is only sound if nothing has left the client yet, which is exactly what
+/// separates the two sinks: [`CollectSink`] holds everything until the catalog is complete
+/// and can therefore restart freely, while a streaming sink that has already handed rows
+/// to its caller cannot, and says so through [`CatalogSink::can_restart`].
+pub trait CatalogSink<T> {
+    /// Take one page of rows. Returning `Err` aborts the whole fetch.
+    fn accept(&mut self, batch: Vec<T>) -> impl std::future::Future<Output = StalkerResult<()>> + Send;
+
+    /// Whether the driver may abandon a half-fetched candidate and retry the next one.
+    fn can_restart(&self) -> bool;
+
+    /// Discard whatever the abandoned candidate produced. Only called when
+    /// [`Self::can_restart`] returned `true`.
+    fn restart(&mut self);
+}
+
+/// Accumulates the whole catalog in memory. This is the historical behaviour, and the one
+/// that keeps the retry-from-scratch guarantee: a truncated catalog is never returned as
+/// `Ok`, because nothing is visible to the caller until the fetch has completed.
+#[derive(Debug, Default)]
+pub struct CollectSink<T> {
+    rows: Vec<T>,
+}
+
+impl<T> CollectSink<T> {
+    #[must_use]
+    pub fn new() -> Self {
+        Self { rows: Vec::new() }
+    }
+
+    #[must_use]
+    pub fn into_rows(self) -> Vec<T> {
+        self.rows
+    }
+}
+
+impl<T: Send> CatalogSink<T> for CollectSink<T> {
+    fn accept(&mut self, mut batch: Vec<T>) -> impl std::future::Future<Output = StalkerResult<()>> + Send {
+        self.rows.append(&mut batch);
+        async { Ok(()) }
+    }
+
+    fn can_restart(&self) -> bool {
+        true
+    }
+
+    fn restart(&mut self) {
+        self.rows.clear();
+    }
+}
+
+/// Forwards each page to a caller-supplied callback as it arrives, so a large catalog
+/// never has to be resident all at once.
+///
+/// The trade is stated in [`CatalogSink`]: once a page has been handed over, the fetch can
+/// no longer fall back to another endpoint candidate. An `Err` from a streaming fetch
+/// therefore means the batches already delivered are an incomplete prefix and must be
+/// discarded by the caller.
+pub struct BatchSink<F> {
+    on_batch: F,
+    emitted_any: bool,
+}
+
+impl<F> BatchSink<F> {
+    pub fn new(on_batch: F) -> Self {
+        Self { on_batch, emitted_any: false }
+    }
+
+    /// Whether any page reached the callback. Useful to a caller deciding whether an empty
+    /// catalog was genuinely empty.
+    #[must_use]
+    pub fn emitted_any(&self) -> bool {
+        self.emitted_any
+    }
+}
+
+impl<T, F, Fut> CatalogSink<T> for BatchSink<F>
+where
+    T: Send,
+    F: FnMut(Vec<T>) -> Fut + Send,
+    Fut: std::future::Future<Output = StalkerResult<()>> + Send,
+{
+    fn accept(&mut self, batch: Vec<T>) -> impl std::future::Future<Output = StalkerResult<()>> + Send {
+        self.emitted_any = true;
+        (self.on_batch)(batch)
+    }
+
+    fn can_restart(&self) -> bool {
+        !self.emitted_any
+    }
+
+    fn restart(&mut self) {}
+}
 
 #[cfg(test)]
 mod tests {
