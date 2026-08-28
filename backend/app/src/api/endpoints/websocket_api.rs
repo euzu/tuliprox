@@ -443,8 +443,11 @@ fn to_protocol_message(event: EventMessage) -> Option<(ProtocolMessage, &'static
         EventMessage::ConfigChange(config) => {
             (ProtocolMessage::ConfigChangeResponse(config), "Configuration files change event")
         }
-        EventMessage::PlaylistUpdate(state) => {
-            (ProtocolMessage::PlaylistUpdateResponse(state), "Playlist update event")
+        // The wire carries the outcome only. The run summary rides along on
+        // the bus for notifications and plugins; the Web UI re-fetches its
+        // own view rather than reading statistics off this frame.
+        EventMessage::PlaylistUpdate(summary) => {
+            (ProtocolMessage::PlaylistUpdateResponse(summary.state), "Playlist update event")
         }
         EventMessage::PlaylistUpdateProgress(progress) => {
             (ProtocolMessage::PlaylistUpdateProgressResponse(progress), "Playlist update progress event")
@@ -668,7 +671,9 @@ mod tests {
     /// One `EventMessage` per `EventKind`; the length assert means a new
     /// variant cannot slip past the test above.
     fn sample_event_of_every_kind() -> Vec<(EventMessage, shared::model::EventKind)> {
-        use shared::model::{ActiveUserConnectionChange, ConfigType, EventKind, PlaylistUpdateState, SystemInfo};
+        use shared::model::{
+            ActiveUserConnectionChange, ConfigType, EventKind, PlaylistUpdateState, PlaylistUpdateSummary, SystemInfo,
+        };
 
         let downloads = DownloadsResponse { queue: Vec::new(), finished: Vec::new(), active: Vec::new() };
         let samples = vec![
@@ -676,7 +681,7 @@ mod tests {
             EventMessage::ActiveUser(ActiveUserConnectionChange::Connections(0, 0)),
             EventMessage::ActiveProvider("p".into(), 1),
             EventMessage::ConfigChange(ConfigType::Config),
-            EventMessage::PlaylistUpdate(PlaylistUpdateState::Success),
+            EventMessage::PlaylistUpdate(PlaylistUpdateSummary::state_only(PlaylistUpdateState::Success)),
             EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
                 target: String::new(),
                 message: String::new(),

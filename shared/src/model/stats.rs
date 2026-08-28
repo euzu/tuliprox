@@ -49,7 +49,7 @@ where
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlaylistStats {
     #[serde(rename = "groups")]
     pub group_count: usize,
@@ -57,7 +57,7 @@ pub struct PlaylistStats {
     pub channel_count: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InputStats {
     pub name: String,
     #[serde(rename = "type")]
@@ -78,7 +78,7 @@ impl Display for InputStats {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TargetStats {
     #[serde(rename = "target")]
     pub name: String,
@@ -96,7 +96,7 @@ impl Display for TargetStats {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SourceStats {
     #[serde(rename = "inputs")]
     pub inputs: Vec<InputStats>,

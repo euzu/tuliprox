@@ -24,7 +24,7 @@ use shared::model::{EventKind, EventKindMask, EventMessage};
 use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
-use tuliprox_core::model::{MessageContent, NotificationEvent};
+use tuliprox_core::model::{MessageContent, NotificationEvent, ProcessingStats};
 
 /// Subscribe to the event bus and forward what the config asks for.
 pub fn spawn_notification_bridge(app_state: &Arc<AppState>, cancel_token: &CancellationToken) {
@@ -107,9 +107,21 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
             Some(NotificationEvent::new(id, first_line(error), error.clone()).with_severity(message.severity()))
         }
 
-        EventMessage::PlaylistUpdate(state) => {
-            let title = format!("Playlist update finished: {state:?}");
-            Some(NotificationEvent::new(id, title.clone(), title).with_severity(message.severity()).with_fields(state))
+        // Rendered through `ProcessingStats` so the "Stats"/"Error"
+        // templates - which read `fields.stats` - see exactly the shape the
+        // separate stats message used to hand them. The id and severity come
+        // from the event, because the pipeline's own `PlaylistUpdateState` is
+        // a better answer than re-deriving the outcome from which fields
+        // happen to be populated.
+        EventMessage::PlaylistUpdate(summary) => {
+            let content = MessageContent::ProcessingStats(ProcessingStats {
+                stats: (!summary.stats.is_empty()).then(|| summary.stats.clone()),
+                errors: summary.error.clone(),
+            });
+            let mut event = NotificationEvent::from_content(&content);
+            event.id = id;
+            event.severity = message.severity();
+            Some(event)
         }
 
         EventMessage::ConfigChange(config_type) => {
@@ -220,8 +232,8 @@ mod tests {
         notification::{registry, Severity},
         ActiveUserConnectionChange, ConfigReloadFailure, ConfigType, DiskAlert, DiskAlertLevel, DownloadsResponse,
         EventKind, LibraryScanProgressEvent, LibraryScanSummary, LibraryScanSummaryStatus, MsgKind,
-        PlaylistUpdateProgressEvent, PlaylistUpdateState, ProviderAccountEvent, ProviderAccountState,
-        RecordingLifecycleMessage, SystemInfo, WatchChanges,
+        PlaylistUpdateProgressEvent, PlaylistUpdateState, PlaylistUpdateSummary, ProviderAccountEvent,
+        ProviderAccountState, RecordingLifecycleMessage, SystemInfo, WatchChanges,
     };
     use std::sync::Arc;
 
@@ -250,7 +262,7 @@ mod tests {
             EventMessage::ActiveUser(ActiveUserConnectionChange::Connections(0, 0)),
             EventMessage::ActiveProvider("p".into(), 1),
             EventMessage::ConfigChange(ConfigType::Config),
-            EventMessage::PlaylistUpdate(PlaylistUpdateState::Success),
+            EventMessage::PlaylistUpdate(PlaylistUpdateSummary::state_only(PlaylistUpdateState::Success)),
             EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
                 target: String::new(),
                 message: String::new(),
@@ -325,21 +337,30 @@ mod tests {
 
     #[test]
     fn a_failed_playlist_update_maps_to_the_failure_event_at_error_severity() {
-        let event = to_notification(&EventMessage::PlaylistUpdate(PlaylistUpdateState::Failure)).expect("mapped");
+        let event = to_notification(&EventMessage::PlaylistUpdate(PlaylistUpdateSummary::state_only(
+            PlaylistUpdateState::Failure,
+        )))
+        .expect("mapped");
         assert_eq!(event.id, registry::PLAYLIST_UPDATE_FAILED);
         assert_eq!(event.severity, Severity::Error);
     }
 
     #[test]
     fn a_partial_playlist_update_is_a_warning_not_a_success() {
-        let event = to_notification(&EventMessage::PlaylistUpdate(PlaylistUpdateState::Partial)).expect("mapped");
+        let event = to_notification(&EventMessage::PlaylistUpdate(PlaylistUpdateSummary::state_only(
+            PlaylistUpdateState::Partial,
+        )))
+        .expect("mapped");
         assert_eq!(event.id, registry::PLAYLIST_UPDATE_COMPLETED);
         assert_eq!(event.severity, Severity::Warn, "a partial update must not read as a clean success");
     }
 
     #[test]
     fn a_successful_playlist_update_is_informational() {
-        let event = to_notification(&EventMessage::PlaylistUpdate(PlaylistUpdateState::Success)).expect("mapped");
+        let event = to_notification(&EventMessage::PlaylistUpdate(PlaylistUpdateSummary::state_only(
+            PlaylistUpdateState::Success,
+        )))
+        .expect("mapped");
         assert_eq!(event.id, registry::PLAYLIST_UPDATE_COMPLETED);
         assert_eq!(event.severity, Severity::Info);
     }
@@ -371,7 +392,7 @@ mod tests {
     fn every_mapped_event_has_a_title_and_body() {
         let messages = vec![
             EventMessage::ServerError("x".to_string()),
-            EventMessage::PlaylistUpdate(PlaylistUpdateState::Success),
+            EventMessage::PlaylistUpdate(PlaylistUpdateSummary::state_only(PlaylistUpdateState::Success)),
             EventMessage::ConfigChange(ConfigType::Config),
             EventMessage::InputMetadataUpdatesStarted("input-a".into()),
             EventMessage::InputMetadataUpdatesCompleted("input-a".into()),
@@ -392,7 +413,7 @@ mod tests {
         // so the bridge would emit into the void.
         let messages = vec![
             EventMessage::ServerError("x".to_string()),
-            EventMessage::PlaylistUpdate(PlaylistUpdateState::Failure),
+            EventMessage::PlaylistUpdate(PlaylistUpdateSummary::state_only(PlaylistUpdateState::Failure)),
             EventMessage::ConfigChange(ConfigType::Config),
             EventMessage::InputMetadataUpdatesStarted("a".into()),
             EventMessage::InputMetadataUpdatesCompleted("a".into()),

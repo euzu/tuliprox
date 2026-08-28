@@ -23,7 +23,7 @@ use shared::{
     model::{
         ClusterFlags, CounterModifier, EventMessage, EventSink, FieldGet, FieldSet, InputStats, InputType, ItemField,
         MappingStage, PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistStats, PlaylistUpdateProgressEvent,
-        ProcessingOrder, SourceStats, StreamProperties, TargetStats, UUIDType, XtreamCluster,
+        PlaylistUpdateSummary, ProcessingOrder, SourceStats, StreamProperties, TargetStats, UUIDType, XtreamCluster,
     },
     utils::{create_alias_uuid, interner_gc, Internable},
 };
@@ -42,8 +42,8 @@ use tokio::{
 use tuliprox_core::{
     model::{
         is_valid, AppConfig, ConfigFavourites, ConfigInput, ConfigInputFlags, ConfigInputOptions, ConfigRename,
-        ConfigTarget, Epg, Mapping, MessageContent, ProcessTargets, ProviderIdType, ResolveReason,
-        ReverseProxyDisabledHeaderConfig, UpdateGuard, UpdateTask,
+        ConfigTarget, Epg, Mapping, ProcessTargets, ProviderIdType, ResolveReason, ReverseProxyDisabledHeaderConfig,
+        UpdateGuard, UpdateTask,
     },
     utils::{debug_if_enabled, log_memory_snapshot, trace_if_enabled, StepMeasure, StepMeasureCallback},
 };
@@ -52,7 +52,6 @@ use tuliprox_media_server::{
     media_server_catalog_snapshot_to_playlist, refresh_media_server_catalog_complete_before_publish,
     MediaServerCatalogRefreshPolicy, MediaServerHttpClient,
 };
-use tuliprox_messaging::send_message;
 use tuliprox_repository::{
     load_input_playlist, persist_input_playlist, persist_playlist, CategoryKey, MemoryPlaylistSource, PlaylistSource,
     PlaylistStorageState,
@@ -1967,7 +1966,9 @@ pub async fn exec_processing<E: EventSink + Clone + 'static>(
             Some(permit)
         } else {
             warn!("Playlist update lock is closed; update skipped.");
-            events.emit(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
+            events.emit(EventMessage::PlaylistUpdate(PlaylistUpdateSummary::state_only(
+                shared::model::PlaylistUpdateState::Failure,
+            )));
             return;
         }
     } else {
@@ -1980,7 +1981,9 @@ pub async fn exec_processing<E: EventSink + Clone + 'static>(
                 error!(
                     "Playlist update bootstrap timed out after {PLAYLIST_UPDATE_MAX_DURATION_SECS} secs while holding playlist lock",
                 );
-                events.emit(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
+                events.emit(EventMessage::PlaylistUpdate(PlaylistUpdateSummary::state_only(
+                    shared::model::PlaylistUpdateState::Failure,
+                )));
                 return;
             }
         }
@@ -2028,14 +2031,18 @@ pub async fn exec_processing<E: EventSink + Clone + 'static>(
         Ok(Ok((stats, errors))) => (stats, errors),
         Ok(Err(_)) => {
             error!("Playlist processing panicked");
-            events.emit(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
+            events.emit(EventMessage::PlaylistUpdate(PlaylistUpdateSummary::state_only(
+                shared::model::PlaylistUpdateState::Failure,
+            )));
             return;
         }
         Err(_) => {
             error!(
                 "Playlist processing timed out after {PLAYLIST_UPDATE_MAX_DURATION_SECS} secs while holding playlist lock",
             );
-            events.emit(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
+            events.emit(EventMessage::PlaylistUpdate(PlaylistUpdateSummary::state_only(
+                shared::model::PlaylistUpdateState::Failure,
+            )));
             return;
         }
     };
@@ -2051,26 +2058,26 @@ pub async fn exec_processing<E: EventSink + Clone + 'static>(
     }
 
     if !stats.is_empty() {
-        // print stats
         if let Ok(stats_msg) = serde_json::to_string(&stats) {
             info!("stats: {stats_msg}");
         }
-        // send stats
-        send_message(&app_config, client, MessageContent::event_stats(stats)).await;
     }
 
-    // send errors
-    if let Some(message) = get_errors_notify_message!(errors, 255) {
-        events.emit(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
-        send_message(&app_config, client, MessageContent::event_error(message)).await;
+    // One event for the whole run, carrying both the outcome and what it
+    // did. These used to be two independent messages - the statistics went
+    // straight to the notification layer, the outcome went to the bus - and
+    // because both resolve to `playlist.update.completed`, a successful
+    // refresh notified twice. Subscribers now get one event with everything,
+    // and the bridge renders the single message from it.
+    let error = get_errors_notify_message!(errors, 255);
+    let outcome = if error.is_some() {
+        shared::model::PlaylistUpdateState::Failure
+    } else if ctx.partial_refresh.load(std::sync::atomic::Ordering::Acquire) {
+        shared::model::PlaylistUpdateState::Partial
     } else {
-        let update_state = if ctx.partial_refresh.load(std::sync::atomic::Ordering::Acquire) {
-            shared::model::PlaylistUpdateState::Partial
-        } else {
-            shared::model::PlaylistUpdateState::Success
-        };
-        events.emit(EventMessage::PlaylistUpdate(update_state));
-    }
+        shared::model::PlaylistUpdateState::Success
+    };
+    events.emit(EventMessage::PlaylistUpdate(PlaylistUpdateSummary { state: outcome, stats, error }));
 
     let elapsed = start_time.elapsed().as_secs();
     let update_finished_message = format!("🌷 Update process finished! Took {elapsed} secs.");

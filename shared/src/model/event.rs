@@ -11,6 +11,7 @@
 
 use crate::model::{
     notification::{registry, EventId, Severity},
+    stats::SourceStats,
     ActiveUserConnectionChange, ConfigReloadFailure, ConfigType, DiskAlert, DownloadsDelta, DownloadsResponse,
     LibraryScanProgressEvent, MsgKind, Permission, PlaylistUpdateProgressEvent, PlaylistUpdateState,
     ProviderAccountEvent, ProviderAccountState, RecordingLifecycleMessage, SystemInfo, WatchChanges,
@@ -27,7 +28,7 @@ pub enum EventMessage {
     ActiveUser(ActiveUserConnectionChange),
     ActiveProvider(Arc<str>, usize),
     ConfigChange(ConfigType),
-    PlaylistUpdate(PlaylistUpdateState),
+    PlaylistUpdate(PlaylistUpdateSummary),
     PlaylistUpdateProgress(PlaylistUpdateProgressEvent),
     SystemInfoUpdate(Arc<SystemInfo>),
     LibraryScanProgress(LibraryScanProgressEvent),
@@ -347,7 +348,7 @@ impl EventMessage {
             // The only case the registry cannot answer: a partial refresh
             // and a clean one share `PLAYLIST_UPDATE_COMPLETED`, but a
             // partial one is not a clean success.
-            Self::PlaylistUpdate(PlaylistUpdateState::Partial) => Severity::Warn,
+            Self::PlaylistUpdate(summary) if summary.state == PlaylistUpdateState::Partial => Severity::Warn,
             // Everything else takes the severity its registered event
             // declares, so there is no second severity table to drift.
             _ => self.notification_id().map_or(Severity::Info, registry::default_severity),
@@ -371,10 +372,10 @@ impl EventMessage {
     pub const fn notification_id(&self) -> Option<EventId> {
         Some(match self {
             Self::ServerError(_) => registry::SYSTEM_ERROR,
-            Self::PlaylistUpdate(PlaylistUpdateState::Success | PlaylistUpdateState::Partial) => {
-                registry::PLAYLIST_UPDATE_COMPLETED
-            }
-            Self::PlaylistUpdate(PlaylistUpdateState::Failure) => registry::PLAYLIST_UPDATE_FAILED,
+            Self::PlaylistUpdate(summary) => match summary.state {
+                PlaylistUpdateState::Success | PlaylistUpdateState::Partial => registry::PLAYLIST_UPDATE_COMPLETED,
+                PlaylistUpdateState::Failure => registry::PLAYLIST_UPDATE_FAILED,
+            },
             Self::ConfigChange(_) => registry::CONFIG_CHANGED,
             Self::LibraryScanProgress(_) => registry::LIBRARY_SCAN_COMPLETED,
             Self::InputMetadataUpdatesStarted(_) => registry::METADATA_UPDATE_STARTED,
@@ -428,7 +429,7 @@ impl EventMessage {
             // `ConfigType` is not `Serialize`; its display form is the
             // stable name operators already see in the Web UI.
             Self::ConfigChange(config_type) => serde_json::json!({ "config_type": config_type.to_string() }),
-            Self::PlaylistUpdate(state) => encode(state),
+            Self::PlaylistUpdate(summary) => encode(summary),
             Self::PlaylistUpdateProgress(progress) => encode(progress),
             Self::SystemInfoUpdate(info) => encode(info.as_ref()),
             Self::LibraryScanProgress(progress) => encode(progress),
@@ -453,6 +454,32 @@ impl EventMessage {
     /// See [`EventKind::is_high_frequency`].
     #[must_use]
     pub const fn is_high_frequency(&self) -> bool { self.kind().is_high_frequency() }
+}
+
+/// What one playlist refresh did.
+///
+/// `PlaylistUpdate` used to carry the state alone, so "the refresh finished"
+/// reached the bus but what it actually did did not - the run summary went
+/// straight to the notification layer as a second, separate message with the
+/// same registered id. Subscribers saw an outcome with no detail, operators
+/// received two notifications per refresh, and a plugin asking for
+/// `playlist.update` got a bare enum.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PlaylistUpdateSummary {
+    pub state: PlaylistUpdateState,
+    /// Per-source statistics. Empty when the run produced none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stats: Vec<SourceStats>,
+    /// The aggregated error text, when the run reported errors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl PlaylistUpdateSummary {
+    /// A summary carrying only an outcome - the timeout and panic paths,
+    /// which have no statistics to report.
+    #[must_use]
+    pub fn state_only(state: PlaylistUpdateState) -> Self { Self { state, stats: Vec::new(), error: None } }
 }
 
 /// A set of [`EventKind`]s, as one word.
