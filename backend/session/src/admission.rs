@@ -87,11 +87,8 @@ pub async fn resolve_playback_request_admission(
     prepare_only: bool,
     terminate: bool,
 ) -> (crate::ConnectionAdmission, Option<crate::GraceMode>, PlaybackRequestClass) {
-    let request_class = classify_playback_request(PlaybackRequestFacts {
-        existing_session: user_session,
-        prepare_only,
-        terminate,
-    });
+    let request_class =
+        classify_playback_request(PlaybackRequestFacts { existing_session: user_session, prepare_only, terminate });
     let limits_enabled =
         (user.max_connections > 0 || user.soft_connections > 0) && adm.app_config.config.load().user_access_control;
 
@@ -225,17 +222,24 @@ pub struct AdmissionStrategyResolution {
 
 pub fn get_effective_admission_strategies(adm: &AdmissionCtx) -> Vec<AdmissionStrategy> {
     let config = adm.app_config.config.load();
-    let stream_config = config.reverse_proxy.as_ref().and_then(|rp| rp.stream.as_ref());
-    match stream_config {
-        Some(sc) if sc.admission_strategies.is_some() => sc.admission_strategies.clone().unwrap_or_default(),
-        Some(sc) if sc.grace_period_millis > 0 => {
-            vec![if sc.grace_period_hold_stream {
+    let Some(stream_config) = config.reverse_proxy.as_ref().and_then(|rp| rp.stream.as_ref()) else {
+        return Vec::new();
+    };
+
+    // `Some(vec![])` is deliberately not the same as `None`. An explicitly empty
+    // list means the operator turned admission strategies off, and must not fall
+    // back to the legacy `grace_period_millis` translation below; only an absent
+    // list does.
+    match stream_config.admission_strategies.as_ref() {
+        Some(strategies) => strategies.clone(),
+        None if stream_config.grace_period_millis > 0 => {
+            vec![if stream_config.grace_period_hold_stream {
                 AdmissionStrategy::GraceHoldStream
             } else {
                 AdmissionStrategy::GraceInstantStream
             }]
         }
-        _ => Vec::new(),
+        None => Vec::new(),
     }
 }
 
