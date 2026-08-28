@@ -498,6 +498,7 @@ fn to_protocol_message(event: EventMessage) -> Option<(ProtocolMessage, &'static
         // request - and nothing in the Web UI subscribes to probe
         // failures yet. Both are on the bus for operators and plugins.
         | EventMessage::UserLifecycle(_)
+        | EventMessage::ConnectionDenied(_)
         | EventMessage::StreamProbeFailed(_)
         // A notification that could not be delivered is an operator concern,
         // not a Web UI one, and there is no panel that renders it.
@@ -698,7 +699,8 @@ mod tests {
         // every notification-only kind against `expected = true` and the
         // test failed on `DiskAlert` - it has been red since the lifecycle
         // events joined the bus.
-        const NOT_ON_THE_WIRE: [EventKind; 24] = [
+        const NOT_ON_THE_WIRE: [EventKind; 25] = [
+            EventKind::ConnectionDenied,
             EventKind::ScheduledTaskFailed,
             EventKind::ProviderFetchFailed,
             EventKind::ProviderPoolExhausted,
@@ -749,8 +751,8 @@ mod tests {
     }
     fn sample_event_of_every_kind() -> Vec<(EventMessage, shared::model::EventKind)> {
         use shared::model::{
-            ActiveUserConnectionChange, ConfigType, EventKind, NotificationDeadLetter, PlaylistUpdateState,
-            PlaylistUpdateSummary, ScheduledTaskFailure, ServerLifecycleEvent, StreamProbeFailure,
+            ActiveUserConnectionChange, ConfigType, ConnectionDenied, EventKind, NotificationDeadLetter,
+            PlaylistUpdateState, PlaylistUpdateSummary, ScheduledTaskFailure, ServerLifecycleEvent, StreamProbeFailure,
             StreamProbeFailureReason, SystemInfo, UserLifecycleEvent, UserLifecycleState,
         };
 
@@ -854,6 +856,7 @@ mod tests {
                 vec!["telegram".to_string()],
                 0,
             )),
+            EventMessage::ConnectionDenied(ConnectionDenied::new("u".into(), "1.2.3.4".into(), 1, 0)),
             EventMessage::StreamProbeFailed(StreamProbeFailure::new(
                 "input".into(),
                 "1".into(),

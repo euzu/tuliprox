@@ -17,7 +17,7 @@ use crate::{
     connection_manager::ConnectionManager,
 };
 use log::debug;
-use shared::model::{AdmissionStrategy, UserConnectionPermission, VirtualId};
+use shared::model::{AdmissionStrategy, ConnectionDenied, EventMessage, UserConnectionPermission, VirtualId};
 use std::sync::Arc;
 use tuliprox_core::model::{AppConfig, Fingerprint, ProxyUserCredentials};
 
@@ -168,6 +168,23 @@ pub async fn resolve_playback_request_admission(
         },
     )
     .await;
+
+    // The ladder models this outcome fully - it is what is left after every
+    // eviction strategy declines - and then returned it to the caller and
+    // nobody else. `ActiveUser` covers connects and disconnects; a refusal is
+    // neither, so the one outcome a user actually complains about was the one
+    // nothing published.
+    //
+    // Only the strategy path emits. An explicit `Terminate` also resolves to
+    // `Exhausted`, but that is a requested teardown, not a denial.
+    if result.admission.permission == UserConnectionPermission::Exhausted {
+        adm.active_users.events().send_event(EventMessage::ConnectionDenied(ConnectionDenied::new(
+            Arc::from(user.username.as_str()),
+            Arc::from(fingerprint.client_ip.to_string().as_str()),
+            user.max_connections,
+            user.soft_connections,
+        )));
+    }
 
     (result.admission, result.grace_mode, request_class)
 }

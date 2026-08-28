@@ -476,6 +476,7 @@ negative pattern does, so `["*", "!system.info"]` reads the way it looks.
 | `metadata.update.failed` | error | A metadata update cycle ended with tasks it could not finish. |
 | `user.connection.changed` | info | A user connected or disconnected. High frequency - subscribe deliberately. |
 | `provider.connections.changed` | info | A provider's active connection count changed. High frequency - subscribe deliberately. |
+| `user.connection.denied` | warn | A user was refused a connection because their limits were full. |
 | `recording.queue.changed` | info | The recording queue changed. |
 | `recording.rules.changed` | info | The recording rule set changed. |
 | `scheduled_task.failed` | error | A scheduled task could not complete. |

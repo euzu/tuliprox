@@ -227,6 +227,9 @@ pub mod registry {
     pub const USER_CONNECTION_CHANGED: EventId = EventId::new("user.connection.changed");
     /// High frequency. Subscribe deliberately.
     pub const PROVIDER_CONNECTIONS_CHANGED: EventId = EventId::new("provider.connections.changed");
+    /// A user was refused a connection because their limits were full. Not
+    /// high frequency: reported per refusal, and a refusal is not routine.
+    pub const USER_CONNECTION_DENIED: EventId = EventId::new("user.connection.denied");
 
     // ---- user accounts ---------------------------------------------------
     pub const USER_CREATED: EventId = EventId::new("user.created");
@@ -380,6 +383,11 @@ pub mod registry {
             id: PROVIDER_CONNECTIONS_CHANGED,
             severity: Severity::Info,
             description: "A provider's active connection count changed. High frequency - subscribe deliberately.",
+        },
+        EventDescriptor {
+            id: USER_CONNECTION_DENIED,
+            severity: Severity::Warn,
+            description: "A user was refused a connection because their limits were full.",
         },
         EventDescriptor {
             id: USER_CREATED,

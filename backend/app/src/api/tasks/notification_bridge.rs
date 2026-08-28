@@ -101,6 +101,7 @@ const NOTIFIABLE_KINDS: EventKindMask = EventKindMask::new()
     .with(EventKind::UserCreated)
     .with(EventKind::UserUpdated)
     .with(EventKind::UserDeleted)
+    .with(EventKind::ConnectionDenied)
     .with(EventKind::StreamProbeFailed)
     .with(EventKind::ScheduledTaskFailed)
     .with(EventKind::AuthSignInSucceeded)
@@ -350,6 +351,16 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
         }
 
         EventMessage::UserLifecycle(event) => Some(user_lifecycle_notification(id, event, message.severity())),
+        EventMessage::ConnectionDenied(denied) => {
+            let limit = if denied.max_connections > 0 {
+                format!("{} connection(s)", denied.max_connections)
+            } else {
+                format!("{} soft connection(s)", denied.soft_connections)
+            };
+            let title = format!("{} was refused a connection (limit: {limit})", denied.username);
+            let body = format!("{title}\n\nFrom {}", denied.client_ip);
+            Some(NotificationEvent::new(id, title, body).with_severity(message.severity()).with_fields(denied))
+        }
         EventMessage::StreamProbeFailed(failure) => Some(probe_failure_notification(id, failure, message.severity())),
 
         EventMessage::AuthAudit(event) => Some(auth_audit_notification(id, event, message.severity())),
@@ -448,13 +459,13 @@ mod tests {
     use super::{to_notification, EventMessage, NOTIFIABLE_KINDS};
     use shared::model::{
         notification::{registry, Severity},
-        ActiveUserConnectionChange, ConfigReloadFailure, ConfigType, DiskAlert, DiskAlertLevel, DownloadsResponse,
-        EventKind, LibraryScanProgressEvent, LibraryScanSummary, LibraryScanSummaryStatus, MetadataUpdateFailure,
-        MsgKind, NotificationDeadLetter, PlaylistGroupsChanged, PlaylistUpdateProgressEvent, PlaylistUpdateState,
-        PlaylistUpdateSummary, ProviderAccountEvent, ProviderAccountState, ProviderFailureKind, ProviderFetchFailure,
-        ProviderPoolExhausted, ProviderPriorityFallback, RecordingLifecycleMessage, ScheduledTaskFailure,
-        ServerLifecycleEvent, StreamProbeFailure, StreamProbeFailureReason, SystemInfo, UserLifecycleEvent,
-        UserLifecycleState, WatchChanges, WatchDisabled, WatchDisabledReason, WatchUnmatched,
+        ActiveUserConnectionChange, ConfigReloadFailure, ConfigType, ConnectionDenied, DiskAlert, DiskAlertLevel,
+        DownloadsResponse, EventKind, LibraryScanProgressEvent, LibraryScanSummary, LibraryScanSummaryStatus,
+        MetadataUpdateFailure, MsgKind, NotificationDeadLetter, PlaylistGroupsChanged, PlaylistUpdateProgressEvent,
+        PlaylistUpdateState, PlaylistUpdateSummary, ProviderAccountEvent, ProviderAccountState, ProviderFailureKind,
+        ProviderFetchFailure, ProviderPoolExhausted, ProviderPriorityFallback, RecordingLifecycleMessage,
+        ScheduledTaskFailure, ServerLifecycleEvent, StreamProbeFailure, StreamProbeFailureReason, SystemInfo,
+        UserLifecycleEvent, UserLifecycleState, WatchChanges, WatchDisabled, WatchDisabledReason, WatchUnmatched,
     };
     use std::sync::Arc;
 
@@ -586,6 +597,7 @@ mod tests {
                 vec!["telegram".to_string()],
                 0,
             )),
+            EventMessage::ConnectionDenied(ConnectionDenied::new("u".into(), "1.2.3.4".into(), 1, 0)),
             EventMessage::StreamProbeFailed(StreamProbeFailure::new(
                 "input".into(),
                 "1".into(),

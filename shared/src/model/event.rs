@@ -13,10 +13,10 @@ use crate::model::{
     auth_audit::{AuthAuditEvent, AuthAuditOutcome},
     notification::{registry, EventId, Severity},
     stats::SourceStats,
-    ActiveUserConnectionChange, ConfigReloadFailure, ConfigType, DiskAlert, DownloadsDelta, DownloadsResponse,
-    LibraryScanProgressEvent, LibraryScanSummaryStatus, MetadataUpdateFailure, MsgKind, NotificationDeadLetter,
-    Permission, PlaylistGroupsChanged, PlaylistUpdateProgressEvent, PlaylistUpdateState, ProviderAccountEvent,
-    ProviderAccountState, ProviderFetchFailure, ProviderPoolExhausted, ProviderPriorityFallback,
+    ActiveUserConnectionChange, ConfigReloadFailure, ConfigType, ConnectionDenied, DiskAlert, DownloadsDelta,
+    DownloadsResponse, LibraryScanProgressEvent, LibraryScanSummaryStatus, MetadataUpdateFailure, MsgKind,
+    NotificationDeadLetter, Permission, PlaylistGroupsChanged, PlaylistUpdateProgressEvent, PlaylistUpdateState,
+    ProviderAccountEvent, ProviderAccountState, ProviderFetchFailure, ProviderPoolExhausted, ProviderPriorityFallback,
     RecordingLifecycleMessage, ScheduledTaskFailure, ServerLifecycleEvent, ServerLifecycleState, StreamProbeFailure,
     SystemInfo, UserLifecycleEvent, UserLifecycleState, WatchChanges, WatchDisabled, WatchUnmatched,
 };
@@ -86,6 +86,9 @@ pub enum EventMessage {
     /// three kinds - see [`EventMessage::kind`] - so a subscriber can ask
     /// for deletions alone.
     UserLifecycle(UserLifecycleEvent),
+    /// A user was refused a connection because their limits were full.
+    ConnectionDenied(ConnectionDenied),
+
     /// A stream probe returned no metadata. There is no success
     /// counterpart; see [`StreamProbeFailure`].
     StreamProbeFailed(StreamProbeFailure),
@@ -201,6 +204,7 @@ pub enum EventKind {
     UserCreated,
     UserUpdated,
     UserDeleted,
+    ConnectionDenied,
     StreamProbeFailed,
     NotificationDeadLettered,
     ScheduledTaskFailed,
@@ -215,7 +219,7 @@ impl EventKind {
     ///
     /// The mask type below indexes into this, so the order is load-bearing:
     /// it is the bit order, not just a listing.
-    pub const ALL: [Self; 43] = [
+    pub const ALL: [Self; 44] = [
         Self::ServerError,
         Self::ServerStarted,
         Self::ServerShutdown,
@@ -252,6 +256,7 @@ impl EventKind {
         Self::UserCreated,
         Self::UserUpdated,
         Self::UserDeleted,
+        Self::ConnectionDenied,
         Self::StreamProbeFailed,
         Self::NotificationDeadLettered,
         Self::ScheduledTaskFailed,
@@ -293,6 +298,9 @@ impl EventKind {
             // Who may hear that an account was created is the same question
             // as who may list accounts.
             Self::UserCreated | Self::UserUpdated | Self::UserDeleted => Permission::UserRead,
+            // Who was turned away is the same question as who signed in, and
+            // strictly narrower than the system-wide read.
+            Self::ConnectionDenied => Permission::UserRead,
             // Who signed in, who failed to, and who was refused: the same
             // question as who may read the user list, and strictly narrower
             // than the system-wide read the other operational events take.
@@ -420,6 +428,7 @@ impl EventKind {
             Self::UserCreated => "user.created",
             Self::UserUpdated => "user.updated",
             Self::UserDeleted => "user.deleted",
+            Self::ConnectionDenied => "user.connection.denied",
             Self::StreamProbeFailed => "stream.probe.failed",
             Self::NotificationDeadLettered => "notification.dead_lettered",
             Self::ScheduledTaskFailed => "scheduled_task.failed",
@@ -495,6 +504,7 @@ impl EventMessage {
                 UserLifecycleState::Updated => EventKind::UserUpdated,
                 UserLifecycleState::Deleted => EventKind::UserDeleted,
             },
+            Self::ConnectionDenied(_) => EventKind::ConnectionDenied,
             Self::StreamProbeFailed(_) => EventKind::StreamProbeFailed,
             Self::NotificationDeadLettered(_) => EventKind::NotificationDeadLettered,
             Self::ScheduledTaskFailed(_) => EventKind::ScheduledTaskFailed,
@@ -587,6 +597,7 @@ impl EventMessage {
                 UserLifecycleState::Updated => registry::USER_UPDATED,
                 UserLifecycleState::Deleted => registry::USER_DELETED,
             },
+            Self::ConnectionDenied(_) => registry::USER_CONNECTION_DENIED,
             Self::StreamProbeFailed(_) => registry::STREAM_PROBE_FAILED,
             Self::NotificationDeadLettered(_) => registry::NOTIFICATION_DEAD_LETTERED,
             Self::ScheduledTaskFailed(_) => registry::SCHEDULED_TASK_FAILED,
@@ -656,6 +667,7 @@ impl EventMessage {
             Self::ProviderPoolExhausted(exhausted) => encode(exhausted),
             Self::ProviderPriorityFallback(fallback) => encode(fallback),
             Self::UserLifecycle(event) => encode(event),
+            Self::ConnectionDenied(denied) => encode(denied),
             Self::StreamProbeFailed(failure) => encode(failure),
             Self::NotificationDeadLettered(dead_letter) => encode(dead_letter),
             Self::ScheduledTaskFailed(failure) => encode(failure),

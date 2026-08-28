@@ -620,6 +620,13 @@ impl ActiveUserManager {
         }
     }
 
+    /// The bus this manager publishes on.
+    ///
+    /// Exposed so the admission path can report a refusal without
+    /// `AdmissionCtx` growing a second handle to the same manager.
+    #[must_use]
+    pub fn events(&self) -> &Arc<EventManager> { &self.event_manager }
+
     pub fn new(config: &Config, geoip: &Arc<ArcSwapOption<GeoIp>>, event_manager: &Arc<EventManager>) -> Self {
         let log_active_user: bool = config.log.as_ref().is_some_and(|l| l.log_active_user);
         let (grace_period_millis, grace_period_timeout_secs) = get_grace_options(config);
