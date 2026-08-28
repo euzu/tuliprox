@@ -1331,6 +1331,18 @@
   `kind_for_exhausted` it never read (both callers construct the exhausted result themselves), and the doc block on the
   post-grace fallback listed a `Deny` rule although `AdmissionDecision` only has `NoMatch`, `Grace` and `Evict`.
 
+- **The documented event table is complete again**: eight events registered by the user-lifecycle and auth work —
+  `user.created`, `user.updated`, `user.deleted`, the four `auth.*` decisions and `stream.probe.failed` — were never
+  given a row, so `every_registered_event_appears_in_the_docs_table` had been failing since before those events landed.
+  The rows are generated from the descriptors, so severity and description match the registry exactly. A run of
+  twenty-seven spaces left inside the `stream.probe.failed` description by a collapsed wrapped literal is normalised in
+  the registry and the table together.
+
+- **The notification bridge stays a routing table**: fourteen new events left `to_notification` doing its own wording
+  inline, at 213 lines. Each event's wording moved into a `*_notification` builder beside the three that already
+  existed, so the match is one arm per variant with no logic in it, and the "... N more not listed" wording has one home
+  shared by both events that carry sampled lists rather than a copy in each.
+
 - **`EventBusStats::Default` is hand-written**: the taxonomy crossed 32 kinds, and the derived `Default` for arrays
   stops there.
 
