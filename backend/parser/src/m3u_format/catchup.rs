@@ -1,5 +1,5 @@
 use super::{encode_m3u_catchup_token, M3uCatchupToken};
-use chrono::{DateTime, NaiveDateTime};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use shared::{
     error::TuliproxError,
     model::CatchupProperties,
@@ -20,6 +20,7 @@ const M3U_CATCHUP_PARAM_LUTC: &str = "lutc";
 const XC_START_TEMPLATE: &str = "{Y}-{m}-{d}:{H}-{M}-{S}";
 const FLUSSONIC_UTC_SENTINEL: &str = "__TULIPROX_M3U_CATCHUP_UTC__";
 const XTREAM_BRIDGE_START_FORMATS: [&str; 4] = ["%Y-%m-%d %H:%M", "%Y-%m-%d:%H-%M", "%Y-%m-%d:%H:%M", "%Y-%m-%d-%H-%M"];
+const MAX_CATCHUP_FUTURE_SKEW_SECS: i64 = 10 * 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct M3uCatchupRewrite {
@@ -214,26 +215,74 @@ fn is_append_like_query_source(mode: &str, source: &str) -> bool {
 /// Build `archive|{utc}|{duration}` when the resolved provider URL still carries append/shift
 /// query markers. Session tokens keep this discriminator so the panel can show Catchup/EPG
 /// after HLS rewrite drops `utc`/`utcstart` from segment URLs.
-fn archive_discriminator_from_resolved_url(url: &str) -> Option<String> {
-    let parsed = Url::parse(url).ok()?;
+fn parse_catchup_timestamp(value: &str) -> Option<i64> {
+    if value.len() == 14 && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return NaiveDateTime::parse_from_str(value, "%Y%m%d%H%M%S").ok().map(|dt| dt.and_utc().timestamp());
+    }
+    let timestamp = value.parse::<i64>().ok()?;
+    DateTime::from_timestamp(timestamp, 0).map(|_| timestamp)
+}
+
+fn validate_catchup_start(start: i64) -> Result<(), TuliproxError> {
+    if start > Utc::now().timestamp().saturating_add(MAX_CATCHUP_FUTURE_SKEW_SECS) {
+        return Err(TuliproxError::RepositoryM3u("Catchup start timestamp is in the future".to_string()));
+    }
+    Ok(())
+}
+
+fn archive_discriminator_from_resolved_url(url: &str) -> Result<Option<String>, TuliproxError> {
+    let Ok(parsed) = Url::parse(url) else {
+        return Ok(None);
+    };
     let mut start_ts = None;
     let mut end_ts = None;
-    let mut duration_secs = None;
+    let mut duration_value = None;
     for (key, value) in parsed.query_pairs() {
         if key.eq_ignore_ascii_case("utc")
             || key.eq_ignore_ascii_case("utcstart")
             || key.eq_ignore_ascii_case("timestamp")
         {
-            start_ts = value.parse::<i64>().ok().or(start_ts);
+            start_ts =
+                Some(parse_catchup_timestamp(&value).ok_or_else(|| {
+                    TuliproxError::RepositoryM3u(format!("Invalid catchup start timestamp: {value}"))
+                })?);
         } else if key.eq_ignore_ascii_case("lutc") {
-            end_ts = value.parse::<i64>().ok().or(end_ts);
+            end_ts = Some(
+                parse_catchup_timestamp(&value)
+                    .ok_or_else(|| TuliproxError::RepositoryM3u(format!("Invalid catchup end timestamp: {value}")))?,
+            );
         } else if key.eq_ignore_ascii_case("offset") || key.eq_ignore_ascii_case("duration") {
-            duration_secs = value.parse::<i64>().ok().and_then(i64::checked_abs).or(duration_secs);
+            duration_value = Some(value.into_owned());
         }
     }
-    let start = start_ts?;
-    let duration = end_ts.map(|end| end.saturating_sub(start).max(0)).or(duration_secs).unwrap_or(0);
-    Some(format!("archive|{start}|{duration}"))
+    let Some(start) = start_ts else {
+        if end_ts.is_some() {
+            return Err(TuliproxError::RepositoryM3u("Catchup window is missing a start timestamp".to_string()));
+        }
+        return Ok(None);
+    };
+    validate_catchup_start(start)?;
+    let duration_secs = duration_value
+        .map(|value| {
+            let duration = value
+                .parse::<i64>()
+                .ok()
+                .and_then(i64::checked_abs)
+                .ok_or_else(|| TuliproxError::RepositoryM3u(format!("Invalid catchup duration: {value}")))?;
+            if duration == 0 {
+                return Err(TuliproxError::RepositoryM3u("Catchup duration must be greater than zero".to_string()));
+            }
+            Ok(duration)
+        })
+        .transpose()?;
+    let duration = if let Some(end) = end_ts {
+        end.checked_sub(start)
+            .filter(|duration| *duration > 0)
+            .ok_or_else(|| TuliproxError::RepositoryM3u("Catchup end must be after its start".to_string()))?
+    } else {
+        duration_secs.unwrap_or(0)
+    };
+    Ok(Some(format!("archive|{start}|{duration}")))
 }
 
 fn derived_template_for_mode<'a>(source_url: &'a str, catchup: &'a CatchupProperties) -> Option<Cow<'a, str>> {
@@ -317,14 +366,15 @@ fn fill_collectors_from_utc_lutc(
     let utc =
         params.iter().find(|(key, _)| key.eq_ignore_ascii_case(M3U_CATCHUP_PARAM_UTC)).map(|(_, value)| value.as_str());
     let duration = utc
-        .and_then(|start| start.parse::<i64>().ok())
+        .and_then(parse_catchup_timestamp)
         .zip(
             params
                 .iter()
                 .find(|(key, _)| key.eq_ignore_ascii_case(M3U_CATCHUP_PARAM_LUTC))
-                .and_then(|(_, value)| value.parse::<i64>().ok()),
+                .and_then(|(_, value)| parse_catchup_timestamp(value)),
         )
-        .and_then(|(start, end)| (end >= start).then(|| (end - start).to_string()));
+        .and_then(|(start, end)| end.checked_sub(start).filter(|duration| *duration > 0))
+        .map(|duration| duration.to_string());
 
     for (collector, placeholder) in collectors.iter_mut().zip(placeholders) {
         if collector.is_some() {
@@ -481,9 +531,18 @@ pub fn resolve_xtream_m3u_catchup_url(
     let minutes: u64 = duration_minutes
         .parse()
         .map_err(|_| TuliproxError::RepositoryM3u(format!("Invalid Xtream duration minutes: {duration_minutes}")))?;
+    if minutes == 0 {
+        return Err(TuliproxError::RepositoryM3u("Xtream duration must be greater than zero".to_string()));
+    }
     let duration_secs = minutes
         .checked_mul(60)
         .ok_or_else(|| TuliproxError::RepositoryM3u("Xtream duration minutes overflow seconds".to_string()))?;
+    let duration_i64 = i64::try_from(duration_secs)
+        .map_err(|_| TuliproxError::RepositoryM3u("Xtream duration exceeds the supported range".to_string()))?;
+    validate_catchup_start(utc_start)?;
+    utc_start
+        .checked_add(duration_i64)
+        .ok_or_else(|| TuliproxError::RepositoryM3u("Xtream catchup end timestamp overflow".to_string()))?;
 
     let collectors: Vec<(usize, String)> = segments
         .iter()
@@ -525,7 +584,7 @@ pub fn resolve_m3u_catchup_url(
     let url = render_template(&segments, &collectors)?;
     // Prefer archive|{utc}|{duration} so Streams/History can recover EPG from the session token
     // after append/shift query params are stripped from rewritten HLS segment URLs.
-    let discriminator = archive_discriminator_from_resolved_url(&url).unwrap_or_else(|| {
+    let discriminator = archive_discriminator_from_resolved_url(&url)?.unwrap_or_else(|| {
         let mut discriminator = url::form_urlencoded::Serializer::new(String::new());
         let mode = catchup.effective_mode().unwrap_or_default();
         discriminator.append_pair("mode", if mode.is_empty() { "default" } else { mode });
@@ -613,6 +672,7 @@ mod tests {
             super::archive_discriminator_from_resolved_url(
                 "http://provider.example/live/42.m3u8?offset=-3600&utcstart=1717200000"
             )
+            .expect("valid append window")
             .as_deref(),
             Some("archive|1717200000|3600")
         );
@@ -620,20 +680,45 @@ mod tests {
             super::archive_discriminator_from_resolved_url(
                 "http://provider.example/live/42.ts?utc=1717200000&lutc=1717203600"
             )
+            .expect("valid shift window")
             .as_deref(),
             Some("archive|1717200000|3600")
         );
     }
 
     #[test]
-    fn append_discriminator_ignores_overflowing_i64_min_offset() {
-        assert_eq!(
-            super::archive_discriminator_from_resolved_url(
-                "http://provider.example/live/42.m3u8?offset=-9223372036854775808&utcstart=1717200000"
-            )
-            .as_deref(),
-            Some("archive|1717200000|0")
+    fn append_discriminator_rejects_overflowing_i64_min_offset() {
+        let result = super::archive_discriminator_from_resolved_url(
+            "http://provider.example/live/42.m3u8?offset=-9223372036854775808&utcstart=1717200000",
         );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn shift_discriminator_normalizes_compact_calendar_window() {
+        let discriminator = super::archive_discriminator_from_resolved_url(
+            "http://provider.example/live/42.ts?utc=20240101120000&lutc=20240101130000",
+        )
+        .expect("valid compact calendar window");
+
+        assert_eq!(discriminator.as_deref(), Some("archive|1704110400|3600"));
+    }
+
+    #[test]
+    fn m3u_catchup_rejects_invalid_windows() {
+        let append = CatchupProperties {
+            mode: Some("append".intern()),
+            source: Some("?offset=-${offset}&utcstart=${timestamp}".intern()),
+            ..CatchupProperties::default()
+        };
+        assert!(resolve_m3u_catchup_url("http://provider.example/live/42.m3u8", &append, Some("v0=0&v1=1717200000"),)
+            .is_err());
+
+        let shift = CatchupProperties { mode: Some("shift".intern()), ..CatchupProperties::default() };
+        for query in ["utc=1717203600&lutc=1717200000", "utc=invalid&lutc=1717203600", "utc=1717200000&lutc=1717200000"]
+        {
+            assert!(resolve_m3u_catchup_url("http://provider.example/live/42.ts", &shift, Some(query)).is_err());
+        }
     }
 
     #[test]
@@ -1049,6 +1134,26 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.kind(), shared::error::ErrorKind::RepositoryM3u);
+    }
+
+    #[test]
+    fn xtream_bridge_rejects_zero_duration_and_future_start() {
+        let catchup = CatchupProperties {
+            mode: Some("flussonic".intern()),
+            source: Some("http://provider.example/channel/video-{utc}-{duration}.m3u8".intern()),
+            ..CatchupProperties::default()
+        };
+        assert!(resolve_xtream_m3u_catchup_url(
+            "http://provider.example/channel/index.m3u8",
+            &catchup,
+            "1704067200",
+            "0",
+        )
+        .is_err());
+
+        let future = chrono::Utc::now().timestamp().saturating_add(3600).to_string();
+        assert!(resolve_xtream_m3u_catchup_url("http://provider.example/channel/index.m3u8", &catchup, &future, "60",)
+            .is_err());
     }
 
     #[test]
