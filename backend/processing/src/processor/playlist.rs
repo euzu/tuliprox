@@ -7,7 +7,7 @@ use crate::{
     parser::xmltv::{flatten_tvguide, merge_epg_trees, EpgMergeAccumulator, TVGuide},
     playlist_watch::process_group_watch,
     processor::{
-        epg::process_playlist_epg, library, sort::sort_playlist, stalker, trakt::process_trakt_categories_for_target,
+        epg::process_playlist_epg, sort::sort_playlist, trakt::process_trakt_categories_for_target,
         xtream_series::playlist_resolve_series, xtream_vod::playlist_resolve_vod, StalkerRefreshMode,
     },
 };
@@ -46,10 +46,13 @@ use tuliprox_core::{
     },
     utils::{debug_if_enabled, log_memory_snapshot, trace_if_enabled, StepMeasure, StepMeasureCallback},
 };
-use tuliprox_iptv::{m3u, xtream};
-use tuliprox_media_server::{
-    media_server_catalog_snapshot_to_playlist, refresh_media_server_catalog_complete_before_publish,
-    MediaServerCatalogRefreshPolicy, MediaServerHttpClient,
+use super::providers::{LibraryProvider, PlexProvider, StalkerProvider};
+use tuliprox_iptv::{
+    provider::{
+        BatchContainerProvider, M3uProvider, PlaylistFetch, PlaylistFetchRequest, PlaylistProvider,
+        UnsupportedProvider, XtreamProvider,
+    },
+    xtream,
 };
 use tuliprox_repository::{
     load_input_playlist, persist_input_playlist, persist_playlist, CategoryKey, MemoryPlaylistSource, PlaylistSource,
@@ -402,35 +405,6 @@ fn collect_effective_skip_clusters(input: &ConfigInput) -> Vec<XtreamCluster> {
     xtream::get_skip_cluster(input)
 }
 
-async fn download_plex_media_server_playlist(
-    client: &reqwest::Client,
-    input: &ConfigInput,
-) -> (Vec<PlaylistGroup>, Vec<TuliproxError>) {
-    let Some(media_server) = input.media_server.as_ref() else {
-        return (
-            vec![],
-            vec![TuliproxError::Download(format!(
-                "media-server input '{}' is missing media_server configuration",
-                input.name
-            ))],
-        );
-    };
-    let http_client = MediaServerHttpClient::new(client.clone());
-    let plex_client = match input.plex_catalog_client(http_client) {
-        Ok(client) => client,
-        Err(error) => return (vec![], vec![TuliproxError::Download(error.to_string())]),
-    };
-    let policy = MediaServerCatalogRefreshPolicy {
-        page_size: usize::from(media_server.catalog.page_size),
-        request_delay_ms: media_server.catalog.request_delay_ms,
-    };
-
-    match refresh_media_server_catalog_complete_before_publish(&plex_client, policy).await {
-        Ok(snapshot) => (media_server_catalog_snapshot_to_playlist(&snapshot), vec![]),
-        Err(error) => (vec![], vec![TuliproxError::Download(error.to_string())]),
-    }
-}
-
 fn filter_skipped_clusters_from_source(source: PlaylistSource, input: &ConfigInput) -> PlaylistSource {
     let skip_clusters = collect_effective_skip_clusters(input);
     if skip_clusters.is_empty() {
@@ -527,72 +501,48 @@ async fn playlist_download_from_input<E: EventSink>(
         return PlaylistDownloadResult::new(vec![], vec![], true, false);
     }
 
-    let (playlist, errors, persisted, _m3u_error_count, _xtream_error_count, partial) = {
-        match download_input_type {
-            InputType::M3u => {
-                let (p, e) = m3u::download_m3u_playlist(app_config, client, config, input).await;
-                (p, e, false, 0, 0, false)
-            }
-            InputType::Xtream => {
-                let (p, e, persisted) = xtream::download_xtream_playlist(
-                    app_config,
-                    client,
-                    events,
-                    input,
-                    Some(xtream_clusters_to_download.as_slice()),
-                )
-                .await;
-                let xtream_error_count = e.len();
-                (p, e, persisted, 0, xtream_error_count, false)
-            }
-            InputType::M3uBatch | InputType::XtreamBatch | InputType::StalkerBatch => {
-                (vec![], vec![], false, 0, 0, false)
-            }
-            InputType::Stalker => {
-                let (p, e, persisted, partial) = stalker::download_stalker_playlist(
-                    app_config,
-                    client,
-                    input,
-                    None,
-                    stalker_refresh_mode,
-                    !config.disk_based_processing,
-                )
-                .await;
-                let stalker_error_count = e.len();
-                (p, e, persisted, 0, stalker_error_count, partial)
-            }
-            InputType::Library => {
-                let (p, e) = library::download_library_playlist(client, app_config, input).await;
-                (p, e, false, 0, 0, false)
-            }
-            InputType::Plex => {
-                let (p, e) = download_plex_media_server_playlist(client, input).await;
-                (p, e, false, 0, 0, false)
-            }
-            InputType::Emby | InputType::Jellyfin => (
-                vec![],
-                vec![TuliproxError::Download(format!(
-                    "media-server input '{}' is configured but catalog import is not implemented yet",
-                    input.name
-                ))],
-                false,
-                0,
-                0,
-                false,
-            ),
-            InputType::Staged => (
-                vec![],
-                vec![TuliproxError::Download(format!(
-                    "staged input '{}' was not resolved against a parent input",
-                    input.name
-                ))],
-                false,
-                0,
-                0,
-                false,
-            ),
-        }
+    let request = PlaylistFetchRequest {
+        app_config,
+        config: &app_config.config.load(),
+        client,
+        input,
+        xtream_clusters: Some(xtream_clusters_to_download.as_slice()),
     };
+
+    // Each arm builds the provider its input type needs and awaits it in place: the
+    // provider types share no supertype, and building one is free, so this stays a match
+    // and stays statically dispatched. What changed is the result - one named
+    // `PlaylistFetch` instead of a six-element tuple assembled by position.
+    let fetch = match download_input_type {
+        InputType::M3u => M3uProvider.fetch(&request).await,
+        InputType::Xtream => XtreamProvider::new(events).fetch(&request).await,
+        InputType::M3uBatch | InputType::XtreamBatch | InputType::StalkerBatch => {
+            BatchContainerProvider.fetch(&request).await
+        }
+        InputType::Stalker => {
+            StalkerProvider::new(stalker_refresh_mode, !config.disk_based_processing).fetch(&request).await
+        }
+        InputType::Library => LibraryProvider.fetch(&request).await,
+        InputType::Plex => {
+            PlexProvider.fetch(&request).await
+        }
+        InputType::Emby | InputType::Jellyfin => UnsupportedProvider::new(
+            "media-server",
+            format!(
+                "media-server input '{}' is configured but catalog import is not implemented yet",
+                input.name
+            ),
+        )
+        .fetch(&request)
+        .await,
+        InputType::Staged => UnsupportedProvider::new(
+            "staged",
+            format!("staged input '{}' was not resolved against a parent input", input.name),
+        )
+        .fetch(&request)
+        .await,
+    };
+    let PlaylistFetch { groups: playlist, errors, persisted, partial } = fetch;
 
     // Update Status
     let save_status;

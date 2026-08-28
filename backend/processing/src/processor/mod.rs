@@ -7,6 +7,7 @@ mod deduplicate;
 mod epg;
 mod library;
 mod probe_handle_guard;
+mod providers;
 mod resolve_options;
 mod sort;
 mod stream_probe;
@@ -17,6 +18,7 @@ pub use self::{
     epg::*,
     playlist::*,
     probe_handle_guard::*,
+    providers::*,
     resolve_options::*,
     stalker::{download_stalker_playlist, re_resolve_stalker_url, StalkerCluster},
     stalker_refresh::StalkerRefreshMode,
