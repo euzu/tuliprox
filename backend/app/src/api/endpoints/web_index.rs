@@ -3,7 +3,10 @@ use crate::{
         api_utils::{serve_file, try_unwrap_body},
         model::AppState,
     },
-    auth::{create_jwt_admin, create_jwt_api_user, create_jwt_web_user, verify_password, verify_token, AuthBearer},
+    auth::{
+        create_jwt_admin, create_jwt_api_user, create_jwt_web_user, validate_password_version, verify_password,
+        verify_token, AuthBearer,
+    },
     model::WebAuthConfig,
 };
 use axum::{body::Body, http::Request, response::IntoResponse};
@@ -121,7 +124,6 @@ async fn token_refresh(
                     return axum::http::StatusCode::UNAUTHORIZED.into_response();
                 }
 
-                let token_pwd_version = claims.pwd_version;
                 let Some(users) = web_auth.t_users.as_ref() else {
                     return axum::http::StatusCode::UNAUTHORIZED.into_response();
                 };
@@ -131,7 +133,9 @@ async fn token_refresh(
                 };
 
                 let current_pwd_version = WebAuthConfig::pwd_version_from_hash(&user.password_hash);
-                if token_pwd_version != 0 && token_pwd_version != current_pwd_version {
+                // This used to read `pwd_version != 0 && pwd_version != current`,
+                // so a token carrying `0` skipped the check entirely.
+                if validate_password_version(&claims, current_pwd_version).is_err() {
                     return axum::http::StatusCode::UNAUTHORIZED.into_response();
                 }
 

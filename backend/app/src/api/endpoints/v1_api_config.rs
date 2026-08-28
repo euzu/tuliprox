@@ -95,10 +95,21 @@ fn has_any_permission(permissions: PermissionSet, required: &[Permission]) -> bo
     required.iter().any(|permission| permissions.contains(*permission))
 }
 
+/// The permissions this token may act with *right now*.
+///
+/// The claim alone is a snapshot from mint time, so a revoked group permission
+/// kept filtering config in until the token expired. Intersecting with the live
+/// grant makes a revocation immediate without ever widening a token beyond what
+/// it was issued with.
 fn decode_permissions(app_state: &AppState, token: &str) -> Option<PermissionSet> {
     let config = app_state.app_config.config.load();
     let web_auth = config.web_ui.as_ref()?.auth.as_ref()?;
-    verify_token(token, web_auth.secret.as_bytes(), &web_auth.issuer).map(|token_data| token_data.claims.permissions)
+    let claims = verify_token(token, web_auth.secret.as_bytes(), &web_auth.issuer)?.claims;
+    Some(
+        web_auth
+            .resolve_permissions_if_known(&claims.username)
+            .map_or(claims.permissions, |live| claims.permissions & live),
+    )
 }
 
 fn filter_api_proxy_by_permissions(api_proxy: &mut ApiProxyConfigDto, permissions: PermissionSet) {

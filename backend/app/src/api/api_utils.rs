@@ -46,14 +46,13 @@ use axum::{
 use bytes::{Bytes, BytesMut};
 use chrono::{DateTime, Utc};
 use futures::{stream, Stream, StreamExt, TryStreamExt};
-use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use log::{debug, error, info, log_enabled, trace, warn};
 use serde::Serialize;
 use shared::{
     concat_string,
     defaults::{DASH_EXT, HLS_EXT},
     model::{
-        Claims, ConfigTargetOptions, InputFetchMethod, InputType, PlaylistEntry, PlaylistItemType, ProxyType,
+        ConfigTargetOptions, InputFetchMethod, InputType, PlaylistEntry, PlaylistItemType, ProxyType,
         StalkerStreamKind, StreamChannel, StreamInfo, TargetType, UserConnectionPermission, VirtualId, XtreamCluster,
     },
     utils::{
@@ -3484,15 +3483,12 @@ pub fn empty_json_list_response() -> axum::response::Response {
 }
 
 pub fn get_username_from_auth_header(token: &str, app_state: &Arc<AppState>) -> Option<String> {
-    if let Some(web_auth_config) = &app_state.app_config.config.load().web_ui.as_ref().and_then(|c| c.auth.as_ref()) {
-        let secret_key: &[u8] = web_auth_config.secret.as_ref();
-        if let Ok(token_data) =
-            decode::<Claims>(token, &DecodingKey::from_secret(secret_key), &Validation::new(Algorithm::HS256))
-        {
-            return Some(token_data.claims.username);
-        }
-    }
-    None
+    let config = app_state.app_config.config.load();
+    let web_auth_config = config.web_ui.as_ref()?.auth.as_ref()?;
+    // This hand-rolled its own `decode` with a bare `Validation::new`, which
+    // checks `exp` and nothing else - no issuer.
+    crate::auth::verify_token(token, web_auth_config.secret.as_bytes(), &web_auth_config.issuer)
+        .map(|token_data| token_data.claims.username)
 }
 
 pub fn redirect(url: &str) -> impl IntoResponse {

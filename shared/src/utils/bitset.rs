@@ -12,6 +12,22 @@ macro_rules! create_bitset {
         #[serde(transparent)]
         pub struct [<$enum_name Set>](pub $storage);
 
+        impl $enum_name {
+            /// Recover a variant from its discriminant.
+            ///
+            /// Needed where the variant has to cross a const-generic boundary:
+            /// a `const P: u32` can carry the discriminant, not the enum.
+            #[inline]
+            pub const fn from_repr(value: $storage) -> Option<Self> {
+                $(
+                    if value == (Self::$variant as $storage) {
+                        return Some(Self::$variant);
+                    }
+                )*
+                None
+            }
+        }
+
         impl [<$enum_name Set>] {
             pub const VARIANT_COUNT: usize = [$(stringify!($variant)),*].len();
 
