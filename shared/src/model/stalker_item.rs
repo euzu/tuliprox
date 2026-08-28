@@ -139,7 +139,9 @@ impl Default for StalkerPlaylistItem {
 
 impl StalkerPlaylistItem {
     /// Whether this item is a series root (no individual playback URL).
-    pub fn is_series_root(&self) -> bool { self.is_series }
+    pub fn is_series_root(&self) -> bool {
+        self.is_series
+    }
 
     /// Whether this item supports archive/timeshift playback.
     pub fn supports_archive(&self) -> bool {

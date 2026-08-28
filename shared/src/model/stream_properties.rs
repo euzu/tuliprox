@@ -103,7 +103,9 @@ fn format_episode_code(season: u32, episode: u32) -> Option<String> {
     }
 }
 
-fn title_contains_episode_code(title: &str) -> bool { CONSTANTS.re_episode_code.is_match(title) }
+fn title_contains_episode_code(title: &str) -> bool {
+    CONSTANTS.re_episode_code.is_match(title)
+}
 
 fn first_series_episode_value<T, F>(series: &SeriesStreamProperties, selector: F) -> Option<T>
 where
@@ -677,9 +679,13 @@ impl StreamProperties {
         }
     }
 
-    pub fn get_season(&self) -> Option<u32> { self.episode_value(|episode| episode.season) }
+    pub fn get_season(&self) -> Option<u32> {
+        self.episode_value(|episode| episode.season)
+    }
 
-    pub fn get_episode(&self) -> Option<u32> { self.episode_value(|episode| episode.episode) }
+    pub fn get_episode(&self) -> Option<u32> {
+        self.episode_value(|episode| episode.episode)
+    }
 
     pub fn get_last_modified(&self) -> Option<u64> {
         match self {

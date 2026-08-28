@@ -306,7 +306,9 @@ impl HlsCacheResponseContext {
         }
     }
 
-    pub fn set_qos_meter(&self, qos_meter: Option<Arc<StreamMeterHandle>>) { self.qos_meter.store(qos_meter); }
+    pub fn set_qos_meter(&self, qos_meter: Option<Arc<StreamMeterHandle>>) {
+        self.qos_meter.store(qos_meter);
+    }
 
     pub async fn mark_media_activity(&self) {
         if let Some(marker) = &self.media_activity_marker {
@@ -423,7 +425,9 @@ impl HlsMediaActivityMarker {
         });
     }
 
-    fn completed_segment_marker(&self) -> Option<Self> { self.completed_segment.map(|_| self.clone()) }
+    fn completed_segment_marker(&self) -> Option<Self> {
+        self.completed_segment.map(|_| self.clone())
+    }
 
     fn record_startup_segment_request(&self, proxy_seq: u64, now_ms: u64) {
         self.manager.startup_observability().record_first_visible_segment_request(&self.lease_id, proxy_seq, now_ms);
@@ -1033,7 +1037,9 @@ struct PreparedBytesStream {
 }
 
 impl PreparedBytesStream {
-    fn new(bytes: Bytes) -> Self { Self { remaining: bytes } }
+    fn new(bytes: Bytes) -> Self {
+        Self { remaining: bytes }
+    }
 }
 
 impl Stream for PreparedBytesStream {
@@ -1178,7 +1184,9 @@ impl CacheReadGuard {
 }
 
 impl Drop for CacheReadGuard {
-    fn drop(&mut self) { self.access.reader_finished(); }
+    fn drop(&mut self) {
+        self.access.reader_finished();
+    }
 }
 
 fn log_body_reader_wait_if_slow(context: &CacheObjectLogContext, wait_for: &'static str, elapsed_ms: u128) {
@@ -1239,7 +1247,9 @@ mod tests {
     use tuliprox_core::model::HlsSegmentRepairConfig;
     use tuliprox_session::StreamMeterHandle;
 
-    fn test_log_identity() -> HlsLogIdentity { HlsLogIdentity::for_test("content-session", "proxy-session") }
+    fn test_log_identity() -> HlsLogIdentity {
+        HlsLogIdentity::for_test("content-session", "proxy-session")
+    }
     use arc_swap::ArcSwapOption;
     use axum::http::{header, HeaderValue, StatusCode};
     use bytes::Bytes;
@@ -1255,7 +1265,9 @@ mod tests {
     };
     use tokio::{sync::Semaphore, time::advance};
 
-    fn header(value: &str) -> HeaderValue { HeaderValue::from_str(value).expect("valid header") }
+    fn header(value: &str) -> HeaderValue {
+        HeaderValue::from_str(value).expect("valid header")
+    }
 
     fn test_segment_repair_manager() -> Arc<HlsSegmentRepairManager> {
         Arc::new(HlsSegmentRepairManager::new(HlsSegmentRepairConfig {

@@ -107,15 +107,21 @@ impl StalkerApiClient {
     }
 
     /// Returns the URL candidates this client will iterate through on errors.
-    pub fn load_url_candidates(&self) -> &[StalkerLoadUrl] { &self.load_urls }
+    pub fn load_url_candidates(&self) -> &[StalkerLoadUrl] {
+        &self.load_urls
+    }
 
     /// Returns the active handshake, if any. Reverse-proxy code calls this to fetch the
     /// bearer token without re-handshaking.
-    pub fn active_handshake(&self) -> Option<StalkerHandshake> { self.handshake.lock().clone() }
+    pub fn active_handshake(&self) -> Option<StalkerHandshake> {
+        self.handshake.lock().clone()
+    }
 
     /// Returns a reference to the active cookie jar. Used by tests and by callers that
     /// need to seed the jar with previously-captured cookies.
-    pub fn cookies(&self) -> &StalkerCookieJar { &self.cookies }
+    pub fn cookies(&self) -> &StalkerCookieJar {
+        &self.cookies
+    }
 
     /// Force-clear the active session and cookies. Useful when the upstream returns a
     /// "token rejected" status.
@@ -266,13 +272,21 @@ impl StalkerApiClient {
     // Internal helpers — used by auth/catalog/epg/playback submodules
     // -------------------------------------------------------------------------------------
 
-    pub fn http(&self) -> &Client { &self.http }
+    pub fn http(&self) -> &Client {
+        &self.http
+    }
 
-    pub fn portal_url(&self) -> &str { &self.portal_url }
+    pub fn portal_url(&self) -> &str {
+        &self.portal_url
+    }
 
-    pub fn config(&self) -> &StalkerInputConfig { &self.config }
+    pub fn config(&self) -> &StalkerInputConfig {
+        &self.config
+    }
 
-    pub fn body_caps(&self) -> &StalkerBodyCaps { &self.body_caps }
+    pub fn body_caps(&self) -> &StalkerBodyCaps {
+        &self.body_caps
+    }
 
     pub fn catalog_max_pages(&self) -> u32 {
         self.config.catalog_max_pages.filter(|value| *value > 0).unwrap_or(DEFAULT_STALKER_CATALOG_MAX_PAGES)

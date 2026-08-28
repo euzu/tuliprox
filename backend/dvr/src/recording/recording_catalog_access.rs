@@ -79,7 +79,9 @@ fn check_schema_version(claims: &Claims) -> Result<(), CatalogAccessError> {
 }
 
 /// True when the principal has `recording.read`.
-fn has_read_perm(claims: &Claims) -> bool { claims.permissions.contains(Permission::RecordingRead) }
+fn has_read_perm(claims: &Claims) -> bool {
+    claims.permissions.contains(Permission::RecordingRead)
+}
 
 /// Re-validate the relative path and file type at open time.
 /// The caller passes a path-resolver closure so the gate stays
@@ -112,7 +114,7 @@ pub fn authorize_catalog_entry(
     }
     // Orphan entries are administrator-only.
     if entry.is_orphan_only() {
-        let admin = claims.roles.iter().any(|r| r == shared::model::ROLE_ADMIN);
+        let admin = claims.is_admin();
         if !admin {
             return Err(CatalogAccessError::Forbidden);
         }
@@ -228,11 +230,15 @@ pub async fn lookup_recording(queue: &DownloadQueue, uuid: &str) -> Option<crate
 
 /// Build a `CatalogKey` from a relative path. Re-exported so HTTP
 /// handlers can share the dedup-key logic.
-pub fn key_for(relative_path: &str) -> CatalogKey { CatalogKey::from_relative_path(relative_path) }
+pub fn key_for(relative_path: &str) -> CatalogKey {
+    CatalogKey::from_relative_path(relative_path)
+}
 
 /// Convenience: produce a stable `FileDownloadDto` from a queue
 /// resident task for the catalog list endpoint.
-pub fn task_view_for(recording: &crate::download::FileDownload) -> FileDownloadDto { FileDownloadDto::from(recording) }
+pub fn task_view_for(recording: &crate::download::FileDownload) -> FileDownloadDto {
+    FileDownloadDto::from(recording)
+}
 
 #[cfg(test)]
 mod tests {
@@ -244,7 +250,7 @@ mod tests {
             iss: "tuliprox".to_string(),
             iat: 0,
             exp: 0,
-            roles: Vec::new(),
+            roles: shared::model::RoleSet::new(),
             permissions: perms.into(),
             pwd_version: 0,
             subject_id: subject,
@@ -330,7 +336,7 @@ mod tests {
     #[test]
     fn legacy_admin_recording_visible_to_admins() {
         let mut claims = make_claims("admin", Some(UserId::builtin_admin()), Permission::RecordingRead);
-        claims.roles.push(shared::model::ROLE_ADMIN.to_string());
+        claims.roles.set(shared::model::Role::Admin);
         let entry = make_orphan_entry();
         let d = authorize_catalog_entry(&claims, &UserId::builtin_admin(), &entry);
         assert!(d.is_ok());
@@ -341,7 +347,7 @@ mod tests {
         // Even an admin without `recording.read` cannot see orphan
         // entries (the read permission is the table-stakes gate).
         let mut claims = make_claims("admin", Some(UserId::builtin_admin()), Permission::ConfigRead);
-        claims.roles.push(shared::model::ROLE_ADMIN.to_string());
+        claims.roles.set(shared::model::Role::Admin);
         let entry = make_orphan_entry();
         let d = authorize_catalog_entry(&claims, &UserId::builtin_admin(), &entry);
         assert!(matches!(d, Err(CatalogAccessError::MissingPermission)));

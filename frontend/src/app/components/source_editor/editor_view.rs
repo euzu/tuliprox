@@ -252,9 +252,13 @@ fn world_from_screen(position: Position, canvas_offset: Position, zoom_factor: f
     ((position.0 - canvas_offset.0) / zoom_factor, (position.1 - canvas_offset.1) / zoom_factor)
 }
 
-fn clamp_zoom_factor(zoom_factor: f32) -> f32 { zoom_factor.clamp(MIN_ZOOM_FACTOR, MAX_ZOOM_FACTOR) }
+fn clamp_zoom_factor(zoom_factor: f32) -> f32 {
+    zoom_factor.clamp(MIN_ZOOM_FACTOR, MAX_ZOOM_FACTOR)
+}
 
-fn initial_layout_view_transform() -> (Position, f32) { ((0.0, 0.0), 1.0) }
+fn initial_layout_view_transform() -> (Position, f32) {
+    ((0.0, 0.0), 1.0)
+}
 
 fn reset_layout_view(editor_state: &mut EditorState) {
     let (offset, zoom) = initial_layout_view_transform();
@@ -353,7 +357,9 @@ fn normalize_input_type_by_url(input: &mut ConfigInputDto, block_type: BlockType
     }
 }
 
-fn is_valid_staged_provider_block_type(block_type: BlockType) -> bool { block_type.is_chainable_input() }
+fn is_valid_staged_provider_block_type(block_type: BlockType) -> bool {
+    block_type.is_chainable_input()
+}
 
 fn is_staged_provider_connection(from_block: &Block, to_block: &Block) -> bool {
     matches!(from_block.block_type, BlockType::InputStaged) && is_valid_staged_provider_block_type(to_block.block_type)

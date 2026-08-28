@@ -104,7 +104,9 @@ impl HlsCommittedAcceptanceReadPin {
 }
 
 impl Drop for HlsCommittedAcceptanceReadPin {
-    fn drop(&mut self) { self.access.reader_finished(); }
+    fn drop(&mut self) {
+        self.access.reader_finished();
+    }
 }
 
 pub(super) fn commit_fetched_manifest(

@@ -8,11 +8,15 @@ pub struct UpdateGuard {
 }
 
 impl Default for UpdateGuard {
-    fn default() -> Self { Self { playlist: Arc::new(Semaphore::new(1)), library: Arc::new(Semaphore::new(1)) } }
+    fn default() -> Self {
+        Self { playlist: Arc::new(Semaphore::new(1)), library: Arc::new(Semaphore::new(1)) }
+    }
 }
 
 impl UpdateGuard {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub fn try_playlist(&self) -> Option<UpdateGuardPermit> {
         self.playlist.clone().try_acquire_owned().ok().map(|permit| UpdateGuardPermit { _permit: permit })

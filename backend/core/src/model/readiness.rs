@@ -21,8 +21,12 @@ pub fn build_provider_slots(
 }
 
 impl CapacityGroup for ConfigInput {
-    fn name(&self) -> &Arc<str> { &self.name }
-    fn enabled(&self) -> bool { self.enabled }
+    fn name(&self) -> &Arc<str> {
+        &self.name
+    }
+    fn enabled(&self) -> bool {
+        self.enabled
+    }
     fn alias_names(&self) -> impl Iterator<Item = &Arc<str>> {
         self.aliases.iter().flatten().filter(|alias| alias.enabled).map(|alias| &alias.name)
     }

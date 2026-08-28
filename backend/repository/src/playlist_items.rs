@@ -44,10 +44,14 @@ pub struct BTreeValues<'a, K, V> {
 
 impl<'a, K, V> BTreeValues<'a, K, V> {
     #[inline]
-    pub fn new(inner: Option<BPlusTreeDiskIterator<'a, K, V>>) -> Self { Self { inner } }
+    pub fn new(inner: Option<BPlusTreeDiskIterator<'a, K, V>>) -> Self {
+        Self { inner }
+    }
 
     #[inline]
-    pub fn empty() -> Self { Self { inner: None } }
+    pub fn empty() -> Self {
+        Self { inner: None }
+    }
 }
 
 impl<K, V> Iterator for BTreeValues<'_, K, V>
@@ -82,7 +86,9 @@ pub struct BTreeStores<'a, K, V, const N: usize> {
 
 impl<'a, K, V, const N: usize> BTreeStores<'a, K, V, N> {
     #[inline]
-    pub fn new(stores: [BTreeValues<'a, K, V>; N]) -> Self { Self { stores, at: 0 } }
+    pub fn new(stores: [BTreeValues<'a, K, V>; N]) -> Self {
+        Self { stores, at: 0 }
+    }
 }
 
 impl<K, V, const N: usize> Iterator for BTreeStores<'_, K, V, N>
@@ -118,7 +124,9 @@ pub struct MemoryDrain<'a> {
 
 impl<'a> MemoryDrain<'a> {
     #[inline]
-    pub fn new(groups: &'a mut [PlaylistGroup]) -> Self { Self { groups: groups.iter_mut(), current: None } }
+    pub fn new(groups: &'a mut [PlaylistGroup]) -> Self {
+        Self { groups: groups.iter_mut(), current: None }
+    }
 }
 
 impl Iterator for MemoryDrain<'_> {
@@ -143,7 +151,9 @@ pub struct MemoryItemsMut<'a> {
 
 impl<'a> MemoryItemsMut<'a> {
     #[inline]
-    pub fn new(groups: &'a mut [PlaylistGroup]) -> Self { Self { groups: groups.iter_mut(), current: None } }
+    pub fn new(groups: &'a mut [PlaylistGroup]) -> Self {
+        Self { groups: groups.iter_mut(), current: None }
+    }
 }
 
 impl<'a> Iterator for MemoryItemsMut<'a> {
@@ -168,7 +178,9 @@ pub struct MemoryItems<'a> {
 
 impl<'a> MemoryItems<'a> {
     #[inline]
-    pub fn new(groups: &'a [PlaylistGroup]) -> Self { Self { groups: groups.iter(), current: None } }
+    pub fn new(groups: &'a [PlaylistGroup]) -> Self {
+        Self { groups: groups.iter(), current: None }
+    }
 }
 
 impl<'a> Iterator for MemoryItems<'a> {
@@ -295,17 +307,23 @@ pub trait HasCluster {
 
 impl HasCluster for PlaylistItem {
     #[inline]
-    fn cluster(&self) -> XtreamCluster { self.header.xtream_cluster }
+    fn cluster(&self) -> XtreamCluster {
+        self.header.xtream_cluster
+    }
 }
 
 impl HasCluster for &mut PlaylistItem {
     #[inline]
-    fn cluster(&self) -> XtreamCluster { self.header.xtream_cluster }
+    fn cluster(&self) -> XtreamCluster {
+        self.header.xtream_cluster
+    }
 }
 
 impl HasCluster for Cow<'_, PlaylistItem> {
     #[inline]
-    fn cluster(&self) -> XtreamCluster { self.as_ref().header.xtream_cluster }
+    fn cluster(&self) -> XtreamCluster {
+        self.as_ref().header.xtream_cluster
+    }
 }
 
 /// Drops items whose cluster is in the skip set.
@@ -320,7 +338,9 @@ pub struct ClusterFiltered<I> {
 
 impl<I> ClusterFiltered<I> {
     #[inline]
-    pub fn new(inner: I, skip: Option<Arc<HashSet<XtreamCluster>>>) -> Self { Self { inner, skip } }
+    pub fn new(inner: I, skip: Option<Arc<HashSet<XtreamCluster>>>) -> Self {
+        Self { inner, skip }
+    }
 }
 
 impl<I> Iterator for ClusterFiltered<I>

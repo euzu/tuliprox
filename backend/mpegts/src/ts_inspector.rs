@@ -53,7 +53,9 @@ impl Default for HlsTsProbeBudget {
 }
 
 impl HlsTsProbeBudget {
-    fn bounded_read_chunk_bytes(self) -> usize { self.read_chunk_bytes.clamp(1, HLS_TS_PROBE_READ_CHUNK_BYTES) }
+    fn bounded_read_chunk_bytes(self) -> usize {
+        self.read_chunk_bytes.clamp(1, HLS_TS_PROBE_READ_CHUNK_BYTES)
+    }
 }
 
 /// Stable PAT/PMT compatibility evidence. It is not cross-host content identity.
@@ -87,9 +89,13 @@ impl HlsTsTrackSignature {
     }
 }
 
-fn is_audio_stream_type(stream_type: u8) -> bool { matches!(stream_type, 0x03 | 0x04 | 0x0F | 0x11 | 0x81 | 0x87) }
+fn is_audio_stream_type(stream_type: u8) -> bool {
+    matches!(stream_type, 0x03 | 0x04 | 0x0F | 0x11 | 0x81 | 0x87)
+}
 
-fn is_video_stream_type(stream_type: u8) -> bool { matches!(stream_type, 0x01 | 0x02 | 0x10 | 0x1B | 0x24 | 0x42) }
+fn is_video_stream_type(stream_type: u8) -> bool {
+    matches!(stream_type, 0x01 | 0x02 | 0x10 | 0x1B | 0x24 | 0x42)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HlsTsMalformedReason {
@@ -175,7 +181,9 @@ impl HlsTsCompatibleSpliceEvidence {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn for_test(topology: HlsTsTrackSignature) -> Self { Self { topology, pid_boundaries: Arc::from([]) } }
+    pub fn for_test(topology: HlsTsTrackSignature) -> Self {
+        Self { topology, pid_boundaries: Arc::from([]) }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -425,7 +433,9 @@ impl HlsPsiTableKind {
     }
 }
 
-fn psi_section_length(header: &[u8]) -> usize { (usize::from(header[1] & 0x0F) << 8) | usize::from(header[2]) }
+fn psi_section_length(header: &[u8]) -> usize {
+    (usize::from(header[1] & 0x0F) << 8) | usize::from(header[2])
+}
 
 /// Thin adapter for the crate's documented syntax-header buffering gap. The
 /// crate still owns section framing, continuation, CRC payload collection and
@@ -624,7 +634,9 @@ impl Default for HlsPatPacketFilter {
 impl PacketFilter for HlsPatPacketFilter {
     type Ctx = HlsTsDemuxContext;
 
-    fn consume(&mut self, ctx: &mut Self::Ctx, packet: &Packet<'_>) { self.consumer.consume(ctx, packet); }
+    fn consume(&mut self, ctx: &mut Self::Ctx, packet: &Packet<'_>) {
+        self.consumer.consume(ctx, packet);
+    }
 }
 
 struct HlsPmtPacketFilter {
@@ -647,7 +659,9 @@ impl HlsPmtPacketFilter {
 impl PacketFilter for HlsPmtPacketFilter {
     type Ctx = HlsTsDemuxContext;
 
-    fn consume(&mut self, ctx: &mut Self::Ctx, packet: &Packet<'_>) { self.consumer.consume(ctx, packet); }
+    fn consume(&mut self, ctx: &mut Self::Ctx, packet: &Packet<'_>) {
+        self.consumer.consume(ctx, packet);
+    }
 }
 
 enum HlsTsPacketFilter {
@@ -876,7 +890,9 @@ impl HlsTsDemuxContext {
 impl DemuxContext for HlsTsDemuxContext {
     type F = HlsTsPacketFilter;
 
-    fn filter_changeset(&mut self) -> &mut FilterChangeset<Self::F> { &mut self.changeset }
+    fn filter_changeset(&mut self) -> &mut FilterChangeset<Self::F> {
+        &mut self.changeset
+    }
 
     fn construct(&mut self, request: FilterRequest<'_, '_>) -> Self::F {
         match request {
@@ -1743,7 +1759,9 @@ impl HlsAes128CbcPrefixDecoder {
 }
 
 impl Drop for HlsAes128CbcPrefixDecoder {
-    fn drop(&mut self) { self.previous_ciphertext.zeroize(); }
+    fn drop(&mut self) {
+        self.previous_ciphertext.zeroize();
+    }
 }
 
 enum HlsTsSourceDecoder {
@@ -1925,7 +1943,9 @@ mod tests {
         section
     }
 
-    fn psi_version_byte(version: u8, current: bool) -> u8 { 0xC0 | ((version & 0x1F) << 1) | u8::from(current) }
+    fn psi_version_byte(version: u8, current: bool) -> u8 {
+        0xC0 | ((version & 0x1F) << 1) | u8::from(current)
+    }
 
     fn pat_section_with_header(
         programs: &[(u16, u16)],
@@ -1954,7 +1974,9 @@ mod tests {
         append_crc(section)
     }
 
-    fn pat_section(programs: &[(u16, u16)]) -> Vec<u8> { pat_section_with_header(programs, 0, true, 0, 0) }
+    fn pat_section(programs: &[(u16, u16)]) -> Vec<u8> {
+        pat_section_with_header(programs, 0, true, 0, 0)
+    }
 
     #[derive(Clone, Copy)]
     struct PmtSectionHeader {
@@ -2703,7 +2725,9 @@ mod tests {
     }
 
     impl Read for VirtualTailReader {
-        fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> { Ok(self.read_into(output)) }
+        fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+            Ok(self.read_into(output))
+        }
     }
 
     impl AsyncRead for VirtualTailReader {

@@ -1,6 +1,8 @@
 use base64::{engine::general_purpose, Engine as _};
 
-pub fn encode_base64_string(input: &[u8]) -> String { general_purpose::URL_SAFE_NO_PAD.encode(input) }
+pub fn encode_base64_string(input: &[u8]) -> String {
+    general_purpose::URL_SAFE_NO_PAD.encode(input)
+}
 
 pub fn decode_base64_string(input: &str) -> Vec<u8> {
     general_purpose::URL_SAFE_NO_PAD.decode(input).unwrap_or_else(|_| input.as_bytes().to_vec())
@@ -13,7 +15,9 @@ pub fn xor_bytes(secret: &[u8], data: &[u8]) -> Vec<u8> {
     data.iter().enumerate().map(|(i, &b)| b ^ secret[i % secret.len()]).collect()
 }
 
-pub fn obfuscate_text(secret: &[u8], text: &str) -> String { encode_base64_string(&xor_bytes(secret, text.as_bytes())) }
+pub fn obfuscate_text(secret: &[u8], text: &str) -> String {
+    encode_base64_string(&xor_bytes(secret, text.as_bytes()))
+}
 
 pub fn deobfuscate_text(secret: &[u8], text: &str) -> Result<String, String> {
     let data = xor_bytes(secret, &decode_base64_string(text));

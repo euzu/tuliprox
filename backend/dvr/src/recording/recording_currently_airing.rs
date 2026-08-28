@@ -53,7 +53,9 @@ pub fn resolve_window(scheduled_start: i64, scheduled_end: i64, now: i64) -> Cur
 
 /// `true` when the candidate's padded end has already passed, i.e.
 /// there is no remaining window to record.
-pub fn is_window_elapsed(scheduled_end: i64, now: i64) -> bool { now >= scheduled_end }
+pub fn is_window_elapsed(scheduled_end: i64, now: i64) -> bool {
+    now >= scheduled_end
+}
 
 /// Total remaining quota bytes for the candidate. Mirrors the
 /// per-minute fallback the quota ledger uses. Callers may pass `None`

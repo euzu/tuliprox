@@ -13,7 +13,9 @@ impl ProbeHandleGuard {
     }
 
     #[inline]
-    pub fn handle(&self) -> Option<&ProviderHandle> { self.handle.as_ref() }
+    pub fn handle(&self) -> Option<&ProviderHandle> {
+        self.handle.as_ref()
+    }
 
     pub async fn release(mut self) {
         if let Some(handle) = self.handle.take() {

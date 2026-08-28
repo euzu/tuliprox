@@ -1,7 +1,9 @@
 use super::BPlusTree;
 use std::{io, io::BufRead, net::Ipv4Addr, path::Path};
 
-fn ipv4_to_u32(ip: &str) -> Option<u32> { ip.parse::<Ipv4Addr>().ok().map(u32::from) }
+fn ipv4_to_u32(ip: &str) -> Option<u32> {
+    ip.parse::<Ipv4Addr>().ok().map(u32::from)
+}
 
 pub struct GeoIp {
     tree: BPlusTree<u32, (u32, String)>,
@@ -82,7 +84,9 @@ impl GeoIp {
 }
 
 impl Default for GeoIp {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]

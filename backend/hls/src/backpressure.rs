@@ -9,9 +9,13 @@ pub enum HlsBackpressureState {
 }
 
 impl HlsBackpressureState {
-    pub const fn allows_prefetch(self) -> bool { matches!(self, Self::Normal) }
+    pub const fn allows_prefetch(self) -> bool {
+        matches!(self, Self::Normal)
+    }
 
-    pub const fn allows_new_demand_fetch(self) -> bool { !matches!(self, Self::Saturated) }
+    pub const fn allows_new_demand_fetch(self) -> bool {
+        !matches!(self, Self::Saturated)
+    }
 }
 
 pub fn classify_hls_backpressure(
@@ -33,7 +37,9 @@ mod tests {
     use super::{classify_hls_backpressure, HlsBackpressureState};
     use crate::{HlsSession, HlsSessionKey};
 
-    fn session() -> HlsSession { HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0) }
+    fn session() -> HlsSession {
+        HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0)
+    }
 
     #[test]
     fn classifies_saturated_when_global_slots_are_exhausted() {

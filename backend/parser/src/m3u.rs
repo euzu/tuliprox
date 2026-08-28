@@ -165,7 +165,9 @@ enum M3uToken {
 }
 
 #[inline]
-fn eq_ascii(bytes: &[u8], expected: &[u8]) -> bool { bytes.eq_ignore_ascii_case(expected) }
+fn eq_ascii(bytes: &[u8], expected: &[u8]) -> bool {
+    bytes.eq_ignore_ascii_case(expected)
+}
 
 #[inline]
 fn classify_possible_id(bytes: &[u8]) -> M3uToken {

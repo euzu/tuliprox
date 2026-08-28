@@ -33,7 +33,9 @@ pub struct ToastOptions {
 }
 
 impl Default for ToastOptions {
-    fn default() -> Self { Self { close_mode: ToastCloseMode::Auto(3500) } }
+    fn default() -> Self {
+        Self { close_mode: ToastCloseMode::Auto(3500) }
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -59,11 +61,17 @@ pub struct ToastrState {
 }
 
 impl ToastrState {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
-    pub fn add_toast(&mut self, toast: Toast) { self.toasts.push(toast); }
+    pub fn add_toast(&mut self, toast: Toast) {
+        self.toasts.push(toast);
+    }
 
-    pub fn remove_toast(&mut self, id: u32) { self.toasts.retain(|t| t.id != id); }
+    pub fn remove_toast(&mut self, id: u32) {
+        self.toasts.retain(|t| t.id != id);
+    }
 }
 
 type ToastrSubscriber = Rc<RefCell<Option<Box<dyn Fn(Vec<Toast>)>>>>;
@@ -76,7 +84,9 @@ pub struct ToastrService {
 }
 
 impl Default for ToastrService {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ToastrService {

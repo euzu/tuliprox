@@ -430,7 +430,9 @@ struct SegmentWorkerRuntime {
 }
 
 impl SegmentWorkerRuntime {
-    fn new(policy: SegmentFetchPolicy, global_semaphore: Arc<Semaphore>) -> Self { Self { global_semaphore, policy } }
+    fn new(policy: SegmentFetchPolicy, global_semaphore: Arc<Semaphore>) -> Self {
+        Self { global_semaphore, policy }
+    }
 }
 
 /// Bounded scheduler for live HLS segment demand fetches and prefetches.
@@ -486,11 +488,17 @@ impl HlsSegmentWorkerPool {
         self.runtime.store(Arc::new(SegmentWorkerRuntime::new(policy, global_semaphore)));
     }
 
-    pub fn policy(&self) -> SegmentFetchPolicy { self.runtime.load().policy.clone() }
+    pub fn policy(&self) -> SegmentFetchPolicy {
+        self.runtime.load().policy.clone()
+    }
 
-    pub fn access_leases(&self) -> &Arc<RwLock<HlsAccessLeaseStore>> { &self.access_leases }
+    pub fn access_leases(&self) -> &Arc<RwLock<HlsAccessLeaseStore>> {
+        &self.access_leases
+    }
 
-    pub fn metrics(&self) -> &Arc<HlsCacheMetrics> { &self.metrics }
+    pub fn metrics(&self) -> &Arc<HlsCacheMetrics> {
+        &self.metrics
+    }
 
     pub async fn classify_backpressure(&self, session: &HlsSessionHandle) -> HlsBackpressureState {
         let session = session.read().await;
@@ -1245,7 +1253,9 @@ fn failed_segment_status(
 }
 
 impl Default for HlsSegmentWorkerPool {
-    fn default() -> Self { Self::new(SegmentFetchPolicy::default()) }
+    fn default() -> Self {
+        Self::new(SegmentFetchPolicy::default())
+    }
 }
 
 async fn fetch_segment_into_cache(
@@ -2230,7 +2240,9 @@ mod tests {
     }
 
     impl Drop for TestSegmentServer {
-        fn drop(&mut self) { self.task.abort(); }
+        fn drop(&mut self) {
+            self.task.abort();
+        }
     }
 
     #[derive(Clone)]

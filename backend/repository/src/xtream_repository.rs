@@ -58,7 +58,9 @@ macro_rules! cant_write_result {
 }
 
 #[inline]
-pub fn get_collection_path(path: &Path, collection: &str) -> PathBuf { path.join(format!("{collection}.json")) }
+pub fn get_collection_path(path: &Path, collection: &str) -> PathBuf {
+    path.join(format!("{collection}.json"))
+}
 
 /// Returns the category-collection base name for an [`XtreamCluster`].
 ///
@@ -74,10 +76,14 @@ pub const fn xtream_cluster_category_collection(cluster: XtreamCluster) -> &'sta
 }
 
 #[inline]
-pub fn get_live_cat_collection_path(path: &Path) -> PathBuf { get_collection_path(path, storage_const::COL_CAT_LIVE) }
+pub fn get_live_cat_collection_path(path: &Path) -> PathBuf {
+    get_collection_path(path, storage_const::COL_CAT_LIVE)
+}
 
 #[inline]
-pub fn get_vod_cat_collection_path(path: &Path) -> PathBuf { get_collection_path(path, storage_const::COL_CAT_VOD) }
+pub fn get_vod_cat_collection_path(path: &Path) -> PathBuf {
+    get_collection_path(path, storage_const::COL_CAT_VOD)
+}
 
 #[inline]
 pub fn get_series_cat_collection_path(path: &Path) -> PathBuf {
@@ -845,7 +851,9 @@ impl XtreamRefreshLease {
         Ok(Self(Arc::new(XtreamRefreshLeaseInner { paths, database_artifacts, _generation_guard: generation_guard })))
     }
 
-    fn paths(&self) -> &XtreamRefreshPaths { &self.0.paths }
+    fn paths(&self) -> &XtreamRefreshPaths {
+        &self.0.paths
+    }
 
     fn cleanup_staging_artifacts(&self) -> io::Result<()> {
         let database_result = self.0.database_artifacts.remove_owned_staging_artifacts();
@@ -1363,7 +1371,9 @@ fn publish_staged_file_platform(mut staging_path: tempfile::TempPath, published:
 }
 
 #[cfg(unix)]
-fn sync_published_file_parent(path: &Path) -> io::Result<()> { File::open(parent_or_dot(path))?.sync_all() }
+fn sync_published_file_parent(path: &Path) -> io::Result<()> {
+    File::open(parent_or_dot(path))?.sync_all()
+}
 
 /// There is no supported directory durability barrier for other targets.
 /// Callers report this only after the atomic rename has completed.
@@ -1388,7 +1398,9 @@ impl LockedCategoryFile {
         Ok(Self { file, path: path.to_path_buf() })
     }
 
-    fn sync_all(&self) -> io::Result<()> { self.file.sync_all() }
+    fn sync_all(&self) -> io::Result<()> {
+        self.file.sync_all()
+    }
 }
 
 impl Drop for LockedCategoryFile {

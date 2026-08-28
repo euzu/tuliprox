@@ -87,8 +87,12 @@ pub struct StalkerRawItem {
 }
 
 impl StalkerRawItem {
-    pub fn stream_id(&self) -> Option<u32> { self.id.as_ref().and_then(|s| s.parse::<u32>().ok()) }
-    pub fn category_id(&self) -> Option<&str> { self.category_id.as_deref().or(self.tv_genre_id.as_deref()) }
+    pub fn stream_id(&self) -> Option<u32> {
+        self.id.as_ref().and_then(|s| s.parse::<u32>().ok())
+    }
+    pub fn category_id(&self) -> Option<&str> {
+        self.category_id.as_deref().or(self.tv_genre_id.as_deref())
+    }
     pub fn stream_kind(&self) -> StalkerStreamKind {
         if self.series_id.is_some() {
             StalkerStreamKind::Episode
@@ -96,7 +100,9 @@ impl StalkerRawItem {
             StalkerStreamKind::Live
         }
     }
-    pub fn display_name(&self) -> &str { self.name.as_deref().or(self.title.as_deref()).unwrap_or("") }
+    pub fn display_name(&self) -> &str {
+        self.name.as_deref().or(self.title.as_deref()).unwrap_or("")
+    }
 }
 
 fn deserialize_boolish_option<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
@@ -205,8 +211,12 @@ pub struct StalkerRawSeriesItem {
 }
 
 impl StalkerRawSeriesItem {
-    pub fn display_name(&self) -> &str { self.name.as_deref().or(self.title.as_deref()).unwrap_or("") }
-    pub fn id_string(&self) -> Option<String> { self.id.clone().or_else(|| self.series_id.clone()) }
+    pub fn display_name(&self) -> &str {
+        self.name.as_deref().or(self.title.as_deref()).unwrap_or("")
+    }
+    pub fn id_string(&self) -> Option<String> {
+        self.id.clone().or_else(|| self.series_id.clone())
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -281,7 +291,9 @@ pub struct StalkerRawSeriesEpisode {
 }
 
 impl StalkerRawSeriesEpisode {
-    pub fn display_name(&self) -> &str { self.name.as_deref().or(self.title.as_deref()).unwrap_or("") }
+    pub fn display_name(&self) -> &str {
+        self.name.as_deref().or(self.title.as_deref()).unwrap_or("")
+    }
 }
 
 // ----- Generic fetchers -------------------------------------------------------------------------
@@ -440,7 +452,9 @@ fn extract_items_array(value: &Value) -> &Value {
     }
 }
 
-fn catalog_js(value: &Value) -> &Value { value.as_object().and_then(|map| map.get("js")).unwrap_or(value) }
+fn catalog_js(value: &Value) -> &Value {
+    value.as_object().and_then(|map| map.get("js")).unwrap_or(value)
+}
 
 fn extract_total_items(value: &Value) -> Option<u32> {
     if let Some(obj) = catalog_js(value).as_object() {
@@ -785,7 +799,9 @@ fn value_string(value: &Value, key: &str) -> Option<String> {
     }
 }
 
-fn value_u32(value: &Value, key: &str) -> Option<u32> { value_string(value, key)?.parse().ok() }
+fn value_u32(value: &Value, key: &str) -> Option<u32> {
+    value_string(value, key)?.parse().ok()
+}
 
 fn series_details_metadata(series_id: u32, entries: &[Value]) -> StalkerRawSeriesDetails {
     entries.iter().find(|entry| !looks_like_season_row(entry)).map_or_else(

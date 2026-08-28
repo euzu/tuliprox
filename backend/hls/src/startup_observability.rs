@@ -83,9 +83,13 @@ impl std::fmt::Display for HlsStartupSummary {
     }
 }
 
-fn optional_ms(value: Option<u64>) -> String { value.map_or_else(|| "none".to_string(), |value| value.to_string()) }
+fn optional_ms(value: Option<u64>) -> String {
+    value.map_or_else(|| "none".to_string(), |value| value.to_string())
+}
 
-fn elapsed_ms(start: Option<u64>, end: Option<u64>) -> Option<u64> { end?.checked_sub(start?) }
+fn elapsed_ms(start: Option<u64>, end: Option<u64>) -> Option<u64> {
+    end?.checked_sub(start?)
+}
 
 impl HlsStartupObservability {
     pub fn record_entry_master_response(&self, lease_id: HlsAccessLeaseId, identity: HlsLogIdentity, now_ms: u64) {

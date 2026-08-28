@@ -26,7 +26,9 @@ const RESERVED_PATHS: &[&str] = &[
     "resource",
 ];
 
-fn default_web_ui_path() -> Option<String> { Some("/".to_string()) }
+fn default_web_ui_path() -> Option<String> {
+    Some("/".to_string())
+}
 
 create_bitset!(
     u16,

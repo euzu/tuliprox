@@ -66,9 +66,13 @@ fn pick_logo(logo: &Arc<str>, logo_small: &Arc<str>, props: Option<&StreamProper
         .unwrap_or_else(|| "".intern())
 }
 
-fn non_empty(s: &Arc<str>) -> Option<Arc<str>> { (!s.is_empty()).then(|| Arc::clone(s)) }
+fn non_empty(s: &Arc<str>) -> Option<Arc<str>> {
+    (!s.is_empty()).then(|| Arc::clone(s))
+}
 
-fn non_empty_opt(s: Option<&Arc<str>>) -> Option<Arc<str>> { s.and_then(non_empty) }
+fn non_empty_opt(s: Option<&Arc<str>>) -> Option<Arc<str>> {
+    s.and_then(non_empty)
+}
 
 /// Helper to get rating
 #[inline]

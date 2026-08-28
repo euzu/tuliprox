@@ -683,7 +683,9 @@ fn current_download_control(control_signal: &RwLock<DownloadControl>) -> Downloa
     control_signal.try_read().map_or(DownloadControl::None, |control| *control)
 }
 
-fn should_exit_worker_after_preempt(control: DownloadControl) -> bool { control == DownloadControl::Restart }
+fn should_exit_worker_after_preempt(control: DownloadControl) -> bool {
+    control == DownloadControl::Restart
+}
 
 async fn handle_download_control<W>(
     _active: &Arc<RwLock<Option<FileDownload>>>,
@@ -2763,7 +2765,9 @@ mod tests {
         })
     }
 
-    fn create_test_app_state() -> Arc<AppState> { create_test_app_state_with_downloads(Arc::new(DownloadQueue::new())) }
+    fn create_test_app_state() -> Arc<AppState> {
+        create_test_app_state_with_downloads(Arc::new(DownloadQueue::new()))
+    }
 
     #[tokio::test]
     async fn pause_persist_failure_returns_error_without_event_or_memory_change() {

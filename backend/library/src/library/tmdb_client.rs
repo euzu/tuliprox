@@ -43,7 +43,9 @@ where
         Self { entries: HashSet::new(), insertion_order: VecDeque::new(), capacity: capacity.max(1) }
     }
 
-    fn contains(&self, value: &T) -> bool { self.entries.contains(value) }
+    fn contains(&self, value: &T) -> bool {
+        self.entries.contains(value)
+    }
 
     /// Inserts `value` and evicts a single oldest entry when full.
     /// Returns `true` if an eviction happened.

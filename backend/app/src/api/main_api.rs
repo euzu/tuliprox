@@ -282,7 +282,9 @@ fn create_healthcheck() -> Healthcheck {
     }
 }
 
-async fn healthcheck() -> impl axum::response::IntoResponse { axum::Json(create_healthcheck()) }
+async fn healthcheck() -> impl axum::response::IntoResponse {
+    axum::Json(create_healthcheck())
+}
 
 #[derive(serde::Serialize)]
 struct ReadyResponse {

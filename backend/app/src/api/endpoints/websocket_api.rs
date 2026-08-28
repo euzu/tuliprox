@@ -13,8 +13,8 @@ use log::{error, trace};
 use shared::{
     defaults::default_kick_secs,
     model::{
-        Claims, Permission, ProtocolHandler, ProtocolHandlerMemory, ProtocolMessage, UserCommand, UserId, UserRole,
-        WsCloseCode, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, PROTOCOL_VERSION, ROLE_ADMIN, TOKEN_NO_AUTH,
+        Claims, Permission, ProtocolHandler, ProtocolHandlerMemory, ProtocolMessage, RoleSet, UserCommand, UserId,
+        UserRole, WsCloseCode, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, PROTOCOL_VERSION, TOKEN_NO_AUTH,
     },
     utils::concat_path_leading_slash,
 };
@@ -51,11 +51,15 @@ impl std::error::Error for WebSocketApiError {
 }
 
 impl From<axum::Error> for WebSocketApiError {
-    fn from(value: axum::Error) -> Self { Self::Transport(value) }
+    fn from(value: axum::Error) -> Self {
+        Self::Transport(value)
+    }
 }
 
 impl From<io::Error> for WebSocketApiError {
-    fn from(value: io::Error) -> Self { Self::Protocol(value) }
+    fn from(value: io::Error) -> Self {
+        Self::Protocol(value)
+    }
 }
 
 // WebSocket upgrade handler
@@ -91,7 +95,7 @@ fn set_websocket_auth(mem: &mut ProtocolHandlerMemory, auth_token: String, claim
         return false;
     }
     mem.permissions = claims.permissions;
-    mem.role = if claims.roles.iter().any(|role| role == ROLE_ADMIN) { UserRole::Admin } else { UserRole::User };
+    mem.role = if claims.is_admin() { UserRole::Admin } else { UserRole::User };
     mem.subject_id = claims.subject_id.as_ref().map(|u| u.0.clone());
     mem.token = Some(auth_token);
     true
@@ -111,7 +115,7 @@ fn websocket_claims(mem: &ProtocolHandlerMemory) -> Option<Claims> {
         iss: "tuliprox".to_string(),
         iat: 0,
         exp: i64::MAX,
-        roles: if mem.role == UserRole::Admin { vec![ROLE_ADMIN.to_string()] } else { Vec::new() },
+        roles: if mem.role == UserRole::Admin { RoleSet::ADMIN } else { RoleSet::new() },
         permissions: mem.permissions,
         pwd_version: 0,
         subject_id: Some(subject_id),
@@ -143,7 +147,9 @@ fn websocket_can_receive_runtime_events(mem: &ProtocolHandlerMemory, event: &Eve
 /// not serialize them - the notification bridge, say - pay a refcount bump
 /// instead of a deep copy. Only here, at the wire boundary, is the value
 /// itself needed.
-fn unwrap_or_clone<T: Clone>(value: Arc<T>) -> T { Arc::try_unwrap(value).unwrap_or_else(|shared| (*shared).clone()) }
+fn unwrap_or_clone<T: Clone>(value: Arc<T>) -> T {
+    Arc::try_unwrap(value).unwrap_or_else(|shared| (*shared).clone())
+}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum MainEventReceiveErrorAction {
@@ -643,9 +649,8 @@ mod tests {
         Claims, ConfigReloadFailure, DiskAlert, DiskAlertLevel, DownloadsDelta, DownloadsResponse, FileDownloadDto,
         LibraryScanProgressEvent, LibraryScanSummary, LibraryScanSummaryStatus, MsgKind, Permission,
         PlaylistUpdateProgressEvent, ProtocolHandler, ProtocolHandlerMemory, ProviderAccountEvent,
-        ProviderAccountState, RecordingLifecycleMessage, TaskKindDto, TaskPriorityDto, TransferStatusDto, UserId,
-        UserRole, WatchChanges, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, PROTOCOL_VERSION, ROLE_ADMIN,
-        TOKEN_NO_AUTH,
+        ProviderAccountState, RecordingLifecycleMessage, RoleSet, TaskKindDto, TaskPriorityDto, TransferStatusDto,
+        UserId, UserRole, WatchChanges, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, PROTOCOL_VERSION, TOKEN_NO_AUTH,
     };
     use std::sync::Arc;
     use tokio::sync::broadcast::error::RecvError;
@@ -804,7 +809,7 @@ mod tests {
         assert_eq!(mem.role, UserRole::Admin);
         assert_eq!(mem.permissions, PERM_ALL);
         assert_eq!(claims.subject_id, Some(UserId::builtin_admin()));
-        assert_eq!(claims.roles, vec![ROLE_ADMIN]);
+        assert_eq!(claims.roles, RoleSet::ADMIN);
         assert_eq!(claims.permission_schema_version, CURRENT_PERMISSION_SCHEMA_VERSION);
     }
 
@@ -814,7 +819,7 @@ mod tests {
             iss: "test".to_string(),
             iat: 1,
             exp: i64::MAX,
-            roles: vec![ROLE_ADMIN.to_string()],
+            roles: RoleSet::ADMIN,
             permissions: Permission::RecordingRead.into(),
             pwd_version: 0,
             subject_id,

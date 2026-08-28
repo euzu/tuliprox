@@ -12,7 +12,9 @@ use tuliprox_parser::hls::origin_manifest::ParsedByteRange;
 pub struct ProxyMapId(pub u64);
 
 impl From<u64> for ProxyMapId {
-    fn from(value: u64) -> Self { Self(value) }
+    fn from(value: u64) -> Self {
+        Self(value)
+    }
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -126,7 +128,9 @@ impl fmt::Debug for MapEntry {
 }
 
 impl MapEntry {
-    pub fn default_content_type() -> &'static str { "video/mp4" }
+    pub fn default_content_type() -> &'static str {
+        "video/mp4"
+    }
 
     /// Creates a proxy MAP entry from a concrete origin MAP key.
     ///

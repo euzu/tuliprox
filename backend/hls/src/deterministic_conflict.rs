@@ -33,5 +33,7 @@ pub struct HlsDeterministicTimelineConflict {
 }
 
 impl HlsDeterministicTimelineConflict {
-    pub fn diagnostic_resource_token(&self) -> [u8; 8] { self.resource_key.diagnostic_token() }
+    pub fn diagnostic_resource_token(&self) -> [u8; 8] {
+        self.resource_key.diagnostic_token()
+    }
 }

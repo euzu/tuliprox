@@ -41,7 +41,9 @@ impl MsgKind {
         }
     }
 
-    pub fn template_filename(&self, prefix: &str) -> String { concat_string!(prefix, "_", self.wire_name(), ".templ") }
+    pub fn template_filename(&self, prefix: &str) -> String {
+        concat_string!(prefix, "_", self.wire_name(), ".templ")
+    }
 
     /// `true` for the recording lifecycle kinds.
     pub fn is_recording_lifecycle(&self) -> bool {

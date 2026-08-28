@@ -58,7 +58,9 @@ pub fn recording_view_denial(claims: &Claims) -> Option<RecordingViewDenial> {
     None
 }
 
-pub fn can_view_recording(claims: &Claims) -> bool { recording_view_denial(claims).is_none() }
+pub fn can_view_recording(claims: &Claims) -> bool {
+    recording_view_denial(claims).is_none()
+}
 
 pub fn task_visible_to(task_meta: Option<&RecordingMetadata>, claims: &Claims, subject_id: &UserId) -> bool {
     let Some(meta) = task_meta else {
@@ -75,7 +77,7 @@ pub fn task_visible_to(task_meta: Option<&RecordingMetadata>, claims: &Claims, s
             RecordingVisibility::Private => owner == subject_id,
             RecordingVisibility::Shared => true,
         },
-        RecordingOwner::LegacyAdmin => claims.roles.iter().any(|r| r == shared::model::ROLE_ADMIN),
+        RecordingOwner::LegacyAdmin => claims.is_admin(),
     }
 }
 
@@ -111,7 +113,9 @@ pub async fn recording_delta(
     (revision, tasks)
 }
 
-fn current_revision(queue: &DownloadQueue) -> QueueRevision { QueueRevision(queue.revision.load(Ordering::SeqCst)) }
+fn current_revision(queue: &DownloadQueue) -> QueueRevision {
+    QueueRevision(queue.revision.load(Ordering::SeqCst))
+}
 
 /// The ids the session may see, plus the revision they belong to.
 ///
@@ -157,7 +161,7 @@ mod tests {
             iss: "tuliprox".to_string(),
             iat: 0,
             exp: 0,
-            roles: vec!["ADMIN".to_string()],
+            roles: shared::model::RoleSet::ADMIN,
             permissions: Permission::RecordingRead.into(),
             pwd_version: 0,
             subject_id: Some(UserId::builtin_admin()),
@@ -173,7 +177,7 @@ mod tests {
             iss: "tuliprox".to_string(),
             iat: 0,
             exp: 0,
-            roles: Vec::new(),
+            roles: shared::model::RoleSet::new(),
             permissions: Permission::RecordingRead.into(),
             pwd_version: 0,
             subject_id: Some(UserId::from("web:alice")),
@@ -292,7 +296,7 @@ mod tests {
             iss: "tuliprox".to_string(),
             iat: 0,
             exp: 0,
-            roles: Vec::new(),
+            roles: shared::model::RoleSet::new(),
             permissions: Permission::RecordingRead.into(),
             pwd_version: 0,
             subject_id: Some(UserId::from("web:bob")),

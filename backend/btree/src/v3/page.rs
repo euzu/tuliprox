@@ -10,14 +10,22 @@ thread_local! {
 }
 
 #[cfg(test)]
-pub(crate) fn reset_page_open_count() { PAGE_OPEN_COUNT.set(0); }
+pub(crate) fn reset_page_open_count() {
+    PAGE_OPEN_COUNT.set(0);
+}
 
 #[cfg(test)]
-pub(crate) fn page_open_count() -> usize { PAGE_OPEN_COUNT.get() }
+pub(crate) fn page_open_count() -> usize {
+    PAGE_OPEN_COUNT.get()
+}
 
-fn invalid_data(message: &'static str) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, message) }
+fn invalid_data(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
 
-fn invalid_input(message: &'static str) -> io::Error { io::Error::new(io::ErrorKind::InvalidInput, message) }
+fn invalid_input(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message)
+}
 
 fn checked_end(offset: usize, length: usize, kind: io::ErrorKind) -> io::Result<usize> {
     offset.checked_add(length).ok_or_else(|| io::Error::new(kind, "page offset overflow"))
@@ -99,13 +107,21 @@ impl<B: AsRef<[u8]>> SlottedPage<B> {
         }
     }
 
-    pub(crate) const fn header(&self) -> PageHeader { self.header }
+    pub(crate) const fn header(&self) -> PageHeader {
+        self.header
+    }
 
-    pub(crate) const fn page_id(&self) -> u64 { self.page_id }
+    pub(crate) const fn page_id(&self) -> u64 {
+        self.page_id
+    }
 
-    pub(crate) const fn next_page_id(&self) -> u64 { self.next_page_id }
+    pub(crate) const fn next_page_id(&self) -> u64 {
+        self.next_page_id
+    }
 
-    pub(crate) fn as_bytes(&self) -> &[u8] { self.bytes.as_ref() }
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        self.bytes.as_ref()
+    }
 
     fn slot(&self, index: usize) -> io::Result<Slot> {
         if index >= usize::from(self.header.cell_count) {
@@ -132,7 +148,9 @@ impl<B: AsRef<[u8]>> SlottedPage<B> {
         Ok(offset..end)
     }
 
-    pub(crate) fn cells(&self) -> Cells<'_, B> { Cells { page: self, next: 0 } }
+    pub(crate) fn cells(&self) -> Cells<'_, B> {
+        Cells { page: self, next: 0 }
+    }
 
     fn validate_slots(&self) -> io::Result<()> {
         if matches!(self.header.page_type, PageType::Overflow | PageType::Free) {
@@ -227,7 +245,9 @@ impl<'a, B: AsRef<[u8]>> Iterator for Cells<'a, B> {
 }
 
 impl<B: AsRef<[u8]>> ExactSizeIterator for Cells<'_, B> {
-    fn len(&self) -> usize { usize::from(self.page.header.cell_count).saturating_sub(self.next) }
+    fn len(&self) -> usize {
+        usize::from(self.page.header.cell_count).saturating_sub(self.next)
+    }
 }
 
 impl<B: AsRef<[u8]>> FusedIterator for Cells<'_, B> {}
@@ -335,7 +355,9 @@ mod tests {
     }
 
     impl AsRef<[u8]> for ChangingMutView {
-        fn as_ref(&self) -> &[u8] { &self.bytes }
+        fn as_ref(&self) -> &[u8] {
+            &self.bytes
+        }
     }
 
     impl AsMut<[u8]> for ChangingMutView {

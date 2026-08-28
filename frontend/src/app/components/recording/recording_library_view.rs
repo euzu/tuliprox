@@ -25,7 +25,9 @@ use yew::prelude::*;
 /// Permission gate: should the DVR navigation entry show?
 /// True when the principal has `recording.read`.
 #[allow(dead_code)]
-pub fn can_show_dvr_nav(has_recording_read: bool) -> bool { has_recording_read }
+pub fn can_show_dvr_nav(has_recording_read: bool) -> bool {
+    has_recording_read
+}
 
 /// Permission gate: can this principal edit/delete the given
 /// task? Real users may edit their own private tasks with
@@ -159,7 +161,9 @@ fn task_visibility(translate: &YewI18n, task: &RecordingTaskResponse) -> String 
 /// Sort key for the status column. Ordering follows the lifecycle
 /// (`TransferStatusDto`'s own `Ord`) rather than the localized text, so
 /// the order does not change with the UI language.
-fn task_status_order(task: &RecordingTaskResponse) -> &TransferStatusDto { &task.status }
+fn task_status_order(task: &RecordingTaskResponse) -> &TransferStatusDto {
+    &task.status
+}
 
 #[allow(dead_code)]
 fn compare_tasks(
@@ -178,7 +182,9 @@ fn compare_tasks(
     }
 }
 
-fn is_sortable_col(col: LibraryColumn) -> bool { !matches!(col, LibraryColumn::Actions) }
+fn is_sortable_col(col: LibraryColumn) -> bool {
+    !matches!(col, LibraryColumn::Actions)
+}
 
 /// Translate a service error for display.
 ///
@@ -186,7 +192,9 @@ fn is_sortable_col(col: LibraryColumn) -> bool { !matches!(col, LibraryColumn::A
 /// failed: {}", e)` — untranslated English with a raw wire code
 /// appended. The code still reaches the browser console; the user sees
 /// a sentence in their own language.
-fn error_message(translate: &YewI18n, error: &RecordingError) -> String { translate.t(error.i18n_key()) }
+fn error_message(translate: &YewI18n, error: &RecordingError) -> String {
+    translate.t(error.i18n_key())
+}
 
 #[function_component(RecordingLibraryView)]
 pub fn recording_library_view() -> Html {

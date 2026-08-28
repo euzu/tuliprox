@@ -49,7 +49,9 @@ fn versioned_static_asset_url(path: &str) -> String {
     format!("{path}{separator}v={STATIC_ASSET_VERSION}")
 }
 
-fn versioned_config_url() -> String { versioned_static_asset_url("config.json") }
+fn versioned_config_url() -> String {
+    versioned_static_asset_url("config.json")
+}
 
 fn router_basename(config: &WebConfig) -> Option<String> {
     config

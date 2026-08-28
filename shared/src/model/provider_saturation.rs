@@ -18,20 +18,36 @@ pub trait CapacityGroup {
 }
 
 impl<T: CapacityGroup> CapacityGroup for &T {
-    fn name(&self) -> &Arc<str> { (**self).name() }
-    fn enabled(&self) -> bool { (**self).enabled() }
-    fn alias_names(&self) -> impl Iterator<Item = &Arc<str>> { (**self).alias_names() }
+    fn name(&self) -> &Arc<str> {
+        (**self).name()
+    }
+    fn enabled(&self) -> bool {
+        (**self).enabled()
+    }
+    fn alias_names(&self) -> impl Iterator<Item = &Arc<str>> {
+        (**self).alias_names()
+    }
 }
 
 impl<T: CapacityGroup> CapacityGroup for Arc<T> {
-    fn name(&self) -> &Arc<str> { (**self).name() }
-    fn enabled(&self) -> bool { (**self).enabled() }
-    fn alias_names(&self) -> impl Iterator<Item = &Arc<str>> { (**self).alias_names() }
+    fn name(&self) -> &Arc<str> {
+        (**self).name()
+    }
+    fn enabled(&self) -> bool {
+        (**self).enabled()
+    }
+    fn alias_names(&self) -> impl Iterator<Item = &Arc<str>> {
+        (**self).alias_names()
+    }
 }
 
 impl CapacityGroup for ConfigInputDto {
-    fn name(&self) -> &Arc<str> { &self.name }
-    fn enabled(&self) -> bool { self.enabled }
+    fn name(&self) -> &Arc<str> {
+        &self.name
+    }
+    fn enabled(&self) -> bool {
+        self.enabled
+    }
     fn alias_names(&self) -> impl Iterator<Item = &Arc<str>> {
         self.aliases.iter().flatten().filter(|alias| alias.enabled).map(|alias| &alias.name)
     }
@@ -169,9 +185,15 @@ mod tests {
     }
 
     impl CapacityGroup for Input {
-        fn name(&self) -> &Arc<str> { &self.name }
-        fn enabled(&self) -> bool { self.enabled }
-        fn alias_names(&self) -> impl Iterator<Item = &Arc<str>> { self.aliases.iter() }
+        fn name(&self) -> &Arc<str> {
+            &self.name
+        }
+        fn enabled(&self) -> bool {
+            self.enabled
+        }
+        fn alias_names(&self) -> impl Iterator<Item = &Arc<str>> {
+            self.aliases.iter()
+        }
     }
 
     fn enabled_input(name: &'static str, aliases: Vec<Arc<str>>) -> Input {

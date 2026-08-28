@@ -29,7 +29,7 @@ use axum::{
     routing::get,
     RequestPartsExt,
 };
-use shared::model::{Claims, UserId, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, ROLE_ADMIN, TOKEN_NO_AUTH};
+use shared::model::{Claims, RoleSet, UserId, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, TOKEN_NO_AUTH};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -50,7 +50,7 @@ fn builtin_admin_claims() -> Claims {
         iss: "tuliprox".to_string(),
         iat: 0,
         exp: i64::MAX,
-        roles: vec![ROLE_ADMIN.to_string()],
+        roles: RoleSet::ADMIN,
         permissions: PERM_ALL,
         pwd_version: 0,
         subject_id: Some(UserId::builtin_admin()),
@@ -407,7 +407,7 @@ mod tests {
     use axum::http::Request;
     use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
     use shared::model::{
-        Permission, UserId, WebUiConfigDto, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, ROLE_ADMIN, TOKEN_NO_AUTH,
+        Permission, RoleSet, UserId, WebUiConfigDto, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, TOKEN_NO_AUTH,
     };
 
     fn config_with_web_auth(enabled: bool, secret: &str) -> Config {
@@ -443,7 +443,7 @@ mod tests {
             extract_auth_claims(&state, Some(&format!("Bearer {TOKEN_NO_AUTH}"))).await.expect("builtin claims");
 
         assert_eq!(claims.subject_id, Some(UserId::builtin_admin()));
-        assert_eq!(claims.roles, vec![ROLE_ADMIN]);
+        assert_eq!(claims.roles, RoleSet::ADMIN);
         assert_eq!(claims.permissions, PERM_ALL);
         assert_eq!(claims.permission_schema_version, CURRENT_PERMISSION_SCHEMA_VERSION);
         assert!(claims.permissions.contains(Permission::RecordingWrite));

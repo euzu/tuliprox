@@ -69,5 +69,7 @@ impl StreamProbeFailure {
     /// the signal. Plugins still see every event on the bus — this only
     /// bounds what reaches a phone.
     #[must_use]
-    pub fn dedup_key(&self) -> String { format!("stream-probe:{}", self.input) }
+    pub fn dedup_key(&self) -> String {
+        format!("stream-probe:{}", self.input)
+    }
 }

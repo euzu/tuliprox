@@ -138,7 +138,9 @@ impl IdentityRegistry {
     /// Build an empty registry without touching disk. Used by the
     /// fail-closed path so the caller can still call methods that
     /// require a registry.
-    fn empty(path: PathBuf) -> Self { Self { state: RwLock::new(PersistedIdentityRegistry::default()), path } }
+    fn empty(path: PathBuf) -> Self {
+        Self { state: RwLock::new(PersistedIdentityRegistry::default()), path }
+    }
 
     async fn load_or_detect_failure(path: &Path) -> Result<Option<PersistedIdentityRegistry>, FailClosedReason> {
         match tokio::fs::read(path).await {
@@ -291,7 +293,9 @@ impl IdentityRegistry {
     }
 
     /// Snapshot the current registry for diagnostics.
-    pub async fn snapshot(&self) -> PersistedIdentityRegistry { self.state.read().await.clone() }
+    pub async fn snapshot(&self) -> PersistedIdentityRegistry {
+        self.state.read().await.clone()
+    }
 
     /// Persist the current in-memory state to disk atomically.
     pub async fn save(&self) -> Result<(), RegistryError> {
@@ -388,14 +392,18 @@ impl std::error::Error for RegistryError {}
 /// Canonicalize a username for the registry: trim leading/trailing
 /// whitespace. Empty inputs are returned as-is so the caller can
 /// reject them through a typed error.
-fn canonical_username(username: &str) -> String { username.trim().to_string() }
+fn canonical_username(username: &str) -> String {
+    username.trim().to_string()
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn web_users(n: usize) -> Vec<String> { (0..n).map(|i| format!("user-{i}")).collect() }
+    fn web_users(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("user-{i}")).collect()
+    }
 
     #[tokio::test]
     async fn bootstrap_initializes_on_empty_storage() {

@@ -311,7 +311,9 @@ mod tests {
         }
     }
 
-    fn utc() -> Tz { Tz::UTC }
+    fn utc() -> Tz {
+        Tz::UTC
+    }
 
     #[test]
     fn validation_accepts_canonical_template() {

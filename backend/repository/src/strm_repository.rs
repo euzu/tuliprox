@@ -188,7 +188,9 @@ struct StrmItemInfo {
 }
 
 impl StrmItemInfo {
-    pub fn get_file_ts(&self) -> Option<u64> { self.added }
+    pub fn get_file_ts(&self) -> Option<u64> {
+        self.added
+    }
 }
 
 fn extract_item_info(pli: &mut PlaylistItem, use_metadata: bool) -> StrmItemInfo {
@@ -1173,9 +1175,13 @@ struct DirNode {
 }
 
 impl DirNode {
-    fn new(path: PathBuf, parent: Option<PathBuf>) -> Self { Self::new_with_flag(path, parent, false) }
+    fn new(path: PathBuf, parent: Option<PathBuf>) -> Self {
+        Self::new_with_flag(path, parent, false)
+    }
 
-    fn new_root(path: PathBuf) -> Self { Self::new_with_flag(path, None, true) }
+    fn new_root(path: PathBuf) -> Self {
+        Self::new_with_flag(path, None, true)
+    }
 
     fn new_with_flag(path: PathBuf, parent: Option<PathBuf>, is_root: bool) -> Self {
         Self { path, is_root, has_files: false, children: HashSet::new(), parent }

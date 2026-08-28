@@ -264,7 +264,9 @@ struct ConfigTypeField {
     config_type: String,
 }
 
-fn first_line(s: &str) -> String { s.lines().next().unwrap_or(s).trim().to_string() }
+fn first_line(s: &str) -> String {
+    s.lines().next().unwrap_or(s).trim().to_string()
+}
 
 #[cfg(test)]
 mod tests {

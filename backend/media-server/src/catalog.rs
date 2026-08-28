@@ -39,7 +39,9 @@ pub struct MediaServerCatalogRefreshPolicy {
 }
 
 impl Default for MediaServerCatalogRefreshPolicy {
-    fn default() -> Self { Self { page_size: 100, request_delay_ms: 0 } }
+    fn default() -> Self {
+        Self { page_size: 100, request_delay_ms: 0 }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -64,7 +66,9 @@ pub struct MediaServerCatalogCache {
 }
 
 impl MediaServerCatalogCache {
-    pub fn trusted(&self) -> Option<&MediaServerCatalogSnapshot> { self.trusted.as_ref() }
+    pub fn trusted(&self) -> Option<&MediaServerCatalogSnapshot> {
+        self.trusted.as_ref()
+    }
 
     pub fn publish(&mut self, snapshot: MediaServerCatalogSnapshot) -> &MediaServerCatalogSnapshot {
         self.trusted.insert(snapshot)
@@ -210,7 +214,9 @@ mod tests {
     }
 
     impl MockMediaServerCatalogClient {
-        fn with_libraries(libraries: Vec<MediaServerLibrary>) -> Self { Self { libraries, ..Self::default() } }
+        fn with_libraries(libraries: Vec<MediaServerLibrary>) -> Self {
+            Self { libraries, ..Self::default() }
+        }
     }
 
     impl MediaServerCatalogClient for MockMediaServerCatalogClient {

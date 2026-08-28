@@ -23,7 +23,9 @@ macro_rules! duration_millis_newtype {
         pub struct $name(u64);
 
         impl $name {
-            pub const fn from_millis(milliseconds: u64) -> Self { Self(milliseconds) }
+            pub const fn from_millis(milliseconds: u64) -> Self {
+                Self(milliseconds)
+            }
         }
     };
 }
@@ -34,7 +36,9 @@ macro_rules! instant_millis_newtype {
         pub struct $name(u64);
 
         impl $name {
-            pub const fn from_millis_since_epoch(milliseconds: u64) -> Self { Self(milliseconds) }
+            pub const fn from_millis_since_epoch(milliseconds: u64) -> Self {
+                Self(milliseconds)
+            }
         }
     };
 }
@@ -51,37 +55,53 @@ instant_millis_newtype!(HlsLatestSafeTerminalCommitAtMs);
 
 impl HlsOperationTimeoutMs {
     #[cfg(any(test, feature = "test-support"))]
-    pub const fn as_millis(self) -> u64 { self.0 }
+    pub const fn as_millis(self) -> u64 {
+        self.0
+    }
 }
 
 impl HlsRecoveryTriggerBudgetMs {
-    pub const fn as_millis(self) -> u64 { self.0 }
+    pub const fn as_millis(self) -> u64 {
+        self.0
+    }
 }
 
 impl HlsRecoveryEtaMs {
-    pub const fn as_millis(self) -> u64 { self.0 }
+    pub const fn as_millis(self) -> u64 {
+        self.0
+    }
 }
 
 impl HlsTransitionMarginMs {
-    pub const fn as_millis(self) -> u64 { self.0 }
+    pub const fn as_millis(self) -> u64 {
+        self.0
+    }
 }
 
 impl HlsAcceptanceDeadlineMs {
-    pub const fn as_millis_since_epoch(self) -> u64 { self.0 }
+    pub const fn as_millis_since_epoch(self) -> u64 {
+        self.0
+    }
 }
 
 impl HlsEstimatedRecoveryCompletionAtMs {
     #[cfg(any(test, feature = "test-support"))]
-    pub const fn as_millis_since_epoch(self) -> u64 { self.0 }
+    pub const fn as_millis_since_epoch(self) -> u64 {
+        self.0
+    }
 }
 
 impl HlsLeaseExhaustionAtMs {
     #[cfg(any(test, feature = "test-support"))]
-    pub const fn as_millis_since_epoch(self) -> u64 { self.0 }
+    pub const fn as_millis_since_epoch(self) -> u64 {
+        self.0
+    }
 }
 
 impl HlsLatestSafeTerminalCommitAtMs {
-    pub const fn as_millis_since_epoch(self) -> u64 { self.0 }
+    pub const fn as_millis_since_epoch(self) -> u64 {
+        self.0
+    }
 }
 
 /// Small bounded interval reserved exclusively for acquiring the final
@@ -90,13 +110,17 @@ impl HlsLatestSafeTerminalCommitAtMs {
 pub struct HlsTerminalCommitAcquisitionBudgetMs(u64);
 
 impl HlsTerminalCommitAcquisitionBudgetMs {
-    pub fn from_retry_policy() -> Self { Self(super::terminal_commit::terminal_commit_retry_schedule_budget_ms()) }
+    pub fn from_retry_policy() -> Self {
+        Self(super::terminal_commit::terminal_commit_retry_schedule_budget_ms())
+    }
 
     pub fn fail_closed_handoff_from_retry_policy() -> Self {
         Self(super::terminal_commit::terminal_commit_retry_handoff_budget_ms())
     }
 
-    pub const fn as_millis(self) -> u64 { self.0 }
+    pub const fn as_millis(self) -> u64 {
+        self.0
+    }
 }
 
 /// Lease-local phase of terminal acquisition. `AcquisitionOpen` is not an
@@ -171,7 +195,9 @@ impl HlsRecoveryWorkload {
         }
     }
 
-    pub const fn after_full_burst(self) -> Self { Self { burst: HlsRecoveryBurstWorkload::FullBurstCompleted, ..self } }
+    pub const fn after_full_burst(self) -> Self {
+        Self { burst: HlsRecoveryBurstWorkload::FullBurstCompleted, ..self }
+    }
 
     pub const fn from_recovery_medium(medium: HlsRecoveryMediumReadiness) -> Self {
         let segment = match (medium.segment, medium.encryption) {
@@ -240,11 +266,17 @@ impl HlsRecoveryWorkloadEnvelope {
         }
     }
 
-    pub const fn from_timing_ceiling(ceiling: HlsRecoveryWorkload) -> Self { Self { ceiling } }
+    pub const fn from_timing_ceiling(ceiling: HlsRecoveryWorkload) -> Self {
+        Self { ceiling }
+    }
 
-    pub const fn ceiling(self) -> HlsRecoveryWorkload { self.ceiling }
+    pub const fn ceiling(self) -> HlsRecoveryWorkload {
+        self.ceiling
+    }
 
-    pub const fn contains(self, workload: HlsRecoveryWorkload) -> bool { workload.is_no_greater_than(self.ceiling) }
+    pub const fn contains(self, workload: HlsRecoveryWorkload) -> bool {
+        workload.is_no_greater_than(self.ceiling)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

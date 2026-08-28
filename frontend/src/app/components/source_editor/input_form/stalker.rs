@@ -34,7 +34,9 @@ pub(super) fn empty_device_form_state() -> StalkerDeviceFormState {
     StalkerDeviceFormState { form: StalkerDeviceProfileDto::default(), modified: false }
 }
 
-fn parsed_size_cap(value: Option<i64>) -> Option<u32> { value.and_then(|value| u32::try_from(value).ok()) }
+fn parsed_size_cap(value: Option<i64>) -> Option<u32> {
+    value.and_then(|value| u32::try_from(value).ok())
+}
 
 fn size_cap_field(
     state: &UseStateHandle<StalkerInputConfigDto>,
@@ -104,7 +106,9 @@ pub(super) struct StalkerInputFormProps {
 }
 
 impl PartialEq for StalkerInputFormProps {
-    fn eq(&self, _other: &Self) -> bool { false }
+    fn eq(&self, _other: &Self) -> bool {
+        false
+    }
 }
 
 #[component]
@@ -189,7 +193,9 @@ pub(super) struct StalkerDeviceInputFormProps {
 }
 
 impl PartialEq for StalkerDeviceInputFormProps {
-    fn eq(&self, _other: &Self) -> bool { false }
+    fn eq(&self, _other: &Self) -> bool {
+        false
+    }
 }
 
 #[component]

@@ -245,7 +245,9 @@ fn legacy_hls_route_allowed_with_cache(
         })
 }
 
-fn query_flag_is_archive(key: &str) -> bool { key.eq_ignore_ascii_case("utc") || key.eq_ignore_ascii_case("utcstart") }
+fn query_flag_is_archive(key: &str) -> bool {
+    key.eq_ignore_ascii_case("utc") || key.eq_ignore_ascii_case("utcstart")
+}
 
 fn query_flag_marks_start_context(key: &str) -> bool {
     key.eq_ignore_ascii_case("end")
@@ -579,9 +581,13 @@ fn stripped_tail_segments(materialized: &HlsMaterializedSharedManifest) -> usize
     })
 }
 
-fn hls_access_lease_ttl_ms(app_state: &Arc<AppState>) -> u64 { app_state.hls_proxy.session_idle_timeout_ms() }
+fn hls_access_lease_ttl_ms(app_state: &Arc<AppState>) -> u64 {
+    app_state.hls_proxy.session_idle_timeout_ms()
+}
 
-fn duration_to_millis_saturating(duration: Duration) -> u64 { u64::try_from(duration.as_millis()).unwrap_or(u64::MAX) }
+fn duration_to_millis_saturating(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
 
 fn hls_pending_bootstrap_window_ms(app_state: &Arc<AppState>) -> u64 {
     duration_to_millis_saturating(hls_initial_manifest_decision_wait_timeout(app_state))
@@ -2746,7 +2752,9 @@ enum HlsOriginEntryUrl {
 }
 
 impl HlsOriginEntryUrl {
-    fn direct_http(url: impl Into<String>) -> Self { Self::DirectHttp { url: url.into() } }
+    fn direct_http(url: impl Into<String>) -> Self {
+        Self::DirectHttp { url: url.into() }
+    }
 
     fn provider_failover(url: impl Into<String>, provider: Arc<ConfigProvider>) -> Self {
         Self::ProviderFailover { url: url.into(), provider }
@@ -2842,11 +2850,17 @@ impl HlsEntryStreamIdentity {
         Some(identity)
     }
 
-    pub(in crate::api) const fn virtual_id(&self) -> u32 { self.virtual_id }
+    pub(in crate::api) const fn virtual_id(&self) -> u32 {
+        self.virtual_id
+    }
 
-    fn stream_ref(&self) -> &str { self.input_stream_id.as_ref() }
+    fn stream_ref(&self) -> &str {
+        self.input_stream_id.as_ref()
+    }
 
-    fn upstream_user_agent(&self) -> Option<&str> { self.upstream_user_agent.as_deref() }
+    fn upstream_user_agent(&self) -> Option<&str> {
+        self.upstream_user_agent.as_deref()
+    }
 }
 
 /// Immutable input identity plus bitrate metadata available at the virtual HLS entry.
@@ -2872,13 +2886,21 @@ impl HlsEntryStreamContext {
         Some(Self { identity, known_bitrate_bps })
     }
 
-    pub(in crate::api) const fn virtual_id(&self) -> u32 { self.identity.virtual_id() }
+    pub(in crate::api) const fn virtual_id(&self) -> u32 {
+        self.identity.virtual_id()
+    }
 
-    pub(in crate::api) fn stream_ref(&self) -> &str { self.identity.stream_ref() }
+    pub(in crate::api) fn stream_ref(&self) -> &str {
+        self.identity.stream_ref()
+    }
 
-    pub(in crate::api) const fn known_bitrate_bps(&self) -> Option<u32> { self.known_bitrate_bps }
+    pub(in crate::api) const fn known_bitrate_bps(&self) -> Option<u32> {
+        self.known_bitrate_bps
+    }
 
-    pub(in crate::api) fn identity(&self) -> &HlsEntryStreamIdentity { &self.identity }
+    pub(in crate::api) fn identity(&self) -> &HlsEntryStreamIdentity {
+        &self.identity
+    }
 }
 
 /// Resolves the configured input together with both identities of one target entry.
@@ -11988,7 +12010,9 @@ mod tests {
         assert_eq!(repair_after.generations, 0);
     }
 
-    fn test_app_state() -> Arc<AppState> { test_app_state_with_hls_proxy(Arc::new(HlsProxyManager::new())) }
+    fn test_app_state() -> Arc<AppState> {
+        test_app_state_with_hls_proxy(Arc::new(HlsProxyManager::new()))
+    }
 
     fn test_beast_hls_proxy(cache_path: &std::path::Path) -> Arc<HlsProxyManager> {
         let config = HlsCacheConfig::from(&HlsCacheConfigDto {
@@ -13762,11 +13786,17 @@ mod tests {
         assert_eq!(session.activity.origin_work_generation, old_generation);
     }
 
-    fn test_addr() -> SocketAddr { "127.0.0.1:55123".parse().unwrap_or_else(|_| unreachable!()) }
+    fn test_addr() -> SocketAddr {
+        "127.0.0.1:55123".parse().unwrap_or_else(|_| unreachable!())
+    }
 
-    fn test_addr_with_port(port: u16) -> SocketAddr { SocketAddr::from(([127, 0, 0, 1], port)) }
+    fn test_addr_with_port(port: u16) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], port))
+    }
 
-    fn test_fingerprint() -> Fingerprint { Fingerprint::new("test".to_string(), "127.0.0.1".to_string(), test_addr()) }
+    fn test_fingerprint() -> Fingerprint {
+        Fingerprint::new("test".to_string(), "127.0.0.1".to_string(), test_addr())
+    }
 
     fn test_fingerprint_with_addr(addr: SocketAddr) -> Fingerprint {
         Fingerprint::new(format!("test-{}", addr.port()), "127.0.0.1".to_string(), addr)
@@ -18627,7 +18657,9 @@ mod tests {
         (bandwidth, uri)
     }
 
-    async fn single_variant_uri(response: Response<Body>) -> String { single_variant_master_playlist(response).await.1 }
+    async fn single_variant_uri(response: Response<Body>) -> String {
+        single_variant_master_playlist(response).await.1
+    }
 
     fn access_lease_id_from_variant_uri(uri: &str) -> &str {
         uri.trim_end_matches("/manifest.m3u8").rsplit('/').next().expect("access lease id in variant URI")
@@ -18871,15 +18903,23 @@ mod tests {
     }
 
     impl Drop for TestSegmentOrigin {
-        fn drop(&mut self) { self.task.abort(); }
+        fn drop(&mut self) {
+            self.task.abort();
+        }
     }
 
     impl TestSegmentOrigin {
-        fn key_request_count(&self) -> usize { self.key_requests.load(Ordering::SeqCst) }
+        fn key_request_count(&self) -> usize {
+            self.key_requests.load(Ordering::SeqCst)
+        }
 
-        fn manifest_request_count(&self) -> usize { self.manifest_requests.load(Ordering::SeqCst) }
+        fn manifest_request_count(&self) -> usize {
+            self.manifest_requests.load(Ordering::SeqCst)
+        }
 
-        fn segment_request_count(&self) -> usize { self.segment_requests.load(Ordering::SeqCst) }
+        fn segment_request_count(&self) -> usize {
+            self.segment_requests.load(Ordering::SeqCst)
+        }
 
         async fn set_key_bytes(&self, bytes: Arc<[u8]>) {
             if let Some(key_bytes) = &self.key_bytes {
@@ -19007,7 +19047,9 @@ mod tests {
     }
 
     impl TestBinaryOriginResponse {
-        fn new(status: StatusCode, body: Arc<[u8]>) -> Self { Self { status, location: None, body } }
+        fn new(status: StatusCode, body: Arc<[u8]>) -> Self {
+            Self { status, location: None, body }
+        }
 
         fn redirect(location: String) -> Self {
             Self { status: StatusCode::FOUND, location: Some(location), body: Arc::from(&b""[..]) }
@@ -19079,7 +19121,9 @@ mod tests {
     }
 
     impl Drop for TestEncodedManifestOrigin {
-        fn drop(&mut self) { self.task.abort(); }
+        fn drop(&mut self) {
+            self.task.abort();
+        }
     }
 
     async fn spawn_test_encoded_manifest_origin(
@@ -19207,7 +19251,9 @@ mod tests {
     }
 
     impl Drop for TestTransientOrigin {
-        fn drop(&mut self) { self.task.abort(); }
+        fn drop(&mut self) {
+            self.task.abort();
+        }
     }
 
     async fn spawn_test_transient_origin() -> TestTransientOrigin {

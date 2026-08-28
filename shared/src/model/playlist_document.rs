@@ -12,9 +12,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 
-fn default_as_live() -> Arc<str> { "live".intern() }
+fn default_as_live() -> Arc<str> {
+    "live".intern()
+}
 
-fn default_as_movie() -> Arc<str> { "movie".intern() }
+fn default_as_movie() -> Arc<str> {
+    "movie".intern()
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct XtreamLiveDoc {

@@ -297,7 +297,9 @@ impl SharedStreamState {
         }
     }
 
-    async fn has_no_subscribers(&self) -> bool { self.subscribers.read().await.is_empty() }
+    async fn has_no_subscribers(&self) -> bool {
+        self.subscribers.read().await.is_empty()
+    }
 
     async fn cleanup_subscriber(
         state: &Arc<SharedStreamState>,

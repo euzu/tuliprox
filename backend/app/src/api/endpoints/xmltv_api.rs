@@ -513,7 +513,9 @@ fn get_applied_epg_timestamps(programme: &EpgProgramme, epg_processing_options: 
     }
 }
 
-fn get_source_epg_timestamps(programme: &EpgProgramme) -> (i64, i64) { (programme.start, programme.stop) }
+fn get_source_epg_timestamps(programme: &EpgProgramme) -> (i64, i64) {
+    (programme.start, programme.stop)
+}
 
 fn format_epg_timeshift_strings(
     programme: &EpgProgramme,
@@ -1030,7 +1032,9 @@ mod tests {
         Config { storage_dir: storage_dir.to_string(), ..Default::default() }
     }
 
-    fn test_app_state() -> Arc<AppState> { create_test_app_state(Config::default()) }
+    fn test_app_state() -> Arc<AppState> {
+        create_test_app_state(Config::default())
+    }
 
     fn test_target_with_epg_options(lowercase_ids: bool, lowercase_display_names: bool) -> Arc<ConfigTarget> {
         let mut target = test_target_with_xtream_only();
@@ -1041,7 +1045,9 @@ mod tests {
         Arc::new(target)
     }
 
-    fn write_test_epg_db(path: &std::path::Path, channel: EpgChannel) { write_test_epg_channels(path, [channel]); }
+    fn write_test_epg_db(path: &std::path::Path, channel: EpgChannel) {
+        write_test_epg_channels(path, [channel]);
+    }
 
     fn write_test_epg_channels(path: &std::path::Path, channels: impl IntoIterator<Item = EpgChannel>) {
         let mut tree = BPlusTree::<Arc<str>, EpgChannel>::new();

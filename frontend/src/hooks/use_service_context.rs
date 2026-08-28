@@ -62,7 +62,9 @@ impl Services {
 }
 
 impl PartialEq for Services {
-    fn eq(&self, _other: &Self) -> bool { true }
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
 }
 
 impl Eq for Services {}
@@ -77,7 +79,9 @@ impl ServiceContext {
         Self { services: Rc::new(Services::new(config, flags)) }
     }
 
-    pub fn services(&self) -> Rc<Services> { self.services.clone() }
+    pub fn services(&self) -> Rc<Services> {
+        self.services.clone()
+    }
 }
 
 #[hook]

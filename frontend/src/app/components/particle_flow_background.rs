@@ -84,9 +84,13 @@ fn normalize(v: [f32; 2]) -> [f32; 2] {
     [v[0] / len, v[1] / len]
 }
 
-fn fract(v: f32) -> f32 { v - v.floor() }
+fn fract(v: f32) -> f32 {
+    v - v.floor()
+}
 
-fn hash1(v: f32) -> f32 { fract((v.sin() * 43_758.547).abs()) }
+fn hash1(v: f32) -> f32 {
+    fract((v.sin() * 43_758.547).abs())
+}
 
 fn parse_rgb_component(component: &str) -> Option<f32> {
     let value = component.trim();

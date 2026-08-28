@@ -114,7 +114,9 @@ where
     Ok(print_json_from_iter(query.iter()))
 }
 
-fn dump_xtream_db(path: &Path) -> bool { try_dump_typed_db::<u32, XtreamPlaylistItem>(path) }
+fn dump_xtream_db(path: &Path) -> bool {
+    try_dump_typed_db::<u32, XtreamPlaylistItem>(path)
+}
 
 fn dump_m3u_db(path: &Path) -> bool {
     // M3U DB keys can be u32 (target playlists) or Arc<str> (input playlists).
@@ -136,13 +138,21 @@ fn dump_m3u_db(path: &Path) -> bool {
     false
 }
 
-fn dump_epg_db(path: &Path) -> bool { try_dump_typed_db::<Arc<str>, EpgChannel>(path) }
+fn dump_epg_db(path: &Path) -> bool {
+    try_dump_typed_db::<Arc<str>, EpgChannel>(path)
+}
 
-fn dump_target_mapping_db(path: &Path) -> bool { try_dump_typed_db::<u32, VirtualIdRecord>(path) }
+fn dump_target_mapping_db(path: &Path) -> bool {
+    try_dump_typed_db::<u32, VirtualIdRecord>(path)
+}
 
-fn dump_metadata_status_db(path: &Path) -> bool { try_dump_typed_db::<MetadataRetryDbKey, MetadataRetryDbValue>(path) }
+fn dump_metadata_status_db(path: &Path) -> bool {
+    try_dump_typed_db::<MetadataRetryDbKey, MetadataRetryDbValue>(path)
+}
 
-fn dump_qos_snapshot_db(path: &Path) -> bool { try_dump_typed_db::<String, QosSnapshotRecord>(path) }
+fn dump_qos_snapshot_db(path: &Path) -> bool {
+    try_dump_typed_db::<String, QosSnapshotRecord>(path)
+}
 
 fn dump_db(filename: &str, label: &str, dump_fn: DumpFn) -> bool {
     match PathBuf::from(filename).canonicalize() {

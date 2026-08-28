@@ -99,7 +99,9 @@ pub struct PaddingBounds {
 /// `Downloading` / `Completed` / `Failed` / `Cancelled` /
 /// `Deleting(<previous>)`. The current state for the existing
 /// `DownloadState` variants is reduced to a string here.
-pub fn state_is_editable(state_label: &str) -> bool { EDITABLE_STATES.contains(&state_label) }
+pub fn state_is_editable(state_label: &str) -> bool {
+    EDITABLE_STATES.contains(&state_label)
+}
 
 /// Pure: validate the merged interval (patch overlaid on current) and
 /// the patch's padding bounds. Validation runs against the merged
@@ -222,7 +224,9 @@ pub fn visibility_unchanged(
 mod tests {
     use super::*;
 
-    fn bounds() -> PaddingBounds { PaddingBounds { max_pre_roll_secs: 900, max_post_roll_secs: 1800 } }
+    fn bounds() -> PaddingBounds {
+        PaddingBounds { max_pre_roll_secs: 900, max_post_roll_secs: 1800 }
+    }
 
     #[test]
     fn state_is_editable_accepts_only_upcoming_states() {

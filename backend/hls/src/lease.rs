@@ -33,10 +33,14 @@ impl HlsAvailabilityEvidenceGeneration {
     const NONE: Self = Self(0);
 
     #[cfg(any(test, feature = "test-support"))]
-    pub const fn for_test(generation: u64) -> Self { Self(generation) }
+    pub const fn for_test(generation: u64) -> Self {
+        Self(generation)
+    }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub const fn as_u64(self) -> u64 { self.0 }
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -215,7 +219,9 @@ pub struct HlsMediaLeaseIdentity {
 }
 
 impl HlsMediaLeaseIdentity {
-    pub const fn is_live(self) -> bool { matches!(self.playback, HlsMediaLeasePlaybackIdentity::Live { .. }) }
+    pub const fn is_live(self) -> bool {
+        matches!(self.playback, HlsMediaLeasePlaybackIdentity::Live { .. })
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -255,7 +261,9 @@ pub enum HlsLeaseManifestPublicationOutcome {
 }
 
 impl HlsLeaseManifestPublicationOutcome {
-    pub const fn is_committed(self) -> bool { matches!(self, Self::Committed { .. }) }
+    pub const fn is_committed(self) -> bool {
+        matches!(self, Self::Committed { .. })
+    }
 
     pub const fn snapshot_generation(self) -> Option<u64> {
         match self {
@@ -338,7 +346,9 @@ impl HlsAccessLease {
         self.origin_priority = priority;
     }
 
-    pub fn age_ms(&self, now_ms: u64) -> u64 { now_ms.saturating_sub(self.issued_at_ms) }
+    pub fn age_ms(&self, now_ms: u64) -> u64 {
+        now_ms.saturating_sub(self.issued_at_ms)
+    }
 
     pub fn media_identity(&self) -> Option<HlsMediaLeaseIdentity> {
         let playback = match &self.playback_mode {
@@ -666,7 +676,9 @@ pub enum HlsAccessLeaseActivation {
 }
 
 impl HlsAccessLeaseActivation {
-    pub const fn is_activated(&self) -> bool { matches!(self, Self::Activated { .. }) }
+    pub const fn is_activated(&self) -> bool {
+        matches!(self, Self::Activated { .. })
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -1026,9 +1038,13 @@ impl HlsAccessLeaseStore {
         removed
     }
 
-    pub fn len(&self) -> usize { self.by_lease_id.len() }
+    pub fn len(&self) -> usize {
+        self.by_lease_id.len()
+    }
 
-    pub fn is_empty(&self) -> bool { self.by_lease_id.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.by_lease_id.is_empty()
+    }
 
     pub fn first_username_for_session(&self, proxy_session_id: &ProxySessionId) -> Option<String> {
         self.by_lease_id

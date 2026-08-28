@@ -32,7 +32,7 @@
 
 use super::recording_ctx::RecordingCtx;
 use log::info;
-use shared::model::{Claims, EventSink, Permission, PermissionSet, CURRENT_PERMISSION_SCHEMA_VERSION, ROLE_ADMIN};
+use shared::model::{Claims, EventSink, Permission, PermissionSet, RoleSet, CURRENT_PERMISSION_SCHEMA_VERSION};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -87,7 +87,9 @@ pub fn recording_enabled(app_config: &AppConfig) -> bool {
         .is_some_and(|download| download.recording.as_ref().is_none_or(|recording| recording.enabled))
 }
 
-pub fn now_ts() -> i64 { chrono::Utc::now().timestamp() }
+pub fn now_ts() -> i64 {
+    chrono::Utc::now().timestamp()
+}
 
 /// Claims for a system-initiated action. The retention worker is not a
 /// user; it holds the administrator role so it can act on shared and
@@ -103,7 +105,7 @@ pub fn system_claims() -> Claims {
         iss: "tuliprox".to_string(),
         iat: now,
         exp: now + 3600,
-        roles: vec![ROLE_ADMIN.to_string()],
+        roles: RoleSet::ADMIN,
         permissions,
         pwd_version: 0,
         subject_id: Some(shared::model::UserId::builtin_admin()),
@@ -121,7 +123,9 @@ impl PassGuard {
 }
 
 impl Drop for PassGuard {
-    fn drop(&mut self) { self.0.store(false, Ordering::Release); }
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 /// Start every DVR supervisor. Called once the HTTP listener is bound so

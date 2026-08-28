@@ -126,7 +126,9 @@ fn serialize_groups_file(groups: &[RbacGroup]) -> String {
         .join("\n")
 }
 
-fn normalize_name(value: &str) -> String { value.trim().to_string() }
+fn normalize_name(value: &str) -> String {
+    value.trim().to_string()
+}
 
 fn normalize_groups(groups: &[String]) -> Vec<String> {
     let mut normalized = Vec::with_capacity(groups.len());
@@ -209,7 +211,9 @@ fn user_has_admin_group(user: &WebUiUser) -> bool {
     user.groups.iter().any(|group| group.eq_ignore_ascii_case("admin"))
 }
 
-fn count_admin_users(users: &[WebUiUser]) -> usize { users.iter().filter(|user| user_has_admin_group(user)).count() }
+fn count_admin_users(users: &[WebUiUser]) -> usize {
+    users.iter().filter(|user| user_has_admin_group(user)).count()
+}
 
 fn resolve_auth_paths(web_auth: &WebAuthConfig, config_path: &str) -> (PathBuf, PathBuf) {
     let userfile_name = if is_blank_or_default_user_file_path(&web_auth.userfile) {

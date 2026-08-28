@@ -116,7 +116,9 @@ impl EpgIdCache {
         }
     }
 
-    fn is_empty(&self) -> bool { self.channel_epg_id.is_empty() && self.normalized.is_empty() }
+    fn is_empty(&self) -> bool {
+        self.channel_epg_id.is_empty() && self.normalized.is_empty()
+    }
 
     /// Adds an epg id to the case-folded membership set.
     ///
@@ -133,7 +135,9 @@ impl EpgIdCache {
         with_folded_epg_id(id, |folded| self.channel_epg_id.contains(folded))
     }
 
-    pub fn needs_guide_names(&self, id: &str) -> bool { self.contains_channel_epg_id(id) }
+    pub fn needs_guide_names(&self, id: &str) -> bool {
+        self.contains_channel_epg_id(id)
+    }
 
     pub fn insert_processed_epg_id(&mut self, id: &str) {
         with_folded_epg_id(id, |folded| self.processed.insert(folded.intern()));
@@ -157,7 +161,9 @@ impl EpgIdCache {
         selected
     }
 
-    pub fn replace_processed_epg_ids(&mut self, ids: HashSet<Arc<str>>) { self.processed = ids; }
+    pub fn replace_processed_epg_ids(&mut self, ids: HashSet<Arc<str>>) {
+        self.processed = ids;
+    }
 
     pub fn register_guide_names<I, S>(&mut self, epg_id: &str, names: I)
     where
@@ -262,7 +268,9 @@ impl EpgIdCache {
     /// let normalized = cache.normalize("HBO HD");
     /// assert!(!normalized.is_empty());
     /// ```
-    fn normalize(&self, name: &str) -> String { normalize_channel_name(name, &self.smart_match_config) }
+    fn normalize(&self, name: &str) -> String {
+        normalize_channel_name(name, &self.smart_match_config)
+    }
 
     pub fn phonetic(&self, name: &Arc<str>) -> Arc<str> {
         let result = self.metaphone.encode(name);
@@ -855,7 +863,9 @@ mod tests {
     };
     use tuliprox_repository::MemoryPlaylistSource;
 
-    fn random_string() -> String { rand::rng().sample_iter(&Alphanumeric).take(30).map(char::from).collect() }
+    fn random_string() -> String {
+        rand::rng().sample_iter(&Alphanumeric).take(30).map(char::from).collect()
+    }
 
     fn write_ics_file(path: &std::path::Path) {
         fs::write(

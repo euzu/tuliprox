@@ -20,17 +20,27 @@ pub struct CommandChannel {
 }
 
 impl CommandChannel {
-    pub fn new(config: CommandMessagingConfig) -> Self { Self { config } }
+    pub fn new(config: CommandMessagingConfig) -> Self {
+        Self { config }
+    }
 }
 
 impl NotificationChannel for CommandChannel {
-    fn id(&self) -> &'static str { "command" }
+    fn id(&self) -> &'static str {
+        "command"
+    }
 
-    fn template_for(&self, event: EventId) -> Option<&str> { self.config.templates.get(&event).map(String::as_str) }
+    fn template_for(&self, event: EventId) -> Option<&str> {
+        self.config.templates.get(&event).map(String::as_str)
+    }
 
-    fn routing(&self) -> &ChannelRouting { &self.config.routing }
+    fn routing(&self) -> &ChannelRouting {
+        &self.config.routing
+    }
 
-    fn wants(&self, event: EventId, severity: Severity) -> bool { self.config.routing.accepts(event, severity) }
+    fn wants(&self, event: EventId, severity: Severity) -> bool {
+        self.config.routing.accepts(event, severity)
+    }
 
     async fn send(&self, msg: &RenderedMessage<'_>) -> Delivery {
         {
@@ -94,5 +104,7 @@ impl NotificationChannel for CommandChannel {
         }
     }
 
-    fn capabilities(&self) -> ChannelCapabilities { ChannelCapabilities::default() }
+    fn capabilities(&self) -> ChannelCapabilities {
+        ChannelCapabilities::default()
+    }
 }

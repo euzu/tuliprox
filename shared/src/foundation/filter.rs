@@ -25,7 +25,9 @@ pub struct CompiledRegex {
 }
 
 impl PartialEq for CompiledRegex {
-    fn eq(&self, other: &Self) -> bool { self.restr == other.restr }
+    fn eq(&self, other: &Self) -> bool {
+        self.restr == other.restr
+    }
 }
 
 #[derive(Parser)]
@@ -956,7 +958,9 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_numeric_round_trip() { assert_filter_round_trip(r"Chno >= 100 AND Chno < 200 OR NOT Chno = 7"); }
+    fn test_filter_numeric_round_trip() {
+        assert_filter_round_trip(r"Chno >= 100 AND Chno < 200 OR NOT Chno = 7");
+    }
 
     #[test]
     fn test_filter_set_round_trip() {

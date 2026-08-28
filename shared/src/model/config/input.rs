@@ -126,7 +126,9 @@ pub enum StagedInputType {
 }
 
 impl StagedInputType {
-    pub fn is_default(value: &Self) -> bool { matches!(value, Self::M3u) }
+    pub fn is_default(value: &Self) -> bool {
+        matches!(value, Self::M3u)
+    }
 
     pub const fn input_type(self) -> InputType {
         match self {
@@ -151,19 +153,33 @@ pub struct ConfigInputStagedDto {
 }
 
 impl InputType {
-    pub fn is_xtream(&self) -> bool { matches!(self, Self::Xtream | Self::XtreamBatch) }
-    pub fn is_m3u(&self) -> bool { matches!(self, Self::M3u | Self::M3uBatch) }
-    pub fn is_stalker(&self) -> bool { matches!(self, Self::Stalker | Self::StalkerBatch) }
+    pub fn is_xtream(&self) -> bool {
+        matches!(self, Self::Xtream | Self::XtreamBatch)
+    }
+    pub fn is_m3u(&self) -> bool {
+        matches!(self, Self::M3u | Self::M3uBatch)
+    }
+    pub fn is_stalker(&self) -> bool {
+        matches!(self, Self::Stalker | Self::StalkerBatch)
+    }
     pub fn uses_standard_input_url(&self) -> bool {
         matches!(
             self,
             Self::M3u | Self::Xtream | Self::M3uBatch | Self::XtreamBatch | Self::Stalker | Self::StalkerBatch
         )
     }
-    pub fn is_library(&self) -> bool { matches!(self, Self::Library) }
-    pub fn is_media_server(&self) -> bool { matches!(self, Self::Emby | Self::Jellyfin | Self::Plex) }
-    pub fn is_batch(&self) -> bool { matches!(self, Self::M3uBatch | Self::XtreamBatch | Self::StalkerBatch) }
-    pub fn is_staged(&self) -> bool { matches!(self, Self::Staged) }
+    pub fn is_library(&self) -> bool {
+        matches!(self, Self::Library)
+    }
+    pub fn is_media_server(&self) -> bool {
+        matches!(self, Self::Emby | Self::Jellyfin | Self::Plex)
+    }
+    pub fn is_batch(&self) -> bool {
+        matches!(self, Self::M3uBatch | Self::XtreamBatch | Self::StalkerBatch)
+    }
+    pub fn is_staged(&self) -> bool {
+        matches!(self, Self::Staged)
+    }
 
     /// Single source of truth for the categorical behavior of an input type.
     ///
@@ -210,7 +226,9 @@ impl InputType {
 
     /// Persistence/load backend family for this input type.
     #[must_use]
-    pub const fn persistence(self) -> InputPersistence { self.capabilities().persistence }
+    pub const fn persistence(self) -> InputPersistence {
+        self.capabilities().persistence
+    }
 }
 
 /// Storage/loading backend family an [`InputType`] maps onto.
@@ -262,7 +280,9 @@ pub enum InputFetchMethod {
 }
 
 impl InputFetchMethod {
-    pub fn is_default(value: &InputFetchMethod) -> bool { matches!(value, Self::GET) }
+    pub fn is_default(value: &InputFetchMethod) -> bool {
+        matches!(value, Self::GET)
+    }
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -1169,14 +1189,24 @@ impl ConfigProviderDto {
     }
 }
 
-pub const fn default_provider_dns_refresh_secs() -> u64 { 300 }
-pub const fn is_default_provider_dns_refresh_secs(v: &u64) -> bool { *v == default_provider_dns_refresh_secs() }
+pub const fn default_provider_dns_refresh_secs() -> u64 {
+    300
+}
+pub const fn is_default_provider_dns_refresh_secs(v: &u64) -> bool {
+    *v == default_provider_dns_refresh_secs()
+}
 pub fn is_default_provider_url_selection_policy(v: &ProviderUrlSelectionPolicy) -> bool {
     *v == ProviderUrlSelectionPolicy::default()
 }
-pub fn is_default_dns_prefer(v: &DnsPrefer) -> bool { *v == DnsPrefer::default() }
-pub fn is_default_on_resolve_error(v: &OnResolveErrorPolicy) -> bool { *v == OnResolveErrorPolicy::default() }
-pub fn is_default_on_connect_error(v: &OnConnectErrorPolicy) -> bool { *v == OnConnectErrorPolicy::default() }
+pub fn is_default_dns_prefer(v: &DnsPrefer) -> bool {
+    *v == DnsPrefer::default()
+}
+pub fn is_default_on_resolve_error(v: &OnResolveErrorPolicy) -> bool {
+    *v == OnResolveErrorPolicy::default()
+}
+pub fn is_default_on_connect_error(v: &OnConnectErrorPolicy) -> bool {
+    *v == OnConnectErrorPolicy::default()
+}
 
 #[derive(
     Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default, EnumString, AsRefStr, Display,

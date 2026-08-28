@@ -41,13 +41,19 @@ const ZOOM_EQUALITY_TOLERANCE: f64 = 0.01;
 struct TimelineZoom(f64);
 
 impl TimelineZoom {
-    fn new(pixels_per_min: f64) -> Self { Self(pixels_per_min.clamp(MIN_PIXELS_PER_MIN, MAX_PIXELS_PER_MIN)) }
+    fn new(pixels_per_min: f64) -> Self {
+        Self(pixels_per_min.clamp(MIN_PIXELS_PER_MIN, MAX_PIXELS_PER_MIN))
+    }
 
-    fn value(self) -> f64 { self.0 }
+    fn value(self) -> f64 {
+        self.0
+    }
 }
 
 impl PartialEq for TimelineZoom {
-    fn eq(&self, other: &Self) -> bool { (self.0 - other.0).abs() < ZOOM_EQUALITY_TOLERANCE }
+    fn eq(&self, other: &Self) -> bool {
+        (self.0 - other.0).abs() < ZOOM_EQUALITY_TOLERANCE
+    }
 }
 
 fn compute_zoomed_scroll_left(

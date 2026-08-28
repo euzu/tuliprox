@@ -18,7 +18,9 @@ pub(super) struct StagedInputFormProps {
 }
 
 impl PartialEq for StagedInputFormProps {
-    fn eq(&self, _other: &Self) -> bool { false }
+    fn eq(&self, _other: &Self) -> bool {
+        false
+    }
 }
 
 #[component]

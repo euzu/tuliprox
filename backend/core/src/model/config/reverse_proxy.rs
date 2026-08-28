@@ -143,11 +143,15 @@ pub struct StripConfig {
 }
 
 impl From<&shared::model::HlsStripConfigDto> for StripConfig {
-    fn from(dto: &shared::model::HlsStripConfigDto) -> Self { Self { mode: dto.mode, value: dto.value } }
+    fn from(dto: &shared::model::HlsStripConfigDto) -> Self {
+        Self { mode: dto.mode, value: dto.value }
+    }
 }
 
 impl From<&StripConfig> for shared::model::HlsStripConfigDto {
-    fn from(config: &StripConfig) -> Self { Self { mode: config.mode, value: config.value } }
+    fn from(config: &StripConfig) -> Self {
+        Self { mode: config.mode, value: config.value }
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -156,15 +160,21 @@ pub struct HlsManifestRecoveryBurstConfig {
 }
 
 impl Default for HlsManifestRecoveryBurstConfig {
-    fn default() -> Self { Self::from(&HlsManifestRecoveryBurstConfigDto::default()) }
+    fn default() -> Self {
+        Self::from(&HlsManifestRecoveryBurstConfigDto::default())
+    }
 }
 
 impl From<&HlsManifestRecoveryBurstConfigDto> for HlsManifestRecoveryBurstConfig {
-    fn from(dto: &HlsManifestRecoveryBurstConfigDto) -> Self { Self { level: dto.level } }
+    fn from(dto: &HlsManifestRecoveryBurstConfigDto) -> Self {
+        Self { level: dto.level }
+    }
 }
 
 impl From<&HlsManifestRecoveryBurstConfig> for HlsManifestRecoveryBurstConfigDto {
-    fn from(config: &HlsManifestRecoveryBurstConfig) -> Self { Self { level: config.level } }
+    fn from(config: &HlsManifestRecoveryBurstConfig) -> Self {
+        Self { level: config.level }
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -175,7 +185,9 @@ pub struct HlsSegmentRepairSizeIncreaseConfig {
 }
 
 impl Default for HlsSegmentRepairSizeIncreaseConfig {
-    fn default() -> Self { Self::from(&HlsSegmentRepairSizeIncreaseConfigDto::default()) }
+    fn default() -> Self {
+        Self::from(&HlsSegmentRepairSizeIncreaseConfigDto::default())
+    }
 }
 
 impl From<&HlsSegmentRepairSizeIncreaseConfigDto> for HlsSegmentRepairSizeIncreaseConfig {
@@ -205,7 +217,9 @@ pub struct HlsSegmentRepairConfig {
 }
 
 impl Default for HlsSegmentRepairConfig {
-    fn default() -> Self { Self::from(&HlsSegmentRepairConfigDto::default()) }
+    fn default() -> Self {
+        Self::from(&HlsSegmentRepairConfigDto::default())
+    }
 }
 
 impl From<&HlsSegmentRepairConfigDto> for HlsSegmentRepairConfig {
@@ -241,7 +255,9 @@ pub struct HlsCorruptSegmentWatchdogConfig {
 }
 
 impl Default for HlsCorruptSegmentWatchdogConfig {
-    fn default() -> Self { Self::from(&HlsCorruptSegmentWatchdogConfigDto::default()) }
+    fn default() -> Self {
+        Self::from(&HlsCorruptSegmentWatchdogConfigDto::default())
+    }
 }
 
 impl From<&HlsCorruptSegmentWatchdogConfigDto> for HlsCorruptSegmentWatchdogConfig {

@@ -35,10 +35,14 @@ pub struct EventId(&'static str);
 impl EventId {
     /// Declare an event id. `const` so the registry is built at compile time.
     #[must_use]
-    pub const fn new(id: &'static str) -> Self { Self(id) }
+    pub const fn new(id: &'static str) -> Self {
+        Self(id)
+    }
 
     #[must_use]
-    pub const fn as_str(&self) -> &'static str { self.0 }
+    pub const fn as_str(&self) -> &'static str {
+        self.0
+    }
 
     /// The `domain` part - everything before the first dot.
     ///
@@ -58,11 +62,15 @@ impl EventId {
     /// the legacy template filename for that kind - so recording templates
     /// are discovered by the canonical id with no alias lookup needed.
     #[must_use]
-    pub fn file_stem(&self) -> String { self.0.replace('.', "_") }
+    pub fn file_stem(&self) -> String {
+        self.0.replace('.', "_")
+    }
 
     /// `{prefix}_{file_stem}.templ`, the on-disk template name.
     #[must_use]
-    pub fn template_filename(&self, prefix: &str) -> String { format!("{prefix}_{}.templ", self.file_stem()) }
+    pub fn template_filename(&self, prefix: &str) -> String {
+        format!("{prefix}_{}.templ", self.file_stem())
+    }
 
     /// Resolve a wire string to a known event id.
     ///
@@ -80,11 +88,15 @@ impl EventId {
 }
 
 impl fmt::Display for EventId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(self.0) }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0)
+    }
 }
 
 impl serde::Serialize for EventId {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> { s.serialize_str(self.0) }
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.0)
+    }
 }
 
 impl<'de> serde::Deserialize<'de> for EventId {
@@ -135,7 +147,9 @@ impl Severity {
 }
 
 impl fmt::Display for Severity {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(self.wire_name()) }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.wire_name())
+    }
 }
 
 /// One entry in the event registry.
@@ -363,11 +377,15 @@ pub mod registry {
 
     /// Look up the descriptor for an id.
     #[must_use]
-    pub fn describe(id: EventId) -> Option<&'static EventDescriptor> { ALL.iter().find(|d| d.id == id) }
+    pub fn describe(id: EventId) -> Option<&'static EventDescriptor> {
+        ALL.iter().find(|d| d.id == id)
+    }
 
     /// Default severity for an id; `Info` for anything unregistered.
     #[must_use]
-    pub fn default_severity(id: EventId) -> Severity { describe(id).map_or(Severity::Info, |d| d.severity) }
+    pub fn default_severity(id: EventId) -> Severity {
+        describe(id).map_or(Severity::Info, |d| d.severity)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -408,7 +426,9 @@ enum Segment {
 }
 
 impl fmt::Display for EventPattern {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(&self.raw) }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.raw)
+    }
 }
 
 impl EventPattern {
@@ -437,11 +457,15 @@ impl EventPattern {
 
     /// The pattern as written, for round-tripping back into config.
     #[must_use]
-    pub fn as_str(&self) -> &str { &self.raw }
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
 
     /// Does this pattern cover `id`? Ignores negation - the caller combines.
     #[must_use]
-    pub fn matches(&self, id: EventId) -> bool { Self::match_segments(&self.segments, id.as_str()) }
+    pub fn matches(&self, id: EventId) -> bool {
+        Self::match_segments(&self.segments, id.as_str())
+    }
 
     fn match_segments(pattern: &[Segment], id: &str) -> bool {
         let mut parts = id.split('.');
@@ -485,11 +509,15 @@ impl EventSubscription {
 
     /// The parsed patterns, for round-tripping back into config.
     #[must_use]
-    pub fn patterns(&self) -> &[EventPattern] { &self.patterns }
+    pub fn patterns(&self) -> &[EventPattern] {
+        &self.patterns
+    }
 
     /// `true` when nothing is subscribed - the caller can skip all work.
     #[must_use]
-    pub fn is_empty(&self) -> bool { self.patterns.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.patterns.is_empty()
+    }
 
     /// At least one positive pattern matches and no negative pattern does.
     #[must_use]

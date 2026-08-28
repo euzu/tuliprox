@@ -101,9 +101,15 @@ pub struct RecordingTaskResponse {
     pub recording: Option<shared::model::recording::RecordingTaskDto>,
 }
 
-fn default_priority() -> TaskPriorityDto { TaskPriorityDto::Normal }
-fn default_status() -> TransferStatusDto { TransferStatusDto::Scheduled }
-fn default_kind() -> TaskKindDto { TaskKindDto::Recording }
+fn default_priority() -> TaskPriorityDto {
+    TaskPriorityDto::Normal
+}
+fn default_status() -> TransferStatusDto {
+    TransferStatusDto::Scheduled
+}
+fn default_kind() -> TaskKindDto {
+    TaskKindDto::Recording
+}
 
 impl From<TransferTaskDto> for RecordingTaskResponse {
     fn from(value: TransferTaskDto) -> Self {
@@ -424,21 +430,37 @@ impl RecordingService {
 
     /// Override the base path. Tests use this to point at a mock
     /// server; production uses the default constructed by `new`.
-    pub fn with_base_path(base_path: String) -> Self { Self { base_path } }
+    pub fn with_base_path(base_path: String) -> Self {
+        Self { base_path }
+    }
 
-    fn tasks_path(&self) -> String { concat_path_leading_slash(&self.base_path, "tasks") }
+    fn tasks_path(&self) -> String {
+        concat_path_leading_slash(&self.base_path, "tasks")
+    }
 
-    fn task_path(&self, id: &str) -> String { concat_path_leading_slash(&self.base_path, &format!("tasks/{id}")) }
+    fn task_path(&self, id: &str) -> String {
+        concat_path_leading_slash(&self.base_path, &format!("tasks/{id}"))
+    }
 
-    fn conflicts_path(&self) -> String { concat_path_leading_slash(&self.base_path, "conflicts/preview") }
+    fn conflicts_path(&self) -> String {
+        concat_path_leading_slash(&self.base_path, "conflicts/preview")
+    }
 
-    fn quota_path(&self) -> String { concat_path_leading_slash(&self.base_path, "quota") }
+    fn quota_path(&self) -> String {
+        concat_path_leading_slash(&self.base_path, "quota")
+    }
 
-    fn rules_path(&self) -> String { concat_path_leading_slash(&self.base_path, "rules") }
+    fn rules_path(&self) -> String {
+        concat_path_leading_slash(&self.base_path, "rules")
+    }
 
-    fn rule_path(&self, id: &str) -> String { concat_path_leading_slash(&self.base_path, &format!("rules/{id}")) }
+    fn rule_path(&self, id: &str) -> String {
+        concat_path_leading_slash(&self.base_path, &format!("rules/{id}"))
+    }
 
-    fn availability_path(&self) -> String { concat_path_leading_slash(&self.base_path, "availability") }
+    fn availability_path(&self) -> String {
+        concat_path_leading_slash(&self.base_path, "availability")
+    }
 
     /// GET /recording/tasks — list visible tasks.
     pub async fn list_tasks(&self) -> Result<RecordingSnapshot, RecordingError> {
@@ -603,7 +625,9 @@ fn extract_error_code(e: &Error) -> Option<String> {
 }
 
 impl Default for RecordingService {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]

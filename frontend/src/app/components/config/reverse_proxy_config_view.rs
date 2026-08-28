@@ -155,7 +155,9 @@ pub struct FailoverPatternsDto {
 }
 
 impl FailoverPatternsDto {
-    pub fn is_empty(&self) -> bool { self.patterns.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.patterns.is_empty()
+    }
 }
 
 generate_form_reducer!(

@@ -557,7 +557,9 @@ impl ParseNumericTag for str {
     }
 }
 
-fn tag_name(line: &str) -> &str { line.split_once(':').map_or(line, |(tag, _)| tag) }
+fn tag_name(line: &str) -> &str {
+    line.split_once(':').map_or(line, |(tag, _)| tag)
+}
 
 fn is_allowed_normal_timeline_tag(tag: &str) -> bool {
     matches!(

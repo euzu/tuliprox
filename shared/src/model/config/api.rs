@@ -10,7 +10,9 @@ pub struct ConfigApiDto {
 }
 
 impl ConfigApiDto {
-    pub fn default_web_root() -> String { get_default_web_root() }
+    pub fn default_web_root() -> String {
+        get_default_web_root()
+    }
 
     pub fn prepare(&mut self) {
         if self.web_root.trim().is_empty() {

@@ -24,18 +24,36 @@ pub fn is_default_supported_video_extensions(v: &[String]) -> bool {
     v.len() == DEFAULT_VIDEO_EXTENSIONS.len() && v.iter().zip(DEFAULT_VIDEO_EXTENSIONS).all(|(a, b)| a == b)
 }
 
-pub fn default_storage_formats() -> Vec<LibraryMetadataFormat> { vec![] }
-pub fn default_movie_category() -> String { String::from("Local Movies") }
-pub fn default_series_category() -> String { String::from("Local TV Shows") }
+pub fn default_storage_formats() -> Vec<LibraryMetadataFormat> {
+    vec![]
+}
+pub fn default_movie_category() -> String {
+    String::from("Local Movies")
+}
+pub fn default_series_category() -> String {
+    String::from("Local TV Shows")
+}
 
-pub fn default_thumbnail_width() -> u32 { 320 }
-pub fn default_thumbnail_height() -> u32 { 180 }
-pub fn default_thumbnail_quality() -> u8 { 75 }
+pub fn default_thumbnail_width() -> u32 {
+    320
+}
+pub fn default_thumbnail_height() -> u32 {
+    180
+}
+pub fn default_thumbnail_quality() -> u8 {
+    75
+}
 
-pub fn is_default_processing_order(p: &ProcessingOrder) -> bool { *p == ProcessingOrder::default() }
+pub fn is_default_processing_order(p: &ProcessingOrder) -> bool {
+    *p == ProcessingOrder::default()
+}
 
-pub const fn default_probe_live_interval() -> u32 { 120 }
-pub const fn is_default_probe_live_interval(v: &u32) -> bool { *v == default_probe_live_interval() }
+pub const fn default_probe_live_interval() -> u32 {
+    120
+}
+pub const fn is_default_probe_live_interval(v: &u32) -> bool {
+    *v == default_probe_live_interval()
+}
 
 pub fn is_none_or_empty_video(video: &Option<VideoConfigDto>) -> bool {
     video.as_ref().is_none_or(VideoConfigDto::is_empty)

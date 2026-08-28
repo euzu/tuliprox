@@ -40,7 +40,9 @@ impl Ord for QueueEntry {
 }
 
 impl PartialOrd for QueueEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -57,7 +59,9 @@ pub struct HlsLifecycleManager {
 }
 
 impl HlsLifecycleManager {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub async fn schedule(&self, key: HlsLifecycleEventKey, due_at_ms: u64) {
         let should_notify = {
@@ -127,7 +131,9 @@ impl HlsLifecycleManager {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub async fn scheduled_len(&self) -> usize { self.state.lock().await.scheduled.len() }
+    pub async fn scheduled_len(&self) -> usize {
+        self.state.lock().await.scheduled.len()
+    }
 }
 
 enum LifecycleWait {

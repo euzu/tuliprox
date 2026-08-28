@@ -135,4 +135,6 @@ pub(super) fn compute_origin_refresh_interval_ms(
     last_segment_duration_ms.or(target_duration_ms).map_or(2_000, |duration_ms| duration_ms / 2).max(1_000)
 }
 
-pub fn cold_start_retry_after_seconds() -> u64 { COLD_START_RETRY_AFTER_SECONDS }
+pub fn cold_start_retry_after_seconds() -> u64 {
+    COLD_START_RETRY_AFTER_SECONDS
+}

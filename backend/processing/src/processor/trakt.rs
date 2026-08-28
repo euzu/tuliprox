@@ -537,7 +537,9 @@ mod tests {
         assert!(categories.is_empty());
     }
 
-    fn list_config(tmdb_only: bool) -> TraktCategoryConfig { named_list_config("category", tmdb_only) }
+    fn list_config(tmdb_only: bool) -> TraktCategoryConfig {
+        named_list_config("category", tmdb_only)
+    }
 
     fn named_list_config(category_name: &str, tmdb_only: bool) -> TraktCategoryConfig {
         TraktCategoryConfig {

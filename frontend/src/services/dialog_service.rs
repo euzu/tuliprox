@@ -74,9 +74,13 @@ pub struct DialogService {
 }
 
 impl DialogService {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
-    pub fn register(&self, cb: Callback<DialogRequest>) { *self.inner.borrow_mut() = Some(cb); }
+    pub fn register(&self, cb: Callback<DialogRequest>) {
+        *self.inner.borrow_mut() = Some(cb);
+    }
 
     pub fn confirm(&self, title: &str) -> DialogFuture {
         let (future, resolver) = DialogFuture::new();

@@ -277,7 +277,9 @@ impl PlexCatalogClient {
 
 #[allow(async_fn_in_trait)]
 impl MediaServerCatalogClient for PlexCatalogClient {
-    async fn discover(&self) -> Result<MediaServerStatus, MediaServerError> { Ok(self.connection().await?.status) }
+    async fn discover(&self) -> Result<MediaServerStatus, MediaServerError> {
+        Ok(self.connection().await?.status)
+    }
 
     async fn list_libraries(&self) -> Result<Vec<MediaServerLibrary>, MediaServerError> {
         let connection = self.connection().await?;

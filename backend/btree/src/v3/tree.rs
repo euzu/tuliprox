@@ -35,9 +35,13 @@ use std::{
     time::Duration,
 };
 
-fn invalid_data(message: &'static str) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, message) }
+fn invalid_data(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
 
-fn invalid_input(message: &'static str) -> io::Error { io::Error::new(io::ErrorKind::InvalidInput, message) }
+fn invalid_input(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message)
+}
 
 fn checked_page_usage<'a, I>(base: usize, cells: I, maximum_cell_footprint: usize) -> io::Result<usize>
 where
@@ -166,10 +170,14 @@ thread_local! {
 }
 
 #[cfg(test)]
-fn reset_internal_key_decode_count() { INTERNAL_KEY_DECODE_COUNT.set(0); }
+fn reset_internal_key_decode_count() {
+    INTERNAL_KEY_DECODE_COUNT.set(0);
+}
 
 #[cfg(test)]
-fn internal_key_decode_count() -> usize { INTERNAL_KEY_DECODE_COUNT.get() }
+fn internal_key_decode_count() -> usize {
+    INTERNAL_KEY_DECODE_COUNT.get()
+}
 
 fn decode_internal_key<K>(encoded: &[u8]) -> io::Result<K>
 where
@@ -322,40 +330,58 @@ pub struct BPlusTree<K, V> {
 }
 
 impl<K: Ord, V> Default for BPlusTree<K, V> {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<K: Ord, V> BPlusTree<K, V> {
-    pub const fn new() -> Self { Self { entries: BTreeMap::new(), metadata: BPlusTreeMetadata::Empty, dirty: true } }
+    pub const fn new() -> Self {
+        Self { entries: BTreeMap::new(), metadata: BPlusTreeMetadata::Empty, dirty: true }
+    }
 
-    pub fn get_metadata(&self) -> &BPlusTreeMetadata { &self.metadata }
+    pub fn get_metadata(&self) -> &BPlusTreeMetadata {
+        &self.metadata
+    }
 
     pub fn set_metadata(&mut self, metadata: BPlusTreeMetadata) {
         self.metadata = metadata;
         self.dirty = true;
     }
 
-    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 
-    pub fn len(&self) -> usize { self.entries.len() }
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
 
     pub fn insert(&mut self, key: K, value: V) {
         let _ = self.entries.insert(key, value);
         self.dirty = true;
     }
 
-    pub fn query(&self, key: &K) -> Option<&V> { self.entries.get(key) }
+    pub fn query(&self, key: &K) -> Option<&V> {
+        self.entries.get(key)
+    }
 
-    pub fn find_le(&self, key: &K) -> Option<(&K, &V)> { self.entries.range(..=key).next_back() }
+    pub fn find_le(&self, key: &K) -> Option<(&K, &V)> {
+        self.entries.range(..=key).next_back()
+    }
 
-    pub fn iter(&self) -> std::collections::btree_map::Iter<'_, K, V> { self.entries.iter() }
+    pub fn iter(&self) -> std::collections::btree_map::Iter<'_, K, V> {
+        self.entries.iter()
+    }
 }
 
 impl<'a, K: Ord, V> IntoIterator for &'a BPlusTree<K, V> {
     type Item = (&'a K, &'a V);
     type IntoIter = std::collections::btree_map::Iter<'a, K, V>;
 
-    fn into_iter(self) -> Self::IntoIter { self.entries.iter() }
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.iter()
+    }
 }
 
 #[derive(Clone)]
@@ -380,7 +406,9 @@ struct PageSink {
 const PAGE_SIZE_U64: u64 = PAGE_SIZE as u64;
 
 impl PageSink {
-    const fn new(file: File) -> Self { Self { file, next_page_id: 0 } }
+    const fn new(file: File) -> Self {
+        Self { file, next_page_id: 0 }
+    }
 
     fn allocate(&mut self) -> io::Result<u64> {
         let page_id = self.next_page_id;
@@ -635,7 +663,9 @@ pub(super) enum PublishDatabaseError {
 }
 
 impl PublishDatabaseError {
-    pub(super) const fn database_was_published(&self) -> bool { matches!(self, Self::PublishedDurabilityUnknown(_)) }
+    pub(super) const fn database_was_published(&self) -> bool {
+        matches!(self, Self::PublishedDurabilityUnknown(_))
+    }
 
     fn into_io(self) -> io::Error {
         match self {
@@ -645,7 +675,9 @@ impl PublishDatabaseError {
 }
 
 impl From<PublishDatabaseError> for io::Error {
-    fn from(error: PublishDatabaseError) -> Self { error.into_io() }
+    fn from(error: PublishDatabaseError) -> Self {
+        error.into_io()
+    }
 }
 
 pub(super) fn publish_database(
@@ -921,7 +953,9 @@ impl DatabaseImage {
         Ok((image, header))
     }
 
-    fn as_slice(&self) -> &[u8] { self.mmap.as_deref().unwrap_or(&self.fallback) }
+    fn as_slice(&self) -> &[u8] {
+        self.mmap.as_deref().unwrap_or(&self.fallback)
+    }
 }
 
 struct WriteTransaction {
@@ -1127,13 +1161,17 @@ where
         })
     }
 
-    pub fn try_new_with_backoff(filepath: &Path) -> io::Result<Self> { Self::try_new(filepath) }
+    pub fn try_new_with_backoff(filepath: &Path) -> io::Result<Self> {
+        Self::try_new(filepath)
+    }
 
     pub fn try_new_with_backoff_stats(filepath: &Path) -> io::Result<(Self, u64)> {
         Self::try_new(filepath).map(|updater| (updater, 0))
     }
 
-    pub fn set_flush_policy(&mut self, policy: FlushPolicy) { self.flush_policy = policy; }
+    pub fn set_flush_policy(&mut self, policy: FlushPolicy) {
+        self.flush_policy = policy;
+    }
 
     fn ensure_transaction(&mut self) -> io::Result<()> {
         if self.active.is_some() {
@@ -1565,7 +1603,9 @@ where
         Ok(())
     }
 
-    pub fn flush_now(&self) -> io::Result<()> { self.commit() }
+    pub fn flush_now(&self) -> io::Result<()> {
+        self.commit()
+    }
 
     pub fn commit(&self) -> io::Result<()> {
         self.updater.lock().commit()?;
@@ -2436,11 +2476,17 @@ impl<K, V> BPlusTreeQuery<K, V> {
         }
     }
 
-    pub fn filepath(&self) -> &Path { &self.snapshot.filepath }
+    pub fn filepath(&self) -> &Path {
+        &self.snapshot.filepath
+    }
 
-    pub(crate) fn snapshot_identity(&self) -> ([u8; 16], u64) { (self.header.database_id, self.header.generation) }
+    pub(crate) fn snapshot_identity(&self) -> ([u8; 16], u64) {
+        (self.header.database_id, self.header.generation)
+    }
 
-    pub(crate) fn snapshot_metadata(&self) -> &BPlusTreeMetadata { &self.header.metadata }
+    pub(crate) fn snapshot_metadata(&self) -> &BPlusTreeMetadata {
+        &self.header.metadata
+    }
 
     fn value_allocation_limit(&self) -> usize {
         self.file_len.saturating_mul(256).min(usize::try_from(u32::MAX).unwrap_or(usize::MAX))
@@ -2728,9 +2774,13 @@ where
         self.decode_entry_range(leaf_id, range).map(|entry| entry.map(|(_, value)| value))
     }
 
-    pub fn query(&mut self, key: &K) -> Result<Option<V>, BPlusTreeError> { self.query_io(key).map_err(Into::into) }
+    pub fn query(&mut self, key: &K) -> Result<Option<V>, BPlusTreeError> {
+        self.query_io(key).map_err(Into::into)
+    }
 
-    pub fn query_zero_copy(&mut self, key: &K) -> Result<Option<V>, BPlusTreeError> { self.query(key) }
+    pub fn query_zero_copy(&mut self, key: &K) -> Result<Option<V>, BPlusTreeError> {
+        self.query(key)
+    }
 
     fn locator_cell_range(&mut self, locator: Locator) -> io::Result<Range<usize>> {
         if self.locator_page_id != locator.leaf_page_id {
@@ -2967,9 +3017,13 @@ where
         }
     }
 
-    pub fn iter(&mut self) -> BPlusTreeDiskIterator<'_, K, V> { BPlusTreeDiskIterator::new(self) }
+    pub fn iter(&mut self) -> BPlusTreeDiskIterator<'_, K, V> {
+        BPlusTreeDiskIterator::new(self)
+    }
 
-    pub fn disk_iter(self) -> BPlusTreeDiskIteratorOwned<K, V> { BPlusTreeDiskIteratorOwned::new(self) }
+    pub fn disk_iter(self) -> BPlusTreeDiskIteratorOwned<K, V> {
+        BPlusTreeDiskIteratorOwned::new(self)
+    }
 
     pub fn range_iter(&mut self, start: Bound<&K>, end: Bound<&K>) -> BPlusTreeRangeIterator<'_, K, V>
     where
@@ -3168,7 +3222,9 @@ pub struct BPlusTreeDiskIterator<'a, K, V> {
 }
 
 impl<'a, K, V> BPlusTreeDiskIterator<'a, K, V> {
-    fn new(query: &'a mut BPlusTreeQuery<K, V>) -> Self { Self { query, state: CursorState::new(Bound::Unbounded) } }
+    fn new(query: &'a mut BPlusTreeQuery<K, V>) -> Self {
+        Self { query, state: CursorState::new(Bound::Unbounded) }
+    }
 
     fn from_bound(query: &'a mut BPlusTreeQuery<K, V>, start: Bound<K>) -> Self {
         Self { query, state: CursorState::new(start) }
@@ -3199,7 +3255,9 @@ where
 {
     type Item = io::Result<(K, V)>;
 
-    fn next(&mut self) -> Option<Self::Item> { cursor_next(self.query, &mut self.state) }
+    fn next(&mut self) -> Option<Self::Item> {
+        cursor_next(self.query, &mut self.state)
+    }
 }
 
 pub struct BPlusTreeDiskIteratorOwned<K, V> {
@@ -3208,7 +3266,9 @@ pub struct BPlusTreeDiskIteratorOwned<K, V> {
 }
 
 impl<K, V> BPlusTreeDiskIteratorOwned<K, V> {
-    fn new(query: BPlusTreeQuery<K, V>) -> Self { Self { query, state: CursorState::new(Bound::Unbounded) } }
+    fn new(query: BPlusTreeQuery<K, V>) -> Self {
+        Self { query, state: CursorState::new(Bound::Unbounded) }
+    }
 }
 
 impl<K, V> BPlusTreeDiskIteratorOwned<K, V>
@@ -3235,7 +3295,9 @@ where
 {
     type Item = io::Result<(K, V)>;
 
-    fn next(&mut self) -> Option<Self::Item> { cursor_next(&mut self.query, &mut self.state) }
+    fn next(&mut self) -> Option<Self::Item> {
+        cursor_next(&mut self.query, &mut self.state)
+    }
 }
 
 pub struct BPlusTreeRangeIterator<'a, K, V> {
@@ -4010,7 +4072,9 @@ mod tests {
         Ok(())
     }
 
-    fn long_split_key(index: u32, marker: char) -> String { format!("{index:04}{marker}{}", "k".repeat(1_880)) }
+    fn long_split_key(index: u32, marker: char) -> String {
+        format!("{index:04}{marker}{}", "k".repeat(1_880))
+    }
 
     #[test]
     fn leaf_promotion_recursively_splits_a_full_internal_root() -> io::Result<()> {

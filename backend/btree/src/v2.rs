@@ -271,7 +271,9 @@ struct ValueInfo {
 
 impl ValueInfo {
     #[inline]
-    const fn is_tombstone(&self) -> bool { matches!(self.mode, ValueStorageMode::Tombstone) }
+    const fn is_tombstone(&self) -> bool {
+        matches!(self.mode, ValueStorageMode::Tombstone)
+    }
 }
 
 impl Clone for ValueInfo {
@@ -308,11 +310,15 @@ where
 
     #[inline]
     #[cfg(any(test, feature = "test-support"))]
-    fn is_overflow(&self, order: usize) -> bool { self.keys.len() > order }
+    fn is_overflow(&self, order: usize) -> bool {
+        self.keys.len() > order
+    }
 
     #[inline]
     #[cfg(any(test, feature = "test-support"))]
-    const fn get_median_index(order: usize) -> usize { order >> 1 }
+    const fn get_median_index(order: usize) -> usize {
+        order >> 1
+    }
 
     #[cfg(any(test, feature = "test-support"))]
     fn find_leaf_entry(node: &Self) -> Option<&K> {
@@ -326,7 +332,9 @@ where
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    fn get_entry_index_upper_bound(&self, key: &K) -> usize { get_entry_index_upper_bound::<K>(&self.keys, key) }
+    fn get_entry_index_upper_bound(&self, key: &K) -> usize {
+        get_entry_index_upper_bound::<K>(&self.keys, key)
+    }
 
     #[cfg(any(test, feature = "test-support"))]
     fn insert(&mut self, key: K, v: V, inner_order: usize, leaf_order: usize) -> Option<Self> {
@@ -1326,7 +1334,9 @@ const fn sanitize_order(order: usize) -> usize {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-const fn default_orders() -> (usize, usize) { (DEFAULT_INNER_ORDER, DEFAULT_LEAF_ORDER) }
+const fn default_orders() -> (usize, usize) {
+    (DEFAULT_INNER_ORDER, DEFAULT_LEAF_ORDER)
+}
 
 #[cfg(any(test, feature = "test-support"))]
 impl<K, V> Default for BPlusTree<K, V>
@@ -1334,7 +1344,9 @@ where
     K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
     V: Serialize + for<'de> Deserialize<'de> + Clone,
 {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -1395,10 +1407,14 @@ where
 
     // Only this crate's own migration tests build a tree with a historical fence.
     #[cfg(test)]
-    pub(crate) fn add_historical_fence_key(&mut self) -> bool { self.root.add_historical_fence_key() }
+    pub(crate) fn add_historical_fence_key(&mut self) -> bool {
+        self.root.add_historical_fence_key()
+    }
 
     #[cfg(test)]
-    pub(crate) fn remove_last_root_child(&mut self) -> bool { !self.root.is_leaf && self.root.children.pop().is_some() }
+    pub(crate) fn remove_last_root_child(&mut self) -> bool {
+        !self.root.is_leaf && self.root.children.pop().is_some()
+    }
 
     pub fn store(&mut self, filepath: &Path) -> io::Result<u64> {
         if self.dirty {
@@ -1609,7 +1625,9 @@ where
         })
     }
 
-    pub fn try_new(filepath: &Path) -> io::Result<Self> { Self::try_from_file(File::open(filepath)?) }
+    pub fn try_new(filepath: &Path) -> io::Result<Self> {
+        Self::try_from_file(File::open(filepath)?)
+    }
 }
 
 impl<K, V> BPlusTreeQuery<K, V>

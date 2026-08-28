@@ -77,13 +77,19 @@ struct SpanWriteResult {
 
 impl FfmpegExecutor {
     #[must_use]
-    pub const fn new() -> Self { Self }
+    pub const fn new() -> Self {
+        Self
+    }
 
     /// Checks if the system `ffmpeg` binary is available.
-    pub async fn check_ffmpeg_availability(&self) -> bool { self.check_binary_availability("ffmpeg").await }
+    pub async fn check_ffmpeg_availability(&self) -> bool {
+        self.check_binary_availability("ffmpeg").await
+    }
 
     // Checks if ffprobe is available in the system path
-    pub async fn check_ffprobe_availability(&self) -> bool { self.check_binary_availability("ffprobe").await }
+    pub async fn check_ffprobe_availability(&self) -> bool {
+        self.check_binary_availability("ffprobe").await
+    }
 
     /// Extracts a JPEG thumbnail from a local file.
     /// Attempts a frame at 180s first and falls back to 0s for short videos.
@@ -439,7 +445,9 @@ fn seekable_probe_window_bytes(probe_size: u64) -> u64 {
     }
 }
 
-fn seekable_probe_temp_dir() -> PathBuf { std::env::temp_dir().join("ffprobe") }
+fn seekable_probe_temp_dir() -> PathBuf {
+    std::env::temp_dir().join("ffprobe")
+}
 
 async fn create_seekable_probe_temp_file() -> Result<tempfile::NamedTempFile, ProbeFailureKind> {
     let temp_dir = seekable_probe_temp_dir();
@@ -1059,7 +1067,9 @@ fn parse_duration_secs(value: Option<&Value>) -> Option<u32> {
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn rounded_duration_secs_to_u32(rounded_seconds: f64) -> u32 { rounded_seconds as u32 }
+fn rounded_duration_secs_to_u32(rounded_seconds: f64) -> u32 {
+    rounded_seconds as u32
+}
 
 fn parse_u32_field(value: Option<&Value>) -> Option<u32> {
     let raw = value.and_then(|value| match value {

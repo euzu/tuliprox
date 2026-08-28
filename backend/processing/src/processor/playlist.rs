@@ -471,7 +471,9 @@ fn apply_staged_overlay_groups(
     groups
 }
 
-fn should_apply_staged_overlay(download_result: &PlaylistDownloadResult) -> bool { !download_result.was_cached }
+fn should_apply_staged_overlay(download_result: &PlaylistDownloadResult) -> bool {
+    !download_result.was_cached
+}
 
 #[allow(clippy::too_many_lines)]
 async fn playlist_download_from_input<E: EventSink>(

@@ -8,11 +8,21 @@ default_eq_fns!(
     default_auth_error_status, is_default_auth_error_status, u16, 403;
 );
 
-pub const fn default_panel_api_provision_timeout_secs() -> u64 { 65 }
-pub const fn default_panel_api_provision_probe_interval_secs() -> u64 { 15 }
-pub const fn default_panel_api_provision_cooldown_secs() -> u64 { 0 }
-pub const fn default_panel_api_alias_pool_min() -> u16 { 1 }
-pub const fn default_panel_api_alias_pool_max() -> u16 { 1 }
+pub const fn default_panel_api_provision_timeout_secs() -> u64 {
+    65
+}
+pub const fn default_panel_api_provision_probe_interval_secs() -> u64 {
+    15
+}
+pub const fn default_panel_api_provision_cooldown_secs() -> u64 {
+    0
+}
+pub const fn default_panel_api_alias_pool_min() -> u16 {
+    1
+}
+pub const fn default_panel_api_alias_pool_max() -> u16 {
+    1
+}
 
 fn fill_with_secure_random_bytes(out: &mut [u8]) -> Result<(), TuliproxError> {
     #[cfg(target_arch = "wasm32")]

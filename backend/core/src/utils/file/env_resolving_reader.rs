@@ -7,7 +7,9 @@ pub struct EnvResolvingReader<R: Read> {
 }
 
 impl<R: Read> EnvResolvingReader<R> {
-    pub fn new(reader: BufReader<R>) -> Self { Self { inner: reader, buffer: Cursor::new(Vec::new()) } }
+    pub fn new(reader: BufReader<R>) -> Self {
+        Self { inner: reader, buffer: Cursor::new(Vec::new()) }
+    }
 
     fn fill_buffer(&mut self) -> io::Result<()> {
         let mut line = String::new();
@@ -41,5 +43,7 @@ impl<R: Read> BufRead for EnvResolvingReader<R> {
         self.buffer.fill_buf()
     }
 
-    fn consume(&mut self, amt: usize) { self.buffer.consume(amt); }
+    fn consume(&mut self, amt: usize) {
+        self.buffer.consume(amt);
+    }
 }

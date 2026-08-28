@@ -30,7 +30,9 @@ pub struct PttParser {
 }
 
 impl PttParser {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub fn add_handler_fn(&mut self, name: &str, handler: HandlerFn) {
         self.handlers.push((name.to_string(), handler));

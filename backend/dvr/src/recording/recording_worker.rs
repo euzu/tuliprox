@@ -163,7 +163,9 @@ async fn recording_resume_or_retry_is_unsupported(download: &FileDownload) -> bo
 /// not leak half-written output on disk. Best-effort: missing file or
 /// permission errors are swallowed because the next attempt's `-y` flag
 /// will overwrite any survivor anyway.
-async fn cleanup_partial(partial_path: &Path) { let _ = tokio::fs::remove_file(partial_path).await; }
+async fn cleanup_partial(partial_path: &Path) {
+    let _ = tokio::fs::remove_file(partial_path).await;
+}
 
 pub fn recording_start_missed_window(download: &FileDownload, now_ts: i64) -> bool {
     download

@@ -34,7 +34,9 @@ use shared::{
 };
 use std::{collections::HashMap, path::Path, sync::Arc};
 
-fn file_revision_from_bytes(bytes: &[u8]) -> String { blake3::hash(bytes).to_hex().to_string() }
+fn file_revision_from_bytes(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
+}
 
 async fn read_file_revision(path: &str) -> Result<String, std::io::Error> {
     match tokio::fs::read(path).await {

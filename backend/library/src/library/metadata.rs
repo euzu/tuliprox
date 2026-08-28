@@ -273,9 +273,13 @@ impl MediaMetadata {
         }
     }
 
-    pub fn is_movie(&self) -> bool { matches!(self, MediaMetadata::Movie(_)) }
+    pub fn is_movie(&self) -> bool {
+        matches!(self, MediaMetadata::Movie(_))
+    }
 
-    pub fn is_series(&self) -> bool { matches!(self, MediaMetadata::Series(_)) }
+    pub fn is_series(&self) -> bool {
+        matches!(self, MediaMetadata::Series(_))
+    }
 }
 
 // Metadata cache entry that links a file to its metadata
@@ -307,7 +311,9 @@ impl MetadataCacheEntry {
     }
 
     // Generates a simple UUID-like identifier
-    fn generate_uuid() -> String { Uuid::new_v4().to_string() }
+    fn generate_uuid() -> String {
+        Uuid::new_v4().to_string()
+    }
 
     // Checks if the file has been modified since this entry was created
     pub fn is_file_modified(&self, file: &ScannedMediaFile, season_num: u32, episode_num: u32) -> bool {

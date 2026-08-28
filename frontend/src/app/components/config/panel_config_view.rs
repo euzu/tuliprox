@@ -486,9 +486,13 @@ impl Reducible for PanelConfigFormState {
 impl HasFormData for PanelConfigFormState {
     type Data = SourcesConfigDto;
 
-    fn data(&self) -> &Self::Data { &self.form }
+    fn data(&self) -> &Self::Data {
+        &self.form
+    }
 
-    fn modified(&self) -> bool { self.modified }
+    fn modified(&self) -> bool {
+        self.modified
+    }
 }
 
 fn render_param_editor(

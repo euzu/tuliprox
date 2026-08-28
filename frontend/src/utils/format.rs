@@ -41,10 +41,14 @@ fn format_rate_unit(value_kb: u32, gb_decimals: usize, unit_suffix: &str) -> Str
 }
 
 #[inline]
-pub fn format_bandwidth(rate_kbps: u32) -> String { format_rate_unit(rate_kbps, 1, "/s") }
+pub fn format_bandwidth(rate_kbps: u32) -> String {
+    format_rate_unit(rate_kbps, 1, "/s")
+}
 
 #[inline]
-pub fn format_transferred(total_kb: u32) -> String { format_rate_unit(total_kb, 2, "") }
+pub fn format_transferred(total_kb: u32) -> String {
+    format_rate_unit(total_kb, 2, "")
+}
 
 /// Format a UTC unix timestamp as "YYYY-MM-DD HH:MM:SS" in the browser's local timezone.
 pub fn format_ts(ts: u64) -> String {
@@ -177,7 +181,9 @@ mod tests {
     }
 
     // 2026-04-12 12:30:45 UTC
-    fn ref_ts() -> i64 { utc_ts(2026, 4, 12, 12, 30, 45) }
+    fn ref_ts() -> i64 {
+        utc_ts(2026, 4, 12, 12, 30, 45)
+    }
 
     fn utc_ts(year: i32, month: u32, day: u32, h: u32, m: u32, s: u32) -> i64 {
         chrono::NaiveDate::from_ymd_opt(year, month, day)

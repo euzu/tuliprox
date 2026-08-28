@@ -415,9 +415,13 @@ mod tests {
     use std::fmt::Write;
     use tuliprox_core::model::IcsEpgSourceConfig;
 
-    fn config() -> IcsEpgSourceConfig { IcsEpgSourceConfig::default() }
+    fn config() -> IcsEpgSourceConfig {
+        IcsEpgSourceConfig::default()
+    }
 
-    fn calendar(body: &str) -> String { format!("BEGIN:VCALENDAR\n{body}\nEND:VCALENDAR") }
+    fn calendar(body: &str) -> String {
+        format!("BEGIN:VCALENDAR\n{body}\nEND:VCALENDAR")
+    }
 
     #[test]
     fn parses_utc_event_with_start_and_end() {

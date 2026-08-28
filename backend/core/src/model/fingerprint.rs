@@ -28,7 +28,9 @@ pub struct Fingerprint {
 }
 
 impl Fingerprint {
-    pub fn new(key: String, client_ip: String, addr: SocketAddr) -> Self { Self { key, client_ip, addr } }
+    pub fn new(key: String, client_ip: String, addr: SocketAddr) -> Self {
+        Self { key, client_ip, addr }
+    }
 }
 
 impl<B> FromRequestParts<B> for Fingerprint

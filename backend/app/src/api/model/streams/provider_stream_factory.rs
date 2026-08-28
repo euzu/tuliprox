@@ -220,40 +220,62 @@ impl ProviderStreamFactoryOptions {
         }
     }
 
-    pub fn set_provider(&mut self, provider: Option<Arc<ConfigProvider>>) { self.provider = provider; }
+    pub fn set_provider(&mut self, provider: Option<Arc<ConfigProvider>>) {
+        self.provider = provider;
+    }
 
     pub fn require_public_destination(&mut self) {
         self.flags.set(ProviderStreamFactoryFlags::PublicDestinationRequired);
     }
 
-    pub fn get_provider(&self) -> Option<&Arc<ConfigProvider>> { self.provider.as_ref() }
+    pub fn get_provider(&self) -> Option<&Arc<ConfigProvider>> {
+        self.provider.as_ref()
+    }
 
     #[inline]
-    fn is_piped(&self) -> bool { self.flags.contains(ProviderStreamFactoryFlags::PipeStream) }
+    fn is_piped(&self) -> bool {
+        self.flags.contains(ProviderStreamFactoryFlags::PipeStream)
+    }
 
     #[inline]
-    fn is_buffer_enabled(&self) -> bool { self.flags.contains(ProviderStreamFactoryFlags::BufferEnabled) }
+    fn is_buffer_enabled(&self) -> bool {
+        self.flags.contains(ProviderStreamFactoryFlags::BufferEnabled)
+    }
 
     #[inline]
-    pub(crate) fn get_buffer_size(&self) -> usize { self.buffer_size }
+    pub(crate) fn get_buffer_size(&self) -> usize {
+        self.buffer_size
+    }
 
     #[inline]
-    pub(crate) fn get_buffer_max_bytes(&self) -> usize { self.buffer_max_bytes }
+    pub(crate) fn get_buffer_max_bytes(&self) -> usize {
+        self.buffer_max_bytes
+    }
 
     #[inline]
-    pub fn get_reconnect_flag_clone(&self) -> CancellationToken { self.reconnect_flag.clone() }
+    pub fn get_reconnect_flag_clone(&self) -> CancellationToken {
+        self.reconnect_flag.clone()
+    }
 
     #[inline]
-    pub fn cancel_reconnect(&self) { self.reconnect_flag.cancel(); }
+    pub fn cancel_reconnect(&self) {
+        self.reconnect_flag.cancel();
+    }
 
     #[inline]
-    pub fn get_url(&self) -> &Url { &self.url }
+    pub fn get_url(&self) -> &Url {
+        &self.url
+    }
 
     #[inline]
-    pub fn get_url_as_str(&self) -> &str { self.url.as_str() }
+    pub fn get_url_as_str(&self) -> &str {
+        self.url.as_str()
+    }
 
     #[inline]
-    fn get_item_type(&self) -> PlaylistItemType { self.item_type }
+    fn get_item_type(&self) -> PlaylistItemType {
+        self.item_type
+    }
 
     #[inline]
     pub fn should_retry_provider_request(&self) -> bool {
@@ -270,16 +292,24 @@ impl ProviderStreamFactoryOptions {
     }
 
     #[inline]
-    pub fn get_headers(&self) -> &HeaderMap { &self.headers }
+    pub fn get_headers(&self) -> &HeaderMap {
+        &self.headers
+    }
 
     #[inline]
-    pub fn get_requested_range(&self) -> Option<&HeaderValue> { self.requested_range.as_ref() }
+    pub fn get_requested_range(&self) -> Option<&HeaderValue> {
+        self.requested_range.as_ref()
+    }
 
     #[inline]
-    pub fn should_continue(&self) -> bool { !self.reconnect_flag.is_cancelled() }
+    pub fn should_continue(&self) -> bool {
+        !self.reconnect_flag.is_cancelled()
+    }
 
     #[inline]
-    pub fn was_range_requested(&self) -> bool { self.flags.contains(ProviderStreamFactoryFlags::RangeRequested) }
+    pub fn was_range_requested(&self) -> bool {
+        self.flags.contains(ProviderStreamFactoryFlags::RangeRequested)
+    }
 
     fn get_log_url(&self) -> std::borrow::Cow<'_, str> {
         if is_sanitize_sensitive_info_enabled() {
@@ -307,10 +337,14 @@ impl ProviderStreamFactoryOptions {
         }))
     }
 
-    fn get_connect_failure_stage(&self) -> Option<FailureStage> { self.connect_failure_stage }
+    fn get_connect_failure_stage(&self) -> Option<FailureStage> {
+        self.connect_failure_stage
+    }
 
     #[inline]
-    pub(crate) fn content_representation(&self) -> ProviderContentRepresentationMode { self.content_representation }
+    pub(crate) fn content_representation(&self) -> ProviderContentRepresentationMode {
+        self.content_representation
+    }
 
     /// Converts an open delayed until body polling to the only representation safe without an origin response head.
     pub(crate) fn for_deferred_open(mut self) -> Self {

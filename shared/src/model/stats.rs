@@ -86,8 +86,12 @@ pub struct TargetStats {
 }
 
 impl TargetStats {
-    pub fn success(name: &str) -> Self { Self { name: name.to_string(), success: true } }
-    pub fn failure(name: &str) -> Self { Self { name: name.to_string(), success: false } }
+    pub fn success(name: &str) -> Self {
+        Self { name: name.to_string(), success: true }
+    }
+    pub fn failure(name: &str) -> Self {
+        Self { name: name.to_string(), success: false }
+    }
 }
 
 impl Display for TargetStats {

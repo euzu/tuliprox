@@ -7,16 +7,22 @@
 
 use crate::{
     api::{api_utils::get_username_from_auth_header, model::AppState},
-    auth::{validate_token_claims, verify_token, verify_token_admin, verify_token_api_user, AuthBearer, AuthError},
+    auth::{validate_token_claims, verify_token, AuthBearer, AuthError},
 };
 use log::warn;
 use shared::model::permission::{permission_to_name, Permission};
 use std::sync::Arc;
 
+/// Decode once, then check the role against the decoded claims.
+///
+/// `role_fn` used to be a `fn(&str, &[u8]) -> bool` that re-decoded the token
+/// from scratch, so every authenticated request paid for two JWT decodes (three
+/// on the API-user path). It is still a plain `fn` pointer - static dispatch,
+/// no closure - it just reads the `Claims` this function already has.
 fn validate_request(
     app_state: &Arc<AppState>,
     token: &str,
-    verify_fn: fn(&str, &[u8]) -> bool,
+    role_fn: fn(&shared::model::Claims) -> bool,
 ) -> Result<(), AuthError> {
     let config = app_state.app_config.config.load();
     let Some(web_auth_config) = config.web_ui.as_ref().and_then(|c| c.auth.as_ref()) else {
@@ -25,7 +31,7 @@ fn validate_request(
     let secret_key = web_auth_config.secret.as_ref();
     let token_data = verify_token(token, secret_key).ok_or(AuthError::InvalidToken)?;
     validate_token_claims(&token_data.claims)?;
-    if !verify_fn(token, secret_key) {
+    if !role_fn(&token_data.claims) {
         return Err(AuthError::Forbidden);
     }
     Ok(())
@@ -57,7 +63,7 @@ pub async fn validator_admin(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    match validate_request(&app_state, &token, verify_token_admin) {
+    match validate_request(&app_state, &token, shared::model::Claims::is_admin) {
         Ok(()) => next.run(request).await,
         Err(err) => rejection_for(err),
     }
@@ -79,7 +85,7 @@ pub async fn validator_api_user(
             }
         }
     }
-    match validate_request(&app_state, &token, verify_token_api_user) {
+    match validate_request(&app_state, &token, shared::model::Claims::is_api_user) {
         Ok(()) => next.run(request).await,
         Err(err) => rejection_for(err),
     }

@@ -118,7 +118,9 @@ pub struct Config {
 }
 
 impl Config {
-    fn lexical_normalize(path: &Path) -> PathBuf { path.components().collect::<PathBuf>() }
+    fn lexical_normalize(path: &Path) -> PathBuf {
+        path.components().collect::<PathBuf>()
+    }
 
     fn normalize_storage_path(
         raw_storage_dir: &str,

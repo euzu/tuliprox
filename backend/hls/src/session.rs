@@ -150,7 +150,9 @@ impl Default for HlsSessionOriginControl {
 impl HlsSessionOriginControl {
     const MAX_HOST_LOCAL_HIGHWATERS: usize = 32;
 
-    pub fn record_origin_response(&mut self, now_ms: u64) { self.last_origin_response_at_ms = Some(now_ms); }
+    pub fn record_origin_response(&mut self, now_ms: u64) {
+        self.last_origin_response_at_ms = Some(now_ms);
+    }
 
     pub fn record_media_progress(&mut self, now_ms: u64, target_duration_ms: u64) {
         self.last_origin_response_at_ms = Some(now_ms);
@@ -399,11 +401,17 @@ impl HlsSession {
         self.pending_handoff_discontinuity_sequence.take()
     }
 
-    pub fn mark_for_gc_removal(&mut self) { self.gc_marked_for_removal = true; }
+    pub fn mark_for_gc_removal(&mut self) {
+        self.gc_marked_for_removal = true;
+    }
 
-    pub fn clear_gc_removal_mark(&mut self) { self.gc_marked_for_removal = false; }
+    pub fn clear_gc_removal_mark(&mut self) {
+        self.gc_marked_for_removal = false;
+    }
 
-    pub fn is_gc_marked_for_removal(&self) -> bool { self.gc_marked_for_removal }
+    pub fn is_gc_marked_for_removal(&self) -> bool {
+        self.gc_marked_for_removal
+    }
 
     pub fn replace_origin_account_binding(&mut self, binding: Option<HlsOriginAccountBinding>) {
         let binding_changed = match (&self.origin_account_binding, &binding) {
@@ -626,7 +634,9 @@ impl HlsSession {
         }
     }
 
-    pub fn clear_terminal_tail_protections(&mut self) { self.terminal_tail_protections.clear(); }
+    pub fn clear_terminal_tail_protections(&mut self) {
+        self.terminal_tail_protections.clear();
+    }
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn terminal_tail_protection(&self, lease_id: &HlsAccessLeaseId) -> Option<&HlsTerminalTailProtection> {
@@ -649,10 +659,14 @@ impl HlsSession {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn terminal_tail_protection_count(&self) -> usize { self.terminal_tail_protections.len() }
+    pub fn terminal_tail_protection_count(&self) -> usize {
+        self.terminal_tail_protections.len()
+    }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn has_terminal_tail_protections(&self) -> bool { !self.terminal_tail_protections.is_empty() }
+    pub fn has_terminal_tail_protections(&self) -> bool {
+        !self.terminal_tail_protections.is_empty()
+    }
 
     pub fn initial_manifest_commit_work_pending(&self) -> bool {
         self.origin_refresh.in_flight

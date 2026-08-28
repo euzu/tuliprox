@@ -61,7 +61,9 @@ impl std::fmt::Display for RecordingPathError {
 impl std::error::Error for RecordingPathError {}
 
 impl From<io::Error> for RecordingPathError {
-    fn from(err: io::Error) -> Self { Self::Io(err) }
+    fn from(err: io::Error) -> Self {
+        Self::Io(err)
+    }
 }
 
 impl From<RecordingPathError> for io::Error {
@@ -117,7 +119,9 @@ pub async fn assert_within_root(rel: &Path, root: &Path) -> Result<(), Recording
 /// any path that exists at the location, including symlinks, directories,
 /// and regular files. The caller can inspect the metadata to choose
 /// the matching policy. Returns `None` only for missing entries.
-pub async fn no_follow_existing(path: &Path) -> Option<std::fs::Metadata> { fs::symlink_metadata(path).await.ok() }
+pub async fn no_follow_existing(path: &Path) -> Option<std::fs::Metadata> {
+    fs::symlink_metadata(path).await.ok()
+}
 
 /// Inspect a path without following symlinks. Returns `Some(metadata)` only
 /// for regular files; directories, symlinks, sockets, devices, and
@@ -310,10 +314,14 @@ mod tests {
     /// refusing an existing entry) is provided by the standard library on
     /// both platforms.
     #[cfg(unix)]
-    fn symlink(target: &Path, link: &Path) -> std::io::Result<()> { std::os::unix::fs::symlink(target, link) }
+    fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
 
     #[test]
-    fn validate_relative_path_accepts_simple_path() { validate_relative_path(Path::new("a/b/c.ts")).expect("accept"); }
+    fn validate_relative_path_accepts_simple_path() {
+        validate_relative_path(Path::new("a/b/c.ts")).expect("accept");
+    }
 
     #[test]
     fn validate_relative_path_rejects_empty() {

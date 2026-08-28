@@ -50,7 +50,9 @@ pub struct NotificationHealth {
 static HEALTH: OnceLock<NotificationHealth> = OnceLock::new();
 
 /// Process-wide delivery counters.
-pub fn health() -> &'static NotificationHealth { HEALTH.get_or_init(NotificationHealth::default) }
+pub fn health() -> &'static NotificationHealth {
+    HEALTH.get_or_init(NotificationHealth::default)
+}
 
 /// One queued notification.
 ///
@@ -106,7 +108,9 @@ static OUTBOX: OnceLock<NotificationOutbox> = OnceLock::new();
 
 /// The installed outbox, if the worker has started. Callers that find
 /// `None` (unit tests, early startup) fall back to a direct send.
-pub fn notification_outbox() -> Option<&'static NotificationOutbox> { OUTBOX.get() }
+pub fn notification_outbox() -> Option<&'static NotificationOutbox> {
+    OUTBOX.get()
+}
 
 /// Start the outbox worker. Idempotent: only the first call installs one.
 pub fn spawn_notification_outbox(
@@ -127,7 +131,9 @@ pub fn spawn_notification_outbox(
     });
 }
 
-fn now_ts() -> i64 { chrono::Utc::now().timestamp() }
+fn now_ts() -> i64 {
+    chrono::Utc::now().timestamp()
+}
 
 fn outbox_path(app_config: &Arc<AppConfig>) -> PathBuf {
     PathBuf::from(app_config.config.load().storage_dir.as_str()).join(OUTBOX_FILE)

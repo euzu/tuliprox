@@ -4,7 +4,7 @@ use shared::{
     error::to_io_error,
     model::{
         permission::{PermissionSet, PERM_ALL},
-        Claims, UserId, CURRENT_PERMISSION_SCHEMA_VERSION, ROLE_ADMIN, ROLE_API_USER,
+        Claims, Role, RoleSet, UserId, CURRENT_PERMISSION_SCHEMA_VERSION,
     },
 };
 use tuliprox_core::model::WebAuthConfig;
@@ -14,21 +14,14 @@ pub fn create_jwt_admin(
     username: &str,
     pwd_version: u32,
 ) -> Result<String, std::io::Error> {
-    create_jwt(
-        web_auth_config,
-        username,
-        vec![ROLE_ADMIN.to_string()],
-        PERM_ALL,
-        pwd_version,
-        Some(UserId::builtin_admin()),
-    )
+    create_jwt(web_auth_config, username, RoleSet::ADMIN, PERM_ALL, pwd_version, Some(UserId::builtin_admin()))
 }
 
 pub fn create_jwt_api_user(web_auth_config: &WebAuthConfig, username: &str) -> Result<String, std::io::Error> {
     create_jwt(
         web_auth_config,
         username,
-        vec![ROLE_API_USER.to_string()],
+        RoleSet::API_USER,
         PermissionSet::new(),
         0,
         // The identity registry will eventually provide the API
@@ -47,7 +40,7 @@ pub fn create_jwt_web_user(
     create_jwt(
         web_auth_config,
         username,
-        Vec::new(),
+        RoleSet::new(),
         permissions,
         pwd_version,
         // The identity registry will eventually provide the web
@@ -60,7 +53,7 @@ pub fn create_jwt_web_user(
 fn create_jwt(
     web_auth_config: &WebAuthConfig,
     username: &str,
-    roles: Vec<String>,
+    roles: RoleSet,
     permissions: PermissionSet,
     pwd_version: u32,
     subject_id: Option<UserId>,
@@ -101,24 +94,16 @@ pub fn verify_token(token: &str, secret_key: &[u8]) -> Option<TokenData<Claims>>
     None
 }
 
-fn has_role(token_data: Option<TokenData<Claims>>, role: &str) -> bool {
-    if let Some(data) = token_data {
-        data.claims.roles.contains(&role.to_string())
-    } else {
-        false
-    }
+fn has_role(token_data: Option<TokenData<Claims>>, role: Role) -> bool {
+    token_data.is_some_and(|data| data.claims.roles.contains(role))
 }
 
-pub fn is_admin(token_data: Option<TokenData<Claims>>) -> bool { has_role(token_data, ROLE_ADMIN) }
-
-pub fn is_api_user(token_data: Option<TokenData<Claims>>) -> bool { has_role(token_data, ROLE_API_USER) }
-
-pub fn verify_token_admin(bearer: &str, secret_key: &[u8]) -> bool {
-    has_role(verify_token(bearer, secret_key), ROLE_ADMIN)
+pub fn is_admin(token_data: Option<TokenData<Claims>>) -> bool {
+    has_role(token_data, Role::Admin)
 }
 
-pub fn verify_token_api_user(bearer: &str, secret_key: &[u8]) -> bool {
-    has_role(verify_token(bearer, secret_key), ROLE_API_USER)
+pub fn is_api_user(token_data: Option<TokenData<Claims>>) -> bool {
+    has_role(token_data, Role::ApiUser)
 }
 
 /// Stable error type for the validators. A stable
@@ -146,7 +131,9 @@ impl AuthError {
     /// `true` when the frontend should request a fresh token before
     /// retrying the request. Stale-schema and missing-subject both
     /// qualify; a re-auth round-trip is required.
-    pub fn is_token_refresh_required(self) -> bool { matches!(self, Self::StaleSchema | Self::MissingSubject) }
+    pub fn is_token_refresh_required(self) -> bool {
+        matches!(self, Self::StaleSchema | Self::MissingSubject)
+    }
 }
 
 impl std::fmt::Display for AuthError {
@@ -179,9 +166,7 @@ pub fn validate_token_claims(claims: &Claims) -> Result<(), AuthError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::model::{
-        permission::Permission, Claims, UserId, CURRENT_PERMISSION_SCHEMA_VERSION, ROLE_ADMIN, ROLE_API_USER,
-    };
+    use shared::model::{permission::Permission, Claims, Role, RoleSet, UserId, CURRENT_PERMISSION_SCHEMA_VERSION};
     use tuliprox_core::model::WebAuthConfig;
 
     fn test_web_auth_config() -> WebAuthConfig {
@@ -205,7 +190,7 @@ mod tests {
         let data = verify_token(&jwt, secret).expect("verify");
         assert_eq!(data.claims.username, "any");
         assert_eq!(data.claims.subject_id, Some(UserId::builtin_admin()));
-        assert!(data.claims.roles.contains(&ROLE_ADMIN.to_string()));
+        assert!(data.claims.is_admin());
         assert!(data.claims.permissions.contains(Permission::ConfigRead));
         assert!(data.claims.permissions.contains(Permission::RecordingRead));
         assert!(data.claims.permissions.contains(Permission::RecordingWrite));
@@ -220,7 +205,7 @@ mod tests {
         let data = verify_token(&jwt, cfg.secret.as_bytes()).expect("verify");
         assert_eq!(data.claims.username, "alice");
         assert_eq!(data.claims.subject_id, Some(UserId::from("web:alice")));
-        assert!(!data.claims.roles.contains(&ROLE_ADMIN.to_string()));
+        assert!(!data.claims.is_admin());
         assert!(data.claims.permissions.contains(Permission::RecordingRead));
         assert!(!data.claims.permissions.contains(Permission::RecordingWrite));
     }
@@ -231,7 +216,7 @@ mod tests {
         let jwt = create_jwt_api_user(&cfg, "bob").expect("api jwt");
         let data = verify_token(&jwt, cfg.secret.as_bytes()).expect("verify");
         assert_eq!(data.claims.subject_id, Some(UserId::from("api:bob")));
-        assert!(data.claims.roles.contains(&ROLE_API_USER.to_string()));
+        assert!(data.claims.is_api_user());
         assert!(data.claims.permissions.is_empty());
     }
 
@@ -307,7 +292,7 @@ mod tests {
             iss: "tuliprox".to_string(),
             iat: 100,
             exp: 200,
-            roles: vec!["user".to_string()],
+            roles: RoleSet::from(Role::Admin),
             permissions: Permission::ConfigRead.into(),
             pwd_version: 7,
             subject_id: Some(UserId::from("web:alice")),

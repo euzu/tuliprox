@@ -9,7 +9,9 @@ pub struct Tag {
     pub class: Option<String>,
 }
 
-fn default_create_tag(value: String) -> Option<Tag> { Some(Tag { label: value, class: None }) }
+fn default_create_tag(value: String) -> Option<Tag> {
+    Some(Tag { label: value, class: None })
+}
 
 #[derive(Properties, Clone, PartialEq)]
 pub struct TagListProps {

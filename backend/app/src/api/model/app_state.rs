@@ -94,7 +94,9 @@ pub(in crate::api) struct UpdateChanges {
 }
 
 impl UpdateChanges {
-    pub(in crate::api) fn modified(&self) -> bool { !self.flags.is_empty() }
+    pub(in crate::api) fn modified(&self) -> bool {
+        !self.flags.is_empty()
+    }
 
     fn set_flag_if(&mut self, condition: bool, flag: UpdateChangesFlags) {
         if condition {
@@ -738,11 +740,17 @@ impl AppState {
         self.app_config.get_disabled_headers()
     }
 
-    pub fn get_grace_options(&self) -> GracePeriodOptions { self.app_config.get_grace_options() }
+    pub fn get_grace_options(&self) -> GracePeriodOptions {
+        self.app_config.get_grace_options()
+    }
 
-    pub fn should_use_manual_redirects(&self) -> bool { crate::model::should_use_manual_redirects(&self.app_config) }
+    pub fn should_use_manual_redirects(&self) -> bool {
+        crate::model::should_use_manual_redirects(&self.app_config)
+    }
 
-    pub fn get_encrypt_secret(&self) -> [u8; 16] { self.app_config.get_encrypt_secret() }
+    pub fn get_encrypt_secret(&self) -> [u8; 16] {
+        self.app_config.get_encrypt_secret()
+    }
 }
 
 fn schedules_changed(a: &[ScheduleConfig], b: &[ScheduleConfig]) -> bool {
@@ -784,7 +792,9 @@ fn hdhomerun_changed(a: &HdHomeRunConfig, b: &HdHomeRunConfig) -> bool {
     false
 }
 
-fn string_changed(a: &str, b: &str) -> bool { a != b }
+fn string_changed(a: &str, b: &str) -> bool {
+    a != b
+}
 
 fn providers_changed(a: &[Arc<ConfigProvider>], b: &[Arc<ConfigProvider>]) -> bool {
     if a.len() != b.len() {

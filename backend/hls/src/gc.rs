@@ -68,7 +68,9 @@ pub struct ProtectedSet {
 }
 
 impl ProtectedSet {
-    pub fn from_session(session: &HlsSession) -> Self { Self::from_session_for_capacity(session, None) }
+    pub fn from_session(session: &HlsSession) -> Self {
+        Self::from_session_for_capacity(session, None)
+    }
 
     fn from_session_for_capacity(session: &HlsSession, release_through: Option<u64>) -> Self {
         let mut protected = Self::default();
@@ -268,9 +270,13 @@ impl HlsGarbageCollector {
         changed
     }
 
-    pub fn policy(&self) -> Arc<GarbageCollectionPolicy> { self.policy.load_full() }
+    pub fn policy(&self) -> Arc<GarbageCollectionPolicy> {
+        self.policy.load_full()
+    }
 
-    pub fn rewrite_secret_fingerprint(&self) -> String { self.rewrite_secret_fingerprint.load().to_string() }
+    pub fn rewrite_secret_fingerprint(&self) -> String {
+        self.rewrite_secret_fingerprint.load().to_string()
+    }
 
     #[allow(clippy::too_many_lines)]
     async fn reclaim_for_projected_write(
@@ -1129,11 +1135,17 @@ impl CacheDeletionBatch {
         Self { queue, reserved_slots, deletions: Vec::new() }
     }
 
-    fn has_capacity(&self) -> bool { self.deletions.len() < self.reserved_slots }
+    fn has_capacity(&self) -> bool {
+        self.deletions.len() < self.reserved_slots
+    }
 
-    fn remaining_capacity(&self) -> usize { self.reserved_slots.saturating_sub(self.deletions.len()) }
+    fn remaining_capacity(&self) -> usize {
+        self.reserved_slots.saturating_sub(self.deletions.len())
+    }
 
-    fn push(&mut self, deletion: CacheObjectDeletion) { self.deletions.push(deletion); }
+    fn push(&mut self, deletion: CacheObjectDeletion) {
+        self.deletions.push(deletion);
+    }
 
     fn persist_pending(&mut self, report: &mut GarbageCollectionReport) {
         let planned = self.deletions.len();
@@ -1151,7 +1163,9 @@ impl CacheDeletionBatch {
         report.cache_object_deletions_planned = report.cache_object_deletions_planned.saturating_add(planned);
     }
 
-    fn persist(mut self, report: &mut GarbageCollectionReport) { self.persist_pending(report); }
+    fn persist(mut self, report: &mut GarbageCollectionReport) {
+        self.persist_pending(report);
+    }
 
     async fn execute_prioritized(
         mut self,

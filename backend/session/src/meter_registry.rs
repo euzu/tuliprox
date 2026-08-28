@@ -41,7 +41,9 @@ struct MeterSlot {
 impl MeterSlot {
     /// A slot with neither a meter nor a viewer is not tracking anything and
     /// must not be left behind, or the map grows for the process lifetime.
-    fn is_vacant(&self) -> bool { self.handle.is_none() && self.clients.is_empty() }
+    fn is_vacant(&self) -> bool {
+        self.handle.is_none() && self.clients.is_empty()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -141,19 +143,27 @@ impl StreamMeterRegistry {
     }
 
     #[must_use]
-    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Vec<StreamMeterEntry>> { self.channel_tx.subscribe() }
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Vec<StreamMeterEntry>> {
+        self.channel_tx.subscribe()
+    }
 
     #[must_use]
-    pub fn has_receivers(&self) -> bool { self.channel_tx.receiver_count() > 0 }
+    pub fn has_receivers(&self) -> bool {
+        self.channel_tx.receiver_count() > 0
+    }
 
-    pub fn subscriber_connected(&self) { self.subscriber_count.fetch_add(1, Ordering::Relaxed); }
+    pub fn subscriber_connected(&self) {
+        self.subscriber_count.fetch_add(1, Ordering::Relaxed);
+    }
 
     pub fn subscriber_disconnected(&self) {
         let _ = self.subscriber_count.try_update(Ordering::AcqRel, Ordering::Relaxed, |count| count.checked_sub(1));
     }
 
     #[must_use]
-    pub fn has_subscribers(&self) -> bool { self.subscriber_count.load(Ordering::Relaxed) > 0 }
+    pub fn has_subscribers(&self) -> bool {
+        self.subscriber_count.load(Ordering::Relaxed) > 0
+    }
 
     pub fn send_batch(&self, entries: Vec<StreamMeterEntry>) {
         if !entries.is_empty() {
@@ -290,11 +300,15 @@ pub struct MeterQos {
 }
 
 impl Default for StreamMeterRegistry {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Drop for StreamMeterRegistry {
-    fn drop(&mut self) { self.sampler_cancel.cancel(); }
+    fn drop(&mut self) {
+        self.sampler_cancel.cancel();
+    }
 }
 
 async fn sample_entries(slots: &RwLock<MeterSlots>) -> Vec<StreamMeterEntry> {

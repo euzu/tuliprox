@@ -338,7 +338,9 @@ pub(super) enum HlsTerminalDecisionPurpose {
 }
 
 impl HlsDetailedTerminalResolution {
-    const fn resolved(resolution: HlsTerminalResolution) -> Self { Self { resolution, live_reserve_deadline: None } }
+    const fn resolved(resolution: HlsTerminalResolution) -> Self {
+        Self { resolution, live_reserve_deadline: None }
+    }
 
     const fn with_deadline(
         resolution: HlsTerminalResolution,

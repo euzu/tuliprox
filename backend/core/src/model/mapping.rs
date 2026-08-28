@@ -89,5 +89,7 @@ impl Mappings {
 
 macros::from_impl!(Mappings);
 impl From<&MappingsDto> for Mappings {
-    fn from(dto: &MappingsDto) -> Self { Mappings { mappings: MappingDefinition::from(&dto.mappings) } }
+    fn from(dto: &MappingsDto) -> Self {
+        Mappings { mappings: MappingDefinition::from(&dto.mappings) }
+    }
 }

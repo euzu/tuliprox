@@ -103,7 +103,9 @@ pub enum RecordingOwner {
 }
 
 impl RecordingOwner {
-    pub fn is_legacy_admin(&self) -> bool { matches!(self, Self::LegacyAdmin) }
+    pub fn is_legacy_admin(&self) -> bool {
+        matches!(self, Self::LegacyAdmin)
+    }
 }
 
 /// Recording visibility. Shared recordings are visible to every user with
@@ -182,7 +184,9 @@ pub struct NotificationMarker {
 }
 
 impl NotificationMarker {
-    pub fn new(kind: NotificationMarkerKind, attempted_at: i64) -> Self { Self { kind, attempted_at } }
+    pub fn new(kind: NotificationMarkerKind, attempted_at: i64) -> Self {
+        Self { kind, attempted_at }
+    }
 }
 
 /// Recurring-rule provenance. `rule_id` and `occurrence_key` are immutable for
@@ -329,7 +333,9 @@ impl RecordingMetadata {
         }
     }
 
-    pub fn is_deleting(&self) -> bool { self.deleting_previous_state.is_some() }
+    pub fn is_deleting(&self) -> bool {
+        self.deleting_previous_state.is_some()
+    }
 }
 
 /// Monotonic revision counter for the persisted download queue. Increments
@@ -339,7 +345,9 @@ impl RecordingMetadata {
 pub struct QueueRevision(pub u64);
 
 impl fmt::Display for QueueRevision {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{}", self.0) }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
 }
 
 #[cfg(test)]

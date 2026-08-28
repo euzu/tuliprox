@@ -71,7 +71,9 @@ impl ChannelState {
 
 static STATE: OnceLock<RwLock<HashMap<String, ChannelState>>> = OnceLock::new();
 
-fn state() -> &'static RwLock<HashMap<String, ChannelState>> { STATE.get_or_init(|| RwLock::new(HashMap::new())) }
+fn state() -> &'static RwLock<HashMap<String, ChannelState>> {
+    STATE.get_or_init(|| RwLock::new(HashMap::new()))
+}
 
 /// Forget all suppression and rate-limit state. Called on config reload.
 pub fn reset() {
@@ -114,7 +116,9 @@ mod tests {
 
     const WINDOW: Duration = Duration::from_mins(1);
 
-    fn win() -> Option<Duration> { Some(WINDOW) }
+    fn win() -> Option<Duration> {
+        Some(WINDOW)
+    }
 
     #[test]
     fn a_repeated_dedup_key_inside_the_window_is_suppressed() {

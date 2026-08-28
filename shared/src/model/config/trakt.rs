@@ -145,7 +145,9 @@ impl Default for TraktConfigDto {
 }
 
 impl TraktConfigDto {
-    pub fn prepare(&mut self) { self.api.prepare(); }
+    pub fn prepare(&mut self) {
+        self.api.prepare();
+    }
 }
 
 #[cfg(test)]

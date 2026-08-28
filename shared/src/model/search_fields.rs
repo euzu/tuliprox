@@ -98,7 +98,9 @@ impl FieldFilter {
         Ok(Self { fields })
     }
 
-    pub fn is_empty(&self) -> bool { self.fields.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.fields.is_empty()
+    }
 
     /// True when every filter entry matches; `resolve` maps a field name and
     /// its compiled operand onto the concrete record.

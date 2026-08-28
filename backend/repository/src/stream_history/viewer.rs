@@ -58,7 +58,9 @@ fn to_unsigned_ts(ts: i64, input: &str) -> Result<u64, String> {
 }
 
 /// Returns true if input is a date-only format (no time component)
-fn is_date_only(input: &str) -> bool { chrono::NaiveDate::parse_from_str(input.trim(), "%Y-%m-%d").is_ok() }
+fn is_date_only(input: &str) -> bool {
+    chrono::NaiveDate::parse_from_str(input.trim(), "%Y-%m-%d").is_ok()
+}
 
 /// Resolve the query's from/to into a concrete time range.
 pub fn resolve_time_range(query: &StreamHistoryQuery) -> Result<TimeRange, String> {
@@ -133,7 +135,9 @@ pub struct CompiledFilter {
 }
 
 impl CompiledFilter {
-    pub fn empty() -> Self { Self { inner: FieldFilter::default() } }
+    pub fn empty() -> Self {
+        Self { inner: FieldFilter::default() }
+    }
 
     pub fn compile(raw: &HashMap<String, String>) -> Result<Self, String> {
         FieldFilter::compile(raw, |key| {

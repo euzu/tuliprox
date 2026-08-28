@@ -62,7 +62,9 @@ pub struct IcsEpgSourceConfig {
 }
 
 impl Default for IcsEpgSourceConfig {
-    fn default() -> Self { Self::from(&IcsEpgSourceConfigDto::default()) }
+    fn default() -> Self {
+        Self::from(&IcsEpgSourceConfigDto::default())
+    }
 }
 
 impl From<&IcsEpgSourceConfigDto> for IcsEpgSourceConfig {

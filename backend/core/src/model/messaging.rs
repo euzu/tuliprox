@@ -14,9 +14,13 @@ pub struct ProcessingStats {
 }
 
 impl ProcessingStats {
-    pub fn new_stats(stats: Vec<SourceStats>) -> Self { Self { stats: Some(stats), errors: None } }
+    pub fn new_stats(stats: Vec<SourceStats>) -> Self {
+        Self { stats: Some(stats), errors: None }
+    }
 
-    pub fn new_error(error: String) -> Self { Self { stats: None, errors: Some(error) } }
+    pub fn new_error(error: String) -> Self {
+        Self { stats: None, errors: Some(error) }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,9 +35,13 @@ pub enum MessageContent {
 }
 
 impl MessageContent {
-    pub fn event_stats(stats: Vec<SourceStats>) -> Self { Self::ProcessingStats(ProcessingStats::new_stats(stats)) }
+    pub fn event_stats(stats: Vec<SourceStats>) -> Self {
+        Self::ProcessingStats(ProcessingStats::new_stats(stats))
+    }
 
-    pub fn event_error(error: String) -> Self { Self::ProcessingStats(ProcessingStats::new_error(error)) }
+    pub fn event_error(error: String) -> Self {
+        Self::ProcessingStats(ProcessingStats::new_error(error))
+    }
 
     pub fn kind(&self) -> MsgKind {
         match self {

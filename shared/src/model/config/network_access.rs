@@ -1,6 +1,8 @@
 use crate::error::TuliproxError;
 
-fn is_empty_vec<T>(v: &Option<Vec<T>>) -> bool { v.as_ref().is_none_or(std::vec::Vec::is_empty) }
+fn is_empty_vec<T>(v: &Option<Vec<T>>) -> bool {
+    v.as_ref().is_none_or(std::vec::Vec::is_empty)
+}
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct NetworkAccessDto {
@@ -11,7 +13,9 @@ pub struct NetworkAccessDto {
 }
 
 impl NetworkAccessDto {
-    pub fn is_empty(&self) -> bool { is_empty_vec(&self.allowed_countries) && is_empty_vec(&self.allowed_networks) }
+    pub fn is_empty(&self) -> bool {
+        is_empty_vec(&self.allowed_countries) && is_empty_vec(&self.allowed_networks)
+    }
 
     fn parse_cidr(network_str: &str) -> Result<(std::net::IpAddr, u8), TuliproxError> {
         let make_err = || {

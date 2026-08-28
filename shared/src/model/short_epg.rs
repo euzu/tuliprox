@@ -31,5 +31,7 @@ pub struct ShortEpgResultDto {
 }
 
 impl ShortEpgResultDto {
-    pub fn new(epg_listings: Vec<ShortEpgDto>) -> Self { Self { epg_listings } }
+    pub fn new(epg_listings: Vec<ShortEpgDto>) -> Self {
+        Self { epg_listings }
+    }
 }

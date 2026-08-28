@@ -61,7 +61,9 @@ pub enum EmitOutcome {
 impl EmitOutcome {
     /// Did this reach at least one subscriber?
     #[must_use]
-    pub const fn is_delivered(self) -> bool { matches!(self, Self::Delivered { .. }) }
+    pub const fn is_delivered(self) -> bool {
+        matches!(self, Self::Delivered { .. })
+    }
 }
 
 /// What the bus has carried, and what it has dropped.
@@ -87,18 +89,24 @@ impl EventBusStats {
         }
     }
 
-    fn record_coalesced(&self, _kind: EventKind) { self.coalesced.fetch_add(1, Ordering::Relaxed); }
+    fn record_coalesced(&self, _kind: EventKind) {
+        self.coalesced.fetch_add(1, Ordering::Relaxed);
+    }
 
     /// Nudges suppressed because an identical one had just gone out.
     #[must_use]
-    pub fn coalesced(&self) -> u64 { self.coalesced.load(Ordering::Relaxed) }
+    pub fn coalesced(&self) -> u64 {
+        self.coalesced.load(Ordering::Relaxed)
+    }
 
     /// A subscriber reporting the gap it was told about.
     ///
     /// Subscribers call this from their `Lagged` arm; the send side cannot
     /// see a lag, because a broadcast channel drops for the slow receiver
     /// and not for the sender.
-    pub fn record_lag(&self, skipped: u64) { self.lagged.fetch_add(skipped, Ordering::Relaxed); }
+    pub fn record_lag(&self, skipped: u64) {
+        self.lagged.fetch_add(skipped, Ordering::Relaxed);
+    }
 
     /// Events published, per kind, since start.
     #[must_use]
@@ -110,16 +118,22 @@ impl EventBusStats {
     /// UI is usually closed - but a non-zero count beside "I never saw that
     /// notification" is the answer.
     #[must_use]
-    pub fn no_subscribers(&self) -> u64 { self.no_subscribers.load(Ordering::Relaxed) }
+    pub fn no_subscribers(&self) -> u64 {
+        self.no_subscribers.load(Ordering::Relaxed)
+    }
 
     /// Events a subscriber was told it had missed. Non-zero means the buffer
     /// is too shallow for the emit rate, or a subscriber is too slow.
     #[must_use]
-    pub fn lagged(&self) -> u64 { self.lagged.load(Ordering::Relaxed) }
+    pub fn lagged(&self) -> u64 {
+        self.lagged.load(Ordering::Relaxed)
+    }
 
     /// Total across all kinds.
     #[must_use]
-    pub fn total_emitted(&self) -> u64 { self.emitted.iter().map(|c| c.load(Ordering::Relaxed)).sum() }
+    pub fn total_emitted(&self) -> u64 {
+        self.emitted.iter().map(|c| c.load(Ordering::Relaxed)).sum()
+    }
 }
 
 /// Take a bus lock, ignoring poisoning.
@@ -160,7 +174,9 @@ pub struct RecordedEvent {
 
 impl EventManager {
     #[must_use]
-    pub fn new() -> Self { Self::with_capacity(DEFAULT_EVENT_CHANNEL_CAPACITY) }
+    pub fn new() -> Self {
+        Self::with_capacity(DEFAULT_EVENT_CHANNEL_CAPACITY)
+    }
 
     /// A bus buffering `capacity` events per subscriber.
     ///
@@ -185,13 +201,19 @@ impl EventManager {
 
     /// Counters for what this bus has carried.
     #[must_use]
-    pub fn stats(&self) -> &Arc<EventBusStats> { &self.stats }
+    pub fn stats(&self) -> &Arc<EventBusStats> {
+        &self.stats
+    }
 
     /// The metering subsystem.
     #[must_use]
-    pub fn meters(&self) -> &StreamMeterRegistry { &self.meters }
+    pub fn meters(&self) -> &StreamMeterRegistry {
+        &self.meters
+    }
 
-    pub fn get_event_channel(&self) -> tokio::sync::broadcast::Receiver<EventMessage> { self.channel_tx.subscribe() }
+    pub fn get_event_channel(&self) -> tokio::sync::broadcast::Receiver<EventMessage> {
+        self.channel_tx.subscribe()
+    }
 
     /// Subscribe to `mask` only.
     ///
@@ -253,7 +275,9 @@ impl EventManager {
     /// resync-on-lag path re-requested a status snapshot for the same
     /// reason. Both are answered by handing over what the bus already has.
     #[must_use]
-    pub fn snapshot(&self) -> Vec<EventMessage> { lock(&self.latched).values().cloned().collect() }
+    pub fn snapshot(&self) -> Vec<EventMessage> {
+        lock(&self.latched).values().cloned().collect()
+    }
 
     /// The last [`RECENT_EVENT_CAPACITY`] events, oldest first.
     ///
@@ -261,7 +285,9 @@ impl EventManager {
     /// a debug build: this shows whether the event was published at all, and
     /// whether anything was subscribed when it was.
     #[must_use]
-    pub fn recent_events(&self) -> Vec<RecordedEvent> { lock(&self.recent).iter().cloned().collect() }
+    pub fn recent_events(&self) -> Vec<RecordedEvent> {
+        lock(&self.recent).iter().cloned().collect()
+    }
 
     /// Should this nudge go out, or has an identical one just gone?
     ///
@@ -280,7 +306,9 @@ impl EventManager {
     }
 
     #[must_use]
-    pub fn has_event_receivers(&self) -> bool { self.channel_tx.receiver_count() > 0 }
+    pub fn has_event_receivers(&self) -> bool {
+        self.channel_tx.receiver_count() > 0
+    }
 
     // --- metering, forwarded ------------------------------------------------
     //
@@ -295,18 +323,30 @@ impl EventManager {
     }
 
     #[must_use]
-    pub fn has_meter_event_receivers(&self) -> bool { self.meters.has_receivers() }
+    pub fn has_meter_event_receivers(&self) -> bool {
+        self.meters.has_receivers()
+    }
 
-    pub fn stream_meter_subscriber_connected(&self) { self.meters.subscriber_connected(); }
+    pub fn stream_meter_subscriber_connected(&self) {
+        self.meters.subscriber_connected();
+    }
 
-    pub fn stream_meter_subscriber_disconnected(&self) { self.meters.subscriber_disconnected(); }
+    pub fn stream_meter_subscriber_disconnected(&self) {
+        self.meters.subscriber_disconnected();
+    }
 
     #[must_use]
-    pub fn has_stream_meter_subscribers(&self) -> bool { self.meters.has_subscribers() }
+    pub fn has_stream_meter_subscribers(&self) -> bool {
+        self.meters.has_subscribers()
+    }
 
-    pub async fn register_meter(&self, meter: Arc<StreamMeterHandle>) { self.meters.register_meter(meter).await; }
+    pub async fn register_meter(&self, meter: Arc<StreamMeterHandle>) {
+        self.meters.register_meter(meter).await;
+    }
 
-    pub async fn unregister_meter(&self, meter_uid: u32) { self.meters.unregister_meter(meter_uid).await; }
+    pub async fn unregister_meter(&self, meter_uid: u32) {
+        self.meters.unregister_meter(meter_uid).await;
+    }
 
     pub async fn flush_and_unregister_meter(&self, meter_uid: u32) {
         self.meters.flush_and_unregister_meter(meter_uid).await;
@@ -320,9 +360,13 @@ impl EventManager {
         self.meters.unregister_meter_client(client_uid).await;
     }
 
-    pub async fn read_meter_qos(&self, meter_uid: u32) -> Option<MeterQos> { self.meters.read_qos(meter_uid).await }
+    pub async fn read_meter_qos(&self, meter_uid: u32) -> Option<MeterQos> {
+        self.meters.read_qos(meter_uid).await
+    }
 
-    pub fn send_meter_batch(&self, entries: Vec<StreamMeterEntry>) { self.meters.send_batch(entries); }
+    pub fn send_meter_batch(&self, entries: Vec<StreamMeterEntry>) {
+        self.meters.send_batch(entries);
+    }
 }
 
 /// An [`EventMessage`] subscription narrowed to some [`EventKindMask`].
@@ -351,7 +395,9 @@ impl FilteredEventReceiver {
 
     /// The mask this subscription was opened with.
     #[must_use]
-    pub fn mask(&self) -> EventKindMask { self.mask }
+    pub fn mask(&self) -> EventKindMask {
+        self.mask
+    }
 }
 
 impl EventManager {
@@ -360,15 +406,21 @@ impl EventManager {
     /// The event channel needs nothing: closing the sender is what tells
     /// subscribers to stop, and `Drop` does that. The meter registry does -
     /// see [`StreamMeterRegistry::shutdown`].
-    pub async fn shutdown(&self) { self.meters.shutdown().await; }
+    pub async fn shutdown(&self) {
+        self.meters.shutdown().await;
+    }
 }
 
 impl EventSink for EventManager {
-    fn emit(&self, event: EventMessage) { self.send_event(event); }
+    fn emit(&self, event: EventMessage) {
+        self.send_event(event);
+    }
 }
 
 impl Default for EventManager {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]

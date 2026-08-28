@@ -175,24 +175,34 @@ pub struct TuliproxError {
 impl TuliproxError {
     #[inline]
     #[must_use]
-    pub fn new(kind: ErrorKind, message: impl Into<Box<str>>) -> Self { Self { kind, message: message.into() } }
+    pub fn new(kind: ErrorKind, message: impl Into<Box<str>>) -> Self {
+        Self { kind, message: message.into() }
+    }
 
     #[inline]
     #[must_use]
-    pub const fn kind(&self) -> ErrorKind { self.kind }
+    pub const fn kind(&self) -> ErrorKind {
+        self.kind
+    }
 
     /// The message, without the category prefix that [`Display`] adds.
     #[inline]
     #[must_use]
-    pub fn message(&self) -> &str { &self.message }
+    pub fn message(&self) -> &str {
+        &self.message
+    }
 
     #[inline]
     #[must_use]
-    pub const fn is_notify(&self) -> bool { self.kind.is_notify() }
+    pub const fn is_notify(&self) -> bool {
+        self.kind.is_notify()
+    }
 }
 
 impl Display for TuliproxError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result { write!(f, "{}: {}", self.kind.label(), self.message) }
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.kind.label(), self.message)
+    }
 }
 
 impl std::error::Error for TuliproxError {}
@@ -204,7 +214,9 @@ where
     std::io::Error::other(sanitize_sensitive_info(&err.to_string()))
 }
 
-pub fn str_to_io_error(err: &str) -> std::io::Error { std::io::Error::other(sanitize_sensitive_info(err)) }
+pub fn str_to_io_error(err: &str) -> std::io::Error {
+    std::io::Error::other(sanitize_sensitive_info(err))
+}
 
 pub fn string_to_io_error(err: impl AsRef<str>) -> std::io::Error {
     std::io::Error::other(sanitize_sensitive_info(err.as_ref()))

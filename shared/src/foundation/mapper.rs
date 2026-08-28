@@ -88,7 +88,9 @@ pub struct ValueAccessor<'a> {
 }
 
 impl ValueAccessor<'_> {
-    pub fn get(&self, field: &str) -> Option<Arc<str>> { self.pli.header.get_field(field) }
+    pub fn get(&self, field: &str) -> Option<Arc<str>> {
+        self.pli.header.get_field(field)
+    }
 
     pub fn set(&mut self, field: &str, value: &str) {
         if self.pli.header.set_field(field, value) {
@@ -105,7 +107,9 @@ pub struct ExprId(pub usize);
 impl Deref for ExprId {
     type Target = usize;
 
-    fn deref(&self) -> &Self::Target { &self.0 }
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -299,7 +303,9 @@ impl MapperScript {
         }
     }
 
-    pub fn get_expr_by_id(&self, id: usize) -> Option<&Expression> { self.expressions.get(id) }
+    pub fn get_expr_by_id(&self, id: usize) -> Option<&Expression> {
+        self.expressions.get(id)
+    }
 }
 
 impl ExprId {
@@ -752,9 +758,13 @@ impl<'a> MapperContext<'a> {
         }
     }
 
-    fn has_var(&self, name: &str) -> bool { self.variables.contains_key(name) }
+    fn has_var(&self, name: &str) -> bool {
+        self.variables.contains_key(name)
+    }
 
-    fn get_var(&self, name: &str) -> &EvalResult { self.variables.get(name).unwrap_or(&Undefined) }
+    fn get_var(&self, name: &str) -> &EvalResult {
+        self.variables.get(name).unwrap_or(&Undefined)
+    }
 
     fn eval_expr_by_id(&mut self, id: usize, accessor: &mut ValueAccessor) -> EvalResult {
         let Some(expr) = self.expressions.get(id) else { return Undefined };
@@ -1061,7 +1071,9 @@ impl EvalResult {
         }
     }
 
-    pub fn is_error(&self) -> bool { matches!(self, Failure(_)) }
+    pub fn is_error(&self) -> bool {
+        matches!(self, Failure(_))
+    }
 }
 
 fn concat_args(args: &Vec<EvalResult>) -> Vec<Cow<'_, str>> {

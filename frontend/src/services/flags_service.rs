@@ -32,7 +32,9 @@ impl Default for FlagsService {
 }
 
 impl FlagsService {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub fn from_loader(loader: FlagsLoader) -> Self {
         Self {
@@ -89,13 +91,19 @@ impl FlagsService {
         self.loader.borrow().as_ref().is_some_and(|loader| loader.has_flag(country_code))
     }
 
-    pub fn count(&self) -> usize { self.loader.borrow().as_ref().map_or(0, |loader| loader.count()) }
+    pub fn count(&self) -> usize {
+        self.loader.borrow().as_ref().map_or(0, |loader| loader.count())
+    }
 
-    pub fn is_loaded(&self) -> bool { self.loader.borrow().is_some() }
+    pub fn is_loaded(&self) -> bool {
+        self.loader.borrow().is_some()
+    }
 }
 
 impl PartialEq for FlagsService {
-    fn eq(&self, other: &Self) -> bool { Rc::ptr_eq(&self.loader, &other.loader) }
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.loader, &other.loader)
+    }
 }
 
 impl Eq for FlagsService {}

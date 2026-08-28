@@ -245,7 +245,9 @@ fn should_redact_as_url(current_key: Option<&str>) -> bool {
     })
 }
 
-fn redact_url_like_value(value: &str) -> String { shared::utils::sanitize_sensitive_info(value).to_string() }
+fn redact_url_like_value(value: &str) -> String {
+    shared::utils::sanitize_sensitive_info(value).to_string()
+}
 
 #[cfg(test)]
 mod tests {

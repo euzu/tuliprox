@@ -27,5 +27,7 @@ pub struct RecordingCtx<E: EventSink> {
 
 impl<E: EventSink + Clone + 'static> RecordingCtx<E> {
     /// The configured storage directory.
-    pub fn storage_dir(&self) -> String { self.app_config.config.load().storage_dir.clone() }
+    pub fn storage_dir(&self) -> String {
+        self.app_config.config.load().storage_dir.clone()
+    }
 }

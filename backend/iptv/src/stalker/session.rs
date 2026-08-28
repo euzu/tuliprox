@@ -53,7 +53,9 @@ impl StalkerSession {
     }
 }
 
-fn now_epoch_secs() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()) }
+fn now_epoch_secs() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
 
 /// How long a `StalkerSession` should be considered fresh. The portal invalidates tokens
 /// aggressively (typically after 5–30 minutes of inactivity); the client treats a session

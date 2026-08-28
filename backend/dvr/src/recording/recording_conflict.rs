@@ -49,7 +49,9 @@ impl EffectiveCapacity {
     /// `max(0, background_slots - reserved_interactive_slots)`.
     /// Saturates to zero so a misconfiguration never reports a
     /// negative headroom.
-    pub fn headroom(self) -> u32 { self.background_slots.saturating_sub(self.reserved_interactive_slots) }
+    pub fn headroom(self) -> u32 {
+        self.background_slots.saturating_sub(self.reserved_interactive_slots)
+    }
 }
 
 /// A single piecewise demand segment on the candidate's padded

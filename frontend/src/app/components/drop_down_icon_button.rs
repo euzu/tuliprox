@@ -22,7 +22,9 @@ pub struct DropDownOption {
 }
 
 impl DropDownOption {
-    pub fn new(id: &str, label: Html, selected: bool) -> Self { Self { id: id.to_owned(), label, selected } }
+    pub fn new(id: &str, label: Html, selected: bool) -> Self {
+        Self { id: id.to_owned(), label, selected }
+    }
 }
 
 #[derive(Properties, Clone, PartialEq, Debug)]

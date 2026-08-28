@@ -65,7 +65,9 @@ fn is_sidebar_expanded(collapsed: CollapseState) -> bool {
 /// `RecordingService::ensure_available`, so hiding the menu while the
 /// DVR is off would only hide the path the operator needs to reach
 /// the toggle in the first place.
-pub const fn show_recording_nav(has_recording_read: bool) -> bool { has_recording_read }
+pub const fn show_recording_nav(has_recording_read: bool) -> bool {
+    has_recording_read
+}
 
 #[component]
 pub fn Sidebar(props: &SidebarProps) -> Html {

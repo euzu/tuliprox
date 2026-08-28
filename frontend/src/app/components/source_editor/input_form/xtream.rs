@@ -14,7 +14,9 @@ pub(super) struct XtreamInputFormProps {
 }
 
 impl PartialEq for XtreamInputFormProps {
-    fn eq(&self, _other: &Self) -> bool { false }
+    fn eq(&self, _other: &Self) -> bool {
+        false
+    }
 }
 
 #[component]

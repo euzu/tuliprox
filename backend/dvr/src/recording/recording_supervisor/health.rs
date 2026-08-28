@@ -31,20 +31,30 @@ pub struct SupervisorHealth {
 }
 
 impl SupervisorHealth {
-    pub fn stamp(field: &AtomicI64, now: i64) { field.store(now, Ordering::Relaxed); }
+    pub fn stamp(field: &AtomicI64, now: i64) {
+        field.store(now, Ordering::Relaxed);
+    }
 
     pub fn reconciliation_last_run(&self) -> Option<i64> {
         non_zero(self.reconciliation_last_run.load(Ordering::Relaxed))
     }
-    pub fn retention_last_tick(&self) -> Option<i64> { non_zero(self.retention_last_tick.load(Ordering::Relaxed)) }
+    pub fn retention_last_tick(&self) -> Option<i64> {
+        non_zero(self.retention_last_tick.load(Ordering::Relaxed))
+    }
     pub fn notification_last_drain(&self) -> Option<i64> {
         non_zero(self.notification_last_drain.load(Ordering::Relaxed))
     }
-    pub fn notification_outbox_depth(&self) -> i64 { self.notification_outbox_depth.load(Ordering::Relaxed) }
-    pub fn notification_dead_lettered(&self) -> i64 { self.notification_dead_lettered.load(Ordering::Relaxed) }
+    pub fn notification_outbox_depth(&self) -> i64 {
+        self.notification_outbox_depth.load(Ordering::Relaxed)
+    }
+    pub fn notification_dead_lettered(&self) -> i64 {
+        self.notification_dead_lettered.load(Ordering::Relaxed)
+    }
 }
 
-fn non_zero(value: i64) -> Option<i64> { (value != 0).then_some(value) }
+fn non_zero(value: i64) -> Option<i64> {
+    (value != 0).then_some(value)
+}
 
 /// Process-wide health, so the health endpoint does not need a handle
 /// threaded through `AppState` (which is rebuilt on every config

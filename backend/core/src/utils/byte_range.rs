@@ -74,7 +74,9 @@ mod tests {
     use super::{resolve_single_byte_range, SingleByteRange};
     use axum::http::HeaderValue;
 
-    fn header(value: &str) -> HeaderValue { HeaderValue::from_str(value).expect("valid test header") }
+    fn header(value: &str) -> HeaderValue {
+        HeaderValue::from_str(value).expect("valid test header")
+    }
 
     #[test]
     fn resolves_open_closed_and_suffix_ranges() {

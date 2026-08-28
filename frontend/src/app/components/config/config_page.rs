@@ -169,7 +169,9 @@ pub struct ConfigFormSlots {
 }
 
 impl ConfigFormSlots {
-    fn set_form_slot(slot: &mut Option<ConfigForm>, form: ConfigForm) { *slot = Some(form); }
+    fn set_form_slot(slot: &mut Option<ConfigForm>, form: ConfigForm) {
+        *slot = Some(form);
+    }
 
     pub fn update_form(&mut self, form: ConfigForm) {
         match form {

@@ -104,7 +104,9 @@ pub fn invalidate_cache() {
     }
 }
 
-fn file_mtime(path: &str) -> Option<std::time::SystemTime> { std::fs::metadata(path).ok()?.modified().ok() }
+fn file_mtime(path: &str) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).ok()?.modified().ok()
+}
 
 /// Resolve a template value to its body, using the cache where possible.
 async fn resolve(app_config: &Arc<AppConfig>, client: &reqwest::Client, template: &str) -> Arc<str> {

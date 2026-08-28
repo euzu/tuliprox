@@ -26,15 +26,21 @@ impl std::fmt::Display for ProviderIdType {
 }
 
 impl From<u32> for ProviderIdType {
-    fn from(id: u32) -> Self { ProviderIdType::Id(id) }
+    fn from(id: u32) -> Self {
+        ProviderIdType::Id(id)
+    }
 }
 
 impl From<&str> for ProviderIdType {
-    fn from(s: &str) -> Self { ProviderIdType::Text(Arc::from(s)) }
+    fn from(s: &str) -> Self {
+        ProviderIdType::Text(Arc::from(s))
+    }
 }
 
 impl From<String> for ProviderIdType {
-    fn from(s: String) -> Self { ProviderIdType::Text(Arc::from(s.as_str())) }
+    fn from(s: String) -> Self {
+        ProviderIdType::Text(Arc::from(s.as_str()))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

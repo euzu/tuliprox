@@ -11,7 +11,9 @@ use tempfile::NamedTempFile;
 // Run with:  `cargo test --release --package tuliprox -- stress_test_bplustree -- --nocapture`
 
 // Helper to generate random string
-fn random_string(len: usize) -> String { rand::rng().sample_iter(&Alphanumeric).take(len).map(char::from).collect() }
+fn random_string(len: usize) -> String {
+    rand::rng().sample_iter(&Alphanumeric).take(len).map(char::from).collect()
+}
 
 #[inline]
 fn lcg_next(state: &mut u64) -> u64 {

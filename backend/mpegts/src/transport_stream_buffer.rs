@@ -28,7 +28,9 @@ fn forward_clock_distance_90khz(start: u64, end: u64) -> u64 {
 
 #[inline]
 #[allow(clippy::cast_possible_truncation)]
-fn pcr_offset_27mhz(offset_90khz: u64) -> u64 { (u128::from(offset_90khz) * 300_u128 % u128::from(MAX_PCR)) as u64 }
+fn pcr_offset_27mhz(offset_90khz: u64) -> u64 {
+    (u128::from(offset_90khz) * 300_u128 % u128::from(MAX_PCR)) as u64
+}
 
 #[inline]
 #[allow(clippy::cast_possible_truncation)]
@@ -191,7 +193,9 @@ struct HlsTsPacketEvidence {
 }
 
 impl HlsTsPacketEvidence {
-    const fn has_payload(self) -> bool { self.payload_offset.is_some() }
+    const fn has_payload(self) -> bool {
+        self.payload_offset.is_some()
+    }
 }
 
 fn inspect_hls_ts_packet(packet: &[u8], packet_start: usize) -> Result<HlsTsPacketEvidence, HlsFiniteTsLayoutError> {
@@ -343,7 +347,9 @@ struct HlsPesHeaderAssembler {
 }
 
 impl HlsPesHeaderAssembler {
-    fn new() -> Self { Self { pending: HashMap::with_capacity(8) } }
+    fn new() -> Self {
+        Self { pending: HashMap::with_capacity(8) }
+    }
 
     fn push_packet(
         &mut self,
@@ -595,7 +601,9 @@ enum HlsTsTimestampKind {
 }
 
 #[inline]
-fn ts_packet_pid(packet: &[u8]) -> u16 { (u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2]) }
+fn ts_packet_pid(packet: &[u8]) -> u16 {
+    (u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2])
+}
 
 fn same_finite_ts_packet_layout(source: &[u8], prepared: &[u8]) -> bool {
     if source.len() != TS_PACKET_SIZE
@@ -985,7 +993,9 @@ fn timestamp_profile_from_finite_layout(
     accumulator.finish()
 }
 
-fn ticks_90khz_to_rounded_millis(ticks: u64) -> Option<u64> { ticks.checked_add(45)?.checked_div(90) }
+fn ticks_90khz_to_rounded_millis(ticks: u64) -> Option<u64> {
+    ticks.checked_add(45)?.checked_div(90)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HlsFiniteTsRenderSpec {
@@ -1154,13 +1164,19 @@ impl TransportStreamBuffer {
         }
     }
 
-    pub fn as_bytes(&self) -> &[u8] { &self.buffer }
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.buffer
+    }
 
     /// Cheap clone of the underlying buffer as `Bytes` (refcount bump).
     /// Use this from response builders to avoid `Bytes::copy_from_slice(&[u8])`.
-    pub fn clone_bytes(&self) -> Bytes { self.buffer.clone() }
+    pub fn clone_bytes(&self) -> Bytes {
+        self.buffer.clone()
+    }
 
-    pub fn duration_ms(&self) -> Option<u64> { self.duration_ticks_90khz().and_then(ticks_90khz_to_rounded_millis) }
+    pub fn duration_ms(&self) -> Option<u64> {
+        self.duration_ticks_90khz().and_then(ticks_90khz_to_rounded_millis)
+    }
 
     pub fn duration_ticks_90khz(&self) -> Option<u64> {
         self.finite_hls_presentation_duration.as_ref().map(|duration| duration.duration_ticks_90khz)
@@ -1174,9 +1190,13 @@ impl TransportStreamBuffer {
         self.finite_hls_track_signature.clone()
     }
 
-    pub const fn has_finite_hls_track_signature(&self) -> bool { self.finite_hls_track_signature.is_some() }
+    pub const fn has_finite_hls_track_signature(&self) -> bool {
+        self.finite_hls_track_signature.is_some()
+    }
 
-    pub const fn finite_hls_asset_fingerprint(&self) -> [u8; 32] { self.finite_hls_asset_fingerprint }
+    pub const fn finite_hls_asset_fingerprint(&self) -> [u8; 32] {
+        self.finite_hls_asset_fingerprint
+    }
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn finite_hls_render_count(&self) -> usize {
@@ -1310,10 +1330,14 @@ impl TransportStreamBuffer {
         Some(kbps as usize)
     }
 
-    pub fn register_waker(&self, waker: &Waker) { self.waker.register(waker); }
+    pub fn register_waker(&self, waker: &Waker) {
+        self.waker.register(waker);
+    }
 
     /// Sets the timestamp offset used when rewriting PTS/DTS/PCR values.
-    pub fn set_timestamp_offset(&mut self, offset: u64) { self.timestamp_offset = offset; }
+    pub fn set_timestamp_offset(&mut self, offset: u64) {
+        self.timestamp_offset = offset;
+    }
 
     /// Generates a Discontinuity packet for the given packet/PID state, writing it directly into `out`.
     fn generate_discontinuity_packet(

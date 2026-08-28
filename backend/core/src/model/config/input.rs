@@ -67,16 +67,24 @@ pub struct ConfigInputOptions {
 macros::from_impl!(ConfigInputOptions);
 impl ConfigInputOptions {
     #[inline]
-    pub fn has_flag(&self, flag: ConfigInputFlags) -> bool { self.flags.contains(flag) }
+    pub fn has_flag(&self, flag: ConfigInputFlags) -> bool {
+        self.flags.contains(flag)
+    }
 
     #[inline]
-    pub fn has_any_flags(&self, flags: ConfigInputFlagsSet) -> bool { self.flags.contains_any(&flags) }
+    pub fn has_any_flags(&self, flags: ConfigInputFlagsSet) -> bool {
+        self.flags.contains_any(&flags)
+    }
 
     #[inline]
-    pub fn has_all_flags(&self, flags: ConfigInputFlagsSet) -> bool { self.flags.contains_all(&flags) }
+    pub fn has_all_flags(&self, flags: ConfigInputFlagsSet) -> bool {
+        self.flags.contains_all(&flags)
+    }
 
     #[inline]
-    pub fn defaults() -> &'static Self { &DEFAULT_CONFIG_INPUT_OPTIONS }
+    pub fn defaults() -> &'static Self {
+        &DEFAULT_CONFIG_INPUT_OPTIONS
+    }
 }
 impl From<&ConfigInputOptionsDto> for ConfigInputOptions {
     fn from(dto: &ConfigInputOptionsDto) -> Self {
@@ -174,7 +182,9 @@ pub struct ConfigInputStaged {
 }
 
 impl From<&ConfigInputStagedDto> for ConfigInputStaged {
-    fn from(dto: &ConfigInputStagedDto) -> Self { Self { for_input: dto.for_input.clone(), clusters: dto.clusters } }
+    fn from(dto: &ConfigInputStagedDto) -> Self {
+        Self { for_input: dto.for_input.clone(), clusters: dto.clusters }
+    }
 }
 
 impl From<&MediaServerInputConfigDto> for MediaServerInputConfig {
@@ -261,7 +271,9 @@ pub struct StalkerDeviceProfile {
 }
 
 impl StalkerDeviceProfile {
-    pub fn mac(&self) -> Option<&str> { self.mac_address.as_deref().map(str::trim).filter(|s| !s.is_empty()) }
+    pub fn mac(&self) -> Option<&str> {
+        self.mac_address.as_deref().map(str::trim).filter(|s| !s.is_empty())
+    }
 
     fn with_alias_overrides(self, alias: Self) -> Self {
         Self {
@@ -414,7 +426,9 @@ pub struct StalkerSizeCaps {
 }
 
 impl Default for StalkerSizeCaps {
-    fn default() -> Self { Self { create_link_kb: 64, ordered_list_mb: 8, get_epg_mb: 64 } }
+    fn default() -> Self {
+        Self { create_link_kb: 64, ordered_list_mb: 8, get_epg_mb: 64 }
+    }
 }
 
 impl From<&StalkerInputConfigDto> for StalkerInputConfig {
@@ -561,7 +575,9 @@ impl ConfigInput {
     }
 
     #[inline]
-    pub fn get_download_input_type(&self) -> InputType { self.input_type }
+    pub fn get_download_input_type(&self) -> InputType {
+        self.input_type
+    }
 
     pub fn resolve_staged_download_type(&mut self) {
         self.input_type = self.staged_type.input_type();
@@ -577,7 +593,9 @@ impl ConfigInput {
     }
 
     #[inline]
-    pub fn has_flag(&self, flag: ConfigInputFlags) -> bool { self.has_flag_or(flag, false) }
+    pub fn has_flag(&self, flag: ConfigInputFlags) -> bool {
+        self.has_flag_or(flag, false)
+    }
 
     #[inline]
     /// Returns `default` when `self.options` is `None`; unlike `has_flag`, which returns
@@ -588,7 +606,9 @@ impl ConfigInput {
     }
 
     #[inline]
-    pub fn has_any_flags(&self, flags: ConfigInputFlagsSet) -> bool { self.has_any_flags_or(flags, false) }
+    pub fn has_any_flags(&self, flags: ConfigInputFlagsSet) -> bool {
+        self.has_any_flags_or(flags, false)
+    }
 
     #[inline]
     /// Returns `default` when `self.options` is `None`; unlike `has_any_flags`, which returns
@@ -599,7 +619,9 @@ impl ConfigInput {
     }
 
     #[inline]
-    pub fn has_all_flags(&self, flags: ConfigInputFlagsSet) -> bool { self.has_all_flags_or(flags, false) }
+    pub fn has_all_flags(&self, flags: ConfigInputFlagsSet) -> bool {
+        self.has_all_flags_or(flags, false)
+    }
 
     #[inline]
     /// Returns `default` when `self.options` is `None`; unlike `has_all_flags`, which returns
@@ -932,7 +954,9 @@ impl ConfigInput {
         }
     }
 
-    pub fn resolve(&self) -> Result<Cow<'_, str>, TuliproxError> { self.resolve_url(&self.url) }
+    pub fn resolve(&self) -> Result<Cow<'_, str>, TuliproxError> {
+        self.resolve_url(&self.url)
+    }
 
     pub fn get_resolve_provider(&self, url: &str) -> Option<Arc<ConfigProvider>> {
         if !url.starts_with(PROVIDER_SCHEME_PREFIX) {

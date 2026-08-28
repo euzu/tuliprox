@@ -27,7 +27,9 @@ fn no_web_auth_token() -> impl axum::response::IntoResponse + Send {
     axum::Json(TokenResponse { token: TOKEN_NO_AUTH.to_string(), username: "admin".to_string() }).into_response()
 }
 
-fn api_user_can_access_web_ui(ui_enabled: bool) -> bool { ui_enabled }
+fn api_user_can_access_web_ui(ui_enabled: bool) -> bool {
+    ui_enabled
+}
 
 async fn token(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
@@ -106,7 +108,7 @@ async fn token_refresh(
                 let claims = token_data.claims;
                 let username = claims.username.as_str();
 
-                if claims.roles.iter().any(|role| role.eq_ignore_ascii_case(shared::model::ROLE_API_USER)) {
+                if claims.is_api_user() {
                     let Some(user) = app_state.app_config.get_user_credentials(username) else {
                         return axum::http::StatusCode::UNAUTHORIZED.into_response();
                     };

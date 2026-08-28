@@ -126,7 +126,9 @@ impl Counters {
         }
     }
 
-    pub fn inc(&self, counter: Counter) { self.inner[counter.index()].fetch_add(1, Ordering::Relaxed); }
+    pub fn inc(&self, counter: Counter) {
+        self.inner[counter.index()].fetch_add(1, Ordering::Relaxed);
+    }
 
     pub fn snapshot(&self) -> CounterSnapshot {
         CounterSnapshot {
@@ -145,7 +147,9 @@ impl Counters {
 }
 
 impl Default for Counters {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// The structured failure category the log redaction uses

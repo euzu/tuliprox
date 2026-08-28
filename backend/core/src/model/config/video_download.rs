@@ -105,7 +105,9 @@ pub struct RecordingRetentionConfig {
 }
 
 impl Default for RecordingRetentionConfig {
-    fn default() -> Self { Self::from(&RecordingRetentionConfigDto::default()) }
+    fn default() -> Self {
+        Self::from(&RecordingRetentionConfigDto::default())
+    }
 }
 
 /// Runtime notification-delivery knobs. Always present: an absent
@@ -120,7 +122,9 @@ pub struct RecordingNotificationConfig {
 }
 
 impl Default for RecordingNotificationConfig {
-    fn default() -> Self { Self::from(&RecordingNotificationConfigDto::default()) }
+    fn default() -> Self {
+        Self::from(&RecordingNotificationConfigDto::default())
+    }
 }
 
 impl RecordingNotificationConfig {

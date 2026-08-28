@@ -484,7 +484,9 @@ async fn setup_root_file(
     setup_index(State(state)).await.into_response()
 }
 
-async fn api_not_found() -> impl IntoResponse + Send { StatusCode::NOT_FOUND.into_response() }
+async fn api_not_found() -> impl IntoResponse + Send {
+    StatusCode::NOT_FOUND.into_response()
+}
 
 enum SetupPersistWriteError {
     Serialize(String),

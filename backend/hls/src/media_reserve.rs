@@ -34,10 +34,14 @@ pub enum HlsManifestDeliveryMode {
 pub struct HlsManifestSourceRenderMarker(u64);
 
 impl HlsManifestSourceRenderMarker {
-    pub const fn new(rendered_at_ms: u64) -> Self { Self(rendered_at_ms) }
+    pub const fn new(rendered_at_ms: u64) -> Self {
+        Self(rendered_at_ms)
+    }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub const fn rendered_at_ms(self) -> u64 { self.0 }
+    pub const fn rendered_at_ms(self) -> u64 {
+        self.0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

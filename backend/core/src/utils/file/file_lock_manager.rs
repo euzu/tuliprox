@@ -10,7 +10,9 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
-fn revision_is_missing(result: &io::Result<bool>) -> bool { matches!(result, Ok(false)) }
+fn revision_is_missing(result: &io::Result<bool>) -> bool {
+    matches!(result, Ok(false))
+}
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum LockKey {
@@ -171,7 +173,9 @@ impl FileLockManager {
 }
 
 impl Default for FileLockManager {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl fmt::Debug for FileLockManager {
@@ -188,7 +192,9 @@ pub struct FileReadGuard {
 }
 
 impl FileReadGuard {
-    fn new(guard: OwnedRwLockReadGuard<()>) -> Self { Self { _guard: guard } }
+    fn new(guard: OwnedRwLockReadGuard<()>) -> Self {
+        Self { _guard: guard }
+    }
 }
 
 // Define FileWriteGuard to hold both the lock reference and the actual write guard.
@@ -197,7 +203,9 @@ pub struct FileWriteGuard {
 }
 
 impl FileWriteGuard {
-    fn new(guard: OwnedRwLockWriteGuard<()>) -> Self { Self { _guard: guard } }
+    fn new(guard: OwnedRwLockWriteGuard<()>) -> Self {
+        Self { _guard: guard }
+    }
 }
 
 fn normalize_path(path: &Path) -> PathBuf {

@@ -28,9 +28,13 @@ pub enum MediaClassification {
 }
 
 impl MediaClassification {
-    pub fn is_movie(&self) -> bool { matches!(self, MediaClassification::Movie { .. }) }
+    pub fn is_movie(&self) -> bool {
+        matches!(self, MediaClassification::Movie { .. })
+    }
 
-    pub fn is_series(&self) -> bool { matches!(self, MediaClassification::Series { .. }) }
+    pub fn is_series(&self) -> bool {
+        matches!(self, MediaClassification::Series { .. })
+    }
 }
 
 /// Classifier for determining if a video file is a movie or series

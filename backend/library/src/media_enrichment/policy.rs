@@ -29,7 +29,9 @@ impl MissingFactEnrichmentPolicy {
     }
 
     /// Returns whether calls to the TMDB supplier are allowed by the policy.
-    pub fn tmdb_supplier_enabled(&self) -> bool { self.tmdb_supplier_enabled }
+    pub fn tmdb_supplier_enabled(&self) -> bool {
+        self.tmdb_supplier_enabled
+    }
 }
 
 #[cfg(test)]

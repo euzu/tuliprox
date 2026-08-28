@@ -26,8 +26,8 @@ use log::{debug, error};
 use shared::model::{
     recording::{RecordingProvenance, RecordingVisibility},
     recording_rule::{RecordingRule, RuleBody, RuleSource, RuleVisibility, TombstoneSet},
-    Claims, EpgProgramme, EventSink, Permission, PermissionSet, XtreamCluster, CURRENT_PERMISSION_SCHEMA_VERSION,
-    ROLE_ADMIN,
+    Claims, EpgProgramme, EventSink, Permission, PermissionSet, RoleSet, XtreamCluster,
+    CURRENT_PERMISSION_SCHEMA_VERSION,
 };
 use tokio_util::sync::CancellationToken;
 use tuliprox_repository::recording_rule_repository::RecordingRuleRepository;
@@ -337,7 +337,7 @@ fn push_reconcilable(tasks: &mut Vec<ReconcilableTask>, task: &FileDownload) {
 fn scheduler_claims(owner_id: shared::model::UserId, visibility: RuleVisibility) -> Claims {
     let mut permissions = PermissionSet::new();
     permissions.set(Permission::RecordingWrite);
-    let roles = if visibility == RuleVisibility::Shared { vec![ROLE_ADMIN.to_string()] } else { Vec::new() };
+    let roles = if visibility == RuleVisibility::Shared { RoleSet::ADMIN } else { RoleSet::new() };
     let now = Utc::now().timestamp();
     Claims {
         username: "recording-scheduler".to_string(),
@@ -364,8 +364,12 @@ mod tests {
         utils::Internable,
     };
 
-    fn user() -> UserId { UserId::from("web:alice") }
-    fn source() -> RuleSource { RuleSource::new("tgt", "virt", "input") }
+    fn user() -> UserId {
+        UserId::from("web:alice")
+    }
+    fn source() -> RuleSource {
+        RuleSource::new("tgt", "virt", "input")
+    }
     fn new_episode_rule() -> RecordingRule {
         RecordingRule {
             id: "r1".into(),

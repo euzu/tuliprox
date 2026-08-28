@@ -16,7 +16,9 @@ pub struct StreamHistoryService {
 }
 
 impl Default for StreamHistoryService {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl StreamHistoryService {

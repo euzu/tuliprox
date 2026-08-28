@@ -12,23 +12,57 @@ pub const HLS_CACHE_DIR_SUFFIX: &str = "tuliprox/cache/hls";
 pub const DEFAULT_HLS_CACHE_BYTES: &str = "10GB";
 pub const DEFAULT_HLS_CACHE_BYTES_PER_SESSION: &str = "512MB";
 
-pub const fn default_hls_cache_duration() -> Secs { Secs::new(300) }
-pub fn default_hls_cache_bytes() -> ByteSize { ByteSize::new(DEFAULT_HLS_CACHE_BYTES) }
-pub fn default_hls_cache_bytes_per_session() -> ByteSize { ByteSize::new(DEFAULT_HLS_CACHE_BYTES_PER_SESSION) }
-pub const fn default_hls_max_segments_prefetch() -> usize { 6 }
-pub const fn default_hls_max_concurrent_segment_fetches_per_session() -> usize { 2 }
-pub const fn default_hls_max_concurrent_segment_fetches_global() -> usize { 64 }
-pub const fn default_hls_origin_manifest_timeout_ms() -> Millis { Millis::new(3_000) }
-pub const fn default_hls_origin_segment_timeout_ms() -> Millis { Millis::new(10_000) }
-pub const fn default_hls_initial_manifest_wait_timeout_secs() -> Secs { Secs::new(90) }
-pub const fn default_hls_session_idle_timeout() -> Secs { Secs::new(300) }
-pub const fn default_hls_segment_repair_apply_to_first_segments() -> u8 { 1 }
-pub const fn default_hls_segment_repair_max_parallel_repairs() -> usize { 1 }
-pub const fn default_hls_segment_repair_low_size_increase_percent() -> u8 { 2 }
-pub const fn default_hls_segment_repair_medium_size_increase_percent() -> u8 { 5 }
-pub const fn default_hls_segment_repair_high_size_increase_percent() -> u8 { 20 }
-pub const fn default_hls_segment_repair_postprocess_timeout_ms() -> Millis { Millis::new(2_000) }
-pub const fn default_hls_corrupt_segment_watchdog_max_parallel_jobs() -> usize { 1 }
+pub const fn default_hls_cache_duration() -> Secs {
+    Secs::new(300)
+}
+pub fn default_hls_cache_bytes() -> ByteSize {
+    ByteSize::new(DEFAULT_HLS_CACHE_BYTES)
+}
+pub fn default_hls_cache_bytes_per_session() -> ByteSize {
+    ByteSize::new(DEFAULT_HLS_CACHE_BYTES_PER_SESSION)
+}
+pub const fn default_hls_max_segments_prefetch() -> usize {
+    6
+}
+pub const fn default_hls_max_concurrent_segment_fetches_per_session() -> usize {
+    2
+}
+pub const fn default_hls_max_concurrent_segment_fetches_global() -> usize {
+    64
+}
+pub const fn default_hls_origin_manifest_timeout_ms() -> Millis {
+    Millis::new(3_000)
+}
+pub const fn default_hls_origin_segment_timeout_ms() -> Millis {
+    Millis::new(10_000)
+}
+pub const fn default_hls_initial_manifest_wait_timeout_secs() -> Secs {
+    Secs::new(90)
+}
+pub const fn default_hls_session_idle_timeout() -> Secs {
+    Secs::new(300)
+}
+pub const fn default_hls_segment_repair_apply_to_first_segments() -> u8 {
+    1
+}
+pub const fn default_hls_segment_repair_max_parallel_repairs() -> usize {
+    1
+}
+pub const fn default_hls_segment_repair_low_size_increase_percent() -> u8 {
+    2
+}
+pub const fn default_hls_segment_repair_medium_size_increase_percent() -> u8 {
+    5
+}
+pub const fn default_hls_segment_repair_high_size_increase_percent() -> u8 {
+    20
+}
+pub const fn default_hls_segment_repair_postprocess_timeout_ms() -> Millis {
+    Millis::new(2_000)
+}
+pub const fn default_hls_corrupt_segment_watchdog_max_parallel_jobs() -> usize {
+    1
+}
 
 // HLS manifest / fallback filename constants.
 pub const HLS_EXT: &str = ".m3u8";

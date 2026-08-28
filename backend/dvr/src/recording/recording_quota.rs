@@ -157,15 +157,27 @@ pub trait QuotaRecordingTaskView {
 }
 
 impl QuotaRecordingTaskView for FileDownload {
-    fn state(&self) -> &DownloadState { &self.state }
-    fn recording(&self) -> Option<&RecordingMetadata> { self.recording.as_ref() }
-    fn uuid(&self) -> &str { &self.uuid }
+    fn state(&self) -> &DownloadState {
+        &self.state
+    }
+    fn recording(&self) -> Option<&RecordingMetadata> {
+        self.recording.as_ref()
+    }
+    fn uuid(&self) -> &str {
+        &self.uuid
+    }
 }
 
 impl QuotaRecordingTaskView for PersistedFileDownload {
-    fn state(&self) -> &DownloadState { &self.state }
-    fn recording(&self) -> Option<&RecordingMetadata> { self.recording.as_ref() }
-    fn uuid(&self) -> &str { &self.uuid }
+    fn state(&self) -> &DownloadState {
+        &self.state
+    }
+    fn recording(&self) -> Option<&RecordingMetadata> {
+        self.recording.as_ref()
+    }
+    fn uuid(&self) -> &str {
+        &self.uuid
+    }
 }
 
 /// `charge_for_task` is the public surface that walks a real
@@ -344,8 +356,12 @@ mod tests {
     }
 
     impl QuotaRecordingTaskView for TaskShape {
-        fn state(&self) -> &DownloadState { &self.state }
-        fn recording(&self) -> Option<&RecordingMetadata> { self.recording.as_ref() }
+        fn state(&self) -> &DownloadState {
+            &self.state
+        }
+        fn recording(&self) -> Option<&RecordingMetadata> {
+            self.recording.as_ref()
+        }
         fn uuid(&self) -> &'static str {
             // The shape fixture has no uuid field; tests that
             // depend on the uuid path (retention) use a richer
@@ -360,9 +376,13 @@ mod tests {
 
     // Mirror the `charge_for_task` body against `TaskShape` so the
     // tests can exercise the function without a real FileDownload.
-    fn charge_task_shape(t: &TaskShape) -> u64 { charge_for_task(t) }
+    fn charge_task_shape(t: &TaskShape) -> u64 {
+        charge_for_task(t)
+    }
 
-    fn pool_for_shape(t: &TaskShape) -> Option<QuotaPool> { quota_pool_for_task(t) }
+    fn pool_for_shape(t: &TaskShape) -> Option<QuotaPool> {
+        quota_pool_for_task(t)
+    }
 
     #[test]
     fn charge_scheduled_is_reservation() {

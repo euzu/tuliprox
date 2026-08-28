@@ -20,7 +20,9 @@ fn push_if_some<T>(values: &mut Vec<T>, value: Option<T>) {
     }
 }
 
-fn set_some<T>(slot: &mut Option<T>, value: T) { *slot = Some(value); }
+fn set_some<T>(slot: &mut Option<T>, value: T) {
+    *slot = Some(value);
+}
 
 fn set_some_if_present<T>(slot: &mut Option<T>, value: Option<T>) {
     if let Some(value) = value {
@@ -41,19 +43,25 @@ fn push_language_and_en(meta: &mut PttMetadata, value: String) {
 
 macro_rules! gen_helper {
     ($name:ident, $apply_fn:expr, $field:ident) => {
-        fn $name(meta: &mut PttMetadata, value: String) { $apply_fn(&mut meta.$field, value); }
+        fn $name(meta: &mut PttMetadata, value: String) {
+            $apply_fn(&mut meta.$field, value);
+        }
     };
 }
 
 macro_rules! gen_option_helper {
     ($name:ident, $apply_fn:expr, $field:ident, $ty:ty) => {
-        fn $name(meta: &mut PttMetadata, value: $ty) { $apply_fn(&mut meta.$field, value); }
+        fn $name(meta: &mut PttMetadata, value: $ty) {
+            $apply_fn(&mut meta.$field, value);
+        }
     };
 }
 
 macro_rules! gen_value_helper {
     ($name:ident, $field:ident, $ty:ty) => {
-        fn $name(meta: &mut PttMetadata, value: $ty) { set_value(&mut meta.$field, value); }
+        fn $name(meta: &mut PttMetadata, value: $ty) {
+            set_value(&mut meta.$field, value);
+        }
     };
 }
 
@@ -134,7 +142,9 @@ gen_value_helper!(set_documentary, documentary, bool);
 gen_value_helper!(set_commentary, commentary, bool);
 gen_value_helper!(set_unrated, unrated, bool);
 gen_value_helper!(set_uncensored, uncensored, bool);
-fn extend_seasons(meta: &mut PttMetadata, value: Vec<u32>) { meta.seasons.extend(value); }
+fn extend_seasons(meta: &mut PttMetadata, value: Vec<u32>) {
+    meta.seasons.extend(value);
+}
 gen_extend_if_present_helper!(extend_episodes, episodes, u32);
 gen_set_if_present_helper!(set_volumes_if_present, volumes, Vec<i32>);
 gen_quality_if_trash_helper!(set_quality_to_scr_if_trash, "SCR");
@@ -167,17 +177,27 @@ fn set_year_with_trace(meta: &mut PttMetadata, value: Option<u32>) {
     }
 }
 
-fn set_value<T>(slot: &mut T, value: T) { *slot = value; }
+fn set_value<T>(slot: &mut T, value: T) {
+    *slot = value;
+}
 
 fn ignore<T, U>(_: &mut T, _: U) {}
 
-fn const_string(value: &'static str) -> impl Fn(&str) -> String + Copy { move |_| value.to_string() }
+fn const_string(value: &'static str) -> impl Fn(&str) -> String + Copy {
+    move |_| value.to_string()
+}
 
-fn append_p(value: &str) -> String { format!("{value}p") }
+fn append_p(value: &str) -> String {
+    format!("{value}p")
+}
 
-fn mark_adult(meta: &mut PttMetadata, _: bool) { meta.adult = true; }
+fn mark_adult(meta: &mut PttMetadata, _: bool) {
+    meta.adult = true;
+}
 
-fn options_default() -> HandlerOptions { HandlerOptions::default() }
+fn options_default() -> HandlerOptions {
+    HandlerOptions::default()
+}
 
 fn options_keep() -> HandlerOptions {
     handler_options! {

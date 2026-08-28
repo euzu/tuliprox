@@ -122,9 +122,13 @@ pub enum HlsManifestAcceptanceTrigger {
 }
 
 impl HlsManifestAcceptanceTrigger {
-    pub const fn starts_episode(self) -> bool { !matches!(self, Self::None) }
+    pub const fn starts_episode(self) -> bool {
+        !matches!(self, Self::None)
+    }
 
-    pub const fn recovery_required(self) -> bool { matches!(self, Self::RecoveryRequired | Self::Critical) }
+    pub const fn recovery_required(self) -> bool {
+        matches!(self, Self::RecoveryRequired | Self::Critical)
+    }
 
     pub const fn as_log_value(self) -> &'static str {
         match self {
@@ -191,11 +195,17 @@ impl HlsManifestAcceptanceEpisode {
         }
     }
 
-    pub fn required_candidates(&self) -> usize { self.burst_plan.total_candidates() }
+    pub fn required_candidates(&self) -> usize {
+        self.burst_plan.total_candidates()
+    }
 
-    pub const fn trigger(&self) -> HlsManifestAcceptanceTrigger { self.trigger }
+    pub const fn trigger(&self) -> HlsManifestAcceptanceTrigger {
+        self.trigger
+    }
 
-    pub const fn timing(&self) -> HlsAcceptanceEpisodeTiming { self.timing }
+    pub const fn timing(&self) -> HlsAcceptanceEpisodeTiming {
+        self.timing
+    }
 
     pub fn deterministic_conflict_receipt(&self) -> Option<&HlsDeterministicConflictReceipt> {
         self.deterministic_conflict_receipt.as_ref()
@@ -382,7 +392,9 @@ impl HlsManifestAcceptanceEpisode {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn record_full_burst(&mut self) { self.record_full_burst_candidates(self.required_candidates()); }
+    pub fn record_full_burst(&mut self) {
+        self.record_full_burst_candidates(self.required_candidates());
+    }
 
     pub fn record_full_burst_candidates(&mut self, completed_candidates: usize) {
         self.completed_burst_candidates = completed_candidates.min(self.required_candidates());
@@ -587,7 +599,9 @@ pub enum HlsSwitchSegmentReadiness {
 }
 
 impl HlsSwitchSegmentReadiness {
-    const fn can_be_staged(self) -> bool { matches!(self, Self::RequiresStaging) }
+    const fn can_be_staged(self) -> bool {
+        matches!(self, Self::RequiresStaging)
+    }
 }
 
 /// Manifest-level eligibility for the Critical single-candidate path. Track
@@ -628,7 +642,9 @@ pub enum HlsResourceTimelineEvidence {
 }
 
 impl HlsResourceTimelineEvidence {
-    const fn permits_acceptance(self) -> bool { matches!(self, Self::Eligible) }
+    const fn permits_acceptance(self) -> bool {
+        matches!(self, Self::Eligible)
+    }
 }
 
 impl HlsEmergencyAcceptanceEvidence {
@@ -709,7 +725,9 @@ pub enum HlsReducedRetryLandscapeChange {
 }
 
 impl HlsReducedRetryLandscapeChange {
-    pub const fn requires_full_requalification(self) -> bool { !matches!(self, Self::Unchanged) }
+    pub const fn requires_full_requalification(self) -> bool {
+        !matches!(self, Self::Unchanged)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

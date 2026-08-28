@@ -19,7 +19,9 @@ pub const DEFAULT_DOWNLOAD_DIR: &str = "downloads";
 pub const DEFAULT_STORAGE_DIR: &str = "data"; // TODO rename to storage and use data for config, storage, ...
 pub const DEFAULT_CUSTOM_STREAM_RESPONSE_PATH: &str = "resources";
 
-pub fn get_default_web_root() -> String { DEFAULT_WEB_DIR.to_string() }
+pub fn get_default_web_root() -> String {
+    DEFAULT_WEB_DIR.to_string()
+}
 pub fn is_blank_or_default_web_root(value: &str) -> bool {
     let normalized = value.trim().replace('\\', "/");
     if normalized.is_empty() {
@@ -42,16 +44,34 @@ pub fn is_default_dir_path(value: &str, default_dir: &str) -> bool {
 pub fn is_blank_or_default_download_dir(path: &Option<String>) -> bool {
     path.as_ref().is_none_or(|value| value.trim().is_empty() || is_default_dir_path(value, DEFAULT_DOWNLOAD_DIR))
 }
-pub fn default_download_dir() -> Option<String> { Some(DEFAULT_DOWNLOAD_DIR.to_string()) }
+pub fn default_download_dir() -> Option<String> {
+    Some(DEFAULT_DOWNLOAD_DIR.to_string())
+}
 
-pub fn default_main_storage_dir() -> Option<String> { Some(DEFAULT_STORAGE_DIR.to_string()) }
-pub fn default_main_backup_dir() -> Option<String> { Some(DEFAULT_BACKUP_DIR.to_string()) }
-pub fn default_main_user_config_dir() -> Option<String> { Some(DEFAULT_USER_CONFIG_DIR.to_string()) }
-pub fn default_main_mapping_path() -> Option<String> { Some(format!("./{CONFIG_PATH}/{MAPPING_FILE}")) }
-pub fn default_main_template_path() -> Option<String> { Some(format!("./{CONFIG_PATH}/{TEMPLATE_FILE}")) }
-pub fn default_custom_stream_response_path() -> Option<String> { Some(DEFAULT_CUSTOM_STREAM_RESPONSE_PATH.to_string()) }
-pub fn default_user_file_path() -> Option<String> { Some(format!("./{CONFIG_PATH}/{USER_FILE}")) }
-pub fn default_user_group_file_path() -> Option<String> { Some(format!("./{CONFIG_PATH}/{USER_GROUP_FILE}")) }
+pub fn default_main_storage_dir() -> Option<String> {
+    Some(DEFAULT_STORAGE_DIR.to_string())
+}
+pub fn default_main_backup_dir() -> Option<String> {
+    Some(DEFAULT_BACKUP_DIR.to_string())
+}
+pub fn default_main_user_config_dir() -> Option<String> {
+    Some(DEFAULT_USER_CONFIG_DIR.to_string())
+}
+pub fn default_main_mapping_path() -> Option<String> {
+    Some(format!("./{CONFIG_PATH}/{MAPPING_FILE}"))
+}
+pub fn default_main_template_path() -> Option<String> {
+    Some(format!("./{CONFIG_PATH}/{TEMPLATE_FILE}"))
+}
+pub fn default_custom_stream_response_path() -> Option<String> {
+    Some(DEFAULT_CUSTOM_STREAM_RESPONSE_PATH.to_string())
+}
+pub fn default_user_file_path() -> Option<String> {
+    Some(format!("./{CONFIG_PATH}/{USER_FILE}"))
+}
+pub fn default_user_group_file_path() -> Option<String> {
+    Some(format!("./{CONFIG_PATH}/{USER_GROUP_FILE}"))
+}
 
 fn is_default_config_file_path(value: &str, file_name: &str) -> bool {
     let normalized = value.trim().replace('\\', "/");

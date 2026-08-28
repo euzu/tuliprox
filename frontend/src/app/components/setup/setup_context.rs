@@ -87,15 +87,21 @@ impl SetupStep {
         Self::Finish,
     ];
 
-    pub fn all() -> &'static [Self] { &Self::ORDER }
+    pub fn all() -> &'static [Self] {
+        &Self::ORDER
+    }
 
     pub fn index(self) -> usize {
         Self::all().iter().position(|step| *step == self).expect("SetupStep::ORDER must include all variants")
     }
 
-    pub fn position(self) -> usize { self.index() + 1 }
+    pub fn position(self) -> usize {
+        self.index() + 1
+    }
 
-    pub fn total() -> usize { Self::ORDER.len() }
+    pub fn total() -> usize {
+        Self::ORDER.len()
+    }
 
     pub fn next(self) -> Option<Self> {
         let index = self.index();
@@ -211,7 +217,9 @@ impl fmt::Display for SetupStep {
 }
 
 impl Internable for SetupStep {
-    fn intern(self) -> Arc<str> { self.as_str().intern() }
+    fn intern(self) -> Arc<str> {
+        self.as_str().intern()
+    }
 }
 
 #[derive(Default, Debug, Clone, PartialEq)]
@@ -220,9 +228,13 @@ pub struct SetupConfigFormState {
 }
 
 impl SetupConfigFormState {
-    pub fn update_form(&mut self, form: ConfigForm) { self.slots.update_form(form); }
+    pub fn update_form(&mut self, form: ConfigForm) {
+        self.slots.update_form(form);
+    }
 
-    pub fn collect_modified_forms(&self) -> Vec<ConfigForm> { self.slots.collect_modified_forms() }
+    pub fn collect_modified_forms(&self) -> Vec<ConfigForm> {
+        self.slots.collect_modified_forms()
+    }
 }
 
 #[derive(Clone)]
@@ -241,7 +253,9 @@ pub struct SetupContext {
 }
 
 impl PartialEq for SetupContext {
-    fn eq(&self, _other: &Self) -> bool { false }
+    fn eq(&self, _other: &Self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

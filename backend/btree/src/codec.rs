@@ -9,7 +9,9 @@ use log::error;
 use std::io;
 
 #[inline]
-fn encode_error<E: std::error::Error>(error: E) -> io::Error { io::Error::other(error.to_string()) }
+fn encode_error<E: std::error::Error>(error: E) -> io::Error {
+    io::Error::other(error.to_string())
+}
 
 #[inline]
 pub(crate) fn binary_serialize<T>(value: &T) -> io::Result<Vec<u8>>

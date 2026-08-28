@@ -73,7 +73,9 @@ pub struct HlsCorruptSegmentWatchdogManager {
 }
 
 impl HlsCorruptSegmentWatchdogManager {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub async fn clear_runtime_state(&self) {
         self.metadata.write().await.clear();

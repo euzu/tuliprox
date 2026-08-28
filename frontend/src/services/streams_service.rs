@@ -7,7 +7,9 @@ pub struct StreamsService {
 }
 
 impl Default for StreamsService {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl StreamsService {

@@ -22,7 +22,9 @@ where
 }
 
 impl AuthBearer {
-    fn from_header(contents: &str) -> Self { Self(contents.to_string()) }
+    fn from_header(contents: &str) -> Self {
+        Self(contents.to_string())
+    }
 
     pub fn from_headers(headers: &HeaderMap) -> Result<Self, Rejection> {
         let authorization = headers
@@ -38,5 +40,7 @@ impl AuthBearer {
         }
     }
 
-    fn decode_request_parts(req: &mut Parts) -> Result<Self, Rejection> { Self::from_headers(&req.headers) }
+    fn decode_request_parts(req: &mut Parts) -> Result<Self, Rejection> {
+        Self::from_headers(&req.headers)
+    }
 }

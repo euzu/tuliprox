@@ -13,7 +13,9 @@ pub enum CellValue<'a> {
 }
 
 impl PartialOrd for CellValue<'_> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl Ord for CellValue<'_> {
@@ -55,7 +57,9 @@ impl Ord for CellValue<'_> {
 }
 
 impl PartialEq for CellValue<'_> {
-    fn eq(&self, other: &Self) -> bool { self.cmp(other) == std::cmp::Ordering::Equal }
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
 }
 
 impl Eq for CellValue<'_> {}

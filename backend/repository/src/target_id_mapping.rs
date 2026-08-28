@@ -38,7 +38,9 @@ impl VirtualIdRecord {
         Self { virtual_id, provider_id, uuid, item_type, parent_virtual_id, last_updated }
     }
 
-    pub fn is_expired(&self) -> bool { (Local::now().timestamp() - self.last_updated) > EXPIRATION_DURATION }
+    pub fn is_expired(&self) -> bool {
+        (Local::now().timestamp() - self.last_updated) > EXPIRATION_DURATION
+    }
 
     pub fn copy_update_timestamp(&self) -> Self {
         Self::new(self.provider_id, self.virtual_id, self.item_type, self.parent_virtual_id, self.uuid)
@@ -46,7 +48,9 @@ impl VirtualIdRecord {
 }
 
 /// Helper to get UUID index path from primary path
-fn get_uuid_index_path(path: &Path) -> PathBuf { path.with_extension("uuid.db") }
+fn get_uuid_index_path(path: &Path) -> PathBuf {
+    path.with_extension("uuid.db")
+}
 
 /// Ensure B+tree file exists, creating empty if needed
 fn ensure_tree_file<K, V>(path: &Path) -> std::io::Result<()>
@@ -240,7 +244,9 @@ impl TargetIdMapping {
             .collect()
     }
 
-    pub fn get_virtual_id_by_uuid(&self, uuid: &UUIDType) -> Option<VirtualId> { self.mem_by_uuid.get(uuid).copied() }
+    pub fn get_virtual_id_by_uuid(&self, uuid: &UUIDType) -> Option<VirtualId> {
+        self.mem_by_uuid.get(uuid).copied()
+    }
 
     pub fn get_parent_virtual_id_by_uuid(&self, uuid: &UUIDType) -> Option<VirtualId> {
         self.get_virtual_id_by_uuid(uuid)

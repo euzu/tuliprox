@@ -10,7 +10,9 @@ pub struct PlansConfigDto {
 }
 
 impl PlansConfigDto {
-    pub fn is_empty(&self) -> bool { self.plans.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.plans.is_empty()
+    }
 
     pub fn prepare(&mut self) -> Result<(), TuliproxError> {
         let mut errors = Vec::new();

@@ -41,8 +41,12 @@ impl StreamMeterHandle {
         }
     }
 
-    pub fn meter_uid(&self) -> u32 { self.meter_uid }
-    pub fn bytes_total(&self) -> u64 { self.bytes_total.load(Ordering::Relaxed) }
+    pub fn meter_uid(&self) -> u32 {
+        self.meter_uid
+    }
+    pub fn bytes_total(&self) -> u64 {
+        self.bytes_total.load(Ordering::Relaxed)
+    }
 
     /// Returns the first-byte latency in milliseconds, or `None` if no bytes were received.
     pub fn first_byte_latency_ms(&self) -> Option<u64> {
@@ -54,7 +58,9 @@ impl StreamMeterHandle {
         }
     }
 
-    pub fn mark_attached(&self) { self.attached.store(true, Ordering::Release); }
+    pub fn mark_attached(&self) {
+        self.attached.store(true, Ordering::Release);
+    }
 
     pub fn record_bytes(&self, len: u64) {
         self.bytes_total.fetch_add(len, Ordering::Relaxed);

@@ -72,7 +72,9 @@ impl<T> LockedReceiverStream<T> {
     /// on-disk playlist. It is safe for ghost/closed channels where the stream
     /// is semantically empty from the start, for example
     /// `XtreamPlaylistIterator::empty()`.
-    pub fn new_empty(rx: mpsc::Receiver<T>) -> Self { Self { rx: ReceiverStream::new(rx), _guard: None } }
+    pub fn new_empty(rx: mpsc::Receiver<T>) -> Self {
+        Self { rx: ReceiverStream::new(rx), _guard: None }
+    }
 
     /// Creates a stream that holds `guard` for its whole lifetime when `Some`.
     ///

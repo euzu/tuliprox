@@ -111,7 +111,9 @@ pub enum SegmentCacheStatus {
 
 impl SegmentCacheStatus {
     /// True only while local capacity owns a concrete revision-bound retry.
-    pub const fn awaits_capacity_recovery(&self) -> bool { matches!(self, Self::CapacityDeferred { .. }) }
+    pub const fn awaits_capacity_recovery(&self) -> bool {
+        matches!(self, Self::CapacityDeferred { .. })
+    }
 }
 
 /// Mutable access counters shared with response streams without holding a session lock.
@@ -122,7 +124,9 @@ pub struct CacheAccessState {
 }
 
 impl CacheAccessState {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub fn reader_started(&self, now_ms: u64) {
         self.active_readers.fetch_add(1, Ordering::AcqRel);
@@ -139,9 +143,13 @@ impl CacheAccessState {
         }
     }
 
-    pub fn active_readers(&self) -> u32 { self.active_readers.load(Ordering::Acquire) }
+    pub fn active_readers(&self) -> u32 {
+        self.active_readers.load(Ordering::Acquire)
+    }
 
-    pub fn last_accessed_at_ms(&self) -> u64 { self.last_accessed_at_ms.load(Ordering::Acquire) }
+    pub fn last_accessed_at_ms(&self) -> u64 {
+        self.last_accessed_at_ms.load(Ordering::Acquire)
+    }
 }
 
 impl PartialEq for CacheAccessState {
@@ -277,7 +285,9 @@ pub enum HlsOriginHandoffPreviewError {
 }
 
 impl From<TimelineMapError> for HlsOriginHandoffPreviewError {
-    fn from(value: TimelineMapError) -> Self { Self::Timeline(value) }
+    fn from(value: TimelineMapError) -> Self {
+        Self::Timeline(value)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -986,7 +996,9 @@ mod tests {
 
     const BASE_URL: &str = "http://origin.example.com/live/final/index.m3u8";
 
-    fn session() -> HlsSession { HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0) }
+    fn session() -> HlsSession {
+        HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0)
+    }
 
     fn origin_key(epoch: u64, host: &str, sequence: u64, index: u32) -> OriginSegmentKey {
         OriginSegmentKey {

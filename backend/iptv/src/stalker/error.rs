@@ -18,11 +18,15 @@ pub fn safe_stalker_url(value: &str) -> String {
 pub struct StalkerErrorUrl(String);
 
 impl From<&str> for StalkerErrorUrl {
-    fn from(value: &str) -> Self { Self(safe_stalker_url(value)) }
+    fn from(value: &str) -> Self {
+        Self(safe_stalker_url(value))
+    }
 }
 
 impl From<String> for StalkerErrorUrl {
-    fn from(value: String) -> Self { Self::from(value.as_str()) }
+    fn from(value: String) -> Self {
+        Self::from(value.as_str())
+    }
 }
 
 /// Failure modes surfaced by the Stalker portal client. The variants cover both transport

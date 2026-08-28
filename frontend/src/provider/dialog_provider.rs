@@ -38,7 +38,9 @@ struct DialogEntry {
 
 // Entries are immutable once pushed, so the id fully determines identity.
 impl PartialEq for DialogEntry {
-    fn eq(&self, other: &Self) -> bool { self.id == other.id }
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
 }
 
 #[derive(Default)]

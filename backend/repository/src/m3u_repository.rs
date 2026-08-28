@@ -59,7 +59,9 @@ pub fn m3u_get_epg_file_path_for_target(target_path: &Path) -> PathBuf {
 }
 
 #[inline]
-pub fn m3u_get_storage_path(cfg: &Config, target_name: &str) -> Option<PathBuf> { M3u::storage_path(cfg, target_name) }
+pub fn m3u_get_storage_path(cfg: &Config, target_name: &str) -> Option<PathBuf> {
+    M3u::storage_path(cfg, target_name)
+}
 
 #[inline]
 pub async fn ensure_m3u_storage_path(cfg: &Config, target_name: &str) -> Result<PathBuf, TuliproxError> {

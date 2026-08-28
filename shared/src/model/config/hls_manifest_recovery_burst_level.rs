@@ -18,7 +18,9 @@ pub struct HlsManifestRecoveryBurstPlan {
 }
 
 impl HlsManifestRecoveryBurstPlan {
-    pub const fn total_candidates(self) -> usize { self.slots.saturating_mul(self.lanes_per_slot) }
+    pub const fn total_candidates(self) -> usize {
+        self.slots.saturating_mul(self.lanes_per_slot)
+    }
 
     pub const fn slot_for_candidate(self, candidate_index: usize) -> usize {
         match candidate_index.checked_div(self.lanes_per_slot) {
@@ -44,9 +46,13 @@ impl HlsManifestRecoveryBurstLevel {
         }
     }
 
-    pub const fn extra_candidates(self) -> usize { self.plan().total_candidates().saturating_sub(1) }
+    pub const fn extra_candidates(self) -> usize {
+        self.plan().total_candidates().saturating_sub(1)
+    }
 
-    pub const fn total_candidates(self) -> usize { self.plan().total_candidates() }
+    pub const fn total_candidates(self) -> usize {
+        self.plan().total_candidates()
+    }
 }
 
 crate::impl_str_enum!(HlsManifestRecoveryBurstLevel, "HLS manifest recovery burst level",

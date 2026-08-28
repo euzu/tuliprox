@@ -20,11 +20,17 @@ impl BatchResultCollector {
         }
     }
 
-    pub fn add_vod(&mut self, id: ProviderIdType, props: VideoStreamProperties) { self.vod.push((id, props)); }
+    pub fn add_vod(&mut self, id: ProviderIdType, props: VideoStreamProperties) {
+        self.vod.push((id, props));
+    }
 
-    pub fn add_series(&mut self, id: ProviderIdType, props: SeriesStreamProperties) { self.series.push((id, props)); }
+    pub fn add_series(&mut self, id: ProviderIdType, props: SeriesStreamProperties) {
+        self.series.push((id, props));
+    }
 
-    pub fn add_live(&mut self, id: ProviderIdType, props: LiveStreamProperties) { self.live.push((id, props)); }
+    pub fn add_live(&mut self, id: ProviderIdType, props: LiveStreamProperties) {
+        self.live.push((id, props));
+    }
 
     pub fn should_flush(&self) -> bool {
         self.vod.len() >= BATCH_THRESHOLD || self.series.len() >= BATCH_THRESHOLD || self.live.len() >= BATCH_THRESHOLD
@@ -54,5 +60,7 @@ impl BatchResultCollector {
         }
     }
 
-    pub fn is_empty(&self) -> bool { self.vod.is_empty() && self.series.is_empty() && self.live.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.vod.is_empty() && self.series.is_empty() && self.live.is_empty()
+    }
 }

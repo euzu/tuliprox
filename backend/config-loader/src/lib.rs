@@ -64,12 +64,16 @@ impl ReadConfigOptions {
     // Expand environment variables and include all computed fields — the typical
     // production default.
     #[must_use]
-    pub const fn resolve_and_compute() -> Self { Self { resolve_env: true, include_computed: true } }
+    pub const fn resolve_and_compute() -> Self {
+        Self { resolve_env: true, include_computed: true }
+    }
 
     // Parse the raw YAML without any variable expansion or computed fields —
     // useful when you need the literal, unexpanded content (e.g. before saving).
     #[must_use]
-    pub const fn raw() -> Self { Self { resolve_env: false, include_computed: false } }
+    pub const fn raw() -> Self {
+        Self { resolve_env: false, include_computed: false }
+    }
 }
 
 pub struct PreparedTemplateBundle {

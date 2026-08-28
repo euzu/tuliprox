@@ -144,7 +144,9 @@ fn unexpected_response_error(message: String) -> Error {
 }
 
 const TOKEN_KEY: &str = "tuliprox.token";
-pub fn get_token() -> Option<String> { LocalStorage::get(TOKEN_KEY).ok() }
+pub fn get_token() -> Option<String> {
+    LocalStorage::get(TOKEN_KEY).ok()
+}
 
 pub fn set_token(token: Option<&str>) {
     if let Some(t) = token {

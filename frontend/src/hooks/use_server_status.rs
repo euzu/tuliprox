@@ -23,7 +23,9 @@ use yew::{platform::spawn_local, prelude::*};
 type ServerStatusState =
     (UseStateHandle<RefCell<Option<Rc<StatusCheck>>>>, UseStateHandle<RefCell<Option<Rc<SystemInfo>>>>);
 
-fn stream_identity_key(stream: &StreamInfo) -> (SocketAddr, u32) { (stream.addr, stream.uid) }
+fn stream_identity_key(stream: &StreamInfo) -> (SocketAddr, u32) {
+    (stream.addr, stream.uid)
+}
 
 fn stream_url_looks_adaptive(url: &str) -> bool {
     contains_ascii_case_insensitive(url, b".m3u8") || contains_ascii_case_insensitive(url, b".mpd")
@@ -121,7 +123,9 @@ fn mark_sticky_session_preserved(stream: &mut StreamInfo) -> bool {
     }
 }
 
-fn is_running_download(download: &FileDownloadDto) -> bool { download.status == TransferStatusDto::Running }
+fn is_running_download(download: &FileDownloadDto) -> bool {
+    download.status == TransferStatusDto::Running
+}
 
 fn download_stream_uid(id: &str) -> u32 {
     let mut hasher = DefaultHasher::new();

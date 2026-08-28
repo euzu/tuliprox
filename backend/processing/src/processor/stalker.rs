@@ -473,7 +473,9 @@ pub async fn re_resolve_stalker_url(
 mod tests {
     use super::*;
 
-    fn runtime_cfg() -> StalkerInputConfig { StalkerInputConfig::default() }
+    fn runtime_cfg() -> StalkerInputConfig {
+        StalkerInputConfig::default()
+    }
 
     #[test]
     fn runtime_client_cache_key_changes_with_endpoint_preference() {

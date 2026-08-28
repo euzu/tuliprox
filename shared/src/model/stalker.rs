@@ -23,7 +23,9 @@ pub enum StalkerAuthMode {
 
 impl StalkerAuthMode {
     #[inline]
-    pub fn is_default(value: &StalkerAuthMode) -> bool { matches!(value, Self::Auto) }
+    pub fn is_default(value: &StalkerAuthMode) -> bool {
+        matches!(value, Self::Auto)
+    }
 }
 
 /// Pre-baked MAG device profiles. The values are derived from
@@ -47,7 +49,9 @@ pub enum StalkerMagPreset {
 
 impl StalkerMagPreset {
     #[inline]
-    pub fn is_default(value: &StalkerMagPreset) -> bool { matches!(value, Self::GenericSafe) }
+    pub fn is_default(value: &StalkerMagPreset) -> bool {
+        matches!(value, Self::GenericSafe)
+    }
 }
 
 /// User override for sibling endpoint selection (`server/load.php` vs `portal.php`).
@@ -65,7 +69,9 @@ pub enum StalkerEndpointPreference {
 
 impl StalkerEndpointPreference {
     #[inline]
-    pub fn is_default(value: &StalkerEndpointPreference) -> bool { matches!(value, Self::Auto) }
+    pub fn is_default(value: &StalkerEndpointPreference) -> bool {
+        matches!(value, Self::Auto)
+    }
 }
 
 /// Playback strategy that the resolved stream URL supports. The chosen mode drives
@@ -179,9 +185,15 @@ pub struct StalkerActionSizeCapDto {
     pub get_epg_mb: u32,
 }
 
-const fn default_create_link_kb() -> u32 { 64 }
-const fn default_ordered_list_mb() -> u32 { 8 }
-const fn default_get_epg_mb() -> u32 { 64 }
+const fn default_create_link_kb() -> u32 {
+    64
+}
+const fn default_ordered_list_mb() -> u32 {
+    8
+}
+const fn default_get_epg_mb() -> u32 {
+    64
+}
 
 impl Default for StalkerActionSizeCapDto {
     fn default() -> Self {
@@ -194,9 +206,13 @@ impl Default for StalkerActionSizeCapDto {
 }
 
 impl StalkerActionSizeCapDto {
-    pub fn is_default(&self) -> bool { *self == Self::default() }
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 
-    pub fn clean(&mut self) { *self = Self::default(); }
+    pub fn clean(&mut self) {
+        *self = Self::default();
+    }
 }
 
 /// Stalker device identity (MAC + derived hashes). When the user does not

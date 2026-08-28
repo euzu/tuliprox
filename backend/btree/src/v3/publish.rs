@@ -44,7 +44,9 @@ impl BPlusTreeArtifactPaths {
         first_error.map_or(Ok(()), Err)
     }
 
-    fn paths(&self) -> [&Path; 5] { [&self.database, &self.index, &self.wal, &self.wal_temporary, &self.sidecar_lock] }
+    fn paths(&self) -> [&Path; 5] {
+        [&self.database, &self.index, &self.wal, &self.wal_temporary, &self.sidecar_lock]
+    }
 
     fn ensure_disjoint_from(&self, published: &Self) -> io::Result<()> {
         let mut published_identities = Vec::with_capacity(5);
@@ -84,7 +86,9 @@ impl BPlusTreeStagingArtifacts {
         Ok(Self(staging_artifacts))
     }
 
-    pub fn remove_owned_staging_artifacts(&self) -> io::Result<()> { self.0.remove_all() }
+    pub fn remove_owned_staging_artifacts(&self) -> io::Result<()> {
+        self.0.remove_all()
+    }
 
     /// Fixture/assertion helper: the five files this staging set owns.
     #[cfg(any(test, feature = "test-support"))]
@@ -229,9 +233,13 @@ mod tests {
     struct KillChildOnDrop(Option<Child>);
 
     impl KillChildOnDrop {
-        fn spawn(command: &mut Command) -> io::Result<Self> { command.spawn().map(|child| Self(Some(child))) }
+        fn spawn(command: &mut Command) -> io::Result<Self> {
+            command.spawn().map(|child| Self(Some(child)))
+        }
 
-        fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> { self.0.as_mut().map_or(Ok(None), Child::try_wait) }
+        fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+            self.0.as_mut().map_or(Ok(None), Child::try_wait)
+        }
 
         fn wait_until(&mut self, deadline: Instant) -> io::Result<ExitStatus> {
             loop {

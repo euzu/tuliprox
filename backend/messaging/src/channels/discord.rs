@@ -19,17 +19,27 @@ pub struct DiscordChannel {
 }
 
 impl DiscordChannel {
-    pub fn new(config: DiscordMessagingConfig, client: reqwest::Client) -> Self { Self { config, client } }
+    pub fn new(config: DiscordMessagingConfig, client: reqwest::Client) -> Self {
+        Self { config, client }
+    }
 }
 
 impl NotificationChannel for DiscordChannel {
-    fn id(&self) -> &'static str { "discord" }
+    fn id(&self) -> &'static str {
+        "discord"
+    }
 
-    fn template_for(&self, event: EventId) -> Option<&str> { self.config.templates.get(&event).map(String::as_str) }
+    fn template_for(&self, event: EventId) -> Option<&str> {
+        self.config.templates.get(&event).map(String::as_str)
+    }
 
-    fn routing(&self) -> &ChannelRouting { &self.config.routing }
+    fn routing(&self) -> &ChannelRouting {
+        &self.config.routing
+    }
 
-    fn wants(&self, event: EventId, severity: Severity) -> bool { self.config.routing.accepts(event, severity) }
+    fn wants(&self, event: EventId, severity: Severity) -> bool {
+        self.config.routing.accepts(event, severity)
+    }
 
     async fn send(&self, msg: &RenderedMessage<'_>) -> Delivery {
         {
@@ -63,5 +73,7 @@ impl NotificationChannel for DiscordChannel {
         }
     }
 
-    fn capabilities(&self) -> ChannelCapabilities { ChannelCapabilities::default() }
+    fn capabilities(&self) -> ChannelCapabilities {
+        ChannelCapabilities::default()
+    }
 }

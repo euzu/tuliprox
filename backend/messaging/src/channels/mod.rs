@@ -64,19 +64,29 @@ macro_rules! delegate {
 impl Channel {
     /// Stable wire id: config key, outbox key, metric label, template prefix.
     #[must_use]
-    pub fn id(&self) -> &'static str { delegate!(self, c => c.id()) }
+    pub fn id(&self) -> &'static str {
+        delegate!(self, c => c.id())
+    }
 
     #[must_use]
-    pub fn capabilities(&self) -> ChannelCapabilities { delegate!(self, c => c.capabilities()) }
+    pub fn capabilities(&self) -> ChannelCapabilities {
+        delegate!(self, c => c.capabilities())
+    }
 
     #[must_use]
-    pub fn template_for(&self, event: EventId) -> Option<&str> { delegate!(self, c => c.template_for(event)) }
+    pub fn template_for(&self, event: EventId) -> Option<&str> {
+        delegate!(self, c => c.template_for(event))
+    }
 
     #[must_use]
-    pub fn routing(&self) -> &ChannelRouting { delegate!(self, c => c.routing()) }
+    pub fn routing(&self) -> &ChannelRouting {
+        delegate!(self, c => c.routing())
+    }
 
     #[must_use]
-    pub fn wants(&self, event: EventId, severity: Severity) -> bool { delegate!(self, c => c.wants(event, severity)) }
+    pub fn wants(&self, event: EventId, severity: Severity) -> bool {
+        delegate!(self, c => c.wants(event, severity))
+    }
 
     /// Deliver through the concrete channel.
     ///
@@ -121,7 +131,9 @@ fn channel_client(app_config: &Arc<AppConfig>) -> reqwest::Client {
 /// Invalidated on config reload via [`invalidate`].
 static CACHE: OnceLock<RwLock<Option<ChannelSet>>> = OnceLock::new();
 
-fn cache() -> &'static RwLock<Option<ChannelSet>> { CACHE.get_or_init(|| RwLock::new(None)) }
+fn cache() -> &'static RwLock<Option<ChannelSet>> {
+    CACHE.get_or_init(|| RwLock::new(None))
+}
 
 /// Drop the cached channel set. Call on config reload.
 pub fn invalidate() {

@@ -6,7 +6,9 @@ pub enum ScheduleTaskType {
     GeoIpUpdate,
 }
 
-const fn default_schedule_task_type() -> ScheduleTaskType { ScheduleTaskType::PlaylistUpdate }
+const fn default_schedule_task_type() -> ScheduleTaskType {
+    ScheduleTaskType::PlaylistUpdate
+}
 
 fn parse_schedule_task_type(value: &str) -> Option<ScheduleTaskType> {
     match value.trim().to_ascii_lowercase().as_str() {

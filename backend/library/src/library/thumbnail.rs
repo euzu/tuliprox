@@ -2,7 +2,9 @@ use std::path::Path;
 use tuliprox_core::{model::ThumbnailConfig, utils::ffmpeg::FfmpegExecutor};
 
 /// Computes a stable BLAKE3 hash for a file path (or URL).
-pub fn file_hash(path: &str) -> String { blake3::hash(path.as_bytes()).to_hex().to_string() }
+pub fn file_hash(path: &str) -> String {
+    blake3::hash(path.as_bytes()).to_hex().to_string()
+}
 
 pub struct ThumbnailExtractor {
     config: ThumbnailConfig,
@@ -10,7 +12,9 @@ pub struct ThumbnailExtractor {
 }
 
 impl ThumbnailExtractor {
-    pub fn new(config: ThumbnailConfig) -> Self { Self { config, ffmpeg: FfmpegExecutor::new() } }
+    pub fn new(config: ThumbnailConfig) -> Self {
+        Self { config, ffmpeg: FfmpegExecutor::new() }
+    }
 
     /// Extracts a thumbnail from a local file. Returns JPEG bytes on success.
     ///

@@ -257,17 +257,23 @@ struct RankedHistoryRecord {
 }
 
 impl PartialEq for RankedHistoryRecord {
-    fn eq(&self, other: &Self) -> bool { compare_history_records(&self.record, &other.record).is_eq() }
+    fn eq(&self, other: &Self) -> bool {
+        compare_history_records(&self.record, &other.record).is_eq()
+    }
 }
 
 impl Eq for RankedHistoryRecord {}
 
 impl PartialOrd for RankedHistoryRecord {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl Ord for RankedHistoryRecord {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering { compare_history_records(&self.record, &other.record) }
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        compare_history_records(&self.record, &other.record)
+    }
 }
 
 struct TopHistoryPageCollector {

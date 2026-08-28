@@ -154,7 +154,9 @@ pub fn cancel_targets_task(task_active: bool, task_editable: bool) -> bool {
 /// Existing tasks keep their `rule_id` so reconciliation can still
 /// group them. The caller does not modify the task's metadata; it
 /// only sets the rule's `enabled = false`.
-pub fn retain_targets_task(_task_uuid: &str) -> bool { true }
+pub fn retain_targets_task(_task_uuid: &str) -> bool {
+    true
+}
 
 /// A summary the HTTP handler can serialize when the cross-store
 /// second step fails. The response carries a partial-operation
@@ -184,9 +186,15 @@ mod tests {
         UserId,
     };
 
-    fn user() -> UserId { UserId::from("web:alice") }
-    fn other() -> UserId { UserId::from("web:bob") }
-    fn admin() -> UserId { UserId::from("builtin:admin") }
+    fn user() -> UserId {
+        UserId::from("web:alice")
+    }
+    fn other() -> UserId {
+        UserId::from("web:bob")
+    }
+    fn admin() -> UserId {
+        UserId::from("builtin:admin")
+    }
 
     fn private_rule(owner: UserId) -> RecordingRule {
         RecordingRule {

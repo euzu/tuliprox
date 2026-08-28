@@ -36,7 +36,9 @@ pub struct EpgSmartMatchFormData {
 }
 
 impl Default for EpgSmartMatchFormData {
-    fn default() -> Self { Self::from(EpgSmartMatchConfigDto::default()) }
+    fn default() -> Self {
+        Self::from(EpgSmartMatchConfigDto::default())
+    }
 }
 
 impl From<EpgSmartMatchConfigDto> for EpgSmartMatchFormData {

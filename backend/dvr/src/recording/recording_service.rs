@@ -118,7 +118,9 @@ pub enum ServiceError {
 }
 
 impl std::fmt::Display for ServiceError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(self.code()) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.code())
+    }
 }
 
 impl std::error::Error for ServiceError {}
@@ -253,7 +255,9 @@ pub struct RecordingService {
 
 impl RecordingService {
     /// Construct from the queue and app config.
-    pub fn new(downloads: Arc<DownloadQueue>, app_config: Arc<AppConfig>) -> Self { Self { downloads, app_config } }
+    pub fn new(downloads: Arc<DownloadQueue>, app_config: Arc<AppConfig>) -> Self {
+        Self { downloads, app_config }
+    }
 
     /// Convenience constructor from the DVR's context.
     pub fn from_ctx<E: EventSink + Clone + 'static>(ctx: &RecordingCtx<E>) -> Self {
@@ -881,7 +885,9 @@ fn is_windows_reserved_stem(value: &str) -> bool {
     WINDOWS_RESERVED_STEMS.iter().any(|reserved| stem.eq_ignore_ascii_case(reserved))
 }
 
-fn render_filename_preview(input: &CreateRecordingInput) -> String { sanitize_filename_component(&input.program_title) }
+fn render_filename_preview(input: &CreateRecordingInput) -> String {
+    sanitize_filename_component(&input.program_title)
+}
 
 fn authorize_create_recording(
     claims: &shared::model::Claims,
@@ -1507,7 +1513,7 @@ mod tests {
             iss: "tuliprox".to_string(),
             iat: 0,
             exp: 0,
-            roles: Vec::new(),
+            roles: shared::model::RoleSet::new(),
             permissions: Permission::RecordingWrite.into(),
             pwd_version: 0,
             subject_id: Some(UserId::from("web:alice")),
@@ -1540,7 +1546,7 @@ mod tests {
             iss: "tuliprox".to_string(),
             iat: 0,
             exp: 0,
-            roles: Vec::new(),
+            roles: shared::model::RoleSet::new(),
             permissions: Permission::RecordingWrite.into(),
             pwd_version: 0,
             subject_id: Some(UserId::from("web:alice")),
@@ -1582,7 +1588,7 @@ mod tests {
             iss: "tuliprox".to_string(),
             iat: 0,
             exp: 0,
-            roles: Vec::new(),
+            roles: shared::model::RoleSet::new(),
             permissions: Permission::RecordingWrite.into(),
             pwd_version: 0,
             subject_id: Some(UserId::from("web:alice")),
@@ -1690,7 +1696,7 @@ mod tests {
             iss: "tuliprox".to_string(),
             iat: 0,
             exp: 0,
-            roles: Vec::new(),
+            roles: shared::model::RoleSet::new(),
             permissions: Permission::RecordingWrite.into(),
             pwd_version: 0,
             subject_id: Some(UserId::from("web:alice")),
@@ -1723,7 +1729,7 @@ mod tests {
             iss: "tuliprox".to_string(),
             iat: 0,
             exp: 0,
-            roles: Vec::new(),
+            roles: shared::model::RoleSet::new(),
             permissions: Permission::RecordingWrite.into(),
             pwd_version: 0,
             subject_id: Some(UserId::from("web:alice")),
@@ -1763,7 +1769,7 @@ mod tests {
             iss: "tuliprox".to_string(),
             iat: 0,
             exp: 0,
-            roles: Vec::new(),
+            roles: shared::model::RoleSet::new(),
             permissions: Permission::RecordingWrite.into(),
             pwd_version: 0,
             subject_id: Some(UserId::from("web:alice")),

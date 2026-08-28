@@ -245,7 +245,9 @@ pub struct XtreamSeriesInfoEpisode {
 }
 
 impl XtreamSeriesInfoEpisode {
-    pub fn get_id(&self) -> u32 { self.id }
+    pub fn get_id(&self) -> u32 {
+        self.id
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

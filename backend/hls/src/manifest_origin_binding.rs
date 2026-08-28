@@ -27,9 +27,13 @@ impl HlsManifestOriginBinding {
         Ok(Self { request_url, provider_url_index })
     }
 
-    pub fn request_url(&self) -> &Url { &self.request_url }
+    pub fn request_url(&self) -> &Url {
+        &self.request_url
+    }
 
-    pub const fn provider_url_index(&self) -> Option<usize> { self.provider_url_index }
+    pub const fn provider_url_index(&self) -> Option<usize> {
+        self.provider_url_index
+    }
 }
 
 impl fmt::Debug for HlsManifestOriginBinding {

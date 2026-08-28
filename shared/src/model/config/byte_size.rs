@@ -19,49 +19,69 @@ pub struct Bytes(pub u64);
 impl Bytes {
     #[inline]
     #[must_use]
-    pub const fn new(value: u64) -> Self { Self(value) }
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
 
     #[inline]
     #[must_use]
-    pub const fn get(self) -> u64 { self.0 }
+    pub const fn get(self) -> u64 {
+        self.0
+    }
 
     /// Floors at one byte. Several probe sizes treat `0` as "unset" rather than
     /// "no bytes", and clamped individually at each call site.
     #[inline]
     #[must_use]
-    pub const fn at_least_1(self) -> Self { Self(if self.0 == 0 { 1 } else { self.0 }) }
+    pub const fn at_least_1(self) -> Self {
+        Self(if self.0 == 0 { 1 } else { self.0 })
+    }
 }
 
 impl std::fmt::Display for Bytes {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{}", self.0) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ByteSize(String);
 
 impl ByteSize {
-    pub fn new(value: impl Into<String>) -> Self { Self(value.into()) }
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
 
-    pub fn as_str(&self) -> &str { self.0.as_str() }
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
 
     pub fn clean_or_default(&mut self, default_value: &str) {
         let trimmed = self.0.trim();
         self.0 = if trimmed.is_empty() { default_value.to_string() } else { trimmed.to_string() };
     }
 
-    pub fn parse_bytes(&self) -> Result<Bytes, String> { parse_size_base_2(self.0.as_str()).map(Bytes::new) }
+    pub fn parse_bytes(&self) -> Result<Bytes, String> {
+        parse_size_base_2(self.0.as_str()).map(Bytes::new)
+    }
 }
 
 impl From<String> for ByteSize {
-    fn from(value: String) -> Self { Self::new(value) }
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
 }
 
 impl From<&str> for ByteSize {
-    fn from(value: &str) -> Self { Self::new(value) }
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
 }
 
 impl std::fmt::Display for ByteSize {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(self.as_str()) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 impl Serialize for ByteSize {

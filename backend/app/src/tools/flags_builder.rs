@@ -63,7 +63,9 @@ pub struct FlagsBuilder {
 }
 
 impl FlagsBuilder {
-    pub fn new() -> Self { Self { flags: HashMap::new() } }
+    pub fn new() -> Self {
+        Self { flags: HashMap::new() }
+    }
 
     pub fn add_flag(&mut self, country_code: &str, svg_data: &[u8]) -> Result<(), String> {
         if country_code.len() != 2 {
@@ -155,7 +157,9 @@ impl FlagsBuilder {
 }
 
 impl Default for FlagsBuilder {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 pub fn main() -> Result<(), Box<dyn std::error::Error>> {

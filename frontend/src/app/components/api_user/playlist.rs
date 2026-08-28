@@ -60,7 +60,9 @@ impl fmt::Display for ApiUserPlaylistPage {
 }
 
 impl Internable for ApiUserPlaylistPage {
-    fn intern(self) -> Arc<str> { self.as_str().intern() }
+    fn intern(self) -> Arc<str> {
+        self.as_str().intern()
+    }
 }
 
 fn selected_categories_or_none(map: &HashMap<String, bool>, available: Option<&Vec<String>>) -> Option<Vec<String>> {

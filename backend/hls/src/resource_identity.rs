@@ -36,7 +36,9 @@ impl HlsMediaResourceIdentity {
             || self.stable_namespace.zip(other.stable_namespace).is_some_and(|(left, right)| left == right)
     }
 
-    pub const fn exact_path_hash(self) -> [u8; 32] { self.exact_path }
+    pub const fn exact_path_hash(self) -> [u8; 32] {
+        self.exact_path
+    }
 
     pub const fn semantic_key(self) -> HlsMediaResourceSemanticKey {
         HlsMediaResourceSemanticKey(match self.stable_namespace {
@@ -46,11 +48,15 @@ impl HlsMediaResourceIdentity {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub const fn for_test(marker: u8) -> Self { Self { exact_path: [marker; 32], stable_namespace: None } }
+    pub const fn for_test(marker: u8) -> Self {
+        Self { exact_path: [marker; 32], stable_namespace: None }
+    }
 }
 
 impl HlsMediaResourceSemanticKey {
-    pub const fn bytes(self) -> [u8; 32] { self.0 }
+    pub const fn bytes(self) -> [u8; 32] {
+        self.0
+    }
 
     pub fn diagnostic_token(self) -> [u8; 8] {
         let mut token = [0_u8; 8];
@@ -59,7 +65,9 @@ impl HlsMediaResourceSemanticKey {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub const fn for_test(bytes: [u8; 32]) -> Self { Self(bytes) }
+    pub const fn for_test(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,9 +88,13 @@ pub struct HlsPublishedResourceHistory {
 }
 
 impl HlsPublishedResourceHistory {
-    pub fn is_empty(&self) -> bool { self.resources.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.resources.is_empty()
+    }
 
-    pub const fn generation(&self) -> u64 { self.generation }
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
 
     pub fn proxy_seq_for(&self, identity: HlsMediaResourceIdentity) -> Option<u64> {
         self.resources
@@ -110,7 +122,9 @@ impl HlsPublishedResourceHistory {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn len(&self) -> usize { self.resources.len() }
+    pub fn len(&self) -> usize {
+        self.resources.len()
+    }
 }
 
 fn resource_path(url: &str) -> String {

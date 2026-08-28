@@ -13,7 +13,7 @@ use axum::{
 use log::{trace, warn};
 use serde::Deserialize;
 use shared::{
-    model::{LogLevel, LogWsMessage, Permission, WsCloseCode, ROLE_ADMIN},
+    model::{LogLevel, LogWsMessage, Permission, WsCloseCode},
     utils::concat_path_leading_slash,
 };
 use std::sync::Arc;
@@ -39,8 +39,7 @@ fn check_token_auth(token: &str, secret_key: Option<&[u8]>) -> bool {
         return false;
     };
     if let Some(token_data) = verify_token(token, secret_key) {
-        token_data.claims.permissions.contains(Permission::SystemRead)
-            || token_data.claims.roles.iter().any(|r| r == ROLE_ADMIN)
+        token_data.claims.permissions.contains(Permission::SystemRead) || token_data.claims.is_admin()
     } else {
         false
     }
