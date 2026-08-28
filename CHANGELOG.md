@@ -72,7 +72,151 @@
   `emby`, or `jellyfin`; Plex use cases should use the HDHomeRun integration instead. Existing generated TMDB marker
   paths remain read-compatible, but `style: plex` is no longer accepted in configuration.
 
+- **`web_ui.auth.token_ttl_mins: 0` no longer means "never expire".** A configured `0` used to mint tokens with a
+  ~100-year lifetime — a permanent bearer credential written as if it were a configuration convenience. `0` now falls
+  back to the 24-hour default, and anything above the 30-day ceiling (`43200` minutes) is clamped; both log a warning
+  naming the effective lifetime. Deployments that relied on `0` for long-lived tokens must set an explicit value within
+  the ceiling, and their clients will start re-authenticating.
+
+- **A missing, malformed or wrong-scheme `Authorization` header now answers `401`, not `403`.** The auth extractors all
+  returned `403 Forbidden` for a request that never authenticated at all, and sent no `WWW-Authenticate` challenge — so
+  a `401` from this server was never a well-formed `401`. Responses now carry the challenge for the scheme the endpoint
+  wanted. Only an unresolvable peer address stays a `400`. Clients that branch on `403` to mean "not signed in" need to
+  handle `401`.
+
+- **Notification event ids replace `MsgKind`.** `messaging.notify_on` is now a list of glob patterns over dotted
+  `domain.event` ids — `*`, `recording.*`, `provider.*.expired`, and a leading `!` to exclude, so
+  `["*", "!system.info"]` reads the way it looks. Every legacy `MsgKind` name (`info`, `stats`, `disk_alert`, …) is
+  still accepted and resolves to its canonical id, but the config is **rewritten in canonical form the next time it is
+  saved**. Existing template filenames keep working; template maps are now keyed by event id wire name.
+
+- **Secrets are masked in config API responses.** `GET` of the main config previously returned `config.yml` in full to
+  any client holding `ConfigRead`, including the Telegram bot token, the Pushover token and user key, and any
+  `Authorization` header configured on the REST channel. Those — plus the new ntfy token, Gotify token and REST signing
+  secret — are now masked on the way out. A save restores any secret the client echoes back still masked, so a Web UI
+  round-trip cannot overwrite a real token with the mask; a genuinely changed secret still writes through. Tooling that
+  read provider credentials out of the config endpoint can no longer do so.
+
 ## 🌟 New Features
+
+- **Open-world notification system**: adding a notification channel or a notification event is no longer a change
+  across ten sites in three crates.
+  - **Events are ids, not an enum.** An event is a dotted `domain.event` string with a registered severity and
+    description. 32 events are registered today, spanning `system.*`, `playlist.*`, `recording.*`, `provider.*`,
+    `config.*`, `library.*`, `metadata.*`, `user.*`, `auth.*` and `stream.*`. The Web UI event picker is driven by the
+    registry, so an event added in the backend appears in the UI without a frontend change, and template discovery
+    iterates the registry instead of a hardcoded eight-variant list that silently made new kinds undiscoverable.
+  - **Four new channels**: `ntfy` (self-hosted push, no account or bot token), `gotify`, `slack` (real Block Kit
+    header/section/context blocks rather than a re-used Discord embed), and `command`, which runs a local program with
+    the event JSON on stdin. The command channel executes the binary directly rather than through a shell, so there are
+    no quoting rules and no shell-injection surface from event content; a missing binary is a permanent failure, while a
+    non-zero exit or timeout is retried.
+  - **Webhook HMAC signing**: the REST channel takes an optional `signing_secret` and sends an HMAC-SHA256 of
+    `{timestamp}.{body}` as `X-Tuliprox-Signature`. The timestamp is inside the signed payload, so a captured request
+    cannot be replayed with a fresh header. Verified against the RFC 4231 test vector.
+  - **Per-channel routing**: each channel accepts an optional `routing` block (`notify_on`, `min_severity`,
+    `quiet_hours`, `max_per_hour`, `dedup_window_secs`), so "critical to Pushover, everything to Discord" is now
+    expressible. An absent block inherits the global subscription, so existing configs are unaffected. Quiet hours
+    **defer** rather than drop — an overnight outage nobody hears about afterwards is worse than one that arrives late —
+    and the hourly ceiling emits one "further notifications suppressed" line when it trips so the silence is
+    distinguishable from a dead notifier.
+  - **Durable delivery for every notification.** The outbox moved out of the recording supervisor, is no longer gated on
+    the recording config, and starts unconditionally once the listener is bound. Playlist stats, watch changes, disk
+    alerts and provider warnings previously fanned out and discarded every outcome, so a transient `502` lost them
+    permanently. Entries key pending channels by stable string id, so an outbox written by a build that knows a newer
+    channel no longer fails to deserialize and take every pending notification down with it. Entries left in
+    `recording_notification_outbox.json` are adopted into `notification_outbox.json` exactly once.
+  - **Failures are classified.** `408`/`429`/`5xx` are transient; other `4xx` are permanent and dead-letter immediately
+    instead of burning every attempt on a request that will fail identically forever. A provider's `Retry-After` — both
+    legal header forms, with a past HTTP-date clamped to "retry now" — wins over our own backoff rather than retrying
+    straight back into the rate limit.
+  - **Every event renders on every channel.** One notification envelope carries id, severity, timestamp, instance, dedup
+    key, title, body and the typed payload, with `title` and `body` always populated. Pushover gains template support,
+    sends `title` separately and maps severity onto its own priority scale — it previously pushed raw `serde_json` dumps
+    of watch changes and playlist stats to phones. Every channel's severity maps onto the target's own priority scale
+    rather than being dropped.
+  - **A test endpoint**: `POST /api/v1/config/messaging/test` renders and optionally sends a chosen event to a chosen
+    channel and returns the per-channel outcome *and* the exact rendered body. `preview: true` renders without sending,
+    so a template can be iterated without spamming a channel. It deliberately bypasses `notify_on` and the suppression
+    window — the operator asked for this one explicitly.
+  - **Typed provider account events**: `provider.account.status_changed`, `.expiring` and `.expired` replace account
+    status and expiry warnings that previously landed in the generic info/error buckets, so subscribing to "my account
+    is about to expire" no longer means also receiving every processing error. All three carry a dedup key, since they
+    are re-evaluated on every playlist refresh.
+  - Section 5 of the operator documentation is rewritten for this model: the glob grammar, a table of all registered
+    events with their default severities (checked against the registry by a test in both directions), per-channel
+    routing, delivery semantics, the new channels, and the uniform `event.*` template context alongside every legacy
+    key. The table sits between generated-block markers and is checked against the registry by a test in both
+    directions, so a registered event missing from the table — or a table row for an event that no longer exists — is a
+    test failure rather than stale documentation.
+
+- **Event bus as the single event backbone**: the WebSocket bus and the notification layer used to be two disconnected
+  worlds with their own emitters. They are now one taxonomy that plugins, notifications and the Web UI all read.
+  - The notification pipeline subscribes to the bus, so every bus event — playlist updates, config changes, library
+    scans, user connections, metadata updates, recording changes — can be notified on, and every future event comes
+    along with it. Everything defaults to unsubscribed, so an upgrade does not start messaging anyone until `notify_on`
+    asks for it. High-frequency variants (progress ticks, download deltas, periodic system info) are deliberately not
+    notifiable; their terminal counterparts are what get through.
+  - Nine notification-only lifecycle events moved onto the bus (disk alerts, config reload failures, playlist watch
+    changes, the three recording lifecycle events, and the three provider account events), so they now reach plugins and
+    subscribers rather than only operators on mail.
+  - **New events**: `user.created` / `.updated` / `.deleted` for API-proxy user CRUD, `stream.probe.failed` for ffprobe
+    failures, `config.reload_failed`, and the auth audit events below. User events carry username, target and state —
+    never the password or token; probe failures carry a sanitized URL and are deduplicated per input, so a provider
+    outage notifies once instead of once per channel behind it.
+  - **`GET /api/v1/events/stats`** (behind `system.read`, like `/status`) reports the bus counters — emissions per kind,
+    emissions with no subscriber, and the size of every gap a lagging subscriber was told about — plus a 256-entry ring
+    of recent events with their kind, uptime and outcome, including the ones that were coalesced. "Why did my
+    notification not fire?" was otherwise unanswerable without a debug build.
+  - **State snapshots on connect**: events that describe current state rather than an occurrence (the system-info and
+    downloads samples) are retained, so a Web UI session that connects between samples gets them immediately instead of
+    showing empty panels for up to three seconds. Occurrences are never replayed.
+  - **Graceful shutdown**: the stream-meter registry is flushed at shutdown, so a stream still running when the server
+    stops no longer loses its last window's transferred bytes.
+  - **Plugin subscription seam**: a plugin manifest's `events.*` list resolves to a subscription mask, with unknown names
+    reported rather than silently narrowing what the plugin asked for, and every event defines its own JSON payload.
+
+- **Authentication hardening**: sign-in throttling, token revocation, and an audit trail.
+  - **Login throttling**: `/auth/token` used to verify an argon2 hash, answer `401` and forget, so a password list could
+    be worked against it as fast as the hash function allows. Failures are now counted on two dimensions — client
+    address, which stops one host grinding a list, and username, which stops a distributed attack converging on one
+    account. Three free attempts, then 2s doubling to a 15-minute ceiling, answered as `429` with `Retry-After`. The
+    check runs *before* the argon2 verify, and a correct password clears the block immediately. Usernames are
+    canonicalised the way the rest of the auth path compares them, so `Alice` and `alice` share one budget.
+  - **Token revocation**: the tokens this server mints are stateless JWTs, so a leaked one previously stayed valid until
+    it expired — there was no way to end a session or respond to a compromise short of rotating the signing secret,
+    which kills every session at once. `POST /auth/revoke/{username}` ends one principal's sessions across both identity
+    namespaces and `POST /auth/revoke` ends everyone's; both require `UserWrite`. Revocation is a per-subject watermark
+    ("everything issued at or before this instant is dead") rather than a deny-list, so it is bounded in size and can
+    express "sign out everywhere" and "revoke everything issued before the breach". It is persisted — a revocation that
+    stopped applying at the next restart would be a security control in name only — and a revocation file that will not
+    parse is a startup error rather than an empty store. The refresh endpoint checks revocation too.
+  - **Auth audit events**: sign-ins, rejected sign-ins, throttled sign-ins and permission denials reach the bus as
+    `auth.sign_in.succeeded` / `.failed` / `.throttled` and `auth.permission.denied` — previously they went to a log line
+    and nowhere else, so the events that matter most for spotting an intrusion were the ones nothing could subscribe to.
+    Each is a separate event id, so a subscriber can ask for the failures without being woken by every successful
+    sign-in. The record holds a username, an address and an outcome; the password and the token are not in the type at
+    all rather than being redacted at each render site, because these records reach Telegram, webhooks and shell
+    commands. Notifications dedupe per principal, address and outcome, so a password-guessing run is one piece of news
+    rather than one per attempt. They require `UserRead`, not `SystemRead`, and are not pushed to the Web UI socket.
+
+- **Providers remember what they already told us**: Stalker capability knowledge — whether a portal implements
+  `get_all_channels`, which handshake recipe worked, which of several endpoint candidates answered — was discovered and
+  then thrown away, so every refresh re-probed endpoints already known to `404` and replayed a chain whose answer was
+  known. Replaying a full handshake chain against a portal with stale credentials looks, from the provider's side, a lot
+  like credential stuffing. The snapshot is a hint rather than a contract: every claim carries the instant it was
+  observed and expires after a day, a remembered endpoint is moved to the front of the candidate list rather than
+  replacing it, and a clock that has run backwards leaves the snapshot alone. A JSON-file store (one file per input,
+  written through the workspace atomic-write helper, ignoring a corrupt file rather than failing) is included for
+  persisting it across restarts; the composition root does not load or write it yet, so today the memory lasts for the
+  life of a client.
+
+- **Streaming provider catalogs**: `get_live_streams` and friends buffered an entire provider catalog into memory before
+  the caller saw a single row. They now have a streaming variant that hands over batches as they arrive, matching the
+  shape the bulk-EPG path already had. The trade is made explicit rather than hidden: the accumulating sink can still
+  restart pagination on the next endpoint candidate after a mid-catalog failure (which is why a truncated catalog is
+  never returned as success), while the streaming sink reports that it can no longer restart once a page has been
+  released, and an error there means the delivered batches are an incomplete prefix.
 
 - **DVR Feature**: a full digital video recorder built around a queue-mutation boundary with a typed `QueueMutationError`,
   atomic edit/quota rollback, O(1) edit writes via a remembered `RecordingLocation`, server-side conflict preview
@@ -544,6 +688,64 @@
 
 ## ⚙️ Optimizations
 
+- **Notification templates are resolved and compiled once**: `resolve_template` wrapped every template value in an
+  input source and ran a full download attempt — once per message, per channel. A `file://` template was re-read from
+  disk and an `http://` one re-fetched over the network for every notification, and an *inline* Handlebars string paid
+  for a download attempt too. The source is now classified once (inline / file / URL), local files revalidate on mtime
+  so an edit applies immediately, remote documents cache on a 5-minute TTL, and compiled templates are kept in a
+  registry so rendering is no longer a re-parse. When a remote template cannot be refreshed the cached copy is served
+  rather than silently degrading to the built-in text. Config validation can now compile-check a template body without
+  sending, surfacing a malformed template at load instead of leaving a per-send error and a plausible-looking fallback.
+
+- **Notification sends are concurrent and bounded**: the outbox awaited channels in sequence and the shared HTTP client
+  sets no request timeout, so one webhook host that accepted a connection and never answered could stall every pending
+  notification — including the recording ones the outbox exists to protect. Sends now run concurrently per channel with
+  a 30-second request timeout. The channel set (and the `reqwest::Client` behind it) is built once and cached rather
+  than reconstructed on every send.
+
+- **Filtered event subscriptions**: every subscriber used to receive all event kinds and filter afterwards — after the
+  broadcast channel had already cloned the message for it. A subscriber now declares a one-word mask and is never woken
+  for what it did not ask for. The notification bridge is the first user: the four kinds it drops are the bulk of the
+  traffic during a playlist refresh. The two largest payloads (the system-info and downloads samples) are carried behind
+  `Arc`, costing a refcount bump per receiver instead of a deep copy, and the last subscriber standing pays nothing.
+
+- **Event coalescing for payload-free nudges**: the recording-changed nudge is emitted from six routes, twice
+  back-to-back where deleting a recording also changes the rules, and once per item in a bulk operation — each one
+  making every Web UI session re-fetch the same snapshot. Nudges that carry no payload are now coalesced in a 250 ms
+  window measured from the last admitted send, so a sustained stream is throttled to one per window rather than one per
+  burst and a later user action always produces a visible refresh. An event carrying a payload is never coalesced,
+  however repetitive, because a dropped tick loses the message it carried.
+
+- **Static dispatch through the messaging, event and processing paths**: the notification layer's
+  `Vec<Arc<dyn NotificationChannel>>` and its boxed future per send, the event sink, the metadata update sink, and the
+  playlist-update bootstrap were all trait objects behind heap-allocated futures. All of them are now static: channels
+  dispatch through an enum the compiler turns into a direct call, and the sinks are type parameters whose absent case
+  is a zero-sized no-op that compiles away entirely. The send path allocates nothing, and emitting an event on the
+  playlist pipeline is a direct call rather than a vtable hop. Same delivery semantics, same 46 messaging tests.
+
+- **Playlist repository iterators no longer box**: the hottest traversal in the repository returned
+  `Box<dyn Iterator + Send>` from three methods on a trait that is never used as a trait object, paying one allocation
+  per call plus one uninlinable indirect call per playlist item — and the cluster skip-set filter boxed a second time on
+  top. The adapter chains are replaced by named state machines and an enum per source kind, so a filtered traversal now
+  allocates nothing at all. Two async methods drop `BoxFuture` for plain `async fn` at the same time.
+
+- **One shared M3U/Xtream playlist backend**: the two raw-playlist iterators were transcriptions of one design — the
+  same two read locks, the same blocking producer feeding a bounded channel, the same sorted-index reader — differing
+  only in item type, storage subdirectory and error constructor. Those differences are now associated types and consts
+  on a zero-sized marker, so 151 lines of duplicated logic became one implementation with entirely static dispatch. The
+  one behavioural difference that was preserved rather than normalised (M3U holds its read lock for the consumer's
+  lifetime, Xtream never did) is now named in the type rather than implicit.
+
+- **Redundant `Arc` clones dropped from the Xtream per-item parse loop**: four fields wrapped a clone around an accessor
+  that already returns an owned value, so each parsed Xtream stream paid four redundant atomic increment/decrement pairs
+  on the playlist parse path. The workspace now has zero `Arc::clone(&x.y())` sites.
+
+- **Typed field access on playlist item headers**: the mapper, sort and counter paths reached fields by string name,
+  walking a chain of ~20 case-insensitive comparisons and returning an owned `Arc<str>` — so reading `chno` or `type`
+  did a heap allocation *and* an interner write lock, on every read, per item, per rule. Field access is now keyed on a
+  typed enum with a borrowing read that never forces an allocation, and mapper counter fields are parsed once at config
+  load instead of re-parsed per channel inside the counter loop.
+
 - **BPlusTree store path rewritten to stream to disk**: `BPlusTree::store` no longer buffers a full
   `Vec<[u8; PAGE_SIZE]>` (up to ~270 MiB for large playlists) before writing. A new `PageSink` hands out
   page ids and writes each finished page positionally to the destination file. Pages are written out of
@@ -620,6 +822,74 @@
 
 ## 🐛 Fixes
 
+- **Messaging: an edited bot token, webhook URL or template did not take effect until a restart.** The channel set and
+  the compiled templates are cached so a notification does not rebuild every channel — and a fresh HTTP client with
+  them — on every send, but nothing invalidated those caches on config reload. They are now invalidated when the config
+  reloads.
+- **Messaging: a successful playlist refresh with statistics notified twice.** The run summary went straight to the
+  notification layer as a second message while the bus carried the bare outcome, and both resolved to
+  `playlist.update.completed` — so one refresh produced two notifications, neither carrying the other's content, and a
+  bus subscriber saw an outcome with no detail. The outcome, per-source statistics and aggregated error text are now one
+  event emitted once at the end of the run. The WebSocket frame is unchanged, so the Web UI sees what it always did.
+- **Messaging: disk alerts were gated on somebody being subscribed by mail.** The emission itself checked the
+  subscription, so a plugin or any other consumer watching for disk pressure saw nothing unless an operator happened to
+  want the same event on the same channel. The notification layer already drops unsubscribed events, so the check is
+  gone.
+- **Auth: changing a password invalidated nothing.** `pwd_version` was minted into every web token and checked in
+  exactly one place — the refresh endpoint — so a token issued against the old password kept working on every guarded
+  route until it expired. Together with `token_ttl_mins: 0` meaning ~100 years, a leaked token was effectively a
+  permanent credential. The check now runs on every request whose principal is a web user, and rejects `pwd_version: 0`
+  rather than treating it as "skip", which is how the refresh endpoint's own copy could be bypassed. Users will be
+  signed out after a password change, which is the intent.
+- **Auth: revoking a permission had no effect until the token expired.** The permission check read the snapshot minted
+  into the token. The effective set is now the intersection of the claim with what the live config grants, so a
+  revocation takes effect on the next request. A new *grant* still requires a refresh, because a token must never end up
+  with more authority than it was issued with. Three permission paths that had drifted apart — one with no schema gate,
+  no subject gate and no password-version check at all — now share one implementation.
+- **Auth: the configured JWT issuer was never validated.** Token validation checked expiry and nothing else, so `iss`
+  was decoration. It is now checked, including on the WebSocket paths, which previously carried a bare secret across
+  task boundaries and so had no issuer to check against.
+- **Auth: an access token minted for one purpose was valid everywhere.** Internal access tokens signed only a timestamp
+  and a TTL, so any valid token verified at every place a token was accepted. The capability scope is now mixed into the
+  keyed hash and is a compile-time constant on both sides, never caller-supplied. The token string format is unchanged.
+- **Auth: renaming a user orphaned their recordings.** The JWT subject was synthesised from the display name
+  (`web:{username}` / `api:{username}`), so a rename reassigned every recording the old subject owned to a principal
+  that does not exist. Subjects now come from the identity registry, which was already built with persistence,
+  bootstrap and a rename that preserves the id, and was simply never wired into the server. A corrupt registry refuses
+  to start rather than inventing replacement ids.
+- **Auth: passwords typed at the terminal were left in memory.** The interactive password generator left two plaintext
+  `String`s sitting after it returned; they are now wiped, the same discipline already applied to a password arriving
+  over HTTP. A dead duplicate of the credential type that was never declared in its crate root has been removed.
+- **Notifications: a typo'd webhook burned every retry attempt.** Delivery outcomes could not distinguish "retry me"
+  from "this URL is malformed and will fail identically forever", so a permanent failure ran the full exponential
+  backoff before dead-lettering, and a `429` was retried straight back into the rate limit it had just hit.
+- **Notifications: a newly added event kind was silently undiscoverable.** Template discovery iterated a hardcoded
+  variant list rather than the event registry, so a new kind's templates were never found — a failure with no error
+  message. It now iterates the registry, and still finds legacy template filenames.
+- **Events: several event kinds reached no WebSocket subscriber at all.** The wire mapping was a hundred-line match
+  nested three deep inside the socket loop, where a kind reaching no arm looked exactly like a kind deliberately
+  ignored — and the test meant to catch that had been failing since the disk-alert event joined the bus. The mapping is
+  now a pure function with tests that iterate every event kind, so a variant added later fails the tests instead of
+  silently reaching nobody.
+- **Events: a stream ending at shutdown lost its last window of transferred bytes.** The meter sampler was cancelled in
+  `Drop`, which cannot await. The registry is now flushed explicitly at shutdown, after the connection manager, so the
+  final batch reports what the streams actually transferred.
+- **Events: the bus dropped events under load with nothing to show for it.** Capacity was hardcoded at 10 for
+  everything, which a playlist refresh routinely outruns — the evidence was already in the tree, in a dedicated lag arm
+  in the notification bridge and an entire resync recovery path in the WebSocket. Capacity is now configurable and
+  defaults to 256, and drops are counted and reported at `GET /api/v1/events/stats`.
+- **Config: mapper and counter field names were rejected for their casing.** The allow-list was compared
+  case-sensitively while the field accessor compared case-insensitively, so a mapper naming `NAME` was rejected at
+  config load even though writing it would have worked. Both now resolve through the same typed parse. Every previously
+  valid config stays valid; some previously rejected ones are now accepted and behave correctly.
+- **Config: a config report listed only the first bad rule.** Sort rules and target renames aggregate every child's
+  error again, so a config with three bad rules reports all three in one pass rather than one round-trip at a time.
+- **Stalker: a `403` was retryable or not depending on which layer noticed it.** The same refusal arrived as either a
+  token rejection or a bad status, and callers were matching on variants to answer questions the variants were never
+  organised around. Errors now carry a classification, and auth failures are deliberately not retryable so nothing loops
+  on a rejected token. Provider redaction is also unified: the three unrelated answers to "what must never reach a log
+  line" (error URLs, the debug-dump writer's inline key list, and the Xtream sanitizer) are now one module with one
+  key list, and the JSON redaction walk catches nested keys, which the debug-dump writer's own copy never did.
 - **Web UI: disk-space alerts could not be enabled from Config → Messaging.** The messaging form only included the
   `messaging.disk_alert` block when a threshold field was touched, and the save-time cleanup dropped the block whenever
   all thresholds still equalled their defaults — even though the block's presence is what enables the alerts. The
@@ -820,10 +1090,37 @@
     `custom_stream_response_enabled` is `false`. Must be a 4xx or 5xx code (`ConfigDto::prepare()` rejects
     anything else; `0` is silently clamped to the default `502`). Operators can match the code to their
     Nginx `proxy_intercept_errors on;` rules.
+  - Added `event_channel_capacity` (`u32`, default `256`, clamped to at least `1`): capacity of the internal event
+    broadcast channel. It was previously hardcoded at `10`, which a playlist refresh routinely outruns — a subscriber
+    that awaits I/O per event falls behind within one target. Drops are visible at `GET /api/v1/events/stats`.
 - **config.yml (`reverse_proxy.stream`)**:
   - Added `admission_strategies` (optional list): ordered list of admission strategy rules.
     Available strategies: `evict_user_same_ip_oldest`, `evict_user_same_ip_latest`, `evict_user_oldest`, `evict_user_latest`,  
     `grace_instant_stream`, `grace_hold_stream`.
+- **config.yml (`messaging`)**:
+  - `notify_on` is now a list of glob patterns over dotted event ids (`*`, `recording.*`, `provider.*.expired`, and a
+    leading `!` to exclude). Legacy `MsgKind` names still parse and are normalized on the next save.
+  - Added an `ntfy` channel: `url`, `topic`, optional `token`, optional `templates`, optional `routing`.
+  - Added a `gotify` channel: `url`, `token`, optional `templates`, optional `routing`.
+  - Added a `slack` channel: `url` (incoming webhook), optional `templates`, optional `routing`.
+  - Added a `command` channel: `program`, optional `args`, optional `timeout_secs`, optional `templates`, optional
+    `routing`. The program is executed directly, not through a shell, and receives the event JSON on stdin.
+  - Added `rest.signing_secret` (optional): enables HMAC-SHA256 signing of `{timestamp}.{body}`, sent as
+    `X-Tuliprox-Signature`.
+  - Added an optional per-channel `routing` block on all eight channels. An absent block inherits the global
+    subscription:
+    - `notify_on` (list of glob patterns): overrides the global subscription for this channel.
+    - `min_severity` (`info` | `warn` | `error` | `critical`): drops anything below it.
+    - `quiet_hours` (`HH:MM-HH:MM`, local time): notifications inside the window are **deferred** by the outbox, never
+      dropped. An entry is only held while every still-pending channel is asleep.
+    - `max_per_hour` (`u32`): circuit breaker. On reaching it the channel sends one "suppressing further notifications"
+      message and then goes quiet for the rest of the hour.
+    - `dedup_window_secs` (`u64`): suppresses a repeated `dedup_key` for this many seconds. Generalizes the disk
+      alert's `repeat_interval_secs`, which was previously available to nothing else.
+  - Templates are now supported on every channel including Pushover, keyed by event id wire name, and every template
+    receives a uniform `event.*` context alongside every legacy top-level key, so templates written against the
+    documented examples render identically.
+
 - **config.yml (`messaging.disk_alert`)**:
   - Added optional `disk_alert` block to enable disk-usage alerts via the existing messaging channels. The
     background monitor in `backend/app/src/api/sys_usage.rs` samples the current working directory's mount on
@@ -908,6 +1205,74 @@
   - Extracted the repeated label / field-id / `tp__input-wrapper` scaffolding from the `Input`, `NumberInput`, and
     `TextArea` primitives into a single shared `FieldWrapper` component, reducing duplication while keeping the
     rendered markup and behavior unchanged.
+
+- **Units and identity in the type system**: several classes of value that were bare integers or strings now carry their
+  meaning in their type, with no change to the serialized form and no config migration:
+  - `Millis` / `Secs` for HLS timing config, applied through the DTO → runtime hop rather than unwrapped at the
+    boundary, so a millisecond value can no longer reach a seconds parameter — the two sat two lines apart in the same
+    struct as bare `u64`s, and `cache_duration` and `session_idle_timeout` did not carry their unit in their names at
+    all.
+  - `Bytes` for resolved byte sizes, so a parsed size is distinguishable from any other `u64` and a runtime struct can
+    no longer hold an unparsed size by accident.
+  - `VirtualId` and `ProviderId` as real newtypes. The same store is keyed by a virtual id on the target path and a
+    provider id on the input path, and nothing stopped a lookup in one key space using an id from the other. There is
+    deliberately no implicit conversion in either direction. On-disk compatibility is pinned by a B+Tree codec test
+    asserting a transparent newtype over `u32` encodes byte-for-byte identically and cross-reads in both directions, so
+    existing databases are unaffected and there is no migration.
+  - The Xtream store's key space is now a type parameter rather than a runtime tag matched per item inside the insert
+    loop, so the two key spaces can no longer be swapped by passing the wrong enum variant.
+
+- **One shape for config preparation and error reporting**:
+  - A `Prepare` trait replaces ~98 inherent `prepare`/`validate` methods that had no agreed signature — some took
+    nothing, some pattern templates, some a storage dir, a port or a boolean, returning four different result types.
+    Because the shape was invisible, the recursive walk was hand-written at every level and a config struct that forgot
+    to call its children failed silently at runtime rather than at compile time. Dispatch stays entirely static.
+  - `TuliproxError` splits into a `Copy` kind and a message. All 50 variants carried exactly one string, so it was a
+    category tag beside a message encoded as an enum — costing a 50-arm accessor and a second 50-name list that had to
+    be kept in sync by hand, and making the category impossible to compare, store or return on its own. The 755
+    construction sites are untouched.
+  - A `Clock` seam replaces 14 character-for-character copies of `current_time_millis` across two crates. It is meant to
+    be held as a generic parameter defaulted to a zero-sized type, never as a trait object; a test asserts owning one
+    leaves a struct's layout unchanged.
+
+- **Single-sourced relations that were written down more than once**:
+  - The item-type-to-cluster relation existed in three places with nothing keeping them in agreement, and its conversion
+    was total while returning a `Result` — a phantom error that had spread defensive fallbacks to 17 call sites across
+    four crates. All 17 drop their fallback.
+  - Genre access was a four-arm match written out five times; it is now two methods.
+  - The mapper and counter field allow-lists are typed rather than string lists, which also collapsed a duplicated EPG
+    channel-id entry that existed only to cover both accepted spellings.
+  - Three macros generating by-name field accessors are gone. One of them — an ~80-line prefix-matched lookup for Xtream
+    cover and backdrop resources — turned out to have no callers at all and was deleted rather than ported.
+
+- **Provider fetches have one shape**: the three provider families were modelled three different ways and each returned
+  a differently-shaped tuple, so the dispatcher was a ninety-line match whose eight arms hand-assembled a six-element
+  tuple, padding fields their provider does not produce with literal zeros and then destructuring by position — two of
+  the six elements were dead on arrival. One trait with one named result type replaces it, dispatch stays a statically
+  dispatched match, and the two unsupported input types now carry their reason.
+
+- **Stalker client seams and test coverage**: the Stalker API client owned its HTTP client and read the system clock
+  directly, which put every interesting decision it makes behind a live portal — the module docs conceded outright that
+  no HTTP requests are issued from unit tests. Both are now type parameters defaulted to the production implementation,
+  neither introducing a vtable or an allocation. Nine tests now cover paths that previously had no way to be reached at
+  all, including a portal refusal hidden inside a `200 OK`, an over-cap body being refused rather than buffered,
+  endpoint-candidate failover in priority order, and a session ageing past its TTL on a clock that can be advanced.
+  Expiry rules — session staleness, cookie `Max-Age`, and the Xtream account-expiry warning — now take the instant as a
+  parameter rather than reading the clock, so the cookie boundary is asserted at the exact second it flips and the
+  three-day expiry window has tests for all three branches instead of none.
+
+- **Stalker page arithmetic has one home**: the rule for "is this the last catalog page" was written out four times and
+  two copies had already drifted in how they measure progress against the advertised total. The two per-row-type page
+  parsers collapse into one generic walk as well; they differed only in the row type and both hand-rolled the same four
+  envelope shapes.
+
+- **`exec_processing` takes a run object**: it had twelve positional parameters, seven of them `Option`, so a call site
+  was a wall of `None`s where the reader had to count commas and the compiler could not catch two same-typed arguments
+  being swapped. The CLI path is now a single constructor call.
+
+- **Workspace dependency edges reduced from 78 to 75**: the DVR crate no longer depends on the streaming-session
+  runtime (the event bus was the only thing it wanted, and a trait bound is not a dependency), and neither the IPTV nor
+  the processing crate depends on the messaging crate any more — emitting an event is not knowing how it is delivered.
 
 ## 3.3.0 (2026-04-02)
 
