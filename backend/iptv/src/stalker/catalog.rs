@@ -4,8 +4,10 @@ use crate::stalker::{
     pagination::{BatchSink, CatalogPage, CatalogSink, CollectSink, PageMeta},
     profile::StalkerHandshake,
     recipes::recipe_spec_for,
+    transport::StalkerTransport,
     url_factory::StalkerLoadUrl,
 };
+use tuliprox_core::utils::Clock;
 use log::{info, warn};
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
@@ -296,8 +298,8 @@ impl StalkerRawSeriesEpisode {
 
 // ----- Generic fetchers -------------------------------------------------------------------------
 
-async fn get_categories(
-    client: &StalkerApiClient,
+async fn get_categories<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
     portal_type: &'static str,
     action: &'static str,
@@ -306,7 +308,7 @@ async fn get_categories(
     let candidates = client.load_url_candidates().to_vec();
     let mut last_err: Option<StalkerError> = None;
     for load_url in candidates {
-        let mut builder = client.http().get(&load_url.load_url).headers(client.common_headers(&load_url)).query(&[
+        let mut builder = client.get(&load_url.load_url).headers(client.common_headers(&load_url)).query(&[
             ("type", portal_type),
             ("action", action),
             ("JsHttpRequest", "1-xml"),
@@ -377,8 +379,8 @@ fn collect_categories(value: &Value, out: &mut Vec<StalkerCategory>) {
 /// truncated catalog for a complete one.
 ///
 /// Returns the number of rows delivered.
-async fn drive_catalog_pages<T, S>(
-    client: &StalkerApiClient,
+async fn drive_catalog_pages<Tr: StalkerTransport, C: Clock, T, S>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
     portal_type: &'static str,
     action: &'static str,
@@ -400,7 +402,7 @@ where
         let mut pages_fetched: u32 = 0;
         let mut delivered: u64 = 0;
         loop {
-            let mut builder = client.http().get(&load_url.load_url).headers(client.common_headers(&load_url)).query(&[
+            let mut builder = client.get(&load_url.load_url).headers(client.common_headers(&load_url)).query(&[
                 ("type", portal_type),
                 ("action", action),
                 ("JsHttpRequest", "1-xml"),
@@ -451,8 +453,8 @@ where
 
 /// Accumulating variant of [`drive_catalog_pages`], for callers that want the whole
 /// catalog in one `Vec`.
-async fn get_paginated_items<T>(
-    client: &StalkerApiClient,
+async fn get_paginated_items<Tr: StalkerTransport, C: Clock, T>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
     portal_type: &'static str,
     action: &'static str,
@@ -517,8 +519,8 @@ where
     Ok(meta.into_page(items, current_page))
 }
 
-async fn get_catalog_value(
-    client: &StalkerApiClient,
+async fn get_catalog_value<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
     portal_type: &'static str,
     action: &'static str,
@@ -536,7 +538,7 @@ async fn get_catalog_value(
         if let Some(page) = page {
             query.push(("p", page.to_string()));
         }
-        let mut builder = client.http().get(&load_url.load_url).headers(client.common_headers(load_url)).query(&query);
+        let mut builder = client.get(&load_url.load_url).headers(client.common_headers(load_url)).query(&query);
         builder = client.apply_mac_query(builder);
         builder = client.apply_bearer(builder, Some(&handshake.session), spec.token_in_query);
         match client.send_json::<Value>(builder, action).await {
@@ -547,16 +549,16 @@ async fn get_catalog_value(
     Err(last_err.unwrap_or_else(|| StalkerError::NoEndpoint { portal: safe_stalker_url(client.portal_url()) }))
 }
 
-pub async fn get_all_channels(
-    client: &StalkerApiClient,
+pub async fn get_all_channels<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
 ) -> StalkerResult<Vec<StalkerRawItem>> {
     let value = get_catalog_value(client, handshake, "itv", "get_all_channels", None).await?;
     parse_all_channels(&value)
 }
 
-pub async fn get_live_streams_page(
-    client: &StalkerApiClient,
+pub async fn get_live_streams_page<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
     page: u32,
 ) -> StalkerResult<StalkerCatalogPage<StalkerRawItem>> {
@@ -566,8 +568,8 @@ pub async fn get_live_streams_page(
     Ok(response)
 }
 
-pub async fn get_vod_streams_page(
-    client: &StalkerApiClient,
+pub async fn get_vod_streams_page<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
     page: u32,
 ) -> StalkerResult<StalkerCatalogPage<StalkerRawItem>> {
@@ -577,8 +579,8 @@ pub async fn get_vod_streams_page(
     Ok(response)
 }
 
-pub async fn get_series_list_page(
-    client: &StalkerApiClient,
+pub async fn get_series_list_page<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
     page: u32,
 ) -> StalkerResult<StalkerCatalogPage<StalkerRawSeriesItem>> {
@@ -604,43 +606,43 @@ fn apply_page_limit<T>(
     Ok(())
 }
 
-pub async fn get_live_categories(
-    client: &StalkerApiClient,
+pub async fn get_live_categories<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
 ) -> StalkerResult<Vec<StalkerCategory>> {
     get_categories(client, handshake, "itv", "get_genres").await
 }
 
-pub async fn get_vod_categories(
-    client: &StalkerApiClient,
+pub async fn get_vod_categories<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
 ) -> StalkerResult<Vec<StalkerCategory>> {
     get_categories(client, handshake, "vod", "get_categories").await
 }
 
-pub async fn get_series_categories(
-    client: &StalkerApiClient,
+pub async fn get_series_categories<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
 ) -> StalkerResult<Vec<StalkerCategory>> {
     get_categories(client, handshake, "series", "get_categories").await
 }
 
-pub async fn get_live_streams_paginated(
-    client: &StalkerApiClient,
+pub async fn get_live_streams_paginated<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
 ) -> StalkerResult<Vec<StalkerRawItem>> {
     get_paginated_items(client, handshake, "itv", "get_ordered_list", parse_items_page).await
 }
 
-pub async fn get_vod_streams_paginated(
-    client: &StalkerApiClient,
+pub async fn get_vod_streams_paginated<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
 ) -> StalkerResult<Vec<StalkerRawItem>> {
     get_paginated_items(client, handshake, "vod", "get_ordered_list", parse_items_page).await
 }
 
-pub async fn get_series_list_paginated(
-    client: &StalkerApiClient,
+pub async fn get_series_list_paginated<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
 ) -> StalkerResult<Vec<StalkerRawSeriesItem>> {
     get_paginated_items(client, handshake, "series", "get_ordered_list", parse_series_page).await
@@ -648,8 +650,8 @@ pub async fn get_series_list_paginated(
 
 /// Stream the live catalog one page at a time. See [`drive_catalog_pages`] for the
 /// endpoint-fallback caveat that comes with not buffering.
-pub async fn stream_live_streams<F, Fut>(
-    client: &StalkerApiClient,
+pub async fn stream_live_streams<Tr: StalkerTransport, C: Clock, F, Fut>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
     on_batch: F,
 ) -> StalkerResult<u64>
@@ -662,8 +664,8 @@ where
 }
 
 /// Stream the VOD catalog one page at a time.
-pub async fn stream_vod_streams<F, Fut>(
-    client: &StalkerApiClient,
+pub async fn stream_vod_streams<Tr: StalkerTransport, C: Clock, F, Fut>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
     on_batch: F,
 ) -> StalkerResult<u64>
@@ -676,8 +678,8 @@ where
 }
 
 /// Stream the series catalog one page at a time.
-pub async fn stream_series_list<F, Fut>(
-    client: &StalkerApiClient,
+pub async fn stream_series_list<Tr: StalkerTransport, C: Clock, F, Fut>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
     on_batch: F,
 ) -> StalkerResult<u64>
@@ -689,8 +691,8 @@ where
     drive_catalog_pages(client, handshake, "series", "get_ordered_list", parse_series_page, &mut sink).await
 }
 
-pub async fn get_series_details(
-    client: &StalkerApiClient,
+pub async fn get_series_details<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
     series_id: u32,
 ) -> StalkerResult<StalkerRawSeriesDetails> {
@@ -714,8 +716,8 @@ pub async fn get_series_details(
     Err(last_err.unwrap_or_else(|| StalkerError::NoEndpoint { portal: safe_stalker_url(client.portal_url()) }))
 }
 
-async fn fetch_series_page(
-    client: &StalkerApiClient,
+async fn fetch_series_page<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
     load_url: &StalkerLoadUrl,
     token_in_query: bool,
@@ -723,7 +725,7 @@ async fn fetch_series_page(
     season_id: &str,
 ) -> StalkerResult<Value> {
     let series_id = series_id.to_string();
-    let mut builder = client.http().get(&load_url.load_url).headers(client.common_headers(load_url)).query(&[
+    let mut builder = client.get(&load_url.load_url).headers(client.common_headers(load_url)).query(&[
         ("type", "series"),
         ("action", "get_ordered_list"),
         ("JsHttpRequest", "1-xml"),
@@ -737,8 +739,8 @@ async fn fetch_series_page(
     client.send_json::<Value>(builder, "series_info").await
 }
 
-async fn hydrate_series_details(
-    client: &StalkerApiClient,
+async fn hydrate_series_details<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
     load_url: &StalkerLoadUrl,
     token_in_query: bool,

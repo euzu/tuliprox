@@ -32,6 +32,7 @@ pub mod presets;
 pub mod profile;
 pub mod recipes;
 pub mod session;
+pub mod transport;
 pub mod url_factory;
 
 pub mod client;

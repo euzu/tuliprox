@@ -3,7 +3,9 @@ use crate::stalker::{
     error::{safe_stalker_url, StalkerError, StalkerResult},
     profile::StalkerHandshake,
     recipes::recipe_spec_for,
+    transport::StalkerTransport,
 };
+use tuliprox_core::utils::Clock;
 use futures::StreamExt;
 use log::warn;
 use serde::{
@@ -90,8 +92,8 @@ fn parse_stalker_timestamp(raw: &str) -> Option<i64> {
 }
 
 /// Short EPG (per channel, 2-24 hour window). Returns the parsed records on success.
-pub async fn get_short_epg(
-    client: &StalkerApiClient,
+pub async fn get_short_epg<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
     channel_id: u32,
     hours: u32,
@@ -100,7 +102,7 @@ pub async fn get_short_epg(
     let candidates = client.load_url_candidates().to_vec();
     let mut last_err: Option<StalkerError> = None;
     for load_url in candidates {
-        let mut builder = client.http().get(&load_url.load_url).headers(client.common_headers(&load_url)).query(&[
+        let mut builder = client.get(&load_url.load_url).headers(client.common_headers(&load_url)).query(&[
             ("type", "itv"),
             ("action", "get_short_epg"),
             ("ch_id", &channel_id.to_string()),
@@ -121,8 +123,8 @@ pub async fn get_short_epg(
 }
 
 /// Per-channel full EPG. The portal returns the same payload shape as the short EPG.
-pub async fn get_epg(
-    client: &StalkerApiClient,
+pub async fn get_epg<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
     channel_id: u32,
     period_hours: u32,
@@ -131,7 +133,7 @@ pub async fn get_epg(
     let candidates = client.load_url_candidates().to_vec();
     let mut last_err: Option<StalkerError> = None;
     for load_url in candidates {
-        let mut builder = client.http().get(&load_url.load_url).headers(client.common_headers(&load_url)).query(&[
+        let mut builder = client.get(&load_url.load_url).headers(client.common_headers(&load_url)).query(&[
             ("type", "itv"),
             ("action", "get_epg_info"),
             ("ch_id", &channel_id.to_string()),
@@ -154,8 +156,8 @@ pub async fn get_epg(
 /// Bulk-EPG stream. The portal can return hundreds of thousands of records in a single
 /// `get_epg_info?period=<h>` call, so we stream the HTTP body through a reader-backed
 /// JSON deserializer and emit one programme record at a time.
-pub async fn stream_bulk_epg<F, Fut>(
-    client: &StalkerApiClient,
+pub async fn stream_bulk_epg<Tr: StalkerTransport, C: Clock, F, Fut>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
     period_hours: u32,
     batch_size: usize,
@@ -169,7 +171,7 @@ where
     let candidates = client.load_url_candidates().to_vec();
     let mut last_err: Option<StalkerError> = None;
     for load_url in candidates {
-        let mut builder = client.http().get(&load_url.load_url).headers(client.common_headers(&load_url)).query(&[
+        let mut builder = client.get(&load_url.load_url).headers(client.common_headers(&load_url)).query(&[
             ("type", "itv"),
             ("action", "get_epg_info"),
             ("period", &period_hours.to_string()),

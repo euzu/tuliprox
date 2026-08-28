@@ -4,7 +4,9 @@ use crate::stalker::{
     error::{safe_stalker_url, StalkerError, StalkerResult},
     profile::{StalkerHandshake, StalkerResolvedStream},
     recipes::recipe_spec_for,
+    transport::StalkerTransport,
 };
+use tuliprox_core::utils::Clock;
 use log::warn;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -33,8 +35,8 @@ struct StalkerCreateLinkResponse {
 /// downstream layers (reverse-proxy, headers) can adapt to nginx-secure / flussonic /
 /// wowza without re-deriving it.
 #[allow(clippy::too_many_arguments)]
-pub async fn create_link(
-    client: &StalkerApiClient,
+pub async fn create_link<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
     kind: StalkerStreamKind,
     requested_mode: StalkerPlaybackMode,
@@ -71,8 +73,8 @@ pub async fn create_link(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_create_link_builder(
-    client: &StalkerApiClient,
+fn build_create_link_builder<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     load_url: &crate::stalker::url_factory::StalkerLoadUrl,
     handshake: &StalkerHandshake,
     spec: &crate::stalker::recipes::StalkerRecipeSpec,
@@ -112,7 +114,7 @@ fn build_create_link_builder(
         }
     }
     let mut builder =
-        client.http().get(&load_url.load_url).headers(client.common_headers(load_url)).query(&query_pairs);
+        client.get(&load_url.load_url).headers(client.common_headers(load_url)).query(&query_pairs);
     builder = client.apply_mac_query(builder);
     builder = client.apply_bearer(builder, Some(&handshake.session), spec.token_in_query);
     builder
