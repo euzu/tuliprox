@@ -38,7 +38,7 @@ use crate::{
     auth::generate_password,
     library::{LibraryProcessor, MediaToolProbes},
     model::{AppConfig, Config, Healthcheck, HealthcheckConfig, ProcessTargets, SourcesConfig},
-    processing::processor::exec_processing,
+    processing::processor::{exec_processing, ProcessingRun},
     repository::{db_viewer, run_startup_migrations},
     utils::{config_file_reader, init_logger, request::create_client, resolve_env_var},
 };
@@ -399,8 +399,7 @@ async fn start_in_cli_mode(cfg: Arc<AppConfig>, targets: Arc<ProcessTargets>) {
         reqwest::Client::new()
     });
     // In CLI mode, we don't start background managers for events or providers
-    exec_processing(&client, cfg, targets, shared::model::NoopSink, None, None, None, None, None, None, None, None)
-        .await;
+    exec_processing(ProcessingRun::new(client, cfg, targets, shared::model::NoopSink)).await;
 }
 
 async fn start_in_server_mode(cfg: Arc<AppConfig>, targets: Arc<ProcessTargets>) {

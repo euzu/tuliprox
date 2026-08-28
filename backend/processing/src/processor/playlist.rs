@@ -1942,12 +1942,18 @@ async fn process_watch<E: EventSink>(
 /// call instead of the state keeps `processing` from naming the server state.
 pub type PlaylistUpdateBootstrap = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
-// `pre_processed_inputs` is always built with the default hasher here;
-// generalising a private signature would buy nothing.
-#[allow(clippy::implicit_hasher)]
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub async fn exec_processing<E: EventSink + Clone + 'static>(
-    client: &reqwest::Client,
+/// Everything one playlist update run needs.
+///
+/// `exec_processing` took twelve positional arguments, seven of them
+/// `Option<_>`, so a call site was a wall of `None`s and `Some(..)`s in which
+/// the reader had to count commas to work out which knob was being set - and
+/// the compiler could not catch two same-typed arguments swapped.
+///
+/// Four of the twelve are always present, so they are constructor arguments.
+/// The rest are optional in fact as well as in type, and a call site names the
+/// ones it actually sets.
+pub struct ProcessingRun<E: EventSink + Clone + 'static> {
+    client: reqwest::Client,
     app_config: Arc<AppConfig>,
     targets: Arc<ProcessTargets>,
     events: E,
@@ -1959,7 +1965,100 @@ pub async fn exec_processing<E: EventSink + Clone + 'static>(
     metadata_manager: Option<Arc<dyn MetadataUpdateSink>>,
     pre_processed_inputs: Option<HashSet<Arc<str>>>,
     acquired_permit: Option<tuliprox_core::model::UpdateGuardPermit>,
-) {
+}
+
+impl<E: EventSink + Clone + 'static> ProcessingRun<E> {
+    pub fn new(client: reqwest::Client, app_config: Arc<AppConfig>, targets: Arc<ProcessTargets>, events: E) -> Self {
+        Self {
+            client,
+            app_config,
+            targets,
+            events,
+            bootstrap: None,
+            playlist_state: None,
+            update_guard: None,
+            disabled_headers: None,
+            provider_manager: None,
+            metadata_manager: None,
+            pre_processed_inputs: None,
+            acquired_permit: None,
+        }
+    }
+
+    /// Work the composition root runs once the lock is held, before the update
+    /// proper starts.
+    #[must_use]
+    pub fn with_bootstrap(mut self, bootstrap: impl Into<Option<PlaylistUpdateBootstrap>>) -> Self {
+        self.bootstrap = bootstrap.into();
+        self
+    }
+
+    #[must_use]
+    pub fn with_playlist_state(mut self, state: impl Into<Option<Arc<PlaylistStorageState>>>) -> Self {
+        self.playlist_state = state.into();
+        self
+    }
+
+    /// The lock this run acquires. Ignored when an already-acquired permit is
+    /// supplied via [`Self::with_acquired_permit`].
+    #[must_use]
+    pub fn with_update_guard(mut self, guard: impl Into<Option<UpdateGuard>>) -> Self {
+        self.update_guard = guard.into();
+        self
+    }
+
+    #[must_use]
+    pub fn with_disabled_headers(mut self, headers: impl Into<Option<ReverseProxyDisabledHeaderConfig>>) -> Self {
+        self.disabled_headers = headers.into();
+        self
+    }
+
+    #[must_use]
+    pub fn with_provider_manager(mut self, manager: impl Into<Option<Arc<ActiveProviderManager>>>) -> Self {
+        self.provider_manager = manager.into();
+        self
+    }
+
+    #[must_use]
+    pub fn with_metadata_manager(mut self, manager: impl Into<Option<Arc<dyn MetadataUpdateSink>>>) -> Self {
+        self.metadata_manager = manager.into();
+        self
+    }
+
+    // Always built with the default hasher here; generalising would buy nothing.
+    #[allow(clippy::implicit_hasher)]
+    #[must_use]
+    pub fn with_pre_processed_inputs(mut self, inputs: impl Into<Option<HashSet<Arc<str>>>>) -> Self {
+        self.pre_processed_inputs = inputs.into();
+        self
+    }
+
+    /// A playlist lock the caller already holds. Takes precedence over
+    /// [`Self::with_update_guard`], which would otherwise acquire a second one.
+    #[must_use]
+    pub fn with_acquired_permit(mut self, permit: impl Into<Option<tuliprox_core::model::UpdateGuardPermit>>) -> Self {
+        self.acquired_permit = permit.into();
+        self
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+pub async fn exec_processing<E: EventSink + Clone + 'static>(run: ProcessingRun<E>) {
+    let ProcessingRun {
+        client,
+        app_config,
+        targets,
+        events,
+        bootstrap,
+        playlist_state,
+        update_guard,
+        disabled_headers,
+        provider_manager,
+        metadata_manager,
+        pre_processed_inputs,
+        acquired_permit,
+    } = run;
+
     let max_update_duration = Duration::from_secs(PLAYLIST_UPDATE_MAX_DURATION_SECS);
     let playlist_guard = if let Some(permit) = acquired_permit {
         Some(permit)
@@ -2004,7 +2103,7 @@ pub async fn exec_processing<E: EventSink + Clone + 'static>(
 
     // Initialize Context
     let ctx = PlaylistProcessingContext {
-        client: client.clone(),
+        client,
         config: app_config.clone(),
         user_targets: targets.clone(),
         events: events.clone(),

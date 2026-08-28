@@ -34,7 +34,7 @@ use crate::{
         },
     },
     model::{AppConfig, Config, HdHomeRunFlags, Healthcheck, ProcessTargets, RateLimitConfig},
-    processing::processor::exec_processing,
+    processing::processor::{exec_processing, PlaylistUpdateBootstrap, ProcessingRun},
     repository::{get_geoip_path, GeoIp},
     utils::{exec_file_lock_prune, get_default_web_root_path},
     VERSION,
@@ -208,25 +208,28 @@ fn spawn_metadata_trigger_update(
                 loop {
                     if let Some(lock) = update_guard.try_playlist() {
                         exec_processing(
-                            &client,
-                            Arc::clone(&app_config),
-                            proc_targets,
-                            Arc::clone(&event_manager) as Arc<dyn shared::model::EventSink>,
-                            Some({
+                            ProcessingRun::new(
+                                client.clone(),
+                                Arc::clone(&app_config),
+                                proc_targets,
+                                Arc::clone(&event_manager) as Arc<dyn shared::model::EventSink>,
+                            )
+                            .with_bootstrap({
                                 let state = Arc::clone(&app_state_clone);
                                 std::sync::Arc::new(move || {
                                     let state = Arc::clone(&state);
                                     Box::pin(async move { sync_panel_api_exp_dates(&state).await })
                                         as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
-                                })
-                            }),
-                            Some(Arc::clone(&playlist_state)),
-                            Some(update_guard.clone()),
-                            disabled_headers.clone(),
-                            Some(app_state_clone.active_provider.clone()),
-                            Some(app_state_clone.metadata_manager.clone()),
-                            pre_processed_inputs.clone(),
-                            Some(lock),
+                                }) as PlaylistUpdateBootstrap
+                            })
+                            .with_playlist_state(Arc::clone(&playlist_state))
+                            .with_update_guard(update_guard.clone())
+                            .with_disabled_headers(disabled_headers.clone())
+                            .with_provider_manager(app_state_clone.active_provider.clone())
+                            .with_metadata_manager(app_state_clone.metadata_manager.clone()
+                                as std::sync::Arc<dyn tuliprox_processing::metadata_sink::MetadataUpdateSink>)
+                            .with_pre_processed_inputs(pre_processed_inputs.clone())
+                            .with_acquired_permit(lock),
                         )
                         .await;
                         break;
@@ -407,26 +410,27 @@ async fn run_manual_update_worker(
             break;
         };
         exec_processing(
-            &client,
-            Arc::clone(&app_state.app_config),
-            request.targets,
-            Arc::clone(&app_state.event_manager) as Arc<dyn shared::model::EventSink>,
-            Some({
+            ProcessingRun::new(
+                client.clone(),
+                Arc::clone(&app_state.app_config),
+                request.targets,
+                Arc::clone(&app_state.event_manager) as Arc<dyn shared::model::EventSink>,
+            )
+            .with_bootstrap({
                 let state = Arc::clone(&app_state);
                 std::sync::Arc::new(move || {
                     let state = Arc::clone(&state);
                     Box::pin(async move { sync_panel_api_exp_dates(&state).await })
                         as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
-                })
-            }),
-            Some(Arc::clone(&app_state.playlists)),
-            Some(app_state.update_guard.clone()),
-            app_state.get_disabled_headers(),
-            Some(Arc::clone(&app_state.active_provider)),
-            Some(Arc::clone(&app_state.metadata_manager)
-                as std::sync::Arc<dyn tuliprox_processing::metadata_sink::MetadataUpdateSink>),
-            None,
-            Some(permit),
+                }) as PlaylistUpdateBootstrap
+            })
+            .with_playlist_state(Arc::clone(&app_state.playlists))
+            .with_update_guard(app_state.update_guard.clone())
+            .with_disabled_headers(app_state.get_disabled_headers())
+            .with_provider_manager(Arc::clone(&app_state.active_provider))
+            .with_metadata_manager(Arc::clone(&app_state.metadata_manager)
+                as std::sync::Arc<dyn tuliprox_processing::metadata_sink::MetadataUpdateSink>)
+            .with_acquired_permit(permit),
         )
         .await;
     }
@@ -491,25 +495,22 @@ fn exec_update_on_boot(client: &reqwest::Client, app_state: &Arc<AppState>, targ
 
         tokio::spawn(async move {
             exec_processing(
-                &client,
-                app_config_clone,
-                targets_clone,
-                event_manager,
-                Some({
-                    let state = Arc::clone(&app_state_clone);
-                    std::sync::Arc::new(move || {
-                        let state = Arc::clone(&state);
-                        Box::pin(async move { sync_panel_api_exp_dates(&state).await })
-                            as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+                ProcessingRun::new(client, app_config_clone, targets_clone, event_manager)
+                    .with_bootstrap({
+                        let state = Arc::clone(&app_state_clone);
+                        std::sync::Arc::new(move || {
+                            let state = Arc::clone(&state);
+                            Box::pin(async move { sync_panel_api_exp_dates(&state).await })
+                                as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+                        }) as PlaylistUpdateBootstrap
                     })
-                }),
-                Some(playlist_state),
-                update_guard,
-                disabled_headers,
-                Some(provider_manager),
-                Some(metadata_manager),
-                None,
-                None,
+                    .with_playlist_state(playlist_state)
+                    .with_update_guard(update_guard)
+                    .with_disabled_headers(disabled_headers)
+                    .with_provider_manager(provider_manager)
+                    .with_metadata_manager(
+                        metadata_manager as std::sync::Arc<dyn tuliprox_processing::metadata_sink::MetadataUpdateSink>,
+                    ),
             )
             .await;
         });

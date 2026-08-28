@@ -6,7 +6,7 @@ use crate::{
     model::{AppConfig, ProcessTargets, ScheduleConfig},
     processing::{
         geoip::{update_geoip_db, GeoIpUpdateError},
-        processor::exec_processing,
+        processor::{exec_processing, PlaylistUpdateBootstrap, ProcessingRun},
     },
     utils::exit,
 };
@@ -184,26 +184,27 @@ async fn run_playlist_update_inner(
     // so that input/target ID changes from hot-reloads are picked up.
     let targets = get_process_targets(&app_state.app_config, &app_state.forced_targets.load(), schedule_target_names);
     exec_processing(
-        client,
-        Arc::clone(&app_state.app_config),
-        targets,
-        Arc::clone(&app_state.event_manager) as Arc<dyn shared::model::EventSink>,
-        Some({
+        ProcessingRun::new(
+            client.clone(),
+            Arc::clone(&app_state.app_config),
+            targets,
+            Arc::clone(&app_state.event_manager) as Arc<dyn shared::model::EventSink>,
+        )
+        .with_bootstrap({
             let state = Arc::clone(app_state);
             std::sync::Arc::new(move || {
                 let state = Arc::clone(&state);
                 Box::pin(async move { crate::api::sync_panel_api_exp_dates(&state).await })
                     as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
-            })
-        }),
-        Some(app_state.playlists.clone()),
-        Some(app_state.update_guard.clone()),
-        app_state.get_disabled_headers(),
-        Some(Arc::clone(&app_state.active_provider)),
-        Some(Arc::clone(&app_state.metadata_manager)
-            as std::sync::Arc<dyn tuliprox_processing::metadata_sink::MetadataUpdateSink>),
-        None,
-        Some(permit),
+            }) as PlaylistUpdateBootstrap
+        })
+        .with_playlist_state(app_state.playlists.clone())
+        .with_update_guard(app_state.update_guard.clone())
+        .with_disabled_headers(app_state.get_disabled_headers())
+        .with_provider_manager(Arc::clone(&app_state.active_provider))
+        .with_metadata_manager(Arc::clone(&app_state.metadata_manager)
+            as std::sync::Arc<dyn tuliprox_processing::metadata_sink::MetadataUpdateSink>)
+        .with_acquired_permit(permit),
     )
     .await;
 }
