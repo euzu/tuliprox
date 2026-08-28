@@ -168,9 +168,7 @@ impl DirectBodyIdleTimeout {
         Self { enabled: false, deadline: None, sleep: None, last_socket_activity_touch: None }
     }
 
-    const fn enabled() -> Self {
-        Self { enabled: true, deadline: None, sleep: None, last_socket_activity_touch: None }
-    }
+    const fn enabled() -> Self { Self { enabled: true, deadline: None, sleep: None, last_socket_activity_touch: None } }
 
     fn mark_progress(&mut self) -> bool {
         if !self.enabled {
@@ -824,9 +822,7 @@ impl Stream for ActiveClientStream {
 }
 
 impl Drop for ActiveClientStream {
-    fn drop(&mut self) {
-        self.state.release_stream_and_provider_handle_once();
-    }
+    fn drop(&mut self) { self.state.release_stream_and_provider_handle_once(); }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1667,9 +1663,7 @@ mod tests {
     struct DropTracker(Arc<AtomicBool>);
 
     impl DropTracker {
-        fn is_dropped(&self) -> bool {
-            self.0.load(Ordering::Acquire)
-        }
+        fn is_dropped(&self) -> bool { self.0.load(Ordering::Acquire) }
     }
 
     struct DropTrackedProviderStream {
@@ -1686,9 +1680,7 @@ mod tests {
     }
 
     impl Drop for DropTrackedProviderStream {
-        fn drop(&mut self) {
-            self.tracker.0.store(true, Ordering::Release);
-        }
+        fn drop(&mut self) { self.tracker.0.store(true, Ordering::Release); }
     }
 
     fn track_provider_stream(stream: BoxedProviderStream) -> (BoxedProviderStream, DropTracker) {

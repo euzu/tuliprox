@@ -14,59 +14,37 @@ pub struct StreamInfoConfig {
 }
 
 impl StreamInfoConfig {
-    pub fn is_none(&self) -> bool {
-        self.flags.is_empty()
-    }
+    pub fn is_none(&self) -> bool { self.flags.is_empty() }
 
     #[inline]
-    pub fn hide_group(&self) -> bool {
-        self.flags.contains(StreamInfoFields::HideGroup)
-    }
+    pub fn hide_group(&self) -> bool { self.flags.contains(StreamInfoFields::HideGroup) }
 
     #[inline]
-    pub fn hide_ip(&self) -> bool {
-        self.flags.contains(StreamInfoFields::HideIp)
-    }
+    pub fn hide_ip(&self) -> bool { self.flags.contains(StreamInfoFields::HideIp) }
 
     #[inline]
-    pub fn hide_country(&self) -> bool {
-        self.flags.contains(StreamInfoFields::HideCountry)
-    }
+    pub fn hide_country(&self) -> bool { self.flags.contains(StreamInfoFields::HideCountry) }
 
     #[inline]
-    pub fn hide_shared(&self) -> bool {
-        self.flags.contains(StreamInfoFields::HideShared)
-    }
+    pub fn hide_shared(&self) -> bool { self.flags.contains(StreamInfoFields::HideShared) }
 
     #[inline]
-    pub fn hide_duration(&self) -> bool {
-        self.flags.contains(StreamInfoFields::HideDuration)
-    }
+    pub fn hide_duration(&self) -> bool { self.flags.contains(StreamInfoFields::HideDuration) }
 
     #[inline]
-    pub fn hide_bandwidth(&self) -> bool {
-        self.flags.contains(StreamInfoFields::HideBandwidth)
-    }
+    pub fn hide_bandwidth(&self) -> bool { self.flags.contains(StreamInfoFields::HideBandwidth) }
 
     #[inline]
-    pub fn hide_transferred(&self) -> bool {
-        self.flags.contains(StreamInfoFields::HideTransferred)
-    }
+    pub fn hide_transferred(&self) -> bool { self.flags.contains(StreamInfoFields::HideTransferred) }
 
     #[inline]
-    pub fn hide_player(&self) -> bool {
-        self.flags.contains(StreamInfoFields::HidePlayer)
-    }
+    pub fn hide_player(&self) -> bool { self.flags.contains(StreamInfoFields::HidePlayer) }
 
     #[inline]
-    pub fn hide_user_comment(&self) -> bool {
-        self.flags.contains(StreamInfoFields::HideUserComment)
-    }
+    pub fn hide_user_comment(&self) -> bool { self.flags.contains(StreamInfoFields::HideUserComment) }
 
     #[inline]
-    pub fn hide_epg(&self) -> bool {
-        self.flags.contains(StreamInfoFields::HideEpg)
-    }
+    pub fn hide_epg(&self) -> bool { self.flags.contains(StreamInfoFields::HideEpg) }
 }
 
 #[derive(Debug, Clone)]

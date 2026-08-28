@@ -6,6 +6,4 @@
 use crate::model::AppConfig;
 
 /// `true` when the server may answer a request with a canned video clip.
-pub fn is_custom_video_stream_enabled(cfg: &AppConfig) -> bool {
-    cfg.config.load().custom_stream_response_enabled
-}
+pub fn is_custom_video_stream_enabled(cfg: &AppConfig) -> bool { cfg.config.load().custom_stream_response_enabled }

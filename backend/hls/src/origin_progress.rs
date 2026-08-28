@@ -27,9 +27,7 @@ pub enum HlsOriginPathCondition {
 }
 
 impl HlsOriginPathCondition {
-    pub const fn is_degraded(self) -> bool {
-        !matches!(self, Self::ProgressExpected)
-    }
+    pub const fn is_degraded(self) -> bool { !matches!(self, Self::ProgressExpected) }
 
     const fn opens_episode_immediately(self) -> bool {
         matches!(self, Self::HardFetchFailure | Self::AcceptanceConflict | Self::SegmentReadinessFailure)
@@ -132,13 +130,9 @@ impl HlsBoundedRecoverySamples {
         self.samples_ms.push_back(elapsed_ms);
     }
 
-    pub fn p95_ms(&self) -> Option<u64> {
-        self.percentile_ms(95)
-    }
+    pub fn p95_ms(&self) -> Option<u64> { self.percentile_ms(95) }
 
-    pub fn p99_ms(&self) -> Option<u64> {
-        self.percentile_ms(99)
-    }
+    pub fn p99_ms(&self) -> Option<u64> { self.percentile_ms(99) }
 
     pub fn latency_snapshot(&self) -> HlsObservedRecoveryLatency {
         HlsObservedRecoveryLatency {

@@ -11,17 +11,11 @@ pub struct MediaToolCapabilities {
 
 impl MediaToolCapabilities {
     #[must_use]
-    pub fn new() -> Self {
-        Self { available: OnceCell::new() }
-    }
+    pub fn new() -> Self { Self { available: OnceCell::new() } }
 
-    pub async fn is_ffmpeg_available(&self) -> bool {
-        self.available().await.contains(MediaToolCapability::Ffmpeg)
-    }
+    pub async fn is_ffmpeg_available(&self) -> bool { self.available().await.contains(MediaToolCapability::Ffmpeg) }
 
-    pub async fn is_ffprobe_available(&self) -> bool {
-        self.available().await.contains(MediaToolCapability::Ffprobe)
-    }
+    pub async fn is_ffprobe_available(&self) -> bool { self.available().await.contains(MediaToolCapability::Ffprobe) }
 
     async fn available(&self) -> MediaToolCapabilitySet {
         *self.available.get_or_init(Self::detect_available_tools).await

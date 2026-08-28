@@ -9,14 +9,10 @@ pub struct ResolveOptions {
 
 impl ResolveOptions {
     #[inline]
-    pub fn has_flag(&self, flag: ResolveOptionsFlags) -> bool {
-        self.flags.contains(flag)
-    }
+    pub fn has_flag(&self, flag: ResolveOptionsFlags) -> bool { self.flags.contains(flag) }
 
     #[inline]
-    pub fn unset_flag(&mut self, flag: ResolveOptionsFlags) {
-        self.flags.unset(flag);
-    }
+    pub fn unset_flag(&mut self, flag: ResolveOptionsFlags) { self.flags.unset(flag); }
 }
 
 impl Default for ResolveOptions {

@@ -88,9 +88,7 @@ impl RecordingCatalogEntry {
     /// Returns true when the entry is an orphan that only
     /// administrators may see. Non-admin callers must not see this
     /// entry.
-    pub fn is_orphan_only(&self) -> bool {
-        matches!(self.source, CatalogSource::Orphan) && self.owner_id.is_none()
-    }
+    pub fn is_orphan_only(&self) -> bool { matches!(self.source, CatalogSource::Orphan) && self.owner_id.is_none() }
 }
 
 #[cfg(test)]

@@ -322,9 +322,7 @@ fn has_video_facts(facts: &MediaServerVideoTechnicalFacts) -> bool {
     facts.codec.is_some() || facts.width.is_some() || facts.height.is_some()
 }
 
-fn has_audio_facts(facts: &MediaServerAudioTechnicalFacts) -> bool {
-    facts.codec.is_some() || facts.channels.is_some()
-}
+fn has_audio_facts(facts: &MediaServerAudioTechnicalFacts) -> bool { facts.codec.is_some() || facts.channels.is_some() }
 
 fn has_technical_facts(facts: &MediaServerTechnicalFacts) -> bool {
     facts.container.is_some()
@@ -400,15 +398,9 @@ mod tests {
         test_fixtures::{PLEX_EPISODES_XML, PLEX_MOVIES_XML, PLEX_SEASONS_XML, PLEX_SHOWS_XML},
     };
 
-    fn input_name() -> Arc<str> {
-        Arc::<str>::from("media_server")
-    }
-    fn server_id() -> Arc<str> {
-        Arc::<str>::from("machine-redacted")
-    }
-    fn library_id() -> Arc<str> {
-        Arc::<str>::from("library-redacted")
-    }
+    fn input_name() -> Arc<str> { Arc::<str>::from("media_server") }
+    fn server_id() -> Arc<str> { Arc::<str>::from("machine-redacted") }
+    fn library_id() -> Arc<str> { Arc::<str>::from("library-redacted") }
 
     #[test]
     fn maps_plex_movie_catalog_row_to_media_server_movie_without_leaking_part_file() {

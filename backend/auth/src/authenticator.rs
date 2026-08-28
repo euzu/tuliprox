@@ -129,26 +129,18 @@ impl TokenVerifier {
         Self { secret: secret.into(), issuer: issuer.into() }
     }
 
-    pub fn from_config(config: &WebAuthConfig) -> Self {
-        Self::new(config.secret.as_bytes(), config.issuer.clone())
-    }
+    pub fn from_config(config: &WebAuthConfig) -> Self { Self::new(config.secret.as_bytes(), config.issuer.clone()) }
 
-    pub fn verify(&self, token: &str) -> Option<TokenData<Claims>> {
-        verify_token(token, &self.secret, &self.issuer)
-    }
+    pub fn verify(&self, token: &str) -> Option<TokenData<Claims>> { verify_token(token, &self.secret, &self.issuer) }
 }
 
 fn has_role(token_data: Option<TokenData<Claims>>, role: Role) -> bool {
     token_data.is_some_and(|data| data.claims.roles.contains(role))
 }
 
-pub fn is_admin(token_data: Option<TokenData<Claims>>) -> bool {
-    has_role(token_data, Role::Admin)
-}
+pub fn is_admin(token_data: Option<TokenData<Claims>>) -> bool { has_role(token_data, Role::Admin) }
 
-pub fn is_api_user(token_data: Option<TokenData<Claims>>) -> bool {
-    has_role(token_data, Role::ApiUser)
-}
+pub fn is_api_user(token_data: Option<TokenData<Claims>>) -> bool { has_role(token_data, Role::ApiUser) }
 
 /// Stable error type for the validators. A stable
 /// "token-refresh-required" response lets the frontend sign out
@@ -183,9 +175,7 @@ impl AuthError {
     /// `true` when the frontend should request a fresh token before
     /// retrying the request. Stale-schema and missing-subject both
     /// qualify; a re-auth round-trip is required.
-    pub fn is_token_refresh_required(self) -> bool {
-        matches!(self, Self::StaleSchema | Self::MissingSubject)
-    }
+    pub fn is_token_refresh_required(self) -> bool { matches!(self, Self::StaleSchema | Self::MissingSubject) }
 }
 
 impl std::fmt::Display for AuthError {

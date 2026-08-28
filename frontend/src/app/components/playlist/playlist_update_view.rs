@@ -27,9 +27,7 @@ fn format_hms_now() -> String {
     format!("{}:{}:{}", pad(now.get_hours()), pad(now.get_minutes()), pad(now.get_seconds()))
 }
 
-fn format_library_log_line(summary: &LibraryScanSummary) -> String {
-    summary.message.clone()
-}
+fn format_library_log_line(summary: &LibraryScanSummary) -> String { summary.message.clone() }
 
 fn append_log_line_entries(current: &[AttrValue], line: String) -> Vec<AttrValue> {
     let mut updated = current.to_vec();

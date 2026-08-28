@@ -51,9 +51,7 @@ struct HlsProvisioningConsumerKey {
 }
 
 impl HlsProvisioningConsumerKey {
-    fn new(input_name: Arc<str>, virtual_id: u32) -> Self {
-        Self { input_name, virtual_id }
-    }
+    fn new(input_name: Arc<str>, virtual_id: u32) -> Self { Self { input_name, virtual_id } }
 }
 
 #[derive(Debug, Clone)]
@@ -94,9 +92,7 @@ pub struct HlsProvisioningState {
 }
 
 impl HlsProvisioningState {
-    pub(in crate::api) fn new() -> Self {
-        Self::default()
-    }
+    pub(in crate::api) fn new() -> Self { Self::default() }
 
     fn desired_jobs_for_waiting_consumers(consumer_count: usize) -> usize {
         if consumer_count == 0 {
@@ -375,9 +371,7 @@ pub(crate) fn hls_panel_provisioning_manifest_path(user: &ProxyUserCredentials, 
     )
 }
 
-pub(crate) fn hls_provisioning_discontinuity_sequence(_now_ms: u64) -> u64 {
-    0
-}
+pub(crate) fn hls_provisioning_discontinuity_sequence(_now_ms: u64) -> u64 { 0 }
 
 fn build_hls_panel_provisioning_manifest_body(mut segment_url: impl FnMut(usize) -> String) -> String {
     let media_sequence = 0;
@@ -600,9 +594,7 @@ pub(crate) fn hls_virtual_entry_redirect_response(
 mod tests {
     use super::*;
 
-    fn input_name() -> Arc<str> {
-        Arc::<str>::from("cdn-test")
-    }
+    fn input_name() -> Arc<str> { Arc::<str>::from("cdn-test") }
 
     #[test]
     fn hls_provisioning_state_tracks_in_progress_ready_and_provider_exhausted() {

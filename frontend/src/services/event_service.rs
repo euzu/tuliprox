@@ -16,9 +16,7 @@ pub struct EventService {
 }
 
 impl Default for EventService {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 impl EventService {
@@ -31,9 +29,7 @@ impl EventService {
         }
     }
 
-    pub fn is_config_change_message_blocked(&self) -> bool {
-        self.block_config_updated_message.load(Ordering::Relaxed)
-    }
+    pub fn is_config_change_message_blocked(&self) -> bool { self.block_config_updated_message.load(Ordering::Relaxed) }
 
     pub fn set_config_change_message_blocked(&self, value: bool) {
         if value {
@@ -59,9 +55,7 @@ impl EventService {
         sub_id
     }
 
-    pub fn unsubscribe(&self, sub_id: usize) {
-        self.subscribers.borrow_mut().remove(&sub_id);
-    }
+    pub fn unsubscribe(&self, sub_id: usize) { self.subscribers.borrow_mut().remove(&sub_id); }
 
     pub fn broadcast(&self, msg: EventMessage) {
         for cb in self.subscribers.borrow().values() {

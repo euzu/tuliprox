@@ -41,13 +41,7 @@ impl StalkerSession {
 
     /// Stamp the session with a caller-supplied instant.
     pub fn new_at(token: String, referer: String, load_url: String, now_epoch_secs: u64) -> Self {
-        Self {
-            token,
-            referer,
-            load_url,
-            fingerprint_evidence: Vec::new(),
-            created_at_epoch_secs: now_epoch_secs,
-        }
+        Self { token, referer, load_url, fingerprint_evidence: Vec::new(), created_at_epoch_secs: now_epoch_secs }
     }
 
     pub fn with_evidence(mut self, evidence: Vec<String>) -> Self {
@@ -58,9 +52,7 @@ impl StalkerSession {
     /// True when the cached session is older than `STALKER_SESSION_TTL`. The portal
     /// may invalidate tokens earlier; this is a soft hint to re-handshake, not a
     /// hard expiry.
-    pub fn is_stale(&self, ttl: Duration) -> bool {
-        self.is_stale_at(system_epoch_secs(), ttl)
-    }
+    pub fn is_stale(&self, ttl: Duration) -> bool { self.is_stale_at(system_epoch_secs(), ttl) }
 
     /// [`Self::is_stale`] against a caller-supplied instant.
     pub fn is_stale_at(&self, now_epoch_secs: u64, ttl: Duration) -> bool {

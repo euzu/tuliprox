@@ -2,9 +2,7 @@ pub fn format_hls_duration_ms(duration_ms: u64) -> String {
     format!("{}.{:03}", duration_ms / 1_000, duration_ms % 1_000)
 }
 
-pub const fn hls_target_duration_secs(duration_ms: u64) -> u64 {
-    duration_ms.saturating_add(999) / 1_000
-}
+pub const fn hls_target_duration_secs(duration_ms: u64) -> u64 { duration_ms.saturating_add(999) / 1_000 }
 
 #[cfg(test)]
 mod tests {

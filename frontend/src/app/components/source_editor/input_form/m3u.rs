@@ -8,9 +8,7 @@ pub(super) struct M3uInputFormProps {
 }
 
 impl PartialEq for M3uInputFormProps {
-    fn eq(&self, _other: &Self) -> bool {
-        false
-    }
+    fn eq(&self, _other: &Self) -> bool { false }
 }
 
 #[component]

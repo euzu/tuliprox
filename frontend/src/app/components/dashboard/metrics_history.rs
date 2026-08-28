@@ -5,9 +5,7 @@ use yew::prelude::*;
 
 const HISTORY_LEN: usize = 40;
 
-fn rc_identity_key<T>(value: &Option<Rc<T>>) -> Option<usize> {
-    value.as_ref().map(|rc| Rc::as_ptr(rc) as usize)
-}
+fn rc_identity_key<T>(value: &Option<Rc<T>>) -> Option<usize> { value.as_ref().map(|rc| Rc::as_ptr(rc) as usize) }
 
 fn push_capped(buffer: &mut VecDeque<f64>, value: f64) {
     if buffer.len() == HISTORY_LEN {
@@ -42,9 +40,7 @@ impl MetricsHistory {
         push_capped(&mut self.connections, status.active_user_connections as f64);
     }
 
-    pub fn as_vec(buffer: &VecDeque<f64>) -> Rc<[f64]> {
-        buffer.iter().copied().collect::<Vec<_>>().into()
-    }
+    pub fn as_vec(buffer: &VecDeque<f64>) -> Rc<[f64]> { buffer.iter().copied().collect::<Vec<_>>().into() }
 }
 
 #[derive(Default)]

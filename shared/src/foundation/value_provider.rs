@@ -161,9 +161,7 @@ pub struct ValueProvider<'a> {
 }
 
 impl ValueProvider<'_> {
-    pub fn quality_rank(&self) -> u8 {
-        header_quality_rank(&self.pli.header)
-    }
+    pub fn quality_rank(&self) -> u8 { header_quality_rank(&self.pli.header) }
 
     pub(crate) fn get_filter_value(&self, field: ItemField) -> Option<Cow<'_, str>> {
         let header = &self.pli.header;

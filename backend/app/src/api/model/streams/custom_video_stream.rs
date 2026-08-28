@@ -11,9 +11,7 @@ pub struct CustomVideoStream {
 }
 
 impl CustomVideoStream {
-    pub fn new(buffer: TransportStreamBuffer) -> Self {
-        Self { buffer }
-    }
+    pub fn new(buffer: TransportStreamBuffer) -> Self { Self { buffer } }
 }
 
 impl Stream for CustomVideoStream {

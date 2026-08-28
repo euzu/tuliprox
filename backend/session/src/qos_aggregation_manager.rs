@@ -350,9 +350,7 @@ fn ratio_score(successes: u64, total: u64) -> u8 {
     u8::try_from(percent.min(100)).unwrap_or(100)
 }
 
-fn average_opt(total: u64, samples: u64) -> Option<u64> {
-    total.checked_div(samples)
-}
+fn average_opt(total: u64, samples: u64) -> Option<u64> { total.checked_div(samples) }
 
 fn max_opt(lhs: Option<u64>, rhs: Option<u64>) -> Option<u64> {
     match (lhs, rhs) {
@@ -374,9 +372,7 @@ fn bucket_in_window(today: Option<NaiveDate>, bucket_day_utc: &str, max_day_dist
     (0..=max_day_distance).contains(&days)
 }
 
-fn parse_utc_day(day: &str) -> Option<NaiveDate> {
-    NaiveDate::parse_from_str(day, "%Y-%m-%d").ok()
-}
+fn parse_utc_day(day: &str) -> Option<NaiveDate> { NaiveDate::parse_from_str(day, "%Y-%m-%d").ok() }
 
 fn discover_history_days(history_dir: &Path) -> io::Result<Vec<String>> {
     if !history_dir.exists() {

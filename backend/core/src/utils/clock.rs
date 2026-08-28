@@ -45,9 +45,7 @@ use std::sync::{
 /// matching the behaviour of the 14 copies this replaces.
 #[inline]
 #[must_use]
-pub fn current_time_millis() -> u64 {
-    chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default()
-}
+pub fn current_time_millis() -> u64 { chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default() }
 
 /// Reads wall-clock time.
 ///
@@ -63,9 +61,7 @@ pub struct SystemClock;
 
 impl Clock for SystemClock {
     #[inline]
-    fn now_ms(&self) -> Millis {
-        Millis::new(current_time_millis())
-    }
+    fn now_ms(&self) -> Millis { Millis::new(current_time_millis()) }
 }
 
 /// A clock the caller sets, for tests that need time to be deterministic.
@@ -77,13 +73,9 @@ pub struct ManualClock(Arc<AtomicU64>);
 
 impl ManualClock {
     #[must_use]
-    pub fn new(now_ms: u64) -> Self {
-        Self(Arc::new(AtomicU64::new(now_ms)))
-    }
+    pub fn new(now_ms: u64) -> Self { Self(Arc::new(AtomicU64::new(now_ms))) }
 
-    pub fn set(&self, now_ms: u64) {
-        self.0.store(now_ms, Ordering::Release);
-    }
+    pub fn set(&self, now_ms: u64) { self.0.store(now_ms, Ordering::Release); }
 
     /// Move time forward, saturating rather than wrapping.
     pub fn advance(&self, delta_ms: u64) {
@@ -93,9 +85,7 @@ impl ManualClock {
 
 impl Clock for ManualClock {
     #[inline]
-    fn now_ms(&self) -> Millis {
-        Millis::new(self.0.load(Ordering::Acquire))
-    }
+    fn now_ms(&self) -> Millis { Millis::new(self.0.load(Ordering::Acquire)) }
 }
 
 #[cfg(test)]

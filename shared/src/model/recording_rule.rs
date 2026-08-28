@@ -87,9 +87,7 @@ pub enum RuleBody {
     WeeklyTimeslot { weekday: u8, local_start_time: String, duration_secs: u64, timezone: String },
 }
 
-const fn default_exclude_repeat() -> bool {
-    true
-}
+const fn default_exclude_repeat() -> bool { true }
 
 impl RuleBody {
     pub fn validate(&self) -> Result<(), &'static str> {
@@ -218,13 +216,9 @@ mod tests {
     use super::*;
     use crate::model::UserId;
 
-    fn user() -> UserId {
-        UserId::from("web:alice")
-    }
+    fn user() -> UserId { UserId::from("web:alice") }
 
-    fn source() -> RuleSource {
-        RuleSource::new("tgt", "virt", "input")
-    }
+    fn source() -> RuleSource { RuleSource::new("tgt", "virt", "input") }
 
     #[test]
     fn rule_source_rejects_empty_fields() {

@@ -6,7 +6,6 @@ use crate::stalker::{
     recipes::recipe_spec_for,
     transport::StalkerTransport,
 };
-use tuliprox_core::utils::Clock;
 use futures::StreamExt;
 use log::warn;
 use serde::{
@@ -30,6 +29,7 @@ use tokio_util::io::{StreamReader, SyncIoBridge};
 // The persisted shape lives in `tuliprox_core::model`; re-exported here for
 // this module's own call sites.
 pub use tuliprox_core::model::StalkerProgramRecord;
+use tuliprox_core::utils::Clock;
 
 #[derive(Debug, Default, Clone, Deserialize)]
 struct RawStalkerProgram {
@@ -179,7 +179,10 @@ where
         ]);
         builder = client.apply_mac_query(builder);
         builder = client.apply_bearer(builder, Some(&handshake.session), spec.token_in_query);
-        let response = match client.send_with_cap(builder, StalkerAction::GetBulkEpg, client.cap_for_action(StalkerAction::GetBulkEpg)).await {
+        let response = match client
+            .send_with_cap(builder, StalkerAction::GetBulkEpg, client.cap_for_action(StalkerAction::GetBulkEpg))
+            .await
+        {
             Ok(r) => r,
             Err(err) => {
                 last_err = Some(err);
@@ -279,9 +282,7 @@ struct EpgCancellationGuard {
 }
 
 impl EpgCancellationGuard {
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
+    fn disarm(&mut self) { self.armed = false; }
 }
 
 impl Drop for EpgCancellationGuard {
@@ -493,9 +494,7 @@ struct LeadingJsonReader<R> {
 }
 
 impl<R> LeadingJsonReader<R> {
-    fn new(inner: R) -> Self {
-        Self { inner, started: false, saw_non_ws: false }
-    }
+    fn new(inner: R) -> Self { Self { inner, started: false, saw_non_ws: false } }
 }
 
 impl<R: Read> Read for LeadingJsonReader<R> {

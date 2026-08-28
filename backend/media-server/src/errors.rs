@@ -27,9 +27,7 @@ pub struct MediaServerError {
 }
 
 impl MediaServerError {
-    pub fn new(kind: MediaServerErrorKind) -> Self {
-        Self { kind, provider: None, status: None, detail: None }
-    }
+    pub fn new(kind: MediaServerErrorKind) -> Self { Self { kind, provider: None, status: None, detail: None } }
 
     pub fn provider(mut self, provider: &'static str) -> Self {
         self.provider = Some(provider);
@@ -49,9 +47,7 @@ impl MediaServerError {
         self
     }
 
-    pub fn detail_text(&self) -> Option<&str> {
-        self.detail.as_deref()
-    }
+    pub fn detail_text(&self) -> Option<&str> { self.detail.as_deref() }
 
     pub fn from_http_status(status: StatusCode) -> Self {
         Self::from_http_status_with_fallback(

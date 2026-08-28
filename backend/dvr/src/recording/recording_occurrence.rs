@@ -324,12 +324,8 @@ mod tests {
     use chrono::NaiveDate;
     use shared::model::{recording_rule::RuleSource, UserId};
 
-    fn source() -> RuleSource {
-        RuleSource::new("tgt-1", "virt-1", "input-1")
-    }
-    fn user() -> UserId {
-        UserId::from("web:alice")
-    }
+    fn source() -> RuleSource { RuleSource::new("tgt-1", "virt-1", "input-1") }
+    fn user() -> UserId { UserId::from("web:alice") }
 
     #[test]
     fn occurrence_key_is_deterministic_and_version_prefixed() {

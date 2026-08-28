@@ -182,9 +182,7 @@ pub struct LibraryScanner {
 }
 
 impl LibraryScanner {
-    pub fn new(config: LibraryConfig) -> Self {
-        Self { config }
-    }
+    pub fn new(config: LibraryConfig) -> Self { Self { config } }
 
     pub async fn scan_all(&self) -> Result<Vec<ScannedMediaFile>, io::Error> {
         if !self.config.enabled {

@@ -280,15 +280,11 @@ impl SchedulesConfigDto {
     // Clippy's method-path suggestion here names a private module and does not
     // compile; the closure is kept deliberately.
     #[allow(clippy::redundant_closure_for_method_calls)]
-    pub fn is_empty(&self) -> bool {
-        self.schedules.as_deref().is_none_or(|s| s.is_empty())
-    }
+    pub fn is_empty(&self) -> bool { self.schedules.as_deref().is_none_or(|s| s.is_empty()) }
 }
 
 impl From<&ConfigDto> for SchedulesConfigDto {
-    fn from(config: &ConfigDto) -> Self {
-        Self { schedules: config.schedules.clone() }
-    }
+    fn from(config: &ConfigDto) -> Self { Self { schedules: config.schedules.clone() } }
 }
 
 pub struct HdHomeRunDeviceOverview {
@@ -467,9 +463,7 @@ impl ConfigDto {
         self.reverse_proxy.as_ref().is_some_and(|r| r.geoip.as_ref().is_some_and(|g| g.enabled))
     }
 
-    pub fn is_library_enabled(&self) -> bool {
-        self.library.as_ref().is_some_and(|l| l.enabled)
-    }
+    pub fn is_library_enabled(&self) -> bool { self.library.as_ref().is_some_and(|l| l.enabled) }
 }
 
 #[cfg(test)]

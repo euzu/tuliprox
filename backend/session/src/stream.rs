@@ -126,14 +126,10 @@ impl StreamDetails {
         }
     }
     #[inline]
-    pub fn has_stream(&self) -> bool {
-        self.stream.is_some()
-    }
+    pub fn has_stream(&self) -> bool { self.stream.is_some() }
 
     #[inline]
-    pub fn has_grace_period(&self) -> bool {
-        self.grace_period.period_millis > 0
-    }
+    pub fn has_grace_period(&self) -> bool { self.grace_period.period_millis > 0 }
 
     #[inline]
     pub fn has_deferred_provider_open(&self) -> bool {

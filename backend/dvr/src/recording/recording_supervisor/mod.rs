@@ -87,9 +87,7 @@ pub fn recording_enabled(app_config: &AppConfig) -> bool {
         .is_some_and(|download| download.recording.as_ref().is_none_or(|recording| recording.enabled))
 }
 
-pub fn now_ts() -> i64 {
-    chrono::Utc::now().timestamp()
-}
+pub fn now_ts() -> i64 { chrono::Utc::now().timestamp() }
 
 /// Claims for a system-initiated action. The retention worker is not a
 /// user; it holds the administrator role so it can act on shared and
@@ -123,9 +121,7 @@ impl PassGuard {
 }
 
 impl Drop for PassGuard {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
-    }
+    fn drop(&mut self) { self.0.store(false, Ordering::Release); }
 }
 
 /// Start every DVR supervisor. Called once the HTTP listener is bound so

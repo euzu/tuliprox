@@ -146,16 +146,12 @@ impl StalkerProviderProfile {
     /// Whether the portal reports an active account. The portal will return `status=0` or
     /// omit the field for blocked/expired accounts; the proxy will then refuse to fetch
     /// any new content from this input.
-    pub fn is_active(&self) -> bool {
-        matches!(self.status, Some(1) | None)
-    }
+    pub fn is_active(&self) -> bool { matches!(self.status, Some(1) | None) }
 
     /// Soft TTL the client uses to decide whether a fresh `get_profile` is required before
     /// a new download batch. The portal will eventually invalidate the session anyway, so
     /// the TTL is intentionally conservative.
-    pub fn profile_freshness_window() -> Duration {
-        Duration::from_mins(10)
-    }
+    pub fn profile_freshness_window() -> Duration { Duration::from_mins(10) }
 }
 
 /// A fully-typed `create_link` result: a playable URL plus the chain of command variants
@@ -199,9 +195,7 @@ pub struct StalkerHandshake {
 mod tests {
     use super::*;
 
-    fn candidate_chain(urls: &[&str]) -> Vec<String> {
-        urls.iter().map(|s| (*s).to_string()).collect()
-    }
+    fn candidate_chain(urls: &[&str]) -> Vec<String> { urls.iter().map(|s| (*s).to_string()).collect() }
 
     #[test]
     fn resolved_stream_advances_after_match() {

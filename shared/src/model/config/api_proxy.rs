@@ -23,9 +23,7 @@ pub struct UserPlanTrialDto {
 }
 
 impl UserPlanTrialDto {
-    pub fn duration_secs(&self) -> Option<u64> {
-        parse_duration_seconds(&self.duration, true).filter(|secs| *secs > 0)
-    }
+    pub fn duration_secs(&self) -> Option<u64> { parse_duration_seconds(&self.duration, true).filter(|secs| *secs > 0) }
 }
 
 /// Reusable capability tier referenced by users via `plan: <name>`.
@@ -163,9 +161,7 @@ impl ApiProxyServerInfoDto {
 
         Ok(())
     }
-    pub fn validate(&mut self) -> bool {
-        self.prepare().is_ok()
-    }
+    pub fn validate(&mut self) -> bool { self.prepare().is_ok() }
 }
 
 impl ApiProxyConfigDto {

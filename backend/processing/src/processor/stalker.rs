@@ -365,9 +365,7 @@ fn groups_for_cluster(
 /// Flattening everything to `ProviderConnection` read as "the network had a bad moment",
 /// so a misconfigured portal URL and a rejected password were both reported as connection
 /// trouble - and both counted as worth retrying.
-fn stalker_err_to_repo(err: StalkerError) -> TuliproxError {
-    tuliprox_iptv::error::stalker_error_to_tuliprox(&err)
-}
+fn stalker_err_to_repo(err: StalkerError) -> TuliproxError { tuliprox_iptv::error::stalker_error_to_tuliprox(&err) }
 
 /// Cache key for the runtime client map. Built from explicit, non-secret
 /// fields — `StalkerInputConfig` carries the portal account credentials, so
@@ -478,9 +476,7 @@ pub async fn re_resolve_stalker_url(
 mod tests {
     use super::*;
 
-    fn runtime_cfg() -> StalkerInputConfig {
-        StalkerInputConfig::default()
-    }
+    fn runtime_cfg() -> StalkerInputConfig { StalkerInputConfig::default() }
 
     #[test]
     fn runtime_client_cache_key_changes_with_endpoint_preference() {

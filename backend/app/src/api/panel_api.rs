@@ -909,9 +909,7 @@ async fn persist_panel_api_time_cache(
     Ok(())
 }
 
-fn parse_cached_tz(tz: Option<String>) -> Option<Tz> {
-    tz.and_then(|name| name.parse::<Tz>().ok())
-}
+fn parse_cached_tz(tz: Option<String>) -> Option<Tz> { tz.and_then(|name| name.parse::<Tz>().ok()) }
 
 async fn panel_account_info(
     app_state: &AppState,
@@ -1103,9 +1101,7 @@ fn resolve_alias_pool_min(app_state: &AppState, input_name: &Arc<str>, cfg: &Pan
     resolve_alias_pool_limit_value(Some(min_val), auto_value)
 }
 
-fn alias_pool_remove_expired(cfg: &PanelApiConfig) -> bool {
-    cfg.alias_pool.as_ref().is_some_and(|p| p.remove_expired)
-}
+fn alias_pool_remove_expired(cfg: &PanelApiConfig) -> bool { cfg.alias_pool.as_ref().is_some_and(|p| p.remove_expired) }
 
 fn collect_accounts(input: &ConfigInput) -> Vec<AccountCredentials> {
     let mut out = Vec::new();
@@ -1174,9 +1170,7 @@ fn sort_account_aliases_keep_root_first(accounts: &mut Vec<AccountCredentials>, 
     accounts.extend(aliases);
 }
 
-fn is_account_valid(exp_date: Option<i64>) -> bool {
-    exp_date.is_some() && !is_input_expired(exp_date)
-}
+fn is_account_valid(exp_date: Option<i64>) -> bool { exp_date.is_some() && !is_input_expired(exp_date) }
 
 fn count_valid_accounts(accounts: &[AccountCredentials]) -> usize {
     accounts.iter().filter(|acct| is_account_valid(acct.exp_date)).count()

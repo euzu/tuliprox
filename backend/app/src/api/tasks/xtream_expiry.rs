@@ -227,9 +227,7 @@ fn is_panel_request_due(last_attempt: Option<i64>, now: i64) -> bool {
     last_attempt.is_none_or(|last| now.saturating_sub(last) >= PANEL_INTERVAL_SECS)
 }
 
-fn is_expired_at(exp_date: i64, now: i64) -> bool {
-    exp_date <= now
-}
+fn is_expired_at(exp_date: i64, now: i64) -> bool { exp_date <= now }
 
 fn prune_state(state: &mut ExpiryState, accounts: &[Account], now: i64) -> bool {
     let previous_len = state.last_refresh.len()
@@ -314,9 +312,7 @@ fn panel_identity(source_url: &str, fallback: &str) -> String {
     )
 }
 
-fn panel_key(account: &Account) -> String {
-    account.panel.to_string()
-}
+fn panel_key(account: &Account) -> String { account.panel.to_string() }
 
 fn account_key(account: &Account) -> String {
     let mut hasher = blake3::Hasher::new();

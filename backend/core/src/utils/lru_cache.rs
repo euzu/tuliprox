@@ -10,9 +10,7 @@ use std::{
 const CACHEDIR_TAG: &str = "CACHEDIR.TAG";
 
 #[inline]
-fn encode_cache_key(key: &str) -> String {
-    encode_base64_hash(key)
-}
+fn encode_cache_key(key: &str) -> String { encode_base64_hash(key) }
 
 /// `LRUResourceCache`
 ///

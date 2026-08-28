@@ -69,9 +69,7 @@ pub enum MappingStage {
 }
 
 impl MappingStage {
-    pub fn is_processing(&self) -> bool {
-        *self == Self::Processing
-    }
+    pub fn is_processing(&self) -> bool { *self == Self::Processing }
 }
 
 #[derive(

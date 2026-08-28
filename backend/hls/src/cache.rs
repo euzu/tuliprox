@@ -38,17 +38,11 @@ impl SegmentCacheKey {
         Self { session_id: proxy_session_id, seq: proxy_seq, file_ext: proxy_file_ext.into() }
     }
 
-    pub fn stable_value(&self) -> String {
-        format!("hls:{}:{:020}", self.session_id.0, self.seq)
-    }
+    pub fn stable_value(&self) -> String { format!("hls:{}:{:020}", self.session_id.0, self.seq) }
 
-    pub fn proxy_session_id(&self) -> &ProxySessionId {
-        &self.session_id
-    }
+    pub fn proxy_session_id(&self) -> &ProxySessionId { &self.session_id }
 
-    pub fn proxy_seq(&self) -> u64 {
-        self.seq
-    }
+    pub fn proxy_seq(&self) -> u64 { self.seq }
 }
 
 impl fmt::Debug for SegmentCacheKey {
@@ -78,13 +72,9 @@ impl MapCacheKey {
         Self { session_id: proxy_session_id, map_id: proxy_map_id.into(), file_ext: proxy_file_ext.into() }
     }
 
-    pub fn stable_value(&self) -> String {
-        format!("hls-map:{}:{:020}", self.session_id.0, self.map_id.0)
-    }
+    pub fn stable_value(&self) -> String { format!("hls-map:{}:{:020}", self.session_id.0, self.map_id.0) }
 
-    pub fn proxy_map_id(&self) -> ProxyMapId {
-        self.map_id
-    }
+    pub fn proxy_map_id(&self) -> ProxyMapId { self.map_id }
 }
 
 impl fmt::Debug for MapCacheKey {
@@ -118,13 +108,9 @@ impl TransientObjectCacheKey {
         Self { session_id: proxy_session_id, resource_id: transient_resource_id, file_ext: proxy_file_ext.into() }
     }
 
-    pub fn stable_value(&self) -> String {
-        format!("hls-transient:{}:{}", self.session_id.0, self.resource_id.0)
-    }
+    pub fn stable_value(&self) -> String { format!("hls-transient:{}:{}", self.session_id.0, self.resource_id.0) }
 
-    pub fn transient_resource_id(&self) -> &TransientResourceId {
-        &self.resource_id
-    }
+    pub fn transient_resource_id(&self) -> &TransientResourceId { &self.resource_id }
 }
 
 impl fmt::Debug for TransientObjectCacheKey {
@@ -145,9 +131,7 @@ pub trait HlsCacheObjectKey {
 }
 
 impl HlsCacheObjectKey for SegmentCacheKey {
-    fn proxy_session_id(&self) -> &ProxySessionId {
-        &self.session_id
-    }
+    fn proxy_session_id(&self) -> &ProxySessionId { &self.session_id }
 
     fn session_path_component(&self) -> String {
         let value = &self.session_id.0;
@@ -157,15 +141,11 @@ impl HlsCacheObjectKey for SegmentCacheKey {
         blake3::hash(value.as_bytes()).to_hex().to_string()
     }
 
-    fn file_name(&self) -> String {
-        format!("{:06}.{}", self.seq, self.file_ext)
-    }
+    fn file_name(&self) -> String { format!("{:06}.{}", self.seq, self.file_ext) }
 }
 
 impl HlsCacheObjectKey for MapCacheKey {
-    fn proxy_session_id(&self) -> &ProxySessionId {
-        &self.session_id
-    }
+    fn proxy_session_id(&self) -> &ProxySessionId { &self.session_id }
 
     fn session_path_component(&self) -> String {
         let value = &self.session_id.0;
@@ -175,15 +155,11 @@ impl HlsCacheObjectKey for MapCacheKey {
         blake3::hash(value.as_bytes()).to_hex().to_string()
     }
 
-    fn file_name(&self) -> String {
-        format!("map/{:06}.{}", self.map_id.0, self.file_ext)
-    }
+    fn file_name(&self) -> String { format!("map/{:06}.{}", self.map_id.0, self.file_ext) }
 }
 
 impl HlsCacheObjectKey for TransientObjectCacheKey {
-    fn proxy_session_id(&self) -> &ProxySessionId {
-        &self.session_id
-    }
+    fn proxy_session_id(&self) -> &ProxySessionId { &self.session_id }
 
     fn session_path_component(&self) -> String {
         let value = &self.session_id.0;
@@ -193,9 +169,7 @@ impl HlsCacheObjectKey for TransientObjectCacheKey {
         blake3::hash(value.as_bytes()).to_hex().to_string()
     }
 
-    fn file_name(&self) -> String {
-        format!("r/{}.{}", self.resource_id.0, self.file_ext)
-    }
+    fn file_name(&self) -> String { format!("r/{}.{}", self.resource_id.0, self.file_ext) }
 }
 
 /// Filesystem metadata for a committed HLS cache object.
@@ -252,9 +226,7 @@ pub struct HlsCacheObjectLimitError {
 }
 
 impl HlsCacheObjectLimitError {
-    pub fn limit(&self) -> u64 {
-        self.limit
-    }
+    pub fn limit(&self) -> u64 { self.limit }
 }
 
 pub fn hls_cache_object_limit_from_io(error: &io::Error) -> Option<&HlsCacheObjectLimitError> {
@@ -287,9 +259,7 @@ impl fmt::Debug for HlsCacheCapacityRevision {
 
 impl HlsCacheCapacityRevision {
     #[cfg(any(test, feature = "test-support"))]
-    pub fn for_test() -> Self {
-        Self(Arc::new(CapacityRevision))
-    }
+    pub fn for_test() -> Self { Self(Arc::new(CapacityRevision)) }
 }
 
 /// Typed local budget deferral kept distinct from filesystem capacity failures.
@@ -311,47 +281,27 @@ pub struct HlsCacheCapacityError {
 }
 
 impl HlsCacheCapacityError {
-    pub fn configured_session_bytes(&self) -> u64 {
-        self.configured_session_bytes
-    }
+    pub fn configured_session_bytes(&self) -> u64 { self.configured_session_bytes }
 
-    pub fn configured_global_bytes(&self) -> u64 {
-        self.configured_global_bytes
-    }
+    pub fn configured_global_bytes(&self) -> u64 { self.configured_global_bytes }
 
-    pub fn current_session_bytes(&self) -> u64 {
-        self.current_session_bytes
-    }
+    pub fn current_session_bytes(&self) -> u64 { self.current_session_bytes }
 
-    pub fn current_global_bytes(&self) -> u64 {
-        self.current_global_bytes
-    }
+    pub fn current_global_bytes(&self) -> u64 { self.current_global_bytes }
 
-    pub fn staged_bytes(&self) -> u64 {
-        self.staged_bytes
-    }
+    pub fn staged_bytes(&self) -> u64 { self.staged_bytes }
 
-    pub fn required_session_bytes(&self) -> u64 {
-        self.required_session_bytes
-    }
+    pub fn required_session_bytes(&self) -> u64 { self.required_session_bytes }
 
-    pub fn required_global_bytes(&self) -> u64 {
-        self.required_global_bytes
-    }
+    pub fn required_global_bytes(&self) -> u64 { self.required_global_bytes }
 
-    pub fn revision(&self) -> &HlsCacheCapacityRevision {
-        &self.revision
-    }
+    pub fn revision(&self) -> &HlsCacheCapacityRevision { &self.revision }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn protected_working_set_bytes(&self) -> u64 {
-        self.protected_working_set_bytes
-    }
+    pub fn protected_working_set_bytes(&self) -> u64 { self.protected_working_set_bytes }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn reclaimable_bytes(&self) -> u64 {
-        self.reclaimable_bytes
-    }
+    pub fn reclaimable_bytes(&self) -> u64 { self.reclaimable_bytes }
 
     fn pressure(&self) -> CacheCapacityPressure {
         CacheCapacityPressure {
@@ -487,9 +437,7 @@ struct CapacityInvalidationGuard {
 }
 
 impl Drop for CapacityInvalidationGuard {
-    fn drop(&mut self) {
-        invalidate_capacity_state(&self.capacity, &self.changed);
-    }
+    fn drop(&mut self) { invalidate_capacity_state(&self.capacity, &self.changed); }
 }
 
 impl Drop for CachePathDeletionReservation {
@@ -557,9 +505,7 @@ impl CapacityMutationReservation {
         Ok(())
     }
 
-    fn mark_filesystem_mutation_started(&mut self) {
-        self.filesystem_mutation_started = true;
-    }
+    fn mark_filesystem_mutation_started(&mut self) { self.filesystem_mutation_started = true; }
 
     fn finish_replacement(mut self) {
         self.replacement = None;
@@ -655,9 +601,7 @@ fn store_session_bytes(capacity: &mut CacheCapacityState, session_component: &st
 }
 
 impl HlsSegmentCache {
-    pub fn new() -> Self {
-        Self::with_cache_path(DEFAULT_HLS_CACHE_PATH)
-    }
+    pub fn new() -> Self { Self::with_cache_path(DEFAULT_HLS_CACHE_PATH) }
 
     pub fn with_cache_path(cache_path: impl Into<PathBuf>) -> Self {
         Self {
@@ -720,9 +664,7 @@ impl HlsSegmentCache {
         self.capacity_changed.notify_waiters();
     }
 
-    pub fn cache_path(&self) -> PathBuf {
-        self.cache_path_snapshot().path
-    }
+    pub fn cache_path(&self) -> PathBuf { self.cache_path_snapshot().path }
 
     pub async fn update_cache_path(&self, cache_path: impl Into<PathBuf>) -> bool {
         let cache_path = cache_path.into();
@@ -1241,13 +1183,9 @@ impl HlsSegmentCache {
         .await
     }
 
-    pub fn object_path<K: HlsCacheObjectKey>(&self, key: &K) -> PathBuf {
-        self.path_for_key(key)
-    }
+    pub fn object_path<K: HlsCacheObjectKey>(&self, key: &K) -> PathBuf { self.path_for_key(key) }
 
-    pub fn contains_current_cache_path(&self, path: &Path) -> bool {
-        path.starts_with(self.cache_path_snapshot().path)
-    }
+    pub fn contains_current_cache_path(&self, path: &Path) -> bool { path.starts_with(self.cache_path_snapshot().path) }
 
     pub fn has_active_mutation(&self, path: &Path) -> bool {
         self.capacity.lock().unwrap_or_else(std::sync::PoisonError::into_inner).active_mutations.contains(path)
@@ -1651,9 +1589,7 @@ impl HlsSegmentCache {
         }
     }
 
-    fn invalidate_capacity_accounting(&self) {
-        invalidate_capacity_state(&self.capacity, &self.capacity_changed);
-    }
+    fn invalidate_capacity_accounting(&self) { invalidate_capacity_state(&self.capacity, &self.capacity_changed); }
 
     fn capacity_invalidation_guard(&self) -> CapacityInvalidationGuard {
         CapacityInvalidationGuard { capacity: Arc::clone(&self.capacity), changed: Arc::clone(&self.capacity_changed) }
@@ -1916,9 +1852,7 @@ fn is_temp_cache_file(path: &Path) -> bool {
 }
 
 impl Default for HlsSegmentCache {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 #[cfg(test)]
@@ -1946,9 +1880,7 @@ mod tests {
         sync::{oneshot, Semaphore},
     };
 
-    fn cache_key() -> SegmentCacheKey {
-        SegmentCacheKey::new(ProxySessionId("proxy_session".to_string()), 123, "ts")
-    }
+    fn cache_key() -> SegmentCacheKey { SegmentCacheKey::new(ProxySessionId("proxy_session".to_string()), 123, "ts") }
 
     async fn cache_with_projected_session_pressure(
     ) -> (tempfile::TempDir, Arc<HlsSegmentCache>, SegmentCacheKey, SegmentCacheKey) {

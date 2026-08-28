@@ -3,15 +3,11 @@ use base64::{engine::general_purpose, Engine};
 use url::Url;
 
 #[inline]
-pub fn hash_bytes(bytes: &[u8]) -> UUIDType {
-    UUIDType(blake3::hash(bytes).into())
-}
+pub fn hash_bytes(bytes: &[u8]) -> UUIDType { UUIDType(blake3::hash(bytes).into()) }
 
 /// generates a hash from a string
 #[inline]
-pub fn hash_string(text: &str) -> UUIDType {
-    hash_bytes(text.as_bytes())
-}
+pub fn hash_string(text: &str) -> UUIDType { hash_bytes(text.as_bytes()) }
 
 pub fn short_hash(text: &str) -> String {
     let hash = blake3::hash(text.as_bytes());
@@ -19,9 +15,7 @@ pub fn short_hash(text: &str) -> String {
 }
 
 #[inline]
-pub fn hex_encode(bytes: &[u8]) -> String {
-    hex::encode_upper(bytes)
-}
+pub fn hex_encode(bytes: &[u8]) -> String { hex::encode_upper(bytes) }
 
 #[inline]
 fn hex_nibble(b: u8) -> Result<u8, ()> {
@@ -50,9 +44,7 @@ pub fn hex_decode(hex_str: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-pub fn hash_string_as_hex(url: &str) -> String {
-    hex_encode(hash_string(url).as_ref())
-}
+pub fn hash_string_as_hex(url: &str) -> String { hex_encode(hash_string(url).as_ref()) }
 
 /// Extracts the numeric ID from the last path segment of a URL.
 /// Returns `Some(id)` only when the segment after the last `/` (before any extension)

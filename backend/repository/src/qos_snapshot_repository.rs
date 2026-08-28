@@ -257,13 +257,9 @@ pub struct QosSnapshotRepository {
 }
 
 impl QosSnapshotRepository {
-    pub fn snapshot_db_path(storage_dir: &Path) -> PathBuf {
-        storage_dir.join(SNAPSHOT_FILE_NAME)
-    }
+    pub fn snapshot_db_path(storage_dir: &Path) -> PathBuf { storage_dir.join(SNAPSHOT_FILE_NAME) }
 
-    pub fn checkpoint_db_path(storage_dir: &Path) -> PathBuf {
-        storage_dir.join(CHECKPOINT_FILE_NAME)
-    }
+    pub fn checkpoint_db_path(storage_dir: &Path) -> PathBuf { storage_dir.join(CHECKPOINT_FILE_NAME) }
 
     pub fn open(storage_dir: &Path) -> io::Result<Self> {
         let snapshot_path = Self::snapshot_db_path(storage_dir);
@@ -286,13 +282,9 @@ impl QosSnapshotRepository {
         })
     }
 
-    pub fn snapshot_path(&self) -> &Path {
-        &self.snapshot_path
-    }
+    pub fn snapshot_path(&self) -> &Path { &self.snapshot_path }
 
-    pub fn checkpoint_path(&self) -> &Path {
-        &self.checkpoint_path
-    }
+    pub fn checkpoint_path(&self) -> &Path { &self.checkpoint_path }
 
     pub fn get_snapshot(&self, stream_identity_key: &str) -> io::Result<Option<QosSnapshotRecord>> {
         let mut tree = self.snapshot_tree.lock();
@@ -314,9 +306,7 @@ impl QosSnapshotRepository {
         Ok(deleted)
     }
 
-    pub fn compact_snapshots(&self) -> io::Result<()> {
-        self.snapshot_tree.lock().compact()
-    }
+    pub fn compact_snapshots(&self) -> io::Result<()> { self.snapshot_tree.lock().compact() }
 
     pub fn for_each_snapshot<F>(&self, mut visit: F) -> io::Result<()>
     where

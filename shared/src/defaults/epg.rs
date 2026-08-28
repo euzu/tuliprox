@@ -30,41 +30,23 @@ pub const DEFAULT_ICS_EVENT_TITLE: &str = "{summary}";
 pub const DEFAULT_ICS_EVENT_DESCRIPTION: &str = "{description}";
 pub const DEFAULT_ICS_DUMMY_TITLE: &str = "No programme entry";
 
-pub fn default_ics_timezone() -> String {
-    DEFAULT_ICS_TIMEZONE.to_string()
-}
-pub fn is_default_ics_timezone(value: &String) -> bool {
-    value == DEFAULT_ICS_TIMEZONE
-}
+pub fn default_ics_timezone() -> String { DEFAULT_ICS_TIMEZONE.to_string() }
+pub fn is_default_ics_timezone(value: &String) -> bool { value == DEFAULT_ICS_TIMEZONE }
 
-pub fn default_ics_event_title() -> String {
-    DEFAULT_ICS_EVENT_TITLE.to_string()
-}
-pub fn is_default_ics_event_title(value: &String) -> bool {
-    value == DEFAULT_ICS_EVENT_TITLE
-}
+pub fn default_ics_event_title() -> String { DEFAULT_ICS_EVENT_TITLE.to_string() }
+pub fn is_default_ics_event_title(value: &String) -> bool { value == DEFAULT_ICS_EVENT_TITLE }
 
-pub fn default_ics_event_description() -> String {
-    DEFAULT_ICS_EVENT_DESCRIPTION.to_string()
-}
-pub fn is_default_ics_event_description(value: &String) -> bool {
-    value == DEFAULT_ICS_EVENT_DESCRIPTION
-}
+pub fn default_ics_event_description() -> String { DEFAULT_ICS_EVENT_DESCRIPTION.to_string() }
+pub fn is_default_ics_event_description(value: &String) -> bool { value == DEFAULT_ICS_EVENT_DESCRIPTION }
 
-pub fn default_ics_dummy_title() -> String {
-    DEFAULT_ICS_DUMMY_TITLE.to_string()
-}
-pub fn is_default_ics_dummy_title(value: &String) -> bool {
-    value == DEFAULT_ICS_DUMMY_TITLE
-}
+pub fn default_ics_dummy_title() -> String { DEFAULT_ICS_DUMMY_TITLE.to_string() }
+pub fn is_default_ics_dummy_title(value: &String) -> bool { value == DEFAULT_ICS_DUMMY_TITLE }
 
 /// Preserves `.`, `_`, and `-` so normalized names remain comparable with common XMLTV IDs.
 /// The former `[^a-zA-Z0-9\-]` pattern remains valid only as an explicit legacy configuration.
 pub const DEFAULT_EPG_NORMALIZE_REGEX: &str = r"[^a-zA-Z0-9._\-]";
 
-pub fn default_epg_normalize_regex() -> Option<String> {
-    Some(DEFAULT_EPG_NORMALIZE_REGEX.to_string())
-}
+pub fn default_epg_normalize_regex() -> Option<String> { Some(DEFAULT_EPG_NORMALIZE_REGEX.to_string()) }
 pub fn is_default_epg_normalize_regex(v: &Option<String>) -> bool {
     match v.as_ref().map(|value| value.trim()) {
         None => true,
@@ -91,9 +73,7 @@ pub fn is_default_epg_strip(v: &Option<Vec<String>>) -> bool {
     current == &default_strip
 }
 
-pub fn default_epg_name_prefix_separator() -> Option<Vec<char>> {
-    Some(DEFAULT_EPG_NAME_PREFIX_SEPARATOR.to_vec())
-}
+pub fn default_epg_name_prefix_separator() -> Option<Vec<char>> { Some(DEFAULT_EPG_NAME_PREFIX_SEPARATOR.to_vec()) }
 pub fn is_default_epg_name_prefix_separator(v: &Option<Vec<char>>) -> bool {
     let Some(current) = v.as_ref() else {
         return true;
@@ -104,9 +84,7 @@ pub fn is_default_epg_name_prefix_separator(v: &Option<Vec<char>>) -> bool {
     current == &default_separator
 }
 
-pub fn default_episode_pattern() -> Option<String> {
-    Some(crate::utils::constants::EPISODE_PATTERN.to_string())
-}
+pub fn default_episode_pattern() -> Option<String> { Some(crate::utils::constants::EPISODE_PATTERN.to_string()) }
 
 pub fn is_blank_or_default_episode_pattern(path: &Option<String>) -> bool {
     path.as_ref()

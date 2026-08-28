@@ -104,13 +104,9 @@ generate_form_reducer!(
 /// Uppercased, underscore-separated form of an event id, for i18n keys and
 /// field ids. `recording.completed` becomes `RECORDING_COMPLETED`, which is
 /// also the legacy `MsgKind` suffix - so existing translations still resolve.
-fn event_label_suffix(event: &str) -> String {
-    event.replace('.', "_").to_uppercase()
-}
+fn event_label_suffix(event: &str) -> String { event.replace('.', "_").to_uppercase() }
 
-fn event_label_key(event: &str) -> String {
-    format!("LABEL.MSG_KIND_{}", event_label_suffix(event))
-}
+fn event_label_key(event: &str) -> String { format!("LABEL.MSG_KIND_{}", event_label_suffix(event)) }
 
 #[component]
 pub fn MessagingConfigView() -> Html {

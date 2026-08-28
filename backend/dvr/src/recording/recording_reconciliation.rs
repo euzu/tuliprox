@@ -241,12 +241,8 @@ mod tests {
         UserId,
     };
 
-    fn source() -> RuleSource {
-        RuleSource::new("tgt", "virt", "input")
-    }
-    fn user() -> UserId {
-        UserId::from("web:alice")
-    }
+    fn source() -> RuleSource { RuleSource::new("tgt", "virt", "input") }
+    fn user() -> UserId { UserId::from("web:alice") }
     fn rule(id: &str) -> RecordingRule {
         RecordingRule {
             id: id.to_string(),

@@ -41,9 +41,7 @@ where
 }
 
 impl ConfigTargetShareLiveStreams {
-    pub fn is_empty(&self) -> bool {
-        !self.hls && !self.mpeg_ts
-    }
+    pub fn is_empty(&self) -> bool { !self.hls && !self.mpeg_ts }
 }
 
 /// Controls optional canonicalization of EPG data emitted for a target.
@@ -57,9 +55,7 @@ pub struct EpgOutputOptions {
 }
 
 impl EpgOutputOptions {
-    pub const fn is_empty(&self) -> bool {
-        !self.lowercase_ids && !self.lowercase_xmltv_display_names
-    }
+    pub const fn is_empty(&self) -> bool { !self.lowercase_ids && !self.lowercase_xmltv_display_names }
 }
 
 #[derive(Debug, Copy, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -124,25 +120,15 @@ impl ConfigTargetOptions {
             && self.force_redirect.is_none_or(|f| f.has_full_flags() || f.is_empty())
     }
 
-    pub const fn lowercase_epg_ids(&self) -> bool {
-        self.epg_output.lowercase_ids
-    }
+    pub const fn lowercase_epg_ids(&self) -> bool { self.epg_output.lowercase_ids }
 
-    pub const fn lowercase_xmltv_display_names(&self) -> bool {
-        self.epg_output.lowercase_xmltv_display_names
-    }
+    pub const fn lowercase_xmltv_display_names(&self) -> bool { self.epg_output.lowercase_xmltv_display_names }
 
-    pub fn share_live_hls_enabled(&self) -> bool {
-        self.share_live_streams.hls
-    }
+    pub fn share_live_hls_enabled(&self) -> bool { self.share_live_streams.hls }
 
-    pub fn share_live_mpeg_ts_enabled(&self) -> bool {
-        self.share_live_streams.mpeg_ts
-    }
+    pub fn share_live_mpeg_ts_enabled(&self) -> bool { self.share_live_streams.mpeg_ts }
 
-    pub fn share_live_any_enabled(&self) -> bool {
-        self.share_live_hls_enabled() || self.share_live_mpeg_ts_enabled()
-    }
+    pub fn share_live_any_enabled(&self) -> bool { self.share_live_hls_enabled() || self.share_live_mpeg_ts_enabled() }
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -286,9 +272,7 @@ pub struct HdHomeRunTargetOutputDto {
 }
 
 impl Default for HdHomeRunTargetOutputDto {
-    fn default() -> Self {
-        Self { device: String::new(), username: String::new(), use_output: Some(TargetType::M3u) }
-    }
+    fn default() -> Self { Self { device: String::new(), username: String::new(), use_output: Some(TargetType::M3u) } }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -580,9 +564,7 @@ mod tests {
         })
     }
 
-    fn xtream_output() -> TargetOutputDto {
-        TargetOutputDto::Xtream(XtreamTargetOutputDto::default())
-    }
+    fn xtream_output() -> TargetOutputDto { TargetOutputDto::Xtream(XtreamTargetOutputDto::default()) }
 
     #[test]
     fn strm_with_username_is_allowed_with_m3u_output() {

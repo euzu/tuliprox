@@ -34,13 +34,9 @@ pub fn push_log_entry(entry: LogEntry) {
     let _ = get_log_broadcaster().send(entry);
 }
 
-pub fn get_log_history() -> Vec<LogEntry> {
-    get_log_buffer().read().iter().cloned().collect()
-}
+pub fn get_log_history() -> Vec<LogEntry> { get_log_buffer().read().iter().cloned().collect() }
 
-pub fn subscribe_logs() -> tokio::sync::broadcast::Receiver<LogEntry> {
-    get_log_broadcaster().subscribe()
-}
+pub fn subscribe_logs() -> tokio::sync::broadcast::Receiver<LogEntry> { get_log_broadcaster().subscribe() }
 
 const LOG_ERROR_LEVEL_MOD: &[&str] =
     &["reqwest", "hyper_util", "tungstenite", "rustls_platform_verifier", "tokio_tungstenite", "notify", "mio"];
@@ -77,19 +73,13 @@ struct ReloadableLogger {
 }
 
 impl ReloadableLogger {
-    fn new(logger: Logger) -> Self {
-        Self { inner: RwLock::new(logger) }
-    }
+    fn new(logger: Logger) -> Self { Self { inner: RwLock::new(logger) } }
 
-    fn replace(&self, logger: Logger) {
-        *self.inner.write() = logger;
-    }
+    fn replace(&self, logger: Logger) { *self.inner.write() = logger; }
 }
 
 impl Log for ReloadableLogger {
-    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
-        self.inner.read().enabled(metadata)
-    }
+    fn enabled(&self, metadata: &Metadata<'_>) -> bool { self.inner.read().enabled(metadata) }
 
     fn log(&self, record: &Record<'_>) {
         self.inner.read().log(record);
@@ -105,9 +95,7 @@ impl Log for ReloadableLogger {
         push_log_entry(entry);
     }
 
-    fn flush(&self) {
-        self.inner.read().flush();
-    }
+    fn flush(&self) { self.inner.read().flush(); }
 }
 
 static LOGGER_CONTEXT: OnceLock<LoggerContext> = OnceLock::new();

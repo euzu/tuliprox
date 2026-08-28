@@ -16,9 +16,7 @@ fn normalize_field_id(raw: &str) -> String {
     join_non_empty_parts(normalized.split('_'), "_")
 }
 
-fn field_tokens(field_id: &str) -> Vec<&str> {
-    field_id.split('.').filter(|part| !part.is_empty()).collect::<Vec<_>>()
-}
+fn field_tokens(field_id: &str) -> Vec<&str> { field_id.split('.').filter(|part| !part.is_empty()).collect::<Vec<_>>() }
 
 fn push_unique(values: &mut Vec<String>, value: String) {
     if !values.iter().any(|existing| existing == &value) {

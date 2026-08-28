@@ -190,9 +190,7 @@ impl ActiveProviderManager {
         cfg.sources.load().inputs.iter().filter(|i| i.enabled).map(Arc::clone).collect()
     }
 
-    fn get_grace_options(cfg: &AppConfig) -> GracePeriodOptions {
-        cfg.config.load().get_grace_options()
-    }
+    fn get_grace_options(cfg: &AppConfig) -> GracePeriodOptions { cfg.config.load().get_grace_options() }
 
     pub async fn update_config(&self, cfg: &AppConfig) {
         let grace_period_options = Self::get_grace_options(cfg);
@@ -237,9 +235,7 @@ impl ActiveProviderManager {
     // Tradeoff: a new reservation for one channel clears any other reservation in the same family, so
     // concurrent multi-channel playback for the same client family is not supported by this grouping.
     // If concurrent streams must be supported, reservation matching must use the full owner identifier.
-    fn reservation_family(owner: &str) -> &str {
-        owner.rsplit_once('|').map_or(owner, |(family, _)| family)
-    }
+    fn reservation_family(owner: &str) -> &str { owner.rsplit_once('|').map_or(owner, |(family, _)| family) }
 
     // Compare reservations at the family level rather than exact owner equality so channel-switching can
     // take over an existing reservation across different `virtual_id`s for the same client family.
@@ -1474,9 +1470,7 @@ impl ActiveProviderManager {
         Ok(())
     }
 
-    pub async fn get_provider_connections_count(&self) -> usize {
-        self.providers.active_connection_count().await
-    }
+    pub async fn get_provider_connections_count(&self) -> usize { self.providers.active_connection_count().await }
 
     pub async fn provider_capacities_for_input(&self, input_name: &Arc<str>) -> Vec<(Arc<str>, usize, usize)> {
         let mut result = Vec::new();
@@ -1575,13 +1569,9 @@ mod tests {
         )
     }
 
-    fn create_test_app_config_single_provider_pool() -> AppConfig {
-        build_test_app_config(None, 1)
-    }
+    fn create_test_app_config_single_provider_pool() -> AppConfig { build_test_app_config(None, 1) }
 
-    fn create_test_app_config_single_unlimited_provider_pool() -> AppConfig {
-        build_test_app_config(None, 0)
-    }
+    fn create_test_app_config_single_unlimited_provider_pool() -> AppConfig { build_test_app_config(None, 0) }
 
     #[tokio::test]
     async fn unlimited_provider_connection_is_not_in_priority_index() {

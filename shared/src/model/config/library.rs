@@ -105,9 +105,7 @@ pub struct LibraryMetadataReadConfigDto {
 }
 
 impl LibraryMetadataReadConfigDto {
-    pub fn is_empty(&self) -> bool {
-        self.kodi && self.jellyfin && self.plex
-    }
+    pub fn is_empty(&self) -> bool { self.kodi && self.jellyfin && self.plex }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -137,9 +135,7 @@ impl LibraryPlaylistConfigDto {
             self.series_category = default_series_category();
         }
     }
-    pub fn clean(&mut self) {
-        self.prepare();
-    }
+    pub fn clean(&mut self) { self.prepare(); }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

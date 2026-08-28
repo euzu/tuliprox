@@ -18,9 +18,7 @@ impl SegmentFetchPriority {
         }
     }
 
-    pub const fn is_higher_priority_than(self, other: Self) -> bool {
-        self.rank() < other.rank()
-    }
+    pub const fn is_higher_priority_than(self, other: Self) -> bool { self.rank() < other.rank() }
 }
 
 /// Session-local deduplicating priority queue for segment fetch candidates.
@@ -51,9 +49,7 @@ impl SegmentPrefetchQueue {
         }
     }
 
-    pub fn max_prefetch_depth(&self) -> usize {
-        self.max_prefetch_depth
-    }
+    pub fn max_prefetch_depth(&self) -> usize { self.max_prefetch_depth }
 
     pub fn set_max_prefetch_depth(&mut self, max_prefetch_depth: usize) -> Vec<u64> {
         self.max_prefetch_depth = max_prefetch_depth;
@@ -114,25 +110,15 @@ impl SegmentPrefetchQueue {
         Some(priority)
     }
 
-    pub fn contains(&self, proxy_seq: u64) -> bool {
-        self.queued.contains_key(&proxy_seq)
-    }
+    pub fn contains(&self, proxy_seq: u64) -> bool { self.queued.contains_key(&proxy_seq) }
 
-    pub fn len(&self) -> usize {
-        self.queued.len()
-    }
+    pub fn len(&self) -> usize { self.queued.len() }
 
-    pub fn is_empty(&self) -> bool {
-        self.queued.is_empty()
-    }
+    pub fn is_empty(&self) -> bool { self.queued.is_empty() }
 
-    pub fn prefetch_len(&self) -> usize {
-        self.prefetch.len()
-    }
+    pub fn prefetch_len(&self) -> usize { self.prefetch.len() }
 
-    pub fn proxy_seqs(&self) -> Vec<u64> {
-        self.queued.keys().copied().collect()
-    }
+    pub fn proxy_seqs(&self) -> Vec<u64> { self.queued.keys().copied().collect() }
 
     fn insert_into_priority(&mut self, proxy_seq: u64, priority: SegmentFetchPriority) {
         match priority {
@@ -164,9 +150,7 @@ impl SegmentPrefetchQueue {
 }
 
 impl Default for SegmentPrefetchQueue {
-    fn default() -> Self {
-        Self::new(6)
-    }
+    fn default() -> Self { Self::new(6) }
 }
 
 impl HlsSession {
@@ -292,9 +276,7 @@ mod tests {
 
     const BASE_URL: &str = "http://origin.example.com/live/final/index.m3u8";
 
-    fn session() -> HlsSession {
-        HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0)
-    }
+    fn session() -> HlsSession { HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0) }
 
     fn normal_manifest(body: &str) -> tuliprox_parser::hls::origin_manifest::ParsedOriginManifest {
         match parse_origin_media_manifest(body, BASE_URL) {

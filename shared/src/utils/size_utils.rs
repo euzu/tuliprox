@@ -1,9 +1,7 @@
 use std::str::FromStr;
 
 #[inline]
-pub const fn bytes_to_megabytes(bytes: u64) -> u64 {
-    bytes / 1_048_576
-}
+pub const fn bytes_to_megabytes(bytes: u64) -> u64 { bytes / 1_048_576 }
 
 pub fn parse_size_base_2(size_str: &str) -> Result<u64, String> {
     let units = [

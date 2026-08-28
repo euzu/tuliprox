@@ -52,16 +52,10 @@ impl AuthService {
         }
     }
 
-    pub fn get_username(&self) -> String {
-        self.username.borrow().to_string()
-    }
-    pub fn is_admin(&self) -> bool {
-        self.roles.borrow().iter().any(|r| r == ROLE_ADMIN)
-    }
+    pub fn get_username(&self) -> String { self.username.borrow().to_string() }
+    pub fn is_admin(&self) -> bool { self.roles.borrow().iter().any(|r| r == ROLE_ADMIN) }
 
-    pub fn is_api_user(&self) -> bool {
-        self.roles.borrow().iter().any(|r| r == ROLE_API_USER)
-    }
+    pub fn is_api_user(&self) -> bool { self.roles.borrow().iter().any(|r| r == ROLE_API_USER) }
 
     pub fn has_permission(&self, permission: Permission) -> bool {
         self.is_admin() || self.permissions.borrow().contains(permission)
@@ -75,13 +69,9 @@ impl AuthService {
         self.is_admin() || self.permissions.borrow().contains_any(&permissions)
     }
 
-    pub fn is_authenticated(&self) -> bool {
-        self.auth_channel.get()
-    }
+    pub fn is_authenticated(&self) -> bool { self.auth_channel.get() }
 
-    pub fn token_exp_timestamp(&self) -> Option<i64> {
-        *self.token_exp.borrow()
-    }
+    pub fn token_exp_timestamp(&self) -> Option<i64> { *self.token_exp.borrow() }
 
     pub async fn auth_subscribe<F, U>(&self, callback: &mut F)
     where
@@ -172,9 +162,7 @@ impl AuthService {
 }
 
 impl Default for AuthService {
-    fn default() -> Self {
-        Self::new(&WebConfig::default())
-    }
+    fn default() -> Self { Self::new(&WebConfig::default()) }
 }
 
 #[cfg(test)]

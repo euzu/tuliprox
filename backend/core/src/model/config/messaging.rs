@@ -163,9 +163,7 @@ pub struct RestMessagingConfig {
 }
 
 impl RestMessagingConfig {
-    pub fn prepare(&mut self, templates_dir: &Path) {
-        discover_templates("rest", &mut self.templates, templates_dir);
-    }
+    pub fn prepare(&mut self, templates_dir: &Path) { discover_templates("rest", &mut self.templates, templates_dir); }
 }
 
 macros::from_impl!(RestMessagingConfig);
@@ -291,9 +289,7 @@ pub struct NtfyMessagingConfig {
 }
 
 impl NtfyMessagingConfig {
-    pub fn prepare(&mut self, templates_dir: &Path) {
-        discover_templates("ntfy", &mut self.templates, templates_dir);
-    }
+    pub fn prepare(&mut self, templates_dir: &Path) { discover_templates("ntfy", &mut self.templates, templates_dir); }
 }
 
 macros::from_impl!(NtfyMessagingConfig);
@@ -366,9 +362,7 @@ pub struct SlackMessagingConfig {
 }
 
 impl SlackMessagingConfig {
-    pub fn prepare(&mut self, templates_dir: &Path) {
-        discover_templates("slack", &mut self.templates, templates_dir);
-    }
+    pub fn prepare(&mut self, templates_dir: &Path) { discover_templates("slack", &mut self.templates, templates_dir); }
 }
 
 macros::from_impl!(SlackMessagingConfig);
@@ -455,9 +449,7 @@ pub struct MessagingConfig {
 impl MessagingConfig {
     /// The parsed `notify_on` subscription.
     #[must_use]
-    pub fn subscription(&self) -> &EventSubscription {
-        &self.subscription
-    }
+    pub fn subscription(&self) -> &EventSubscription { &self.subscription }
 
     pub fn prepare(&mut self, config_path: &str) {
         let templates_dir = PathBuf::from(config_path).join("messaging_templates");

@@ -89,9 +89,7 @@ impl HlsPostRefreshFallbackAggregate {
         }
     }
 
-    pub(super) fn is_complete(&self) -> bool {
-        self.unresolved.is_empty()
-    }
+    pub(super) fn is_complete(&self) -> bool { self.unresolved.is_empty() }
 
     fn outcome(&self) -> HlsPostRefreshFallbackOutcome {
         if let Some(reason) = self.first_unresolved_reason {

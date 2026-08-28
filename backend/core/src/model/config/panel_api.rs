@@ -17,15 +17,11 @@ pub struct PanelApiQueryParam {
 
 macros::from_impl!(PanelApiQueryParam);
 impl From<&PanelApiQueryParamDto> for PanelApiQueryParam {
-    fn from(dto: &PanelApiQueryParamDto) -> Self {
-        Self { key: dto.key.clone(), value: dto.value.clone() }
-    }
+    fn from(dto: &PanelApiQueryParamDto) -> Self { Self { key: dto.key.clone(), value: dto.value.clone() } }
 }
 
 impl From<&PanelApiQueryParam> for PanelApiQueryParamDto {
-    fn from(instance: &PanelApiQueryParam) -> Self {
-        Self { key: instance.key.clone(), value: instance.value.clone() }
-    }
+    fn from(instance: &PanelApiQueryParam) -> Self { Self { key: instance.key.clone(), value: instance.value.clone() } }
 }
 
 #[derive(Debug, Clone)]
@@ -178,9 +174,7 @@ pub struct PanelApiAliasPoolSize {
 
 macros::from_impl!(PanelApiAliasPoolSize);
 impl From<&PanelApiAliasPoolSizeDto> for PanelApiAliasPoolSize {
-    fn from(dto: &PanelApiAliasPoolSizeDto) -> Self {
-        Self { min: dto.min.clone(), max: dto.max.clone() }
-    }
+    fn from(dto: &PanelApiAliasPoolSizeDto) -> Self { Self { min: dto.min.clone(), max: dto.max.clone() } }
 }
 
 #[derive(Debug, Clone)]

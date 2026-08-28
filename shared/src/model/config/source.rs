@@ -211,9 +211,7 @@ impl SourcesConfigDto {
         Ok(())
     }
 
-    pub fn get_input(&self, name: &Arc<str>) -> Option<&ConfigInputDto> {
-        self.inputs.iter().find(|i| &i.name == name)
-    }
+    pub fn get_input(&self, name: &Arc<str>) -> Option<&ConfigInputDto> { self.inputs.iter().find(|i| &i.name == name) }
 }
 
 #[cfg(test)]

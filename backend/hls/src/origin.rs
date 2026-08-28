@@ -134,9 +134,7 @@ impl HlsOriginAccountIoLease {
         self.account_name == binding.account_name && self.session_owner == binding.session_owner
     }
 
-    pub const fn is_active_or_acquiring(&self) -> bool {
-        self.active_io_count > 0 || self.acquiring
-    }
+    pub const fn is_active_or_acquiring(&self) -> bool { self.active_io_count > 0 || self.acquiring }
 }
 
 impl fmt::Debug for HlsOriginAccountIoLease {
@@ -157,9 +155,7 @@ pub struct HlsOriginAccountIoLeaseGuard {
 }
 
 impl HlsOriginAccountIoLeaseGuard {
-    pub fn binding(&self) -> &HlsOriginAccountBinding {
-        &self.binding
-    }
+    pub fn binding(&self) -> &HlsOriginAccountBinding { &self.binding }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -303,9 +299,7 @@ impl HlsOriginAccountBinding {
         binding
     }
 
-    pub fn promote_to_active(&mut self) {
-        self.binding_mode = HlsOriginAccountBindingMode::Active;
-    }
+    pub fn promote_to_active(&mut self) { self.binding_mode = HlsOriginAccountBindingMode::Active; }
 
     pub fn detach(&mut self, reason: HlsOriginAccountDetachedReason, now_ms: u64) {
         self.binding_mode = HlsOriginAccountBindingMode::Detached { reason, detached_at_ms: now_ms };
@@ -390,9 +384,7 @@ pub enum HlsBoundAccountAcquireErrorKind {
 }
 
 impl HlsBoundAccountAcquireErrorKind {
-    pub fn allows_rebind(self) -> bool {
-        matches!(self, Self::Missing | Self::Expired)
-    }
+    pub fn allows_rebind(self) -> bool { matches!(self, Self::Missing | Self::Expired) }
 
     pub fn is_retryable_resource_failure(self) -> bool {
         matches!(
@@ -428,9 +420,7 @@ impl HlsEffectiveOriginAcquirePolicy {
         Self { connection_kind, priority, updated_at_ms }
     }
 
-    pub const fn fallback() -> Self {
-        Self::new(ConnectionKind::Normal, 0, 0)
-    }
+    pub const fn fallback() -> Self { Self::new(ConnectionKind::Normal, 0, 0) }
 
     pub const fn with_updated_at(self, updated_at_ms: u64) -> Self {
         Self::new(self.connection_kind, self.priority, updated_at_ms)
@@ -477,13 +467,9 @@ impl HlsOriginWorkClass {
         }
     }
 
-    pub const fn allows_grace(self) -> bool {
-        matches!(self, Self::ManifestInteractive | Self::Demand)
-    }
+    pub const fn allows_grace(self) -> bool { matches!(self, Self::ManifestInteractive | Self::Demand) }
 
-    pub const fn allows_speculative_overlap(self) -> bool {
-        matches!(self, Self::ManifestInteractive | Self::Demand)
-    }
+    pub const fn allows_speculative_overlap(self) -> bool { matches!(self, Self::ManifestInteractive | Self::Demand) }
 }
 
 #[derive(Clone)]

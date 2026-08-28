@@ -70,9 +70,7 @@ struct MapWorkerRuntime {
 }
 
 impl MapWorkerRuntime {
-    fn new(policy: SegmentFetchPolicy, global_semaphore: Arc<Semaphore>) -> Self {
-        Self { global_semaphore, policy }
-    }
+    fn new(policy: SegmentFetchPolicy, global_semaphore: Arc<Semaphore>) -> Self { Self { global_semaphore, policy } }
 }
 
 /// Bounded scheduler for live HLS EXT-X-MAP origin fetches.
@@ -123,9 +121,7 @@ impl HlsMapWorkerPool {
         self.runtime.store(Arc::new(MapWorkerRuntime::new(policy, global_semaphore)));
     }
 
-    pub fn access_leases(&self) -> &Arc<RwLock<HlsAccessLeaseStore>> {
-        &self.access_leases
-    }
+    pub fn access_leases(&self) -> &Arc<RwLock<HlsAccessLeaseStore>> { &self.access_leases }
 
     pub async fn wake_scheduler(self: &Arc<Self>, context: MapFetchContext, now_ms: u64) {
         loop {
@@ -302,9 +298,7 @@ impl HlsMapWorkerPool {
 }
 
 impl Default for HlsMapWorkerPool {
-    fn default() -> Self {
-        Self::new(SegmentFetchPolicy::default())
-    }
+    fn default() -> Self { Self::new(SegmentFetchPolicy::default()) }
 }
 
 async fn fetch_map_into_cache(

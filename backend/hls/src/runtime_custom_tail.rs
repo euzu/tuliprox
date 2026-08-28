@@ -114,9 +114,7 @@ pub enum HlsRuntimeCustomTailBasePolicy {
 }
 
 impl std::fmt::Display for HlsRuntimeCustomTailReason {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_label())
-    }
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { formatter.write_str(self.as_label()) }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -151,9 +149,7 @@ impl HlsFiniteTailTrigger {
         }
     }
 
-    pub const fn is_runtime_policy(self) -> bool {
-        matches!(self, Self::RuntimePolicy(_))
-    }
+    pub const fn is_runtime_policy(self) -> bool { matches!(self, Self::RuntimePolicy(_)) }
 }
 
 #[derive(Clone)]
@@ -194,9 +190,7 @@ impl HlsRuntimeCustomTailRevision {
         Self { reason: identity.reason, asset: Some(identity.media) }
     }
 
-    pub const fn missing(reason: HlsRuntimeCustomTailReason) -> Self {
-        Self { reason, asset: None }
-    }
+    pub const fn missing(reason: HlsRuntimeCustomTailReason) -> Self { Self { reason, asset: None } }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -490,9 +484,7 @@ impl HlsStandaloneCustomAccess {
         }
     }
 
-    pub fn lease_id(&self) -> &HlsAccessLeaseId {
-        &self.lease_id
-    }
+    pub fn lease_id(&self) -> &HlsAccessLeaseId { &self.lease_id }
 
     fn valid_until_ms(&self, now_ms: u64, media_duration_ms: u64, segment_count: u16) -> u64 {
         self.shared_valid_until_ms.unwrap_or_else(|| {
@@ -605,9 +597,7 @@ impl HlsStandaloneCustomAccessStore {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    fn len(&self) -> usize {
-        self.lock().entries.len()
-    }
+    fn len(&self) -> usize { self.lock().entries.len() }
 }
 
 pub struct HlsStandaloneCustomSegmentAccess {

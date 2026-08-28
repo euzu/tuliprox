@@ -1,32 +1,20 @@
 use crate::ptt::constants::PTT_CONSTANTS;
 use chrono::NaiveDate;
 
-pub fn none(input: &str) -> String {
-    input.to_string()
-}
+pub fn none(input: &str) -> String { input.to_string() }
 
-pub fn value(val: &str) -> String {
-    val.to_string()
-}
+pub fn value(val: &str) -> String { val.to_string() }
 
-pub fn boolean(_: &str) -> bool {
-    true
-}
-pub fn uinteger(input: &str) -> Option<u32> {
-    input.parse::<u32>().ok()
-}
+pub fn boolean(_: &str) -> bool { true }
+pub fn uinteger(input: &str) -> Option<u32> { input.parse::<u32>().ok() }
 
 pub fn first_uinteger(input: &str) -> Option<u32> {
     PTT_CONSTANTS.integer.find(input).and_then(|m| m.as_str().parse::<u32>().ok())
 }
 
-pub fn lowercase(input: &str) -> String {
-    input.to_lowercase()
-}
+pub fn lowercase(input: &str) -> String { input.to_lowercase() }
 
-pub fn uppercase(input: &str) -> String {
-    input.to_uppercase()
-}
+pub fn uppercase(input: &str) -> String { input.to_uppercase() }
 
 pub fn convert_months(date_str: &str) -> String {
     let mut result = date_str.to_string();

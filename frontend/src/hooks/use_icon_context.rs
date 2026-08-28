@@ -14,9 +14,7 @@ pub struct Icons {
 }
 
 impl Icons {
-    pub fn new() -> Self {
-        Self { definitions: None }
-    }
+    pub fn new() -> Self { Self { definitions: None } }
 
     pub fn new_with(definitions: &Vec<Rc<IconDefinition>>) -> Self {
         let mut map = HashMap::new();
@@ -39,9 +37,7 @@ impl Icons {
 }
 
 impl Default for Icons {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 #[derive(PartialEq, Debug, Clone)]
@@ -50,13 +46,9 @@ pub struct IconContext {
 }
 
 impl IconContext {
-    pub fn new(definitions: &Vec<Rc<IconDefinition>>) -> Self {
-        Self { icons: Rc::new(Icons::new_with(definitions)) }
-    }
+    pub fn new(definitions: &Vec<Rc<IconDefinition>>) -> Self { Self { icons: Rc::new(Icons::new_with(definitions)) } }
 
-    pub fn icons(&self) -> Rc<Icons> {
-        self.icons.clone()
-    }
+    pub fn icons(&self) -> Rc<Icons> { self.icons.clone() }
 }
 
 #[hook]

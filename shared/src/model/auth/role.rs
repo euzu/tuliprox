@@ -54,9 +54,7 @@ impl RoleSet {
     }
 
     /// The wire names, in declaration order.
-    pub fn names(self) -> Vec<&'static str> {
-        self.iter().map(Role::as_str).collect()
-    }
+    pub fn names(self) -> Vec<&'static str> { self.iter().map(Role::as_str).collect() }
 
     /// Build from wire names. Unknown names are dropped rather than rejected:
     /// a token minted by a newer version carrying a role this build does not

@@ -217,9 +217,7 @@ fn unescape_internal_url_component(value: &str) -> String {
     String::from_utf8_lossy(&decoded).into_owned()
 }
 
-fn decode_hex_byte(high: u8, low: u8) -> Option<u8> {
-    Some(hex_value(high)? << 4 | hex_value(low)?)
-}
+fn decode_hex_byte(high: u8, low: u8) -> Option<u8> { Some(hex_value(high)? << 4 | hex_value(low)?) }
 
 fn hex_value(value: u8) -> Option<u8> {
     match value {

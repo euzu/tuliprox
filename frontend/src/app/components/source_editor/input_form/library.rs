@@ -8,9 +8,7 @@ pub(super) struct LibraryInputFormProps {
 }
 
 impl PartialEq for LibraryInputFormProps {
-    fn eq(&self, _other: &Self) -> bool {
-        false
-    }
+    fn eq(&self, _other: &Self) -> bool { false }
 }
 
 #[component]

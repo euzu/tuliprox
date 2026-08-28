@@ -14,15 +14,11 @@ trait FactSource {
 }
 
 impl FactSource for VideoStreamProperties {
-    fn current_facts(&self) -> MediaItemFacts {
-        video_current_facts(self)
-    }
+    fn current_facts(&self) -> MediaItemFacts { video_current_facts(self) }
 }
 
 impl FactSource for SeriesStreamProperties {
-    fn current_facts(&self) -> MediaItemFacts {
-        series_current_facts(self)
-    }
+    fn current_facts(&self) -> MediaItemFacts { series_current_facts(self) }
 }
 
 fn fact_patch_from_metadata<S: FactSource>(properties: &S, metadata: &MediaMetadata) -> MediaFactPatch {

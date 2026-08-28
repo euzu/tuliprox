@@ -136,9 +136,7 @@ impl Theme {
         Theme::CvdFriendlyBright,
     ];
 
-    pub const fn all() -> &'static [Self] {
-        &Self::ALL
-    }
+    pub const fn all() -> &'static [Self] { &Self::ALL }
 
     pub const fn label(self) -> &'static str {
         match self {
@@ -191,9 +189,7 @@ impl Theme {
     }
 
     /// Applies the theme visually without persisting it (used for live previews).
-    pub fn preview(&self) {
-        self.set_body_theme();
-    }
+    pub fn preview(&self) { self.set_body_theme(); }
 
     fn save_to_local_storage(&self) {
         match self {

@@ -65,9 +65,7 @@ pub fn get_home_path() -> PathBuf {
     std::env::var(DEFAULT_HOME_ENV_VAR).ok().filter(|p| !p.trim().is_empty()).map_or_else(get_exe_path, PathBuf::from)
 }
 
-pub fn get_default_web_root_path() -> PathBuf {
-    get_default_web_root_path_for_home(get_home_path().as_path())
-}
+pub fn get_default_web_root_path() -> PathBuf { get_default_web_root_path_for_home(get_home_path().as_path()) }
 
 pub fn get_default_web_root_path_for_home(home_path: &Path) -> PathBuf {
     if let Some(web_root) = env::var(DEFAULT_WEB_ROOT_ENV_VAR).ok().filter(|p| !p.trim().is_empty()) {
@@ -77,13 +75,9 @@ pub fn get_default_web_root_path_for_home(home_path: &Path) -> PathBuf {
     get_default_path_for_home(home_path, DEFAULT_WEB_DIR)
 }
 
-pub fn get_default_path(file: &str) -> PathBuf {
-    get_default_path_for_home(get_home_path().as_path(), file)
-}
+pub fn get_default_path(file: &str) -> PathBuf { get_default_path_for_home(get_home_path().as_path(), file) }
 
-pub fn get_default_path_for_home(home_path: &Path, file: &str) -> PathBuf {
-    home_path.join(file)
-}
+pub fn get_default_path_for_home(home_path: &Path, file: &str) -> PathBuf { home_path.join(file) }
 
 pub fn get_default_file_path(config_path: &str, file: &str) -> String {
     let path: PathBuf = PathBuf::from(config_path);
@@ -91,9 +85,7 @@ pub fn get_default_file_path(config_path: &str, file: &str) -> String {
 }
 
 #[inline]
-pub fn get_default_user_file_path(config_path: &str) -> String {
-    get_default_file_path(config_path, USER_FILE)
-}
+pub fn get_default_user_file_path(config_path: &str) -> String { get_default_file_path(config_path, USER_FILE) }
 
 #[inline]
 pub fn get_default_user_group_file_path(config_path: &str) -> String {
@@ -101,29 +93,19 @@ pub fn get_default_user_group_file_path(config_path: &str) -> String {
 }
 
 #[inline]
-pub fn get_default_config_path() -> String {
-    get_default_path(CONFIG_PATH).to_str().unwrap_or(CONFIG_PATH).to_string()
-}
+pub fn get_default_config_path() -> String { get_default_path(CONFIG_PATH).to_str().unwrap_or(CONFIG_PATH).to_string() }
 
 #[inline]
-pub fn get_default_config_file_path(config_path: &str) -> String {
-    get_default_file_path(config_path, CONFIG_FILE)
-}
+pub fn get_default_config_file_path(config_path: &str) -> String { get_default_file_path(config_path, CONFIG_FILE) }
 
 #[inline]
-pub fn get_default_sources_file_path(config_path: &str) -> String {
-    get_default_file_path(config_path, SOURCE_FILE)
-}
+pub fn get_default_sources_file_path(config_path: &str) -> String { get_default_file_path(config_path, SOURCE_FILE) }
 
 #[inline]
-pub fn get_default_mappings_path(config_path: &str) -> String {
-    get_default_file_path(config_path, MAPPING_FILE)
-}
+pub fn get_default_mappings_path(config_path: &str) -> String { get_default_file_path(config_path, MAPPING_FILE) }
 
 #[inline]
-pub fn get_default_templates_path(config_path: &str) -> String {
-    get_default_file_path(config_path, TEMPLATE_FILE)
-}
+pub fn get_default_templates_path(config_path: &str) -> String { get_default_file_path(config_path, TEMPLATE_FILE) }
 
 fn resolve_config_scoped_path(config_path: &str, candidate: &str) -> String {
     let candidate_path = PathBuf::from(candidate.trim()).clean();
@@ -229,18 +211,12 @@ pub fn resolve_directory_path(input: &str) -> String {
     )
 }
 
-pub fn file_exists(path: &str) -> bool {
-    std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
-}
+pub fn file_exists(path: &str) -> bool { std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) }
 
-pub async fn file_exists_async(path: &Path) -> bool {
-    tokio::fs::try_exists(path).await.unwrap_or(false)
-}
+pub async fn file_exists_async(path: &Path) -> bool { tokio::fs::try_exists(path).await.unwrap_or(false) }
 
 #[inline]
-pub fn open_file(file_name: &Path) -> Result<File, std::io::Error> {
-    File::open(file_name)
-}
+pub fn open_file(file_name: &Path) -> Result<File, std::io::Error> { File::open(file_name) }
 
 pub async fn persist_file(persist_file: Option<PathBuf>, text: &str) {
     if let Some(path_buf) = persist_file {
@@ -378,9 +354,7 @@ pub fn parent_or_dot(path: &Path) -> &Path {
     path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."))
 }
 
-pub fn same_parent_directory(left: &Path, right: &Path) -> bool {
-    parent_or_dot(left) == parent_or_dot(right)
-}
+pub fn same_parent_directory(left: &Path, right: &Path) -> bool { parent_or_dot(left) == parent_or_dot(right) }
 
 /// Rejects a staging/published pair that a rename cannot atomically publish.
 pub fn require_same_parent_directory(staging: &Path, published: &Path) -> std::io::Result<()> {
@@ -503,9 +477,7 @@ pub fn resolve_relative_path(relative: &str) -> std::io::Result<PathBuf> {
     Ok(current_dir.join(relative))
 }
 
-pub fn is_directory(path: &str) -> bool {
-    PathBuf::from(path).is_dir()
-}
+pub fn is_directory(path: &str) -> bool { PathBuf::from(path).is_dir() }
 
 // Cleans up the directories and deletes all files whic are not listed in the list
 pub fn cleanup_unlisted_files_with_suffix(keep_files: &Vec<PathBuf>, suffix: &str) -> std::io::Result<()> {

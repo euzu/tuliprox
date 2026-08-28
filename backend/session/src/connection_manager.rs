@@ -41,9 +41,7 @@ const PREEMPT_REENTRY_BLOCK_SECS: u64 = 3;
 const SOCKET_EXPIRY_QUEUE_REBUILD_FACTOR: usize = 2;
 // Avoid rebuilding the expiry heap unless it contains at least this many stale entries.
 const SOCKET_EXPIRY_QUEUE_REBUILD_MIN_STALE: usize = 256;
-fn notify_capacity(capacity_notify: &Notify) {
-    capacity_notify.notify_waiters();
-}
+fn notify_capacity(capacity_notify: &Notify) { capacity_notify.notify_waiters(); }
 
 struct BackpressureState<T> {
     overflow: VecDeque<T>,
@@ -168,9 +166,7 @@ where
         state.draining = false;
     }
 
-    fn dropped_count(&self) -> u64 {
-        self.dropped_events.load(Ordering::Relaxed)
-    }
+    fn dropped_count(&self) -> u64 { self.dropped_events.load(Ordering::Relaxed) }
 }
 
 fn lock_backpressure_state<T>(state: &Mutex<BackpressureState<T>>) -> MutexGuard<'_, BackpressureState<T>> {
@@ -190,9 +186,7 @@ struct SocketActivityTracker {
 }
 
 impl SocketActivityTracker {
-    fn new() -> Self {
-        Self { pending: Arc::new(Mutex::new(HashMap::new())), notify: Arc::new(Notify::new()) }
-    }
+    fn new() -> Self { Self { pending: Arc::new(Mutex::new(HashMap::new())), notify: Arc::new(Notify::new()) } }
 
     fn track(&self, event: SocketActivityEvent) {
         let key = event.addr();
@@ -207,9 +201,7 @@ impl SocketActivityTracker {
         pending.drain().map(|(_, event)| event).collect()
     }
 
-    async fn notified(&self) {
-        self.notify.notified().await;
-    }
+    async fn notified(&self) { self.notify.notified().await; }
 }
 
 fn lock_socket_activity_pending(
@@ -626,9 +618,7 @@ impl ConnectionManager {
     }
 
     /// Returns a reference to the history writer.
-    pub fn history_writer(&self) -> &Arc<ArcSwapOption<StreamHistoryWriter>> {
-        &self.history_writer
-    }
+    pub fn history_writer(&self) -> &Arc<ArcSwapOption<StreamHistoryWriter>> { &self.history_writer }
 
     fn spawn_socket_activity_worker(
         activity_tracker: SocketActivityTracker,
@@ -853,9 +843,7 @@ impl ConnectionManager {
         });
     }
 
-    pub fn send_cleanup(&self, event: CleanupEvent) {
-        self.cleanup_sender.enqueue(event);
-    }
+    pub fn send_cleanup(&self, event: CleanupEvent) { self.cleanup_sender.enqueue(event); }
 
     pub fn dropped_cleanup_events(&self) -> u64 {
         self.cleanup_sender.dropped_count() + self.user_manager.dropped_cleanup_events.load(Ordering::Relaxed)
@@ -1033,9 +1021,7 @@ impl ConnectionManager {
         );
     }
 
-    pub fn capacity_notified(&self) -> Arc<Notify> {
-        Arc::clone(&self.capacity_notify)
-    }
+    pub fn capacity_notified(&self) -> Arc<Notify> { Arc::clone(&self.capacity_notify) }
 
     /// Emit disconnect records for all still-active streams and flush the history writer.
     /// Call once at graceful shutdown before dropping the `ConnectionManager`.
@@ -1059,9 +1045,7 @@ impl ConnectionManager {
         }
     }
 
-    pub async fn add_connection(&self, addr: &SocketAddr) {
-        self.user_manager.add_connection(addr).await;
-    }
+    pub async fn add_connection(&self, addr: &SocketAddr) { self.user_manager.add_connection(addr).await; }
 
     pub async fn touch_http_activity(&self, username: &str, token: &str, addr: &SocketAddr) {
         self.user_manager.touch_http_activity(username, token, addr).await;

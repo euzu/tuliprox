@@ -47,9 +47,7 @@ impl SortOrder {
 }
 
 impl Display for SortOrder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(self.as_str()) }
 }
 
 #[derive(Serialize, Debug, Copy, Clone, Eq, PartialEq)]
@@ -97,9 +95,7 @@ impl<'de> Deserialize<'de> for SortTarget {
 }
 
 impl Display for SortTarget {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result { f.write_str(self.as_str()) }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

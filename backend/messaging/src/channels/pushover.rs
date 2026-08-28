@@ -26,9 +26,7 @@ pub struct PushoverChannel {
 }
 
 impl PushoverChannel {
-    pub fn new(config: PushoverMessagingConfig, client: reqwest::Client) -> Self {
-        Self { config, client }
-    }
+    pub fn new(config: PushoverMessagingConfig, client: reqwest::Client) -> Self { Self { config, client } }
 
     /// Pushover's own priority scale, from the event severity.
     fn priority(severity: Severity) -> &'static str {
@@ -41,21 +39,13 @@ impl PushoverChannel {
 }
 
 impl NotificationChannel for PushoverChannel {
-    fn id(&self) -> &'static str {
-        "pushover"
-    }
+    fn id(&self) -> &'static str { "pushover" }
 
-    fn template_for(&self, event: EventId) -> Option<&str> {
-        self.config.templates.get(&event).map(String::as_str)
-    }
+    fn template_for(&self, event: EventId) -> Option<&str> { self.config.templates.get(&event).map(String::as_str) }
 
-    fn routing(&self) -> &ChannelRouting {
-        &self.config.routing
-    }
+    fn routing(&self) -> &ChannelRouting { &self.config.routing }
 
-    fn wants(&self, event: EventId, severity: Severity) -> bool {
-        self.config.routing.accepts(event, severity)
-    }
+    fn wants(&self, event: EventId, severity: Severity) -> bool { self.config.routing.accepts(event, severity) }
 
     async fn send(&self, msg: &RenderedMessage<'_>) -> Delivery {
         {

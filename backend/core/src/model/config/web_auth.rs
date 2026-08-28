@@ -374,9 +374,7 @@ mod tests {
     }
 
     impl Drop for DirGuard {
-        fn drop(&mut self) {
-            let _ = std::env::set_current_dir(&self.previous_dir);
-        }
+        fn drop(&mut self) { let _ = std::env::set_current_dir(&self.previous_dir); }
     }
 
     // --- parse_user_line tests ---

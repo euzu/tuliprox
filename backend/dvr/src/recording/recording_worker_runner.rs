@@ -284,9 +284,7 @@ impl<V: QuotaRecordingTaskView> QuotaRecordingTaskView for UuidView<'_, V> {
     fn recording(&self) -> Option<&shared::model::recording::RecordingMetadata> {
         self.tasks.iter().find(|t| t.uuid() == self.uuid).and_then(|t| t.recording())
     }
-    fn uuid(&self) -> &str {
-        self.uuid
-    }
+    fn uuid(&self) -> &str { self.uuid }
 }
 
 /// Cancellation-aware worker handle. Holds a `CancelToken` and
@@ -304,9 +302,7 @@ impl Worker {
     }
 
     /// `true` if a pass is currently in flight.
-    pub fn is_running(&self) -> bool {
-        self.is_running.load(Ordering::Acquire)
-    }
+    pub fn is_running(&self) -> bool { self.is_running.load(Ordering::Acquire) }
 
     /// Try to claim the worker for one pass. Returns `true` if
     /// the pass may run; `false` if a previous pass is still
@@ -316,9 +312,7 @@ impl Worker {
     }
 
     /// Release the worker after one pass.
-    pub fn release(&self) {
-        self.is_running.store(false, Ordering::Release);
-    }
+    pub fn release(&self) { self.is_running.store(false, Ordering::Release); }
 }
 
 #[cfg(test)]
@@ -368,15 +362,9 @@ mod tests {
         recording: Option<RecordingMetadata>,
     }
     impl QuotaRecordingTaskView for T {
-        fn state(&self) -> &DownloadState {
-            &self.state
-        }
-        fn recording(&self) -> Option<&RecordingMetadata> {
-            self.recording.as_ref()
-        }
-        fn uuid(&self) -> &str {
-            &self.uuid
-        }
+        fn state(&self) -> &DownloadState { &self.state }
+        fn recording(&self) -> Option<&RecordingMetadata> { self.recording.as_ref() }
+        fn uuid(&self) -> &str { &self.uuid }
     }
 
     fn completed(uuid: &str, channel_id: &str, completed_at: i64, measured: u64) -> T {

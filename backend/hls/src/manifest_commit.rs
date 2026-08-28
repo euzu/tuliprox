@@ -45,9 +45,7 @@ impl HlsCachedManifestOptions {
         self
     }
 
-    const fn requires_newer_manifest(self) -> bool {
-        self.newer_than_rendered_at_ms.is_some()
-    }
+    const fn requires_newer_manifest(self) -> bool { self.newer_than_rendered_at_ms.is_some() }
 }
 
 pub const fn hls_cached_manifest_options_for_requirement(

@@ -45,9 +45,7 @@ impl RenderPolicy {
 }
 
 impl Default for RenderPolicy {
-    fn default() -> Self {
-        Self::new(0)
-    }
+    fn default() -> Self { Self::new(0) }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -526,9 +524,7 @@ mod tests {
 
     const BASE_URL: &str = "http://origin.example.com/live/final/index.m3u8";
 
-    fn session() -> HlsSession {
-        HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0)
-    }
+    fn session() -> HlsSession { HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0) }
 
     fn normal_manifest(body: &str) -> tuliprox_parser::hls::origin_manifest::ParsedOriginManifest {
         match parse_origin_media_manifest(body, BASE_URL) {

@@ -44,9 +44,7 @@ impl Ord for ProxyType {
 }
 
 impl PartialOrd for ProxyType {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
 }
 
 impl Hash for ProxyType {
@@ -87,9 +85,7 @@ impl ProxyType {
         }
     }
 
-    pub fn is_reverse(&self, item_type: PlaylistItemType) -> bool {
-        !self.is_redirect(item_type)
-    }
+    pub fn is_reverse(&self, item_type: PlaylistItemType) -> bool { !self.is_redirect(item_type) }
 }
 
 impl Display for ProxyType {

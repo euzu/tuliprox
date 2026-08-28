@@ -64,9 +64,7 @@ fn get_cell_value(user: &TargetUser, col: usize) -> CellValue<'_> {
     }
 }
 
-fn is_col_sortable(col: usize) -> bool {
-    matches!(col, 1 | 2 | 3 | 4 | 7 | 8 | 9 | 10 | 11 | 12 | 16 | 17)
-}
+fn is_col_sortable(col: usize) -> bool { matches!(col, 1 | 2 | 3 | 4 | 7 | 8 | 9 | 10 | 11 | 12 | 16 | 17) }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 enum TableAction {

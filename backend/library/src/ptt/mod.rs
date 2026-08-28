@@ -15,6 +15,4 @@ static PTT_PARSER: LazyLock<PttParser> = LazyLock::new(|| {
     parser
 });
 
-pub fn ptt_parse_title(title: &str) -> PttMetadata {
-    PTT_PARSER.parse(title, false)
-}
+pub fn ptt_parse_title(title: &str) -> PttMetadata { PTT_PARSER.parse(title, false) }

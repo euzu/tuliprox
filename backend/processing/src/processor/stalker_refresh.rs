@@ -59,17 +59,11 @@ pub struct StalkerRefreshBudget {
 }
 
 impl StalkerRefreshBudget {
-    pub fn deadline(deadline: Instant) -> Self {
-        Self { limit: StalkerRefreshLimit::Deadline(deadline) }
-    }
+    pub fn deadline(deadline: Instant) -> Self { Self { limit: StalkerRefreshLimit::Deadline(deadline) } }
 
-    pub fn unlimited() -> Self {
-        Self { limit: StalkerRefreshLimit::Unlimited }
-    }
+    pub fn unlimited() -> Self { Self { limit: StalkerRefreshLimit::Unlimited } }
 
-    fn units(remaining: usize) -> Self {
-        Self { limit: StalkerRefreshLimit::Units { remaining } }
-    }
+    fn units(remaining: usize) -> Self { Self { limit: StalkerRefreshLimit::Units { remaining } } }
 
     fn completed_unit(&mut self) {
         if let StalkerRefreshLimit::Units { remaining } = &mut self.limit {

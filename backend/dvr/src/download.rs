@@ -88,13 +88,9 @@ impl QueueMutationError {
     /// `pub(crate)` because the only callers are download worker
     /// actions (`download_api.rs`) that wrap an inner error or carry
     /// an action label.
-    pub fn new(message: impl Into<String>) -> Self {
-        Self::Other(message.into())
-    }
+    pub fn new(message: impl Into<String>) -> Self { Self::Other(message.into()) }
 
-    pub fn from_io(err: std::io::Error) -> Self {
-        Self::Io(err)
-    }
+    pub fn from_io(err: std::io::Error) -> Self { Self::Io(err) }
 
     /// Stable display message for logging and HTTP error rendering.
     pub fn message(&self) -> &'static str {
@@ -730,9 +726,7 @@ impl From<&FileDownload> for FileDownloadDto {
 }
 
 impl From<FileDownload> for FileDownloadDto {
-    fn from(value: FileDownload) -> Self {
-        Self::from(&value)
-    }
+    fn from(value: FileDownload) -> Self { Self::from(&value) }
 }
 
 /// Priority-aware wait queue for download connection slots.
@@ -768,19 +762,13 @@ pub struct DownloadSlotWaitQueue {
 }
 
 impl Default for DownloadSlotWaitQueue {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 impl DownloadSlotWaitQueue {
-    pub fn new() -> Self {
-        Self { waiters: Arc::new(Mutex::new(Vec::new())), next_waiter_id: AtomicU64::new(1) }
-    }
+    pub fn new() -> Self { Self { waiters: Arc::new(Mutex::new(Vec::new())), next_waiter_id: AtomicU64::new(1) } }
 
-    async fn remove_waiter(&self, waiter_id: u64) {
-        self.waiters.lock().await.retain(|waiter| waiter.id != waiter_id);
-    }
+    async fn remove_waiter(&self, waiter_id: u64) { self.waiters.lock().await.retain(|waiter| waiter.id != waiter_id); }
 
     /// Register and block until this task is signalled or control flow requests pause/cancel.
     pub async fn wait(
@@ -884,9 +872,7 @@ pub struct DownloadQueue {
 }
 
 impl Default for DownloadQueue {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 impl DownloadQueue {
@@ -967,9 +953,7 @@ impl DownloadQueue {
             })
     }
 
-    pub fn new() -> Self {
-        Self::new_with_state_file(None)
-    }
+    pub fn new() -> Self { Self::new_with_state_file(None) }
 
     pub fn new_with_state_file(state_file: Option<PathBuf>) -> Self {
         Self {
@@ -1433,9 +1417,7 @@ impl DownloadQueue {
         }
     }
 
-    pub async fn promote_due_scheduled_now(&self) -> usize {
-        self.promote_due_scheduled(Utc::now().timestamp()).await
-    }
+    pub async fn promote_due_scheduled_now(&self) -> usize { self.promote_due_scheduled(Utc::now().timestamp()).await }
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]

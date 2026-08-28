@@ -119,15 +119,11 @@ fn log_and_skip_btree_error<T>(entry: std::io::Result<T>) -> Option<T> {
 }
 
 impl Default for PlaylistSource {
-    fn default() -> Self {
-        Self::new(PlaylistSourceKind::Empty(EmptyPlaylistSource::default()))
-    }
+    fn default() -> Self { Self::new(PlaylistSourceKind::Empty(EmptyPlaylistSource::default())) }
 }
 
 impl PlaylistSource {
-    fn new(kind: PlaylistSourceKind) -> Self {
-        Self { kind, skip_set: None }
-    }
+    fn new(kind: PlaylistSourceKind) -> Self { Self { kind, skip_set: None } }
 
     pub fn xtream_disk(source: XtreamDiskPlaylistSource) -> Self {
         Self::new(PlaylistSourceKind::XtreamDisk(Box::new(source)))
@@ -137,9 +133,7 @@ impl PlaylistSource {
         Self::new(PlaylistSourceKind::StalkerDisk(Box::new(source)))
     }
 
-    pub fn m3u_disk(source: M3uDiskPlaylistSource) -> Self {
-        Self::new(PlaylistSourceKind::M3uDisk(Box::new(source)))
-    }
+    pub fn m3u_disk(source: M3uDiskPlaylistSource) -> Self { Self::new(PlaylistSourceKind::M3uDisk(Box::new(source))) }
 
     pub fn local_library_disk(source: LocalLibraryDiskPlaylistSource) -> Self {
         Self::new(PlaylistSourceKind::LocalLibraryDisk(Box::new(source)))
@@ -149,9 +143,7 @@ impl PlaylistSource {
         Self::new(PlaylistSourceKind::MediaServerDisk(Box::new(source)))
     }
 
-    pub fn memory(source: MemoryPlaylistSource) -> Self {
-        Self::new(PlaylistSourceKind::Memory(source))
-    }
+    pub fn memory(source: MemoryPlaylistSource) -> Self { Self::new(PlaylistSourceKind::Memory(source)) }
 
     pub fn filtered(mut inner: Self, skip_set: HashSet<XtreamCluster>) -> Self {
         if skip_set.is_empty() {
@@ -420,9 +412,7 @@ impl PlaylistSource {
         }
     }
 
-    pub async fn obtain_resources(&mut self) -> Result<(), TuliproxError> {
-        dispatch_await!(self.obtain_resources())
-    }
+    pub async fn obtain_resources(&mut self) -> Result<(), TuliproxError> { dispatch_await!(self.obtain_resources()) }
 
     pub fn sort_by_provider_ordinal(&mut self) {
         match &mut self.kind {
@@ -466,60 +456,30 @@ fn clone_xtream_query(
 pub struct EmptyPlaylistSource {}
 
 impl PlaylistSourceOps for EmptyPlaylistSource {
-    fn is_memory(&self) -> bool {
-        true
-    }
-    fn get_channel_count(&mut self) -> usize {
-        0
-    }
-    fn get_group_count(&mut self) -> usize {
-        0
-    }
-    fn get_channel_count_excluding_clusters(&mut self, _skip_set: &HashSet<XtreamCluster>) -> usize {
-        0
-    }
-    fn get_group_count_excluding_clusters(&mut self, _skip_set: &HashSet<XtreamCluster>) -> usize {
-        0
-    }
-    fn is_empty(&mut self) -> bool {
-        true
-    }
-    fn into_items(&mut self) -> SourceItems<'_> {
-        SourceItems::Empty
-    }
-    fn items_mut(&mut self) -> SourceItemsMut<'_> {
-        SourceItemsMut::Empty
-    }
-    fn items(&mut self) -> SourceCowItems<'_> {
-        SourceCowItems::Owned(SourceItems::Empty)
-    }
+    fn is_memory(&self) -> bool { true }
+    fn get_channel_count(&mut self) -> usize { 0 }
+    fn get_group_count(&mut self) -> usize { 0 }
+    fn get_channel_count_excluding_clusters(&mut self, _skip_set: &HashSet<XtreamCluster>) -> usize { 0 }
+    fn get_group_count_excluding_clusters(&mut self, _skip_set: &HashSet<XtreamCluster>) -> usize { 0 }
+    fn is_empty(&mut self) -> bool { true }
+    fn into_items(&mut self) -> SourceItems<'_> { SourceItems::Empty }
+    fn items_mut(&mut self) -> SourceItemsMut<'_> { SourceItemsMut::Empty }
+    fn items(&mut self) -> SourceCowItems<'_> { SourceCowItems::Owned(SourceItems::Empty) }
     async fn update_playlist(&mut self, _plg: &PlaylistGroup) { /* noop */
     }
-    fn get_missing_vod_info_count(&mut self) -> usize {
-        0
-    }
-    fn get_missing_series_info_count(&mut self) -> usize {
-        0
-    }
-    fn get_missing_vod_info_count_excluding_clusters(&mut self, _skip_set: &HashSet<XtreamCluster>) -> usize {
-        0
-    }
-    fn get_missing_series_info_count_excluding_clusters(&mut self, _skip_set: &HashSet<XtreamCluster>) -> usize {
-        0
-    }
+    fn get_missing_vod_info_count(&mut self) -> usize { 0 }
+    fn get_missing_series_info_count(&mut self) -> usize { 0 }
+    fn get_missing_vod_info_count_excluding_clusters(&mut self, _skip_set: &HashSet<XtreamCluster>) -> usize { 0 }
+    fn get_missing_series_info_count_excluding_clusters(&mut self, _skip_set: &HashSet<XtreamCluster>) -> usize { 0 }
     fn deduplicate(&mut self, _duplicates: &mut HashSet<UUIDType>) { /* noop */
     }
-    fn take_groups(&mut self) -> Vec<PlaylistGroup> {
-        vec![]
-    }
+    fn take_groups(&mut self) -> Vec<PlaylistGroup> { vec![] }
     fn clone_source(&self) -> Result<PlaylistSource, TuliproxError> {
         Ok(PlaylistSource::new(PlaylistSourceKind::Empty(EmptyPlaylistSource::default())))
     }
     fn release_resources(&mut self, _cluster: XtreamCluster) { /* noop */
     }
-    async fn obtain_resources(&mut self) -> Result<(), TuliproxError> {
-        Ok(())
-    }
+    async fn obtain_resources(&mut self) -> Result<(), TuliproxError> { Ok(()) }
     fn sort_by_provider_ordinal(&mut self) { /* noop */
     }
 }
@@ -584,9 +544,7 @@ impl XtreamDiskPlaylistSource {
 }
 
 impl PlaylistSourceOps for XtreamDiskPlaylistSource {
-    fn is_memory(&self) -> bool {
-        false
-    }
+    fn is_memory(&self) -> bool { false }
 
     fn get_channel_count(&mut self) -> usize {
         self.live.as_mut().map_or(0usize, |(t, _)| t.len().unwrap_or(0usize))
@@ -662,13 +620,9 @@ impl PlaylistSourceOps for XtreamDiskPlaylistSource {
             && self.series.as_mut().is_none_or(|(q, _)| q.is_empty().unwrap_or(true))
     }
 
-    fn into_items(&mut self) -> SourceItems<'_> {
-        SourceItems::Xtream(self.stores())
-    }
+    fn into_items(&mut self) -> SourceItems<'_> { SourceItems::Xtream(self.stores()) }
 
-    fn items(&mut self) -> SourceCowItems<'_> {
-        SourceCowItems::Owned(self.into_items())
-    }
+    fn items(&mut self) -> SourceCowItems<'_> { SourceCowItems::Owned(self.into_items()) }
 
     fn items_mut(&mut self) -> SourceItemsMut<'_> {
         warn!(
@@ -800,9 +754,7 @@ impl PlaylistSourceOps for XtreamDiskPlaylistSource {
         }
     }
 
-    async fn obtain_resources(&mut self) -> Result<(), TuliproxError> {
-        self.reload().await
-    }
+    async fn obtain_resources(&mut self) -> Result<(), TuliproxError> { self.reload().await }
     fn sort_by_provider_ordinal(&mut self) {
         warn!("Sorting by provider ordinal is not supported for disk based playlists");
     }
@@ -916,9 +868,7 @@ impl StalkerDiskPlaylistSource {
 }
 
 impl PlaylistSourceOps for StalkerDiskPlaylistSource {
-    fn is_memory(&self) -> bool {
-        false
-    }
+    fn is_memory(&self) -> bool { false }
 
     fn get_channel_count(&mut self) -> usize {
         self.live_count + self.vod_count + self.series_roots_count + self.series_count
@@ -986,9 +936,7 @@ impl PlaylistSourceOps for StalkerDiskPlaylistSource {
         SourceItems::Stalker { stores: self.stores(), input_name }
     }
 
-    fn items(&mut self) -> SourceCowItems<'_> {
-        SourceCowItems::Owned(self.into_items())
-    }
+    fn items(&mut self) -> SourceCowItems<'_> { SourceCowItems::Owned(self.into_items()) }
 
     fn items_mut(&mut self) -> SourceItemsMut<'_> {
         warn!(
@@ -1016,13 +964,9 @@ impl PlaylistSourceOps for StalkerDiskPlaylistSource {
         0
     }
 
-    fn get_missing_vod_info_count_excluding_clusters(&mut self, _skip_set: &HashSet<XtreamCluster>) -> usize {
-        0
-    }
+    fn get_missing_vod_info_count_excluding_clusters(&mut self, _skip_set: &HashSet<XtreamCluster>) -> usize { 0 }
 
-    fn get_missing_series_info_count_excluding_clusters(&mut self, _skip_set: &HashSet<XtreamCluster>) -> usize {
-        0
-    }
+    fn get_missing_series_info_count_excluding_clusters(&mut self, _skip_set: &HashSet<XtreamCluster>) -> usize { 0 }
 
     fn deduplicate(&mut self, _duplicates: &mut HashSet<UUIDType>) {
         warn!("Deduplication is not supported for disk based playlist updates");
@@ -1100,9 +1044,7 @@ impl PlaylistSourceOps for StalkerDiskPlaylistSource {
         }
     }
 
-    async fn obtain_resources(&mut self) -> Result<(), TuliproxError> {
-        self.reload().await
-    }
+    async fn obtain_resources(&mut self) -> Result<(), TuliproxError> { self.reload().await }
     fn sort_by_provider_ordinal(&mut self) {
         warn!("Sorting by provider ordinal is not supported for disk based playlists");
     }
@@ -1299,13 +1241,9 @@ pub struct MemoryPlaylistSource {
 }
 
 impl MemoryPlaylistSource {
-    pub fn new(groups: Vec<PlaylistGroup>) -> Self {
-        Self { playlist: Arc::new(groups) }
-    }
+    pub fn new(groups: Vec<PlaylistGroup>) -> Self { Self { playlist: Arc::new(groups) } }
 
-    pub fn into_source(self) -> PlaylistSource {
-        PlaylistSource::memory(self)
-    }
+    pub fn into_source(self) -> PlaylistSource { PlaylistSource::memory(self) }
 
     /// Merge a batch of groups into the in-memory playlist in a single pass.
     ///
@@ -1349,21 +1287,13 @@ impl MemoryPlaylistSource {
 }
 
 impl Default for MemoryPlaylistSource {
-    fn default() -> Self {
-        Self { playlist: Arc::new(vec![]) }
-    }
+    fn default() -> Self { Self { playlist: Arc::new(vec![]) } }
 }
 
 impl PlaylistSourceOps for MemoryPlaylistSource {
-    fn is_memory(&self) -> bool {
-        true
-    }
-    fn get_channel_count(&mut self) -> usize {
-        self.playlist.iter().map(|group| group.channels.len()).sum()
-    }
-    fn get_group_count(&mut self) -> usize {
-        self.playlist.len()
-    }
+    fn is_memory(&self) -> bool { true }
+    fn get_channel_count(&mut self) -> usize { self.playlist.iter().map(|group| group.channels.len()).sum() }
+    fn get_group_count(&mut self) -> usize { self.playlist.len() }
     fn get_channel_count_excluding_clusters(&mut self, skip_set: &HashSet<XtreamCluster>) -> usize {
         self.playlist
             .iter()
@@ -1378,9 +1308,7 @@ impl PlaylistSourceOps for MemoryPlaylistSource {
             .filter(|group| group.channels.iter().any(|item| !skip_set.contains(&item.header.xtream_cluster)))
             .count()
     }
-    fn is_empty(&mut self) -> bool {
-        self.playlist.is_empty()
-    }
+    fn is_empty(&mut self) -> bool { self.playlist.is_empty() }
     fn into_items(&mut self) -> SourceItems<'_> {
         SourceItems::Memory(MemoryDrain::new(Arc::make_mut(&mut self.playlist).as_mut_slice()))
     }
@@ -1392,9 +1320,7 @@ impl PlaylistSourceOps for MemoryPlaylistSource {
     /// Non-destructive, unlike `into_items`: hands out borrows rather than
     /// draining the groups, so this is the one source that yields
     /// `Cow::Borrowed`.
-    fn items(&mut self) -> SourceCowItems<'_> {
-        SourceCowItems::Borrowed(MemoryItems::new(self.playlist.as_slice()))
-    }
+    fn items(&mut self) -> SourceCowItems<'_> { SourceCowItems::Borrowed(MemoryItems::new(self.playlist.as_slice())) }
 
     async fn update_playlist(&mut self, plg: &PlaylistGroup) {
         let playlist = Arc::make_mut(&mut self.playlist);
@@ -1458,17 +1384,13 @@ impl PlaylistSourceOps for MemoryPlaylistSource {
             group.channels.retain(|item| duplicates.insert(item.get_uuid()));
         }
     }
-    fn take_groups(&mut self) -> Vec<PlaylistGroup> {
-        std::mem::take(Arc::make_mut(&mut self.playlist))
-    }
+    fn take_groups(&mut self) -> Vec<PlaylistGroup> { std::mem::take(Arc::make_mut(&mut self.playlist)) }
     fn clone_source(&self) -> Result<PlaylistSource, TuliproxError> {
         Ok(PlaylistSource::memory(MemoryPlaylistSource { playlist: Arc::clone(&self.playlist) }))
     }
     fn release_resources(&mut self, _cluster: XtreamCluster) { /* noop */
     }
-    async fn obtain_resources(&mut self) -> Result<(), TuliproxError> {
-        Ok(())
-    }
+    async fn obtain_resources(&mut self) -> Result<(), TuliproxError> { Ok(()) }
 
     fn sort_by_provider_ordinal(&mut self) {
         let playlist = Arc::make_mut(&mut self.playlist);

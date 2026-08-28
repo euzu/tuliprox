@@ -134,14 +134,10 @@ fn verify_crc(crc_buf: [u8; 4], payload: &[u8]) -> io::Result<()> {
 }
 
 /// Write the file magic bytes at the beginning of a `.pending` file.
-pub fn write_file_magic<W: Write>(writer: &mut W) -> io::Result<()> {
-    writer.write_all(&FILE_MAGIC)
-}
+pub fn write_file_magic<W: Write>(writer: &mut W) -> io::Result<()> { writer.write_all(&FILE_MAGIC) }
 
 /// Write the block magic bytes before a block header.
-pub fn write_block_magic<W: Write>(writer: &mut W) -> io::Result<()> {
-    writer.write_all(&BLOCK_MAGIC)
-}
+pub fn write_block_magic<W: Write>(writer: &mut W) -> io::Result<()> { writer.write_all(&BLOCK_MAGIC) }
 
 /// Shared body of the four `read_and_verify_*_magic` entry points below.
 /// Sync and async are kept as separate macros because the `read_exact` trait

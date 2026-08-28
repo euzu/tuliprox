@@ -80,13 +80,9 @@ impl HlsManifestFetchFailureSignal {
         }
     }
 
-    pub(super) const fn is_hard(self) -> bool {
-        matches!(self.disposition, HlsManifestFetchFailureDisposition::Hard)
-    }
+    pub(super) const fn is_hard(self) -> bool { matches!(self.disposition, HlsManifestFetchFailureDisposition::Hard) }
 
-    const fn is_discarded(self) -> bool {
-        matches!(self.disposition, HlsManifestFetchFailureDisposition::Discarded)
-    }
+    const fn is_discarded(self) -> bool { matches!(self.disposition, HlsManifestFetchFailureDisposition::Discarded) }
 
     const fn has_valid_http_response(self) -> bool {
         matches!(self.response_evidence, HlsManifestHttpResponseEvidence::ValidResponse)

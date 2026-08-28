@@ -180,22 +180,16 @@ pub(crate) fn remove_file_if_exists(path: &Path) -> io::Result<()> {
 pub(crate) const FILE_SUFFIX_INDEX: &str = "idx";
 
 /// Path of the sorted-index sidecar belonging to `db_path`.
-pub fn get_file_path_for_db_index(db_path: &Path) -> PathBuf {
-    db_path.with_extension(FILE_SUFFIX_INDEX)
-}
+pub fn get_file_path_for_db_index(db_path: &Path) -> PathBuf { db_path.with_extension(FILE_SUFFIX_INDEX) }
 
 /// Buffer size for the engine's own buffered readers and writers.
 pub(crate) const IO_BUFFER_SIZE: usize = 256 * 1024;
 
 /// Only the v2 write path buffers writes, and that path is a fixture builder.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn file_writer<W: io::Write>(w: W) -> io::BufWriter<W> {
-    io::BufWriter::with_capacity(IO_BUFFER_SIZE, w)
-}
+pub(crate) fn file_writer<W: io::Write>(w: W) -> io::BufWriter<W> { io::BufWriter::with_capacity(IO_BUFFER_SIZE, w) }
 
-pub(crate) fn file_reader<R: io::Read>(r: R) -> io::BufReader<R> {
-    io::BufReader::with_capacity(IO_BUFFER_SIZE, r)
-}
+pub(crate) fn file_reader<R: io::Read>(r: R) -> io::BufReader<R> { io::BufReader::with_capacity(IO_BUFFER_SIZE, r) }
 
 /// Move `src` onto `dest`, degrading to a copy when the rename fails.
 ///
@@ -214,9 +208,7 @@ pub(crate) fn parent_or_dot(path: &Path) -> &Path {
     path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."))
 }
 
-pub(crate) fn same_parent_directory(left: &Path, right: &Path) -> bool {
-    parent_or_dot(left) == parent_or_dot(right)
-}
+pub(crate) fn same_parent_directory(left: &Path, right: &Path) -> bool { parent_or_dot(left) == parent_or_dot(right) }
 
 pub(crate) fn require_same_parent_directory(staging: &Path, published: &Path) -> io::Result<()> {
     if same_parent_directory(staging, published) {
@@ -262,9 +254,7 @@ impl std::error::Error for BPlusTreeError {
 }
 
 impl From<io::Error> for BPlusTreeError {
-    fn from(err: io::Error) -> Self {
-        Self::Io(err)
-    }
+    fn from(err: io::Error) -> Self { Self::Io(err) }
 }
 
 impl BPlusTreeError {

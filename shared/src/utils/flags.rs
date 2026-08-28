@@ -88,9 +88,7 @@ impl FlagFileHeader {
     pub const MAGIC: [u8; 4] = *b"FLAG";
     pub const SIZE: usize = 7;
 
-    pub fn new(version: FlagVersion, entry_count: u16) -> Self {
-        Self { magic: Self::MAGIC, version, entry_count }
-    }
+    pub fn new(version: FlagVersion, entry_count: u16) -> Self { Self { magic: Self::MAGIC, version, entry_count } }
 
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(Self::SIZE);

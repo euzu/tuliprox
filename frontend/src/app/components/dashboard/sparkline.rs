@@ -32,9 +32,7 @@ pub struct SparklineSeries {
 }
 
 impl SparklineSeries {
-    pub fn new(values: Rc<[f64]>) -> Self {
-        Self { values, class: String::new(), label: String::new() }
-    }
+    pub fn new(values: Rc<[f64]>) -> Self { Self { values, class: String::new(), label: String::new() } }
 
     pub fn with_class(mut self, class: impl Into<String>) -> Self {
         self.class = class.into();

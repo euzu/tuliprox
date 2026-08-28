@@ -179,9 +179,7 @@ fn compare_downloads(a: &FileDownloadDto, b: &FileDownloadDto, col: usize) -> Or
     }
 }
 
-fn is_sortable(col: usize) -> bool {
-    (1..=8).contains(&col)
-}
+fn is_sortable(col: usize) -> bool { (1..=8).contains(&col) }
 
 fn download_action_availability(can_write: bool, dto: &FileDownloadDto) -> DownloadActionAvailability {
     if !can_write {

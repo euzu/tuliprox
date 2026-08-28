@@ -24,9 +24,7 @@ pub struct PlaylistService {
     stream_epg_path: String,
 }
 impl Default for PlaylistService {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 impl PlaylistService {

@@ -127,9 +127,7 @@ pub(crate) fn DateTimeInputBase(props: &DateTimeInputBaseProps) -> Html {
     }
 }
 
-fn trimmed_is_empty(value: &str) -> bool {
-    value.trim().is_empty()
-}
+fn trimmed_is_empty(value: &str) -> bool { value.trim().is_empty() }
 
 #[component]
 pub fn DateTimeInput(props: &DateTimeInputProps) -> Html {

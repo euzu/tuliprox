@@ -39,9 +39,7 @@ impl AppState {
     ///
     /// Prefer the named accessors below at call sites; this is what they call,
     /// and what generic code can use.
-    pub fn view<V: AppStateView>(&self) -> V {
-        V::from_app_state(self)
-    }
+    pub fn view<V: AppStateView>(&self) -> V { V::from_app_state(self) }
 }
 
 /// Declare a view: the accessor name, the context type, and the `AppState`

@@ -79,9 +79,7 @@ fn check_schema_version(claims: &Claims) -> Result<(), CatalogAccessError> {
 }
 
 /// True when the principal has `recording.read`.
-fn has_read_perm(claims: &Claims) -> bool {
-    claims.permissions.contains(Permission::RecordingRead)
-}
+fn has_read_perm(claims: &Claims) -> bool { claims.permissions.contains(Permission::RecordingRead) }
 
 /// Re-validate the relative path and file type at open time.
 /// The caller passes a path-resolver closure so the gate stays
@@ -230,15 +228,11 @@ pub async fn lookup_recording(queue: &DownloadQueue, uuid: &str) -> Option<crate
 
 /// Build a `CatalogKey` from a relative path. Re-exported so HTTP
 /// handlers can share the dedup-key logic.
-pub fn key_for(relative_path: &str) -> CatalogKey {
-    CatalogKey::from_relative_path(relative_path)
-}
+pub fn key_for(relative_path: &str) -> CatalogKey { CatalogKey::from_relative_path(relative_path) }
 
 /// Convenience: produce a stable `FileDownloadDto` from a queue
 /// resident task for the catalog list endpoint.
-pub fn task_view_for(recording: &crate::download::FileDownload) -> FileDownloadDto {
-    FileDownloadDto::from(recording)
-}
+pub fn task_view_for(recording: &crate::download::FileDownload) -> FileDownloadDto { FileDownloadDto::from(recording) }
 
 #[cfg(test)]
 mod tests {

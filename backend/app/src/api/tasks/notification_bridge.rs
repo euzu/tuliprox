@@ -22,8 +22,8 @@ use crate::api::model::AppState;
 use log::{debug, warn};
 use shared::model::{
     notification::{EventId, Severity},
-    AuthAuditEvent, AuthAuditOutcome, EventKind, EventKindMask, EventMessage, StreamProbeFailure,
-    StreamProbeFailureReason, UserLifecycleEvent, UserLifecycleState,
+    AuthAuditEvent, AuthAuditOutcome, EventKind, EventKindMask, EventMessage, LibraryScanSummaryStatus,
+    StreamProbeFailure, StreamProbeFailureReason, UserLifecycleEvent, UserLifecycleState,
 };
 use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
@@ -81,6 +81,7 @@ const NOTIFIABLE_KINDS: EventKindMask = EventKindMask::new()
     .with(EventKind::PlaylistUpdate)
     .with(EventKind::ConfigChange)
     .with(EventKind::LibraryScanProgress)
+    .with(EventKind::LibraryScanFailed)
     .with(EventKind::InputMetadataUpdatesStarted)
     .with(EventKind::InputMetadataUpdatesCompleted)
     .with(EventKind::ActiveUser)
@@ -148,9 +149,14 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
         }
 
         EventMessage::LibraryScanProgress(event) => {
-            // Progress ticks are not news; the finished scan is.
+            // Progress ticks are not news; the finished scan is - and a scan
+            // that failed is not a scan that finished. `id` already carries
+            // the distinction, so the wording only has to follow it.
             let summary = &event.summary;
-            let title = "Library scan finished".to_string();
+            let title = match summary.status {
+                LibraryScanSummaryStatus::Success => "Library scan finished".to_string(),
+                LibraryScanSummaryStatus::Error => format!("Library scan failed: {}", summary.message),
+            };
             Some(NotificationEvent::new(id, title.clone(), title).with_fields(summary))
         }
 
@@ -349,6 +355,13 @@ mod tests {
                 disk_total_bytes: 0,
                 disk_free_bytes: 0,
             })),
+            EventMessage::LibraryScanProgress(LibraryScanProgressEvent {
+                summary: LibraryScanSummary {
+                    status: LibraryScanSummaryStatus::Error,
+                    message: String::new(),
+                    result: None,
+                },
+            }),
             EventMessage::LibraryScanProgress(LibraryScanProgressEvent {
                 summary: LibraryScanSummary {
                     status: LibraryScanSummaryStatus::Success,

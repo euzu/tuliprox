@@ -53,9 +53,7 @@ impl HlsSessionKey {
         )
     }
 
-    pub fn stable_value(&self) -> String {
-        self.canonical()
-    }
+    pub fn stable_value(&self) -> String { self.canonical() }
 }
 
 /// Public opaque lookup token for HLS proxy URLs.

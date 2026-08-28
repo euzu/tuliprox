@@ -56,27 +56,19 @@ impl BlockType {
         )
     }
 
-    pub fn is_target(&self) -> bool {
-        matches!(self, Self::Target)
-    }
+    pub fn is_target(&self) -> bool { matches!(self, Self::Target) }
 
     pub fn is_output(&self) -> bool {
         matches!(self, Self::OutputXtream | Self::OutputM3u | Self::OutputHdHomeRun | Self::OutputStrm)
     }
 
-    pub fn is_chainable_input(&self) -> bool {
-        matches!(self, Self::InputM3u | Self::InputXtream)
-    }
+    pub fn is_chainable_input(&self) -> bool { matches!(self, Self::InputM3u | Self::InputXtream) }
 
     /// Left port — block can receive a connection.
-    pub fn has_input_port(&self) -> bool {
-        self.is_target() || self.is_output() || self.is_chainable_input()
-    }
+    pub fn has_input_port(&self) -> bool { self.is_target() || self.is_output() || self.is_chainable_input() }
 
     /// Right port — block can be the source of a connection.
-    pub fn has_output_port(&self) -> bool {
-        self.is_target() || self.is_input()
-    }
+    pub fn has_output_port(&self) -> bool { self.is_target() || self.is_input() }
 }
 
 // Convert from String to BlockType
@@ -102,9 +94,7 @@ impl From<&str> for BlockType {
 }
 
 impl From<String> for BlockType {
-    fn from(s: String) -> Self {
-        BlockType::from(s.as_str())
-    }
+    fn from(s: String) -> Self { BlockType::from(s.as_str()) }
 }
 
 impl From<InputType> for BlockType {
@@ -248,7 +238,5 @@ pub struct SourceEditorContext {
 }
 
 impl PartialEq for SourceEditorContext {
-    fn eq(&self, _other: &Self) -> bool {
-        false
-    }
+    fn eq(&self, _other: &Self) -> bool { false }
 }

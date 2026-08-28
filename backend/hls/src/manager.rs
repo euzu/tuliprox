@@ -625,21 +625,13 @@ impl HlsProxyManager {
         }
     }
 
-    pub fn sessions(&self) -> &Arc<HlsSessionStore> {
-        &self.sessions
-    }
+    pub fn sessions(&self) -> &Arc<HlsSessionStore> { &self.sessions }
 
-    pub fn segment_cache(&self) -> &Arc<HlsSegmentCache> {
-        &self.segment_cache
-    }
+    pub fn segment_cache(&self) -> &Arc<HlsSegmentCache> { &self.segment_cache }
 
-    pub fn segment_repair(&self) -> &Arc<HlsSegmentRepairManager> {
-        &self.segment_repair
-    }
+    pub fn segment_repair(&self) -> &Arc<HlsSegmentRepairManager> { &self.segment_repair }
 
-    pub fn startup_observability(&self) -> &Arc<HlsStartupObservability> {
-        &self.startup_observability
-    }
+    pub fn startup_observability(&self) -> &Arc<HlsStartupObservability> { &self.startup_observability }
 
     pub fn spawn_access_lease_repair_prewarm(
         self: &Arc<Self>,
@@ -684,13 +676,9 @@ impl HlsProxyManager {
         });
     }
 
-    pub fn segment_worker_pool(&self) -> &Arc<HlsSegmentWorkerPool> {
-        &self.segment_worker_pool
-    }
+    pub fn segment_worker_pool(&self) -> &Arc<HlsSegmentWorkerPool> { &self.segment_worker_pool }
 
-    pub fn map_worker_pool(&self) -> &Arc<HlsMapWorkerPool> {
-        &self.map_worker_pool
-    }
+    pub fn map_worker_pool(&self) -> &Arc<HlsMapWorkerPool> { &self.map_worker_pool }
 
     pub fn start_prepared_terminal_bundle(
         &self,
@@ -737,9 +725,7 @@ impl HlsProxyManager {
         self.standalone_custom_access.resolve(lease_id, asset_fingerprint, index, now_ms)
     }
 
-    pub fn terminal_pending(&self) -> Arc<HlsTerminalPendingCoordinator> {
-        Arc::clone(&self.terminal_pending)
-    }
+    pub fn terminal_pending(&self) -> Arc<HlsTerminalPendingCoordinator> { Arc::clone(&self.terminal_pending) }
 
     /// Cancels terminal work frozen before newly committed shared media
     /// progress. Callers must not hold the session or lease-store lock; late
@@ -749,9 +735,7 @@ impl HlsProxyManager {
         self.terminal_commit_retries.cancel_session(proxy_session_id);
     }
 
-    pub fn terminal_commit_now_ms(&self) -> u64 {
-        self.terminal_commit_clock.now_ms()
-    }
+    pub fn terminal_commit_now_ms(&self) -> u64 { self.terminal_commit_clock.now_ms() }
 
     #[cfg(any(test, feature = "test-support"))]
     pub async fn wait_for_prepared_terminal_bundle(
@@ -784,33 +768,19 @@ impl HlsProxyManager {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn cache_deletion_queue_usage(&self) -> (usize, usize) {
-        self.gc.cache_deletion_queue_usage()
-    }
+    pub fn cache_deletion_queue_usage(&self) -> (usize, usize) { self.gc.cache_deletion_queue_usage() }
 
-    pub fn segment_fetch_policy(&self) -> SegmentFetchPolicy {
-        self.runtime_config.load().segment_fetch_policy.clone()
-    }
+    pub fn segment_fetch_policy(&self) -> SegmentFetchPolicy { self.runtime_config.load().segment_fetch_policy.clone() }
 
-    pub fn is_enabled(&self) -> bool {
-        self.runtime_config.load().enabled
-    }
+    pub fn is_enabled(&self) -> bool { self.runtime_config.load().enabled }
 
-    pub fn cache_duration_seconds(&self) -> u64 {
-        self.runtime_config.load().cache_duration_seconds
-    }
+    pub fn cache_duration_seconds(&self) -> u64 { self.runtime_config.load().cache_duration_seconds }
 
-    pub fn session_idle_timeout_ms(&self) -> u64 {
-        self.runtime_config.load().gc_policy.session_idle_timeout_ms
-    }
+    pub fn session_idle_timeout_ms(&self) -> u64 { self.runtime_config.load().gc_policy.session_idle_timeout_ms }
 
-    pub fn strip(&self) -> StripConfig {
-        self.runtime_config.load().strip.clone()
-    }
+    pub fn strip(&self) -> StripConfig { self.runtime_config.load().strip.clone() }
 
-    pub fn origin_manifest_timeout_ms(&self) -> u64 {
-        self.runtime_config.load().origin_manifest_timeout_ms
-    }
+    pub fn origin_manifest_timeout_ms(&self) -> u64 { self.runtime_config.load().origin_manifest_timeout_ms }
 
     pub fn initial_manifest_wait_timeout_secs(&self) -> u64 {
         self.runtime_config.load().initial_manifest_wait_timeout_secs
@@ -820,41 +790,23 @@ impl HlsProxyManager {
         self.runtime_config.load().manifest_recovery_burst.clone()
     }
 
-    pub fn transient_resource_ttl_ms(&self) -> u64 {
-        self.runtime_config.load().transient_resource_ttl_ms
-    }
+    pub fn transient_resource_ttl_ms(&self) -> u64 { self.runtime_config.load().transient_resource_ttl_ms }
 
-    pub fn transient_resources(&self) -> &Arc<TransientResourceStore> {
-        &self.transient_resources
-    }
+    pub fn transient_resources(&self) -> &Arc<TransientResourceStore> { &self.transient_resources }
 
-    pub fn access_leases(&self) -> &Arc<RwLock<HlsAccessLeaseStore>> {
-        &self.access_leases
-    }
+    pub fn access_leases(&self) -> &Arc<RwLock<HlsAccessLeaseStore>> { &self.access_leases }
 
-    pub fn lifecycle(&self) -> &Arc<HlsLifecycleManager> {
-        &self.lifecycle
-    }
+    pub fn lifecycle(&self) -> &Arc<HlsLifecycleManager> { &self.lifecycle }
 
-    pub fn metrics(&self) -> &Arc<HlsCacheMetrics> {
-        &self.metrics
-    }
+    pub fn metrics(&self) -> &Arc<HlsCacheMetrics> { &self.metrics }
 
-    pub fn qos(&self) -> &Arc<HlsQosRegistry> {
-        &self.qos
-    }
+    pub fn qos(&self) -> &Arc<HlsQosRegistry> { &self.qos }
 
-    pub fn garbage_collector(&self) -> &Arc<HlsGarbageCollector> {
-        &self.gc
-    }
+    pub fn garbage_collector(&self) -> &Arc<HlsGarbageCollector> { &self.gc }
 
-    pub fn gc_policy(&self) -> GarbageCollectionPolicy {
-        self.runtime_config.load().gc_policy.clone()
-    }
+    pub fn gc_policy(&self) -> GarbageCollectionPolicy { self.runtime_config.load().gc_policy.clone() }
 
-    pub fn rewrite_secret_fingerprint(&self) -> String {
-        self.runtime_config.load().rewrite_secret_fingerprint.clone()
-    }
+    pub fn rewrite_secret_fingerprint(&self) -> String { self.runtime_config.load().rewrite_secret_fingerprint.clone() }
 
     pub async fn is_account_overlap_cooling_down(
         &self,
@@ -2779,9 +2731,7 @@ impl HlsProxyManager {
 }
 
 impl Default for HlsProxyManager {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 pub fn exec_hls_lifecycle(ctx: &HlsCtx, cancel_token: &CancellationToken) {

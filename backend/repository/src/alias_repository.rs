@@ -79,9 +79,7 @@ pub fn compare_alias_exp_date_with_order(
     .then_with(|| a.name.cmp(&b.name))
 }
 
-pub fn is_csv_file(url: &str) -> bool {
-    url.to_lowercase().ends_with(CSV_EXTENSION)
-}
+pub fn is_csv_file(url: &str) -> bool { url.to_lowercase().ends_with(CSV_EXTENSION) }
 
 fn build_m3u_url(base: &Url, username: Option<&str>, password: Option<&str>) -> Result<Url, url::ParseError> {
     let base_origin = base.origin().ascii_serialization();

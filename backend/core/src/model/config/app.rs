@@ -543,9 +543,7 @@ impl AppConfig {
         config.get_disabled_headers()
     }
 
-    pub fn get_grace_options(&self) -> GracePeriodOptions {
-        self.config.load().get_grace_options()
-    }
+    pub fn get_grace_options(&self) -> GracePeriodOptions { self.config.load().get_grace_options() }
 
     pub fn get_geoip_unavailable_policy(&self) -> GeoIpUnavailablePolicy {
         self.config.load().get_geoip_unavailable_policy()
@@ -563,9 +561,7 @@ impl AppConfig {
         self.media_tools.is_ffprobe_available().await
     }
 
-    pub async fn is_ffmpeg_available(&self) -> bool {
-        self.media_tools.is_ffmpeg_available().await
-    }
+    pub async fn is_ffmpeg_available(&self) -> bool { self.media_tools.is_ffmpeg_available().await }
 }
 
 #[cfg(test)]

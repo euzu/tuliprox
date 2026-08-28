@@ -87,9 +87,7 @@ pub struct DecodedHttpResponse {
 
 impl DecodedHttpResponse {
     /// Reports whether at least one non-identity content coding was removed.
-    pub fn was_content_decoded(&self) -> bool {
-        !self.decoded_from.is_empty()
-    }
+    pub fn was_content_decoded(&self) -> bool { !self.decoded_from.is_empty() }
 
     /// Returns only fixed and numeric fields suitable for HLS origin diagnostics.
     pub fn content_coding_observation(&self) -> Option<ContentCodingObservation> {

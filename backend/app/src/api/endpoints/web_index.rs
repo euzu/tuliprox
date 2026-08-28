@@ -1,7 +1,7 @@
 use crate::{
-    api::auth_middleware::AuthorizedClaims,
     api::{
         api_utils::{serve_file, try_unwrap_body},
+        auth_middleware::AuthorizedClaims,
         model::AppState,
     },
     auth::{
@@ -18,8 +18,7 @@ use rand::{rngs::OsRng, RngCore, TryRngCore};
 use serde_json::json;
 use shared::{
     model::{AuthAuditEvent, EventMessage, EventSink, TokenResponse, UserCredential, TOKEN_NO_AUTH},
-    utils::sanitize_sensitive_info,
-    utils::{concat_path_leading_slash, CONSTANTS},
+    utils::{concat_path_leading_slash, sanitize_sensitive_info, CONSTANTS},
 };
 use std::{
     path::{Path, PathBuf},
@@ -32,9 +31,7 @@ fn no_web_auth_token() -> impl axum::response::IntoResponse + Send {
     axum::Json(TokenResponse { token: TOKEN_NO_AUTH.to_string(), username: "admin".to_string() }).into_response()
 }
 
-fn api_user_can_access_web_ui(ui_enabled: bool) -> bool {
-    ui_enabled
-}
+fn api_user_can_access_web_ui(ui_enabled: bool) -> bool { ui_enabled }
 
 /// The stable subject id for a web user, allocating one on first sight.
 ///

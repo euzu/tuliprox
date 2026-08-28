@@ -50,15 +50,11 @@ impl Claims {
     /// strings with `==` and one with `eq_ignore_ascii_case`. One of those
     /// six was therefore answering a different question from the other five.
     #[inline]
-    pub fn is_admin(&self) -> bool {
-        self.roles.contains(Role::Admin)
-    }
+    pub fn is_admin(&self) -> bool { self.roles.contains(Role::Admin) }
 
     /// `true` when the principal is a proxy API user rather than a web user.
     #[inline]
-    pub fn is_api_user(&self) -> bool {
-        self.roles.contains(Role::ApiUser)
-    }
+    pub fn is_api_user(&self) -> bool { self.roles.contains(Role::ApiUser) }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -81,9 +77,7 @@ pub struct UserCredential {
 }
 
 impl UserCredential {
-    pub fn zeroize(&mut self) {
-        self.password.zeroize();
-    }
+    pub fn zeroize(&mut self) { self.password.zeroize(); }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Eq, PartialEq, Default)]

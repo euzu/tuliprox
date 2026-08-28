@@ -102,13 +102,9 @@ impl HlsQosRegistry {
         removed
     }
 
-    pub async fn len(&self) -> usize {
-        self.states.read().await.len()
-    }
+    pub async fn len(&self) -> usize { self.states.read().await.len() }
 
-    pub async fn is_empty(&self) -> bool {
-        self.states.read().await.is_empty()
-    }
+    pub async fn is_empty(&self) -> bool { self.states.read().await.is_empty() }
 }
 
 #[cfg(test)]

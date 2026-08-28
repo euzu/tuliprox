@@ -196,9 +196,7 @@ impl PlaylistBackend for M3u {
     const LABEL: &'static str = "M3U";
     const HOLD_ITER_LOCK: bool = true;
 
-    fn repo_error(message: String) -> TuliproxError {
-        TuliproxError::RepositoryM3u(message)
-    }
+    fn repo_error(message: String) -> TuliproxError { TuliproxError::RepositoryM3u(message) }
 }
 
 impl PlaylistBackend for Xtream {
@@ -209,7 +207,5 @@ impl PlaylistBackend for Xtream {
     const LABEL: &'static str = "Xtream";
     const HOLD_ITER_LOCK: bool = false;
 
-    fn repo_error(message: String) -> TuliproxError {
-        TuliproxError::RepositoryXtream(message)
-    }
+    fn repo_error(message: String) -> TuliproxError { TuliproxError::RepositoryXtream(message) }
 }

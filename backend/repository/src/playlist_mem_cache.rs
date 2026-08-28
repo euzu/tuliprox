@@ -30,15 +30,11 @@ pub struct PlaylistStorageState {
 }
 
 impl Default for PlaylistStorageState {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 impl PlaylistStorageState {
-    pub fn new() -> Self {
-        Self { data: RwLock::new(HashMap::new()) }
-    }
+    pub fn new() -> Self { Self { data: RwLock::new(HashMap::new()) } }
 
     pub async fn update_target_id_mapping(&self, target: &ConfigTarget, mapping: Vec<VirtualIdRecord>) {
         if target.use_memory_cache {

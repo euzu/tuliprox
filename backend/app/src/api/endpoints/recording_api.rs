@@ -492,9 +492,7 @@ fn recording_rule_repo(app_state: &AppState) -> RecordingRuleRepository {
     RecordingRuleRepository::new(&app_state.app_config.config.load().storage_dir)
 }
 
-fn can_write_rules(claims: &shared::model::Claims) -> bool {
-    claims.permissions.contains(Permission::RecordingWrite)
-}
+fn can_write_rules(claims: &shared::model::Claims) -> bool { claims.permissions.contains(Permission::RecordingWrite) }
 
 fn quota_limits_from_config(config: Option<&crate::model::RecordingQuotaConfig>) -> recording_quota::QuotaLimits {
     let mut per_user_bytes = std::collections::HashMap::new();
@@ -798,9 +796,7 @@ fn apply_recording_rule_edit(rule: &mut RecordingRule, body: EditRecordingRuleBo
     rule.updated_at = now;
 }
 
-fn recording_virtual_id(virtual_id: &str) -> Option<u32> {
-    virtual_id.parse::<u32>().ok()
-}
+fn recording_virtual_id(virtual_id: &str) -> Option<u32> { virtual_id.parse::<u32>().ok() }
 
 fn accept_resolved_recording_source(
     virtual_id: &mut String,

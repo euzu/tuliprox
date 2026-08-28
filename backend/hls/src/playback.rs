@@ -53,15 +53,11 @@ pub enum HlsAccessAdmissionMode {
 }
 
 impl HlsAccessAdmissionMode {
-    const fn prepares_manifest(self) -> bool {
-        matches!(self, Self::ManifestPrepare)
-    }
+    const fn prepares_manifest(self) -> bool { matches!(self, Self::ManifestPrepare) }
 
     /// Manifest denials retain the exact live lease long enough to commit an
     /// anchored finite tail; media-resource denials revoke origin access now.
-    const fn revokes_lease_on_denial(self) -> bool {
-        matches!(self, Self::ResourceAccess)
-    }
+    const fn revokes_lease_on_denial(self) -> bool { matches!(self, Self::ResourceAccess) }
 }
 
 pub async fn validate_hls_access_lease(

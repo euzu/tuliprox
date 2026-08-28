@@ -62,9 +62,7 @@ pub struct LoginThrottle {
 }
 
 impl LoginThrottle {
-    pub fn new() -> Self {
-        Self::default()
-    }
+    pub fn new() -> Self { Self::default() }
 
     /// How long the caller must wait, or `None` if it may attempt now.
     ///
@@ -132,9 +130,7 @@ fn backoff_for(failures: u32) -> Option<Duration> {
 /// Usernames are matched case-insensitively everywhere else in the auth path,
 /// so the throttle must match too - otherwise `Alice` and `alice` get separate
 /// budgets against the same account.
-fn canonical(username: &str) -> String {
-    username.trim().to_ascii_lowercase()
-}
+fn canonical(username: &str) -> String { username.trim().to_ascii_lowercase() }
 
 #[cfg(test)]
 mod tests {

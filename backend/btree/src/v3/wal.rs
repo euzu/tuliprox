@@ -27,9 +27,7 @@ const PAGE_SIZE_U64: u64 = 4096;
 const WAL_MAGIC: &[u8; 4] = b"BTW3";
 const WAL_VERSION: u32 = 1;
 
-fn invalid_data(message: impl Into<String>) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message.into())
-}
+fn invalid_data(message: impl Into<String>) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, message.into()) }
 
 fn invalid_input(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
@@ -52,13 +50,9 @@ fn bytes_at<const N: usize>(bytes: &[u8], offset: usize) -> io::Result<[u8; N]> 
         .map_err(|_| invalid_data("invalid WAL field length"))
 }
 
-fn read_u32(bytes: &[u8], offset: usize) -> io::Result<u32> {
-    Ok(u32::from_le_bytes(bytes_at(bytes, offset)?))
-}
+fn read_u32(bytes: &[u8], offset: usize) -> io::Result<u32> { Ok(u32::from_le_bytes(bytes_at(bytes, offset)?)) }
 
-fn read_u64(bytes: &[u8], offset: usize) -> io::Result<u64> {
-    Ok(u64::from_le_bytes(bytes_at(bytes, offset)?))
-}
+fn read_u64(bytes: &[u8], offset: usize) -> io::Result<u64> { Ok(u64::from_le_bytes(bytes_at(bytes, offset)?)) }
 
 fn require_zero(bytes: &[u8], message: &'static str) -> io::Result<()> {
     if bytes.iter().all(|byte| *byte == 0) {
@@ -387,29 +381,19 @@ pub(crate) struct WalOperationError {
 }
 
 impl WalOperationError {
-    pub(crate) fn outcome(&self) -> WalOutcome {
-        self.outcome
-    }
+    pub(crate) fn outcome(&self) -> WalOutcome { self.outcome }
 
     #[cfg(test)]
-    pub(crate) fn database_path(&self) -> &Path {
-        &self.database
-    }
+    pub(crate) fn database_path(&self) -> &Path { &self.database }
 
     #[cfg(test)]
-    pub(crate) fn wal_path(&self) -> &Path {
-        &self.wal
-    }
+    pub(crate) fn wal_path(&self) -> &Path { &self.wal }
 
     #[cfg(test)]
-    pub(crate) fn transaction_id(&self) -> u64 {
-        self.transaction_id
-    }
+    pub(crate) fn transaction_id(&self) -> u64 { self.transaction_id }
 
     #[cfg(test)]
-    pub(crate) fn phase(&self) -> &'static str {
-        self.phase
-    }
+    pub(crate) fn phase(&self) -> &'static str { self.phase }
 }
 
 impl fmt::Display for WalOperationError {
@@ -428,9 +412,7 @@ impl fmt::Display for WalOperationError {
 }
 
 impl Error for WalOperationError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(&self.cause)
-    }
+    fn source(&self) -> Option<&(dyn Error + 'static)> { Some(&self.cause) }
 }
 
 fn wal_operation_error<'a>(
@@ -481,24 +463,16 @@ pub(crate) struct WalReadError {
 
 impl WalReadError {
     #[cfg(test)]
-    pub(crate) fn database_path(&self) -> &Path {
-        &self.database
-    }
+    pub(crate) fn database_path(&self) -> &Path { &self.database }
 
     #[cfg(test)]
-    pub(crate) fn wal_path(&self) -> &Path {
-        &self.wal
-    }
+    pub(crate) fn wal_path(&self) -> &Path { &self.wal }
 
     #[cfg(test)]
-    pub(crate) fn wal_database_id(&self) -> Option<[u8; 16]> {
-        self.wal_database_id
-    }
+    pub(crate) fn wal_database_id(&self) -> Option<[u8; 16]> { self.wal_database_id }
 
     #[cfg(test)]
-    pub(crate) fn current_database_id(&self) -> Option<[u8; 16]> {
-        self.current_database_id
-    }
+    pub(crate) fn current_database_id(&self) -> Option<[u8; 16]> { self.current_database_id }
 }
 
 impl fmt::Display for WalReadError {
@@ -519,9 +493,7 @@ impl fmt::Display for WalReadError {
 }
 
 impl Error for WalReadError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(&self.cause)
-    }
+    fn source(&self) -> Option<&(dyn Error + 'static)> { Some(&self.cause) }
 }
 
 fn raw_database_id(path: &Path, offset: u64) -> Option<[u8; 16]> {
@@ -566,9 +538,7 @@ fn database_length(next_page_id: u64) -> io::Result<u64> {
     next_page_id.checked_mul(PAGE_SIZE_U64).ok_or_else(|| invalid_input("database length overflow"))
 }
 
-fn database_header_crc32(page: &[u8; PAGE_SIZE]) -> io::Result<u32> {
-    read_u32(page, 72)
-}
+fn database_header_crc32(page: &[u8; PAGE_SIZE]) -> io::Result<u32> { read_u32(page, 72) }
 
 fn new_transaction_id() -> io::Result<u64> {
     let bytes = uuid::Uuid::new_v4().as_u128().to_le_bytes();
@@ -585,9 +555,7 @@ pub(super) fn sync_parent_directory(path: &Path) -> io::Result<()> {
 
 #[cfg(not(unix))]
 #[allow(clippy::unnecessary_wraps)]
-pub(super) fn sync_parent_directory(_path: &Path) -> io::Result<()> {
-    Ok(())
-}
+pub(super) fn sync_parent_directory(_path: &Path) -> io::Result<()> { Ok(()) }
 
 pub(crate) fn invalidate_sorted_index(database: &Path) -> io::Result<()> {
     let index = crate::common::get_file_path_for_db_index(database);
@@ -938,13 +906,9 @@ fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-pub(crate) fn wal_path(database: &Path) -> PathBuf {
-    append_suffix(database, ".wal")
-}
+pub(crate) fn wal_path(database: &Path) -> PathBuf { append_suffix(database, ".wal") }
 
-pub(crate) fn wal_temporary_path(database: &Path) -> PathBuf {
-    append_suffix(database, ".wal.tmp")
-}
+pub(crate) fn wal_temporary_path(database: &Path) -> PathBuf { append_suffix(database, ".wal.tmp") }
 
 pub(crate) fn recovery_required(database: &Path, cause: io::Error) -> io::Error {
     let active = wal_path(database);

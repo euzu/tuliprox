@@ -108,9 +108,7 @@ impl StreamHistoryWriter {
         }
     }
 
-    pub fn is_enabled(&self) -> bool {
-        self.tx.is_some()
-    }
+    pub fn is_enabled(&self) -> bool { self.tx.is_some() }
 
     /// Returns a copy of the current in-memory batch records.
     /// Async version — sends a command and waits for the response.

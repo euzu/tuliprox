@@ -19,23 +19,15 @@ default_eq_fns!(
     default_event_channel_capacity, is_default_event_channel_capacity, u32, 256;
 );
 
-pub const fn default_resource_retry_backoff_multiplier() -> f64 {
-    1.0
-}
+pub const fn default_resource_retry_backoff_multiplier() -> f64 { 1.0 }
 pub const F64_DEFAULT_EPSILON: f64 = 1e-9;
 pub const fn is_default_resource_retry_backoff_multiplier(v: &f64) -> bool {
     (*v - default_resource_retry_backoff_multiplier()).abs() < F64_DEFAULT_EPSILON
 }
 
-pub const fn default_resolve_background() -> bool {
-    true
-}
-pub const fn default_xtream_live_stream_use_prefix() -> bool {
-    true
-}
+pub const fn default_resolve_background() -> bool { true }
+pub const fn default_xtream_live_stream_use_prefix() -> bool { true }
 
 pub const DEFAULT_PORT: u16 = 8901;
 pub const DEFAULT_USER_AGENT: &str = "VLC/3.0.16 LibVLC/3.0.16";
-pub fn default_default_user_agent() -> Option<String> {
-    Some(DEFAULT_USER_AGENT.to_string())
-}
+pub fn default_default_user_agent() -> Option<String> { Some(DEFAULT_USER_AGENT.to_string()) }

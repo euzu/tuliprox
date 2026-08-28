@@ -40,9 +40,7 @@ fn is_grace_strategy(strategy: AdmissionStrategy) -> bool {
     matches!(strategy, AdmissionStrategy::GraceInstantStream | AdmissionStrategy::GraceHoldStream)
 }
 
-pub(crate) fn is_grace_strategy_tag(tag: &str) -> bool {
-    tag.trim().starts_with("grace_")
-}
+pub(crate) fn is_grace_strategy_tag(tag: &str) -> bool { tag.trim().starts_with("grace_") }
 
 pub(crate) fn admission_strategy_tags(strategies: Option<&Vec<AdmissionStrategy>>) -> Option<Vec<String>> {
     strategies.map(|entries| entries.iter().map(|entry| (*entry).to_string()).collect())

@@ -18,9 +18,7 @@ fn build_season_episode_field(season: u32, episode: u32, field: &str) -> String 
 }
 
 #[inline]
-fn build_season_field(season: u32, field: &str) -> String {
-    concat_string!("nfo_s_", &season.to_string(), "_", field)
-}
+fn build_season_field(season: u32, field: &str) -> String { concat_string!("nfo_s_", &season.to_string(), "_", field) }
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -35,9 +33,7 @@ pub enum XtreamInfoDocument {
 pub struct XtreamEmptyDoc {}
 
 impl Default for XtreamInfoDocument {
-    fn default() -> Self {
-        Self::Empty(XtreamEmptyDoc {})
-    }
+    fn default() -> Self { Self::Empty(XtreamEmptyDoc {}) }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

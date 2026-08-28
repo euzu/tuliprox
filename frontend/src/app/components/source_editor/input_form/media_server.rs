@@ -18,9 +18,7 @@ pub(super) struct MediaServerInputFormProps {
 }
 
 impl PartialEq for MediaServerInputFormProps {
-    fn eq(&self, _other: &Self) -> bool {
-        false
-    }
+    fn eq(&self, _other: &Self) -> bool { false }
 }
 
 #[component]
@@ -38,9 +36,7 @@ pub(super) struct MediaServerSettingsFormProps {
 }
 
 impl PartialEq for MediaServerSettingsFormProps {
-    fn eq(&self, _other: &Self) -> bool {
-        false
-    }
+    fn eq(&self, _other: &Self) -> bool { false }
 }
 
 #[component]

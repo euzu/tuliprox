@@ -26,9 +26,7 @@ pub mod v4 {
         io::Error::new(io::ErrorKind::InvalidData, message.into())
     }
 
-    fn invalid_integer(error: TryFromIntError) -> io::Error {
-        invalid_data(error.to_string())
-    }
+    fn invalid_integer(error: TryFromIntError) -> io::Error { invalid_data(error.to_string()) }
 
     fn header(database_id: [u8; 16], generation: u64, count: u64) -> [u8; HEADER_LEN] {
         let mut bytes = [0; HEADER_LEN];
@@ -185,9 +183,7 @@ pub mod v4 {
         }
 
         #[cfg(test)]
-        pub(crate) fn remaining(&self) -> u64 {
-            self.remaining_entries
-        }
+        pub(crate) fn remaining(&self) -> u64 { self.remaining_entries }
 
         #[cfg(test)]
         pub(crate) fn read_next(&mut self) -> io::Result<Option<Entry<SortKey, K>>> {
@@ -298,9 +294,7 @@ pub mod v4 {
         }
 
         #[cfg(test)]
-        pub fn remaining(&self) -> u64 {
-            self.reader.remaining()
-        }
+        pub fn remaining(&self) -> u64 { self.reader.remaining() }
     }
 
     impl<K, V, SortKey> Iterator for OwnedIterator<K, V, SortKey>

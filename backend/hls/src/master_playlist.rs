@@ -21,9 +21,7 @@ impl HlsMasterBandwidth {
         Self { measured_bps }
     }
 
-    pub const fn is_unknown(self) -> bool {
-        self.measured_bps.is_none()
-    }
+    pub const fn is_unknown(self) -> bool { self.measured_bps.is_none() }
 
     pub fn advertised_bps(self) -> u32 {
         let Some(measured_bps) = self.measured_bps else {
@@ -73,17 +71,11 @@ impl HlsMasterBandwidthSelection {
         Self { bandwidth: HlsMasterBandwidth::new(None), source: HlsMasterBandwidthSource::Fallback }
     }
 
-    pub const fn bandwidth(self) -> HlsMasterBandwidth {
-        self.bandwidth
-    }
+    pub const fn bandwidth(self) -> HlsMasterBandwidth { self.bandwidth }
 
-    pub const fn source(self) -> HlsMasterBandwidthSource {
-        self.source
-    }
+    pub const fn source(self) -> HlsMasterBandwidthSource { self.source }
 
-    pub const fn known_bitrate_bps(self) -> Option<u32> {
-        self.bandwidth.measured_bps
-    }
+    pub const fn known_bitrate_bps(self) -> Option<u32> { self.bandwidth.measured_bps }
 }
 
 /// Minimal single-variant HLS master playlist for one lease-bound media playlist.

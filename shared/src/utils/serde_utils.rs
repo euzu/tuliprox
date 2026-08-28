@@ -32,9 +32,7 @@ fn parse_number<T: std::str::FromStr>(number: &serde_json::Number) -> Option<T> 
     std::str::from_utf8(out.buf.get(..out.len)?).ok()?.parse().ok()
 }
 
-fn value_to_string_array(value: &[Value]) -> Vec<Arc<str>> {
-    value.iter().filter_map(value_to_arc_str).collect()
-}
+fn value_to_string_array(value: &[Value]) -> Vec<Arc<str>> { value.iter().filter_map(value_to_arc_str).collect() }
 
 fn value_to_arc_str(v: &Value) -> Option<Arc<str>> {
     match v {
@@ -234,9 +232,7 @@ where
     ciborium::de::from_reader(value).map_err(to_io_error)
 }
 
-pub fn u8_16_to_hex(bytes: &[u8; 16]) -> String {
-    bytes.iter().map(|b| format!("{b:02X}")).collect()
-}
+pub fn u8_16_to_hex(bytes: &[u8; 16]) -> String { bytes.iter().map(|b| format!("{b:02X}")).collect() }
 
 pub fn hex_to_u8_16(hex: &str) -> Result<[u8; 16], String> {
     if hex.len() != 32 {

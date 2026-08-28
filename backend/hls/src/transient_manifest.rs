@@ -438,9 +438,7 @@ pub(super) struct MediaSegmentUnit {
 }
 
 impl MediaSegmentUnit {
-    pub(super) const fn contains(self, index: usize) -> bool {
-        self.start <= index && index <= self.end
-    }
+    pub(super) const fn contains(self, index: usize) -> bool { self.start <= index && index <= self.end }
 }
 
 pub(super) fn manifest_lines(body: &str) -> Vec<ManifestLine<'_>> {
@@ -655,13 +653,9 @@ fn parse_discontinuity_sequence(line: &str) -> Option<u64> {
     line.trim().strip_prefix("#EXT-X-DISCONTINUITY-SEQUENCE:")?.trim().parse().ok()
 }
 
-fn is_discontinuity_sequence_tag(line: &str) -> bool {
-    line.starts_with("#EXT-X-DISCONTINUITY-SEQUENCE:")
-}
+fn is_discontinuity_sequence_tag(line: &str) -> bool { line.starts_with("#EXT-X-DISCONTINUITY-SEQUENCE:") }
 
-fn is_discontinuity_tag(line: &str) -> bool {
-    line == "#EXT-X-DISCONTINUITY"
-}
+fn is_discontinuity_tag(line: &str) -> bool { line == "#EXT-X-DISCONTINUITY" }
 
 fn duration_ms_from_extinf(value: &str) -> Option<u64> {
     let seconds = value.trim().parse::<f64>().ok()?;
@@ -671,9 +665,7 @@ fn duration_ms_from_extinf(value: &str) -> Option<u64> {
     u64::try_from(Duration::from_secs_f64(seconds).as_millis()).ok()
 }
 
-fn is_segment_unit_tag(line: &str) -> bool {
-    is_media_segment_unit_tag(line)
-}
+fn is_segment_unit_tag(line: &str) -> bool { is_media_segment_unit_tag(line) }
 
 fn is_media_segment_unit_tag(line: &str) -> bool {
     line.starts_with("#EXTINF:")
@@ -994,7 +986,5 @@ mod tests {
         assert!(body.contains("#EXT-X-MEDIA-SEQUENCE:6560\n#EXT-X-DISCONTINUITY-SEQUENCE:1\n"));
     }
 
-    fn strip_segments(value: u64) -> StripConfig {
-        StripConfig { mode: HlsStripMode::Segments, value }
-    }
+    fn strip_segments(value: u64) -> StripConfig { StripConfig { mode: HlsStripMode::Segments, value } }
 }

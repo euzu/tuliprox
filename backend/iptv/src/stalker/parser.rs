@@ -26,9 +26,7 @@ use shared::{
 };
 use std::{collections::HashSet, sync::Arc};
 
-fn intern_optional(s: Option<String>) -> Option<Arc<str>> {
-    s.filter(|v| !v.is_empty()).map(Internable::intern)
-}
+fn intern_optional(s: Option<String>) -> Option<Arc<str>> { s.filter(|v| !v.is_empty()).map(Internable::intern) }
 
 fn intern_optional_value(s: Option<&String>) -> Option<Arc<str>> {
     s.filter(|v| !v.is_empty()).map(|v| Internable::intern(v.clone()))
@@ -43,17 +41,11 @@ impl StalkerTempLinkFlags {
     const WOWZA_TMP_LINK: u8 = 1 << 2;
     const USE_HTTP_TMP_LINK: u8 = 1 << 3;
 
-    fn has_nginx_secure_link(self) -> bool {
-        self.0 & Self::NGINX_SECURE_LINK != 0
-    }
+    fn has_nginx_secure_link(self) -> bool { self.0 & Self::NGINX_SECURE_LINK != 0 }
 
-    fn has_flussonic_tmp_link(self) -> bool {
-        self.0 & Self::FLUSSONIC_TMP_LINK != 0
-    }
+    fn has_flussonic_tmp_link(self) -> bool { self.0 & Self::FLUSSONIC_TMP_LINK != 0 }
 
-    fn has_wowza_tmp_link(self) -> bool {
-        self.0 & Self::WOWZA_TMP_LINK != 0
-    }
+    fn has_wowza_tmp_link(self) -> bool { self.0 & Self::WOWZA_TMP_LINK != 0 }
 }
 
 impl From<&StalkerRawItem> for StalkerTempLinkFlags {

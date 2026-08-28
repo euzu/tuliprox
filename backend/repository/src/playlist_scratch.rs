@@ -6,15 +6,11 @@ pub trait WithCapacity {
 }
 
 impl<T> WithCapacity for Vec<T> {
-    fn with_capacity(capacity: usize) -> Self {
-        Vec::with_capacity(capacity)
-    }
+    fn with_capacity(capacity: usize) -> Self { Vec::with_capacity(capacity) }
 }
 
 impl<K, V> WithCapacity for IndexMap<K, V> {
-    fn with_capacity(capacity: usize) -> Self {
-        IndexMap::with_capacity(capacity)
-    }
+    fn with_capacity(capacity: usize) -> Self { IndexMap::with_capacity(capacity) }
 }
 
 pub trait IsEmpty {
@@ -22,15 +18,11 @@ pub trait IsEmpty {
 }
 
 impl<T> IsEmpty for Vec<T> {
-    fn is_empty(&self) -> bool {
-        Vec::is_empty(self)
-    }
+    fn is_empty(&self) -> bool { Vec::is_empty(self) }
 }
 
 impl<K, V> IsEmpty for IndexMap<K, V> {
-    fn is_empty(&self) -> bool {
-        IndexMap::is_empty(self)
-    }
+    fn is_empty(&self) -> bool { IndexMap::is_empty(self) }
 }
 
 pub struct PlaylistScratch<C> {

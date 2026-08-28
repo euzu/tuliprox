@@ -27,9 +27,7 @@ pub struct XtreamCategory {
 }
 
 impl XtreamCategory {
-    pub fn add(&mut self, item: PlaylistItem) {
-        self.channels.push(item);
-    }
+    pub fn add(&mut self, item: PlaylistItem) { self.channels.push(item); }
 }
 
 pub fn xtream_mapping_option_from_target_options(

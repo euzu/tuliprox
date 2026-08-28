@@ -34,9 +34,7 @@ pub struct UseLogStreamOptions {
 }
 
 impl Default for UseLogStreamOptions {
-    fn default() -> Self {
-        Self { active: true, max_lines: DEFAULT_MAX_LOG_LINES }
-    }
+    fn default() -> Self { Self { active: true, max_lines: DEFAULT_MAX_LOG_LINES } }
 }
 
 #[derive(Clone)]

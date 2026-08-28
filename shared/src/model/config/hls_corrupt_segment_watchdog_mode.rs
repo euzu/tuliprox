@@ -11,9 +11,7 @@ pub enum HlsCorruptSegmentWatchdogMode {
 impl HlsCorruptSegmentWatchdogMode {
     /// True when the watchdog is configured to take any action (sanitize or
     /// emit diagnostics). `Off` and `DetectOnly` are observation-only.
-    pub const fn is_enabled(self) -> bool {
-        !matches!(self, Self::Off)
-    }
+    pub const fn is_enabled(self) -> bool { !matches!(self, Self::Off) }
 
     /// Stable lowercase log label — same canonical form as the `Display` impl
     /// so log readers can correlate the two.

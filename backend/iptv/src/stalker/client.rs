@@ -1,18 +1,18 @@
 use crate::{
     capabilities::ProviderCapabilities,
     stalker::{
-    auth, catalog,
-    cookie_jar::{apply_set_cookie_headers_unchecked, StalkerCookieJar},
-    epg,
-    error::{StalkerError, StalkerResult},
-    playback,
-    presets::stalker_mag_preset_spec,
-    profile::{StalkerHandshake, StalkerResolvedStream},
-    recipes::apply_endpoint_preference,
-    action::StalkerAction,
-    session::StalkerSession,
-    transport::{ReqwestTransport, StalkerTransport},
-    url_factory::{load_url_candidates, StalkerLoadUrl},
+        action::StalkerAction,
+        auth, catalog,
+        cookie_jar::{apply_set_cookie_headers_unchecked, StalkerCookieJar},
+        epg,
+        error::{StalkerError, StalkerResult},
+        playback,
+        presets::stalker_mag_preset_spec,
+        profile::{StalkerHandshake, StalkerResolvedStream},
+        recipes::apply_endpoint_preference,
+        session::StalkerSession,
+        transport::{ReqwestTransport, StalkerTransport},
+        url_factory::{load_url_candidates, StalkerLoadUrl},
     },
 };
 use bytes::{Bytes, BytesMut};
@@ -117,12 +117,7 @@ impl StalkerApiClient<ReqwestTransport, SystemClock> {
 
 impl<Tr: StalkerTransport, C: Clock> StalkerApiClient<Tr, C> {
     /// Build a client over a caller-supplied transport and clock.
-    pub fn with_parts(
-        transport: Tr,
-        clock: C,
-        portal_url: String,
-        config: StalkerInputConfig,
-    ) -> StalkerResult<Self> {
+    pub fn with_parts(transport: Tr, clock: C, portal_url: String, config: StalkerInputConfig) -> StalkerResult<Self> {
         let load_urls = apply_endpoint_preference(config.endpoint_preference, load_url_candidates(&portal_url)?);
         let default_caps = StalkerSizeCaps::default();
         let body_caps = StalkerBodyCaps::from(config.size_caps.as_ref().unwrap_or(&default_caps));
@@ -149,9 +144,7 @@ impl<Tr: StalkerTransport, C: Clock> StalkerApiClient<Tr, C> {
 
     /// The current snapshot, for persisting back to a store.
     #[must_use]
-    pub fn capabilities(&self) -> ProviderCapabilities {
-        self.capabilities.lock().clone()
-    }
+    pub fn capabilities(&self) -> ProviderCapabilities { self.capabilities.lock().clone() }
 
     /// Whether `action` is known not to work on this portal, according to a snapshot
     /// still worth believing.
@@ -198,26 +191,18 @@ impl<Tr: StalkerTransport, C: Clock> StalkerApiClient<Tr, C> {
     /// Unix-epoch seconds according to this client's clock. Everything that expires -
     /// sessions, cookies - is measured against this.
     #[must_use]
-    pub fn now_epoch_secs(&self) -> u64 {
-        crate::clock::epoch_secs(&self.clock)
-    }
+    pub fn now_epoch_secs(&self) -> u64 { crate::clock::epoch_secs(&self.clock) }
 
     /// Returns the URL candidates this client will iterate through on errors.
-    pub fn load_url_candidates(&self) -> &[StalkerLoadUrl] {
-        &self.load_urls
-    }
+    pub fn load_url_candidates(&self) -> &[StalkerLoadUrl] { &self.load_urls }
 
     /// Returns the active handshake, if any. Reverse-proxy code calls this to fetch the
     /// bearer token without re-handshaking.
-    pub fn active_handshake(&self) -> Option<StalkerHandshake> {
-        self.handshake.lock().clone()
-    }
+    pub fn active_handshake(&self) -> Option<StalkerHandshake> { self.handshake.lock().clone() }
 
     /// Returns a reference to the active cookie jar. Used by tests and by callers that
     /// need to seed the jar with previously-captured cookies.
-    pub fn cookies(&self) -> &StalkerCookieJar {
-        &self.cookies
-    }
+    pub fn cookies(&self) -> &StalkerCookieJar { &self.cookies }
 
     /// Force-clear the active session and cookies. Useful when the upstream returns a
     /// "token rejected" status.
@@ -329,11 +314,7 @@ impl<Tr: StalkerTransport, C: Clock> StalkerApiClient<Tr, C> {
     /// Stream the live catalog to `on_batch` one page at a time, instead of buffering the
     /// whole thing like [`Self::get_live_streams`]. An `Err` means the batches already
     /// delivered are an incomplete prefix and must be discarded.
-    pub async fn stream_live_streams<F, Fut>(
-        &self,
-        handshake: &StalkerHandshake,
-        on_batch: F,
-    ) -> StalkerResult<u64>
+    pub async fn stream_live_streams<F, Fut>(&self, handshake: &StalkerHandshake, on_batch: F) -> StalkerResult<u64>
     where
         F: FnMut(Vec<catalog::StalkerRawItem>) -> Fut + Send,
         Fut: std::future::Future<Output = StalkerResult<()>> + Send,
@@ -402,21 +383,13 @@ impl<Tr: StalkerTransport, C: Clock> StalkerApiClient<Tr, C> {
     // -------------------------------------------------------------------------------------
 
     /// Start a request against `url`. Stalker portals answer `GET` for every action.
-    pub fn get(&self, url: &str) -> RequestBuilder {
-        self.transport.get(url)
-    }
+    pub fn get(&self, url: &str) -> RequestBuilder { self.transport.get(url) }
 
-    pub fn portal_url(&self) -> &str {
-        &self.portal_url
-    }
+    pub fn portal_url(&self) -> &str { &self.portal_url }
 
-    pub fn config(&self) -> &StalkerInputConfig {
-        &self.config
-    }
+    pub fn config(&self) -> &StalkerInputConfig { &self.config }
 
-    pub fn body_caps(&self) -> &StalkerBodyCaps {
-        &self.body_caps
-    }
+    pub fn body_caps(&self) -> &StalkerBodyCaps { &self.body_caps }
 
     pub fn catalog_max_pages(&self) -> u32 {
         self.config.catalog_max_pages.filter(|value| *value > 0).unwrap_or(DEFAULT_STALKER_CATALOG_MAX_PAGES)
@@ -634,9 +607,7 @@ impl<Tr: StalkerTransport, C: Clock> StalkerApiClient<Tr, C> {
 
     /// The body cap for `action`, from this client's configured [`StalkerBodyCaps`].
     #[must_use]
-    pub fn cap_for_action(&self, action: StalkerAction) -> u64 {
-        action.cap_bytes(&self.body_caps)
-    }
+    pub fn cap_for_action(&self, action: StalkerAction) -> u64 { action.cap_bytes(&self.body_caps) }
 }
 
 /// Inspect the body for a Stalker/Ministra portal-internal `code` field. The
@@ -877,11 +848,11 @@ fn sanitize_dump_component(value: &str) -> String {
 mod transport_tests {
     use super::*;
     use crate::stalker::{
+        action::StalkerAction,
         catalog,
         profile::{StalkerHandshake, StalkerProviderProfile, StalkerRawProviderProfile},
         recipes::fallback_recipes_for,
-        action::StalkerAction,
-    session::StalkerSession,
+        session::StalkerSession,
         transport::testing::{FakeTransport, Reply},
     };
     use shared::model::stalker::{StalkerBootstrapRecipe, StalkerPortalCapabilitiesDto};
@@ -945,10 +916,7 @@ mod transport_tests {
             ..StalkerInputConfig::default()
         };
         let oversized = "x".repeat(4096);
-        let client = client_with(
-            std::sync::Arc::new(FakeTransport::new([Reply::ok(&oversized)])),
-            config,
-        );
+        let client = client_with(std::sync::Arc::new(FakeTransport::new([Reply::ok(&oversized)])), config);
         let err = client
             .send_json::<serde_json::Value>(client.get(PORTAL), StalkerAction::CreateLink)
             .await
@@ -1106,12 +1074,13 @@ mod transport_tests {
     /// the two that did not are never dialled again.
     #[tokio::test]
     async fn a_remembered_endpoint_is_tried_first() {
-        let transport = std::sync::Arc::new(FakeTransport::new([Reply::ok(r#"{"js": [{"id": "1", "title": "Sport"}]}"#)]));
+        let transport =
+            std::sync::Arc::new(FakeTransport::new([Reply::ok(r#"{"js": [{"id": "1", "title": "Sport"}]}"#)]));
         let mut capabilities = crate::capabilities::ProviderCapabilities::default();
         // 10_000_000 ms on the manual clock is 10_000 s.
         capabilities.record_handshake("GenericSafe", &format!("{PORTAL}c/"), 10_000);
-        let client =
-            client_with(std::sync::Arc::clone(&transport), StalkerInputConfig::default()).with_capabilities(capabilities);
+        let client = client_with(std::sync::Arc::clone(&transport), StalkerInputConfig::default())
+            .with_capabilities(capabilities);
 
         catalog::get_live_categories(&client, &handshake()).await.expect("remembered endpoint answers");
 
@@ -1131,8 +1100,8 @@ mod transport_tests {
         ]));
         let mut capabilities = crate::capabilities::ProviderCapabilities::default();
         capabilities.record_handshake("GenericSafe", &format!("{PORTAL}c/"), 10_000);
-        let client =
-            client_with(std::sync::Arc::clone(&transport), StalkerInputConfig::default()).with_capabilities(capabilities);
+        let client = client_with(std::sync::Arc::clone(&transport), StalkerInputConfig::default())
+            .with_capabilities(capabilities);
 
         let categories = catalog::get_live_categories(&client, &handshake()).await.expect("another endpoint answers");
 
@@ -1347,13 +1316,25 @@ mod tests {
     #[test]
     fn is_token_rejected_recognises_portal_body_error() {
         // 44 and 440..=449 are recognised as token-rejected body errors.
-        assert!(StalkerError::PortalBodyError { code: 44, action: StalkerAction::CreateLink, body_snippet: String::new() }
-            .is_token_rejected());
-        assert!(StalkerError::PortalBodyError { code: 449, action: StalkerAction::CreateLink, body_snippet: String::new() }
-            .is_token_rejected());
+        assert!(StalkerError::PortalBodyError {
+            code: 44,
+            action: StalkerAction::CreateLink,
+            body_snippet: String::new()
+        }
+        .is_token_rejected());
+        assert!(StalkerError::PortalBodyError {
+            code: 449,
+            action: StalkerAction::CreateLink,
+            body_snippet: String::new()
+        }
+        .is_token_rejected());
         // Codes outside the 44xx band do not classify as token rejection.
-        assert!(!StalkerError::PortalBodyError { code: 11, action: StalkerAction::CreateLink, body_snippet: String::new() }
-            .is_token_rejected());
+        assert!(!StalkerError::PortalBodyError {
+            code: 11,
+            action: StalkerAction::CreateLink,
+            body_snippet: String::new()
+        }
+        .is_token_rejected());
         assert!(!StalkerError::PortalBodyError {
             code: 500,
             action: StalkerAction::CreateLink,

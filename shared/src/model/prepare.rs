@@ -75,9 +75,7 @@ impl<T: Prepare> Prepare for Option<T> {
 impl<T: Prepare> Prepare for Box<T> {
     type Ctx<'a> = T::Ctx<'a>;
 
-    fn prepare(&mut self, ctx: Self::Ctx<'_>) -> Result<(), TuliproxError> {
-        (**self).prepare(ctx)
-    }
+    fn prepare(&mut self, ctx: Self::Ctx<'_>) -> Result<(), TuliproxError> { (**self).prepare(ctx) }
 }
 
 /// Prepares every child and reports **all** failures, not just the first.
@@ -106,15 +104,11 @@ where
 }
 
 impl<T: Prepare> PrepareAll for Vec<T> {
-    fn prepare_all(&mut self, ctx: Self::Ctx<'_>) -> Result<(), TuliproxError> {
-        prepare_each(self.iter_mut(), ctx)
-    }
+    fn prepare_all(&mut self, ctx: Self::Ctx<'_>) -> Result<(), TuliproxError> { prepare_each(self.iter_mut(), ctx) }
 }
 
 impl<T: Prepare> PrepareAll for [T] {
-    fn prepare_all(&mut self, ctx: Self::Ctx<'_>) -> Result<(), TuliproxError> {
-        prepare_each(self.iter_mut(), ctx)
-    }
+    fn prepare_all(&mut self, ctx: Self::Ctx<'_>) -> Result<(), TuliproxError> { prepare_each(self.iter_mut(), ctx) }
 }
 
 impl<T: PrepareAll> PrepareAll for Option<T> {
@@ -127,9 +121,7 @@ impl<T: PrepareAll> PrepareAll for Option<T> {
 }
 
 impl<T: PrepareAll> PrepareAll for Box<T> {
-    fn prepare_all(&mut self, ctx: Self::Ctx<'_>) -> Result<(), TuliproxError> {
-        (**self).prepare_all(ctx)
-    }
+    fn prepare_all(&mut self, ctx: Self::Ctx<'_>) -> Result<(), TuliproxError> { (**self).prepare_all(ctx) }
 }
 
 #[cfg(test)]
@@ -157,9 +149,7 @@ mod tests {
         }
     }
 
-    fn node(name: &str) -> Node {
-        Node { name: name.to_string(), resolved: None }
-    }
+    fn node(name: &str) -> Node { Node { name: name.to_string(), resolved: None } }
 
     #[test]
     fn vec_impl_prepares_every_child_with_the_same_context() {

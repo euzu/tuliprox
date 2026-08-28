@@ -35,20 +35,14 @@ impl CompressedFileReader {
 
 // Implement the Read trait for CompressedFileReader
 impl Read for CompressedFileReader {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.reader.read(buf)
-    }
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> { self.reader.read(buf) }
 }
 
 // Implement BufRead for CompressedFileReader
 impl BufRead for CompressedFileReader {
-    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
-        self.reader.fill_buf()
-    }
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> { self.reader.fill_buf() }
 
-    fn consume(&mut self, amt: usize) {
-        self.reader.consume(amt);
-    }
+    fn consume(&mut self, amt: usize) { self.reader.consume(amt); }
 }
 
 impl Iterator for CompressedFileReader {

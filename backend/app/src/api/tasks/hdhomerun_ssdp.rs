@@ -12,9 +12,7 @@ use tokio_util::sync::CancellationToken;
 const SSDP_GROUP: Ipv4Addr = Ipv4Addr::new(239, 255, 255, 250);
 const SSDP_PORT: u16 = 1900;
 
-fn max_ssdp_delay_ms(mx: u64) -> u64 {
-    mx.min(u64::MAX / 1000) * 1000
-}
+fn max_ssdp_delay_ms(mx: u64) -> u64 { mx.min(u64::MAX / 1000) * 1000 }
 
 fn create_ssdp_response(device: &HdHomeRunDeviceConfig, server_host: &str) -> String {
     format!(

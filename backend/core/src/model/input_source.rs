@@ -40,9 +40,7 @@ impl InputSource {
     ///
     /// This can be used to pass to `send_with_retry_and_provider` for failover support.
     #[inline]
-    pub fn get_provider(&self) -> Option<&Arc<ConfigProvider>> {
-        self.provider.as_ref()
-    }
+    pub fn get_provider(&self) -> Option<&Arc<ConfigProvider>> { self.provider.as_ref() }
 }
 
 impl From<&ConfigInput> for InputSource {

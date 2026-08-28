@@ -10,15 +10,11 @@ pub struct RegexCache {
 }
 
 impl Default for RegexCache {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 impl RegexCache {
-    pub fn new() -> Self {
-        Self { cache: DashMap::new() }
-    }
+    pub fn new() -> Self { Self { cache: DashMap::new() } }
 
     pub fn get_or_compile(&self, pattern: &str) -> Result<Arc<Regex>, TuliproxError> {
         // Try to get existing entry first
@@ -33,7 +29,5 @@ impl RegexCache {
     }
 
     /// Removes regexes that are only held by the cache itself (`strong_count` == 1).
-    pub fn sweep(&self) {
-        self.cache.retain(|_k, v| Arc::strong_count(v) > 1);
-    }
+    pub fn sweep(&self) { self.cache.retain(|_k, v| Arc::strong_count(v) > 1); }
 }

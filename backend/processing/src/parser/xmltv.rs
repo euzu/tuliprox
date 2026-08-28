@@ -157,13 +157,9 @@ impl TVGuide {
     }
 
     #[inline]
-    pub fn get_epg_sources(&self) -> &Vec<PersistedEpgSource> {
-        &self.epg_sources
-    }
+    pub fn get_epg_sources(&self) -> &Vec<PersistedEpgSource> { &self.epg_sources }
 
-    pub fn get_file_locks(&self) -> Option<&FileLockManager> {
-        self.file_locks.as_deref()
-    }
+    pub fn get_file_locks(&self) -> Option<&FileLockManager> { self.file_locks.as_deref() }
 }
 
 impl TVGuide {
@@ -636,9 +632,7 @@ enum XmlTagType {
 
 impl XmlTagType {
     #[inline]
-    pub fn is_tv(self) -> bool {
-        self == XmlTagType::Tv
-    }
+    pub fn is_tv(self) -> bool { self == XmlTagType::Tv }
 }
 
 fn get_tag_type(name: &str) -> XmlTagType {
@@ -727,9 +721,7 @@ pub struct EpgMergeAccumulator {
 }
 
 impl EpgMergeAccumulator {
-    pub fn new() -> Self {
-        Self::default()
-    }
+    pub fn new() -> Self { Self::default() }
 
     fn channel_ids_with_programmes(&self) -> HashSet<Arc<str>> {
         self.channels
@@ -1065,9 +1057,7 @@ impl Ord for EpgDiskChannelKey {
     }
 }
 impl PartialOrd for EpgDiskChannelKey {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
 }
 
 /// Handle for a temp `BPlusTree` that holds the channels of one EPG source.

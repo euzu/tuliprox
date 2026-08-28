@@ -95,13 +95,9 @@ pub struct ConfigTargetOptionsFormState {
 impl HasFormData for ConfigTargetOptionsFormState {
     type Data = ConfigTargetOptions;
 
-    fn data(&self) -> &Self::Data {
-        &self.form
-    }
+    fn data(&self) -> &Self::Data { &self.form }
 
-    fn modified(&self) -> bool {
-        self.modified
-    }
+    fn modified(&self) -> bool { self.modified }
 }
 
 #[allow(clippy::large_enum_variant)]

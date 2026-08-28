@@ -259,9 +259,7 @@ struct HlsPreparedTerminalBundleFlightCompletion {
 }
 
 impl HlsPreparedTerminalBundleFlightCompletion {
-    fn new() -> Self {
-        Self { result: Mutex::new(None), completed: Notify::new() }
-    }
+    fn new() -> Self { Self { result: Mutex::new(None), completed: Notify::new() } }
 
     fn publish(&self, completion: HlsPreparedTerminalBundleCompletion) {
         let published = {
@@ -312,9 +310,7 @@ impl std::fmt::Debug for HlsPreparedTerminalBundleCompletionTicket {
 }
 
 impl HlsPreparedTerminalBundleCompletionTicket {
-    pub async fn wait(self) -> HlsPreparedTerminalBundleCompletion {
-        self.completion.wait().await
-    }
+    pub async fn wait(self) -> HlsPreparedTerminalBundleCompletion { self.completion.wait().await }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -324,9 +320,7 @@ pub struct HlsPreparedTerminalBundleCompletionPublisher {
 
 #[cfg(any(test, feature = "test-support"))]
 impl HlsPreparedTerminalBundleCompletionPublisher {
-    pub fn publish(self, result: HlsPreparedTerminalBundleCompletion) {
-        self.completion.publish(result)
-    }
+    pub fn publish(self, result: HlsPreparedTerminalBundleCompletion) { self.completion.publish(result) }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -373,9 +367,7 @@ pub struct HlsPreparedTerminalBundleCache {
 }
 
 impl Default for HlsPreparedTerminalBundleCache {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 impl HlsPreparedTerminalBundleCache {
@@ -656,19 +648,13 @@ impl HlsPreparedTerminalBundleCache {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    fn entry_count(&self) -> usize {
-        self.lock_inner().entries.len()
-    }
+    fn entry_count(&self) -> usize { self.lock_inner().entries.len() }
 
     #[cfg(any(test, feature = "test-support"))]
-    fn in_flight_count(&self) -> usize {
-        self.lock_inner().flights.len()
-    }
+    fn in_flight_count(&self) -> usize { self.lock_inner().flights.len() }
 
     #[cfg(any(test, feature = "test-support"))]
-    fn resident_bytes(&self) -> u64 {
-        self.lock_inner().resident_bytes
-    }
+    fn resident_bytes(&self) -> u64 { self.lock_inner().resident_bytes }
 }
 
 fn estimated_bundle_bytes(asset: &HlsTerminalMediaAsset, segment_count: u16) -> Option<u64> {

@@ -3,17 +3,13 @@ use tokio::time::Sleep;
 
 const HLS_CLIENT_BODY_SEND_TIMEOUT_SECS: u64 = 90;
 
-pub fn hls_client_body_send_deadline() -> Duration {
-    Duration::from_secs(HLS_CLIENT_BODY_SEND_TIMEOUT_SECS)
-}
+pub fn hls_client_body_send_deadline() -> Duration { Duration::from_secs(HLS_CLIENT_BODY_SEND_TIMEOUT_SECS) }
 
 pub fn refresh_hls_client_body_send_deadline(mut deadline: Pin<&mut Sleep>) {
     deadline.as_mut().reset(tokio::time::Instant::now() + hls_client_body_send_deadline());
 }
 
-pub fn hls_object_body_deadline(timeout_ms: u64) -> Duration {
-    Duration::from_millis(timeout_ms.max(1))
-}
+pub fn hls_object_body_deadline(timeout_ms: u64) -> Duration { Duration::from_millis(timeout_ms.max(1)) }
 
 #[cfg(test)]
 mod tests {

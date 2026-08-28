@@ -36,9 +36,7 @@ const SUPPORTED_RESPONSE_HEADERS: &[&str] = &[
     "expires",
 ];
 
-pub fn filter_response_header(key: &str) -> bool {
-    SUPPORTED_RESPONSE_HEADERS.contains(&key)
-}
+pub fn filter_response_header(key: &str) -> bool { SUPPORTED_RESPONSE_HEADERS.contains(&key) }
 
 pub fn filter_request_header(key: &str) -> bool {
     if key == "host" || key == "connection" {

@@ -30,20 +30,14 @@ pub struct Millis(pub u64);
 
 impl Millis {
     #[inline]
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
+    pub const fn new(value: u64) -> Self { Self(value) }
 
     /// The raw count. Prefer [`Self::as_duration`] where a `Duration` will do.
     #[inline]
-    pub const fn get(self) -> u64 {
-        self.0
-    }
+    pub const fn get(self) -> u64 { self.0 }
 
     #[inline]
-    pub const fn as_duration(self) -> Duration {
-        Duration::from_millis(self.0)
-    }
+    pub const fn as_duration(self) -> Duration { Duration::from_millis(self.0) }
 
     /// As a `Duration`, floored at one millisecond.
     ///
@@ -57,9 +51,7 @@ impl Millis {
 }
 
 impl Display for Millis {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}ms", self.0)
-    }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{}ms", self.0) }
 }
 
 /// A duration in whole seconds.
@@ -70,32 +62,22 @@ pub struct Secs(pub u64);
 
 impl Secs {
     #[inline]
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
+    pub const fn new(value: u64) -> Self { Self(value) }
 
     /// The raw count. Prefer [`Self::as_duration`] where a `Duration` will do.
     #[inline]
-    pub const fn get(self) -> u64 {
-        self.0
-    }
+    pub const fn get(self) -> u64 { self.0 }
 
     #[inline]
-    pub const fn as_duration(self) -> Duration {
-        Duration::from_secs(self.0)
-    }
+    pub const fn as_duration(self) -> Duration { Duration::from_secs(self.0) }
 
     /// Convert to milliseconds, saturating rather than wrapping.
     #[inline]
-    pub const fn as_millis(self) -> Millis {
-        Millis(self.0.saturating_mul(1_000))
-    }
+    pub const fn as_millis(self) -> Millis { Millis(self.0.saturating_mul(1_000)) }
 }
 
 impl Display for Secs {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}s", self.0)
-    }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{}s", self.0) }
 }
 
 #[cfg(test)]

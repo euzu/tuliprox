@@ -74,7 +74,5 @@ pub mod test_support {
 
     /// The identity a sorted-index sidecar has to carry to be accepted for a
     /// given database snapshot.
-    pub fn snapshot_identity<K, V>(query: &crate::BPlusTreeQuery<K, V>) -> ([u8; 16], u64) {
-        query.snapshot_identity()
-    }
+    pub fn snapshot_identity<K, V>(query: &crate::BPlusTreeQuery<K, V>) -> ([u8; 16], u64) { query.snapshot_identity() }
 }

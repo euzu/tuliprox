@@ -369,9 +369,7 @@ fn close_html_tags(tags: &[(String, String)]) -> String {
     })
 }
 
-fn open_html_tags(tags: &[(String, String)]) -> String {
-    tags.iter().map(|(_, full)| full.clone()).collect()
-}
+fn open_html_tags(tags: &[(String, String)]) -> String { tags.iter().map(|(_, full)| full.clone()).collect() }
 
 fn calculate_html_closing_overhead(tags: &[(String, String)]) -> usize {
     tags.iter().map(|(name, _)| name.len() + 3).sum() // </name>

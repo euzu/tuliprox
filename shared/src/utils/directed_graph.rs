@@ -15,14 +15,10 @@ impl<K> DirectedGraph<K>
 where
     K: Eq + std::hash::Hash + Clone + Display + Debug,
 {
-    pub fn new() -> Self {
-        Self { adjacencies: HashMap::new() }
-    }
+    pub fn new() -> Self { Self { adjacencies: HashMap::new() } }
 
     // Add a node to the graph, ignore if it already exists
-    pub fn add_node(&mut self, node: &K) {
-        self.adjacencies.entry(node.to_owned()).or_default();
-    }
+    pub fn add_node(&mut self, node: &K) { self.adjacencies.entry(node.to_owned()).or_default(); }
 
     // Add a directed edge to the graph, ignore if it already exists
     pub fn add_edge(&mut self, from: &K, to: &K) {
@@ -197,9 +193,7 @@ impl<K> Default for DirectedGraph<K>
 where
     K: Eq + std::hash::Hash + Clone + Display + Debug,
 {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 #[cfg(test)]

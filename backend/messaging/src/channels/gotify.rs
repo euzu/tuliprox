@@ -15,9 +15,7 @@ pub struct GotifyChannel {
 }
 
 impl GotifyChannel {
-    pub fn new(config: GotifyMessagingConfig, client: reqwest::Client) -> Self {
-        Self { config, client }
-    }
+    pub fn new(config: GotifyMessagingConfig, client: reqwest::Client) -> Self { Self { config, client } }
 
     /// Gotify's 0-10 priority scale.
     fn priority(severity: Severity) -> u8 {
@@ -31,21 +29,13 @@ impl GotifyChannel {
 }
 
 impl NotificationChannel for GotifyChannel {
-    fn id(&self) -> &'static str {
-        "gotify"
-    }
+    fn id(&self) -> &'static str { "gotify" }
 
-    fn template_for(&self, event: EventId) -> Option<&str> {
-        self.config.templates.get(&event).map(String::as_str)
-    }
+    fn template_for(&self, event: EventId) -> Option<&str> { self.config.templates.get(&event).map(String::as_str) }
 
-    fn routing(&self) -> &ChannelRouting {
-        &self.config.routing
-    }
+    fn routing(&self) -> &ChannelRouting { &self.config.routing }
 
-    fn wants(&self, event: EventId, severity: Severity) -> bool {
-        self.config.routing.accepts(event, severity)
-    }
+    fn wants(&self, event: EventId, severity: Severity) -> bool { self.config.routing.accepts(event, severity) }
 
     async fn send(&self, msg: &RenderedMessage<'_>) -> Delivery {
         {
@@ -84,9 +74,7 @@ impl NotificationChannel for GotifyChannel {
         }
     }
 
-    fn capabilities(&self) -> ChannelCapabilities {
-        ChannelCapabilities::default()
-    }
+    fn capabilities(&self) -> ChannelCapabilities { ChannelCapabilities::default() }
 }
 
 #[cfg(test)]

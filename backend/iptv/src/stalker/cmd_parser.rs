@@ -52,17 +52,13 @@ fn check_playable(candidate: &str, url: &Url) -> StalkerResult<String> {
 /// only relay HTTP-family traffic to its clients. Rejecting non-HTTP schemes
 /// up-front keeps the supported-transport policy testable and prevents
 /// silently broken streams from leaking into M3U/xtream outputs.
-pub fn scheme_is_playable(scheme: &str) -> bool {
-    matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https")
-}
+pub fn scheme_is_playable(scheme: &str) -> bool { matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn b64(s: &str) -> String {
-        BASE64.encode(s.as_bytes())
-    }
+    fn b64(s: &str) -> String { BASE64.encode(s.as_bytes()) }
 
     #[test]
     fn extracts_url_after_space() {

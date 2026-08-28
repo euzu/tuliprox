@@ -239,9 +239,7 @@ impl ConfigProvider {
     }
 
     /// Resets the current URL index to 0
-    pub fn reset_index(&self) {
-        self.current_url_index.store(0, Ordering::Relaxed);
-    }
+    pub fn reset_index(&self) { self.current_url_index.store(0, Ordering::Relaxed); }
 
     /// Gets the current URL index
     #[inline]
@@ -264,9 +262,7 @@ impl ConfigProvider {
         self.provider_url_selection_policy
     }
 
-    pub fn get_dns_config(&self) -> Option<&ProviderDnsConfig> {
-        self.dns.as_ref()
-    }
+    pub fn get_dns_config(&self) -> Option<&ProviderDnsConfig> { self.dns.as_ref() }
 
     pub fn dns_enabled_for_scheme(&self, scheme: &str) -> bool {
         self.dns.as_ref().is_some_and(|cfg| cfg.supports_scheme(scheme))
@@ -324,21 +320,15 @@ impl ConfigProvider {
         hostnames
     }
 
-    pub fn store_resolved(&self, host: &str, ips: Vec<IpAddr>) {
-        self.dns_cache.store_resolved(host, ips);
-    }
+    pub fn store_resolved(&self, host: &str, ips: Vec<IpAddr>) { self.dns_cache.store_resolved(host, ips); }
 
-    pub fn clear_resolved(&self, host: &str) {
-        self.dns_cache.clear_resolved(host);
-    }
+    pub fn clear_resolved(&self, host: &str) { self.dns_cache.clear_resolved(host); }
 
     pub fn mark_resolve_error(&self, host: &str, err: impl Into<String>) {
         self.dns_cache.mark_resolve_error(host, err);
     }
 
-    pub fn snapshot_resolved(&self) -> HashMap<String, Vec<IpAddr>> {
-        self.dns_cache.snapshot_resolved()
-    }
+    pub fn snapshot_resolved(&self) -> HashMap<String, Vec<IpAddr>> { self.dns_cache.snapshot_resolved() }
 
     pub fn snapshot_resolved_ordered(&self) -> IndexMap<String, Vec<IpAddr>> {
         let mut remaining = self.snapshot_resolved();
@@ -482,9 +472,7 @@ impl TryFrom<&SourcesConfigDto> for SourcesConfig {
 }
 
 impl SourcesConfig {
-    pub fn get_source_at(&self, idx: usize) -> Option<&ConfigSource> {
-        self.sources.get(idx)
-    }
+    pub fn get_source_at(&self, idx: usize) -> Option<&ConfigSource> { self.sources.get(idx) }
 
     pub fn get_staged_input_for_provider(&self, provider_name: &Arc<str>) -> Option<&Arc<ConfigInput>> {
         self.inputs.iter().find(|input| {

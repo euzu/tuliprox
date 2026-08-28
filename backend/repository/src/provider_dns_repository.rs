@@ -28,17 +28,13 @@ static DNS_WRITER_GENERATION: AtomicU64 = AtomicU64::new(0);
 const DNS_WRITER_FLUSH_INTERVAL_SECS: u64 = 2;
 const DNS_WRITER_FLUSH_BATCH_THRESHOLD: usize = 32;
 
-pub fn next_dns_writer_generation() -> u64 {
-    DNS_WRITER_GENERATION.fetch_add(1, Ordering::SeqCst) + 1
-}
+pub fn next_dns_writer_generation() -> u64 { DNS_WRITER_GENERATION.fetch_add(1, Ordering::SeqCst) + 1 }
 
 fn is_dns_writer_generation_current(generation: u64) -> bool {
     DNS_WRITER_GENERATION.load(Ordering::SeqCst) == generation
 }
 
-pub fn dns_resolved_file_path(storage_dir: &str) -> PathBuf {
-    PathBuf::from(storage_dir).join(DNS_RESOLVED_FILE)
-}
+pub fn dns_resolved_file_path(storage_dir: &str) -> PathBuf { PathBuf::from(storage_dir).join(DNS_RESOLVED_FILE) }
 
 #[derive(Debug)]
 pub enum DnsResolvedStoreLoadError {

@@ -22,15 +22,11 @@ struct IncomingStream {
 
 impl IncomingStream {
     /// Returns the remote address that this stream is bound to.
-    pub fn remote_addr(&self) -> &SocketAddr {
-        &self.remote_addr
-    }
+    pub fn remote_addr(&self) -> &SocketAddr { &self.remote_addr }
 }
 
 impl axum::extract::connect_info::Connected<IncomingStream> for SocketAddr {
-    fn connect_info(target: IncomingStream) -> SocketAddr {
-        *target.remote_addr()
-    }
+    fn connect_info(target: IncomingStream) -> SocketAddr { *target.remote_addr() }
 }
 
 pub async fn serve(
@@ -238,15 +234,11 @@ mod tests {
     impl Stream for PendingDropProbeStream {
         type Item = Result<Bytes, StreamError>;
 
-        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            Poll::Pending
-        }
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> { Poll::Pending }
     }
 
     impl Drop for PendingDropProbeStream {
-        fn drop(&mut self) {
-            self.dropped.store(true, Ordering::Release);
-        }
+        fn drop(&mut self) { self.dropped.store(true, Ordering::Release); }
     }
 
     async fn pending_direct_series_response(

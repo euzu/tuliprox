@@ -2260,9 +2260,7 @@ struct TestOriginServer {
 type TestOriginHandler = Arc<dyn Fn(String) -> (u16, Vec<(&'static str, String)>, String) + Send + Sync>;
 
 impl Drop for TestOriginServer {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
+    fn drop(&mut self) { self.task.abort(); }
 }
 
 async fn spawn_test_origin(handler: TestOriginHandler) -> TestOriginServer {
@@ -2336,9 +2334,7 @@ fn request_header_value<'a>(request: &'a str, expected_name: &str) -> Option<&'a
     })
 }
 
-fn no_delay_policy() -> RetryPolicy {
-    RetryPolicy { delays_ms: [0, 0, 0, 0, 0], jitter_max_ms: 0 }
-}
+fn no_delay_policy() -> RetryPolicy { RetryPolicy { delays_ms: [0, 0, 0, 0, 0], jitter_max_ms: 0 } }
 
 fn test_recovery_timing_policy(expected_eta_ms: u64) -> HlsRecoveryTimingPolicy {
     HlsRecoveryTimingPolicy::new(
@@ -2541,9 +2537,7 @@ fn host_from_base_url(base_url: &str) -> String {
     url::Url::parse(base_url).expect("base url").host_str().expect("host").to_string()
 }
 
-fn manifest_body() -> String {
-    "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\nseg.ts\n".to_string()
-}
+fn manifest_body() -> String { "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\nseg.ts\n".to_string() }
 
 fn three_segment_manifest_body(media_sequence: u64) -> String {
     format!(
@@ -4194,9 +4188,7 @@ struct ControlledSwitchOriginServer {
 }
 
 impl Drop for ControlledSwitchOriginServer {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
+    fn drop(&mut self) { self.task.abort(); }
 }
 
 async fn await_controlled_switch_segment_prefix<T: std::fmt::Debug>(
@@ -4225,9 +4217,7 @@ struct CriticalEmergencyOriginServer {
 }
 
 impl Drop for CriticalEmergencyOriginServer {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
+    fn drop(&mut self) { self.task.abort(); }
 }
 
 async fn read_test_request_path(socket: &mut tokio::net::TcpStream) -> Option<String> {
@@ -4715,9 +4705,7 @@ async fn critical_handoff_lock_busy_retry_retains_staged_state_until_acquired() 
     }
 
     impl Drop for StagedRetentionProbe {
-        fn drop(&mut self) {
-            self.drops.fetch_add(1, Ordering::SeqCst);
-        }
+        fn drop(&mut self) { self.drops.fetch_add(1, Ordering::SeqCst); }
     }
 
     let drops = Arc::new(AtomicUsize::new(0));

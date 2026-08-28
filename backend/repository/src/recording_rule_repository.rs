@@ -30,9 +30,7 @@ impl RecordingRuleRepository {
         tuliprox_core::utils::atomic_json_store::write_json_atomic(&self.path, &bytes).await
     }
 
-    pub async fn list(&self) -> std::io::Result<Vec<RecordingRule>> {
-        Ok(self.load().await?.rules)
-    }
+    pub async fn list(&self) -> std::io::Result<Vec<RecordingRule>> { Ok(self.load().await?.rules) }
 
     pub async fn create(&self, rule: RecordingRule) -> std::io::Result<RecordingRule> {
         let _guard = MUTATION_GUARD.lock().await;

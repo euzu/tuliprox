@@ -30,9 +30,7 @@ pub struct AtomicWriteError {
 }
 
 impl AtomicWriteError {
-    pub fn new(stage: AtomicWriteStage, source: std::io::Error) -> Self {
-        Self { stage, source }
-    }
+    pub fn new(stage: AtomicWriteStage, source: std::io::Error) -> Self { Self { stage, source } }
 }
 
 impl std::fmt::Display for AtomicWriteError {
@@ -42,15 +40,11 @@ impl std::fmt::Display for AtomicWriteError {
 }
 
 impl std::error::Error for AtomicWriteError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.source)
-    }
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(&self.source) }
 }
 
 impl From<AtomicWriteError> for std::io::Error {
-    fn from(err: AtomicWriteError) -> Self {
-        std::io::Error::new(err.source.kind(), err)
-    }
+    fn from(err: AtomicWriteError) -> Self { std::io::Error::new(err.source.kind(), err) }
 }
 
 /// Filesystem operations needed for an atomic write. Default impls of the

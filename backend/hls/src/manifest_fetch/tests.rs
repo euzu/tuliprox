@@ -273,9 +273,7 @@ struct TestOriginResponse {
 }
 
 impl TestOriginResponse {
-    fn ok(body: Vec<u8>) -> Self {
-        Self { status: "200 OK", headers: Vec::new(), body, body_delay: Duration::ZERO }
-    }
+    fn ok(body: Vec<u8>) -> Self { Self { status: "200 OK", headers: Vec::new(), body, body_delay: Duration::ZERO } }
 
     fn with_header(mut self, name: &'static str, value: impl Into<String>) -> Self {
         self.headers.push((name, value.into()));

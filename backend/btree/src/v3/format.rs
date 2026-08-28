@@ -27,13 +27,9 @@ pub(crate) const OVERFLOW_HEADER_LEN: usize = 8;
 const COMPRESSION_MIN_LENGTH: usize = 64;
 const COMPRESSION_PERCENT: usize = 85;
 
-fn invalid_data(message: &'static str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message)
-}
+fn invalid_data(message: &'static str) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, message) }
 
-fn invalid_input(message: &'static str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidInput, message)
-}
+fn invalid_input(message: &'static str) -> io::Error { io::Error::new(io::ErrorKind::InvalidInput, message) }
 
 fn checked_end(offset: usize, length: usize) -> io::Result<usize> {
     offset.checked_add(length).ok_or_else(|| invalid_data("format offset overflow"))
@@ -54,17 +50,11 @@ fn write_at(bytes: &mut [u8], offset: usize, value: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-fn read_u16(bytes: &[u8], offset: usize) -> io::Result<u16> {
-    Ok(u16::from_le_bytes(bytes_at(bytes, offset)?))
-}
+fn read_u16(bytes: &[u8], offset: usize) -> io::Result<u16> { Ok(u16::from_le_bytes(bytes_at(bytes, offset)?)) }
 
-fn read_u32(bytes: &[u8], offset: usize) -> io::Result<u32> {
-    Ok(u32::from_le_bytes(bytes_at(bytes, offset)?))
-}
+fn read_u32(bytes: &[u8], offset: usize) -> io::Result<u32> { Ok(u32::from_le_bytes(bytes_at(bytes, offset)?)) }
 
-fn read_u64(bytes: &[u8], offset: usize) -> io::Result<u64> {
-    Ok(u64::from_le_bytes(bytes_at(bytes, offset)?))
-}
+fn read_u64(bytes: &[u8], offset: usize) -> io::Result<u64> { Ok(u64::from_le_bytes(bytes_at(bytes, offset)?)) }
 
 fn read_u8(bytes: &[u8], offset: usize) -> io::Result<u8> {
     let [value] = bytes_at(bytes, offset)?;
@@ -358,17 +348,11 @@ impl PageHeader {
 }
 
 #[cfg(test)]
-pub(crate) fn page_checksum(page: &[u8]) -> io::Result<u32> {
-    checksum_with_zeroed_field(page, PAGE_CHECKSUM_OFFSET)
-}
+pub(crate) fn page_checksum(page: &[u8]) -> io::Result<u32> { checksum_with_zeroed_field(page, PAGE_CHECKSUM_OFFSET) }
 
-pub(crate) fn write_page_checksum(page: &mut [u8]) -> io::Result<()> {
-    write_checksum(page, PAGE_CHECKSUM_OFFSET)
-}
+pub(crate) fn write_page_checksum(page: &mut [u8]) -> io::Result<()> { write_checksum(page, PAGE_CHECKSUM_OFFSET) }
 
-pub(crate) fn verify_page_checksum(page: &[u8]) -> io::Result<()> {
-    verify_checksum(page, PAGE_CHECKSUM_OFFSET)
-}
+pub(crate) fn verify_page_checksum(page: &[u8]) -> io::Result<()> { verify_checksum(page, PAGE_CHECKSUM_OFFSET) }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Slot {
@@ -642,9 +626,7 @@ pub(crate) fn validate_free_body(page: &[u8]) -> io::Result<()> {
     )
 }
 
-pub(crate) fn stored_value_checksum(stored: &[u8]) -> u32 {
-    crc32fast::hash(stored)
-}
+pub(crate) fn stored_value_checksum(stored: &[u8]) -> u32 { crc32fast::hash(stored) }
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum StoredValue<'a> {

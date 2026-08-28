@@ -19,7 +19,7 @@ pub struct LibraryScanResult {
     pub errors: usize,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 pub enum LibraryScanSummaryStatus {
     Success,
     Error,

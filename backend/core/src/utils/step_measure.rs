@@ -41,9 +41,7 @@ impl StepMeasure {
         }
     }
 
-    pub fn broadcast(&self, step: &str, msg: &str) {
-        (self.callback)(step, msg);
-    }
+    pub fn broadcast(&self, step: &str, msg: &str) { (self.callback)(step, msg); }
 
     pub fn tick(&mut self, step: &str) {
         if self.enabled {
@@ -72,7 +70,5 @@ impl StepMeasure {
 }
 
 impl Drop for StepMeasure {
-    fn drop(&mut self) {
-        self.stop("");
-    }
+    fn drop(&mut self) { self.stop(""); }
 }

@@ -9,42 +9,20 @@ use crate::{
 };
 use std::{borrow::BorrowMut, collections::HashMap};
 
-const fn default_retry_backoff_initial_secs() -> u64 {
-    3
-}
-const fn default_retry_backoff_multiplier() -> f64 {
-    3.0
-}
-const fn default_retry_backoff_max_secs() -> u64 {
-    30
-}
-const fn default_retry_backoff_jitter_percent() -> u8 {
-    20
-}
-const fn default_retry_max_attempts() -> u8 {
-    5
-}
-fn is_default_retry_backoff_initial_secs(value: &u64) -> bool {
-    *value == default_retry_backoff_initial_secs()
-}
+const fn default_retry_backoff_initial_secs() -> u64 { 3 }
+const fn default_retry_backoff_multiplier() -> f64 { 3.0 }
+const fn default_retry_backoff_max_secs() -> u64 { 30 }
+const fn default_retry_backoff_jitter_percent() -> u8 { 20 }
+const fn default_retry_max_attempts() -> u8 { 5 }
+fn is_default_retry_backoff_initial_secs(value: &u64) -> bool { *value == default_retry_backoff_initial_secs() }
 fn is_default_retry_backoff_multiplier(value: &f64) -> bool {
     (*value - default_retry_backoff_multiplier()).abs() < F64_DEFAULT_EPSILON
 }
-fn is_default_retry_backoff_max_secs(value: &u64) -> bool {
-    *value == default_retry_backoff_max_secs()
-}
-fn is_default_retry_backoff_jitter_percent(value: &u8) -> bool {
-    *value == default_retry_backoff_jitter_percent()
-}
-fn is_default_retry_max_attempts(value: &u8) -> bool {
-    *value == default_retry_max_attempts()
-}
-fn is_zero_u8(value: &u8) -> bool {
-    *value == 0
-}
-fn is_zero_i8(value: &i8) -> bool {
-    *value == 0
-}
+fn is_default_retry_backoff_max_secs(value: &u64) -> bool { *value == default_retry_backoff_max_secs() }
+fn is_default_retry_backoff_jitter_percent(value: &u8) -> bool { *value == default_retry_backoff_jitter_percent() }
+fn is_default_retry_max_attempts(value: &u8) -> bool { *value == default_retry_max_attempts() }
+fn is_zero_u8(value: &u8) -> bool { *value == 0 }
+fn is_zero_i8(value: &i8) -> bool { *value == 0 }
 
 // Recording configuration constants.
 const DEFAULT_RECORDING_DIRECTORY_SUFFIX: &str = "recordings";
@@ -100,52 +78,28 @@ pub fn default_recording_directory(download_dir: &str) -> String {
     format!("{download_dir}/{DEFAULT_RECORDING_DIRECTORY_SUFFIX}")
 }
 
-pub fn default_recording_timezone() -> String {
-    DEFAULT_RECORDING_TIMEZONE.to_string()
-}
-pub fn default_recording_filename_template() -> String {
-    DEFAULT_RECORDING_FILENAME_TEMPLATE.to_string()
-}
-pub const fn default_recording_max_pre_roll_secs() -> u64 {
-    DEFAULT_RECORDING_MAX_PRE_ROLL_SECS
-}
-pub const fn default_recording_max_post_roll_secs() -> u64 {
-    DEFAULT_RECORDING_MAX_POST_ROLL_SECS
-}
-pub const fn default_recording_cleanup_interval_secs() -> u64 {
-    DEFAULT_RECORDING_CLEANUP_INTERVAL_SECS
-}
-pub const fn default_recording_disk_safety_bytes() -> u64 {
-    DEFAULT_RECORDING_DISK_SAFETY_BYTES
-}
-pub const fn default_recording_fallback_bytes_per_minute() -> u64 {
-    DEFAULT_RECORDING_FALLBACK_BYTES_PER_MINUTE
-}
+pub fn default_recording_timezone() -> String { DEFAULT_RECORDING_TIMEZONE.to_string() }
+pub fn default_recording_filename_template() -> String { DEFAULT_RECORDING_FILENAME_TEMPLATE.to_string() }
+pub const fn default_recording_max_pre_roll_secs() -> u64 { DEFAULT_RECORDING_MAX_PRE_ROLL_SECS }
+pub const fn default_recording_max_post_roll_secs() -> u64 { DEFAULT_RECORDING_MAX_POST_ROLL_SECS }
+pub const fn default_recording_cleanup_interval_secs() -> u64 { DEFAULT_RECORDING_CLEANUP_INTERVAL_SECS }
+pub const fn default_recording_disk_safety_bytes() -> u64 { DEFAULT_RECORDING_DISK_SAFETY_BYTES }
+pub const fn default_recording_fallback_bytes_per_minute() -> u64 { DEFAULT_RECORDING_FALLBACK_BYTES_PER_MINUTE }
 
-fn is_default_recording_max_pre_roll_secs(value: &u64) -> bool {
-    *value == default_recording_max_pre_roll_secs()
-}
-fn is_default_recording_max_post_roll_secs(value: &u64) -> bool {
-    *value == default_recording_max_post_roll_secs()
-}
+fn is_default_recording_max_pre_roll_secs(value: &u64) -> bool { *value == default_recording_max_pre_roll_secs() }
+fn is_default_recording_max_post_roll_secs(value: &u64) -> bool { *value == default_recording_max_post_roll_secs() }
 pub const fn default_recording_retention_sweep_interval_secs() -> u64 {
     DEFAULT_RECORDING_RETENTION_SWEEP_INTERVAL_SECS
 }
-pub const fn default_recording_notification_outbox_buffer() -> usize {
-    DEFAULT_RECORDING_NOTIFICATION_OUTBOX_BUFFER
-}
-pub const fn default_recording_notification_max_attempts() -> u32 {
-    DEFAULT_RECORDING_NOTIFICATION_MAX_ATTEMPTS
-}
+pub const fn default_recording_notification_outbox_buffer() -> usize { DEFAULT_RECORDING_NOTIFICATION_OUTBOX_BUFFER }
+pub const fn default_recording_notification_max_attempts() -> u32 { DEFAULT_RECORDING_NOTIFICATION_MAX_ATTEMPTS }
 pub const fn default_recording_notification_backoff_initial_secs() -> u64 {
     DEFAULT_RECORDING_NOTIFICATION_BACKOFF_INITIAL_SECS
 }
 pub const fn default_recording_notification_backoff_max_secs() -> u64 {
     DEFAULT_RECORDING_NOTIFICATION_BACKOFF_MAX_SECS
 }
-pub const fn default_recording_enabled() -> bool {
-    true
-}
+pub const fn default_recording_enabled() -> bool { true }
 
 fn is_default_recording_fallback_bytes_per_minute(value: &u64) -> bool {
     *value == default_recording_fallback_bytes_per_minute()
@@ -165,24 +119,16 @@ fn is_default_recording_notification_backoff_initial_secs(value: &u64) -> bool {
 fn is_default_recording_notification_backoff_max_secs(value: &u64) -> bool {
     *value == default_recording_notification_backoff_max_secs()
 }
-fn is_recording_enabled(value: &bool) -> bool {
-    *value
-}
+fn is_recording_enabled(value: &bool) -> bool { *value }
 fn is_default_recording_container_format(value: &RecordingContainerFormat) -> bool {
     *value == RecordingContainerFormat::default()
 }
 // `skip_serializing_if` predicates that distinguish "field absent" from
 // "field present with a zero value". An explicit `Some(0)` is a real
 // configuration choice and must round-trip; only `None` means "absent".
-fn is_zero_u64_opt(value: &Option<u64>) -> bool {
-    value.is_none()
-}
-fn is_zero_u32_opt(value: &Option<u32>) -> bool {
-    value.is_none()
-}
-fn is_zero_u8_opt(value: &Option<u8>) -> bool {
-    value.is_none()
-}
+fn is_zero_u64_opt(value: &Option<u64>) -> bool { value.is_none() }
+fn is_zero_u32_opt(value: &Option<u32>) -> bool { value.is_none() }
+fn is_zero_u8_opt(value: &Option<u8>) -> bool { value.is_none() }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -408,9 +354,7 @@ impl Default for RecordingNotificationConfigDto {
 }
 
 impl RecordingNotificationConfigDto {
-    pub fn is_empty(&self) -> bool {
-        *self == Self::default()
-    }
+    pub fn is_empty(&self) -> bool { *self == Self::default() }
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -968,9 +912,7 @@ mod tests {
 
     // --- Recording config tests ---
 
-    fn make_recording_config() -> RecordingConfigDto {
-        RecordingConfigDto::default()
-    }
+    fn make_recording_config() -> RecordingConfigDto { RecordingConfigDto::default() }
 
     #[test]
     fn recording_config_default_matches_the_serde_defaults() {

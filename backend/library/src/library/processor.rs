@@ -75,9 +75,7 @@ impl std::error::Error for LibraryProcessError {
 }
 
 impl From<io::Error> for LibraryProcessError {
-    fn from(value: io::Error) -> Self {
-        Self::Io(value)
-    }
+    fn from(value: io::Error) -> Self { Self::Io(value) }
 }
 
 // VOD processor that orchestrates scanning, classification, metadata resolution, and storage
@@ -692,9 +690,7 @@ impl LibraryProcessor {
     }
 
     // Gets all cached metadata entries
-    pub async fn get_all_entries(&self) -> Vec<MetadataCacheEntry> {
-        self.storage.load_all().await
-    }
+    pub async fn get_all_entries(&self) -> Vec<MetadataCacheEntry> { self.storage.load_all().await }
 
     async fn is_local_ffprobe_enabled(&self) -> bool {
         if let Some(probes) = &self.tool_probes {

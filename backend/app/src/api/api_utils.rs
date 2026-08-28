@@ -334,13 +334,9 @@ pub fn get_server_time() -> String {
 static PROCESS_START: LazyLock<std::time::Instant> = LazyLock::new(std::time::Instant::now);
 
 /// Anchors the uptime clock; call once at process startup.
-pub fn init_uptime_clock() {
-    let _ = *PROCESS_START;
-}
+pub fn init_uptime_clock() { let _ = *PROCESS_START; }
 
-pub fn get_uptime_secs() -> u64 {
-    PROCESS_START.elapsed().as_secs()
-}
+pub fn get_uptime_secs() -> u64 { PROCESS_START.elapsed().as_secs() }
 
 pub fn get_build_time() -> Option<String> {
     BUILD_TIMESTAMP
@@ -5228,9 +5224,7 @@ mod tests {
         }
     }
 
-    fn create_test_app_state() -> Arc<AppState> {
-        create_test_app_state_for_config(Arc::new(create_test_app_config()))
-    }
+    fn create_test_app_state() -> Arc<AppState> { create_test_app_state_for_config(Arc::new(create_test_app_config())) }
 
     #[tokio::test]
     async fn create_api_proxy_user_defaults_output_clusters_to_all() {
@@ -9132,9 +9126,7 @@ mod tests {
     }
 
     /// `Arc<ArcSwapOption<GeoIp>>` with no `GeoIP` database loaded.
-    fn empty_geoip() -> Arc<ArcSwapOption<GeoIp>> {
-        Arc::new(ArcSwapOption::<GeoIp>::default())
-    }
+    fn empty_geoip() -> Arc<ArcSwapOption<GeoIp>> { Arc::new(ArcSwapOption::<GeoIp>::default()) }
 
     /// `Arc<ArcSwapOption<GeoIp>>` with a mock `GeoIP` that always reports the
     /// given country for any lookup.

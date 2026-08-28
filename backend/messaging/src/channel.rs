@@ -43,29 +43,21 @@ pub enum Delivery {
 
 impl Delivery {
     /// Transient failure with no provider-supplied delay.
-    pub fn retry(reason: impl Into<String>) -> Self {
-        Self::Retry { reason: reason.into(), after: None }
-    }
+    pub fn retry(reason: impl Into<String>) -> Self { Self::Retry { reason: reason.into(), after: None } }
 
     /// Transient failure honouring a provider `Retry-After`.
     pub fn retry_after(reason: impl Into<String>, after: std::time::Duration) -> Self {
         Self::Retry { reason: reason.into(), after: Some(after) }
     }
 
-    pub fn permanent(reason: impl Into<String>) -> Self {
-        Self::Permanent { reason: reason.into() }
-    }
+    pub fn permanent(reason: impl Into<String>) -> Self { Self::Permanent { reason: reason.into() } }
 
     #[must_use]
-    pub fn is_delivered(&self) -> bool {
-        matches!(self, Self::Delivered)
-    }
+    pub fn is_delivered(&self) -> bool { matches!(self, Self::Delivered) }
 
     /// Should the outbox keep this channel pending?
     #[must_use]
-    pub fn should_retry(&self) -> bool {
-        matches!(self, Self::Retry { .. })
-    }
+    pub fn should_retry(&self) -> bool { matches!(self, Self::Retry { .. }) }
 }
 
 /// Classify an HTTP status into a delivery outcome.
@@ -123,9 +115,7 @@ pub struct ChannelCapabilities {
 }
 
 impl Default for ChannelCapabilities {
-    fn default() -> Self {
-        Self { supports_templates: true, max_body_bytes: None }
-    }
+    fn default() -> Self { Self { supports_templates: true, max_body_bytes: None } }
 }
 
 /// An event with its body already rendered for one channel.
@@ -149,9 +139,7 @@ pub trait NotificationChannel: Send + Sync {
     /// persists it.
     fn id(&self) -> &'static str;
 
-    fn capabilities(&self) -> ChannelCapabilities {
-        ChannelCapabilities::default()
-    }
+    fn capabilities(&self) -> ChannelCapabilities { ChannelCapabilities::default() }
 
     /// The operator's template for this event, if any.
     fn template_for(&self, event: EventId) -> Option<&str>;
@@ -163,9 +151,7 @@ pub trait NotificationChannel: Send + Sync {
     /// Does this channel want this event at this severity?
     ///
     /// Default accepts everything; per-channel routing overrides it.
-    fn wants(&self, _event: EventId, _severity: Severity) -> bool {
-        true
-    }
+    fn wants(&self, _event: EventId, _severity: Severity) -> bool { true }
 
     /// Deliver. Must not panic and must not block - a slow provider has to
     /// surface as [`Delivery::Retry`], not a stalled worker.

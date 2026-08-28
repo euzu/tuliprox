@@ -195,13 +195,9 @@ pub struct HlsContentDecodingFailure {
 }
 
 impl HlsContentDecodingFailure {
-    fn from_io_error(error: &ContentDecodingIoError) -> Self {
-        Self { coding: error.coding }
-    }
+    fn from_io_error(error: &ContentDecodingIoError) -> Self { Self { coding: error.coding } }
 
-    fn label(&self) -> String {
-        format!("ContentDecodingError(coding={})", self.coding.as_http_token())
-    }
+    fn label(&self) -> String { format!("ContentDecodingError(coding={})", self.coding.as_http_token()) }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,9 +229,7 @@ impl HlsCacheCommitFailure {
         )
     }
 
-    pub fn storage_full(&self) -> bool {
-        self.storage_full
-    }
+    pub fn storage_full(&self) -> bool { self.storage_full }
 }
 
 impl HlsOriginResourceFetchError {
@@ -309,9 +303,7 @@ impl HlsOriginResourceFetchError {
         }
     }
 
-    pub fn is_local_cache_capacity(&self) -> bool {
-        matches!(self, Self::LocalCacheCapacity { .. })
-    }
+    pub fn is_local_cache_capacity(&self) -> bool { matches!(self, Self::LocalCacheCapacity { .. }) }
 
     pub fn capacity_revision(&self) -> Option<&super::HlsCacheCapacityRevision> {
         match self {
@@ -404,24 +396,16 @@ pub struct HlsOriginResourceBodyDeadline {
 }
 
 impl HlsOriginResourceBodyDeadline {
-    fn new(timeout: Duration) -> Self {
-        Self { deadline: tokio::time::Instant::now() + timeout, timeout }
-    }
+    fn new(timeout: Duration) -> Self { Self { deadline: tokio::time::Instant::now() + timeout, timeout } }
 
     /// Returns the remaining body budget, saturating at zero once the deadline is exhausted.
-    pub fn remaining(self) -> Duration {
-        self.deadline.saturating_duration_since(tokio::time::Instant::now())
-    }
+    pub fn remaining(self) -> Duration { self.deadline.saturating_duration_since(tokio::time::Instant::now()) }
 
     /// Returns the absolute deadline used by decoded cache-body consumers.
-    pub fn deadline(self) -> tokio::time::Instant {
-        self.deadline
-    }
+    pub fn deadline(self) -> tokio::time::Instant { self.deadline }
 
     /// Returns the configured per-attempt body budget for timeout diagnostics.
-    pub fn timeout(self) -> Duration {
-        self.timeout
-    }
+    pub fn timeout(self) -> Duration { self.timeout }
 }
 
 /// Runs the shared HLS origin-resource retry policy with an optional per-attempt guard.
@@ -799,9 +783,7 @@ pub struct HlsResourceFetchAttempt {
 
 impl HlsResourceFetchAttempt {
     /// Returns the one-based attempt number used in human-readable diagnostics.
-    const fn display_number(self) -> usize {
-        self.attempt_index + 1
-    }
+    const fn display_number(self) -> usize { self.attempt_index + 1 }
 }
 
 #[cfg(test)]
@@ -987,9 +969,7 @@ mod tests {
         String::from_utf8(request).expect("request should be HTTP text")
     }
 
-    fn test_log_identity() -> HlsLogIdentity {
-        HlsLogIdentity::for_test("content-session", "proxy-session")
-    }
+    fn test_log_identity() -> HlsLogIdentity { HlsLogIdentity::for_test("content-session", "proxy-session") }
 
     fn fetch_target(origin_url: String) -> HlsOriginResourceFetchTarget {
         let mut headers = HeaderMap::new();

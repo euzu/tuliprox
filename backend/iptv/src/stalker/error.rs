@@ -4,23 +4,17 @@ use thiserror::Error;
 
 /// Render a portal URL safely. Kept as this module's name for its existing callers; the
 /// rule itself lives in [`crate::redaction`] alongside the rest.
-pub fn safe_stalker_url(value: &str) -> String {
-    redaction::safe_url(value)
-}
+pub fn safe_stalker_url(value: &str) -> String { redaction::safe_url(value) }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StalkerErrorUrl(String);
 
 impl From<&str> for StalkerErrorUrl {
-    fn from(value: &str) -> Self {
-        Self(safe_stalker_url(value))
-    }
+    fn from(value: &str) -> Self { Self(safe_stalker_url(value)) }
 }
 
 impl From<String> for StalkerErrorUrl {
-    fn from(value: String) -> Self {
-        Self::from(value.as_str())
-    }
+    fn from(value: String) -> Self { Self::from(value.as_str()) }
 }
 
 /// Failure modes surfaced by the Stalker portal client. The variants cover both transport
@@ -115,9 +109,7 @@ impl StalkerError {
             Self::BadStatus { status, action, .. } => {
                 action.is_optional_catalog_shortcut() && matches!(*status, 400 | 404 | 405 | 501)
             }
-            Self::PortalBodyError { action, .. } => {
-                action.is_optional_catalog_shortcut() && !self.is_token_rejected()
-            }
+            Self::PortalBodyError { action, .. } => action.is_optional_catalog_shortcut() && !self.is_token_rejected(),
             _ => false,
         }
     }
@@ -177,9 +169,7 @@ impl StalkerError {
     /// different call; it is reported here as not retryable so a caller does not loop on
     /// a rejected token. Use [`Self::is_token_rejected`] for that path.
     #[must_use]
-    pub fn is_retryable(&self) -> bool {
-        matches!(self.kind(), StalkerErrorKind::Transient)
-    }
+    pub fn is_retryable(&self) -> bool { matches!(self.kind(), StalkerErrorKind::Transient) }
 }
 
 pub type StalkerResult<T> = Result<T, StalkerError>;
@@ -193,15 +183,26 @@ mod tests {
         let cases: [(StalkerError, StalkerErrorKind); 8] = [
             (StalkerError::TokenRejected { status: 401, url: None }, StalkerErrorKind::Auth),
             (
-                StalkerError::PortalBodyError { code: 44, action: StalkerAction::GetOrderedList, body_snippet: String::new() },
+                StalkerError::PortalBodyError {
+                    code: 44,
+                    action: StalkerAction::GetOrderedList,
+                    body_snippet: String::new(),
+                },
                 StalkerErrorKind::Auth,
             ),
             (StalkerError::RecipesExhausted { portal: "p".into() }, StalkerErrorKind::Auth),
-            (StalkerError::ResponseTooLarge { action: StalkerAction::GetOrderedList, cap_bytes: 1 }, StalkerErrorKind::Capacity),
+            (
+                StalkerError::ResponseTooLarge { action: StalkerAction::GetOrderedList, cap_bytes: 1 },
+                StalkerErrorKind::Capacity,
+            ),
             (StalkerError::NoEndpoint { portal: "p".into() }, StalkerErrorKind::Config),
             (StalkerError::HtmlResponse { snippet: "<html>".into() }, StalkerErrorKind::Protocol),
             (
-                StalkerError::BadStatus { status: 502, action: StalkerAction::GetOrderedList, body_snippet: String::new() },
+                StalkerError::BadStatus {
+                    status: 502,
+                    action: StalkerAction::GetOrderedList,
+                    body_snippet: String::new(),
+                },
                 StalkerErrorKind::Transient,
             ),
             (StalkerError::Io(std::io::Error::other("reset")), StalkerErrorKind::Transient),
@@ -221,7 +222,8 @@ mod tests {
     /// auth - the two variants describe the same portal answer.
     #[test]
     fn a_rejected_token_classifies_as_auth_whichever_variant_carries_it() {
-        let as_status = StalkerError::BadStatus { status: 403, action: StalkerAction::GetOrderedList, body_snippet: String::new() };
+        let as_status =
+            StalkerError::BadStatus { status: 403, action: StalkerAction::GetOrderedList, body_snippet: String::new() };
         assert_eq!(as_status.kind(), StalkerErrorKind::Auth);
         assert!(!as_status.is_retryable(), "looping on a rejected token is never right");
     }

@@ -54,9 +54,7 @@ pub struct EpgChannel {
 }
 
 impl EpgChannel {
-    pub fn new(id: Arc<str>) -> Self {
-        Self { id, title: None, icon: None, programmes: Vec::new() }
-    }
+    pub fn new(id: Arc<str>) -> Self { Self { id, title: None, icon: None, programmes: Vec::new() } }
 
     pub fn get_programme_with_limit(&self, limit: u32) -> Vec<&EpgProgramme> {
         let now = Utc::now().timestamp();
@@ -183,9 +181,7 @@ pub struct EpgProgramme {
 
 impl EpgProgramme {
     // the channel_id is only available when read from xml file, reading from db do not return any epg_id
-    pub fn get_transient_channel_id(&self) -> &Arc<str> {
-        &self.channel
-    }
+    pub fn get_transient_channel_id(&self) -> &Arc<str> { &self.channel }
 }
 
 impl EpgProgramme {

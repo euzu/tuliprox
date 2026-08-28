@@ -335,9 +335,7 @@ impl AttemptTarget {
     }
 }
 
-fn is_ip_literal(host: &str) -> bool {
-    host.parse::<IpAddr>().is_ok()
-}
+fn is_ip_literal(host: &str) -> bool { host.parse::<IpAddr>().is_ok() }
 
 fn format_host_header_with_port(host: &str, port: Option<u16>) -> String {
     match port {
@@ -2027,9 +2025,7 @@ pub struct TextContentFetchOptions {
 }
 
 impl TextContentFetchOptions {
-    pub const fn new(request: RequestFetchOptions, body: TextContentBodyOptions) -> Self {
-        Self { request, body }
-    }
+    pub const fn new(request: RequestFetchOptions, body: TextContentBodyOptions) -> Self { Self { request, body } }
 
     fn with_request_options(request: RequestFetchOptions) -> Self {
         Self { body: TextContentBodyOptions::legacy_text_with_deadline(request.attempt_idle_timeout), request }
@@ -2925,9 +2921,7 @@ pub fn parse_range(range: &str) -> Option<(u64, Option<u64>)> {
     Some((start, end))
 }
 
-pub fn is_file_url(url: &str) -> bool {
-    Url::parse(url).is_ok_and(|u| u.scheme().eq_ignore_ascii_case("file"))
-}
+pub fn is_file_url(url: &str) -> bool { Url::parse(url).is_ok_and(|u| u.scheme().eq_ignore_ascii_case("file")) }
 
 pub fn is_uri(url: &str) -> bool {
     Url::parse(url).is_ok_and(|u| {

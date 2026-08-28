@@ -34,9 +34,7 @@ impl ReverseProxyDisabledHeaderConfigDto {
             && self.custom_header.iter().all(|h| h.trim().is_empty())
     }
 
-    pub fn clean(&mut self) {
-        self.custom_header.retain(|h| !h.trim().is_empty());
-    }
+    pub fn clean(&mut self) { self.custom_header.retain(|h| !h.trim().is_empty()); }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]

@@ -128,9 +128,7 @@ mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
 
-    fn addr(port: u16) -> SocketAddr {
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
-    }
+    fn addr(port: u16) -> SocketAddr { SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port) }
 
     fn candidate(port: u16, ip: &str, ts: u64) -> EvictionCandidate {
         EvictionCandidate { addr: addr(port), client_ip: ip.to_string(), ts }

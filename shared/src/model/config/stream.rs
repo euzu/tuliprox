@@ -35,13 +35,9 @@ pub enum AdmissionStrategy {
 }
 
 impl AdmissionStrategy {
-    pub fn is_grace(&self) -> bool {
-        matches!(self, Self::GraceInstantStream | Self::GraceHoldStream)
-    }
+    pub fn is_grace(&self) -> bool { matches!(self, Self::GraceInstantStream | Self::GraceHoldStream) }
 
-    pub fn is_grace_hold(&self) -> bool {
-        matches!(self, Self::GraceHoldStream)
-    }
+    pub fn is_grace_hold(&self) -> bool { matches!(self, Self::GraceHoldStream) }
 }
 
 impl Display for AdmissionStrategy {
@@ -93,9 +89,7 @@ pub struct StreamBufferConfigDto {
 }
 
 impl Default for StreamBufferConfigDto {
-    fn default() -> Self {
-        Self { enabled: false, size: 0, max_bytes_mb: default_stream_buffer_max_bytes_mb() }
-    }
+    fn default() -> Self { Self { enabled: false, size: 0, max_bytes_mb: default_stream_buffer_max_bytes_mb() } }
 }
 
 impl StreamBufferConfigDto {

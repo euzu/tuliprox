@@ -18,12 +18,8 @@ pub enum UserRole {
 }
 
 impl UserRole {
-    pub fn is_admin(&self) -> bool {
-        self.eq(&UserRole::Admin)
-    }
-    pub fn is_user(&self) -> bool {
-        self.eq(&UserRole::User)
-    }
+    pub fn is_admin(&self) -> bool { self.eq(&UserRole::Admin) }
+    pub fn is_user(&self) -> bool { self.eq(&UserRole::User) }
 }
 
 #[derive(Default)]

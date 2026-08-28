@@ -38,9 +38,7 @@ pub struct RbacService {
     rbac_path: String,
 }
 
-fn encode_path_segment(value: &str) -> String {
-    encode_uri_component(value).into()
-}
+fn encode_path_segment(value: &str) -> String { encode_uri_component(value).into() }
 
 impl RbacService {
     pub fn new() -> Self {
@@ -111,7 +109,5 @@ impl RbacService {
 }
 
 impl Default for RbacService {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }

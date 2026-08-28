@@ -155,9 +155,7 @@ pub struct DiscordMessagingConfigDto {
 }
 
 impl DiscordMessagingConfigDto {
-    pub fn is_empty(&self) -> bool {
-        self.url.trim().is_empty() && self.templates.is_empty()
-    }
+    pub fn is_empty(&self) -> bool { self.url.trim().is_empty() && self.templates.is_empty() }
 }
 
 #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -206,9 +204,7 @@ pub struct NtfyMessagingConfigDto {
 }
 
 impl NtfyMessagingConfigDto {
-    pub fn is_empty(&self) -> bool {
-        self.url.trim().is_empty() && self.topic.trim().is_empty()
-    }
+    pub fn is_empty(&self) -> bool { self.url.trim().is_empty() && self.topic.trim().is_empty() }
 }
 
 /// [Gotify](https://gotify.net) - same audience as ntfy, same shape.
@@ -226,9 +222,7 @@ pub struct GotifyMessagingConfigDto {
 }
 
 impl GotifyMessagingConfigDto {
-    pub fn is_empty(&self) -> bool {
-        self.url.trim().is_empty() && self.token.trim().is_empty()
-    }
+    pub fn is_empty(&self) -> bool { self.url.trim().is_empty() && self.token.trim().is_empty() }
 }
 
 /// Slack incoming webhook.
@@ -246,9 +240,7 @@ pub struct SlackMessagingConfigDto {
 }
 
 impl SlackMessagingConfigDto {
-    pub fn is_empty(&self) -> bool {
-        self.url.trim().is_empty()
-    }
+    pub fn is_empty(&self) -> bool { self.url.trim().is_empty() }
 }
 
 /// Run a local program, with the event JSON on stdin.
@@ -274,9 +266,7 @@ pub struct CommandMessagingConfigDto {
 }
 
 impl CommandMessagingConfigDto {
-    pub fn is_empty(&self) -> bool {
-        self.program.trim().is_empty()
-    }
+    pub fn is_empty(&self) -> bool { self.program.trim().is_empty() }
 }
 
 /// Configuration for threshold-driven disk-space alerts.

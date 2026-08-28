@@ -366,9 +366,7 @@ impl HlsPostProcessingDeadline {
         Self { started: Instant::now(), timeout: Duration::from_millis(timeout_ms.max(100)) }
     }
 
-    pub(super) fn remaining(&self) -> Option<Duration> {
-        self.timeout.checked_sub(self.started.elapsed())
-    }
+    pub(super) fn remaining(&self) -> Option<Duration> { self.timeout.checked_sub(self.started.elapsed()) }
 }
 
 #[derive(Debug, Default)]
@@ -557,9 +555,7 @@ impl HlsSegmentRepairRuntime {
         self.repair_enabled() || self.config.corrupt_segment_watchdog.mode.is_enabled()
     }
 
-    fn postprocess_timeout_ms(&self) -> u64 {
-        self.config.postprocess_timeout_ms.get().max(100)
-    }
+    fn postprocess_timeout_ms(&self) -> u64 { self.config.postprocess_timeout_ms.get().max(100) }
 }
 
 fn log_segment_repair_config(config: &HlsSegmentRepairConfig) {
@@ -2211,9 +2207,7 @@ pub(super) async fn sha256_file(path: &Path) -> io::Result<String> {
     Ok(hex)
 }
 
-pub(super) fn ffmpeg_identity_version() -> String {
-    "system".to_string()
-}
+pub(super) fn ffmpeg_identity_version() -> String { "system".to_string() }
 
 fn repair_output_path(raw_path: &Path) -> PathBuf {
     let suffix = fastrand::u64(..);

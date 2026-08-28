@@ -140,15 +140,11 @@ impl HeaderField {
 }
 
 impl Display for HeaderField {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(self.as_str()) }
 }
 
 impl AsRef<str> for HeaderField {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
+    fn as_ref(&self) -> &str { self.as_str() }
 }
 
 impl ItemField {

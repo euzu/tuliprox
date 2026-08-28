@@ -464,6 +464,7 @@ negative pattern does, so `["*", "!system.info"]` reads the way it looks.
 | `config.changed` | info | A configuration file was changed and reloaded. |
 | `config.reload_failed` | error | A configuration file changed but could not be reloaded. |
 | `library.scan.completed` | info | A local library scan finished. |
+| `library.scan.failed` | error | A local library scan could not complete. |
 | `metadata.update.started` | info | A metadata update started for an input. |
 | `metadata.update.completed` | info | A metadata update finished for an input. |
 | `user.connection.changed` | info | A user connected or disconnected. High frequency - subscribe deliberately. |

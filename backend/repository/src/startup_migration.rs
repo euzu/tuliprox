@@ -51,9 +51,7 @@ struct BPlusTreeStartupMigrator {
 }
 
 impl BPlusTreeStartupMigrator {
-    pub fn new(roots: Vec<PathBuf>) -> Self {
-        Self { roots, migration_marker_path: None }
-    }
+    pub fn new(roots: Vec<PathBuf>) -> Self { Self { roots, migration_marker_path: None } }
 
     pub fn new_with_marker(roots: Vec<PathBuf>, migration_marker_path: PathBuf) -> Self {
         Self { roots, migration_marker_path: Some(migration_marker_path) }
@@ -463,9 +461,7 @@ pub fn migrate_bplustree_databases(roots: &[PathBuf]) -> io::Result<BPlusTreeMig
     BPlusTreeStartupMigrator::new(roots.to_vec()).run()
 }
 
-pub fn bplustree_migration_marker_path(marker_dir: &Path) -> PathBuf {
-    marker_dir.join(marker_file_name())
-}
+pub fn bplustree_migration_marker_path(marker_dir: &Path) -> PathBuf { marker_dir.join(marker_file_name()) }
 
 pub fn migrate_bplustree_databases_with_marker(
     roots: &[PathBuf],
@@ -475,9 +471,7 @@ pub fn migrate_bplustree_databases_with_marker(
     BPlusTreeStartupMigrator::new_with_marker(roots.to_vec(), marker_path).run()
 }
 
-fn marker_file_name() -> String {
-    format!("{MARKER_FILE_GUARD_PREFIX}{STORAGE_VERSION}")
-}
+fn marker_file_name() -> String { format!("{MARKER_FILE_GUARD_PREFIX}{STORAGE_VERSION}") }
 
 //
 // The user database has gone through seven serialization schemas (MessagePack,
@@ -644,13 +638,9 @@ impl StoredApiUserV4 {
         }
     }
 
-    fn from_v2(v2: &StoredApiUserV2) -> Self {
-        Self::from_v3(&StoredApiUserV3::from_v2(v2))
-    }
+    fn from_v2(v2: &StoredApiUserV2) -> Self { Self::from_v3(&StoredApiUserV3::from_v2(v2)) }
 
-    fn from_v1(v1: &StoredApiUserV1) -> Self {
-        Self::from_v3(&StoredApiUserV3::from_v1(v1))
-    }
+    fn from_v1(v1: &StoredApiUserV1) -> Self { Self::from_v3(&StoredApiUserV3::from_v1(v1)) }
 }
 
 // V5 mirror — same layout as the previous user_repository::StoredProxyUserCredentials.
@@ -702,17 +692,11 @@ impl StoredApiUserV5 {
         }
     }
 
-    fn from_v3(v3: &StoredApiUserV3) -> Self {
-        Self::from_v4(&StoredApiUserV4::from_v3(v3))
-    }
+    fn from_v3(v3: &StoredApiUserV3) -> Self { Self::from_v4(&StoredApiUserV4::from_v3(v3)) }
 
-    fn from_v2(v2: &StoredApiUserV2) -> Self {
-        Self::from_v4(&StoredApiUserV4::from_v2(v2))
-    }
+    fn from_v2(v2: &StoredApiUserV2) -> Self { Self::from_v4(&StoredApiUserV4::from_v2(v2)) }
 
-    fn from_v1(v1: &StoredApiUserV1) -> Self {
-        Self::from_v4(&StoredApiUserV4::from_v1(v1))
-    }
+    fn from_v1(v1: &StoredApiUserV1) -> Self { Self::from_v4(&StoredApiUserV4::from_v1(v1)) }
 }
 
 // V6 mirror — same layout as the previous user_repository::StoredProxyUserCredentials.
@@ -766,21 +750,13 @@ impl StoredApiUserV6 {
         }
     }
 
-    fn from_v4(v4: &StoredApiUserV4) -> Self {
-        Self::from_v5(&StoredApiUserV5::from_v4(v4))
-    }
+    fn from_v4(v4: &StoredApiUserV4) -> Self { Self::from_v5(&StoredApiUserV5::from_v4(v4)) }
 
-    fn from_v3(v3: &StoredApiUserV3) -> Self {
-        Self::from_v5(&StoredApiUserV5::from_v3(v3))
-    }
+    fn from_v3(v3: &StoredApiUserV3) -> Self { Self::from_v5(&StoredApiUserV5::from_v3(v3)) }
 
-    fn from_v2(v2: &StoredApiUserV2) -> Self {
-        Self::from_v5(&StoredApiUserV5::from_v2(v2))
-    }
+    fn from_v2(v2: &StoredApiUserV2) -> Self { Self::from_v5(&StoredApiUserV5::from_v2(v2)) }
 
-    fn from_v1(v1: &StoredApiUserV1) -> Self {
-        Self::from_v5(&StoredApiUserV5::from_v1(v1))
-    }
+    fn from_v1(v1: &StoredApiUserV1) -> Self { Self::from_v5(&StoredApiUserV5::from_v1(v1)) }
 }
 
 // V7 mirror — same layout as user_repository::StoredProxyUserCredentials.
@@ -838,25 +814,15 @@ impl StoredApiUserV7 {
         }
     }
 
-    fn from_v5(v5: &StoredApiUserV5) -> Self {
-        Self::from_v6(&StoredApiUserV6::from_v5(v5))
-    }
+    fn from_v5(v5: &StoredApiUserV5) -> Self { Self::from_v6(&StoredApiUserV6::from_v5(v5)) }
 
-    fn from_v4(v4: &StoredApiUserV4) -> Self {
-        Self::from_v6(&StoredApiUserV6::from_v4(v4))
-    }
+    fn from_v4(v4: &StoredApiUserV4) -> Self { Self::from_v6(&StoredApiUserV6::from_v4(v4)) }
 
-    fn from_v3(v3: &StoredApiUserV3) -> Self {
-        Self::from_v6(&StoredApiUserV6::from_v3(v3))
-    }
+    fn from_v3(v3: &StoredApiUserV3) -> Self { Self::from_v6(&StoredApiUserV6::from_v3(v3)) }
 
-    fn from_v2(v2: &StoredApiUserV2) -> Self {
-        Self::from_v6(&StoredApiUserV6::from_v2(v2))
-    }
+    fn from_v2(v2: &StoredApiUserV2) -> Self { Self::from_v6(&StoredApiUserV6::from_v2(v2)) }
 
-    fn from_v1(v1: &StoredApiUserV1) -> Self {
-        Self::from_v6(&StoredApiUserV6::from_v1(v1))
-    }
+    fn from_v1(v1: &StoredApiUserV1) -> Self { Self::from_v6(&StoredApiUserV6::from_v1(v1)) }
 }
 
 fn create_user_db_merge_guard(merge_guard_path: &Path) -> io::Result<()> {
@@ -866,9 +832,7 @@ fn create_user_db_merge_guard(merge_guard_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub fn user_db_merge_guard_path(config_dir: &Path) -> PathBuf {
-    config_dir.join(MARKER_FILE_API_USER_GUARD)
-}
+pub fn user_db_merge_guard_path(config_dir: &Path) -> PathBuf { config_dir.join(MARKER_FILE_API_USER_GUARD) }
 
 fn migrate_legacy_user_schema<SourceV, Map>(db_path: &Path, merge_guard_path: &Path, map: Map) -> io::Result<bool>
 where

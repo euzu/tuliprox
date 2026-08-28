@@ -1,3 +1,4 @@
+use super::providers::{LibraryProvider, PlexProvider, StalkerProvider, XmltvEpgProvider};
 use crate::{
     fetched_playlist::FetchedPlaylist,
     input_cache,
@@ -45,7 +46,6 @@ use tuliprox_core::{
     },
     utils::{debug_if_enabled, log_memory_snapshot, trace_if_enabled, StepMeasure, StepMeasureCallback},
 };
-use super::providers::{LibraryProvider, PlexProvider, StalkerProvider, XmltvEpgProvider};
 use tuliprox_iptv::{
     epg::{CountingEpgSink, EpgFetchRequest, EpgProvider},
     provider::{
@@ -444,9 +444,7 @@ fn apply_staged_overlay_groups(
     groups
 }
 
-fn should_apply_staged_overlay(download_result: &PlaylistDownloadResult) -> bool {
-    !download_result.was_cached
-}
+fn should_apply_staged_overlay(download_result: &PlaylistDownloadResult) -> bool { !download_result.was_cached }
 
 #[allow(clippy::too_many_lines)]
 async fn playlist_download_from_input<E: EventSink>(
@@ -523,24 +521,23 @@ async fn playlist_download_from_input<E: EventSink>(
             StalkerProvider::new(stalker_refresh_mode, !config.disk_based_processing).fetch(&request).await
         }
         InputType::Library => LibraryProvider.fetch(&request).await,
-        InputType::Plex => {
-            PlexProvider.fetch(&request).await
+        InputType::Plex => PlexProvider.fetch(&request).await,
+        InputType::Emby | InputType::Jellyfin => {
+            UnsupportedProvider::new(
+                "media-server",
+                format!("media-server input '{}' is configured but catalog import is not implemented yet", input.name),
+            )
+            .fetch(&request)
+            .await
         }
-        InputType::Emby | InputType::Jellyfin => UnsupportedProvider::new(
-            "media-server",
-            format!(
-                "media-server input '{}' is configured but catalog import is not implemented yet",
-                input.name
-            ),
-        )
-        .fetch(&request)
-        .await,
-        InputType::Staged => UnsupportedProvider::new(
-            "staged",
-            format!("staged input '{}' was not resolved against a parent input", input.name),
-        )
-        .fetch(&request)
-        .await,
+        InputType::Staged => {
+            UnsupportedProvider::new(
+                "staged",
+                format!("staged input '{}' was not resolved against a parent input", input.name),
+            )
+            .fetch(&request)
+            .await
+        }
     };
     let PlaylistFetch { groups: playlist, errors, persisted, partial } = fetch;
 
@@ -1935,9 +1932,7 @@ where
     F: Fn() -> Fut + Send + Sync + 'static,
     Fut: Future<Output = ()> + Send,
 {
-    fn run(&self) -> impl Future<Output = ()> + Send {
-        self()
-    }
+    fn run(&self) -> impl Future<Output = ()> + Send { self() }
 }
 
 /// The bootstrap type parameter of a run that has no bootstrap.

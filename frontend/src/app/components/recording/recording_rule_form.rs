@@ -168,9 +168,7 @@ pub fn build_create_request(form: &RuleFormDto, visibility: RuleVisibility) -> O
     })
 }
 
-fn show_source_controls(existing: bool) -> bool {
-    !existing
-}
+fn show_source_controls(existing: bool) -> bool { !existing }
 
 fn channel_id_patch(existing: Option<&str>, current: Option<&str>) -> (Option<String>, bool) {
     let current = current.filter(|value| !value.trim().is_empty());

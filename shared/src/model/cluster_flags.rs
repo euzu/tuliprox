@@ -17,9 +17,7 @@ bitflags! {
 }
 
 impl Default for ClusterFlags {
-    fn default() -> Self {
-        Self::all()
-    }
+    fn default() -> Self { Self::all() }
 }
 
 impl ClusterFlags {
@@ -31,9 +29,7 @@ impl ClusterFlags {
         }
     }
 
-    pub fn has_full_flags(&self) -> bool {
-        self.is_all()
-    }
+    pub fn has_full_flags(&self) -> bool { self.is_all() }
 
     fn from_items<I, S>(items: I) -> Result<Self, String>
     where
@@ -56,9 +52,7 @@ impl ClusterFlags {
 }
 
 impl From<Option<ClusterFlags>> for ClusterFlags {
-    fn from(value: Option<ClusterFlags>) -> Self {
-        value.unwrap_or_else(ClusterFlags::all)
-    }
+    fn from(value: Option<ClusterFlags>) -> Self { value.unwrap_or_else(ClusterFlags::all) }
 }
 
 impl fmt::Display for ClusterFlags {
@@ -94,9 +88,7 @@ impl TryFrom<&str> for ClusterFlags {
 impl TryFrom<Vec<String>> for ClusterFlags {
     type Error = String;
 
-    fn try_from(value: Vec<String>) -> Result<Self, Self::Error> {
-        ClusterFlags::from_items(value)
-    }
+    fn try_from(value: Vec<String>) -> Result<Self, Self::Error> { ClusterFlags::from_items(value) }
 }
 
 impl Serialize for ClusterFlags {

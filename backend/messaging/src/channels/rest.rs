@@ -35,27 +35,17 @@ pub struct RestChannel {
 }
 
 impl RestChannel {
-    pub fn new(config: RestMessagingConfig, client: reqwest::Client) -> Self {
-        Self { config, client }
-    }
+    pub fn new(config: RestMessagingConfig, client: reqwest::Client) -> Self { Self { config, client } }
 }
 
 impl NotificationChannel for RestChannel {
-    fn id(&self) -> &'static str {
-        "rest"
-    }
+    fn id(&self) -> &'static str { "rest" }
 
-    fn template_for(&self, event: EventId) -> Option<&str> {
-        self.config.templates.get(&event).map(String::as_str)
-    }
+    fn template_for(&self, event: EventId) -> Option<&str> { self.config.templates.get(&event).map(String::as_str) }
 
-    fn routing(&self) -> &ChannelRouting {
-        &self.config.routing
-    }
+    fn routing(&self) -> &ChannelRouting { &self.config.routing }
 
-    fn wants(&self, event: EventId, severity: Severity) -> bool {
-        self.config.routing.accepts(event, severity)
-    }
+    fn wants(&self, event: EventId, severity: Severity) -> bool { self.config.routing.accepts(event, severity) }
 
     async fn send(&self, msg: &RenderedMessage<'_>) -> Delivery {
         {
@@ -94,9 +84,7 @@ impl NotificationChannel for RestChannel {
         }
     }
 
-    fn capabilities(&self) -> ChannelCapabilities {
-        ChannelCapabilities::default()
-    }
+    fn capabilities(&self) -> ChannelCapabilities { ChannelCapabilities::default() }
 }
 
 #[cfg(test)]

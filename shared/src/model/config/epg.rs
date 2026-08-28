@@ -118,9 +118,7 @@ impl EpgSourceDto {
         validate_ics_url_scheme(&self.url)
     }
 
-    pub fn is_valid(&self) -> bool {
-        !self.url.is_empty()
-    }
+    pub fn is_valid(&self) -> bool { !self.url.is_empty() }
 
     pub fn source_identity(&self) -> String {
         match self.source_type {
@@ -193,9 +191,7 @@ impl Default for IcsEventMappingDto {
 }
 
 impl IcsEventMappingDto {
-    pub fn is_default(value: &Self) -> bool {
-        value == &Self::default()
-    }
+    pub fn is_default(value: &Self) -> bool { value == &Self::default() }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -235,9 +231,7 @@ impl Default for IcsDummyConfigDto {
 }
 
 impl IcsDummyConfigDto {
-    pub fn is_default(value: &Self) -> bool {
-        value == &Self::default()
-    }
+    pub fn is_default(value: &Self) -> bool { value == &Self::default() }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Default)]
@@ -395,9 +389,7 @@ fn is_absolute_local_path(value: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn xmltv_source(url: &str) -> EpgSourceDto {
-        EpgSourceDto { url: url.to_owned(), ..EpgSourceDto::default() }
-    }
+    fn xmltv_source(url: &str) -> EpgSourceDto { EpgSourceDto { url: url.to_owned(), ..EpgSourceDto::default() } }
 
     fn ics_source(url: &str, channel_id: Option<&str>) -> EpgSourceDto {
         EpgSourceDto {

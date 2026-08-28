@@ -69,9 +69,7 @@ pub fn get_epg_processing_options(
     EpgProcessingOptions { rewrite_urls, time_shift: timeshift, encrypt_secret }
 }
 
-pub fn apply_offset(ts_utc: i64, offset_minutes: i32) -> i64 {
-    ts_utc + i64::from(offset_minutes) * 60
-}
+pub fn apply_offset(ts_utc: i64, offset_minutes: i32) -> i64 { ts_utc + i64::from(offset_minutes) * 60 }
 
 pub fn format_offset(offset_minutes: i32) -> String {
     let sign = if offset_minutes < 0 { '-' } else { '+' };

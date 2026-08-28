@@ -38,9 +38,7 @@ const MAX_JITTER_PERCENT: u8 = 95;
 const MIN_QUEUE_SIZE: usize = 1;
 const DEFAULT_FFPROBE_TIMEOUT_SECS: u64 = 60;
 
-fn default_ffprobe_timeout_secs() -> Option<u64> {
-    Some(DEFAULT_FFPROBE_TIMEOUT_SECS)
-}
+fn default_ffprobe_timeout_secs() -> Option<u64> { Some(DEFAULT_FFPROBE_TIMEOUT_SECS) }
 fn is_default_ffprobe_timeout(timeout: &Option<u64>) -> bool {
     timeout.is_none_or(|value| value == DEFAULT_FFPROBE_TIMEOUT_SECS)
 }

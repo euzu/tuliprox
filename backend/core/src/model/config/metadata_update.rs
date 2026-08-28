@@ -115,9 +115,7 @@ impl Default for TmdbConfig {
 }
 
 impl Default for MetadataUpdateConfig {
-    fn default() -> Self {
-        Self::from(&MetadataUpdateConfigDto::default())
-    }
+    fn default() -> Self { Self::from(&MetadataUpdateConfigDto::default()) }
 }
 
 macros::from_impl!(MetadataUpdateConfig);

@@ -191,9 +191,7 @@ struct ScopedTaskKey {
 }
 
 impl ScopedTaskKey {
-    fn new(input_name: Arc<str>, task_key: TaskKey) -> Self {
-        Self { input_name, task_key }
-    }
+    fn new(input_name: Arc<str>, task_key: TaskKey) -> Self { Self { input_name, task_key } }
 }
 
 #[derive(Debug, Clone)]
@@ -233,13 +231,9 @@ struct TaskRetryState {
 }
 
 impl TaskRetryState {
-    fn is_empty(&self) -> bool {
-        self.resolve.is_none() && self.probe.is_none() && self.tmdb.is_none()
-    }
+    fn is_empty(&self) -> bool { self.resolve.is_none() && self.probe.is_none() && self.tmdb.is_none() }
 
-    fn touch(&mut self, now_ts: i64) {
-        self.updated_at_ts = now_ts.max(1);
-    }
+    fn touch(&mut self, now_ts: i64) { self.updated_at_ts = now_ts.max(1); }
 
     fn max_domain_timestamp(&self) -> i64 {
         let domain_max = |state: &RetryState| state.next_allowed_at_ts.max(state.cooldown_until_ts.unwrap_or(0));
@@ -433,9 +427,7 @@ struct PendingTask {
 }
 
 impl PendingTask {
-    fn new(task: UpdateTask) -> Self {
-        Self { task: ParkingMutex::new(task), generation: AtomicU64::new(0) }
-    }
+    fn new(task: UpdateTask) -> Self { Self { task: ParkingMutex::new(task), generation: AtomicU64::new(0) } }
 }
 
 /// Manager for background metadata resolution tasks.
@@ -515,9 +507,7 @@ impl MetadataUpdateManager {
     }
 
     /// Returns true once shutdown has been requested.
-    pub fn is_shutdown(&self) -> bool {
-        self.is_shutdown_flag.load(Ordering::Acquire)
-    }
+    pub fn is_shutdown(&self) -> bool { self.is_shutdown_flag.load(Ordering::Acquire) }
 
     /// Rotates the cancellation token for metadata workers.
     /// Existing workers are cancelled and removed so new tasks start with fresh runtime state.
@@ -1027,9 +1017,7 @@ impl MetadataUpdateManager {
     }
 
     /// Get the number of active workers (for monitoring/debugging)
-    pub fn active_worker_count(&self) -> usize {
-        self.workers.len()
-    }
+    pub fn active_worker_count(&self) -> usize { self.workers.len() }
 
     /// Returns `true` when an equivalent task is already pending for this input and
     /// submitting `task` would not change the queued payload after merge semantics.
@@ -2366,14 +2354,10 @@ impl InputWorker {
     }
 
     #[inline]
-    fn is_vod_task_key(key: &TaskKey) -> bool {
-        matches!(key, TaskKey::Vod(_) | TaskKey::VodStr(_))
-    }
+    fn is_vod_task_key(key: &TaskKey) -> bool { matches!(key, TaskKey::Vod(_) | TaskKey::VodStr(_)) }
 
     #[inline]
-    fn is_series_task_key(key: &TaskKey) -> bool {
-        matches!(key, TaskKey::Series(_) | TaskKey::SeriesStr(_))
-    }
+    fn is_series_task_key(key: &TaskKey) -> bool { matches!(key, TaskKey::Series(_) | TaskKey::SeriesStr(_)) }
 
     #[inline]
     fn is_probe_task(task: &UpdateTask) -> bool {
@@ -2549,9 +2533,7 @@ impl InputWorker {
     }
 
     #[inline]
-    fn is_word_byte(byte: u8) -> bool {
-        byte.is_ascii_alphanumeric() || byte == b'_'
-    }
+    fn is_word_byte(byte: u8) -> bool { byte.is_ascii_alphanumeric() || byte == b'_' }
 
     fn contains_standalone_fragment(haystack: &str, fragment: &str) -> bool {
         if fragment.is_empty() || haystack.len() < fragment.len() {

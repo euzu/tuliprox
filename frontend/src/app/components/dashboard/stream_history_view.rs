@@ -76,16 +76,10 @@ fn today_start_ts() -> i64 {
     today.and_then(|date| date.and_hms_opt(0, 0, 0)).map_or(0, |dt| dt.and_utc().timestamp())
 }
 
-fn ts_to_filter_str(ts: i64, end_of_day: bool) -> String {
-    format_local_day_boundary_utc(ts, end_of_day)
-}
+fn ts_to_filter_str(ts: i64, end_of_day: bool) -> String { format_local_day_boundary_utc(ts, end_of_day) }
 
-fn optional_record_text_str(value: Option<&str>) -> &str {
-    value.unwrap_or("-")
-}
-fn optional_record_text(value: Option<String>) -> String {
-    value.unwrap_or_else(|| String::from("-"))
-}
+fn optional_record_text_str(value: Option<&str>) -> &str { value.unwrap_or("-") }
+fn optional_record_text(value: Option<String>) -> String { value.unwrap_or_else(|| String::from("-")) }
 
 fn search_request_parts(request: &SearchRequest) -> (Option<String>, Option<String>, Option<Vec<String>>) {
     match request {
@@ -103,9 +97,7 @@ fn search_request_parts(request: &SearchRequest) -> (Option<String>, Option<Stri
     }
 }
 
-fn is_latest_request(latest_request_id: u64, request_id: u64) -> bool {
-    latest_request_id == request_id
-}
+fn is_latest_request(latest_request_id: u64, request_id: u64) -> bool { latest_request_id == request_id }
 
 fn qos_snapshot_matches(snapshot: &QosSnapshotRecordDto, filter: &SearchRequest) -> bool {
     match filter {

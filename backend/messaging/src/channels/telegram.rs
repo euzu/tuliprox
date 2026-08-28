@@ -26,21 +26,13 @@ impl TelegramChannel {
 }
 
 impl NotificationChannel for TelegramChannel {
-    fn id(&self) -> &'static str {
-        "telegram"
-    }
+    fn id(&self) -> &'static str { "telegram" }
 
-    fn template_for(&self, event: EventId) -> Option<&str> {
-        self.config.templates.get(&event).map(String::as_str)
-    }
+    fn template_for(&self, event: EventId) -> Option<&str> { self.config.templates.get(&event).map(String::as_str) }
 
-    fn routing(&self) -> &ChannelRouting {
-        &self.config.routing
-    }
+    fn routing(&self) -> &ChannelRouting { &self.config.routing }
 
-    fn wants(&self, event: EventId, severity: Severity) -> bool {
-        self.config.routing.accepts(event, severity)
-    }
+    fn wants(&self, event: EventId, severity: Severity) -> bool { self.config.routing.accepts(event, severity) }
 
     async fn send(&self, msg: &RenderedMessage<'_>) -> Delivery {
         {
@@ -95,7 +87,5 @@ impl NotificationChannel for TelegramChannel {
         }
     }
 
-    fn capabilities(&self) -> ChannelCapabilities {
-        ChannelCapabilities::default()
-    }
+    fn capabilities(&self) -> ChannelCapabilities { ChannelCapabilities::default() }
 }

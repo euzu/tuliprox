@@ -36,9 +36,7 @@ struct UserFormFieldErrors {
 }
 
 impl UserFormFieldErrors {
-    fn has_errors(&self) -> bool {
-        self.username.is_some() || self.password.is_some() || self.target.is_some()
-    }
+    fn has_errors(&self) -> bool { self.username.is_some() || self.password.is_some() || self.target.is_some() }
 }
 
 fn normalize_country_entry(input: &str) -> Result<String, &'static str> {

@@ -59,9 +59,7 @@ impl PanelApiAliasPoolSizeValue {
         }
     }
 
-    pub fn is_auto(&self) -> bool {
-        matches!(self, Self::Auto(_))
-    }
+    pub fn is_auto(&self) -> bool { matches!(self, Self::Auto(_)) }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -175,9 +173,7 @@ impl Default for PanelApiProvisioningDto {
 }
 
 impl PanelApiProvisioningDto {
-    pub fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
+    pub fn is_default(&self) -> bool { *self == Self::default() }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]

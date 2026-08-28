@@ -73,75 +73,29 @@ pub struct HlsCacheMetricsSnapshot {
 }
 
 impl HlsCacheMetrics {
-    pub fn record_session_created(&self) {
-        increment(&self.sessions_created, 1);
-    }
-    pub fn record_session_reused(&self) {
-        increment(&self.sessions_reused, 1);
-    }
-    pub fn record_lease_granted(&self) {
-        increment(&self.lease_granted, 1);
-    }
-    pub fn record_lease_denied(&self) {
-        increment(&self.lease_denied, 1);
-    }
-    pub fn record_refresh_started(&self) {
-        increment(&self.refresh_started, 1);
-    }
-    pub fn record_refresh_skipped(&self) {
-        increment(&self.refresh_skipped, 1);
-    }
-    pub fn record_refresh_completed(&self) {
-        increment(&self.refresh_completed, 1);
-    }
-    pub fn record_refresh_retried(&self) {
-        increment(&self.refresh_retried, 1);
-    }
-    pub fn record_refresh_failed(&self) {
-        increment(&self.refresh_failed, 1);
-    }
-    pub fn record_transient_switch(&self) {
-        increment(&self.transient_switches, 1);
-    }
-    pub fn record_manifest_rendered(&self) {
-        increment(&self.manifest_rendered, 1);
-    }
-    pub fn record_manifest_render_skipped(&self) {
-        increment(&self.manifest_render_skipped, 1);
-    }
-    pub fn record_cache_hit(&self) {
-        increment(&self.cache_hits, 1);
-    }
-    pub fn record_cache_range_hit(&self) {
-        increment(&self.cache_range_hits, 1);
-    }
-    pub fn record_demand_fetch_started(&self) {
-        increment(&self.demand_fetch_started, 1);
-    }
-    pub fn record_prefetch_queued(&self, count: usize) {
-        increment(&self.prefetch_queued, count as u64);
-    }
-    pub fn record_prefetch_skipped(&self, count: usize) {
-        increment(&self.prefetch_skipped, count as u64);
-    }
-    pub fn record_segment_cached(&self) {
-        increment(&self.segments_cached, 1);
-    }
-    pub fn record_gc_run(&self) {
-        increment(&self.gc_runs, 1);
-    }
-    pub fn record_segments_removed(&self, count: usize) {
-        increment(&self.segments_removed, count as u64);
-    }
-    pub fn record_maps_removed(&self, count: usize) {
-        increment(&self.maps_removed, count as u64);
-    }
-    pub fn record_secret_marker_mismatch(&self) {
-        increment(&self.secret_marker_mismatch, 1);
-    }
-    pub fn record_secret_invalidation_deferred(&self) {
-        increment(&self.secret_invalidation_deferred, 1);
-    }
+    pub fn record_session_created(&self) { increment(&self.sessions_created, 1); }
+    pub fn record_session_reused(&self) { increment(&self.sessions_reused, 1); }
+    pub fn record_lease_granted(&self) { increment(&self.lease_granted, 1); }
+    pub fn record_lease_denied(&self) { increment(&self.lease_denied, 1); }
+    pub fn record_refresh_started(&self) { increment(&self.refresh_started, 1); }
+    pub fn record_refresh_skipped(&self) { increment(&self.refresh_skipped, 1); }
+    pub fn record_refresh_completed(&self) { increment(&self.refresh_completed, 1); }
+    pub fn record_refresh_retried(&self) { increment(&self.refresh_retried, 1); }
+    pub fn record_refresh_failed(&self) { increment(&self.refresh_failed, 1); }
+    pub fn record_transient_switch(&self) { increment(&self.transient_switches, 1); }
+    pub fn record_manifest_rendered(&self) { increment(&self.manifest_rendered, 1); }
+    pub fn record_manifest_render_skipped(&self) { increment(&self.manifest_render_skipped, 1); }
+    pub fn record_cache_hit(&self) { increment(&self.cache_hits, 1); }
+    pub fn record_cache_range_hit(&self) { increment(&self.cache_range_hits, 1); }
+    pub fn record_demand_fetch_started(&self) { increment(&self.demand_fetch_started, 1); }
+    pub fn record_prefetch_queued(&self, count: usize) { increment(&self.prefetch_queued, count as u64); }
+    pub fn record_prefetch_skipped(&self, count: usize) { increment(&self.prefetch_skipped, count as u64); }
+    pub fn record_segment_cached(&self) { increment(&self.segments_cached, 1); }
+    pub fn record_gc_run(&self) { increment(&self.gc_runs, 1); }
+    pub fn record_segments_removed(&self, count: usize) { increment(&self.segments_removed, count as u64); }
+    pub fn record_maps_removed(&self, count: usize) { increment(&self.maps_removed, count as u64); }
+    pub fn record_secret_marker_mismatch(&self) { increment(&self.secret_marker_mismatch, 1); }
+    pub fn record_secret_invalidation_deferred(&self) { increment(&self.secret_invalidation_deferred, 1); }
 
     pub fn snapshot(&self) -> HlsCacheMetricsSnapshot {
         HlsCacheMetricsSnapshot {
@@ -172,21 +126,13 @@ impl HlsCacheMetrics {
     }
 }
 
-pub fn safe_session_key(key: &HlsSessionKey) -> String {
-    short_hash(&key.stable_value())
-}
+pub fn safe_session_key(key: &HlsSessionKey) -> String { short_hash(&key.stable_value()) }
 
-pub fn safe_hls_access_lease_id(lease_id: &HlsAccessLeaseId) -> String {
-    short_hash(&lease_id.0)
-}
+pub fn safe_hls_access_lease_id(lease_id: &HlsAccessLeaseId) -> String { short_hash(&lease_id.0) }
 
-pub fn safe_user_session_token(session_token: &str) -> String {
-    short_hash(session_token)
-}
+pub fn safe_user_session_token(session_token: &str) -> String { short_hash(session_token) }
 
-pub fn safe_proxy_session_id(proxy_session_id: &ProxySessionId) -> String {
-    short_hash(&proxy_session_id.0)
-}
+pub fn safe_proxy_session_id(proxy_session_id: &ProxySessionId) -> String { short_hash(&proxy_session_id.0) }
 
 /// Canonical HLS log identity source. Raw identifiers remain private and are
 /// converted to safe short values only at the logging boundary.
@@ -204,22 +150,16 @@ impl HlsLogIdentity {
         }
     }
 
-    pub fn from_session(session: &HlsSession) -> Self {
-        Self::new(&session.key, &session.proxy_session_id)
-    }
+    pub fn from_session(session: &HlsSession) -> Self { Self::new(&session.key, &session.proxy_session_id) }
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_test(session: impl Into<String>, proxy_session: impl Into<String>) -> Self {
         Self { session_key: Arc::from(session.into()), proxy_session_id: Arc::from(proxy_session.into()) }
     }
 
-    pub fn session(&self) -> String {
-        short_hash(&self.session_key)
-    }
+    pub fn session(&self) -> String { short_hash(&self.session_key) }
 
-    pub fn proxy_session(&self) -> String {
-        short_hash(&self.proxy_session_id)
-    }
+    pub fn proxy_session(&self) -> String { short_hash(&self.proxy_session_id) }
 }
 
 impl fmt::Debug for HlsLogIdentity {
@@ -234,9 +174,7 @@ impl fmt::Debug for HlsLogIdentity {
 
 /// Applies the process-wide logging policy without adding HLS-specific
 /// hashing, truncation, parsing, or forced redaction.
-pub fn hls_origin_log_value(value: impl AsRef<str>) -> String {
-    sanitize_sensitive_info(value.as_ref()).into_owned()
-}
+pub fn hls_origin_log_value(value: impl AsRef<str>) -> String { sanitize_sensitive_info(value.as_ref()).into_owned() }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum HlsRecoveryTriggerSource {
@@ -369,13 +307,9 @@ fn format_optional_u64(value: Option<u64>) -> String {
     value.map_or_else(|| "none".to_string(), |value| value.to_string())
 }
 
-fn increment(counter: &AtomicU64, count: u64) {
-    counter.fetch_add(count, Ordering::Relaxed);
-}
+fn increment(counter: &AtomicU64, count: u64) { counter.fetch_add(count, Ordering::Relaxed); }
 
-fn load(counter: &AtomicU64) -> u64 {
-    counter.load(Ordering::Relaxed)
-}
+fn load(counter: &AtomicU64) -> u64 { counter.load(Ordering::Relaxed) }
 
 fn short_hash(value: &str) -> String {
     let digest = Sha256::digest(value.as_bytes());
@@ -413,9 +347,7 @@ mod tests {
     }
 
     impl Drop for SanitizationSettingGuard {
-        fn drop(&mut self) {
-            set_sanitize_sensitive_info(self.0);
-        }
+        fn drop(&mut self) { set_sanitize_sensitive_info(self.0); }
     }
 
     #[test]

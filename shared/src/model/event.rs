@@ -14,9 +14,9 @@ use crate::model::{
     notification::{registry, EventId, Severity},
     stats::SourceStats,
     ActiveUserConnectionChange, ConfigReloadFailure, ConfigType, DiskAlert, DownloadsDelta, DownloadsResponse,
-    LibraryScanProgressEvent, MsgKind, Permission, PlaylistUpdateProgressEvent, PlaylistUpdateState,
-    ProviderAccountEvent, ProviderAccountState, RecordingLifecycleMessage, StreamProbeFailure, SystemInfo,
-    UserLifecycleEvent, UserLifecycleState, WatchChanges,
+    LibraryScanProgressEvent, LibraryScanSummaryStatus, MsgKind, Permission, PlaylistUpdateProgressEvent,
+    PlaylistUpdateState, ProviderAccountEvent, ProviderAccountState, RecordingLifecycleMessage, StreamProbeFailure,
+    SystemInfo, UserLifecycleEvent, UserLifecycleState, WatchChanges,
 };
 use std::sync::Arc;
 
@@ -110,15 +110,11 @@ impl EventSink for NoopSink {
 }
 
 impl<T: EventSink + ?Sized> EventSink for Arc<T> {
-    fn emit(&self, event: EventMessage) {
-        (**self).emit(event);
-    }
+    fn emit(&self, event: EventMessage) { (**self).emit(event); }
 }
 
 impl<T: EventSink> EventSink for &T {
-    fn emit(&self, event: EventMessage) {
-        (**self).emit(event);
-    }
+    fn emit(&self, event: EventMessage) { (**self).emit(event); }
 }
 
 /// Which event this is, without its payload.
@@ -142,6 +138,9 @@ pub enum EventKind {
     PlaylistUpdateProgress,
     SystemInfoUpdate,
     LibraryScanProgress,
+    /// A scan that ended in an error. Separate from the progress kind so a
+    /// subscriber can take scan failures without the tick firehose.
+    LibraryScanFailed,
     DownloadsUpdate,
     DownloadsDeltaUpdate,
     RecordingChanged,
@@ -172,7 +171,7 @@ impl EventKind {
     ///
     /// The mask type below indexes into this, so the order is load-bearing:
     /// it is the bit order, not just a listing.
-    pub const ALL: [Self; 31] = [
+    pub const ALL: [Self; 32] = [
         Self::ServerError,
         Self::ActiveUser,
         Self::ActiveProvider,
@@ -181,6 +180,7 @@ impl EventKind {
         Self::PlaylistUpdateProgress,
         Self::SystemInfoUpdate,
         Self::LibraryScanProgress,
+        Self::LibraryScanFailed,
         Self::DownloadsUpdate,
         Self::DownloadsDeltaUpdate,
         Self::RecordingChanged,
@@ -212,9 +212,7 @@ impl EventKind {
     /// it is where a mask migration would have to happen *after* operators
     /// had written subscriptions into config. Widening now is free.
     #[must_use]
-    pub const fn bit(self) -> u64 {
-        1 << (self as u32)
-    }
+    pub const fn bit(self) -> u64 { 1 << (self as u32) }
 
     /// The permission a websocket session must hold to receive this kind.
     ///
@@ -233,7 +231,7 @@ impl EventKind {
             Self::PlaylistUpdate | Self::PlaylistUpdateProgress | Self::PlaylistWatchChanged => {
                 Permission::PlaylistWrite
             }
-            Self::LibraryScanProgress => Permission::LibraryWrite,
+            Self::LibraryScanProgress | Self::LibraryScanFailed => Permission::LibraryWrite,
             // Who may hear that an account was created is the same question
             // as who may list accounts.
             Self::UserCreated | Self::UserUpdated | Self::UserDeleted => Permission::UserRead,
@@ -310,9 +308,7 @@ impl EventKind {
     /// Never true for an event carrying a payload, however repetitive - a
     /// dropped progress tick loses the message it carried.
     #[must_use]
-    pub const fn is_coalescable(self) -> bool {
-        matches!(self, Self::RecordingChanged | Self::RecordingRulesChanged)
-    }
+    pub const fn is_coalescable(self) -> bool { matches!(self, Self::RecordingChanged | Self::RecordingRulesChanged) }
 
     /// Stable wire name.
     ///
@@ -330,6 +326,7 @@ impl EventKind {
             Self::PlaylistUpdateProgress => "playlist.update.progress",
             Self::SystemInfoUpdate => "system.info",
             Self::LibraryScanProgress => "library.scan.progress",
+            Self::LibraryScanFailed => "library.scan.failed",
             Self::DownloadsUpdate => "downloads.update",
             Self::DownloadsDeltaUpdate => "downloads.delta",
             Self::RecordingChanged => "recording.changed",
@@ -359,9 +356,7 @@ impl EventKind {
     /// Parse a wire name back. Unknown names are `None` rather than a
     /// fallback variant, so a typo in a subscription is visible.
     #[must_use]
-    pub fn from_wire_name(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|kind| kind.as_wire_name() == name)
-    }
+    pub fn from_wire_name(name: &str) -> Option<Self> { Self::ALL.into_iter().find(|kind| kind.as_wire_name() == name) }
 }
 
 impl EventMessage {
@@ -376,7 +371,13 @@ impl EventMessage {
             Self::PlaylistUpdate(_) => EventKind::PlaylistUpdate,
             Self::PlaylistUpdateProgress(_) => EventKind::PlaylistUpdateProgress,
             Self::SystemInfoUpdate(_) => EventKind::SystemInfoUpdate,
-            Self::LibraryScanProgress(_) => EventKind::LibraryScanProgress,
+            // One payload, two kinds. The emitter sends exactly one event per
+            // scan - a success or a failure - so the status is the whole
+            // discriminant.
+            Self::LibraryScanProgress(event) => match event.summary.status {
+                LibraryScanSummaryStatus::Success => EventKind::LibraryScanProgress,
+                LibraryScanSummaryStatus::Error => EventKind::LibraryScanFailed,
+            },
             Self::DownloadsUpdate(_) => EventKind::DownloadsUpdate,
             Self::DownloadsDeltaUpdate(_) => EventKind::DownloadsDeltaUpdate,
             Self::RecordingChanged => EventKind::RecordingChanged,
@@ -455,7 +456,13 @@ impl EventMessage {
                 PlaylistUpdateState::Failure => registry::PLAYLIST_UPDATE_FAILED,
             },
             Self::ConfigChange(_) => registry::CONFIG_CHANGED,
-            Self::LibraryScanProgress(_) => registry::LIBRARY_SCAN_COMPLETED,
+            // A failed scan used to take `LIBRARY_SCAN_COMPLETED` like any
+            // other, so operators were told "A local library scan finished"
+            // at info severity when it had not.
+            Self::LibraryScanProgress(event) => match event.summary.status {
+                LibraryScanSummaryStatus::Success => registry::LIBRARY_SCAN_COMPLETED,
+                LibraryScanSummaryStatus::Error => registry::LIBRARY_SCAN_FAILED,
+            },
             Self::InputMetadataUpdatesStarted(_) => registry::METADATA_UPDATE_STARTED,
             Self::InputMetadataUpdatesCompleted(_) => registry::METADATA_UPDATE_COMPLETED,
             Self::DiskAlert(_) => registry::SYSTEM_DISK_ALERT,
@@ -542,15 +549,11 @@ impl EventMessage {
 
     /// See [`EventKind::required_permission`].
     #[must_use]
-    pub const fn required_permission(&self) -> Permission {
-        self.kind().required_permission()
-    }
+    pub const fn required_permission(&self) -> Permission { self.kind().required_permission() }
 
     /// See [`EventKind::is_high_frequency`].
     #[must_use]
-    pub const fn is_high_frequency(&self) -> bool {
-        self.kind().is_high_frequency()
-    }
+    pub const fn is_high_frequency(&self) -> bool { self.kind().is_high_frequency() }
 }
 
 /// What one playlist refresh did.
@@ -576,9 +579,7 @@ impl PlaylistUpdateSummary {
     /// A summary carrying only an outcome - the timeout and panic paths,
     /// which have no statistics to report.
     #[must_use]
-    pub fn state_only(state: PlaylistUpdateState) -> Self {
-        Self { state, stats: Vec::new(), error: None }
-    }
+    pub fn state_only(state: PlaylistUpdateState) -> Self { Self { state, stats: Vec::new(), error: None } }
 }
 
 /// A set of [`EventKind`]s, as one word.
@@ -599,35 +600,25 @@ impl EventKindMask {
 
     /// An empty mask to build on.
     #[must_use]
-    pub const fn new() -> Self {
-        Self::NONE
-    }
+    pub const fn new() -> Self { Self::NONE }
 
     /// This mask plus `kind`.
     #[must_use]
-    pub const fn with(self, kind: EventKind) -> Self {
-        Self(self.0 | kind.bit())
-    }
+    pub const fn with(self, kind: EventKind) -> Self { Self(self.0 | kind.bit()) }
 
     /// Is `kind` in this mask?
     #[must_use]
-    pub const fn contains(self, kind: EventKind) -> bool {
-        self.0 & kind.bit() != 0
-    }
+    pub const fn contains(self, kind: EventKind) -> bool { self.0 & kind.bit() != 0 }
 
     /// Is this mask empty? A subscriber with nothing selected should not be
     /// spawned at all.
     #[must_use]
-    pub const fn is_empty(self) -> bool {
-        self.0 == 0
-    }
+    pub const fn is_empty(self) -> bool { self.0 == 0 }
 
     /// The union of two masks - how a plugin host builds one mask covering
     /// every loaded plugin's subscriptions.
     #[must_use]
-    pub const fn union(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
+    pub const fn union(self, other: Self) -> Self { Self(self.0 | other.0) }
 }
 
 impl EventKindMask {
@@ -655,15 +646,11 @@ impl EventKindMask {
 
     /// The kinds in this mask.
     #[must_use]
-    pub fn kinds(self) -> Vec<EventKind> {
-        EventKind::ALL.into_iter().filter(|kind| self.contains(*kind)).collect()
-    }
+    pub fn kinds(self) -> Vec<EventKind> { EventKind::ALL.into_iter().filter(|kind| self.contains(*kind)).collect() }
 }
 
 impl FromIterator<EventKind> for EventKindMask {
-    fn from_iter<I: IntoIterator<Item = EventKind>>(iter: I) -> Self {
-        iter.into_iter().fold(Self::NONE, Self::with)
-    }
+    fn from_iter<I: IntoIterator<Item = EventKind>>(iter: I) -> Self { iter.into_iter().fold(Self::NONE, Self::with) }
 }
 
 #[cfg(test)]

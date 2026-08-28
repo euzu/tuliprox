@@ -38,9 +38,7 @@ pub trait Internable {
 }
 
 impl Internable for &Arc<str> {
-    fn intern(self) -> Arc<str> {
-        Arc::clone(self)
-    }
+    fn intern(self) -> Arc<str> { Arc::clone(self) }
 }
 
 impl Internable for &Cow<'_, str> {
@@ -53,45 +51,31 @@ impl Internable for &Cow<'_, str> {
 }
 
 impl Internable for &UUIDType {
-    fn intern(self) -> Arc<str> {
-        intern_string(self.to_string())
-    }
+    fn intern(self) -> Arc<str> { intern_string(self.to_string()) }
 }
 
 impl Internable for String {
-    fn intern(self) -> Arc<str> {
-        intern_string(self)
-    }
+    fn intern(self) -> Arc<str> { intern_string(self) }
 }
 
 impl Internable for &String {
-    fn intern(self) -> Arc<str> {
-        intern_str(self.as_str())
-    }
+    fn intern(self) -> Arc<str> { intern_str(self.as_str()) }
 }
 
 impl Internable for &str {
-    fn intern(self) -> Arc<str> {
-        intern_str(self)
-    }
+    fn intern(self) -> Arc<str> { intern_str(self) }
 }
 
 impl Internable for u32 {
-    fn intern(self) -> Arc<str> {
-        intern_string(self.to_string())
-    }
+    fn intern(self) -> Arc<str> { intern_string(self.to_string()) }
 }
 
 impl Internable for u64 {
-    fn intern(self) -> Arc<str> {
-        intern_string(self.to_string())
-    }
+    fn intern(self) -> Arc<str> { intern_string(self.to_string()) }
 }
 
 impl Internable for i64 {
-    fn intern(self) -> Arc<str> {
-        intern_string(self.to_string())
-    }
+    fn intern(self) -> Arc<str> { intern_string(self.to_string()) }
 }
 
 macro_rules! intern_impl {
@@ -114,20 +98,14 @@ macro_rules! intern_impl {
 }
 
 /// Interns a string slice.
-fn intern_str(s: &str) -> Arc<str> {
-    intern_impl!(s, Arc::from(s))
-}
+fn intern_str(s: &str) -> Arc<str> { intern_impl!(s, Arc::from(s)) }
 
 /// Interns an owned string.
-fn intern_string(s: String) -> Arc<str> {
-    intern_impl!(s.as_str(), Arc::from(s))
-}
+fn intern_string(s: String) -> Arc<str> { intern_impl!(s.as_str(), Arc::from(s)) }
 
 /// Returns the current number of strings held in the interning pool.
 /// Uses a read lock and is safe to call on hot paths for threshold checks.
-pub fn interner_len() -> usize {
-    INTERNER.read().map_or(0, |g| g.len())
-}
+pub fn interner_len() -> usize { INTERNER.read().map_or(0, |g| g.len()) }
 
 /// Garbage collection: removes strings that are only referenced by the cache.
 pub fn interner_gc() -> usize {
@@ -202,9 +180,7 @@ struct ArcStrVisitor;
 impl<'de> Visitor<'de> for ArcStrVisitor {
     type Value = Arc<str>;
 
-    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str("a string, number, boolean, or null")
-    }
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result { f.write_str("a string, number, boolean, or null") }
 
     fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
         Ok(normalize_scalar_string(v).intern())
@@ -212,27 +188,13 @@ impl<'de> Visitor<'de> for ArcStrVisitor {
     fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
         Ok(normalize_scalar_string(v.as_str()).intern())
     }
-    fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> {
-        Ok(v.to_string().intern())
-    }
-    fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
-        Ok(v.to_string().intern())
-    }
-    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
-        Ok(v.to_string().intern())
-    }
-    fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> {
-        Ok(f64_to_str(v).intern())
-    }
-    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-        Ok("".intern())
-    }
-    fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-        Ok("".intern())
-    }
-    fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
-        d.deserialize_any(self)
-    }
+    fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> { Ok(v.to_string().intern()) }
+    fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> { Ok(v.to_string().intern()) }
+    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> { Ok(v.to_string().intern()) }
+    fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> { Ok(f64_to_str(v).intern()) }
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> { Ok("".intern()) }
+    fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> { Ok("".intern()) }
+    fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> { d.deserialize_any(self) }
 }
 
 /// Visitor that produces `Option<Arc<str>>`, mapping null / empty -> `None`.
@@ -261,27 +223,13 @@ impl<'de> Visitor<'de> for OptionArcStrVisitor {
             Ok(Some(normalized.intern()))
         }
     }
-    fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> {
-        Ok(Some(v.to_string().intern()))
-    }
-    fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
-        Ok(Some(v.to_string().intern()))
-    }
-    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
-        Ok(Some(v.to_string().intern()))
-    }
-    fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> {
-        Ok(Some(f64_to_str(v).intern()))
-    }
-    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-        Ok(None)
-    }
-    fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-        Ok(None)
-    }
-    fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
-        d.deserialize_any(self)
-    }
+    fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> { Ok(Some(v.to_string().intern())) }
+    fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> { Ok(Some(v.to_string().intern())) }
+    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> { Ok(Some(v.to_string().intern())) }
+    fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> { Ok(Some(f64_to_str(v).intern())) }
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> { Ok(None) }
+    fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> { Ok(None) }
+    fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> { d.deserialize_any(self) }
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
         while seq.next_element::<IgnoredAny>()?.is_some() {}
         log::debug!("ignored sequence while deserializing string interner, returning None");

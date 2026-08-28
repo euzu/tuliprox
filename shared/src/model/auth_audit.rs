@@ -91,7 +91,5 @@ impl AuthAuditEvent {
     /// the most events. Scoped to the outcome so a success is not suppressed
     /// by the failures that preceded it.
     #[must_use]
-    pub fn dedup_key(&self) -> String {
-        format!("auth:{}:{}:{}", self.outcome.as_str(), self.username, self.client_ip)
-    }
+    pub fn dedup_key(&self) -> String { format!("auth:{}:{}:{}", self.outcome.as_str(), self.username, self.client_ip) }
 }

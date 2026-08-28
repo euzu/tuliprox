@@ -41,9 +41,7 @@ impl HlsTerminalKeyMaterial {
         Some(Self { bytes: Zeroizing::new(bytes) })
     }
 
-    fn as_bytes(&self) -> &[u8; AES_128_BLOCK_BYTES] {
-        &self.bytes
-    }
+    fn as_bytes(&self) -> &[u8; AES_128_BLOCK_BYTES] { &self.bytes }
 }
 
 impl std::fmt::Debug for HlsTerminalKeyMaterial {
@@ -90,27 +88,17 @@ impl HlsTerminalKeyBinding {
         self.resource_id == resource_file.resource_id && self.route_extension.as_ref() == resource_file.extension
     }
 
-    fn matches_route(&self, proxy_session_id: &ProxySessionId) -> bool {
-        self.proxy_session_id == *proxy_session_id
-    }
+    fn matches_route(&self, proxy_session_id: &ProxySessionId) -> bool { self.proxy_session_id == *proxy_session_id }
 
-    pub fn content_type(&self) -> &str {
-        &self.content_type
-    }
+    pub fn content_type(&self) -> &str { &self.content_type }
 
-    pub fn bytes(&self) -> Bytes {
-        Bytes::copy_from_slice(self.material.as_bytes())
-    }
+    pub fn bytes(&self) -> Bytes { Bytes::copy_from_slice(self.material.as_bytes()) }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn source_cache_key(&self) -> &TransientObjectCacheKey {
-        &self.source_cache_key
-    }
+    pub fn source_cache_key(&self) -> &TransientObjectCacheKey { &self.source_cache_key }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn resource_id(&self) -> &TransientResourceId {
-        &self.resource_id
-    }
+    pub fn resource_id(&self) -> &TransientResourceId { &self.resource_id }
 }
 
 impl std::fmt::Debug for HlsTerminalKeyBinding {
@@ -226,33 +214,19 @@ impl HlsTerminalMediaAsset {
         HlsTerminalAssetIdentity { revision: self.validated.revision, fingerprint: self.validated.fingerprint }
     }
 
-    pub fn container(&self) -> HlsMediaContainer {
-        self.validated.container
-    }
+    pub fn container(&self) -> HlsMediaContainer { self.validated.container }
 
-    pub fn track_signature(&self) -> &HlsTsTrackSignature {
-        &self.validated.track_signature
-    }
+    pub fn track_signature(&self) -> &HlsTsTrackSignature { &self.validated.track_signature }
 
-    pub fn duration_ms(&self) -> u64 {
-        self.validated.duration_ms
-    }
+    pub fn duration_ms(&self) -> u64 { self.validated.duration_ms }
 
-    pub fn duration_ticks_90khz(&self) -> u64 {
-        self.validated.duration_ticks_90khz
-    }
+    pub fn duration_ticks_90khz(&self) -> u64 { self.validated.duration_ticks_90khz }
 
-    pub fn timestamp_profile(&self) -> Option<HlsTsTimestampProfile> {
-        self.validated.timestamp_profile
-    }
+    pub fn timestamp_profile(&self) -> Option<HlsTsTimestampProfile> { self.validated.timestamp_profile }
 
-    pub fn content_type(&self) -> &'static str {
-        self.validated.content_type
-    }
+    pub fn content_type(&self) -> &'static str { self.validated.content_type }
 
-    pub(super) fn renderer(&self) -> Arc<TransportStreamBuffer> {
-        Arc::clone(&self.validated.renderer)
-    }
+    pub(super) fn renderer(&self) -> Arc<TransportStreamBuffer> { Arc::clone(&self.validated.renderer) }
 }
 
 /// Captures and validates one immutable revision of the configured terminal TS asset.
@@ -312,9 +286,7 @@ pub struct HlsTerminalAssetIdentity {
 }
 
 impl HlsTerminalAssetIdentity {
-    pub fn from_asset(asset: &HlsTerminalMediaAsset) -> Self {
-        asset.identity()
-    }
+    pub fn from_asset(asset: &HlsTerminalMediaAsset) -> Self { asset.identity() }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -353,43 +325,29 @@ pub struct HlsTerminalBaseEvidence {
 }
 
 impl HlsTerminalBaseEvidence {
-    pub fn availability(&self) -> Arc<[HlsTerminalBaseSegmentAvailability]> {
-        Arc::clone(&self.availability)
-    }
+    pub fn availability(&self) -> Arc<[HlsTerminalBaseSegmentAvailability]> { Arc::clone(&self.availability) }
 
     pub fn track_signature(&self) -> Option<HlsTsTrackSignature> {
         self.track_resolution.as_ref().and_then(HlsTrackEvidenceResolution::signature).cloned()
     }
 
-    pub fn track_resolution(&self) -> Option<&HlsTrackEvidenceResolution> {
-        self.track_resolution.as_ref()
-    }
+    pub fn track_resolution(&self) -> Option<&HlsTrackEvidenceResolution> { self.track_resolution.as_ref() }
 
-    pub fn splice_evidence(&self) -> Option<&HlsTsSpliceEvidence> {
-        self.splice_evidence.as_ref()
-    }
+    pub fn splice_evidence(&self) -> Option<&HlsTsSpliceEvidence> { self.splice_evidence.as_ref() }
 
     pub fn track_evidence_reason_code(&self) -> &'static str {
         self.track_resolution.as_ref().map_or("base-not-ready", HlsTrackEvidenceResolution::reason_code)
     }
 
-    pub fn track_base(&self) -> Option<&HlsTerminalBaseTrackIdentity> {
-        self.track_base.as_ref()
-    }
+    pub fn track_base(&self) -> Option<&HlsTerminalBaseTrackIdentity> { self.track_base.as_ref() }
 
-    pub fn timing(&self) -> Option<&HlsTerminalBaseTimingEvidence> {
-        self.timing.as_ref()
-    }
+    pub fn timing(&self) -> Option<&HlsTerminalBaseTimingEvidence> { self.timing.as_ref() }
 
-    pub fn key_bindings(&self) -> Arc<[HlsTerminalKeyBinding]> {
-        Arc::clone(&self.key_bindings)
-    }
+    pub fn key_bindings(&self) -> Arc<[HlsTerminalKeyBinding]> { Arc::clone(&self.key_bindings) }
 
     /// Makes the intended guard lifetime explicit at the endpoint commit boundary.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn release(self) {
-        drop(self.read_protection)
-    }
+    pub fn release(self) { drop(self.read_protection) }
 
     /// Transfers the READY-object reader pins to an autonomous terminal commit.
     ///
@@ -408,9 +366,7 @@ pub struct HlsTerminalCommitMediaGuard {
 
 #[cfg(any(test, feature = "test-support"))]
 impl HlsTerminalCommitMediaGuard {
-    pub fn empty_for_test() -> Self {
-        Self { read_protection: HlsTerminalBaseReadProtection { accesses: Vec::new() } }
-    }
+    pub fn empty_for_test() -> Self { Self { read_protection: HlsTerminalBaseReadProtection { accesses: Vec::new() } } }
 }
 
 impl std::fmt::Debug for HlsTerminalCommitMediaGuard {
@@ -722,9 +678,7 @@ enum HlsTerminalBaseKeyEvidence {
 }
 
 impl HlsTerminalBaseKeyEvidence {
-    fn unavailable(resolution: HlsTrackEvidenceResolution) -> Self {
-        Self::Unavailable { resolution }
-    }
+    fn unavailable(resolution: HlsTrackEvidenceResolution) -> Self { Self::Unavailable { resolution } }
 }
 
 fn terminal_base_key_evidence(
@@ -1054,9 +1008,7 @@ impl HlsTerminalTailPlan {
         self.prepared_segment(path).and_then(|segment| u64::try_from(segment.bytes.len()).ok())
     }
 
-    pub fn segment_content_type(&self) -> &'static str {
-        self.segment_content_type
-    }
+    pub fn segment_content_type(&self) -> &'static str { self.segment_content_type }
 
     /// Clones one immutable pre-rendered segment only for this plan generation.
     pub fn segment_bytes(&self, path: HlsTerminalSegmentPath) -> Option<Bytes> {
@@ -1087,9 +1039,7 @@ impl HlsTerminalTailPlan {
             .cloned()
     }
 
-    pub fn key_bindings(&self) -> Arc<[HlsTerminalKeyBinding]> {
-        Arc::clone(&self.key_bindings)
-    }
+    pub fn key_bindings(&self) -> Arc<[HlsTerminalKeyBinding]> { Arc::clone(&self.key_bindings) }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1364,9 +1314,7 @@ fn valid_quoted_attribute(value: &str) -> bool {
     !value.is_empty() && value.chars().all(|character| character != '"' && !character.is_control())
 }
 
-fn valid_iv(value: &str) -> bool {
-    super::hls_aes128_cbc_iv(Some(value), 0).is_ok()
-}
+fn valid_iv(value: &str) -> bool { super::hls_aes128_cbc_iv(Some(value), 0).is_ok() }
 
 fn valid_key_format_versions(value: &str) -> bool {
     !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit() || byte == b'/')

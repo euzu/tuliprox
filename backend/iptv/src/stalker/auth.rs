@@ -46,7 +46,9 @@ pub struct StalkerHandshakeJs {
 /// call against the next recipe on any 4xx/5xx. Once a recipe succeeds we follow up with
 /// a `get_profile` call to extract account info and a `get_capabilities` call (best
 /// effort) to populate the `StalkerPortalCapabilitiesDto`.
-pub async fn handshake<Tr: StalkerTransport, C: Clock>(client: &StalkerApiClient<Tr, C>) -> StalkerResult<StalkerHandshake> {
+pub async fn handshake<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
+) -> StalkerResult<StalkerHandshake> {
     let config = client.config();
     let preset = config.mag_preset;
     // Start from the recipe that last worked. The rest of the chain still follows, so a
@@ -91,7 +93,10 @@ fn prefer_remembered_recipe<Tr: StalkerTransport, C: Clock>(
     chain
 }
 
-async fn attempt_recipe<Tr: StalkerTransport, C: Clock>(client: &StalkerApiClient<Tr, C>, recipe: StalkerBootstrapRecipe) -> StalkerResult<StalkerHandshake> {
+async fn attempt_recipe<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
+    recipe: StalkerBootstrapRecipe,
+) -> StalkerResult<StalkerHandshake> {
     let spec = recipe_spec_for(recipe);
     let candidates = client.ordered_load_urls();
     if candidates.is_empty() {
@@ -175,10 +180,14 @@ async fn perform_handshake_against<Tr: StalkerTransport, C: Clock>(
     ]);
     builder = client.apply_mac_query(builder);
     builder = client.apply_bearer(builder, None, spec.token_in_query || preset_spec.emit_token_query);
-    let response = client.send_with_cap(builder, StalkerAction::Handshake, client.cap_for_action(StalkerAction::Handshake)).await?;
+    let response = client
+        .send_with_cap(builder, StalkerAction::Handshake, client.cap_for_action(StalkerAction::Handshake))
+        .await?;
     client.ingest_response_cookies(&response);
     let status = response.status();
-    let body = client.read_body_with_cap(response, StalkerAction::Handshake, client.cap_for_action(StalkerAction::Handshake)).await?;
+    let body = client
+        .read_body_with_cap(response, StalkerAction::Handshake, client.cap_for_action(StalkerAction::Handshake))
+        .await?;
     if !status.is_success() {
         if matches!(status.as_u16(), 401 | 403 | 456) {
             return Err(StalkerError::TokenRejected {
@@ -286,7 +295,9 @@ async fn perform_handshake_extra<Tr: StalkerTransport, C: Clock>(
         .query(&[("type", "stb"), ("action", "handshake-extra")]);
     builder = client.apply_mac_query(builder);
     builder = client.apply_bearer(builder, Some(session), spec.token_in_query);
-    let response = client.send_with_cap(builder, StalkerAction::HandshakeExtra, client.cap_for_action(StalkerAction::HandshakeExtra)).await?;
+    let response = client
+        .send_with_cap(builder, StalkerAction::HandshakeExtra, client.cap_for_action(StalkerAction::HandshakeExtra))
+        .await?;
     client.ingest_response_cookies(&response);
     let status = response.status();
     if status.is_success() {
@@ -313,7 +324,9 @@ async fn perform_portal_handshake<Tr: StalkerTransport, C: Clock>(
         .query(&[("type", "stb"), ("action", "handshake")]);
     builder = client.apply_mac_query(builder);
     builder = client.apply_bearer(builder, Some(session), spec.token_in_query);
-    let response = client.send_with_cap(builder, StalkerAction::HandshakePortal, client.cap_for_action(StalkerAction::HandshakePortal)).await?;
+    let response = client
+        .send_with_cap(builder, StalkerAction::HandshakePortal, client.cap_for_action(StalkerAction::HandshakePortal))
+        .await?;
     client.ingest_response_cookies(&response);
     let status = response.status();
     if status.is_success() {

@@ -279,13 +279,9 @@ fn parse_fps(video: &Value) -> Option<String> {
     }
 }
 
-fn parse_video_codec(video: &Value) -> Option<String> {
-    get_str(video, &["codec_name"]).map(normalize_video_codec)
-}
+fn parse_video_codec(video: &Value) -> Option<String> { get_str(video, &["codec_name"]).map(normalize_video_codec) }
 
-fn parse_audio_codec(audio: &Value) -> Option<String> {
-    get_str(audio, &["codec_name"]).map(normalize_audio_codec)
-}
+fn parse_audio_codec(audio: &Value) -> Option<String> { get_str(audio, &["codec_name"]).map(normalize_audio_codec) }
 
 fn parse_audio_channels(audio: &Value) -> Option<String> {
     let channels = get_u64(audio, &["channels"])?;

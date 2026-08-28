@@ -121,9 +121,7 @@ pub struct HlsTerminalPendingCoordinator {
 }
 
 impl Default for HlsTerminalPendingCoordinator {
-    fn default() -> Self {
-        Self::with_capacity(HLS_TERMINAL_PENDING_CAPACITY)
-    }
+    fn default() -> Self { Self::with_capacity(HLS_TERMINAL_PENDING_CAPACITY) }
 }
 
 impl HlsTerminalPendingCoordinator {
@@ -243,9 +241,7 @@ impl HlsTerminalPendingCoordinator {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn owner_count(&self) -> usize {
-        self.lock_state().owners.len()
-    }
+    pub fn owner_count(&self) -> usize { self.lock_state().owners.len() }
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, HlsTerminalPendingState> {
         self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -268,13 +264,9 @@ impl HlsTerminalPendingOwnership {
     /// Returns the frozen deadline after applying the no-extension rule during
     /// owner supersession. Pending work must use this value instead of a
     /// deadline captured before registration.
-    pub fn latest_safe_commit_at_ms(&self) -> u64 {
-        self.key.latest_safe_commit_at_ms
-    }
+    pub fn latest_safe_commit_at_ms(&self) -> u64 { self.key.latest_safe_commit_at_ms }
 
-    pub async fn cancelled(&self) {
-        self.cancellation.cancelled().await
-    }
+    pub async fn cancelled(&self) { self.cancellation.cancelled().await }
 }
 
 struct HlsTerminalPendingCompletion {
@@ -283,9 +275,7 @@ struct HlsTerminalPendingCompletion {
 }
 
 impl Drop for HlsTerminalPendingCompletion {
-    fn drop(&mut self) {
-        self.ownership.coordinator.complete(&self.ownership.key, self.ownership.owner_token);
-    }
+    fn drop(&mut self) { self.ownership.coordinator.complete(&self.ownership.key, self.ownership.owner_token); }
 }
 
 #[cfg(test)]

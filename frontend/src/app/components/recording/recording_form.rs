@@ -178,9 +178,7 @@ fn format_timestamp_for_filename(ts: i64) -> String {
 
 /// Show the Shared visibility option only to administrators with
 /// `recording.write`. Non-admins can only record privately.
-pub fn can_pick_shared(has_recording_write: bool, is_admin_role: bool) -> bool {
-    has_recording_write && is_admin_role
-}
+pub fn can_pick_shared(has_recording_write: bool, is_admin_role: bool) -> bool { has_recording_write && is_admin_role }
 
 pub fn target_name_for_id(
     sources: &shared::model::SourcesConfigDto,

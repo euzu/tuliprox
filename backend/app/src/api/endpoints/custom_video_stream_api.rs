@@ -443,9 +443,7 @@ mod hls_cvs_tests {
         bytes
     }
 
-    fn test_buffer() -> TransportStreamBuffer {
-        TransportStreamBuffer::new(test_ts_bytes())
-    }
+    fn test_buffer() -> TransportStreamBuffer { TransportStreamBuffer::new(test_ts_bytes()) }
 
     async fn response_body(response: axum::response::Response) -> bytes::Bytes {
         to_bytes(response.into_body(), usize::MAX).await.expect("body should collect")

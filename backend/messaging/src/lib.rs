@@ -27,9 +27,7 @@ use std::sync::Arc;
 use tuliprox_core::model::{AppConfig, MessageContent, MessagingConfig, NotificationEvent};
 
 /// Is this event subscribed by `notify_on`?
-fn is_enabled(id: EventId, cfg: &MessagingConfig) -> bool {
-    cfg.subscription().matches(id)
-}
+fn is_enabled(id: EventId, cfg: &MessagingConfig) -> bool { cfg.subscription().matches(id) }
 
 /// The channels currently configured for `id`, by stable channel id.
 ///
@@ -50,9 +48,7 @@ pub fn configured_channels(app_config: &Arc<AppConfig>, id: EventId) -> Vec<Stri
         .collect()
 }
 
-fn severity_of(id: EventId) -> Severity {
-    shared::model::notification::registry::default_severity(id)
-}
+fn severity_of(id: EventId) -> Severity { shared::model::notification::registry::default_severity(id) }
 
 /// Render `event` for `channel`, falling back to the built-in body.
 async fn render_for<'a>(

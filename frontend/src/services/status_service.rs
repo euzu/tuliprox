@@ -7,9 +7,7 @@ pub struct StatusService {
 }
 
 impl Default for StatusService {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 impl StatusService {

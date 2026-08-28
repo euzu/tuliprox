@@ -4,12 +4,8 @@
 use crate::model::ByteSize;
 
 pub const DEFAULT_METADATA_PATH: &str = "metadata";
-pub fn default_metadata_path() -> String {
-    DEFAULT_METADATA_PATH.to_string()
-}
-pub fn is_default_metadata_path(s: &str) -> bool {
-    s == DEFAULT_METADATA_PATH
-}
+pub fn default_metadata_path() -> String { DEFAULT_METADATA_PATH.to_string() }
+pub fn is_default_metadata_path(s: &str) -> bool { s == DEFAULT_METADATA_PATH }
 
 // All queue/log/cooldown/retry-duration defaults are human-readable strings
 // (e.g. "30s", "1h", "7d"); the macro emits a non-allocating comparison via
@@ -46,31 +42,17 @@ default_eq_fns!(
 // `ByteSize` defaults — non-numeric, non-`str`, kept as manual impls. Keep
 // them minimal; if a third `ByteSize` default appears, extend the macro with
 // a `byte_size` arm instead of repeating this pattern.
-pub fn default_metadata_ffprobe_probe_size() -> ByteSize {
-    ByteSize::new("10MB")
-}
-pub fn is_default_metadata_ffprobe_probe_size(v: &ByteSize) -> bool {
-    v == &default_metadata_ffprobe_probe_size()
-}
-pub fn default_metadata_ffprobe_live_probe_size() -> ByteSize {
-    ByteSize::new("5MB")
-}
+pub fn default_metadata_ffprobe_probe_size() -> ByteSize { ByteSize::new("10MB") }
+pub fn is_default_metadata_ffprobe_probe_size(v: &ByteSize) -> bool { v == &default_metadata_ffprobe_probe_size() }
+pub fn default_metadata_ffprobe_live_probe_size() -> ByteSize { ByteSize::new("5MB") }
 pub fn is_default_metadata_ffprobe_live_probe_size(v: &ByteSize) -> bool {
     v == &default_metadata_ffprobe_live_probe_size()
 }
 
-pub const fn default_probe_user_priority() -> i8 {
-    127
-}
-pub const fn is_default_probe_user_priority(v: &i8) -> bool {
-    *v == default_probe_user_priority()
-}
-pub const fn default_user_priority() -> i8 {
-    0
-}
-pub const fn is_default_user_priority(v: &i8) -> bool {
-    *v == default_user_priority()
-}
+pub const fn default_probe_user_priority() -> i8 { 127 }
+pub const fn is_default_probe_user_priority(v: &i8) -> bool { *v == default_probe_user_priority() }
+pub const fn default_user_priority() -> i8 { 0 }
+pub const fn is_default_user_priority(v: &i8) -> bool { *v == default_user_priority() }
 
 pub fn is_none_or_empty_metadata_update(metadata_update: &Option<crate::model::MetadataUpdateConfigDto>) -> bool {
     metadata_update.as_ref().is_none_or(crate::model::MetadataUpdateConfigDto::is_empty)

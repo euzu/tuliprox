@@ -273,9 +273,7 @@ impl HlsTransientObjectFetchFinalizer {
         Self { session, segment_cache, fetch_token, completed: false, retry_after_ms }
     }
 
-    pub fn complete(&mut self) {
-        self.completed = true;
-    }
+    pub fn complete(&mut self) { self.completed = true; }
 }
 
 impl Drop for HlsTransientObjectFetchFinalizer {
@@ -523,9 +521,7 @@ impl HlsTransientDirectResponseFinalizer {
         }))
     }
 
-    fn finish_client_aborted(&mut self) {
-        self.context.take();
-    }
+    fn finish_client_aborted(&mut self) { self.context.take(); }
 }
 
 impl Drop for HlsTransientDirectResponseFinalizer {
@@ -763,9 +759,7 @@ impl HlsTransientReadGuard {
 }
 
 impl Drop for HlsTransientReadGuard {
-    fn drop(&mut self) {
-        self.access.reader_finished();
-    }
+    fn drop(&mut self) { self.access.reader_finished(); }
 }
 
 pub struct HlsTransientOriginIoGuard {
@@ -878,9 +872,7 @@ mod tests {
     }
 
     impl Drop for TestOrigin {
-        fn drop(&mut self) {
-            self.task.abort();
-        }
+        fn drop(&mut self) { self.task.abort(); }
     }
 
     #[test]
@@ -1301,9 +1293,7 @@ mod tests {
     struct DropCounter(Arc<AtomicUsize>);
 
     impl Drop for DropCounter {
-        fn drop(&mut self) {
-            self.0.fetch_add(1, Ordering::Relaxed);
-        }
+        fn drop(&mut self) { self.0.fetch_add(1, Ordering::Relaxed); }
     }
 
     #[tokio::test]

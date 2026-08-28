@@ -298,9 +298,7 @@ fn media_server_series_episode_detail(header: &PlaylistItemHeader) -> Option<Ser
     })
 }
 
-fn non_blank_arc(value: &Arc<str>) -> Option<Arc<str>> {
-    (!value.trim().is_empty()).then(|| Arc::clone(value))
-}
+fn non_blank_arc(value: &Arc<str>) -> Option<Arc<str>> { (!value.trim().is_empty()).then(|| Arc::clone(value)) }
 
 fn source_series_info_episode_key(channel: &PlaylistItem) -> Option<Arc<str>> {
     match channel.header.item_type {

@@ -45,9 +45,7 @@ impl SuppliedMediaFacts {
         Self { kind, tmdb_id: valid_tmdb_id(tmdb_id), release_date, release_year: valid_year(release_year) }
     }
 
-    pub fn from_release_year(kind: MediaItemKind, year: u32) -> Self {
-        Self::new(kind, None, None, Some(year))
-    }
+    pub fn from_release_year(kind: MediaItemKind, year: u32) -> Self { Self::new(kind, None, None, Some(year)) }
 
     fn resolved_release_date(&self) -> Option<String> {
         self.release_date.clone().or_else(|| self.release_year.map(synthetic_release_date_from_year))
@@ -61,9 +59,7 @@ pub struct MediaFactPatch {
 }
 
 impl MediaFactPatch {
-    pub fn is_empty(&self) -> bool {
-        self.tmdb_id.is_none() && self.release_date.is_none()
-    }
+    pub fn is_empty(&self) -> bool { self.tmdb_id.is_none() && self.release_date.is_none() }
 }
 
 pub fn build_missing_fact_patch(current: &MediaItemFacts, supplied: &SuppliedMediaFacts) -> MediaFactPatch {
@@ -77,17 +73,11 @@ pub fn build_missing_fact_patch(current: &MediaItemFacts, supplied: &SuppliedMed
     }
 }
 
-pub fn synthetic_release_date_from_year(year: u32) -> String {
-    format!("{year:04}-01-01")
-}
+pub fn synthetic_release_date_from_year(year: u32) -> String { format!("{year:04}-01-01") }
 
-fn valid_tmdb_id(tmdb_id: Option<u32>) -> Option<u32> {
-    tmdb_id.filter(|id| *id > 0)
-}
+fn valid_tmdb_id(tmdb_id: Option<u32>) -> Option<u32> { tmdb_id.filter(|id| *id > 0) }
 
-fn valid_year(year: Option<u32>) -> Option<u32> {
-    year.filter(|year| (1..=9999).contains(year))
-}
+fn valid_year(year: Option<u32>) -> Option<u32> { year.filter(|year| (1..=9999).contains(year)) }
 
 #[cfg(test)]
 mod tests {

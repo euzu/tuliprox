@@ -3,9 +3,7 @@ use deunicode::deunicode_with_tofu_cow;
 use std::{borrow::Cow, sync::Arc};
 
 /// Cleans a playlist title by removing common IPTV prefixes (e.g., "[US]", "┃DE┃").
-pub fn clean_playlist_title(title: &str) -> String {
-    CONSTANTS.re_clean_title.replace(title, "").trim().to_string()
-}
+pub fn clean_playlist_title(title: &str) -> String { CONSTANTS.re_clean_title.replace(title, "").trim().to_string() }
 
 pub trait Capitalize {
     fn capitalize(&self) -> String;
@@ -62,17 +60,13 @@ pub fn get_non_empty_str<'a>(first: &'a str, second: &'a str, third: &'a str) ->
     }
 }
 
-pub fn is_blank_optional_str(s: Option<&str>) -> bool {
-    s.as_ref().is_none_or(|s| s.chars().all(char::is_whitespace))
-}
+pub fn is_blank_optional_str(s: Option<&str>) -> bool { s.as_ref().is_none_or(|s| s.chars().all(char::is_whitespace)) }
 
 pub fn is_blank_optional_string(s: &Option<String>) -> bool {
     s.as_ref().is_none_or(|s| s.chars().all(char::is_whitespace))
 }
 
-pub fn is_non_blank_optional_string(s: &Option<String>) -> bool {
-    !is_blank_optional_string(s)
-}
+pub fn is_non_blank_optional_string(s: &Option<String>) -> bool { !is_blank_optional_string(s) }
 
 pub fn is_blank_optional_arc_str(s: &Option<::std::sync::Arc<str>>) -> bool {
     s.as_ref().is_none_or(|s| s.chars().all(char::is_whitespace))
@@ -101,9 +95,7 @@ pub trait Substring {
 }
 
 impl Substring for String {
-    fn substring(&self, from: usize, to: usize) -> String {
-        self.chars().skip(from).take(to - from).collect()
-    }
+    fn substring(&self, from: usize, to: usize) -> String { self.chars().skip(from).take(to - from).collect() }
 }
 
 pub fn truncate_string(s: &str, max_len: usize) -> String {
@@ -142,9 +134,7 @@ pub fn humanize_snake_case(s: &str) -> String {
     result
 }
 
-pub fn deunicode_string(s: &str) -> Cow<'_, str> {
-    deunicode_with_tofu_cow(s, "[?]")
-}
+pub fn deunicode_string(s: &str) -> Cow<'_, str> { deunicode_with_tofu_cow(s, "[?]") }
 
 pub fn longest<'a>(a: &'a Arc<str>, b: &'a Arc<str>) -> &'a Arc<str> {
     if a.len() >= b.len() {
@@ -215,9 +205,7 @@ pub fn quality_tokens(value: &str) -> impl Iterator<Item = &str> {
 }
 
 /// Best quality tier found in `value` (5=UHD/4K .. 1=SD); 0 when no known token is present.
-pub fn quality_rank(value: &str) -> u8 {
-    quality_tokens(value).filter_map(token_quality).max().unwrap_or(0)
-}
+pub fn quality_rank(value: &str) -> u8 { quality_tokens(value).filter_map(token_quality).max().unwrap_or(0) }
 
 // ------------------------------------------------------------
 // Generic string concatenation macro with optional capacity hint

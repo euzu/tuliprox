@@ -37,13 +37,9 @@ impl ProviderAllocation {
         }
     }
 
-    pub fn new_available(config: Arc<ProviderConfig>) -> Self {
-        ProviderAllocation::Available(config)
-    }
+    pub fn new_available(config: Arc<ProviderConfig>) -> Self { ProviderAllocation::Available(config) }
 
-    pub fn new_grace_period(config: Arc<ProviderConfig>) -> Self {
-        ProviderAllocation::GracePeriod(config)
-    }
+    pub fn new_grace_period(config: Arc<ProviderConfig>) -> Self { ProviderAllocation::GracePeriod(config) }
 
     pub fn get_provider_name(&self) -> Option<Arc<str>> {
         match self {
@@ -158,9 +154,7 @@ impl fmt::Display for ProviderConfig {
 }
 
 impl fmt::Debug for ProviderConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{self}")
-    }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{self}") }
 }
 
 impl PartialEq for ProviderConfig {
@@ -253,19 +247,13 @@ impl ProviderConfig {
     }
 
     #[inline]
-    pub fn max_connections(&self) -> usize {
-        self.max_connections
-    }
+    pub fn max_connections(&self) -> usize { self.max_connections }
 
     #[inline]
-    pub fn is_unlimited(&self) -> bool {
-        self.max_connections == 0
-    }
+    pub fn is_unlimited(&self) -> bool { self.max_connections == 0 }
 
     #[inline]
-    pub fn exp_date(&self) -> Option<i64> {
-        self.exp_date
-    }
+    pub fn exp_date(&self) -> Option<i64> { self.exp_date }
 
     pub fn get_user_info(&self) -> Option<InputUserInfo> {
         InputUserInfo::new(self.input_type, self.username.as_deref(), self.password.as_deref(), &self.url)
@@ -413,14 +401,10 @@ impl ProviderConfig {
     }
 
     #[inline]
-    pub async fn get_current_connections(&self) -> usize {
-        self.connection.read().await.current_connections
-    }
+    pub async fn get_current_connections(&self) -> usize { self.connection.read().await.current_connections }
 
     #[inline]
-    pub fn get_priority(&self) -> i16 {
-        self.priority
-    }
+    pub fn get_priority(&self) -> i16 { self.priority }
 }
 
 #[derive(Clone, Debug)]
@@ -429,19 +413,13 @@ pub struct ProviderConfigWrapper {
 }
 
 impl fmt::Display for ProviderConfigWrapper {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.inner)
-    }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{}", self.inner) }
 }
 
 impl ProviderConfigWrapper {
-    pub fn new(cfg: ProviderConfig) -> Self {
-        Self { inner: Arc::new(cfg) }
-    }
+    pub fn new(cfg: ProviderConfig) -> Self { Self { inner: Arc::new(cfg) } }
 
-    pub fn config(&self) -> Arc<ProviderConfig> {
-        Arc::clone(&self.inner)
-    }
+    pub fn config(&self) -> Arc<ProviderConfig> { Arc::clone(&self.inner) }
 
     pub async fn try_allocate(&self, grace: bool, grace_period_timeout_secs: u64) -> ProviderAllocation {
         match self.inner.try_allocate(grace, grace_period_timeout_secs).await {
@@ -461,9 +439,7 @@ impl ProviderConfigWrapper {
 impl Deref for ProviderConfigWrapper {
     type Target = ProviderConfig;
 
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
+    fn deref(&self) -> &Self::Target { &self.inner }
 }
 
 impl PartialEq for ProviderAllocation {

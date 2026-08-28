@@ -65,9 +65,7 @@ fn get_adaptive_session_ttl_secs(config: &Config) -> u64 {
         .map_or_else(default_hls_session_ttl_secs, |s| s.hls_session_ttl_secs)
 }
 
-fn stream_history_session_id(ts: u64, uid: u32) -> u64 {
-    (ts << 32) | u64::from(uid)
-}
+fn stream_history_session_id(ts: u64, uid: u32) -> u64 { (ts << 32) | u64::from(uid) }
 
 fn decide_connection_kind(
     counts: UserConnectionCounts,
@@ -125,9 +123,7 @@ impl PlaybackLifecycle {
     /// Returns true for lifecycle states that own a counted admission lease.
     /// Both `Active` and `GraceActive` count — `GraceActive` is a provisional
     /// counted state for `GraceMode::Instant` sessions.
-    pub fn is_counted(&self) -> bool {
-        matches!(self, Self::Active | Self::GraceActive)
-    }
+    pub fn is_counted(&self) -> bool { matches!(self, Self::Active | Self::GraceActive) }
 }
 
 #[derive(Clone, Debug)]
@@ -522,9 +518,7 @@ fn clear_session_addr(session: &mut UserSession, addr: &SocketAddr) -> bool {
 }
 
 impl SocketRegistration {
-    fn anonymous() -> Self {
-        Self { username: String::new(), ts: current_time_secs() }
-    }
+    fn anonymous() -> Self { Self { username: String::new(), ts: current_time_secs() } }
 }
 
 struct UserSessionParams<'a> {
@@ -593,9 +587,7 @@ struct DivergenceSnapshot {
 }
 
 impl ActiveUserManager {
-    pub fn shutdown(&self) {
-        self.adaptive_expiry_cancel.cancel();
-    }
+    pub fn shutdown(&self) { self.adaptive_expiry_cancel.cancel(); }
 
     pub fn start_adaptive_expiry_worker(self: &Arc<Self>) {
         if self
@@ -702,9 +694,7 @@ impl ActiveUserManager {
             || incoming_channel.item_type.requires_provider_affinity()
     }
 
-    pub fn set_cleanup_sender(&self, tx: mpsc::Sender<CleanupEvent>) {
-        let _ = self.cleanup_tx.set(tx);
-    }
+    pub fn set_cleanup_sender(&self, tx: mpsc::Sender<CleanupEvent>) { let _ = self.cleanup_tx.set(tx); }
 
     pub fn set_provider_manager(&self, provider_manager: Arc<ActiveProviderManager>) {
         let _ = self.provider_manager.set(provider_manager);
@@ -1637,9 +1627,7 @@ impl ActiveUserManager {
         Some(stream_info)
     }
 
-    fn is_log_user_enabled(&self) -> bool {
-        self.log_active_user.load(Ordering::Relaxed)
-    }
+    fn is_log_user_enabled(&self) -> bool { self.log_active_user.load(Ordering::Relaxed) }
 
     fn build_preserved_stream_expiry(
         &self,

@@ -7,11 +7,11 @@ use crate::stalker::{
     recipes::recipe_spec_for,
     transport::StalkerTransport,
 };
-use tuliprox_core::utils::Clock;
 use log::warn;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use shared::model::stalker::{StalkerPlaybackMode, StalkerStreamKind};
+use tuliprox_core::utils::Clock;
 use url::Url;
 
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
@@ -114,8 +114,7 @@ fn build_create_link_builder<Tr: StalkerTransport, C: Clock>(
             query_pairs.push(("end".to_string(), end.to_string()));
         }
     }
-    let mut builder =
-        client.get(&load_url.load_url).headers(client.common_headers(load_url)).query(&query_pairs);
+    let mut builder = client.get(&load_url.load_url).headers(client.common_headers(load_url)).query(&query_pairs);
     builder = client.apply_mac_query(builder);
     builder = client.apply_bearer(builder, Some(&handshake.session), spec.token_in_query);
     builder

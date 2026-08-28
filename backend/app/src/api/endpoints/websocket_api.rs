@@ -748,6 +748,13 @@ mod tests {
                     result: None,
                 },
             }),
+            EventMessage::LibraryScanProgress(LibraryScanProgressEvent {
+                summary: LibraryScanSummary {
+                    status: LibraryScanSummaryStatus::Error,
+                    message: String::new(),
+                    result: None,
+                },
+            }),
             EventMessage::DownloadsUpdate(Arc::new(downloads)),
             EventMessage::DownloadsDeltaUpdate(DownloadsDelta::ActiveCleared),
             EventMessage::RecordingChanged,

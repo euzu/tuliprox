@@ -46,9 +46,7 @@ pub(super) struct CommonInputFormProps {
 }
 
 impl PartialEq for CommonInputFormProps {
-    fn eq(&self, _other: &Self) -> bool {
-        false
-    }
+    fn eq(&self, _other: &Self) -> bool { false }
 }
 
 #[component]
@@ -187,9 +185,7 @@ pub(super) struct InputOptionsFormProps {
 }
 
 impl PartialEq for InputOptionsFormProps {
-    fn eq(&self, _other: &Self) -> bool {
-        false
-    }
+    fn eq(&self, _other: &Self) -> bool { false }
 }
 
 #[component]

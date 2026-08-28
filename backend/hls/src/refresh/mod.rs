@@ -87,9 +87,7 @@ pub struct OriginRefreshState {
 }
 
 impl OriginRefreshState {
-    pub fn is_due(&self, now_ms: u64) -> bool {
-        now_ms >= self.next_fetch_allowed_at_ms && !self.in_flight
-    }
+    pub fn is_due(&self, now_ms: u64) -> bool { now_ms >= self.next_fetch_allowed_at_ms && !self.in_flight }
 
     pub fn mark_started(&mut self, now_ms: u64) {
         self.last_fetch_started_at_ms = Some(now_ms);

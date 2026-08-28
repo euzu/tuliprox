@@ -44,9 +44,7 @@ pub enum ViewType {
 }
 
 impl ViewType {
-    pub fn is_default(&self) -> bool {
-        matches!(self, ViewType::Dashboard)
-    }
+    pub fn is_default(&self) -> bool { matches!(self, ViewType::Dashboard) }
     pub fn as_str(&self) -> &'static str {
         match self {
             ViewType::Dashboard => DASHBOARD,
@@ -105,9 +103,7 @@ impl fmt::Display for ViewType {
 }
 
 impl Internable for ViewType {
-    fn intern(self) -> Arc<str> {
-        self.as_str().intern()
-    }
+    fn intern(self) -> Arc<str> { self.as_str().intern() }
 }
 
 impl<'de> Deserialize<'de> for ViewType {

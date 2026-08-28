@@ -36,16 +36,12 @@ pub enum XtreamCluster {
 }
 
 impl XtreamCluster {
-    pub fn as_str(&self) -> &str {
-        self.as_ref()
-    }
+    pub fn as_str(&self) -> &str { self.as_ref() }
 
     /// True when this cluster is the Xtream `Series` cluster. Used in
     /// bucket-key computations and dispatch sites that previously
     /// spelled out `== XtreamCluster::Series` inline.
-    pub fn is_series(self) -> bool {
-        matches!(self, Self::Series)
-    }
+    pub fn is_series(self) -> bool { matches!(self, Self::Series) }
 
     pub fn as_stream_type(&self) -> &str {
         match self {
@@ -75,9 +71,7 @@ impl XtreamCluster {
 /// call sites in four crates. See [`PlaylistItemType::cluster`].
 impl From<PlaylistItemType> for XtreamCluster {
     #[inline]
-    fn from(item_type: PlaylistItemType) -> Self {
-        item_type.cluster()
-    }
+    fn from(item_type: PlaylistItemType) -> Self { item_type.cluster() }
 }
 
 #[derive(Debug, Copy, Clone, Eq, Hash, PartialEq, Serialize, Deserialize, Default, EnumIter)]
@@ -160,19 +154,13 @@ impl PlaylistItemType {
         )
     }
 
-    pub fn is_live_adaptive(&self) -> bool {
-        matches!(self, PlaylistItemType::LiveHls | PlaylistItemType::LiveDash)
-    }
+    pub fn is_live_adaptive(&self) -> bool { matches!(self, PlaylistItemType::LiveHls | PlaylistItemType::LiveDash) }
 
     /// True for VOD item types (`Video` or `LocalVideo`).
-    pub fn is_video(&self) -> bool {
-        matches!(self, PlaylistItemType::Video | PlaylistItemType::LocalVideo)
-    }
+    pub fn is_video(&self) -> bool { matches!(self, PlaylistItemType::Video | PlaylistItemType::LocalVideo) }
 
     /// True for concrete series item types (`Series` or `LocalSeries`); excludes the `SeriesInfo` containers.
-    pub fn is_series(&self) -> bool {
-        matches!(self, PlaylistItemType::Series | PlaylistItemType::LocalSeries)
-    }
+    pub fn is_series(&self) -> bool { matches!(self, PlaylistItemType::Series | PlaylistItemType::LocalSeries) }
 
     /// Controls address tracking only.
     /// Do not use this to decide whether a playback request should use session-based admission
@@ -199,9 +187,7 @@ impl PlaylistItemType {
         )
     }
 
-    pub fn as_u8(self) -> u8 {
-        self as u8
-    }
+    pub fn as_u8(self) -> u8 { self as u8 }
 
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -246,36 +232,26 @@ impl PlaylistItemType {
     }
 
     #[inline]
-    pub const fn is_cluster(&self, cluster: XtreamCluster) -> bool {
-        self.cluster() as u8 == cluster as u8
-    }
+    pub const fn is_cluster(&self, cluster: XtreamCluster) -> bool { self.cluster() as u8 == cluster as u8 }
 }
 
 impl Display for PlaylistItemType {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result { write!(f, "{}", self.as_str()) }
 }
 
 impl Internable for PlaylistItemType {
-    fn intern(self) -> Arc<str> {
-        self.as_str().intern()
-    }
+    fn intern(self) -> Arc<str> { self.as_str().intern() }
 }
 
 impl Internable for XtreamCluster {
-    fn intern(self) -> Arc<str> {
-        self.as_str().intern()
-    }
+    fn intern(self) -> Arc<str> { self.as_str().intern() }
 }
 
 #[derive(Copy, Clone, Default, Debug)]
 pub struct PlaylistItemTypeSet(u16);
 impl PlaylistItemTypeSet {
     #[inline]
-    pub fn empty() -> Self {
-        Self(0)
-    }
+    pub fn empty() -> Self { Self(0) }
 
     #[inline]
     pub fn from_item(item: PlaylistItemType) -> Self {
@@ -284,24 +260,16 @@ impl PlaylistItemTypeSet {
     }
 
     #[inline]
-    pub fn insert(&mut self, item: PlaylistItemType) {
-        self.0 |= 1u16 << ((item as u8) - 1);
-    }
+    pub fn insert(&mut self, item: PlaylistItemType) { self.0 |= 1u16 << ((item as u8) - 1); }
 
     #[inline]
-    pub fn remove(&mut self, item: PlaylistItemType) {
-        self.0 &= !(1u16 << ((item as u8) - 1));
-    }
+    pub fn remove(&mut self, item: PlaylistItemType) { self.0 &= !(1u16 << ((item as u8) - 1)); }
 
     #[inline]
-    pub fn is_set(&self, item: PlaylistItemType) -> bool {
-        (self.0 & (1u16 << ((item as u8) - 1))) != 0
-    }
+    pub fn is_set(&self, item: PlaylistItemType) -> bool { (self.0 & (1u16 << ((item as u8) - 1))) != 0 }
 
     #[inline]
-    pub fn bits(self) -> u16 {
-        self.0
-    }
+    pub fn bits(self) -> u16 { self.0 }
 }
 
 /// A field's value, borrowed where possible.
@@ -491,9 +459,7 @@ impl PlaylistItemHeader {
     }
 
     #[inline]
-    pub const fn get_uuid(&self) -> &UUIDType {
-        &self.uuid
-    }
+    pub const fn get_uuid(&self) -> &UUIDType { &self.uuid }
 
     pub fn get_provider_id(&mut self) -> Option<u32> {
         match get_provider_id(&self.id, &self.url) {
@@ -670,9 +636,7 @@ pub struct M3uPlaylistItem {
     pub upstream_user_agent: Option<Arc<str>>,
 }
 
-fn write_m3u_attr(line: &mut String, name: &str, value: &str) {
-    let _ = write!(line, " {name}=\"{value}\"");
-}
+fn write_m3u_attr(line: &mut String, name: &str, value: &str) { let _ = write!(line, " {name}=\"{value}\""); }
 
 fn append_catchup_attribute(line: &mut String, name: &str, value: Option<&Arc<str>>) {
     if let Some(value) = value.filter(|value| !value.is_empty()) {
@@ -847,44 +811,30 @@ impl M3uPlaylistItem {
 
 impl PlaylistEntry for M3uPlaylistItem {
     #[inline]
-    fn get_virtual_id(&self) -> VirtualId {
-        self.virtual_id
-    }
+    fn get_virtual_id(&self) -> VirtualId { self.virtual_id }
 
     fn get_input_stream_id(&self) -> Option<Arc<str>> {
         let input_stream_id = if self.input_stream_id.is_empty() { &self.provider_id } else { &self.input_stream_id };
         (!input_stream_id.is_empty()).then(|| Arc::clone(input_stream_id))
     }
 
-    fn get_upstream_user_agent(&self) -> Option<&str> {
-        self.upstream_user_agent.as_deref()
-    }
+    fn get_upstream_user_agent(&self) -> Option<&str> { self.upstream_user_agent.as_deref() }
 
-    fn get_provider_id(&self) -> Option<u32> {
-        get_provider_id(&self.provider_id, &self.url)
-    }
+    fn get_provider_id(&self) -> Option<u32> { get_provider_id(&self.provider_id, &self.url) }
     #[inline]
-    fn get_category_id(&self) -> Option<u32> {
-        None
-    }
+    fn get_category_id(&self) -> Option<u32> { None }
     #[inline]
-    fn get_provider_url(&self) -> Arc<str> {
-        Arc::clone(&self.url)
-    }
+    fn get_provider_url(&self) -> Arc<str> { Arc::clone(&self.url) }
 
     fn get_uuid(&self) -> UUIDType {
         generate_runtime_playlist_uuid(&self.input_name, &self.provider_id, self.item_type, &self.url)
     }
 
     #[inline]
-    fn get_item_type(&self) -> PlaylistItemType {
-        self.item_type
-    }
+    fn get_item_type(&self) -> PlaylistItemType { self.item_type }
 
     #[inline]
-    fn get_group(&self) -> Arc<str> {
-        Arc::clone(&self.group)
-    }
+    fn get_group(&self) -> Arc<str> { Arc::clone(&self.group) }
 
     #[inline]
     fn get_name(&self) -> Arc<str> {
@@ -896,17 +846,11 @@ impl PlaylistEntry for M3uPlaylistItem {
     }
 
     #[inline]
-    fn get_resolved_info_document(&self, _options: &XtreamMappingOptions) -> Option<XtreamInfoDocument> {
-        None
-    }
+    fn get_resolved_info_document(&self, _options: &XtreamMappingOptions) -> Option<XtreamInfoDocument> { None }
     #[inline]
-    fn get_additional_properties(&self) -> Option<&StreamProperties> {
-        self.additional_properties.as_ref()
-    }
+    fn get_additional_properties(&self) -> Option<&StreamProperties> { self.additional_properties.as_ref() }
     #[inline]
-    fn get_additional_properties_mut(&mut self) -> Option<&mut StreamProperties> {
-        self.additional_properties.as_mut()
-    }
+    fn get_additional_properties_mut(&mut self) -> Option<&mut StreamProperties> { self.additional_properties.as_mut() }
 }
 
 impl crate::model::FieldGet for M3uPlaylistItem {
@@ -947,9 +891,7 @@ impl crate::model::FieldGetAccessor for M3uPlaylistItem {
 }
 
 impl From<M3uPlaylistItem> for CommonPlaylistItem {
-    fn from(item: M3uPlaylistItem) -> Self {
-        item.to_common()
-    }
+    fn from(item: M3uPlaylistItem) -> Self { item.to_common() }
 }
 
 create_bitset!(
@@ -975,9 +917,7 @@ pub struct XtreamMappingOptions {
 
 impl XtreamMappingOptions {
     #[inline]
-    pub fn is_reverse(&self, item_type: PlaylistItemType) -> bool {
-        self.reverse_item_types.is_set(item_type)
-    }
+    pub fn is_reverse(&self, item_type: PlaylistItemType) -> bool { self.reverse_item_types.is_set(item_type) }
 
     fn is_trusted_web_ui_resource_path(resource_url: &str) -> bool {
         const TRUSTED_WEB_UI_RESOURCE_PREFIXES: [&str; 1] = ["/api/v1/library/thumbnail/"];
@@ -1166,9 +1106,7 @@ impl XtreamPlaylistItem {
 
 impl PlaylistEntry for XtreamPlaylistItem {
     #[inline]
-    fn get_virtual_id(&self) -> VirtualId {
-        self.virtual_id
-    }
+    fn get_virtual_id(&self) -> VirtualId { self.virtual_id }
     fn get_input_stream_id(&self) -> Option<Arc<str>> {
         if self.input_stream_id.is_empty() {
             (self.provider_id > 0).then(|| self.provider_id.to_string().intern())
@@ -1177,34 +1115,22 @@ impl PlaylistEntry for XtreamPlaylistItem {
         }
     }
 
-    fn get_upstream_user_agent(&self) -> Option<&str> {
-        self.upstream_user_agent.as_deref()
-    }
+    fn get_upstream_user_agent(&self) -> Option<&str> { self.upstream_user_agent.as_deref() }
     #[inline]
-    fn get_provider_id(&self) -> Option<u32> {
-        Some(self.provider_id)
-    }
+    fn get_provider_id(&self) -> Option<u32> { Some(self.provider_id) }
     #[inline]
-    fn get_category_id(&self) -> Option<u32> {
-        Some(self.category_id)
-    }
+    fn get_category_id(&self) -> Option<u32> { Some(self.category_id) }
     #[inline]
-    fn get_provider_url(&self) -> Arc<str> {
-        Arc::clone(&self.url)
-    }
+    fn get_provider_url(&self) -> Arc<str> { Arc::clone(&self.url) }
 
     #[inline]
     fn get_uuid(&self) -> UUIDType {
         generate_runtime_playlist_uuid(&self.input_name, &self.provider_id.to_string(), self.item_type, &self.url)
     }
     #[inline]
-    fn get_item_type(&self) -> PlaylistItemType {
-        self.item_type
-    }
+    fn get_item_type(&self) -> PlaylistItemType { self.item_type }
     #[inline]
-    fn get_group(&self) -> Arc<str> {
-        Arc::clone(&self.group)
-    }
+    fn get_group(&self) -> Arc<str> { Arc::clone(&self.group) }
     #[inline]
     fn get_name(&self) -> Arc<str> {
         if self.title.is_empty() {
@@ -1230,19 +1156,13 @@ impl PlaylistEntry for XtreamPlaylistItem {
     }
 
     #[inline]
-    fn get_additional_properties(&self) -> Option<&StreamProperties> {
-        self.additional_properties.as_ref()
-    }
+    fn get_additional_properties(&self) -> Option<&StreamProperties> { self.additional_properties.as_ref() }
     #[inline]
-    fn get_additional_properties_mut(&mut self) -> Option<&mut StreamProperties> {
-        self.additional_properties.as_mut()
-    }
+    fn get_additional_properties_mut(&mut self) -> Option<&mut StreamProperties> { self.additional_properties.as_mut() }
 }
 
 impl From<XtreamPlaylistItem> for CommonPlaylistItem {
-    fn from(item: XtreamPlaylistItem) -> Self {
-        item.to_common()
-    }
+    fn from(item: XtreamPlaylistItem) -> Self { item.to_common() }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1591,18 +1511,12 @@ impl PlaylistItem {
 
 impl PlaylistEntry for PlaylistItem {
     #[inline]
-    fn get_virtual_id(&self) -> VirtualId {
-        self.header.virtual_id
-    }
+    fn get_virtual_id(&self) -> VirtualId { self.header.virtual_id }
 
     #[inline]
-    fn get_input_stream_id(&self) -> Option<Arc<str>> {
-        self.header.get_input_stream_id()
-    }
+    fn get_input_stream_id(&self) -> Option<Arc<str>> { self.header.get_input_stream_id() }
 
-    fn get_upstream_user_agent(&self) -> Option<&str> {
-        self.header.upstream_user_agent.as_deref()
-    }
+    fn get_upstream_user_agent(&self) -> Option<&str> { self.header.upstream_user_agent.as_deref() }
 
     fn get_provider_id(&self) -> Option<u32> {
         let header = &self.header;
@@ -1610,14 +1524,10 @@ impl PlaylistEntry for PlaylistItem {
     }
 
     #[inline]
-    fn get_category_id(&self) -> Option<u32> {
-        Some(self.header.category_id)
-    }
+    fn get_category_id(&self) -> Option<u32> { Some(self.header.category_id) }
 
     #[inline]
-    fn get_provider_url(&self) -> Arc<str> {
-        Arc::clone(&self.header.url)
-    }
+    fn get_provider_url(&self) -> Arc<str> { Arc::clone(&self.header.url) }
 
     #[inline]
     fn get_uuid(&self) -> UUIDType {
@@ -1626,19 +1536,13 @@ impl PlaylistEntry for PlaylistItem {
     }
 
     #[inline]
-    fn get_item_type(&self) -> PlaylistItemType {
-        self.header.item_type
-    }
+    fn get_item_type(&self) -> PlaylistItemType { self.header.item_type }
 
     #[inline]
-    fn get_group(&self) -> Arc<str> {
-        Arc::clone(&self.header.group)
-    }
+    fn get_group(&self) -> Arc<str> { Arc::clone(&self.header.group) }
 
     #[inline]
-    fn get_name(&self) -> Arc<str> {
-        self.header.get_name()
-    }
+    fn get_name(&self) -> Arc<str> { self.header.get_name() }
 
     fn get_resolved_info_document(&self, options: &XtreamMappingOptions) -> Option<XtreamInfoDocument> {
         if self.has_details() {
@@ -1655,9 +1559,7 @@ impl PlaylistEntry for PlaylistItem {
         }
     }
 
-    fn get_additional_properties(&self) -> Option<&StreamProperties> {
-        self.header.additional_properties.as_ref()
-    }
+    fn get_additional_properties(&self) -> Option<&StreamProperties> { self.header.additional_properties.as_ref() }
     #[inline]
     fn get_additional_properties_mut(&mut self) -> Option<&mut StreamProperties> {
         self.header.additional_properties.as_mut()

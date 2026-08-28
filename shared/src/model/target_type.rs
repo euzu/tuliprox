@@ -38,21 +38,15 @@ impl TargetType {
 
     /// Whether this output format produces an EPG.
     #[must_use]
-    pub const fn supports_epg(self) -> bool {
-        self.capabilities().supports_epg
-    }
+    pub const fn supports_epg(self) -> bool { self.capabilities().supports_epg }
 
     /// Whether this output format honors a playlist filter.
     #[must_use]
-    pub const fn supports_filter(self) -> bool {
-        self.capabilities().supports_filter
-    }
+    pub const fn supports_filter(self) -> bool { self.capabilities().supports_filter }
 
     /// Whether this output format can be served from the in-memory playlist cache.
     #[must_use]
-    pub const fn supports_memory_cache(self) -> bool {
-        self.capabilities().supports_memory_cache
-    }
+    pub const fn supports_memory_cache(self) -> bool { self.capabilities().supports_memory_cache }
 }
 
 /// Categorical capabilities of a [`TargetType`], declared once in

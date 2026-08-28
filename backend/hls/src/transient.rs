@@ -123,13 +123,9 @@ pub struct TransientObjectFetchToken {
 }
 
 impl TransientObjectFetchToken {
-    pub fn cache_key(&self) -> &TransientObjectCacheKey {
-        &self.cache_key
-    }
+    pub fn cache_key(&self) -> &TransientObjectCacheKey { &self.cache_key }
 
-    pub fn superseded_object(&self) -> Option<&TransientObjectRemoval> {
-        self.superseded_object.as_ref()
-    }
+    pub fn superseded_object(&self) -> Option<&TransientObjectRemoval> { self.superseded_object.as_ref() }
 }
 
 impl TransientObjectResourceBinding {
@@ -241,9 +237,7 @@ impl TransientResourceRef {
         }
     }
 
-    pub fn is_valid_at(&self, now_ms: u64) -> bool {
-        now_ms <= self.expires_at_ms
-    }
+    pub fn is_valid_at(&self, now_ms: u64) -> bool { now_ms <= self.expires_at_ms }
 
     fn refresh_from(&mut self, next: TransientResourceRef) {
         self.kind = next.kind;
@@ -266,9 +260,7 @@ impl TransientResourceRef {
             && self.file_ext_hint == other.file_ext_hint
     }
 
-    pub fn active_readers(&self) -> u32 {
-        self.access.active_readers()
-    }
+    pub fn active_readers(&self) -> u32 { self.access.active_readers() }
 }
 
 impl fmt::Debug for TransientResourceRef {
@@ -319,9 +311,7 @@ impl TransientPassthroughState {
         }
     }
 
-    pub fn set_resource_ttl_ms(&mut self, resource_ttl_ms: u64) {
-        self.resource_ttl_ms = resource_ttl_ms;
-    }
+    pub fn set_resource_ttl_ms(&mut self, resource_ttl_ms: u64) { self.resource_ttl_ms = resource_ttl_ms; }
 
     pub fn replace_manifest(&mut self, body: String, rendered_at_ms: u64) {
         self.last_manifest_body = Some(body);
@@ -408,9 +398,7 @@ impl TransientPassthroughState {
         self.resources.values().map(TransientResourceRef::active_readers).sum()
     }
 
-    pub fn has_active_resource_readers(&self) -> bool {
-        self.active_resource_readers() > 0
-    }
+    pub fn has_active_resource_readers(&self) -> bool { self.active_resource_readers() > 0 }
 
     /// Builds the object-cache key for an already registered transient resource.
     ///
@@ -624,9 +612,7 @@ impl TransientPassthroughState {
         self.enforce_failed_object_metadata_bound();
     }
 
-    fn failed_object_metadata_expires_at(&self, now_ms: u64) -> u64 {
-        now_ms.saturating_add(self.resource_ttl_ms)
-    }
+    fn failed_object_metadata_expires_at(&self, now_ms: u64) -> u64 { now_ms.saturating_add(self.resource_ttl_ms) }
 
     pub fn mark_object_failed_retryable_if_current(
         &mut self,
@@ -788,9 +774,7 @@ impl TransientPassthroughState {
 }
 
 impl Default for TransientPassthroughState {
-    fn default() -> Self {
-        Self::new(DEFAULT_TRANSIENT_RESOURCE_TTL_MS)
-    }
+    fn default() -> Self { Self::new(DEFAULT_TRANSIENT_RESOURCE_TTL_MS) }
 }
 
 impl HlsSession {
@@ -867,9 +851,7 @@ pub fn extract_transient_resource_ids(body: &str) -> HashSet<TransientResourceId
 pub struct TransientResourceStore;
 
 impl TransientResourceStore {
-    pub fn new() -> Self {
-        Self
-    }
+    pub fn new() -> Self { Self }
 }
 
 fn default_content_type_for_transient_ext(extension: &str) -> Option<&'static str> {

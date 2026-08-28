@@ -1,11 +1,10 @@
+use crate::Rejection;
 use axum::{
     extract::FromRequestParts,
     http::{header::AUTHORIZATION, request::Parts},
 };
 use base64::{engine::general_purpose, Engine};
 use tuliprox_core::model::{AuthRejection, AuthScheme};
-
-use crate::Rejection;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct AuthBasic(pub (String, String));
@@ -25,9 +24,7 @@ where
 }
 
 impl AuthBasic {
-    fn from_header(contents: (String, String)) -> Self {
-        Self(contents)
-    }
+    fn from_header(contents: (String, String)) -> Self { Self(contents) }
 
     fn decode_request_parts(req: &mut Parts) -> Result<Self, Rejection> {
         let authorization = req

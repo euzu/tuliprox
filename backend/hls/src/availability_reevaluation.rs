@@ -160,9 +160,7 @@ pub struct HlsAvailabilityReevaluationCoordinator {
 }
 
 impl Default for HlsAvailabilityReevaluationCoordinator {
-    fn default() -> Self {
-        Self::with_capacity(HLS_AVAILABILITY_REEVALUATION_CAPACITY)
-    }
+    fn default() -> Self { Self::with_capacity(HLS_AVAILABILITY_REEVALUATION_CAPACITY) }
 }
 
 impl HlsAvailabilityReevaluationCoordinator {
@@ -375,14 +373,10 @@ impl HlsAvailabilityReevaluationCoordinator {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn owner_count(&self) -> usize {
-        self.lock_state().owners.len()
-    }
+    pub fn owner_count(&self) -> usize { self.lock_state().owners.len() }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn available_task_permits_for_test(&self) -> usize {
-        self.task_capacity.available_permits()
-    }
+    pub fn available_task_permits_for_test(&self) -> usize { self.task_capacity.available_permits() }
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, HlsAvailabilityReevaluationState> {
         self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -427,9 +421,7 @@ impl HlsAvailabilityReevaluationOwnership {
         !self.cancellation.is_cancelled() && self.coordinator.is_current(owner_key, self.owner_token)
     }
 
-    pub async fn cancelled(&self) {
-        self.cancellation.cancelled().await
-    }
+    pub async fn cancelled(&self) { self.cancellation.cancelled().await }
 
     pub fn current_mode(
         &self,
@@ -438,9 +430,7 @@ impl HlsAvailabilityReevaluationOwnership {
         self.coordinator.current_mode(owner_key, self.owner_token)
     }
 
-    pub async fn wake_requested(&self) {
-        self.wake.notified().await
-    }
+    pub async fn wake_requested(&self) { self.wake.notified().await }
 
     /// Atomically transfers this running task to monotonic evidence for the
     /// same proxy session. No task or semaphore permit is created.
@@ -479,9 +469,7 @@ pub enum HlsAvailabilityReevaluationFinishReason {
 }
 
 impl HlsAvailabilityReevaluationFinishReason {
-    fn preserves_dirty_demand(self) -> bool {
-        matches!(self, Self::Evaluated | Self::CycleBudgetExhausted)
-    }
+    fn preserves_dirty_demand(self) -> bool { matches!(self, Self::Evaluated | Self::CycleBudgetExhausted) }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -58,9 +58,7 @@ pub fn recording_view_denial(claims: &Claims) -> Option<RecordingViewDenial> {
     None
 }
 
-pub fn can_view_recording(claims: &Claims) -> bool {
-    recording_view_denial(claims).is_none()
-}
+pub fn can_view_recording(claims: &Claims) -> bool { recording_view_denial(claims).is_none() }
 
 pub fn task_visible_to(task_meta: Option<&RecordingMetadata>, claims: &Claims, subject_id: &UserId) -> bool {
     let Some(meta) = task_meta else {
@@ -113,9 +111,7 @@ pub async fn recording_delta(
     (revision, tasks)
 }
 
-fn current_revision(queue: &DownloadQueue) -> QueueRevision {
-    QueueRevision(queue.revision.load(Ordering::SeqCst))
-}
+fn current_revision(queue: &DownloadQueue) -> QueueRevision { QueueRevision(queue.revision.load(Ordering::SeqCst)) }
 
 /// The ids the session may see, plus the revision they belong to.
 ///

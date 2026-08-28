@@ -24,9 +24,7 @@ struct DiskAlertMonitor {
 }
 
 impl DiskAlertMonitor {
-    fn new() -> Self {
-        Self { last_level: None, last_notified_at: None }
-    }
+    fn new() -> Self { Self { last_level: None, last_notified_at: None } }
 
     #[allow(clippy::cast_precision_loss)]
     fn inspect(&mut self, cfg: &DiskAlertConfig, total_bytes: u64, free_bytes: u64) -> Option<DiskAlert> {
@@ -136,9 +134,7 @@ impl DiskProbe {
 }
 
 #[cfg(unix)]
-fn statvfs_counter_to_u64<T: Into<u64>>(value: T) -> u64 {
-    value.into()
-}
+fn statvfs_counter_to_u64<T: Into<u64>>(value: T) -> u64 { value.into() }
 
 #[cfg(unix)]
 impl DiskPath {
@@ -213,9 +209,7 @@ struct CpuTracker {
 }
 
 impl CpuTracker {
-    fn new(cpu_time_secs: f64) -> Self {
-        Self { last_cpu_time_secs: cpu_time_secs, last_sample_at: Instant::now() }
-    }
+    fn new(cpu_time_secs: f64) -> Self { Self { last_cpu_time_secs: cpu_time_secs, last_sample_at: Instant::now() } }
 
     fn sample(&mut self, cpu_time_secs: f64) -> f32 {
         let now = Instant::now();
@@ -234,9 +228,7 @@ impl CpuTracker {
 }
 
 #[allow(clippy::cast_possible_truncation)]
-fn cpu_percent(cpu_delta_secs: f64, elapsed_secs: f64) -> f32 {
-    ((cpu_delta_secs / elapsed_secs) * 100.0) as f32
-}
+fn cpu_percent(cpu_delta_secs: f64, elapsed_secs: f64) -> f32 { ((cpu_delta_secs / elapsed_secs) * 100.0) as f32 }
 
 #[derive(Clone, Copy, Default)]
 struct NetSample {
@@ -658,9 +650,7 @@ mod platform {
         Some((kernel_100ns.saturating_add(user_100ns)) as f64 / 10_000_000.0)
     }
 
-    fn filetime_to_u64(ft: FILETIME) -> u64 {
-        (u64::from(ft.dwHighDateTime) << 32) | u64::from(ft.dwLowDateTime)
-    }
+    fn filetime_to_u64(ft: FILETIME) -> u64 { (u64::from(ft.dwHighDateTime) << 32) | u64::from(ft.dwLowDateTime) }
 }
 
 #[cfg(target_os = "macos")]
@@ -789,9 +779,7 @@ mod platform {
     }
 
     #[allow(clippy::cast_precision_loss)]
-    fn timeval_to_secs(tv: timeval) -> f64 {
-        tv.tv_sec as f64 + (f64::from(tv.tv_usec) / 1_000_000.0)
-    }
+    fn timeval_to_secs(tv: timeval) -> f64 { tv.tv_sec as f64 + (f64::from(tv.tv_usec) / 1_000_000.0) }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
@@ -799,12 +787,8 @@ mod platform {
     pub(super) struct Sampler;
 
     impl Sampler {
-        pub(super) fn new() -> Option<Self> {
-            None
-        }
-        pub(super) fn sample(&mut self) -> Option<shared::model::SystemInfo> {
-            None
-        }
+        pub(super) fn new() -> Option<Self> { None }
+        pub(super) fn sample(&mut self) -> Option<shared::model::SystemInfo> { None }
     }
 }
 

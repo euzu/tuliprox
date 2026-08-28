@@ -57,9 +57,7 @@ pub fn media_server_catalog_snapshot_to_playlist(snapshot: &MediaServerCatalogSn
     groups
 }
 
-fn next_group_id(group_count: usize) -> u32 {
-    u32::try_from(group_count.saturating_add(1)).unwrap_or(u32::MAX)
-}
+fn next_group_id(group_count: usize) -> u32 { u32::try_from(group_count.saturating_add(1)).unwrap_or(u32::MAX) }
 
 type MediaServerSeriesKey<'a> = (&'a str, &'a str, &'a str, &'a str);
 
@@ -408,9 +406,7 @@ fn media_server_rating(descriptive: Option<&MediaServerDescriptiveFacts>) -> Opt
         .filter(|value| value.is_finite())
 }
 
-fn rating_5based(rating: f64) -> f64 {
-    rating / 2.0
-}
+fn rating_5based(rating: f64) -> f64 { rating / 2.0 }
 
 fn duration_secs_to_xtream_duration(duration_secs: u32) -> Arc<str> {
     let hours = duration_secs / 3600;

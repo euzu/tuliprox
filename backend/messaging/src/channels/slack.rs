@@ -21,9 +21,7 @@ pub struct SlackChannel {
 }
 
 impl SlackChannel {
-    pub fn new(config: SlackMessagingConfig, client: reqwest::Client) -> Self {
-        Self { config, client }
-    }
+    pub fn new(config: SlackMessagingConfig, client: reqwest::Client) -> Self { Self { config, client } }
 
     /// Slack has no severity field, so it goes in the header text where a
     /// human will actually see it.
@@ -38,21 +36,13 @@ impl SlackChannel {
 }
 
 impl NotificationChannel for SlackChannel {
-    fn id(&self) -> &'static str {
-        "slack"
-    }
+    fn id(&self) -> &'static str { "slack" }
 
-    fn template_for(&self, event: EventId) -> Option<&str> {
-        self.config.templates.get(&event).map(String::as_str)
-    }
+    fn template_for(&self, event: EventId) -> Option<&str> { self.config.templates.get(&event).map(String::as_str) }
 
-    fn routing(&self) -> &ChannelRouting {
-        &self.config.routing
-    }
+    fn routing(&self) -> &ChannelRouting { &self.config.routing }
 
-    fn wants(&self, event: EventId, severity: Severity) -> bool {
-        self.config.routing.accepts(event, severity)
-    }
+    fn wants(&self, event: EventId, severity: Severity) -> bool { self.config.routing.accepts(event, severity) }
 
     async fn send(&self, msg: &RenderedMessage<'_>) -> Delivery {
         {
@@ -94,9 +84,7 @@ impl NotificationChannel for SlackChannel {
         }
     }
 
-    fn capabilities(&self) -> ChannelCapabilities {
-        ChannelCapabilities::default()
-    }
+    fn capabilities(&self) -> ChannelCapabilities { ChannelCapabilities::default() }
 }
 
 #[cfg(test)]

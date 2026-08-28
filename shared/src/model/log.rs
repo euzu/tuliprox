@@ -24,15 +24,11 @@ impl LogLevel {
         }
     }
 
-    pub fn matches(&self, filter: LogLevel) -> bool {
-        *self >= filter
-    }
+    pub fn matches(&self, filter: LogLevel) -> bool { *self >= filter }
 }
 
 impl fmt::Display for LogLevel {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{}", self.as_str()) }
 }
 
 impl FromStr for LogLevel {

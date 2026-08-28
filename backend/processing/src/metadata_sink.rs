@@ -63,9 +63,7 @@ impl MetadataUpdateSink for NoopMetadataSink {
 
     async fn prepare_enqueue_state(&self, _input_name: Arc<str>) {}
 
-    fn should_skip_enqueue(&self, _input_name: &str, _task: &UpdateTask) -> bool {
-        true
-    }
+    fn should_skip_enqueue(&self, _input_name: &str, _task: &UpdateTask) -> bool { true }
 
     fn queue_task_background(self: Arc<Self>, _input_name: Arc<str>, _task: UpdateTask) {}
 }

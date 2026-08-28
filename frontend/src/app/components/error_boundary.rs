@@ -12,14 +12,10 @@ pub struct ErrorBoundaryHandle {
 
 impl ErrorBoundaryHandle {
     #[allow(dead_code)]
-    pub fn report(&self, message: impl Into<String>) {
-        self.report.emit(message.into());
-    }
+    pub fn report(&self, message: impl Into<String>) { self.report.emit(message.into()); }
 
     #[allow(dead_code)]
-    pub fn reset(&self) {
-        self.reset.emit(());
-    }
+    pub fn reset(&self) { self.reset.emit(()); }
 }
 
 #[derive(Properties, Clone, PartialEq)]
@@ -94,6 +90,4 @@ pub fn ErrorBoundary(props: &ErrorBoundaryProps) -> Html {
 }
 
 #[hook]
-pub fn use_error_boundary() -> Option<ErrorBoundaryHandle> {
-    use_context::<ErrorBoundaryHandle>()
-}
+pub fn use_error_boundary() -> Option<ErrorBoundaryHandle> { use_context::<ErrorBoundaryHandle>() }
