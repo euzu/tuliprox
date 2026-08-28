@@ -42,6 +42,27 @@ pub enum EvictionReentryGuard<'a> {
     SocketPlayback { virtual_id: VirtualId },
 }
 
+/// The request-scoped inputs every admission path threads through unchanged.
+///
+/// These used to be ten positional parameters repeated across four functions,
+/// three of them bare `bool`s in a row - a shape where transposing two arguments
+/// still compiles. Naming them at the call site is the point.
+#[derive(Clone, Copy)]
+pub struct AdmissionRequest<'a> {
+    pub username: &'a str,
+    pub max_connections: u32,
+    pub soft_connections: u16,
+    pub client_ip: &'a str,
+    pub request_addr: &'a std::net::SocketAddr,
+    /// Whether an existing logical playback session may reopen while the user is
+    /// already at limit. Intentionally independent from whether the session is
+    /// socket-bound.
+    pub use_session_admission: bool,
+    pub session_token: Option<&'a str>,
+    pub activate_unbound_session: bool,
+    pub eviction_reentry_guard: EvictionReentryGuard<'a>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PlaybackRequestClass {
     Prepare,
@@ -134,15 +155,17 @@ pub async fn resolve_playback_request_admission(
 
     let result = resolve_admission_with_strategies(
         adm,
-        &user.username,
-        user.max_connections,
-        user.soft_connections,
-        &fingerprint.client_ip,
-        &fingerprint.addr,
-        true,
-        Some(session_token),
-        activate_unbound_session,
-        eviction_reentry_guard,
+        AdmissionRequest {
+            username: &user.username,
+            max_connections: user.max_connections,
+            soft_connections: user.soft_connections,
+            client_ip: &fingerprint.client_ip,
+            request_addr: &fingerprint.addr,
+            use_session_admission: true,
+            session_token: Some(session_token),
+            activate_unbound_session,
+            eviction_reentry_guard,
+        },
     )
     .await;
 
@@ -151,12 +174,10 @@ pub async fn resolve_playback_request_admission(
 
 async fn should_suppress_eviction_for_recent_request(
     adm: &AdmissionCtx,
-    username: &str,
-    client_ip: &str,
-    guard: EvictionReentryGuard<'_>,
+    request: &AdmissionRequest<'_>,
     target_addr: &std::net::SocketAddr,
 ) -> bool {
-    match guard {
+    match request.eviction_reentry_guard {
         EvictionReentryGuard::Session(session_token) => adm
             .active_users
             .recently_evicted_session_protected_addr(session_token)
@@ -164,39 +185,23 @@ async fn should_suppress_eviction_for_recent_request(
             .is_some_and(|protected_addr| protected_addr == *target_addr),
         EvictionReentryGuard::SocketPlayback { virtual_id } => adm
             .active_users
-            .recent_socket_reentry_protected_addr(username, client_ip, virtual_id)
+            .recent_socket_reentry_protected_addr(request.username, request.client_ip, virtual_id)
             .await
             .is_some_and(|protected_addr| protected_addr == *target_addr),
     }
 }
 
-async fn get_admission_for_request(
-    adm: &AdmissionCtx,
-    username: &str,
-    max_connections: u32,
-    soft_connections: u16,
-    is_session_request: bool,
-    session_token: Option<&str>,
-    activate_unbound_session: bool,
-) -> crate::ConnectionAdmission {
-    if is_session_request {
-        if activate_unbound_session {
+async fn get_admission_for_request(adm: &AdmissionCtx, request: &AdmissionRequest<'_>) -> crate::ConnectionAdmission {
+    let AdmissionRequest { username, max_connections, soft_connections, .. } = *request;
+    if request.use_session_admission {
+        let session_token = request.session_token.unwrap_or_default();
+        if request.activate_unbound_session {
             adm.active_users
-                .connection_admission_for_session_activation(
-                    username,
-                    max_connections,
-                    soft_connections,
-                    session_token.unwrap_or_default(),
-                )
+                .connection_admission_for_session_activation(username, max_connections, soft_connections, session_token)
                 .await
         } else {
             adm.active_users
-                .connection_admission_for_session(
-                    username,
-                    max_connections,
-                    soft_connections,
-                    session_token.unwrap_or_default(),
-                )
+                .connection_admission_for_session(username, max_connections, soft_connections, session_token)
                 .await
         }
     } else {
@@ -249,19 +254,10 @@ pub fn get_effective_admission_strategies(adm: &AdmissionCtx) -> Arc<[AdmissionS
 /// Returns `None` when every strategy in `strategies` returns `NoMatch` — the caller
 /// is then responsible for constructing the final exhausted result with the correct
 /// `kind` (preserved from the original admission).
-#[allow(clippy::too_many_arguments)]
-async fn evaluate_admission_strategy_loop<'a, F>(
+async fn evaluate_admission_strategy_loop<F>(
     adm: &AdmissionCtx,
-    username: &'a str,
-    max_connections: u32,
-    soft_connections: u16,
-    client_ip: &'a str,
-    request_addr: &'a std::net::SocketAddr,
-    use_session_admission: bool,
-    session_token: Option<&'a str>,
-    activate_unbound_session: bool,
-    eviction_reentry_guard: EvictionReentryGuard<'a>,
-    strategies: &'a [shared::model::AdmissionStrategy],
+    request: &AdmissionRequest<'_>,
+    strategies: &[shared::model::AdmissionStrategy],
     base_idx: usize,
     admission: crate::ConnectionAdmission,
     build_grace_ctx: F,
@@ -271,6 +267,7 @@ where
 {
     use crate::{evaluate_strategy, AdmissionDecision, StrategyContext};
     use shared::model::UserConnectionPermission;
+    let AdmissionRequest { username, client_ip, request_addr, .. } = *request;
     let mut candidates = adm.active_users.get_eviction_candidates(username, client_ip).await;
     let ctx = StrategyContext { username, client_ip };
     // Set once an eviction has been carried out without reducing the user's
@@ -311,15 +308,7 @@ where
                     );
                     continue;
                 }
-                if should_suppress_eviction_for_recent_request(
-                    adm,
-                    username,
-                    client_ip,
-                    eviction_reentry_guard,
-                    &target.addr,
-                )
-                .await
-                {
+                if should_suppress_eviction_for_recent_request(adm, request, &target.addr).await {
                     debug!(
                         "Skipping eviction strategy {strategy:?} for recently evicted request of user {username} targeting {}",
                         target.addr
@@ -332,16 +321,7 @@ where
                     .mark_recent_eviction_guard_for_addr(&target.addr, *request_addr, RECENT_EVICTION_REENTRY_TTL_SECS)
                     .await;
                 adm.connection_manager.release_connection_as_kicked(&target.addr).await;
-                let retry_admission = get_admission_for_request(
-                    adm,
-                    username,
-                    max_connections,
-                    soft_connections,
-                    use_session_admission,
-                    session_token,
-                    activate_unbound_session,
-                )
-                .await;
+                let retry_admission = get_admission_for_request(adm, request).await;
                 if retry_admission.permission == UserConnectionPermission::Allowed {
                     return Some(AdmissionStrategyResolution {
                         admission: retry_admission,
@@ -369,33 +349,14 @@ where
     None
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn resolve_admission_with_strategies(
     adm: &AdmissionCtx,
-    username: &str,
-    max_connections: u32,
-    soft_connections: u16,
-    client_ip: &str,
-    request_addr: &std::net::SocketAddr,
-    // This controls whether an existing logical playback session may reopen while the user is already at limit.
-    // It is intentionally independent from whether the session is socket-bound.
-    use_session_admission: bool,
-    session_token: Option<&str>,
-    activate_unbound_session: bool,
-    eviction_reentry_guard: EvictionReentryGuard<'_>,
+    request: AdmissionRequest<'_>,
 ) -> AdmissionStrategyResolution {
     use shared::model::UserConnectionPermission;
 
-    let admission = get_admission_for_request(
-        adm,
-        username,
-        max_connections,
-        soft_connections,
-        use_session_admission,
-        session_token,
-        activate_unbound_session,
-    )
-    .await;
+    let username = request.username;
+    let admission = get_admission_for_request(adm, &request).await;
 
     if admission.permission != UserConnectionPermission::Exhausted {
         return AdmissionStrategyResolution { admission, grace_mode: None, grace_context: None };
@@ -414,16 +375,7 @@ pub async fn resolve_admission_with_strategies(
     // the very slot we are about to evict somebody for. Walking the strategies on
     // the stale snapshot kicks a live connection to free a slot that is already
     // free.
-    let admission = get_admission_for_request(
-        adm,
-        username,
-        max_connections,
-        soft_connections,
-        use_session_admission,
-        session_token,
-        activate_unbound_session,
-    )
-    .await;
+    let admission = get_admission_for_request(adm, &request).await;
 
     if admission.permission != UserConnectionPermission::Exhausted {
         debug!("Admission became available while waiting on the admission gate for user {username}");
@@ -436,23 +388,8 @@ pub async fn resolve_admission_with_strategies(
         kind: admission.kind,
     };
 
-    if let Some(resolution) = evaluate_admission_strategy_loop(
-        adm,
-        username,
-        max_connections,
-        soft_connections,
-        client_ip,
-        request_addr,
-        use_session_admission,
-        session_token,
-        activate_unbound_session,
-        eviction_reentry_guard,
-        &strategies,
-        0,
-        admission,
-        build_grace_ctx,
-    )
-    .await
+    if let Some(resolution) =
+        evaluate_admission_strategy_loop(adm, &request, &strategies, 0, admission, build_grace_ctx).await
     {
         return resolution;
     }
@@ -473,23 +410,15 @@ pub async fn resolve_admission_with_strategies(
 ///   `GraceResolutionContext` whose `strategy_index` points at this later strategy, so a
 ///   second failure resumes past it rather than replaying it
 /// - Every strategy exhausted, or an empty remaining slice -> final exhausted
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub async fn evaluate_remaining_strategies_after_grace(
     adm: &AdmissionCtx,
-    username: &str,
-    max_connections: u32,
-    soft_connections: u16,
-    client_ip: &str,
-    request_addr: &std::net::SocketAddr,
-    use_session_admission: bool,
-    session_token: Option<&str>,
-    activate_unbound_session: bool,
-    eviction_reentry_guard: EvictionReentryGuard<'_>,
+    request: AdmissionRequest<'_>,
     grace_context: &GraceResolutionContext,
     original_kind: Option<crate::ConnectionKind>,
 ) -> AdmissionStrategyResolution {
     use shared::model::UserConnectionPermission;
 
+    let username = request.username;
     let remaining = grace_context.strategy_index + 1;
     let strategies = &grace_context.strategies;
     if remaining >= strategies.len() {
@@ -517,23 +446,9 @@ pub async fn evaluate_remaining_strategies_after_grace(
 
     let _admission_guard = adm.active_users.acquire_user_admission(username).await;
 
-    if let Some(resolution) = evaluate_admission_strategy_loop(
-        adm,
-        username,
-        max_connections,
-        soft_connections,
-        client_ip,
-        request_addr,
-        use_session_admission,
-        session_token,
-        activate_unbound_session,
-        eviction_reentry_guard,
-        &strategies[remaining..],
-        remaining,
-        admission,
-        build_grace_ctx,
-    )
-    .await
+    if let Some(resolution) =
+        evaluate_admission_strategy_loop(adm, &request, &strategies[remaining..], remaining, admission, build_grace_ctx)
+            .await
     {
         return resolution;
     }

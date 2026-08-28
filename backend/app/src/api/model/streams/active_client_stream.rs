@@ -1172,15 +1172,17 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                             let remaining_result =
                                 tuliprox_session::admission::evaluate_remaining_strategies_after_grace(
                                     &app_state.admission_ctx(),
-                                    &username,
-                                    max_connections,
-                                    user.soft_connections,
-                                    &fingerprint.client_ip,
-                                    &fingerprint.addr,
-                                    true,
-                                    session_token.as_deref(),
-                                    true,
-                                    eviction_guard,
+                                    tuliprox_session::admission::AdmissionRequest {
+                                        username: &username,
+                                        max_connections,
+                                        soft_connections: user.soft_connections,
+                                        client_ip: &fingerprint.client_ip,
+                                        request_addr: &fingerprint.addr,
+                                        use_session_admission: true,
+                                        session_token: session_token.as_deref(),
+                                        activate_unbound_session: true,
+                                        eviction_reentry_guard: eviction_guard,
+                                    },
                                     ctx,
                                     grace_kind,
                                 )

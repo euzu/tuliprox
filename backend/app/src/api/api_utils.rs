@@ -322,7 +322,8 @@ pub(crate) use tuliprox_core::utils::request_headers::{get_headers_from_request,
 pub(crate) use tuliprox_session::{
     admission::{
         classify_playback_request, connection_priority_for_kind, resolve_admission_with_strategies,
-        resolve_playback_request_admission, EvictionReentryGuard, PlaybackRequestClass, PlaybackRequestFacts,
+        resolve_playback_request_admission, AdmissionRequest, EvictionReentryGuard, PlaybackRequestClass,
+        PlaybackRequestFacts,
     },
     stream_options::{get_stream_options, StreamOptions},
 };
@@ -646,18 +647,20 @@ async fn activate_session_before_stream_open(
 
     let result = resolve_admission_with_strategies(
         &app_state.admission_ctx(),
-        &user.username,
-        user.max_connections,
-        user.soft_connections,
-        &fingerprint.client_ip,
-        &fingerprint.addr,
-        true,
-        Some(session_token),
-        true,
-        if socket_bound {
-            EvictionReentryGuard::SocketPlayback { virtual_id }
-        } else {
-            EvictionReentryGuard::Session(session_token)
+        AdmissionRequest {
+            username: &user.username,
+            max_connections: user.max_connections,
+            soft_connections: user.soft_connections,
+            client_ip: &fingerprint.client_ip,
+            request_addr: &fingerprint.addr,
+            use_session_admission: true,
+            session_token: Some(session_token),
+            activate_unbound_session: true,
+            eviction_reentry_guard: if socket_bound {
+                EvictionReentryGuard::SocketPlayback { virtual_id }
+            } else {
+                EvictionReentryGuard::Session(session_token)
+            },
         },
     )
     .await;
@@ -6381,15 +6384,17 @@ mod tests {
         // Now the new request finds the slot exhausted and the grace strategy kicks in.
         let result = resolve_admission_with_strategies(
             &app_state.admission_ctx(),
-            &user.username,
-            user.max_connections,
-            user.soft_connections,
-            &fingerprint2.client_ip,
-            &fingerprint2.addr,
-            true,
-            Some("tok-new-request"),
-            true,
-            EvictionReentryGuard::Session("tok-new-request"),
+            AdmissionRequest {
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                client_ip: &fingerprint2.client_ip,
+                request_addr: &fingerprint2.addr,
+                use_session_admission: true,
+                session_token: Some("tok-new-request"),
+                activate_unbound_session: true,
+                eviction_reentry_guard: EvictionReentryGuard::Session("tok-new-request"),
+            },
         )
         .await;
 
@@ -6474,15 +6479,17 @@ mod tests {
 
         let result = evaluate_remaining_strategies_after_grace(
             &app_state.admission_ctx(),
-            "remaining-evict",
-            1,
-            0,
-            &fingerprint2.client_ip,
-            &fingerprint2.addr,
-            true,
-            Some("tok-new"),
-            true,
-            EvictionReentryGuard::Session("tok-new"),
+            AdmissionRequest {
+                username: "remaining-evict",
+                max_connections: 1,
+                soft_connections: 0,
+                client_ip: &fingerprint2.client_ip,
+                request_addr: &fingerprint2.addr,
+                use_session_admission: true,
+                session_token: Some("tok-new"),
+                activate_unbound_session: true,
+                eviction_reentry_guard: EvictionReentryGuard::Session("tok-new"),
+            },
             &grace_context,
             Some(crate::api::model::ConnectionKind::Normal),
         )
@@ -6578,15 +6585,17 @@ mod tests {
 
         let result = evaluate_remaining_strategies_after_grace(
             &app_state.admission_ctx(),
-            "remaining-skip-no-match",
-            1,
-            0,
-            &fingerprint2.client_ip,
-            &fingerprint2.addr,
-            true,
-            Some("tok-new"),
-            true,
-            EvictionReentryGuard::Session("tok-new"),
+            AdmissionRequest {
+                username: "remaining-skip-no-match",
+                max_connections: 1,
+                soft_connections: 0,
+                client_ip: &fingerprint2.client_ip,
+                request_addr: &fingerprint2.addr,
+                use_session_admission: true,
+                session_token: Some("tok-new"),
+                activate_unbound_session: true,
+                eviction_reentry_guard: EvictionReentryGuard::Session("tok-new"),
+            },
             &grace_context,
             Some(crate::api::model::ConnectionKind::Normal),
         )
@@ -6627,15 +6636,17 @@ mod tests {
 
         let result = evaluate_remaining_strategies_after_grace(
             &app_state.admission_ctx(),
-            "no-remaining-strategies",
-            1,
-            0,
-            &fingerprint.client_ip,
-            &fingerprint.addr,
-            true,
-            Some("tok-new"),
-            true,
-            EvictionReentryGuard::Session("tok-new"),
+            AdmissionRequest {
+                username: "no-remaining-strategies",
+                max_connections: 1,
+                soft_connections: 0,
+                client_ip: &fingerprint.client_ip,
+                request_addr: &fingerprint.addr,
+                use_session_admission: true,
+                session_token: Some("tok-new"),
+                activate_unbound_session: true,
+                eviction_reentry_guard: EvictionReentryGuard::Session("tok-new"),
+            },
             &grace_context,
             None,
         )
@@ -6681,15 +6692,17 @@ mod tests {
 
         let result = evaluate_remaining_strategies_after_grace(
             &app_state.admission_ctx(),
-            "soft-kind-user",
-            1,
-            0,
-            &fingerprint.client_ip,
-            &fingerprint.addr,
-            true,
-            Some("tok-soft"),
-            true,
-            EvictionReentryGuard::Session("tok-soft"),
+            AdmissionRequest {
+                username: "soft-kind-user",
+                max_connections: 1,
+                soft_connections: 0,
+                client_ip: &fingerprint.client_ip,
+                request_addr: &fingerprint.addr,
+                use_session_admission: true,
+                session_token: Some("tok-soft"),
+                activate_unbound_session: true,
+                eviction_reentry_guard: EvictionReentryGuard::Session("tok-soft"),
+            },
             &grace_context,
             Some(crate::api::model::ConnectionKind::Soft),
         )
@@ -6786,15 +6799,17 @@ mod tests {
 
         let result = evaluate_remaining_strategies_after_grace(
             &app_state.admission_ctx(),
-            "remaining-no-retry",
-            1,
-            0,
-            &fingerprint2.client_ip,
-            &fingerprint2.addr,
-            true,
-            Some("tok-new"),
-            true,
-            EvictionReentryGuard::Session("tok-new"),
+            AdmissionRequest {
+                username: "remaining-no-retry",
+                max_connections: 1,
+                soft_connections: 0,
+                client_ip: &fingerprint2.client_ip,
+                request_addr: &fingerprint2.addr,
+                use_session_admission: true,
+                session_token: Some("tok-new"),
+                activate_unbound_session: true,
+                eviction_reentry_guard: EvictionReentryGuard::Session("tok-new"),
+            },
             &grace_context,
             Some(crate::api::model::ConnectionKind::Normal),
         )
@@ -6841,15 +6856,17 @@ mod tests {
 
         let result = evaluate_remaining_strategies_after_grace(
             &app_state.admission_ctx(),
-            "kind-mismatch-empty",
-            1,
-            0,
-            &fingerprint.client_ip,
-            &fingerprint.addr,
-            true,
-            Some("tok-empty"),
-            true,
-            EvictionReentryGuard::Session("tok-empty"),
+            AdmissionRequest {
+                username: "kind-mismatch-empty",
+                max_connections: 1,
+                soft_connections: 0,
+                client_ip: &fingerprint.client_ip,
+                request_addr: &fingerprint.addr,
+                use_session_admission: true,
+                session_token: Some("tok-empty"),
+                activate_unbound_session: true,
+                eviction_reentry_guard: EvictionReentryGuard::Session("tok-empty"),
+            },
             &grace_context,
             original_kind,
         )
@@ -6944,15 +6961,17 @@ mod tests {
 
         let result = evaluate_remaining_strategies_after_grace(
             &app_state.admission_ctx(),
-            "kind-mismatch-grace",
-            1,
-            0,
-            &fingerprint2.client_ip,
-            &fingerprint2.addr,
-            true,
-            Some("tok-new-grace"),
-            true,
-            EvictionReentryGuard::Session("tok-new-grace"),
+            AdmissionRequest {
+                username: "kind-mismatch-grace",
+                max_connections: 1,
+                soft_connections: 0,
+                client_ip: &fingerprint2.client_ip,
+                request_addr: &fingerprint2.addr,
+                use_session_admission: true,
+                session_token: Some("tok-new-grace"),
+                activate_unbound_session: true,
+                eviction_reentry_guard: EvictionReentryGuard::Session("tok-new-grace"),
+            },
             &grace_context,
             original_kind,
         )
@@ -7073,15 +7092,17 @@ mod tests {
 
         let result = resolve_admission_with_strategies(
             &app_state.admission_ctx(),
-            "fallthrough",
-            1,
-            1,
-            "127.0.0.1",
-            &"127.0.0.1:55153".parse().unwrap_or_else(|_| unreachable!()),
-            true,
-            Some("tok-third"),
-            false,
-            EvictionReentryGuard::Session("tok-third"),
+            AdmissionRequest {
+                username: "fallthrough",
+                max_connections: 1,
+                soft_connections: 1,
+                client_ip: "127.0.0.1",
+                request_addr: &"127.0.0.1:55153".parse().unwrap_or_else(|_| unreachable!()),
+                use_session_admission: true,
+                session_token: Some("tok-third"),
+                activate_unbound_session: false,
+                eviction_reentry_guard: EvictionReentryGuard::Session("tok-third"),
+            },
         )
         .await;
         let admission = result.admission;
@@ -7136,30 +7157,34 @@ mod tests {
 
         let session_based = resolve_admission_with_strategies(
             &app_state.admission_ctx(),
-            &user.username,
-            user.max_connections,
-            user.soft_connections,
-            &fingerprint.client_ip,
-            &fingerprint.addr,
-            true,
-            Some("vod-session"),
-            false,
-            EvictionReentryGuard::Session("vod-session"),
+            AdmissionRequest {
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                client_ip: &fingerprint.client_ip,
+                request_addr: &fingerprint.addr,
+                use_session_admission: true,
+                session_token: Some("vod-session"),
+                activate_unbound_session: false,
+                eviction_reentry_guard: EvictionReentryGuard::Session("vod-session"),
+            },
         )
         .await;
         assert_eq!(session_based.admission.permission, UserConnectionPermission::Allowed);
 
         let connection_based = resolve_admission_with_strategies(
             &app_state.admission_ctx(),
-            &user.username,
-            user.max_connections,
-            user.soft_connections,
-            &fingerprint.client_ip,
-            &fingerprint.addr,
-            false,
-            Some("vod-session"),
-            false,
-            EvictionReentryGuard::Session("vod-session"),
+            AdmissionRequest {
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                client_ip: &fingerprint.client_ip,
+                request_addr: &fingerprint.addr,
+                use_session_admission: false,
+                session_token: Some("vod-session"),
+                activate_unbound_session: false,
+                eviction_reentry_guard: EvictionReentryGuard::Session("vod-session"),
+            },
         )
         .await;
         assert_eq!(connection_based.admission.permission, UserConnectionPermission::Exhausted);
@@ -7240,15 +7265,17 @@ mod tests {
 
         let result = resolve_admission_with_strategies(
             &app_state.admission_ctx(),
-            "loop-user",
-            1,
-            0,
-            &reconnect_fingerprint.client_ip,
-            &reconnect_fingerprint.addr,
-            true,
-            Some("socket-reconnect"),
-            false,
-            EvictionReentryGuard::SocketPlayback { virtual_id: VirtualId::new(9001) },
+            AdmissionRequest {
+                username: "loop-user",
+                max_connections: 1,
+                soft_connections: 0,
+                client_ip: &reconnect_fingerprint.client_ip,
+                request_addr: &reconnect_fingerprint.addr,
+                use_session_admission: true,
+                session_token: Some("socket-reconnect"),
+                activate_unbound_session: false,
+                eviction_reentry_guard: EvictionReentryGuard::SocketPlayback { virtual_id: VirtualId::new(9001) },
+            },
         )
         .await;
         let admission = result.admission;
@@ -7369,15 +7396,17 @@ mod tests {
 
         let result = resolve_admission_with_strategies(
             &app_state.admission_ctx(),
-            "loop-user-2",
-            1,
-            0,
-            &new_fingerprint.client_ip,
-            &new_fingerprint.addr,
-            true,
-            Some("session-new"),
-            false,
-            EvictionReentryGuard::SocketPlayback { virtual_id: VirtualId::new(9103) },
+            AdmissionRequest {
+                username: "loop-user-2",
+                max_connections: 1,
+                soft_connections: 0,
+                client_ip: &new_fingerprint.client_ip,
+                request_addr: &new_fingerprint.addr,
+                use_session_admission: true,
+                session_token: Some("session-new"),
+                activate_unbound_session: false,
+                eviction_reentry_guard: EvictionReentryGuard::SocketPlayback { virtual_id: VirtualId::new(9103) },
+            },
         )
         .await;
         let admission = result.admission;
@@ -7493,15 +7522,17 @@ mod tests {
 
         let result = resolve_admission_with_strategies(
             &app_state.admission_ctx(),
-            "loop-user-4",
-            1,
-            0,
-            &new_fingerprint.client_ip,
-            &new_fingerprint.addr,
-            true,
-            Some("session-other"),
-            false,
-            EvictionReentryGuard::Session("session-other"),
+            AdmissionRequest {
+                username: "loop-user-4",
+                max_connections: 1,
+                soft_connections: 0,
+                client_ip: &new_fingerprint.client_ip,
+                request_addr: &new_fingerprint.addr,
+                use_session_admission: true,
+                session_token: Some("session-other"),
+                activate_unbound_session: false,
+                eviction_reentry_guard: EvictionReentryGuard::Session("session-other"),
+            },
         )
         .await;
         let admission = result.admission;
@@ -7587,15 +7618,17 @@ mod tests {
 
         let result = resolve_admission_with_strategies(
             &app_state.admission_ctx(),
-            "loop-user-3",
-            1,
-            1,
-            &reconnect_fingerprint.client_ip,
-            &reconnect_fingerprint.addr,
-            true,
-            Some("socket-reconnect"),
-            false,
-            EvictionReentryGuard::SocketPlayback { virtual_id: VirtualId::new(9201) },
+            AdmissionRequest {
+                username: "loop-user-3",
+                max_connections: 1,
+                soft_connections: 1,
+                client_ip: &reconnect_fingerprint.client_ip,
+                request_addr: &reconnect_fingerprint.addr,
+                use_session_admission: true,
+                session_token: Some("socket-reconnect"),
+                activate_unbound_session: false,
+                eviction_reentry_guard: EvictionReentryGuard::SocketPlayback { virtual_id: VirtualId::new(9201) },
+            },
         )
         .await;
         let admission = result.admission;
@@ -8329,28 +8362,32 @@ mod tests {
 
         let first_admission = resolve_admission_with_strategies(
             &app_state.admission_ctx(),
-            &user.username,
-            user.max_connections,
-            user.soft_connections,
-            &first_fingerprint.client_ip,
-            &first_fingerprint.addr,
-            true,
-            Some("tok-hls-first"),
-            true,
-            EvictionReentryGuard::Session("tok-hls-first"),
+            AdmissionRequest {
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                client_ip: &first_fingerprint.client_ip,
+                request_addr: &first_fingerprint.addr,
+                use_session_admission: true,
+                session_token: Some("tok-hls-first"),
+                activate_unbound_session: true,
+                eviction_reentry_guard: EvictionReentryGuard::Session("tok-hls-first"),
+            },
         )
         .await;
         let second_admission = resolve_admission_with_strategies(
             &app_state.admission_ctx(),
-            &user.username,
-            user.max_connections,
-            user.soft_connections,
-            &second_fingerprint.client_ip,
-            &second_fingerprint.addr,
-            true,
-            Some("tok-hls-second"),
-            true,
-            EvictionReentryGuard::Session("tok-hls-second"),
+            AdmissionRequest {
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                client_ip: &second_fingerprint.client_ip,
+                request_addr: &second_fingerprint.addr,
+                use_session_admission: true,
+                session_token: Some("tok-hls-second"),
+                activate_unbound_session: true,
+                eviction_reentry_guard: EvictionReentryGuard::Session("tok-hls-second"),
+            },
         )
         .await;
 
@@ -8499,15 +8536,17 @@ mod tests {
         let mut close_rx = app_state.connection_manager.get_close_connection_channel();
         let result = resolve_admission_with_strategies(
             &app_state.admission_ctx(),
-            &user.username,
-            user.max_connections,
-            user.soft_connections,
-            &ts_fingerprint.client_ip,
-            &ts_fingerprint.addr,
-            false,
-            None,
-            false,
-            EvictionReentryGuard::SocketPlayback { virtual_id: VirtualId::new(5001) },
+            AdmissionRequest {
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                client_ip: &ts_fingerprint.client_ip,
+                request_addr: &ts_fingerprint.addr,
+                use_session_admission: false,
+                session_token: None,
+                activate_unbound_session: false,
+                eviction_reentry_guard: EvictionReentryGuard::SocketPlayback { virtual_id: VirtualId::new(5001) },
+            },
         )
         .await;
         let admission = result.admission;
