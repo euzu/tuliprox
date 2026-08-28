@@ -20,7 +20,11 @@
 
 use crate::api::model::AppState;
 use log::{debug, warn};
-use shared::model::{EventKind, EventKindMask, EventMessage};
+use shared::model::{
+    notification::{EventId, Severity},
+    EventKind, EventKindMask, EventMessage, StreamProbeFailure, StreamProbeFailureReason, UserLifecycleEvent,
+    UserLifecycleState,
+};
 use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
@@ -82,7 +86,11 @@ const NOTIFIABLE_KINDS: EventKindMask = EventKindMask::new()
     .with(EventKind::ActiveUser)
     .with(EventKind::ActiveProvider)
     .with(EventKind::RecordingChanged)
-    .with(EventKind::RecordingRulesChanged);
+    .with(EventKind::RecordingRulesChanged)
+    .with(EventKind::UserCreated)
+    .with(EventKind::UserUpdated)
+    .with(EventKind::UserDeleted)
+    .with(EventKind::StreamProbeFailed);
 
 /// Map a bus event onto a notification, or `None` to ignore it.
 ///
@@ -189,6 +197,9 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
         // operator delivery.
         EventMessage::RecordingLifecycle(_) => None,
 
+        EventMessage::UserLifecycle(event) => Some(user_lifecycle_notification(id, event, message.severity())),
+        EventMessage::StreamProbeFailed(failure) => Some(probe_failure_notification(id, failure, message.severity())),
+
         EventMessage::ConfigReloadFailed(failure) => {
             let title = format!("Configuration reload failed: {}", failure.paths);
             Some(
@@ -216,6 +227,36 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
     }
 }
 
+/// Word an account lifecycle change.
+fn user_lifecycle_notification(id: EventId, event: &UserLifecycleEvent, severity: Severity) -> NotificationEvent {
+    let action = match event.state {
+        UserLifecycleState::Created => "created",
+        UserLifecycleState::Updated => "updated",
+        UserLifecycleState::Deleted => "deleted",
+    };
+    let title = format!("User {} {action} on target {}", event.username, event.target);
+    NotificationEvent::new(id, title.clone(), title)
+        .with_severity(severity)
+        .with_dedup_key(event.dedup_key())
+        .with_fields(event)
+}
+
+/// Word a failed stream probe.
+fn probe_failure_notification(id: EventId, failure: &StreamProbeFailure, severity: Severity) -> NotificationEvent {
+    let reason = match failure.reason {
+        StreamProbeFailureReason::NotFound => "returned 404",
+        StreamProbeFailureReason::Unreachable => "was unreachable or timed out",
+    };
+    let title = format!("Stream probe failed for input {}", failure.input);
+    let body = format!("Stream {} {reason}: {}", failure.unique_id, failure.url);
+    NotificationEvent::new(id, title, body)
+        .with_severity(severity)
+        // Per input, not per stream: a provider outage fails every channel
+        // behind it in the same run.
+        .with_dedup_key(failure.dedup_key())
+        .with_fields(failure)
+}
+
 /// `ConfigType` is not `Serialize`, so the template payload carries its
 /// display form.
 #[derive(serde::Serialize)]
@@ -233,7 +274,8 @@ mod tests {
         ActiveUserConnectionChange, ConfigReloadFailure, ConfigType, DiskAlert, DiskAlertLevel, DownloadsResponse,
         EventKind, LibraryScanProgressEvent, LibraryScanSummary, LibraryScanSummaryStatus, MsgKind,
         PlaylistUpdateProgressEvent, PlaylistUpdateState, PlaylistUpdateSummary, ProviderAccountEvent,
-        ProviderAccountState, RecordingLifecycleMessage, SystemInfo, WatchChanges,
+        ProviderAccountState, RecordingLifecycleMessage, StreamProbeFailure, StreamProbeFailureReason, SystemInfo,
+        UserLifecycleEvent, UserLifecycleState, WatchChanges,
     };
     use std::sync::Arc;
 
@@ -314,6 +356,15 @@ mod tests {
             provider_account(ProviderAccountState::StatusChanged),
             provider_account(ProviderAccountState::Expiring),
             provider_account(ProviderAccountState::Expired),
+            user_lifecycle(UserLifecycleState::Created),
+            user_lifecycle(UserLifecycleState::Updated),
+            user_lifecycle(UserLifecycleState::Deleted),
+            EventMessage::StreamProbeFailed(StreamProbeFailure::new(
+                "input".into(),
+                "1".into(),
+                "http://example.test/s".into(),
+                StreamProbeFailureReason::NotFound,
+            )),
         ];
         assert_eq!(samples.len(), EventKind::ALL.len(), "add the new variant to this list");
         samples
@@ -438,6 +489,10 @@ mod tests {
             output_filename: None,
             failure_reason: None,
         })
+    }
+
+    fn user_lifecycle(state: UserLifecycleState) -> EventMessage {
+        EventMessage::UserLifecycle(UserLifecycleEvent::new("u".into(), "t".into(), state))
     }
 
     fn provider_account(state: ProviderAccountState) -> EventMessage {

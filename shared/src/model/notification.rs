@@ -220,6 +220,14 @@ pub mod registry {
     /// High frequency. Subscribe deliberately.
     pub const PROVIDER_CONNECTIONS_CHANGED: EventId = EventId::new("provider.connections.changed");
 
+    // ---- user accounts ---------------------------------------------------
+    pub const USER_CREATED: EventId = EventId::new("user.created");
+    pub const USER_UPDATED: EventId = EventId::new("user.updated");
+    pub const USER_DELETED: EventId = EventId::new("user.deleted");
+
+    // ---- streams ---------------------------------------------------------
+    pub const STREAM_PROBE_FAILED: EventId = EventId::new("stream.probe.failed");
+
     // ---- dvr ------------------------------------------------------------
     pub const RECORDING_QUEUE_CHANGED: EventId = EventId::new("recording.queue.changed");
     pub const RECORDING_RULES_CHANGED: EventId = EventId::new("recording.rules.changed");
@@ -315,6 +323,26 @@ pub mod registry {
             id: PROVIDER_CONNECTIONS_CHANGED,
             severity: Severity::Info,
             description: "A provider's active connection count changed. High frequency - subscribe deliberately.",
+        },
+        EventDescriptor {
+            id: USER_CREATED,
+            severity: Severity::Info,
+            description: "An API-proxy user account was created.",
+        },
+        EventDescriptor {
+            id: USER_UPDATED,
+            severity: Severity::Info,
+            description: "An API-proxy user account was changed.",
+        },
+        EventDescriptor {
+            id: USER_DELETED,
+            severity: Severity::Warn,
+            description: "An API-proxy user account was deleted.",
+        },
+        EventDescriptor {
+            id: STREAM_PROBE_FAILED,
+            severity: Severity::Warn,
+            description: "A stream probe returned no metadata; the stream may be dead.                           Deduplicated per input, so a provider outage notifies once rather than per channel.",
         },
         EventDescriptor {
             id: RECORDING_QUEUE_CHANGED,

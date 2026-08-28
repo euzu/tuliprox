@@ -3,8 +3,9 @@ use log::{debug, info, warn};
 use shared::{
     error::TuliproxError,
     model::{
-        EpisodeStreamProperties, InputType, LiveStreamProperties, M3uPlaylistItem, PlaylistItemType, StreamProperties,
-        UUIDType, VideoStreamDetailProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem,
+        EpisodeStreamProperties, EventMessage, EventSink, InputType, LiveStreamProperties, M3uPlaylistItem,
+        PlaylistItemType, StreamProbeFailure, StreamProbeFailureReason, StreamProperties, UUIDType,
+        VideoStreamDetailProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem,
     },
     utils::sanitize_sensitive_info,
 };
@@ -73,7 +74,7 @@ fn uses_seekable_remote_probe(item_type: PlaylistItemType, is_remote_probe: bool
 /// - `unique_id`: For M3U this is the `provider_id` (String). For Library this is the `UUID` string.
 ///   For Xtream this is the numeric provider id as string.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub async fn update_generic_stream_metadata(
+pub async fn update_generic_stream_metadata<E: EventSink>(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
     input: &ConfigInput,
@@ -83,6 +84,7 @@ pub async fn update_generic_stream_metadata(
     active_provider: &Arc<ActiveProviderManager>,
     active_handle: Option<&tuliprox_core::model::ProviderHandle>,
     probe_priority: i8,
+    events: &E,
 ) -> Result<GenericProbeOutcome, TuliproxError> {
     let prepared = match prepare_generic_stream_metadata(
         app_config,
@@ -94,6 +96,7 @@ pub async fn update_generic_stream_metadata(
         active_provider,
         active_handle,
         probe_priority,
+        events,
     )
     .await?
     {
@@ -109,7 +112,7 @@ pub async fn update_generic_stream_metadata(
 ///
 /// This is used by metadata workers that can batch the eventual B+Tree writes.
 #[allow(clippy::too_many_arguments)]
-pub async fn probe_generic_stream_metadata(
+pub async fn probe_generic_stream_metadata<E: EventSink>(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
     input: &ConfigInput,
@@ -119,6 +122,7 @@ pub async fn probe_generic_stream_metadata(
     active_provider: &Arc<ActiveProviderManager>,
     active_handle: Option<&tuliprox_core::model::ProviderHandle>,
     probe_priority: i8,
+    events: &E,
 ) -> Result<GenericProbeMetadataOutcome, TuliproxError> {
     let prepared = match prepare_generic_stream_metadata(
         app_config,
@@ -130,6 +134,7 @@ pub async fn probe_generic_stream_metadata(
         active_provider,
         active_handle,
         probe_priority,
+        events,
     )
     .await?
     {
@@ -145,8 +150,28 @@ pub async fn probe_generic_stream_metadata(
     }))
 }
 
+/// Publish "this stream did not probe".
+///
+/// The URL is sanitized here rather than by the caller: it is a resolved
+/// provider URL carrying account credentials, and this record is rendered
+/// into notification channels.
+fn emit_probe_failure<E: EventSink>(
+    events: &E,
+    input: &ConfigInput,
+    unique_id: &str,
+    probe_url: &str,
+    reason: StreamProbeFailureReason,
+) {
+    events.emit(EventMessage::StreamProbeFailed(StreamProbeFailure::new(
+        Arc::clone(&input.name),
+        unique_id.into(),
+        sanitize_sensitive_info(probe_url).as_ref().into(),
+        reason,
+    )));
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-async fn prepare_generic_stream_metadata(
+async fn prepare_generic_stream_metadata<E: EventSink>(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
     input: &ConfigInput,
@@ -156,6 +181,7 @@ async fn prepare_generic_stream_metadata(
     active_provider: &Arc<ActiveProviderManager>,
     active_handle: Option<&tuliprox_core::model::ProviderHandle>,
     probe_priority: i8,
+    events: &E,
 ) -> Result<PreparedGenericProbeOutcome, TuliproxError> {
     let storage_dir = &app_config.config.load().storage_dir;
 
@@ -269,16 +295,26 @@ async fn prepare_generic_stream_metadata(
             raw_audio.map(|value| Arc::<str>::from(value.to_string())),
             stats,
         ),
+        // The three failure arms are the only place the *reason* survives:
+        // both outcome enums above collapse to a single `ProbeFailed`, so a
+        // caller cannot tell a dead provider from a cancelled shutdown. The
+        // event is published here rather than plumbed out for that reason.
         ProbeUrlOutcome::Failed(ProbeFailureKind::NotFound) => {
             warn!("Probe target not found (404) for generic stream: {unique_id}");
+            emit_probe_failure(events, input, unique_id, &probe_url, StreamProbeFailureReason::NotFound);
             return Err(shared::error::TuliproxError::Probe(format!(
                 "Probe target returned 404 Not Found for stream {unique_id}"
             )));
         }
         ProbeUrlOutcome::Failed(ProbeFailureKind::Other) => {
             warn!("Probe failed or timed out for generic stream: {unique_id}");
+            emit_probe_failure(events, input, unique_id, &probe_url, StreamProbeFailureReason::Unreachable);
             return Ok(PreparedGenericProbeOutcome::ProbeFailed);
         }
+        // Deliberately silent. A cancelled probe is this server shutting
+        // down or preempting the task, not a statement about the stream,
+        // and an operator alerted on it would be alerted on our own
+        // lifecycle.
         ProbeUrlOutcome::Failed(ProbeFailureKind::Cancelled) => {
             warn!("Probe cancelled for generic stream: {unique_id}");
             return Ok(PreparedGenericProbeOutcome::ProbeFailed);

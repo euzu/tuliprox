@@ -14,7 +14,8 @@ use crate::model::{
     stats::SourceStats,
     ActiveUserConnectionChange, ConfigReloadFailure, ConfigType, DiskAlert, DownloadsDelta, DownloadsResponse,
     LibraryScanProgressEvent, MsgKind, Permission, PlaylistUpdateProgressEvent, PlaylistUpdateState,
-    ProviderAccountEvent, ProviderAccountState, RecordingLifecycleMessage, SystemInfo, WatchChanges,
+    ProviderAccountEvent, ProviderAccountState, RecordingLifecycleMessage, StreamProbeFailure, SystemInfo,
+    UserLifecycleEvent, UserLifecycleState, WatchChanges,
 };
 use std::sync::Arc;
 
@@ -56,6 +57,14 @@ pub enum EventMessage {
     RecordingLifecycle(RecordingLifecycleMessage),
     /// A provider account changed status, is about to expire, or has.
     ProviderAccount(ProviderAccountEvent),
+
+    /// An API-proxy user was created, changed or removed. One variant,
+    /// three kinds - see [`EventMessage::kind`] - so a subscriber can ask
+    /// for deletions alone.
+    UserLifecycle(UserLifecycleEvent),
+    /// A stream probe returned no metadata. There is no success
+    /// counterpart; see [`StreamProbeFailure`].
+    StreamProbeFailed(StreamProbeFailure),
 }
 
 /// Somewhere an [`EventMessage`] can be published.
@@ -137,6 +146,10 @@ pub enum EventKind {
     ProviderAccountStatus,
     ProviderAccountExpiring,
     ProviderAccountExpired,
+    UserCreated,
+    UserUpdated,
+    UserDeleted,
+    StreamProbeFailed,
 }
 
 impl EventKind {
@@ -144,7 +157,7 @@ impl EventKind {
     ///
     /// The mask type below indexes into this, so the order is load-bearing:
     /// it is the bit order, not just a listing.
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 27] = [
         Self::ServerError,
         Self::ActiveUser,
         Self::ActiveProvider,
@@ -168,11 +181,19 @@ impl EventKind {
         Self::ProviderAccountStatus,
         Self::ProviderAccountExpiring,
         Self::ProviderAccountExpired,
+        Self::UserCreated,
+        Self::UserUpdated,
+        Self::UserDeleted,
+        Self::StreamProbeFailed,
     ];
 
     /// This kind's bit position.
+    ///
+    /// `u64`, not `u32`: the taxonomy passed 23 kinds and the headroom above
+    /// it is where a mask migration would have to happen *after* operators
+    /// had written subscriptions into config. Widening now is free.
     #[must_use]
-    pub const fn bit(self) -> u32 { 1 << (self as u32) }
+    pub const fn bit(self) -> u64 { 1 << (self as u32) }
 
     /// The permission a websocket session must hold to receive this kind.
     ///
@@ -192,6 +213,9 @@ impl EventKind {
                 Permission::PlaylistWrite
             }
             Self::LibraryScanProgress => Permission::LibraryWrite,
+            // Who may hear that an account was created is the same question
+            // as who may list accounts.
+            Self::UserCreated | Self::UserUpdated | Self::UserDeleted => Permission::UserRead,
             Self::ServerError
             | Self::ActiveUser
             | Self::ActiveProvider
@@ -203,7 +227,9 @@ impl EventKind {
             | Self::ConfigReloadFailed
             | Self::ProviderAccountStatus
             | Self::ProviderAccountExpiring
-            | Self::ProviderAccountExpired => Permission::SystemRead,
+            | Self::ProviderAccountExpired
+            // Sits with the metadata-update events it is produced by.
+            | Self::StreamProbeFailed => Permission::SystemRead,
         }
     }
 
@@ -289,6 +315,10 @@ impl EventKind {
             Self::ProviderAccountStatus => "provider.account.status",
             Self::ProviderAccountExpiring => "provider.account.expiring",
             Self::ProviderAccountExpired => "provider.account.expired",
+            Self::UserCreated => "user.created",
+            Self::UserUpdated => "user.updated",
+            Self::UserDeleted => "user.deleted",
+            Self::StreamProbeFailed => "stream.probe.failed",
         }
     }
 
@@ -335,6 +365,12 @@ impl EventMessage {
                 ProviderAccountState::Expiring => EventKind::ProviderAccountExpiring,
                 ProviderAccountState::Expired => EventKind::ProviderAccountExpired,
             },
+            Self::UserLifecycle(event) => match event.state {
+                UserLifecycleState::Created => EventKind::UserCreated,
+                UserLifecycleState::Updated => EventKind::UserUpdated,
+                UserLifecycleState::Deleted => EventKind::UserDeleted,
+            },
+            Self::StreamProbeFailed(_) => EventKind::StreamProbeFailed,
         }
     }
 
@@ -393,6 +429,12 @@ impl EventMessage {
                 ProviderAccountState::Expiring => registry::PROVIDER_ACCOUNT_EXPIRING,
                 ProviderAccountState::Expired => registry::PROVIDER_ACCOUNT_EXPIRED,
             },
+            Self::UserLifecycle(event) => match event.state {
+                UserLifecycleState::Created => registry::USER_CREATED,
+                UserLifecycleState::Updated => registry::USER_UPDATED,
+                UserLifecycleState::Deleted => registry::USER_DELETED,
+            },
+            Self::StreamProbeFailed(_) => registry::STREAM_PROBE_FAILED,
             Self::ActiveUser(_) => registry::USER_CONNECTION_CHANGED,
             Self::ActiveProvider(_, _) => registry::PROVIDER_CONNECTIONS_CHANGED,
             Self::RecordingChanged => registry::RECORDING_QUEUE_CHANGED,
@@ -444,6 +486,8 @@ impl EventMessage {
             Self::PlaylistWatchChanged(changes) => encode(changes),
             Self::RecordingLifecycle(msg) => encode(msg),
             Self::ProviderAccount(event) => encode(event),
+            Self::UserLifecycle(event) => encode(event),
+            Self::StreamProbeFailed(failure) => encode(failure),
         }
     }
 
@@ -489,14 +533,14 @@ impl PlaylistUpdateSummary {
 /// message for it. A subscriber that wants two kinds should not pay for the
 /// other twelve.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub struct EventKindMask(u32);
+pub struct EventKindMask(u64);
 
 impl EventKindMask {
     /// Nothing.
     pub const NONE: Self = Self(0);
 
     /// Everything, including kinds added after this mask was written.
-    pub const ALL: Self = Self(u32::MAX);
+    pub const ALL: Self = Self(u64::MAX);
 
     /// An empty mask to build on.
     #[must_use]
@@ -559,18 +603,20 @@ mod tests {
 
     #[test]
     fn every_kind_has_a_distinct_bit() {
-        let mut seen = 0u32;
+        let mut seen = 0u64;
         for kind in EventKind::ALL {
             assert_eq!(seen & kind.bit(), 0, "{kind:?} shares a bit with an earlier kind");
             seen |= kind.bit();
         }
     }
 
-    /// `EventKindMask` is a `u32`, so the taxonomy cannot outgrow 32 kinds
-    /// without the mask type changing with it.
+    /// `EventKindMask` is a `u64`, so the taxonomy cannot outgrow 64 kinds
+    /// without the mask type changing with it. It was a `u32` at 23 kinds;
+    /// the widening happened while no operator had a subscription list to
+    /// migrate, which is the only cheap time to do it.
     #[test]
     fn the_taxonomy_still_fits_in_the_mask() {
-        assert!(EventKind::ALL.len() <= 32, "EventKindMask needs a wider integer");
+        assert!(EventKind::ALL.len() <= 64, "EventKindMask needs a wider integer");
     }
 
     #[test]

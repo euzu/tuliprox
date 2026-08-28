@@ -3282,6 +3282,7 @@ impl InputWorker {
                             &ctx.active_provider,
                             active_handle,
                             probe_priority,
+                            &ctx.events,
                         )
                         .await?;
 
@@ -3358,6 +3359,7 @@ impl InputWorker {
                     &ctx.active_provider,
                     active_handle,
                     probe_priority,
+                    &ctx.events,
                 )
                 .await?;
 

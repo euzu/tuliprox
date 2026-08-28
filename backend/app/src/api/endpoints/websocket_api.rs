@@ -484,7 +484,12 @@ fn to_protocol_message(event: EventMessage) -> Option<(ProtocolMessage, &'static
         | EventMessage::ConfigReloadFailed(_)
         | EventMessage::PlaylistWatchChanged(_)
         | EventMessage::RecordingLifecycle(_)
-        | EventMessage::ProviderAccount(_) => return None,
+        | EventMessage::ProviderAccount(_)
+        // The panel already knows it just saved a user - it made the
+        // request - and nothing in the Web UI subscribes to probe
+        // failures yet. Both are on the bus for operators and plugins.
+        | EventMessage::UserLifecycle(_)
+        | EventMessage::StreamProbeFailed(_) => return None,
     })
 }
 
@@ -653,17 +658,47 @@ mod tests {
     fn every_event_kind_is_either_wire_mapped_or_deliberately_not() {
         use shared::model::EventKind;
 
-        // `RecordingChanged` needs a per-session snapshot re-fetch that this
-        // pure function cannot do; the metadata events are internal.
+        // Two reasons a kind produces no frame, kept apart because they are
+        // not the same fact - the same distinction `to_notification` draws
+        // between its own two `None` arms.
+
+        // Reachable over the wire, just not through this pure function:
+        // `RecordingChanged` needs a per-session snapshot re-fetch, and the
+        // metadata events are internal.
         const HANDLED_ELSEWHERE: [EventKind; 3] = [
             EventKind::RecordingChanged,
             EventKind::InputMetadataUpdatesCompleted,
             EventKind::InputMetadataUpdatesStarted,
         ];
 
+        // Never on the wire: these reach operators through the messaging
+        // pipeline and plugins through the bus. Putting one on the wire
+        // would need a `ProtocolMessage` variant and frontend handling that
+        // nothing asks for.
+        //
+        // This list did not exist until now, so the assert below compared
+        // every notification-only kind against `expected = true` and the
+        // test failed on `DiskAlert` - it has been red since the lifecycle
+        // events joined the bus.
+        const NOT_ON_THE_WIRE: [EventKind; 13] = [
+            EventKind::DiskAlert,
+            EventKind::ConfigReloadFailed,
+            EventKind::PlaylistWatchChanged,
+            EventKind::RecordingStarted,
+            EventKind::RecordingCompleted,
+            EventKind::RecordingFailed,
+            EventKind::ProviderAccountStatus,
+            EventKind::ProviderAccountExpiring,
+            EventKind::ProviderAccountExpired,
+            EventKind::UserCreated,
+            EventKind::UserUpdated,
+            EventKind::UserDeleted,
+            EventKind::StreamProbeFailed,
+        ];
+
         for (event, kind) in sample_event_of_every_kind() {
             let mapped = to_protocol_message(event).is_some();
-            let expected = !HANDLED_ELSEWHERE.contains(&kind);
+            let expected = !HANDLED_ELSEWHERE.contains(&kind) && !NOT_ON_THE_WIRE.contains(&kind);
             assert_eq!(mapped, expected, "{kind:?}: wire-mapped={mapped}, expected={expected}");
         }
     }
@@ -672,8 +707,13 @@ mod tests {
     /// variant cannot slip past the test above.
     fn sample_event_of_every_kind() -> Vec<(EventMessage, shared::model::EventKind)> {
         use shared::model::{
-            ActiveUserConnectionChange, ConfigType, EventKind, PlaylistUpdateState, PlaylistUpdateSummary, SystemInfo,
+            ActiveUserConnectionChange, ConfigType, EventKind, PlaylistUpdateState, PlaylistUpdateSummary,
+            StreamProbeFailure, StreamProbeFailureReason, SystemInfo, UserLifecycleEvent, UserLifecycleState,
         };
+
+        fn user_lifecycle(state: UserLifecycleState) -> EventMessage {
+            EventMessage::UserLifecycle(UserLifecycleEvent::new("u".into(), "t".into(), state))
+        }
 
         let downloads = DownloadsResponse { queue: Vec::new(), finished: Vec::new(), active: Vec::new() };
         let samples = vec![
@@ -733,6 +773,15 @@ mod tests {
             provider_account(ProviderAccountState::StatusChanged),
             provider_account(ProviderAccountState::Expiring),
             provider_account(ProviderAccountState::Expired),
+            user_lifecycle(UserLifecycleState::Created),
+            user_lifecycle(UserLifecycleState::Updated),
+            user_lifecycle(UserLifecycleState::Deleted),
+            EventMessage::StreamProbeFailed(StreamProbeFailure::new(
+                "input".into(),
+                "1".into(),
+                "http://example.test/s".into(),
+                StreamProbeFailureReason::Unreachable,
+            )),
         ];
         assert_eq!(samples.len(), EventKind::ALL.len(), "add the new variant to this list");
         samples

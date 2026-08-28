@@ -44,6 +44,7 @@ mod stream_history;
 mod stream_history_record;
 mod stream_info;
 mod stream_meter;
+mod stream_probe_failure;
 mod stream_properties;
 mod strm_export_style;
 pub mod system_info;
@@ -51,6 +52,7 @@ mod target_type;
 mod transfer;
 mod ui_playlist_item;
 mod user_command;
+mod user_lifecycle;
 mod uuidtype;
 pub mod view_type;
 pub mod web_socket;
@@ -64,8 +66,8 @@ pub use self::{
     playlist_info_document::*, playlist_request::*, processing_order::*, progress::*, recording::*, recording_math::*,
     regex_cache::*, search_fields::*, search_request::*, short_epg::*, stalker::*, stalker_item::*, stats::*,
     status_check::*, stream_history::*, stream_history_record::*, stream_info::*, stream_meter::*,
-    stream_properties::*, strm_export_style::*, system_info::*, target_type::*, transfer::*, ui_playlist_item::*,
-    user_command::*, uuidtype::*, web_socket::*, xtream::*,
+    stream_probe_failure::*, stream_properties::*, strm_export_style::*, system_info::*, target_type::*, transfer::*,
+    ui_playlist_item::*, user_command::*, user_lifecycle::*, uuidtype::*, web_socket::*, xtream::*,
 };
 pub use ids::*;
 pub use prepare::*;
