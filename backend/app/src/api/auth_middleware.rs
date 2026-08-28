@@ -49,6 +49,10 @@ fn rejection_for(err: AuthError) -> axum::response::Response {
         _ => StatusCode::UNAUTHORIZED,
     };
     let mut builder = axum::http::Response::builder().status(status);
+    if status == StatusCode::UNAUTHORIZED {
+        // A 401 without a challenge is not a well-formed 401.
+        builder = builder.header(axum::http::header::WWW_AUTHENTICATE, "Bearer");
+    }
     if err.is_token_refresh_required() {
         builder = builder.header("X-Token-Refresh", "required");
     }

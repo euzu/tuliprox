@@ -1,6 +1,6 @@
 use crate::{
     api::model::AppState,
-    auth::{generate_password_from_input, verify_token, AuthBearer},
+    auth::{generate_password_from_input, verify_token, AuthBearer, AuthRejection},
     model::{RbacGroup, WebAuthConfig, WebUiUser},
     utils,
     utils::{get_default_user_file_path, get_default_user_group_file_path},
@@ -314,7 +314,7 @@ fn token_from_extensions_or_headers(request: &mut axum::extract::Request) -> Res
         return Ok(token);
     }
 
-    let token = AuthBearer::from_headers(request.headers()).map_err(|(status, _)| status)?;
+    let token = AuthBearer::from_headers(request.headers()).map_err(AuthRejection::status)?;
     request.extensions_mut().insert(token.clone());
     Ok(token)
 }

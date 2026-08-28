@@ -75,7 +75,7 @@ impl FromRequestParts<Arc<AppState>> for AuthClaims {
     ) -> Result<Self, Self::Rejection> {
         let app_state = state.clone();
         let AuthBearer(token) =
-            parts.extract::<AuthBearer>().await.map_err(|(_, msg)| (StatusCode::UNAUTHORIZED, msg).into_response())?;
+            parts.extract::<AuthBearer>().await.map_err(axum::response::IntoResponse::into_response)?;
         let config = app_state.app_config.config.load();
         match config.web_ui.as_ref().and_then(|w| w.auth.as_ref()).filter(|auth| auth.enabled) {
             Some(web_auth) => {

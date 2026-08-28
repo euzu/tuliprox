@@ -1,8 +1,10 @@
-use crate::Rejection;
 use axum::{
     extract::FromRequestParts,
-    http::{request::Parts, HeaderMap, StatusCode},
+    http::{header::AUTHORIZATION, request::Parts, HeaderMap},
 };
+use tuliprox_core::model::{AuthRejection, AuthScheme};
+
+use crate::Rejection;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct AuthBearer(pub String);
@@ -28,15 +30,14 @@ impl AuthBearer {
 
     pub fn from_headers(headers: &HeaderMap) -> Result<Self, Rejection> {
         let authorization = headers
-            .get(axum::http::header::AUTHORIZATION)
-            .ok_or((StatusCode::FORBIDDEN, "Authorization header is missing"))?
+            .get(AUTHORIZATION)
+            .ok_or(AuthRejection::MissingHeader(AuthScheme::Bearer))?
             .to_str()
-            .map_err(|_| (StatusCode::FORBIDDEN, "Authorization header contains invalid characters"))?;
+            .map_err(|_| AuthRejection::MalformedHeader(AuthScheme::Bearer))?;
 
-        let split = authorization.split_once(' ');
-        match split {
+        match authorization.split_once(' ') {
             Some((scheme, contents)) if scheme.eq_ignore_ascii_case("bearer") => Ok(Self::from_header(contents)),
-            _ => Err((StatusCode::FORBIDDEN, "`Authorization` header must be a bearer token")),
+            _ => Err(AuthRejection::WrongScheme(AuthScheme::Bearer)),
         }
     }
 
