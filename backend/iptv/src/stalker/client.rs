@@ -1,4 +1,6 @@
-use crate::stalker::{
+use crate::{
+    capabilities::ProviderCapabilities,
+    stalker::{
     auth, catalog,
     cookie_jar::{apply_set_cookie_headers_unchecked, StalkerCookieJar},
     epg,
@@ -10,6 +12,7 @@ use crate::stalker::{
     session::StalkerSession,
     transport::{ReqwestTransport, StalkerTransport},
     url_factory::{load_url_candidates, StalkerLoadUrl},
+    },
 };
 use bytes::{Bytes, BytesMut};
 use log::{trace, warn};
@@ -97,6 +100,10 @@ pub struct StalkerApiClient<Tr: StalkerTransport = ReqwestTransport, C: Clock = 
     handshake: Mutex<Option<StalkerHandshake>>,
     /// Serialises concurrent refresh attempts (e.g. 4xx-triggered re-handshake).
     refresh_lock: AsyncMutex<()>,
+    /// What this portal has already proven about itself. Seeded by the caller from a
+    /// [`crate::capability_store::CapabilityStore`] when one is available, and updated as
+    /// the portal answers.
+    capabilities: Mutex<ProviderCapabilities>,
 }
 
 impl StalkerApiClient<ReqwestTransport, SystemClock> {
@@ -128,7 +135,63 @@ impl<Tr: StalkerTransport, C: Clock> StalkerApiClient<Tr, C> {
             cookies: StalkerCookieJar::new(),
             handshake: Mutex::new(None),
             refresh_lock: AsyncMutex::new(()),
+            capabilities: Mutex::new(ProviderCapabilities::default()),
         })
+    }
+
+    /// Seed the client with what a previous run learned about this portal.
+    #[must_use]
+    pub fn with_capabilities(self, capabilities: ProviderCapabilities) -> Self {
+        *self.capabilities.lock() = capabilities;
+        self
+    }
+
+    /// The current snapshot, for persisting back to a store.
+    #[must_use]
+    pub fn capabilities(&self) -> ProviderCapabilities {
+        self.capabilities.lock().clone()
+    }
+
+    /// Whether `action` is known not to work on this portal, according to a snapshot
+    /// still worth believing.
+    #[must_use]
+    pub fn action_is_unsupported(&self, action: &str) -> bool {
+        self.capabilities.lock().is_unsupported(action, self.now_epoch_secs())
+    }
+
+    /// Note that the portal does not implement `action`. Returns whether this was new
+    /// information, so a caller can skip a write that would persist nothing.
+    pub fn record_unsupported_action(&self, action: &str) -> bool {
+        let now = self.now_epoch_secs();
+        self.capabilities.lock().record_unsupported(action, now)
+    }
+
+    /// Note that `action` worked, taking back any earlier negative claim.
+    pub fn record_supported_action(&self, action: &str) -> bool {
+        let now = self.now_epoch_secs();
+        self.capabilities.lock().record_supported(action, now)
+    }
+
+    /// Note the recipe and endpoint that completed a handshake, so the next one can start
+    /// there instead of walking the chain from the top.
+    pub fn record_successful_handshake(&self, recipe: &str, endpoint: &str) -> bool {
+        let now = self.now_epoch_secs();
+        self.capabilities.lock().record_handshake(recipe, endpoint, now)
+    }
+
+    /// The recipe that last completed a handshake here, when still worth believing.
+    #[must_use]
+    pub fn remembered_recipe(&self) -> Option<String> {
+        let now = self.now_epoch_secs();
+        self.capabilities.lock().remembered_recipe(now).map(ToString::to_string)
+    }
+
+    /// The endpoint candidates in the order they should be tried, with the one that last
+    /// answered moved to the front.
+    #[must_use]
+    pub fn ordered_load_urls(&self) -> Vec<StalkerLoadUrl> {
+        let now = self.now_epoch_secs();
+        self.capabilities.lock().prefer_remembered(self.load_urls.clone(), |url| url.load_url.clone(), now)
     }
 
     /// Unix-epoch seconds according to this client's clock. Everything that expires -
@@ -995,6 +1058,92 @@ mod transport_tests {
         assert!(result.is_err(), "the caller must be told the prefix is incomplete");
         assert_eq!(*seen.lock(), vec!["1".to_string(), "2".to_string()]);
         assert_eq!(transport.requested().len(), 2, "no restart against the next candidate");
+    }
+
+    /// A portal that does not implement the bulk shortcut is asked exactly once.
+    #[tokio::test]
+    async fn an_unsupported_action_is_not_probed_again() {
+        let transport = std::sync::Arc::new(FakeTransport::new([
+            // `get_all_channels` 404s on all three endpoint candidates.
+            Reply::Http(404, String::new()),
+            Reply::Http(404, String::new()),
+            Reply::Http(404, String::new()),
+        ]));
+        let client = client_with(std::sync::Arc::clone(&transport), StalkerInputConfig::default());
+
+        let first = catalog::get_all_channels(&client, &handshake()).await.expect_err("portal 404s");
+        assert!(first.is_unsupported_catalog_action());
+        let probes_after_first = transport.requested().len();
+
+        let second = catalog::get_all_channels(&client, &handshake()).await.expect_err("still unsupported");
+
+        assert!(matches!(second, StalkerError::ActionUnsupported { .. }));
+        assert!(second.is_unsupported_catalog_action(), "the caller's paginated fallback keys off this");
+        assert_eq!(transport.requested().len(), probes_after_first, "the second call must not touch the network");
+    }
+
+    /// The negative claim is a hint with an expiry, not a permanent verdict.
+    #[tokio::test]
+    async fn an_expired_claim_lets_a_fixed_portal_be_retried() {
+        let clock = ManualClock::new(10_000_000);
+        let transport = std::sync::Arc::new(FakeTransport::new([
+            Reply::Http(404, String::new()),
+            Reply::Http(404, String::new()),
+            Reply::Http(404, String::new()),
+            Reply::ok(r#"{"js": {"data": [{"id": "1", "name": "Now supported"}]}}"#),
+        ]));
+        let client = StalkerApiClient::with_parts(
+            std::sync::Arc::clone(&transport),
+            clock.clone(),
+            PORTAL.to_string(),
+            StalkerInputConfig::default(),
+        )
+        .expect("portal url is well formed");
+
+        catalog::get_all_channels(&client, &handshake()).await.expect_err("portal 404s");
+        clock.advance((crate::capabilities::CAPABILITY_TTL_SECS + 1) * 1_000);
+
+        let channels = catalog::get_all_channels(&client, &handshake()).await.expect("re-probed after the TTL");
+        assert_eq!(channels.len(), 1);
+    }
+
+    /// A snapshot from a previous run moves the endpoint that answered to the front, so
+    /// the two that did not are never dialled again.
+    #[tokio::test]
+    async fn a_remembered_endpoint_is_tried_first() {
+        let transport = std::sync::Arc::new(FakeTransport::new([Reply::ok(r#"{"js": [{"id": "1", "title": "Sport"}]}"#)]));
+        let mut capabilities = crate::capabilities::ProviderCapabilities::default();
+        // 10_000_000 ms on the manual clock is 10_000 s.
+        capabilities.record_handshake("GenericSafe", &format!("{PORTAL}c/"), 10_000);
+        let client =
+            client_with(std::sync::Arc::clone(&transport), StalkerInputConfig::default()).with_capabilities(capabilities);
+
+        catalog::get_live_categories(&client, &handshake()).await.expect("remembered endpoint answers");
+
+        assert_eq!(
+            transport.requested_paths(),
+            vec!["/stalker_portal/c/".to_string()],
+            "the two endpoints that never answered must not be dialled"
+        );
+    }
+
+    /// A remembered endpoint that has since gone away must not strand the client.
+    #[tokio::test]
+    async fn a_remembered_endpoint_that_stops_answering_falls_back_to_the_others() {
+        let transport = std::sync::Arc::new(FakeTransport::new([
+            Reply::Http(500, String::new()),
+            Reply::ok(r#"{"js": [{"id": "1", "title": "Sport"}]}"#),
+        ]));
+        let mut capabilities = crate::capabilities::ProviderCapabilities::default();
+        capabilities.record_handshake("GenericSafe", &format!("{PORTAL}c/"), 10_000);
+        let client =
+            client_with(std::sync::Arc::clone(&transport), StalkerInputConfig::default()).with_capabilities(capabilities);
+
+        let categories = catalog::get_live_categories(&client, &handshake()).await.expect("another endpoint answers");
+
+        assert_eq!(categories.len(), 1);
+        assert_eq!(transport.requested_paths().len(), 2);
+        assert_eq!(transport.requested_paths()[0], "/stalker_portal/c/", "the remembered one is still tried first");
     }
 
     /// Session staleness is the client's own clock, so a cached handshake can be aged

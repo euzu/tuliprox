@@ -48,12 +48,17 @@ pub struct StalkerHandshakeJs {
 pub async fn handshake<Tr: StalkerTransport, C: Clock>(client: &StalkerApiClient<Tr, C>) -> StalkerResult<StalkerHandshake> {
     let config = client.config();
     let preset = config.mag_preset;
-    let chain = fallback_recipes_for(config.auth_mode, preset);
+    // Start from the recipe that last worked. The rest of the chain still follows, so a
+    // portal that has changed its mind is still reachable - this only spares us replaying
+    // four rejected handshakes against a portal whose answer we already know, which is
+    // the part that looks like credential stuffing from the provider's side.
+    let chain = prefer_remembered_recipe(client, fallback_recipes_for(config.auth_mode, preset));
     let mut last_err: Option<StalkerError> = None;
     for recipe in chain {
         match attempt_recipe(client, recipe).await {
             Ok(handshake) => {
                 info!("Stalker handshake succeeded with recipe {recipe:?}");
+                client.record_successful_handshake(&format!("{recipe:?}"), &handshake.session.load_url);
                 return Ok(handshake);
             }
             Err(err) => {
@@ -69,9 +74,25 @@ pub async fn handshake<Tr: StalkerTransport, C: Clock>(client: &StalkerApiClient
     Err(last_err.unwrap_or_else(|| StalkerError::RecipesExhausted { portal: safe_stalker_url(client.portal_url()) }))
 }
 
+/// Move the remembered recipe to the front of `chain`, keeping the rest in order.
+fn prefer_remembered_recipe<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
+    chain: Vec<StalkerBootstrapRecipe>,
+) -> Vec<StalkerBootstrapRecipe> {
+    let Some(remembered) = client.remembered_recipe() else {
+        return chain;
+    };
+    let Some(position) = chain.iter().position(|recipe| format!("{recipe:?}") == remembered) else {
+        return chain;
+    };
+    let mut chain = chain;
+    chain.swap(0, position);
+    chain
+}
+
 async fn attempt_recipe<Tr: StalkerTransport, C: Clock>(client: &StalkerApiClient<Tr, C>, recipe: StalkerBootstrapRecipe) -> StalkerResult<StalkerHandshake> {
     let spec = recipe_spec_for(recipe);
-    let candidates = client.load_url_candidates().to_vec();
+    let candidates = client.ordered_load_urls();
     if candidates.is_empty() {
         return Err(StalkerError::NoEndpoint { portal: safe_stalker_url(client.portal_url()) });
     }

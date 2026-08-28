@@ -46,7 +46,7 @@ pub async fn create_link<Tr: StalkerTransport, C: Clock>(
     archive_end: Option<&str>,
 ) -> StalkerResult<StalkerResolvedStream> {
     let spec = recipe_spec_for(handshake.profile.bootstrap_recipe);
-    let candidates = client.load_url_candidates().to_vec();
+    let candidates = client.ordered_load_urls();
     let mut last_err: Option<StalkerError> = None;
     for load_url in candidates {
         let builder = build_create_link_builder(

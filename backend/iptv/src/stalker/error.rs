@@ -56,6 +56,9 @@ pub enum StalkerError {
     #[error("stalker portal returned an empty body for {action}")]
     EmptyBody { action: String },
 
+    #[error("stalker portal does not implement {action}")]
+    ActionUnsupported { action: String },
+
     #[error("stalker {portal_type} catalog is incomplete: {reason}")]
     CatalogIncomplete { portal_type: &'static str, reason: String },
 
@@ -107,7 +110,7 @@ impl StalkerError {
 
     pub fn is_unsupported_catalog_action(&self) -> bool {
         match self {
-            Self::BodyDecode { .. } | Self::HtmlResponse { .. } => true,
+            Self::ActionUnsupported { .. } | Self::BodyDecode { .. } | Self::HtmlResponse { .. } => true,
             Self::EmptyBody { action } => action == "get_all_channels",
             Self::BadStatus { status, action, .. } => {
                 action == "get_all_channels" && matches!(*status, 400 | 404 | 405 | 501)
@@ -160,6 +163,7 @@ impl StalkerError {
             | Self::HtmlResponse { .. }
             | Self::EmptyBody { .. }
             | Self::PortalRefusedCmd { .. }
+            | Self::ActionUnsupported { .. }
             | Self::PortalBodyError { .. } => StalkerErrorKind::Protocol,
             Self::BadStatus { .. } | Self::RequestBuild(_) | Self::Io(_) => StalkerErrorKind::Transient,
         }

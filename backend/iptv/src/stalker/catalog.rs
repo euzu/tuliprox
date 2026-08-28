@@ -305,7 +305,7 @@ async fn get_categories<Tr: StalkerTransport, C: Clock>(
     action: &'static str,
 ) -> StalkerResult<Vec<StalkerCategory>> {
     let spec = recipe_spec_for(handshake.profile.bootstrap_recipe);
-    let candidates = client.load_url_candidates().to_vec();
+    let candidates = client.ordered_load_urls();
     let mut last_err: Option<StalkerError> = None;
     for load_url in candidates {
         let mut builder = client.get(&load_url.load_url).headers(client.common_headers(&load_url)).query(&[
@@ -393,7 +393,7 @@ where
 {
     let spec = recipe_spec_for(handshake.profile.bootstrap_recipe);
     let page_limit = client.catalog_max_pages();
-    let candidates = client.load_url_candidates().to_vec();
+    let candidates = client.ordered_load_urls();
     let mut last_err: Option<StalkerError> = None;
     'candidates: for load_url in candidates {
         // Pagination state is per-candidate: a mid-pagination failure must not leak a
@@ -528,7 +528,7 @@ async fn get_catalog_value<Tr: StalkerTransport, C: Clock>(
 ) -> StalkerResult<Value> {
     let spec = recipe_spec_for(handshake.profile.bootstrap_recipe);
     let mut last_err = None;
-    for load_url in client.load_url_candidates() {
+    for load_url in &client.ordered_load_urls() {
         let mut query = vec![
             ("type", portal_type.to_string()),
             ("action", action.to_string()),
@@ -549,12 +549,36 @@ async fn get_catalog_value<Tr: StalkerTransport, C: Clock>(
     Err(last_err.unwrap_or_else(|| StalkerError::NoEndpoint { portal: safe_stalker_url(client.portal_url()) }))
 }
 
+/// The bulk `get_all_channels` shortcut, which many portals simply do not implement.
+///
+/// A portal that has already told us so is not asked again until the claim expires: the
+/// caller falls back to paginated fetch, and re-probing an endpoint known to 404 on every
+/// refresh is exactly the traffic pattern providers ban for.
 pub async fn get_all_channels<Tr: StalkerTransport, C: Clock>(
     client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
 ) -> StalkerResult<Vec<StalkerRawItem>> {
-    let value = get_catalog_value(client, handshake, "itv", "get_all_channels", None).await?;
-    parse_all_channels(&value)
+    const ACTION: &str = "get_all_channels";
+    if client.action_is_unsupported(ACTION) {
+        return Err(StalkerError::ActionUnsupported { action: ACTION.to_string() });
+    }
+    let result = async {
+        let value = get_catalog_value(client, handshake, "itv", ACTION, None).await?;
+        parse_all_channels(&value)
+    }
+    .await;
+    match &result {
+        Ok(_) => {
+            client.record_supported_action(ACTION);
+        }
+        Err(err) if err.is_unsupported_catalog_action() => {
+            if client.record_unsupported_action(ACTION) {
+                info!("Stalker portal does not implement {ACTION}; falling back to paginated fetch");
+            }
+        }
+        Err(_) => {}
+    }
+    result
 }
 
 pub async fn get_live_streams_page<Tr: StalkerTransport, C: Clock>(
@@ -697,7 +721,7 @@ pub async fn get_series_details<Tr: StalkerTransport, C: Clock>(
     series_id: u32,
 ) -> StalkerResult<StalkerRawSeriesDetails> {
     let spec = recipe_spec_for(handshake.profile.bootstrap_recipe);
-    let candidates = client.load_url_candidates().to_vec();
+    let candidates = client.ordered_load_urls();
     let mut last_err: Option<StalkerError> = None;
     for load_url in candidates {
         match fetch_series_page(client, handshake, &load_url, spec.token_in_query, series_id, "0").await {

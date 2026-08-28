@@ -99,7 +99,7 @@ pub async fn get_short_epg<Tr: StalkerTransport, C: Clock>(
     hours: u32,
 ) -> StalkerResult<Vec<StalkerProgramRecord>> {
     let spec = recipe_spec_for(handshake.profile.bootstrap_recipe);
-    let candidates = client.load_url_candidates().to_vec();
+    let candidates = client.ordered_load_urls();
     let mut last_err: Option<StalkerError> = None;
     for load_url in candidates {
         let mut builder = client.get(&load_url.load_url).headers(client.common_headers(&load_url)).query(&[
@@ -130,7 +130,7 @@ pub async fn get_epg<Tr: StalkerTransport, C: Clock>(
     period_hours: u32,
 ) -> StalkerResult<Vec<StalkerProgramRecord>> {
     let spec = recipe_spec_for(handshake.profile.bootstrap_recipe);
-    let candidates = client.load_url_candidates().to_vec();
+    let candidates = client.ordered_load_urls();
     let mut last_err: Option<StalkerError> = None;
     for load_url in candidates {
         let mut builder = client.get(&load_url.load_url).headers(client.common_headers(&load_url)).query(&[
@@ -168,7 +168,7 @@ where
     Fut: std::future::Future<Output = StalkerResult<()>>,
 {
     let spec = recipe_spec_for(handshake.profile.bootstrap_recipe);
-    let candidates = client.load_url_candidates().to_vec();
+    let candidates = client.ordered_load_urls();
     let mut last_err: Option<StalkerError> = None;
     for load_url in candidates {
         let mut builder = client.get(&load_url.load_url).headers(client.common_headers(&load_url)).query(&[
