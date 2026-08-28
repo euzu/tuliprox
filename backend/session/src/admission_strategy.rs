@@ -1,6 +1,7 @@
 use log::debug;
 use shared::model::AdmissionStrategy;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionDecision {
@@ -33,7 +34,11 @@ pub struct GraceResolutionContext {
     /// Index of the grace strategy that was actually used.
     pub strategy_index: usize,
     /// Full effective strategy list for stable reconstruction of the remaining slice.
-    pub strategies: Vec<AdmissionStrategy>,
+    ///
+    /// `Arc` rather than `Vec`: this context is stored on `StreamInfo` and travels with
+    /// every clone of it, and the list is immutable once the effective strategies have
+    /// been resolved.
+    pub strategies: Arc<[AdmissionStrategy]>,
     /// The original `ConnectionKind` from the admission decision that led to this grace.
     /// Preserved so that the remaining-strategy fallback can return the correct kind
     /// (e.g., `Soft`) even when the grace itself hardcoded `Normal`.

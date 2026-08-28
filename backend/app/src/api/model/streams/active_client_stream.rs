@@ -2728,7 +2728,7 @@ mod tests {
 
         let grace_context = GraceResolutionContext {
             strategy_index: 0,
-            strategies: vec![AdmissionStrategy::GraceHoldStream],
+            strategies: [AdmissionStrategy::GraceHoldStream].into(),
             kind: Some(crate::api::model::ConnectionKind::Soft),
         };
 

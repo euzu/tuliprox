@@ -6277,8 +6277,8 @@ mod tests {
         });
 
         assert_eq!(
-            get_effective_admission_strategies(&app_state.admission_ctx()),
-            vec![shared::model::AdmissionStrategy::GraceHoldStream]
+            get_effective_admission_strategies(&app_state.admission_ctx()).as_ref(),
+            &[shared::model::AdmissionStrategy::GraceHoldStream][..]
         );
     }
 
@@ -6407,7 +6407,7 @@ mod tests {
         // Grace was used at index 0, so only EvictUserOldest (index 1) is evaluated.
         // Eviction frees the slot -> Allowed.
         let strategies = vec![AdmissionStrategy::GraceHoldStream, AdmissionStrategy::EvictUserOldest];
-        let grace_context = GraceResolutionContext { strategy_index: 0, strategies, kind: None };
+        let grace_context = GraceResolutionContext { strategy_index: 0, strategies: strategies.into(), kind: None };
 
         let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
             retry: true,
@@ -6507,7 +6507,7 @@ mod tests {
             AdmissionStrategy::EvictUserSameIpOldest,
             AdmissionStrategy::EvictUserOldest,
         ];
-        let grace_context = GraceResolutionContext { strategy_index: 0, strategies, kind: None };
+        let grace_context = GraceResolutionContext { strategy_index: 0, strategies: strategies.into(), kind: None };
 
         let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
             retry: true,
@@ -6604,7 +6604,7 @@ mod tests {
         // Strategies: [GraceHoldStream]
         // Grace was at index 0, remaining slice is empty -> exhausted.
         let strategies = vec![AdmissionStrategy::GraceHoldStream];
-        let grace_context = GraceResolutionContext { strategy_index: 0, strategies, kind: None };
+        let grace_context = GraceResolutionContext { strategy_index: 0, strategies: strategies.into(), kind: None };
 
         let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
             retry: true,
@@ -6656,7 +6656,7 @@ mod tests {
         let strategies = vec![AdmissionStrategy::GraceHoldStream];
         let grace_context = GraceResolutionContext {
             strategy_index: 0,
-            strategies,
+            strategies: strategies.into(),
             kind: Some(crate::api::model::ConnectionKind::Soft),
         };
 
@@ -6719,7 +6719,7 @@ mod tests {
             AdmissionStrategy::EvictUserOldest,
         ];
         let strategies_for_config = strategies.clone();
-        let grace_context = GraceResolutionContext { strategy_index: 1, strategies, kind: None };
+        let grace_context = GraceResolutionContext { strategy_index: 1, strategies: strategies.into(), kind: None };
 
         let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
             retry: true,
@@ -6815,7 +6815,7 @@ mod tests {
         let strategies = vec![AdmissionStrategy::GraceHoldStream];
         let grace_context = GraceResolutionContext {
             strategy_index: 0,
-            strategies,
+            strategies: strategies.into(),
             kind: Some(crate::api::model::ConnectionKind::Normal),
         };
         let original_kind = Some(crate::api::model::ConnectionKind::Soft);
@@ -6874,7 +6874,7 @@ mod tests {
         let strategies = vec![AdmissionStrategy::GraceHoldStream, AdmissionStrategy::GraceInstantStream];
         let grace_context = GraceResolutionContext {
             strategy_index: 0,
-            strategies,
+            strategies: strategies.into(),
             kind: Some(crate::api::model::ConnectionKind::Normal),
         };
         let original_kind = Some(crate::api::model::ConnectionKind::Soft);

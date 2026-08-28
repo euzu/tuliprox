@@ -220,10 +220,10 @@ pub struct AdmissionStrategyResolution {
     pub grace_context: Option<GraceResolutionContext>,
 }
 
-pub fn get_effective_admission_strategies(adm: &AdmissionCtx) -> Vec<AdmissionStrategy> {
+pub fn get_effective_admission_strategies(adm: &AdmissionCtx) -> Arc<[AdmissionStrategy]> {
     let config = adm.app_config.config.load();
     let Some(stream_config) = config.reverse_proxy.as_ref().and_then(|rp| rp.stream.as_ref()) else {
-        return Vec::new();
+        return Arc::from([]);
     };
 
     // `Some(vec![])` is deliberately not the same as `None`. An explicitly empty
@@ -231,15 +231,13 @@ pub fn get_effective_admission_strategies(adm: &AdmissionCtx) -> Vec<AdmissionSt
     // back to the legacy `grace_period_millis` translation below; only an absent
     // list does.
     match stream_config.admission_strategies.as_ref() {
-        Some(strategies) => strategies.clone(),
-        None if stream_config.grace_period_millis > 0 => {
-            vec![if stream_config.grace_period_hold_stream {
-                AdmissionStrategy::GraceHoldStream
-            } else {
-                AdmissionStrategy::GraceInstantStream
-            }]
-        }
-        None => Vec::new(),
+        Some(strategies) => Arc::from(strategies.as_slice()),
+        None if stream_config.grace_period_millis > 0 => Arc::from([if stream_config.grace_period_hold_stream {
+            AdmissionStrategy::GraceHoldStream
+        } else {
+            AdmissionStrategy::GraceInstantStream
+        }]),
+        None => Arc::from([]),
     }
 }
 
