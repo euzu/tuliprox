@@ -1176,6 +1176,18 @@
   slots only from providers with active connections, so an enabled alias without connections was invisible and
   its spare capacity ignored. Slots are now derived from the configured enabled members (missing live counts
   default to zero), matching the `/ready` endpoint.
+- **Xtream: a VOD document could carry a blank `container_extension`, and players appended `.null` to the playback
+  URL.** The field is filled from the provider's `get_vod_streams` response, where a missing or null value collapses
+  to an empty string, and only a per-item `get_vod_info` fetch or an ffprobe run fills it in afterwards. A provider
+  that omits it therefore left every VOD document carrying `""`, and a client building
+  `<stream_id>.<container_extension>` has nothing to append — several render the blank as the literal string `null`
+  and go on to request `813563.null`. `get_vod_info` already fell back to the extension carried by the item URL; the
+  four document builders that did not — the stream-list document, both no-properties paths, and the resolved info
+  document, which delegates to a `StreamProperties` method with no URL to consult — now share that fallback. A
+  non-empty provider value still wins, and an item whose URL carries no extension either still reports the blank.
+  `create_vod_info_from_item` had the fallback but kept the leading dot that `extract_extension_from_url` returns, so
+  a URL-derived extension was published as `.mkv` and would have built `813563..mkv`; it is stripped now. Series
+  episodes are unchanged: their properties carry no provider URL at that layer.
 
 ## ⚙️ New Settings
 
