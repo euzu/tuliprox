@@ -184,7 +184,7 @@ pub(in crate::api) fn build_webplayer_recording_url(
     virtual_id: u32,
     cluster: XtreamCluster,
 ) -> Option<String> {
-    let access_token = create_access_token(&app_config.access_token_secret, 30);
+    let access_token = create_access_token(&app_config.access_token_secret, 30, crate::auth::scope::INTERNAL_PLAYER);
     let config = app_config.config.load();
     let server_name = config
         .web_ui
@@ -202,7 +202,7 @@ pub(in crate::api) fn build_stable_recording_url(
     virtual_id: u32,
     cluster: XtreamCluster,
 ) -> Option<String> {
-    let access_token = create_access_token(&app_config.access_token_secret, 30);
+    let access_token = create_access_token(&app_config.access_token_secret, 30, crate::auth::scope::INTERNAL_PLAYER);
     let config = app_config.config.load();
     let server_name = config
         .web_ui
@@ -681,7 +681,7 @@ async fn playlist_webplayer_stream(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     req_headers: axum::http::HeaderMap,
 ) -> impl IntoResponse + Send {
-    if !verify_access_token(&token, &app_state.app_config.access_token_secret) {
+    if !verify_access_token(&token, &app_state.app_config.access_token_secret, crate::auth::scope::INTERNAL_PLAYER) {
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
 
@@ -737,7 +737,7 @@ async fn playlist_recording_stream(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     req_headers: axum::http::HeaderMap,
 ) -> impl IntoResponse + Send {
-    if !verify_access_token(&token, &app_state.app_config.access_token_secret) {
+    if !verify_access_token(&token, &app_state.app_config.access_token_secret, crate::auth::scope::INTERNAL_PLAYER) {
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
     let ctxt = try_result_bad_request!(ApiStreamContext::from_str(cluster.as_str()));
@@ -1258,7 +1258,8 @@ mod tests {
             },
         ));
         let app_state = test_app_state(Arc::clone(&app_config));
-        let token = crate::auth::create_access_token(&app_config.access_token_secret, 1);
+        let token =
+            crate::auth::create_access_token(&app_config.access_token_secret, 1, crate::auth::scope::INTERNAL_PLAYER);
         let fingerprint = crate::auth::Fingerprint::new(
             "test".to_string(),
             "127.0.0.1".to_string(),

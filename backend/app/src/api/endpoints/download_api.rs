@@ -2313,7 +2313,11 @@ mod tests {
             .and_then(|segments| segments.collect::<Vec<_>>().get(4).copied())
             .expect("route token");
 
-        assert!(crate::auth::verify_access_token(token, &app_config.access_token_secret));
+        assert!(crate::auth::verify_access_token(
+            token,
+            &app_config.access_token_secret,
+            crate::auth::scope::INTERNAL_PLAYER
+        ));
         assert_eq!(recording.url.as_str(), persisted_before.url);
         assert_eq!(DownloadQueue::to_persisted(&recording).url, persisted_before.url);
         assert_ne!(execution.url, recording.url);

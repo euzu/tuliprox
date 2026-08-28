@@ -867,7 +867,13 @@ pub(in crate::api) async fn xtream_player_api_stream_with_resolved_target(
     expected_input: Option<Arc<ConfigInput>>,
     stream_req: ApiStreamRequest<'_>,
 ) -> impl IntoResponse + Send {
-    if stream_req.access_token && !verify_access_token(stream_req.password, &app_state.app_config.access_token_secret) {
+    if stream_req.access_token
+        && !verify_access_token(
+            stream_req.password,
+            &app_state.app_config.access_token_secret,
+            crate::auth::scope::INTERNAL_PLAYER,
+        )
+    {
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
 
@@ -2827,7 +2833,8 @@ mod tests {
         let item = m3u_timeshift_item();
         cache_xtream_test_item(&app_state, &target, item, Some(input)).await;
 
-        let token = create_access_token(&app_state.app_config.access_token_secret, 60);
+        let token =
+            create_access_token(&app_state.app_config.access_token_secret, 60, crate::auth::scope::INTERNAL_PLAYER);
 
         let response = xtream_player_api_stream_with_token(
             &Fingerprint::new("fp".to_string(), "127.0.0.1".to_string(), "127.0.0.1:0".parse().unwrap()),

@@ -233,7 +233,11 @@ async fn cvs_api_response(context: CvsApiResponseContext<'_>) -> Response {
             let Some(token) = token.as_deref() else {
                 return app_state.app_config.get_auth_error_status().into_response();
             };
-            if !verify_access_token(token, &app_state.app_config.access_token_secret) {
+            if !verify_access_token(
+                token,
+                &app_state.app_config.access_token_secret,
+                crate::auth::scope::INTERNAL_PLAYER,
+            ) {
                 return app_state.app_config.get_auth_error_status().into_response();
             }
             return create_custom_video_stream_response(
