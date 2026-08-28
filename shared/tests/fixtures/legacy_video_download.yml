@@ -1,0 +1,61 @@
+# Pre-upgrade `tuliprox` configuration. This fixture is the canonical
+# reference for the legacy `video.download.recording:` shape; the
+# Phase 1 (T2) custom deserializer in `ConfigDto` must migrate it
+# to the canonical top-level `recording:` field without losing any
+# DVR settings. The literal text here is what an operator was
+# running before the schema lift; do NOT regenerate it from the
+# current Rust types.
+#
+# `serde_saphyr` parses it in `tests/recording_unification.rs`.
+
+api:
+  host: 127.0.0.1
+  port: 8901
+  web_root: ./web
+
+storage_dir: ./storage
+
+video:
+  extensions:
+    - .ts
+    - .mp4
+  download:
+    headers:
+      Accept: video/*
+      User-Agent: legacy-agent
+    directory: /var/lib/tuliprox/downloads
+    organize_into_directories: true
+    episode_pattern: ".*"
+    download_priority: 9
+    recording_priority: 7
+    reserve_slots_for_users: 1
+    max_background_per_provider: 2
+    retry_backoff_initial_secs: 3
+    retry_backoff_multiplier: 3.0
+    retry_backoff_max_secs: 30
+    retry_backoff_jitter_percent: 20
+    retry_max_attempts: 5
+    recording:
+      enabled: true
+      directory: /var/lib/tuliprox/recordings
+      timezone: Europe/Berlin
+      filename_template: "{channel}_{program_title}_{start_time}"
+      default_pre_roll_secs: 0
+      max_pre_roll_secs: 900
+      default_post_roll_secs: 0
+      max_post_roll_secs: 1800
+      fallback_bytes_per_minute: 8388608
+      retention:
+        keep_last_per_channel: 5
+        delete_after_days: 30
+        sweep_interval_secs: 3600
+      disk:
+        high_water_percent: 90
+        low_water_percent: 75
+        cleanup_interval_secs: 3600
+        safety_bytes: 1073741824
+      notifications:
+        outbox_buffer: 1024
+        max_attempts: 6
+        backoff_initial_secs: 5
+        backoff_max_secs: 900

@@ -233,10 +233,10 @@ pub fn build_request(
     CreateRecordingTaskRequest {
         source: prefill.source.clone(),
         program_title: prefill.program_title.clone(),
-        program_start,
-        program_end,
-        pre_roll_secs,
-        post_roll_secs,
+        program_start: Some(program_start),
+        program_end: Some(program_end),
+        pre_roll_secs: Some(pre_roll_secs),
+        post_roll_secs: Some(post_roll_secs),
         visibility: visibility_to_wire(picked_shared).to_string(),
         channel_id: prefill.channel_id.clone(),
         channel_name: prefill.channel_name.clone(),
@@ -375,10 +375,10 @@ pub fn RecordingForm(props: &RecordingFormProps) -> Html {
                     on_submit.emit(CreateRecordingTaskRequest {
                         source: prefill.source.clone(),
                         program_title: prefill.program_title.clone(),
-                        program_start: 0,
-                        program_end: 0,
-                        pre_roll_secs: 0,
-                        post_roll_secs: 0,
+                        program_start: Some(0),
+                        program_end: Some(0),
+                        pre_roll_secs: Some(0),
+                        post_roll_secs: Some(0),
                         visibility: if *shared { "shared".to_string() } else { "private".to_string() },
                         channel_id: None,
                         channel_name: None,
@@ -806,8 +806,8 @@ mod tests {
         assert_eq!(request.source.target_id, "default");
         assert_eq!(request.source.virtual_id, "virt-1");
         assert_eq!(request.source.input_name, "input-1");
-        assert_eq!(request.pre_roll_secs, 60);
-        assert_eq!(request.post_roll_secs, 30);
+        assert_eq!(request.pre_roll_secs, Some(60));
+        assert_eq!(request.post_roll_secs, Some(30));
         assert_eq!(request.visibility, "private");
     }
 
@@ -826,24 +826,24 @@ mod tests {
         // documents that the helper does not silently truncate.
         let prefill = RecordingFormPrefill::new(source(), "Title", 100, 200, bounds());
         let request = build_request(&prefill, 9999, 9999, false, None, None);
-        assert_eq!(request.pre_roll_secs, 9999);
-        assert_eq!(request.post_roll_secs, 9999);
+        assert_eq!(request.pre_roll_secs, Some(9999));
+        assert_eq!(request.post_roll_secs, Some(9999));
     }
 
     #[test]
     fn build_request_emits_override_start_and_duration() {
         let prefill = RecordingFormPrefill::new(source(), "Title", 100, 200, bounds());
         let request = build_request(&prefill, 0, 0, false, Some(500), Some(15));
-        assert_eq!(request.program_start, 500);
-        assert_eq!(request.program_end, 500 + 15 * 60);
+        assert_eq!(request.program_start, Some(500));
+        assert_eq!(request.program_end, Some(500 + 15 * 60));
     }
 
     #[test]
     fn build_request_falls_back_to_prefill_when_overrides_are_none() {
         let prefill = RecordingFormPrefill::new(source(), "Title", 100, 200, bounds());
         let request = build_request(&prefill, 0, 0, false, None, None);
-        assert_eq!(request.program_start, 100);
-        assert_eq!(request.program_end, 200);
+        assert_eq!(request.program_start, Some(100));
+        assert_eq!(request.program_end, Some(200));
     }
 
     #[test]
@@ -851,8 +851,8 @@ mod tests {
         let prefill = RecordingFormPrefill::new(source(), "Title", 100, 200, bounds());
         // Only start provided — duration falls back; end reverts to prefill end.
         let request = build_request(&prefill, 0, 0, false, Some(500), None);
-        assert_eq!(request.program_start, 500);
-        assert_eq!(request.program_end, 200);
+        assert_eq!(request.program_start, Some(500));
+        assert_eq!(request.program_end, Some(200));
     }
 
     #[test]

@@ -298,6 +298,21 @@ impl RecordingMetadata {
         }
     }
 
+    pub fn new_transfer(
+        owner: RecordingOwner,
+        visibility: RecordingVisibility,
+        source: RecordingSource,
+        title: String,
+    ) -> Self {
+        let mut metadata = Self::new(owner, visibility, source, 0, 0, 0, 0);
+        metadata.program_start = None;
+        metadata.program_end = None;
+        metadata.scheduled_start = None;
+        metadata.scheduled_end = None;
+        metadata.program_title = Some(title);
+        metadata
+    }
+
     /// Build metadata for a legacy admin record loaded from pre-DVR persisted
     /// state. The source is `None` and the program/scheduled intervals are
     /// derived from the legacy start/duration if provided.
@@ -376,6 +391,24 @@ mod tests {
     }
 
     #[test]
+    fn transfer_metadata_has_owner_and_source_without_live_interval() {
+        let source =
+            RecordingSource::new("target-1", "v-1", "input-a").with_cluster(super::super::XtreamCluster::Video);
+        let meta = RecordingMetadata::new_transfer(
+            RecordingOwner::User(UserId::from("web:abc")),
+            RecordingVisibility::Private,
+            source,
+            "Movie".to_string(),
+        );
+
+        assert_eq!(meta.program_title.as_deref(), Some("Movie"));
+        assert!(meta.program_start.is_none());
+        assert!(meta.program_end.is_none());
+        assert!(meta.scheduled_start.is_none());
+        assert!(meta.scheduled_end.is_none());
+    }
+
+    #[test]
     fn legacy_admin_metadata_has_no_source_and_zero_padding() {
         let meta = RecordingMetadata::for_legacy_admin(1_700_000_000, 3_600);
         assert!(meta.source.is_none());
@@ -430,7 +463,7 @@ mod tests {
 
     // --- RecordingTaskDto tests ---
 
-    use super::super::transfer::{TaskKindDto, TaskPriorityDto, TransferStatusDto, TransferTaskDto};
+    use super::super::transfer::{RecordingTypeDto, TaskKindDto, TaskPriorityDto, TransferStatusDto, TransferTaskDto};
 
     fn make_test_metadata() -> RecordingMetadata {
         let mut meta = RecordingMetadata::for_legacy_admin(1_700_000_000, 3_600);
@@ -500,6 +533,7 @@ mod tests {
             id: "rec-1".to_string(),
             title: "Pilot".to_string(),
             kind: TaskKindDto::Recording,
+            recording_type: RecordingTypeDto::Live,
             priority: TaskPriorityDto::Normal,
             status: TransferStatusDto::Scheduled,
             retry_attempts: 0,

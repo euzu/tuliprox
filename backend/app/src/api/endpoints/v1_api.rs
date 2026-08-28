@@ -156,8 +156,8 @@ pub fn v1_api_register(
         router = router
             .merge(system_read.layer(permission_layer!(app_state, Permission::SystemRead)))
             .merge(system_write.layer(permission_layer!(app_state, Permission::SystemWrite)))
-            .merge(download_read.layer(permission_layer!(app_state, Permission::DownloadRead)))
-            .merge(download_write.layer(permission_layer!(app_state, Permission::DownloadWrite)))
+            .merge(download_read.layer(permission_layer!(app_state, Permission::RecordingRead)))
+            .merge(download_write.layer(permission_layer!(app_state, Permission::RecordingWrite)))
             .merge(v1_api_config_register_with_permissions(app_state))
             .merge(v1_api_user_register_with_permissions(axum::routing::Router::new(), app_state))
             .merge(v1_api_playlist_register_with_permissions(axum::routing::Router::new(), app_state))
@@ -209,7 +209,7 @@ mod tests {
     use crate::{
         api::model::{create_test_app_state, ConnectionKind, ConnectionParams},
         auth::{create_jwt_web_user, Fingerprint},
-        model::Config,
+        model::{Config, RecordingConfig},
     };
     use axum::{
         body::Body,
@@ -225,11 +225,11 @@ mod tests {
     /// A config whose DVR block is present and explicitly on or off.
     /// Built through the DTO so the `enabled` flag travels the same
     /// deserialize → domain path it does in production.
+    ///
     fn config_with_recording_enabled(enabled: bool) -> Config {
-        let recording = shared::model::RecordingConfigDto { enabled, ..Default::default() };
-        let download = shared::model::VideoDownloadConfigDto { recording: Some(recording), ..Default::default() };
-        let video = shared::model::VideoConfigDto { download: Some(download), ..Default::default() };
-        Config { video: Some((&video).into()), ..Config::default() }
+        let recording_dto = shared::model::RecordingConfigDto { enabled, ..Default::default() };
+        let recording_runtime = RecordingConfig::from(&recording_dto);
+        Config { recording: Some(recording_runtime), ..Config::default() }
     }
 
     fn config_with_recording_and_web_auth(recording_enabled: bool) -> Config {

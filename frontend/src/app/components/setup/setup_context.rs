@@ -169,7 +169,7 @@ impl SetupStep {
             Self::ReverseProxy => Some(ConfigPage::ReverseProxy),
             Self::Proxy => Some(ConfigPage::Proxy),
             Self::IpCheck => Some(ConfigPage::IpCheck),
-            Self::Video => Some(ConfigPage::Video),
+            Self::Video => Some(ConfigPage::Recording),
             Self::MetadataUpdate => Some(ConfigPage::MetadataUpdate),
             Self::HdHomerun => Some(ConfigPage::HdHomerun),
             Self::Library => Some(ConfigPage::Library),

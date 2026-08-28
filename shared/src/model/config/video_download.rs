@@ -192,6 +192,39 @@ impl VideoDownloadConfigDto {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RecordingConfigDto {
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub headers: HashMap<String, String>,
+    #[serde(
+        default = "default_supported_video_extensions",
+        skip_serializing_if = "is_default_supported_video_extensions"
+    )]
+    pub extensions: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub organize_into_directories: bool,
+    #[serde(default = "default_episode_pattern", skip_serializing_if = "is_blank_or_default_episode_pattern")]
+    pub episode_pattern: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero_i8")]
+    pub priority: i8,
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub reserve_slots_for_users: u8,
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub max_background_per_provider: u8,
+    #[serde(
+        default = "default_retry_backoff_initial_secs",
+        skip_serializing_if = "is_default_retry_backoff_initial_secs"
+    )]
+    pub retry_backoff_initial_secs: u64,
+    #[serde(default = "default_retry_backoff_multiplier", skip_serializing_if = "is_default_retry_backoff_multiplier")]
+    pub retry_backoff_multiplier: f64,
+    #[serde(default = "default_retry_backoff_max_secs", skip_serializing_if = "is_default_retry_backoff_max_secs")]
+    pub retry_backoff_max_secs: u64,
+    #[serde(
+        default = "default_retry_backoff_jitter_percent",
+        skip_serializing_if = "is_default_retry_backoff_jitter_percent"
+    )]
+    pub retry_backoff_jitter_percent: u8,
+    #[serde(default = "default_retry_max_attempts", skip_serializing_if = "is_default_retry_max_attempts")]
+    pub retry_max_attempts: u8,
     /// Master switch for the whole DVR feature. `false` stops the
     /// supervisors, so nothing is materialized, swept, or notified.
     #[serde(default = "default_recording_enabled", skip_serializing_if = "is_recording_enabled")]
@@ -240,6 +273,18 @@ pub struct RecordingConfigDto {
 impl Default for RecordingConfigDto {
     fn default() -> Self {
         Self {
+            headers: HashMap::new(),
+            extensions: default_supported_video_extensions(),
+            organize_into_directories: false,
+            episode_pattern: default_episode_pattern(),
+            priority: 0,
+            reserve_slots_for_users: 0,
+            max_background_per_provider: 0,
+            retry_backoff_initial_secs: default_retry_backoff_initial_secs(),
+            retry_backoff_multiplier: default_retry_backoff_multiplier(),
+            retry_backoff_max_secs: default_retry_backoff_max_secs(),
+            retry_backoff_jitter_percent: default_retry_backoff_jitter_percent(),
+            retry_max_attempts: default_retry_max_attempts(),
             enabled: default_recording_enabled(),
             container_format: RecordingContainerFormat::default(),
             directory: None,
@@ -260,7 +305,19 @@ impl Default for RecordingConfigDto {
 
 impl RecordingConfigDto {
     pub fn is_empty(&self) -> bool {
-        self.enabled == default_recording_enabled()
+        self.headers.is_empty()
+            && is_default_supported_video_extensions(&self.extensions)
+            && !self.organize_into_directories
+            && is_blank_or_default_episode_pattern(&self.episode_pattern)
+            && self.priority == 0
+            && self.reserve_slots_for_users == 0
+            && self.max_background_per_provider == 0
+            && is_default_retry_backoff_initial_secs(&self.retry_backoff_initial_secs)
+            && is_default_retry_backoff_multiplier(&self.retry_backoff_multiplier)
+            && is_default_retry_backoff_max_secs(&self.retry_backoff_max_secs)
+            && is_default_retry_backoff_jitter_percent(&self.retry_backoff_jitter_percent)
+            && is_default_retry_max_attempts(&self.retry_max_attempts)
+            && self.enabled == default_recording_enabled()
             && is_default_recording_container_format(&self.container_format)
             && self.notifications.is_none()
             && self.directory.is_none()
@@ -274,6 +331,13 @@ impl RecordingConfigDto {
             && self.disk.is_none()
             && self.quota.is_none()
             && self.fallback_bytes_per_minute == default_recording_fallback_bytes_per_minute()
+    }
+
+    pub fn clean(&mut self) {
+        self.retention = self.retention.take().filter(|value| !value.is_empty());
+        self.disk = self.disk.take().filter(|value| !value.is_empty());
+        self.quota = self.quota.take().filter(|value| !value.is_empty());
+        self.notifications = self.notifications.take().filter(|value| !value.is_empty());
     }
 }
 
@@ -543,7 +607,33 @@ impl VideoConfigDto {
     }
 }
 
-fn prepare_recording_config(recording: &mut RecordingConfigDto, download_dir: &str) -> Result<(), TuliproxError> {
+pub(crate) fn prepare_recording_config(
+    recording: &mut RecordingConfigDto,
+    download_dir: &str,
+) -> Result<(), TuliproxError> {
+    if recording.headers.is_empty() {
+        recording.headers.insert("Accept".to_string(), "video/*".to_string());
+        recording.headers.insert("User-Agent".to_string(), DEFAULT_USER_AGENT.to_string());
+    }
+    if recording.extensions.is_empty() {
+        recording.extensions = default_supported_video_extensions();
+    }
+    if is_blank_or_default_episode_pattern(&recording.episode_pattern) {
+        recording.episode_pattern = default_episode_pattern();
+    } else if let Some(pattern) = recording.episode_pattern.as_ref() {
+        recording.episode_pattern = Some(pattern.trim().to_string());
+    }
+    if let Some(pattern) = recording.episode_pattern.as_ref() {
+        crate::model::REGEX_CACHE
+            .get_or_compile(pattern)
+            .map_err(|err| TuliproxError::RegexCompile(format!("{pattern} {err}")))?;
+    }
+    recording.retry_backoff_initial_secs = recording.retry_backoff_initial_secs.max(1);
+    recording.retry_backoff_multiplier = recording.retry_backoff_multiplier.max(1.0);
+    recording.retry_backoff_max_secs = recording.retry_backoff_max_secs.max(recording.retry_backoff_initial_secs);
+    recording.retry_backoff_jitter_percent = recording.retry_backoff_jitter_percent.min(95);
+    recording.retry_max_attempts = recording.retry_max_attempts.max(1);
+
     // directory: default to <download_dir>/recordings when blank.
     if let Some(dir) = recording.directory.as_ref() {
         let trimmed = dir.trim();

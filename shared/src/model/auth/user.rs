@@ -11,7 +11,13 @@ pub const ROLE_API_USER: &str = "API_USER";
 /// issued before a bump fail closed at the validator with a stable
 /// "token refresh required" response so clients re-authenticate
 /// before the new permission bits can leak through.
-pub const CURRENT_PERMISSION_SCHEMA_VERSION: u16 = 1;
+///
+/// Bumped to `2` for the `download.read/write -> recording.read/write`
+/// migration. Old tokens still decode the legacy bits (rollback compat),
+/// but a fresh token issued by the authenticator carries the new bits
+/// and the `download.*` bits have been cleared by
+/// [`crate::model::permission::migrate_permissions`].
+pub const CURRENT_PERMISSION_SCHEMA_VERSION: u16 = 2;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Claims {
@@ -25,10 +31,10 @@ pub struct Claims {
     #[serde(default)]
     pub pwd_version: u32,
     /// Stable subject identifier for the principal. `None` for
-    /// pre-Phase 2 tokens; tokens missing this field are rejected by
-    /// the validators. Built-in admin tokens carry the reserved
-    /// `builtin:admin` subject; web/API tokens carry the
-    /// registry-allocated `UserId`.
+    /// tokens issued before subject ids were introduced; tokens
+    /// missing this field are rejected by the validators. Built-in
+    /// admin tokens carry the reserved `builtin:admin` subject;
+    /// web/API tokens carry the registry-allocated `UserId`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject_id: Option<UserId>,
     /// Version of the permission schema at token issuance. Tokens
@@ -168,5 +174,13 @@ mod tests {
         };
         let json = serde_json::to_string(&claims).expect("serialize");
         assert!(!json.contains("subject_id"), "no subject_id key in: {json}");
+    }
+
+    #[test]
+    fn current_permission_schema_version_is_at_least_two() {
+        // The schema version was bumped by +1 to invalidate tokens
+        // carrying only `download.*` permission bits. Old tokens must
+        // fail closed at the validator.
+        assert!(CURRENT_PERMISSION_SCHEMA_VERSION >= 2, "schema must be bumped for download->recording migration");
     }
 }

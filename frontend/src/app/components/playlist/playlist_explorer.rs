@@ -133,12 +133,9 @@ fn normalize_input_name(input_name: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-fn can_show_download_action(can_write_downloads: bool, selected_channel: Option<&ChannelSelection>) -> bool {
-    can_write_downloads && selected_channel.is_some_and(|item| item.cluster != XtreamCluster::Live && item.downloadable)
-}
-
 fn can_show_record_action(can_write_recordings: bool, selected_channel: Option<&ChannelSelection>) -> bool {
-    can_write_recordings && selected_channel.is_some_and(|item| item.cluster == XtreamCluster::Live)
+    can_write_recordings
+        && selected_channel.is_some_and(|item| item.cluster == XtreamCluster::Live || item.downloadable)
 }
 
 enum ExplorerLevel {
@@ -159,22 +156,13 @@ pub fn PlaylistExplorer() -> Html {
         return html! { <NoContent text={translate.t("LABEL.NO_CONTENT")} /> };
     };
     let service_ctx = use_service_context();
-    let can_write_downloads = service_ctx.auth.has_permission(Permission::DownloadWrite);
+    let can_write_downloads = service_ctx.auth.has_permission(Permission::RecordingWrite);
     let can_write_recordings = service_ctx.auth.has_permission(Permission::RecordingWrite);
     let is_admin_role = service_ctx.auth.is_admin();
-    let default_download_priority = config_ctx
-        .config
-        .as_ref()
-        .and_then(|cfg| cfg.config.video.as_ref())
-        .and_then(|video| video.download.as_ref())
-        .map(|download| download.download_priority);
+    let default_download_priority =
+        config_ctx.config.as_ref().and_then(|cfg| cfg.config.recording.as_ref()).map(|recording| recording.priority);
     let recording_padding = {
-        let rec = config_ctx
-            .config
-            .as_ref()
-            .and_then(|cfg| cfg.config.video.as_ref())
-            .and_then(|video| video.download.as_ref())
-            .and_then(|video| video.recording.as_ref());
+        let rec = config_ctx.config.as_ref().and_then(|cfg| cfg.config.recording.as_ref());
         PaddingBounds {
             default_pre_roll_secs: rec.and_then(|c| c.default_pre_roll_secs).unwrap_or(0),
             max_pre_roll_secs: rec.map_or(900, |c| c.max_pre_roll_secs),
@@ -563,9 +551,14 @@ pub fn PlaylistExplorer() -> Html {
                                 }
 
                                 let input_name = normalize_input_name(&selected.input_name);
+                                let recording_type = match selected.cluster {
+                                    XtreamCluster::Video => shared::model::RecordingTypeDto::Vod,
+                                    XtreamCluster::Series => shared::model::RecordingTypeDto::Series,
+                                    XtreamCluster::Live => shared::model::RecordingTypeDto::Live,
+                                };
                                 match services
                                     .downloads
-                                    .queue_download(resolved_url, filename, input_name, priority)
+                                    .queue_download(resolved_url, filename, input_name, priority, recording_type)
                                     .await
                                 {
                                     Ok(_) => {
@@ -610,6 +603,27 @@ pub fn PlaylistExplorer() -> Html {
                                     cluster: selected.cluster,
                                     input_name: selected.input_name.clone(),
                                 };
+                                if selected.cluster != XtreamCluster::Live {
+                                    let request = CreateRecordingTaskRequest {
+                                        source,
+                                        program_title: selected.title.clone(),
+                                        program_start: None,
+                                        program_end: None,
+                                        pre_roll_secs: None,
+                                        post_roll_secs: None,
+                                        visibility: "private".to_string(),
+                                        channel_id: None,
+                                        channel_name: None,
+                                        epg: None,
+                                    };
+                                    match RecordingService::new().create_task(request).await {
+                                        Ok(_) => {
+                                            services.toastr.success(translate_clone.t("MESSAGES.RECORDING.QUEUED"))
+                                        }
+                                        Err(error) => services.toastr.error(error.to_string()),
+                                    }
+                                    return;
+                                }
                                 let now = chrono::Utc::now().timestamp();
                                 let program_end = now + 90 * 60;
                                 let prefill = RecordingFormPrefill::new(
@@ -1060,11 +1074,6 @@ pub fn PlaylistExplorer() -> Html {
                 {
                 <MenuItem icon="Record" name={ExplorerAction::Record.to_string()} label={translate.t("LABEL.RECORD")} onclick={&handle_menu_click}></MenuItem>
             })}
-            { html_if!(
-                can_show_download_action(can_write_downloads, selected_channel.as_ref()),
-                {
-                <MenuItem icon="Download" name={ExplorerAction::Download.to_string()} label={translate.t("LABEL.DOWNLOAD")} onclick={&handle_menu_click}></MenuItem>
-            })}
         </PopupMenu>
       </div>
     }
@@ -1073,8 +1082,8 @@ pub fn PlaylistExplorer() -> Html {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_download_filename, can_show_download_action, can_show_record_action, normalize_input_name,
-        parse_optional_priority_input, ChannelSelection,
+        build_download_filename, can_show_record_action, normalize_input_name, parse_optional_priority_input,
+        ChannelSelection,
     };
     use shared::model::{VirtualId, XtreamCluster};
 
@@ -1105,7 +1114,7 @@ mod tests {
     }
 
     #[test]
-    fn popup_actions_require_download_write_permission() {
+    fn record_action_covers_live_vod_and_episode_with_recording_write() {
         let live = ChannelSelection {
             virtual_id: VirtualId::default(),
             cluster: XtreamCluster::Live,
@@ -1140,13 +1149,11 @@ mod tests {
         };
 
         assert!(!can_show_record_action(false, Some(&live)));
-        assert!(!can_show_download_action(false, Some(&vod)));
+        assert!(!can_show_record_action(false, Some(&vod)));
         assert!(can_show_record_action(true, Some(&live)));
-        assert!(can_show_download_action(true, Some(&vod)));
-        assert!(!can_show_download_action(true, Some(&live)));
-        assert!(!can_show_download_action(true, Some(&series_container)));
-        assert!(can_show_download_action(true, Some(&episode)));
-        assert!(!can_show_record_action(true, Some(&vod)));
+        assert!(can_show_record_action(true, Some(&vod)));
+        assert!(!can_show_record_action(true, Some(&series_container)));
+        assert!(can_show_record_action(true, Some(&episode)));
     }
 
     #[test]

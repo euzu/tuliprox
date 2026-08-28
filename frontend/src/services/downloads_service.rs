@@ -4,7 +4,7 @@ use crate::{
 };
 use serde::Serialize;
 use shared::{
-    model::{DownloadActionResponse, DownloadsResponse, FileDownloadDto},
+    model::{DownloadActionResponse, DownloadsResponse, FileDownloadDto, RecordingTypeDto},
     utils::concat_path_leading_slash,
 };
 
@@ -16,6 +16,7 @@ pub struct QueueDownloadRequest {
     pub input_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub priority: Option<i8>,
+    pub recording_type: RecordingTypeDto,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -53,8 +54,9 @@ impl DownloadsService {
         filename: String,
         input_name: Option<String>,
         priority: Option<i8>,
+        recording_type: RecordingTypeDto,
     ) -> Result<FileDownloadDto, Error> {
-        let request = QueueDownloadRequest { url, filename, input_name, priority };
+        let request = QueueDownloadRequest { url, filename, input_name, priority, recording_type };
         request_post::<&QueueDownloadRequest, FileDownloadDto>(
             &self.downloads_api_path,
             &request,

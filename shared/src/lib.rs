@@ -1,10 +1,10 @@
 // Shared clippy policy: see [workspace.lints.clippy] in the root Cargo.toml.
 //
-// `clippy::all` + `clippy::pedantic` are switched on workspace-wide by the
-// modularization plan's Phase 0. Everything clippy can rewrite mechanically has
-// been applied with `cargo clippy --fix`. The lints below are the residue that
-// has no machine-applicable fix and would need hand edits to DTO, serde and
-// parsing code that Phase 0 is explicitly not allowed to change the behaviour of.
+// `clippy::all` + `clippy::pedantic` are switched on workspace-wide. Everything
+// clippy can rewrite mechanically has been applied with `cargo clippy --fix`.
+// The lints below are the residue that has no machine-applicable fix and would
+// need hand edits to DTO, serde and parsing code that this policy is explicitly
+// not allowed to change the behaviour of.
 //
 // They are crate-local debt, not workspace policy: the backend crate — the one
 // this plan actually modularizes — is held to the full policy with no such list,

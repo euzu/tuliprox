@@ -12,8 +12,8 @@
 //! recursive at the value level - `ConnectionManager` holds an
 //! `Arc<SharedStreamManager>`, which holds an `Arc<ActiveProviderManager>`,
 //! which holds a back-reference to the `SharedStreamManager`. Splitting them
-//! would require callback traits that exist only to break the cycle, which the
-//! modularization plan rules out.
+//! would require callback traits that exist only to break the cycle, which is
+//! not worth the indirection.
 //!
 //! Nothing here names `AppState`: the runtime takes the handles it needs.
 

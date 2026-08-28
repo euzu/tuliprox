@@ -5,12 +5,12 @@ use crate::{
         endpoints::recording_media_api::AuthClaims,
         model::{
             event_manager::EventMessage,
-            recording_quota,
+            mutate, recording_quota,
             recording_rule_service::{DeleteFuture, RuleServiceError},
             recording_service::{
                 CreateRecordingInput, EditRecordingPatch, RecordingService, RecordingSourceInput, ServiceError,
             },
-            recording_ws, AppState, FileDownload,
+            recording_ws, AppState, DownloadQueue, FileDownload,
         },
     },
     repository::recording_rule_repository::RecordingRuleRepository,
@@ -24,9 +24,9 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use shared::model::{
-    recording::{RecordingProvenance, RecordingVisibility},
+    recording::{RecordingMetadata, RecordingOwner, RecordingProvenance, RecordingSource, RecordingVisibility},
     recording_rule::{RecordingRule, RuleBody, RuleSource, RuleVisibility},
-    FileDownloadDto, Permission, UserId, XtreamCluster, ROLE_ADMIN,
+    FileDownloadDto, Permission, RecordingTypeDto, UserId, XtreamCluster, ROLE_ADMIN,
 };
 use std::sync::Arc;
 
@@ -120,8 +120,8 @@ pub async fn create_recording_task(
     AuthClaims(claims): AuthClaims,
     Json(body): Json<CreateRecordingTaskBody>,
 ) -> impl IntoResponse {
-    let mut source = body.source;
-    if !resolve_recording_source(
+    let mut source = body.source.clone();
+    let Some(resolved_source) = resolve_recording_source(
         &app_state,
         &source.target_id,
         &mut source.virtual_id,
@@ -129,9 +129,15 @@ pub async fn create_recording_task(
         source.cluster,
     )
     .await
-    {
+    else {
         return service_error_response(&ServiceError::InvalidSource);
+    };
+    if source.cluster != XtreamCluster::Live {
+        return create_http_recording_task(&app_state, &claims, body, source, resolved_source).await;
     }
+    let (Some(program_start), Some(program_end)) = (body.program_start, body.program_end) else {
+        return error_response(StatusCode::UNPROCESSABLE_ENTITY, "recording_invalid_interval");
+    };
     let service = RecordingService::new(app_state.downloads.clone(), app_state.app_config.clone());
     let input = CreateRecordingInput {
         source: RecordingSourceInput {
@@ -141,10 +147,10 @@ pub async fn create_recording_task(
             input_name: source.input_name,
         },
         program_title: body.program_title,
-        program_start: body.program_start,
-        program_end: body.program_end,
-        pre_roll_secs: body.pre_roll_secs,
-        post_roll_secs: body.post_roll_secs,
+        program_start,
+        program_end,
+        pre_roll_secs: body.pre_roll_secs.unwrap_or_default(),
+        post_roll_secs: body.post_roll_secs.unwrap_or_default(),
         visibility: body.visibility,
         channel_id: body.channel_id,
         channel_name: body.channel_name,
@@ -165,10 +171,14 @@ pub async fn create_recording_task(
 pub struct CreateRecordingTaskBody {
     pub source: CreateRecordingSourceBody,
     pub program_title: String,
-    pub program_start: i64,
-    pub program_end: i64,
-    pub pre_roll_secs: u64,
-    pub post_roll_secs: u64,
+    #[serde(default)]
+    pub program_start: Option<i64>,
+    #[serde(default)]
+    pub program_end: Option<i64>,
+    #[serde(default)]
+    pub pre_roll_secs: Option<u64>,
+    #[serde(default)]
+    pub post_roll_secs: Option<u64>,
     pub visibility: RecordingVisibility,
     #[serde(default)]
     pub channel_id: Option<String>,
@@ -184,6 +194,110 @@ pub struct CreateRecordingSourceBody {
     pub virtual_id: String,
     pub cluster: XtreamCluster,
     pub input_name: String,
+}
+
+async fn create_http_recording_task(
+    app_state: &Arc<AppState>,
+    claims: &shared::model::Claims,
+    body: CreateRecordingTaskBody,
+    source: CreateRecordingSourceBody,
+    resolved: crate::api::endpoints::v1_api_playlist::ResolvedRecordingSource,
+) -> axum::response::Response {
+    if body.program_start.is_some()
+        || body.program_end.is_some()
+        || body.pre_roll_secs.is_some()
+        || body.post_roll_secs.is_some()
+    {
+        return error_response(StatusCode::UNPROCESSABLE_ENTITY, "recording_invalid_interval");
+    }
+    if !claims.permissions.contains(Permission::RecordingWrite) {
+        return error_response(StatusCode::FORBIDDEN, "recording_forbidden");
+    }
+    let Some(owner_id) = claims.subject_id.clone() else {
+        return error_response(StatusCode::UNAUTHORIZED, "recording_token_refresh_required");
+    };
+    if body.visibility == RecordingVisibility::Shared && !is_admin(claims) {
+        return error_response(StatusCode::FORBIDDEN, "recording_shared_requires_administrator");
+    }
+    let recording_type = match source.cluster {
+        XtreamCluster::Video => RecordingTypeDto::Vod,
+        XtreamCluster::Series => RecordingTypeDto::Series,
+        XtreamCluster::Live => return error_response(StatusCode::BAD_REQUEST, "recording_invalid_source"),
+    };
+    if !resolved.downloadable {
+        return error_response(StatusCode::UNPROCESSABLE_ENTITY, "recording_invalid_source");
+    }
+    let Some(extension) = resolved.extension.as_deref().filter(|extension| !extension.is_empty()) else {
+        return error_response(StatusCode::UNPROCESSABLE_ENTITY, "recording_invalid_path");
+    };
+    let Some(url) = crate::api::endpoints::v1_api_playlist::build_stable_recording_url(
+        &app_state.app_config,
+        &source.target_id,
+        &source.input_name,
+        resolved.virtual_id,
+        source.cluster,
+    ) else {
+        return error_response(StatusCode::BAD_REQUEST, "recording_invalid_source");
+    };
+    let config = app_state.app_config.config.load();
+    let Some(recording_config) = config.recording.as_ref() else {
+        return error_response(StatusCode::NOT_IMPLEMENTED, "recording_disabled");
+    };
+    let filename = format!("{}.{}", resolved.title, extension.trim_start_matches('.'));
+    let Some(mut task) = FileDownload::new_with_type(
+        &url,
+        &filename,
+        recording_config,
+        Some(Arc::from(source.input_name.as_str())),
+        recording_config.priority,
+        recording_type,
+    ) else {
+        return error_response(StatusCode::UNPROCESSABLE_ENTITY, "recording_invalid_path");
+    };
+    let recording_source =
+        RecordingSource::new(source.target_id, source.virtual_id, source.input_name).with_cluster(source.cluster);
+    let mut metadata = RecordingMetadata::new_transfer(
+        RecordingOwner::User(owner_id),
+        body.visibility,
+        recording_source,
+        resolved.title,
+    );
+    metadata.relative_path = task
+        .file_path
+        .strip_prefix(&recording_config.directory)
+        .ok()
+        .and_then(|path| path.to_str())
+        .map(str::to_string);
+    task.recording = Some(metadata);
+
+    if let Some(existing) = app_state.downloads.find_duplicate(&task).await {
+        return Json(FileDownloadDto::from(&existing)).into_response();
+    }
+    if let Err(error) = mutate(&app_state.downloads, |candidate| {
+        candidate.queue.push(DownloadQueue::to_persisted(&task));
+        Ok(())
+    })
+    .await
+    {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, error.message());
+    }
+    if app_state.downloads.active.read().await.is_none() {
+        if crate::api::endpoints::download_api::ensure_download_worker_running(
+            &app_state.app_config,
+            recording_config,
+            &app_state.downloads,
+            &app_state.event_manager,
+            &app_state.active_provider,
+            &app_state.connection_manager,
+        )
+        .await
+        .is_err()
+        {
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, "recording_worker_failed");
+        }
+    }
+    let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
+    Json(FileDownloadDto::from(&task)).into_response()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -243,6 +357,71 @@ impl From<EditRecordingTaskBody> for EditRecordingPatch {
 }
 
 /// POST /api/v1/recording/tasks/{id}/cancel
+
+/// POST /api/v1/recording/tasks/{id}/pause
+pub async fn pause_recording_task(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    State(app_state): State<Arc<AppState>>,
+    AuthClaims(claims): AuthClaims,
+) -> impl IntoResponse {
+    let service = RecordingService::new(app_state.downloads.clone(), app_state.app_config.clone());
+    match service.pause_recording(&claims, &id).await {
+        Ok(()) => {
+            let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(err) => service_error_response(&err),
+    }
+}
+
+/// POST /api/v1/recording/tasks/{id}/resume
+pub async fn resume_recording_task(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    State(app_state): State<Arc<AppState>>,
+    AuthClaims(claims): AuthClaims,
+) -> impl IntoResponse {
+    let service = RecordingService::new(app_state.downloads.clone(), app_state.app_config.clone());
+    match service.resume_recording(&claims, &id).await {
+        Ok(_) => {
+            let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(err) => service_error_response(&err),
+    }
+}
+
+/// POST /api/v1/recording/tasks/{id}/retry
+pub async fn retry_recording_task(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    State(app_state): State<Arc<AppState>>,
+    AuthClaims(claims): AuthClaims,
+) -> impl IntoResponse {
+    let service = RecordingService::new(app_state.downloads.clone(), app_state.app_config.clone());
+    match service.retry_recording(&claims, &id).await {
+        Ok(_) => {
+            let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(err) => service_error_response(&err),
+    }
+}
+
+/// DELETE /api/v1/recording/tasks/{id}
+pub async fn remove_recording_task(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    State(app_state): State<Arc<AppState>>,
+    AuthClaims(claims): AuthClaims,
+) -> impl IntoResponse {
+    let service = RecordingService::new(app_state.downloads.clone(), app_state.app_config.clone());
+    match service.remove_recording_task(&claims, &id).await {
+        Ok(_) => {
+            let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(err) => service_error_response(&err),
+    }
+}
+
 pub async fn cancel_recording_task(
     axum::extract::Path(id): axum::extract::Path<String>,
     State(app_state): State<Arc<AppState>>,
@@ -390,14 +569,7 @@ pub async fn get_recording_quota(
     let tasks = all_recording_tasks(&app_state).await;
     let totals = recording_quota::compute_totals(&tasks);
     let config = app_state.app_config.config.load();
-    let limits = quota_limits_from_config(
-        config
-            .video
-            .as_ref()
-            .and_then(|v| v.download.as_ref())
-            .and_then(|d| d.recording.as_ref())
-            .and_then(|r| r.quota.as_ref()),
-    );
+    let limits = quota_limits_from_config(config.recording.as_ref().and_then(|recording| recording.quota.as_ref()));
     let quota = recording_quota::regular_user_dto(subject_id, &totals, &limits, &tasks);
     Json(RecordingQuotaResponse {
         private_used_bytes: quota.private.measured_bytes.saturating_add(quota.private.reserved_bytes),
@@ -436,11 +608,7 @@ pub async fn get_recording_health(
     }
     let health = crate::api::model::recording::recording_supervisor::supervisor_health();
     let config = app_state.app_config.config.load();
-    let recording = config
-        .video
-        .as_ref()
-        .and_then(|video| video.download.as_ref())
-        .and_then(|download| download.recording.as_ref());
+    let recording = config.recording.as_ref();
     Json(RecordingHealthResponse {
         enabled: recording.is_none_or(|cfg| cfg.enabled),
         server_time: chrono::Utc::now().timestamp(),
@@ -531,10 +699,10 @@ async fn resolve_recording_source(
     virtual_id: &mut String,
     input_name: &mut String,
     cluster: XtreamCluster,
-) -> bool {
+) -> Option<crate::api::endpoints::v1_api_playlist::ResolvedRecordingSource> {
     if recording_virtual_id(virtual_id).is_none() {
         if cluster != XtreamCluster::Live {
-            return false;
+            return None;
         }
         let Some(resolved) =
             crate::api::endpoints::v1_api_playlist::resolve_target_live_recording_source_by_epg_channel(
@@ -544,14 +712,14 @@ async fn resolve_recording_source(
             )
             .await
         else {
-            return false;
+            return None;
         };
-        if !accept_resolved_recording_source(virtual_id, input_name, resolved) {
-            return false;
+        if !accept_resolved_recording_source(virtual_id, input_name, &resolved) {
+            return None;
         }
     }
     let Some(virtual_id_value) = recording_virtual_id(virtual_id) else {
-        return false;
+        return None;
     };
     let Some(resolved) = crate::api::endpoints::v1_api_playlist::resolve_target_recording_source(
         &app_state.app_config,
@@ -562,9 +730,9 @@ async fn resolve_recording_source(
     )
     .await
     else {
-        return false;
+        return None;
     };
-    accept_resolved_recording_source(virtual_id, input_name, resolved)
+    accept_resolved_recording_source(virtual_id, input_name, &resolved).then_some(resolved)
 }
 
 /// GET /api/v1/recording/rules
@@ -611,7 +779,7 @@ pub async fn create_recording_rule(
     let Some(owner_id) = claims.subject_id.clone() else {
         return error_response(StatusCode::UNAUTHORIZED, "recording_token_refresh_required");
     };
-    if !resolve_recording_source(
+    if resolve_recording_source(
         &app_state,
         &body.target_id,
         &mut body.virtual_id,
@@ -619,6 +787,7 @@ pub async fn create_recording_rule(
         XtreamCluster::Live,
     )
     .await
+    .is_none()
     {
         return rule_error_response(&RuleServiceError::InvalidRule);
     }
@@ -800,13 +969,13 @@ fn recording_virtual_id(virtual_id: &str) -> Option<u32> { virtual_id.parse::<u3
 fn accept_resolved_recording_source(
     virtual_id: &mut String,
     input_name: &mut String,
-    resolved: crate::api::endpoints::v1_api_playlist::ResolvedRecordingSource,
+    resolved: &crate::api::endpoints::v1_api_playlist::ResolvedRecordingSource,
 ) -> bool {
     if !input_name.trim().is_empty() && input_name != &resolved.input_name {
         return false;
     }
     *virtual_id = resolved.virtual_id.to_string();
-    *input_name = resolved.input_name;
+    input_name.clone_from(&resolved.input_name);
     true
 }
 
@@ -948,11 +1117,11 @@ pub fn recording_availability_register(router: Router<Arc<AppState>>) -> Router<
 
 /// Reject every recording route while the DVR is switched off.
 ///
-/// `video.download.recording.enabled: false` has to mean more than
-/// "supervisors idle": a client that keeps calling the routes would
-/// otherwise keep creating recordings nothing will ever run. One layer
-/// on the nested router covers every route, so a route added later is
-/// gated automatically.
+/// `config.recording.enabled: false` has to mean more than "supervisors
+/// idle": a client that keeps calling the routes would otherwise keep
+/// creating recordings nothing will ever run. One layer on the nested
+/// router covers every route, so a route added later is gated
+/// automatically.
 ///
 /// `501 Not Implemented` with the stable code `recording_disabled`
 /// distinguishes "switched off here" from `403` (not allowed) and `404`
@@ -980,6 +1149,10 @@ pub fn recording_api_register(router: Router<Arc<AppState>>) -> axum::Router<Arc
         .route("/tasks", get(list_recording_tasks).post(create_recording_task))
         .route("/tasks/{id}", patch(edit_recording_task).delete(delete_recording_task))
         .route("/tasks/{id}/cancel", post(cancel_recording_task))
+        .route("/tasks/{id}/pause", post(pause_recording_task))
+        .route("/tasks/{id}/resume", post(resume_recording_task))
+        .route("/tasks/{id}/retry", post(retry_recording_task))
+        .route("/tasks/{id}/remove", axum::routing::delete(remove_recording_task))
         .route("/conflicts/preview", post(preview_recording_conflicts))
         .route("/quota", get(get_recording_quota))
         .route("/health", get(get_recording_health))
@@ -1025,11 +1198,10 @@ mod tests {
     }
 
     fn enabled_recording_state() -> Arc<AppState> {
-        let recording = shared::model::RecordingConfigDto { enabled: true, ..Default::default() };
-        let download = shared::model::VideoDownloadConfigDto { recording: Some(recording), ..Default::default() };
-        let video = shared::model::VideoConfigDto { download: Some(download), ..Default::default() };
+        let recording_dto = shared::model::RecordingConfigDto { enabled: true, ..Default::default() };
+        let recording_runtime = crate::model::RecordingConfig::from(&recording_dto);
         crate::api::model::create_test_app_state(crate::model::Config {
-            video: Some((&video).into()),
+            recording: Some(recording_runtime),
             ..crate::model::Config::default()
         })
     }
@@ -1151,14 +1323,17 @@ mod tests {
         let resolved = crate::api::endpoints::v1_api_playlist::ResolvedRecordingSource {
             virtual_id: 42,
             input_name: "input-a".to_string(),
+            title: "Example".to_string(),
+            extension: Some("ts".to_string()),
+            downloadable: true,
         };
         let mut virtual_id = "00042".to_string();
         let mut input_name = "input-b".to_string();
-        assert!(!accept_resolved_recording_source(&mut virtual_id, &mut input_name, resolved.clone()));
+        assert!(!accept_resolved_recording_source(&mut virtual_id, &mut input_name, &resolved));
         assert_eq!(input_name, "input-b");
 
         input_name.clear();
-        assert!(accept_resolved_recording_source(&mut virtual_id, &mut input_name, resolved));
+        assert!(accept_resolved_recording_source(&mut virtual_id, &mut input_name, &resolved));
         assert_eq!(virtual_id, "42");
         assert_eq!(input_name, "input-a");
     }

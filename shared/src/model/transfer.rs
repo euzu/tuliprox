@@ -1,11 +1,21 @@
 use super::recording::RecordingTaskDto;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskKindDto {
     Download,
     Recording,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordingTypeDto {
+    Live,
+    Vod,
+    Series,
+    #[default]
+    LegacyDownload,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -35,6 +45,8 @@ pub struct TransferTaskDto {
     pub id: String,
     pub title: String,
     pub kind: TaskKindDto,
+    #[serde(default)]
+    pub recording_type: RecordingTypeDto,
     pub priority: TaskPriorityDto,
     pub status: TransferStatusDto,
     pub retry_attempts: u8,
@@ -79,7 +91,10 @@ pub enum TransfersDelta {
 
 #[cfg(test)]
 mod tests {
-    use super::{TaskKindDto, TaskPriorityDto, TransferStatusDto, TransferTaskDto, TransfersDelta, TransfersResponse};
+    use super::{
+        RecordingTypeDto, TaskKindDto, TaskPriorityDto, TransferStatusDto, TransferTaskDto, TransfersDelta,
+        TransfersResponse,
+    };
 
     #[test]
     fn task_kind_serializes_as_snake_case() {
@@ -104,6 +119,7 @@ mod tests {
             id: "abc".to_string(),
             title: "Example".to_string(),
             kind: TaskKindDto::Download,
+            recording_type: RecordingTypeDto::Vod,
             priority: TaskPriorityDto::Background,
             status: TransferStatusDto::Queued,
             retry_attempts: 0,
@@ -124,6 +140,15 @@ mod tests {
         let json = serde_json::to_string(&task).expect("serialize");
         let decoded: TransferTaskDto = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded, task);
+    }
+
+    #[test]
+    fn legacy_transfer_without_recording_type_defaults_to_legacy_download() {
+        let mut value = serde_json::to_value(make_test_task()).expect("serialize");
+        value.as_object_mut().expect("object").remove("recording_type");
+        let task: TransferTaskDto = serde_json::from_value(value).expect("deserialize");
+
+        assert_eq!(task.recording_type, RecordingTypeDto::LegacyDownload);
     }
 
     #[test]

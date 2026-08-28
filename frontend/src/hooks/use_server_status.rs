@@ -368,7 +368,7 @@ pub fn use_server_status(
                         let services_clone = services_clone.clone();
                         spawn_local(async move {
                             services_clone.websocket.get_server_status().await;
-                            if services_clone.auth.has_permission(Permission::DownloadRead) {
+                            if services_clone.auth.has_permission(Permission::RecordingRead) {
                                 if services_clone.websocket.send_message(ProtocolMessage::DownloadsRequest) {
                                     return;
                                 }
@@ -1027,6 +1027,11 @@ mod tests {
             id: id.to_string(),
             title: format!("{id}.ts"),
             kind,
+            recording_type: if kind == TaskKindDto::Recording {
+                shared::model::RecordingTypeDto::Live
+            } else {
+                shared::model::RecordingTypeDto::Vod
+            },
             priority: TaskPriorityDto::Background,
             status,
             retry_attempts: 0,

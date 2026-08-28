@@ -179,7 +179,7 @@ fn apply_setup_config_forms(config: &mut shared::model::ConfigDto, forms: Vec<Co
             ConfigForm::Api(_, api_cfg) => config.api = api_cfg,
             ConfigForm::Log(_, log_cfg) => config.log = Some(log_cfg),
             ConfigForm::Schedules(_, schedules_cfg) => config.schedules = schedules_cfg.schedules,
-            ConfigForm::Video(_, video_cfg) => config.video = Some(video_cfg),
+            ConfigForm::Recording(_, recording_cfg) => config.recording = Some(recording_cfg),
             ConfigForm::MetadataUpdate(_, mut metadata_update_cfg) => {
                 if metadata_update_cfg.is_empty() {
                     config.metadata_update = None;

@@ -12,7 +12,7 @@ use crate::{
         },
     },
     messaging::send_message,
-    model::{AppConfig, MessageContent, VideoDownloadConfig},
+    model::{AppConfig, MessageContent, RecordingConfig},
     utils::{async_file_writer, request, request::create_client, IO_BUFFER_SIZE},
 };
 use axum::response::IntoResponse;
@@ -33,6 +33,10 @@ use tokio::{
     time::{self, Duration, Instant, Sleep},
 };
 use tokio_util::sync::CancellationToken;
+use tuliprox_dvr::http_transfer::{
+    compute_total_size, is_retryable_error, is_retryable_status, retryable_transport_error_message,
+    validate_resume_response, ResponseSnapshot, ResumeValidationError, ResumeValidator,
+};
 
 const DOWNLOAD_PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const DOWNLOAD_PROGRESS_LOG_BYTES: u64 = 16 * 1024 * 1024;
@@ -111,7 +115,7 @@ fn apply_download_retry_jitter(base_secs: u64, jitter_percent: u8) -> u64 {
 }
 
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn compute_download_retry_backoff_secs(attempts: u8, download_cfg: &VideoDownloadConfig) -> u64 {
+fn compute_download_retry_backoff_secs(attempts: u8, download_cfg: &RecordingConfig) -> u64 {
     let exponent = i32::from(attempts.saturating_sub(1));
     let scaled_secs =
         (download_cfg.retry_backoff_initial_secs as f64) * download_cfg.retry_backoff_multiplier.powi(exponent);
@@ -121,53 +125,14 @@ fn compute_download_retry_backoff_secs(attempts: u8, download_cfg: &VideoDownloa
     apply_download_retry_jitter(base_secs, download_cfg.retry_backoff_jitter_percent)
 }
 
-fn is_retryable_download_status(status: reqwest::StatusCode) -> bool {
-    status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
-}
+fn is_retryable_download_status(status: reqwest::StatusCode) -> bool { is_retryable_status(status) }
 
-fn is_retryable_download_error(err: &reqwest::Error) -> bool {
-    err.is_timeout() || err.is_connect() || retryable_transport_error_message(&err.to_string())
-}
-
-fn retryable_transport_error_message(message: &str) -> bool {
-    let msg = message.to_ascii_lowercase();
-    msg.contains("timed out")
-        || msg.contains("connection reset")
-        || msg.contains("connection refused")
-        || msg.contains("temporary failure")
-        || msg.contains("temporarily unavailable")
-        || msg.contains("network is unreachable")
-        || msg.contains("dns")
-        || msg.contains("name or service not known")
-        || msg.contains("connection closed before message completed")
-        || msg.contains("unexpected eof")
-}
-
-fn parse_content_range_total(headers: &reqwest::header::HeaderMap) -> Option<u64> {
-    headers.get("content-range").and_then(|v| {
-        v.to_str().ok().and_then(|s| s.split('/').next_back().and_then(|total| total.parse::<u64>().ok()))
-    })
-}
-
-fn compute_download_total_size(response: &reqwest::Response, existing_size: u64) -> Option<u64> {
-    let is_resume = existing_size > 0 || response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
-    if is_resume {
-        parse_content_range_total(response.headers()).or_else(|| {
-            if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
-                response.content_length().map(|len| len.saturating_add(existing_size))
-            } else {
-                response.content_length()
-            }
-        })
-    } else {
-        response.content_length()
-    }
-}
+fn is_retryable_download_error(err: &reqwest::Error) -> bool { is_retryable_error(err) }
 
 fn background_download_should_wait(
     priority: i8,
     capacities: &[(Arc<str>, usize, usize)],
-    download_cfg: &VideoDownloadConfig,
+    download_cfg: &RecordingConfig,
 ) -> bool {
     if priority <= 0 || capacities.is_empty() {
         return false;
@@ -312,6 +277,74 @@ async fn refresh_recording_progress(
     }
 }
 
+async fn send_download_request(
+    client: &reqwest::Client,
+    url: &reqwest::Url,
+    offset: u64,
+    control_signal: &RwLock<DownloadControl>,
+    control_notify: &Notify,
+    provider_cancel_token: Option<&CancellationToken>,
+) -> Result<reqwest::Response, DownloadExecutionResult> {
+    if let Some(result) = handle_download_control_without_writer(current_download_control(control_signal)) {
+        return Err(result);
+    }
+
+    let mut request = client.get(url.clone());
+    if offset > 0 {
+        request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
+    }
+    let send = request.send();
+    tokio::pin!(send);
+    loop {
+        if let Some(cancel_token) = provider_cancel_token {
+            tokio::select! {
+                biased;
+                () = cancel_token.cancelled() => return Err(DownloadExecutionResult::Preempted),
+                () = control_notify.notified() => {
+                    if let Some(result) = handle_download_control_without_writer(*control_signal.read().await) {
+                        return Err(result);
+                    }
+                }
+                response = &mut send => return response.map_err(|error| classify_download_open_error(url, &error)),
+            }
+        } else {
+            tokio::select! {
+                biased;
+                () = control_notify.notified() => {
+                    if let Some(result) = handle_download_control_without_writer(*control_signal.read().await) {
+                        return Err(result);
+                    }
+                }
+                response = &mut send => return response.map_err(|error| classify_download_open_error(url, &error)),
+            }
+        }
+    }
+}
+
+fn http_transfer_path(download: &FileDownload) -> std::path::PathBuf {
+    if matches!(download.kind, DownloadKind::Vod | DownloadKind::Series) {
+        recording_partial_path(&download.file_path)
+    } else {
+        download.file_path.clone()
+    }
+}
+
+async fn finalize_http_transfer(download: &FileDownload, transfer_path: &std::path::Path) -> std::io::Result<()> {
+    if transfer_path == download.file_path {
+        return Ok(());
+    }
+    fs::File::open(transfer_path).await?.sync_all().await?;
+    fs::hard_link(transfer_path, &download.file_path).await?;
+    if let Err(error) = fs::remove_file(transfer_path).await {
+        warn!(
+            "Finalized {} but could not remove partial {}: {error}",
+            download.file_path.display(),
+            transfer_path.display()
+        );
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)]
 async fn download_file(
     active: Arc<RwLock<Option<FileDownload>>>,
@@ -324,52 +357,65 @@ async fn download_file(
 ) -> DownloadExecutionResult {
     let worker_uuid = file_download.uuid.as_str();
     let url = file_download.url.clone();
-    let file_path = file_download.file_path.clone();
-    // Check for existing partial file for resume
-    let existing_size = tokio::fs::metadata(&file_path).await.map_or(0, |metadata| metadata.len());
-
-    let mut request_builder = client.get(url.clone());
-    if existing_size > 0 {
-        request_builder = request_builder.header("Range", format!("bytes={existing_size}-"));
-    }
-
-    if let Some(result) = handle_download_control_without_writer(current_download_control(&control_signal)) {
-        return result;
-    }
-
-    let send_request = request_builder.send();
-    tokio::pin!(send_request);
-    let response_result = loop {
-        if let Some(cancel_token) = provider_cancel_token.as_ref() {
-            tokio::select! {
-                biased;
-                () = cancel_token.cancelled() => return DownloadExecutionResult::Preempted,
-                () = control_notify.notified() => {
-                    if let Some(result) =
-                        handle_download_control_without_writer(*control_signal.read().await)
-                    {
-                        return result;
-                    }
-                }
-                response = &mut send_request => break response,
-            }
-        } else {
-            tokio::select! {
-                biased;
-                () = control_notify.notified() => {
-                    if let Some(result) =
-                        handle_download_control_without_writer(*control_signal.read().await)
-                    {
-                        return result;
-                    }
-                }
-                response = &mut send_request => break response,
-            }
-        }
-    };
+    let file_path = http_transfer_path(&file_download);
+    let mut existing_size = tokio::fs::metadata(&file_path).await.map_or(0, |metadata| metadata.len());
+    let response_result = send_download_request(
+        client,
+        &url,
+        existing_size,
+        &control_signal,
+        &control_notify,
+        provider_cancel_token.as_ref(),
+    )
+    .await;
 
     match response_result {
-        Ok(response) => {
+        Ok(mut response) => {
+            if existing_size > 0 {
+                let validator = ResumeValidator {
+                    expected_offset: existing_size,
+                    expected_total: file_download.total_size,
+                    ..ResumeValidator::default()
+                };
+                match validate_resume_response(&ResponseSnapshot::from_response(&response), &validator) {
+                    Ok(()) => {}
+                    Err(ResumeValidationError::IgnoredRange) => existing_size = 0,
+                    Err(ResumeValidationError::Unsatisfiable { complete: true }) => {
+                        return match finalize_http_transfer(&file_download, &file_path).await {
+                            Ok(()) => DownloadExecutionResult::Completed,
+                            Err(error) => DownloadExecutionResult::Failed(format!(
+                                "Could not finalize {}: {error}",
+                                file_download.file_path.display()
+                            )),
+                        };
+                    }
+                    Err(error) => {
+                        warn!("Discarding unsafe resume response for {url}: {error}; restarting from byte zero");
+                        response = match send_download_request(
+                            client,
+                            &url,
+                            0,
+                            &control_signal,
+                            &control_notify,
+                            provider_cancel_token.as_ref(),
+                        )
+                        .await
+                        {
+                            Ok(response) => response,
+                            Err(result) => return result,
+                        };
+                        existing_size = 0;
+                        if let Err(error) = validate_resume_response(
+                            &ResponseSnapshot::from_response(&response),
+                            &ResumeValidator::default(),
+                        ) {
+                            return DownloadExecutionResult::Failed(format!(
+                                "Unsafe fresh download response for {url}: {error}"
+                            ));
+                        }
+                    }
+                }
+            }
             let status = response.status();
             if !status.is_success() && status != reqwest::StatusCode::PARTIAL_CONTENT {
                 if is_retryable_download_status(status) {
@@ -383,7 +429,7 @@ async fn download_file(
             }
             let is_resume = status == reqwest::StatusCode::PARTIAL_CONTENT;
 
-            let total_size = compute_download_total_size(&response, existing_size);
+            let total_size = compute_total_size(&response, existing_size);
 
             if let Some(total) = total_size {
                 let changed = update_active_download_for_worker(&active, worker_uuid, |download| {
@@ -654,7 +700,13 @@ async fn download_file(
                                                 if let Err(err) = buf_writer.shutdown().await {
                                                     return DownloadExecutionResult::Failed(err.to_string());
                                                 }
-                                                return DownloadExecutionResult::Completed;
+                                                return match finalize_http_transfer(&file_download, &file_path).await {
+                                                    Ok(()) => DownloadExecutionResult::Completed,
+                                                    Err(error) => DownloadExecutionResult::Failed(format!(
+                                                        "Could not finalize {}: {error}",
+                                                        file_download.file_path.display()
+                                                    )),
+                                                };
                                             }
                                         }
                                         Err(err) => return classify_download_stream_io_error(file_path_str, &err),
@@ -676,7 +728,7 @@ async fn download_file(
                 )),
             }
         }
-        Err(err) => classify_download_open_error(&url, &err),
+        Err(result) => result,
     }
 }
 
@@ -1032,7 +1084,7 @@ enum RetryCommit {
 async fn prepare_active_retry(
     download_queue: &DownloadQueue,
     uuid: &str,
-    download_cfg: &VideoDownloadConfig,
+    download_cfg: &RecordingConfig,
 ) -> Result<Option<RetryCommit>, QueueMutationError> {
     mutate_optional(download_queue, |candidate| {
         let Some(active) = candidate.active.as_mut().filter(|active| active.uuid == uuid) else {
@@ -1081,7 +1133,7 @@ const RECORDING_PREEMPTED_REASON: &str =
 
 fn preemption_reason_for(download: &FileDownload) -> &'static str {
     match download.kind {
-        DownloadKind::Download => DOWNLOAD_PREEMPTED_REASON,
+        DownloadKind::Download | DownloadKind::Vod | DownloadKind::Series => DOWNLOAD_PREEMPTED_REASON,
         DownloadKind::Recording => RECORDING_PREEMPTED_REASON,
     }
 }
@@ -1089,7 +1141,7 @@ fn preemption_reason_for(download: &FileDownload) -> &'static str {
 #[allow(clippy::too_many_lines)]
 pub(in crate::api) async fn ensure_download_worker_running(
     cfg: &AppConfig,
-    download_cfg: &VideoDownloadConfig,
+    download_cfg: &RecordingConfig,
     download_queue: &Arc<DownloadQueue>,
     event_manager: &Arc<EventManager>,
     active_provider: &Arc<ActiveProviderManager>,
@@ -1323,10 +1375,18 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                 break 'worker;
                             };
                             match download.kind.clone() {
-                                DownloadKind::Download => {
+                                DownloadKind::Download | DownloadKind::Vod | DownloadKind::Series => 'http_execution: {
+                                    let execution_download = if download.recording.is_some() {
+                                        match recording_execution_download(&app_config, &download) {
+                                            Ok(execution) => execution,
+                                            Err(error) => break 'http_execution DownloadExecutionResult::Failed(error),
+                                        }
+                                    } else {
+                                        download.clone()
+                                    };
                                     download_file(
                                         Arc::clone(&dq.active),
-                                        download,
+                                        execution_download,
                                         &client,
                                         Arc::clone(&control_signal),
                                         Arc::clone(&control_notify),
@@ -1342,16 +1402,11 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                         Err(err) => break 'recording_execution DownloadExecutionResult::Failed(err),
                                     };
                                     let progress_path = recording_partial_path(&execution_download.file_path);
-                                    let container_format = app_config
-                                        .config
-                                        .load()
-                                        .video
-                                        .as_ref()
-                                        .and_then(|video| video.download.as_ref())
-                                        .and_then(|dl| dl.recording.as_ref())
-                                        .map_or_else(shared::model::RecordingContainerFormat::default, |recording| {
-                                            recording.container_format
-                                        });
+                                    let container_format =
+                                        app_config.config.load().recording.as_ref().map_or_else(
+                                            shared::model::RecordingContainerFormat::default,
+                                            |recording| recording.container_format,
+                                        );
                                     let mut recording_future = Box::pin(run_recording(
                                         &execution_download,
                                         &control_signal,
@@ -1688,7 +1743,7 @@ pub(in crate::api) async fn ensure_download_worker_running(
 
 pub(in crate::api) fn start_download_scheduler(
     app_config: Arc<AppConfig>,
-    download_cfg: VideoDownloadConfig,
+    download_cfg: RecordingConfig,
     download_queue: Arc<DownloadQueue>,
     event_manager: Arc<EventManager>,
     active_provider: Arc<ActiveProviderManager>,
@@ -1778,7 +1833,7 @@ pub(in crate::api) fn start_download_scheduler(
 
 pub(in crate::api) fn spawn_download_services(app_state: &AppState, cancel_token: &CancellationToken) {
     let config = app_state.app_config.config.load();
-    let Some(download_cfg) = config.video.as_ref().and_then(|video| video.download.as_ref()).cloned() else {
+    let Some(download_cfg) = config.recording.as_ref().cloned() else {
         return;
     };
 
@@ -1795,7 +1850,7 @@ pub(in crate::api) fn spawn_download_services(app_state: &AppState, cancel_token
 
 pub(in crate::api) async fn resume_download_worker_if_needed(
     app_state: &AppState,
-    download_cfg: &VideoDownloadConfig,
+    download_cfg: &RecordingConfig,
 ) -> Result<(), String> {
     if app_state.downloads.queue.lock().await.is_empty() && app_state.downloads.active.read().await.is_none() {
         return Ok(());
@@ -1819,78 +1874,78 @@ pub async fn queue_download_file(
     let app_config = &*app_state.app_config;
 
     let config = app_config.config.load();
-    if let Some(video_cfg) = config.video.as_ref() {
-        if let Some(download_cfg) = video_cfg.download.as_ref() {
-            if download_cfg.directory.is_empty() {
-                return (
-                    axum::http::StatusCode::BAD_REQUEST,
-                    axum::Json(json!({"error": "Server config missing video.download.directory configuration"})),
-                )
-                    .into_response();
-            }
-            let input_name = req.input_name.map(|s| std::sync::Arc::from(s.as_str()));
-            let priority = req.priority.unwrap_or(download_cfg.download_priority);
-            match FileDownload::new(req.url.as_str(), req.filename.as_str(), download_cfg, input_name, priority) {
-                Some(file_download) => {
-                    if let Some(existing) = app_state.downloads.find_duplicate(&file_download).await {
-                        info!(
-                            "Skipping duplicate download request for {} (matched existing task {})",
-                            file_download.url, existing.uuid
-                        );
-                        return axum::Json(shared::model::FileDownloadDto::from(&existing)).into_response();
-                    }
+    if let Some(download_cfg) = config.recording.as_ref() {
+        if download_cfg.directory.is_empty() {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                axum::Json(json!({"error": "Server config missing video.download.directory configuration"})),
+            )
+                .into_response();
+        }
+        let input_name = req.input_name.map(|s| std::sync::Arc::from(s.as_str()));
+        let priority = req.priority.unwrap_or(download_cfg.priority);
+        match FileDownload::new_with_type(
+            req.url.as_str(),
+            req.filename.as_str(),
+            download_cfg,
+            input_name,
+            priority,
+            req.recording_type,
+        ) {
+            Some(file_download) => {
+                if let Some(existing) = app_state.downloads.find_duplicate(&file_download).await {
                     info!(
-                        "Queueing download {} ({}) from {}",
-                        file_download.uuid, file_download.filename, file_download.url
+                        "Skipping duplicate download request for {} (matched existing task {})",
+                        file_download.url, existing.uuid
                     );
-                    if let Err(err) = mutate(&app_state.downloads, |candidate| {
-                        candidate.queue.push(DownloadQueue::to_persisted(&file_download));
-                        Ok(())
-                    })
+                    return axum::Json(shared::model::FileDownloadDto::from(&existing)).into_response();
+                }
+                info!(
+                    "Queueing download {} ({}) from {}",
+                    file_download.uuid, file_download.filename, file_download.url
+                );
+                if let Err(err) = mutate(&app_state.downloads, |candidate| {
+                    candidate.queue.push(DownloadQueue::to_persisted(&file_download));
+                    Ok(())
+                })
+                .await
+                {
+                    return (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        axum::Json(json!({"error": err.message()})),
+                    )
+                        .into_response();
+                }
+                if app_state.downloads.active.read().await.is_none() {
+                    match ensure_download_worker_running(
+                        &app_state.app_config,
+                        download_cfg,
+                        &app_state.downloads,
+                        &app_state.event_manager,
+                        &app_state.active_provider,
+                        &app_state.connection_manager,
+                    )
                     .await
                     {
-                        return (
-                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                            axum::Json(json!({"error": err.message()})),
-                        )
-                            .into_response();
-                    }
-                    if app_state.downloads.active.read().await.is_none() {
-                        match ensure_download_worker_running(
-                            &app_state.app_config,
-                            download_cfg,
-                            &app_state.downloads,
-                            &app_state.event_manager,
-                            &app_state.active_provider,
-                            &app_state.connection_manager,
-                        )
-                        .await
-                        {
-                            Ok(()) => {}
-                            Err(err) => {
-                                return (
-                                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                                    axum::Json(json!({"error": err})),
-                                )
-                                    .into_response()
-                            }
+                        Ok(()) => {}
+                        Err(err) => {
+                            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err})))
+                                .into_response()
                         }
                     }
-                    broadcast_download_queue_update(&app_state.event_manager, &app_state.downloads).await;
-                    axum::Json(shared::model::FileDownloadDto::from(&file_download)).into_response()
                 }
-                None => (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Invalid Arguments"})))
-                    .into_response(),
+                broadcast_download_queue_update(&app_state.event_manager, &app_state.downloads).await;
+                axum::Json(shared::model::FileDownloadDto::from(&file_download)).into_response()
             }
-        } else {
-            (
-                axum::http::StatusCode::BAD_REQUEST,
-                axum::Json(json!({"error": "Server config missing video.download configuration"})),
-            )
-                .into_response()
+            None => {
+                (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Invalid Arguments"}))).into_response()
+            }
         }
     } else {
-        (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Server config missing video configuration"})))
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": "Server config missing recording configuration"})),
+        )
             .into_response()
     }
 }
@@ -1916,63 +1971,59 @@ pub async fn queue_recording_file(
             .into_response();
     }
 
-    if let Some(video_cfg) = config.video.as_ref() {
-        if let Some(download_cfg) = video_cfg.download.as_ref() {
-            if download_cfg.directory.is_empty() {
-                return (
-                    axum::http::StatusCode::BAD_REQUEST,
-                    axum::Json(json!({"error": "Server config missing video.download.directory configuration"})),
-                )
-                    .into_response();
-            }
-            let input_name = req.input_name.map(|s| std::sync::Arc::from(s.as_str()));
-            let priority = req.priority.unwrap_or(download_cfg.recording_priority);
-            match FileDownload::new_recording(
-                req.url.as_str(),
-                req.filename.as_str(),
-                download_cfg,
-                req.start_at,
-                req.duration_secs,
-                input_name,
-                priority,
-            ) {
-                Some(recording) => {
-                    if let Some(existing) = app_state.downloads.find_duplicate(&recording).await {
-                        info!(
-                            "Skipping duplicate recording request for {} at {} (matched existing task {})",
-                            recording.url,
-                            recording.start_at.unwrap_or_default(),
-                            existing.uuid
-                        );
-                        return axum::Json(shared::model::FileDownloadDto::from(&existing)).into_response();
-                    }
-                    if let Err(err) = mutate(&app_state.downloads, |candidate| {
-                        candidate.scheduled.push(DownloadQueue::to_persisted(&recording));
-                        Ok(())
-                    })
-                    .await
-                    {
-                        return (
-                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                            axum::Json(json!({"error": err.message()})),
-                        )
-                            .into_response();
-                    }
-                    broadcast_download_queue_update(&app_state.event_manager, &app_state.downloads).await;
-                    axum::Json(shared::model::FileDownloadDto::from(&recording)).into_response()
-                }
-                None => (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Invalid Arguments"})))
-                    .into_response(),
-            }
-        } else {
-            (
+    if let Some(download_cfg) = config.recording.as_ref() {
+        if download_cfg.directory.is_empty() {
+            return (
                 axum::http::StatusCode::BAD_REQUEST,
-                axum::Json(json!({"error": "Server config missing video.download configuration"})),
+                axum::Json(json!({"error": "Server config missing video.download.directory configuration"})),
             )
-                .into_response()
+                .into_response();
+        }
+        let input_name = req.input_name.map(|s| std::sync::Arc::from(s.as_str()));
+        let priority = req.priority.unwrap_or(download_cfg.priority);
+        match FileDownload::new_recording(
+            req.url.as_str(),
+            req.filename.as_str(),
+            download_cfg,
+            req.start_at,
+            req.duration_secs,
+            input_name,
+            priority,
+        ) {
+            Some(recording) => {
+                if let Some(existing) = app_state.downloads.find_duplicate(&recording).await {
+                    info!(
+                        "Skipping duplicate recording request for {} at {} (matched existing task {})",
+                        recording.url,
+                        recording.start_at.unwrap_or_default(),
+                        existing.uuid
+                    );
+                    return axum::Json(shared::model::FileDownloadDto::from(&existing)).into_response();
+                }
+                if let Err(err) = mutate(&app_state.downloads, |candidate| {
+                    candidate.scheduled.push(DownloadQueue::to_persisted(&recording));
+                    Ok(())
+                })
+                .await
+                {
+                    return (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        axum::Json(json!({"error": err.message()})),
+                    )
+                        .into_response();
+                }
+                broadcast_download_queue_update(&app_state.event_manager, &app_state.downloads).await;
+                axum::Json(shared::model::FileDownloadDto::from(&recording)).into_response()
+            }
+            None => {
+                (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Invalid Arguments"}))).into_response()
+            }
         }
     } else {
-        (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Server config missing video configuration"})))
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": "Server config missing recording configuration"})),
+        )
             .into_response()
     }
 }
@@ -2005,8 +2056,7 @@ pub async fn resume_download(
 ) -> impl axum::response::IntoResponse + Send {
     match app_state.downloads.resume_active(&req.uuid).await {
         Ok(true) => {
-            let download_cfg =
-                app_state.app_config.config.load().video.as_ref().and_then(|video| video.download.as_ref()).cloned();
+            let download_cfg = app_state.app_config.config.load().recording.as_ref().cloned();
             if let Some(download_cfg) = download_cfg {
                 let app_state = Arc::clone(&app_state);
                 tokio::spawn(async move {
@@ -2049,7 +2099,7 @@ pub async fn cancel_download(
         Ok(Some(was_paused)) => {
             if was_paused {
                 let config = app_state.app_config.config.load();
-                if let Some(download_cfg) = config.video.as_ref().and_then(|video| video.download.as_ref()) {
+                if let Some(download_cfg) = config.recording.as_ref() {
                     if let Err(err) = ensure_download_worker_running(
                         &app_state.app_config,
                         download_cfg,
@@ -2115,19 +2165,17 @@ pub async fn retry_download(
         // Start the queue if not running
         let app_config = &app_state.app_config;
         let config = app_config.config.load();
-        if let Some(video_cfg) = config.video.as_ref() {
-            if let Some(download_cfg) = video_cfg.download.as_ref() {
-                if app_state.downloads.active.read().await.is_none() {
-                    let _ = ensure_download_worker_running(
-                        app_config,
-                        download_cfg,
-                        &app_state.downloads,
-                        &app_state.event_manager,
-                        &app_state.active_provider,
-                        &app_state.connection_manager,
-                    )
-                    .await;
-                }
+        if let Some(download_cfg) = config.recording.as_ref() {
+            if app_state.downloads.active.read().await.is_none() {
+                let _ = ensure_download_worker_running(
+                    app_config,
+                    download_cfg,
+                    &app_state.downloads,
+                    &app_state.event_manager,
+                    &app_state.active_provider,
+                    &app_state.connection_manager,
+                )
+                .await;
             }
         }
     }
@@ -2140,11 +2188,11 @@ mod tests {
     use super::{
         active_download_snapshot, active_download_snapshot_for_worker, broadcast_download_queue_update,
         broadcast_required_worker_mutation, broadcast_worker_mutation, cancel_active_and_promote, cancel_download,
-        commit_acquired_download, finish_active_and_promote, mark_recording_notification, parse_content_range_total,
-        pause_download, preemption_reason_for, recording_deadline_reached, recording_execution_download,
-        refresh_recording_progress, requeue_active_download_for_capacity_wait, requeue_active_download_for_retry,
-        resume_download, retryable_transport_error_message, rollback_last_recording_marker, set_active_download_state,
-        should_exit_worker_after_preempt, DownloadActionRequest, DOWNLOAD_PREEMPTED_REASON, RECORDING_PREEMPTED_REASON,
+        commit_acquired_download, finish_active_and_promote, mark_recording_notification, pause_download,
+        preemption_reason_for, recording_deadline_reached, recording_execution_download, refresh_recording_progress,
+        requeue_active_download_for_capacity_wait, requeue_active_download_for_retry, resume_download,
+        rollback_last_recording_marker, set_active_download_state, should_exit_worker_after_preempt,
+        DownloadActionRequest, DOWNLOAD_PREEMPTED_REASON, RECORDING_PREEMPTED_REASON,
     };
     use crate::{
         api::model::{
@@ -2171,6 +2219,7 @@ mod tests {
     };
     use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
     use tokio::sync::{mpsc, RwLock};
+    use tuliprox_dvr::http_transfer::{parse_content_range_total_from_headers, retryable_transport_error_message};
 
     fn make_download(
         kind: DownloadKind,
@@ -2199,6 +2248,17 @@ mod tests {
             next_retry_at: None,
             recording: None,
         }
+    }
+
+    #[test]
+    fn vod_and_series_use_partial_transfer_paths() {
+        let vod = make_download(DownloadKind::Vod, DownloadState::Queued, None, None);
+        let series = make_download(DownloadKind::Series, DownloadState::Queued, None, None);
+        let legacy = make_download(DownloadKind::Download, DownloadState::Queued, None, None);
+
+        assert_eq!(super::http_transfer_path(&vod), crate::api::model::recording_partial_path(&vod.file_path));
+        assert_eq!(super::http_transfer_path(&series), crate::api::model::recording_partial_path(&series.file_path));
+        assert_eq!(super::http_transfer_path(&legacy), legacy.file_path);
     }
 
     fn attach_recording(download: &mut FileDownload, owner: RecordingOwner, visibility: RecordingVisibility) {
@@ -2526,22 +2586,15 @@ mod tests {
 
     #[test]
     fn compute_download_retry_backoff_uses_multiplier_and_cap() {
-        let download_cfg = crate::model::VideoDownloadConfig {
-            headers: std::collections::HashMap::new(),
-            directory: "/tmp".to_string(),
-            organize_into_directories: false,
-            episode_pattern: None,
-            download_priority: 0,
-            recording_priority: 0,
-            reserve_slots_for_users: 0,
-            max_background_per_provider: 0,
+        let download_cfg = crate::model::RecordingConfig::from(&shared::model::RecordingConfigDto {
+            directory: Some("/tmp".to_string()),
             retry_backoff_initial_secs: 3,
             retry_backoff_multiplier: 3.0,
             retry_backoff_max_secs: 30,
             retry_backoff_jitter_percent: 0,
             retry_max_attempts: 5,
-            recording: None,
-        };
+            ..Default::default()
+        });
 
         assert_eq!(super::compute_download_retry_backoff_secs(1, &download_cfg), 3);
         assert_eq!(super::compute_download_retry_backoff_secs(2, &download_cfg), 9);
@@ -2551,22 +2604,11 @@ mod tests {
 
     #[test]
     fn background_download_waits_when_all_candidates_hit_background_limit() {
-        let download_cfg = crate::model::VideoDownloadConfig {
-            headers: std::collections::HashMap::new(),
-            directory: "/tmp".to_string(),
-            organize_into_directories: false,
-            episode_pattern: None,
-            download_priority: 0,
-            recording_priority: 0,
-            reserve_slots_for_users: 0,
+        let download_cfg = crate::model::RecordingConfig::from(&shared::model::RecordingConfigDto {
+            directory: Some("/tmp".to_string()),
             max_background_per_provider: 2,
-            retry_backoff_initial_secs: 3,
-            retry_backoff_multiplier: 3.0,
-            retry_backoff_max_secs: 30,
-            retry_backoff_jitter_percent: 0,
-            retry_max_attempts: 5,
-            recording: None,
-        };
+            ..Default::default()
+        });
 
         let capacities = vec![(Arc::<str>::from("a"), 2, 5), (Arc::<str>::from("b"), 3, 5)];
         assert!(super::background_download_should_wait(1, &capacities, &download_cfg));
@@ -2575,22 +2617,11 @@ mod tests {
 
     #[test]
     fn background_download_waits_when_reserved_user_slots_would_be_consumed() {
-        let download_cfg = crate::model::VideoDownloadConfig {
-            headers: std::collections::HashMap::new(),
-            directory: "/tmp".to_string(),
-            organize_into_directories: false,
-            episode_pattern: None,
-            download_priority: 0,
-            recording_priority: 0,
+        let download_cfg = crate::model::RecordingConfig::from(&shared::model::RecordingConfigDto {
+            directory: Some("/tmp".to_string()),
             reserve_slots_for_users: 1,
-            max_background_per_provider: 0,
-            retry_backoff_initial_secs: 3,
-            retry_backoff_multiplier: 3.0,
-            retry_backoff_max_secs: 30,
-            retry_backoff_jitter_percent: 0,
-            retry_max_attempts: 5,
-            recording: None,
-        };
+            ..Default::default()
+        });
 
         let blocked = vec![(Arc::<str>::from("a"), 4, 5), (Arc::<str>::from("b"), 4, 5)];
         let allowed = vec![(Arc::<str>::from("a"), 3, 5), (Arc::<str>::from("b"), 4, 6)];
@@ -2641,7 +2672,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("content-range", HeaderValue::from_static("bytes 512-1023/4096"));
 
-        assert_eq!(parse_content_range_total(&headers), Some(4096));
+        assert_eq!(parse_content_range_total_from_headers(&headers), Some(4096));
     }
 
     fn create_test_app_config() -> AppConfig {

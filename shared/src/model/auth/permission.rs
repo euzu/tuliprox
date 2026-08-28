@@ -62,6 +62,26 @@ pub fn permission_to_name(perm: Permission) -> Option<&'static str> {
     PERMISSION_NAMES.iter().find(|(_, p)| *p == perm).map(|(n, _)| *n)
 }
 
+/// Migrate the legacy `download.*` permission bits onto the canonical
+/// `recording.*` bits and clear them. Idempotent; called by the rbac
+/// authenticator when it prepares a permission set from a legacy groups
+/// file.
+///
+/// The legacy enum variants stay in the type and the
+/// `permission_from_name` table so on-disk groups files that still
+/// mention `download.read`/`download.write` decode correctly until
+/// the rollback-compat window closes.
+pub fn migrate_permissions(set: &mut PermissionSet) {
+    if set.contains(Permission::DownloadRead) {
+        set.unset(Permission::DownloadRead);
+        set.set(Permission::RecordingRead);
+    }
+    if set.contains(Permission::DownloadWrite) {
+        set.unset(Permission::DownloadWrite);
+        set.set(Permission::RecordingWrite);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,5 +221,78 @@ mod tests {
         let set: PermissionSet = Default::default();
         assert!(set.is_empty());
         assert_eq!(set.0, 0);
+    }
+
+    // --- Permission-migration tests ---
+    //
+    // The recording-unification plan migrates `download.read/write` to
+    // `recording.read/write` in the prepared permission output. Tokens
+    // still decode the legacy bits until the rollback-compat path is
+    // removed; a `migrate_permissions` helper strips them from the
+    // cleaned output.
+
+    #[test]
+    fn migrate_permissions_moves_download_read_to_recording_read() {
+        let mut set: PermissionSet = Permission::DownloadRead.into();
+        set.set(Permission::ConfigRead);
+        migrate_permissions(&mut set);
+        assert!(set.contains(Permission::RecordingRead));
+        assert!(set.contains(Permission::ConfigRead));
+        assert!(!set.contains(Permission::DownloadRead));
+    }
+
+    #[test]
+    fn migrate_permissions_moves_download_write_to_recording_write() {
+        let mut set: PermissionSet = Permission::DownloadWrite.into();
+        migrate_permissions(&mut set);
+        assert!(set.contains(Permission::RecordingWrite));
+        assert!(!set.contains(Permission::DownloadWrite));
+    }
+
+    #[test]
+    fn migrate_permissions_preserves_recording_bits() {
+        let mut set: PermissionSet = Permission::RecordingRead | Permission::RecordingWrite;
+        set.set(Permission::DownloadRead);
+        migrate_permissions(&mut set);
+        assert!(set.contains(Permission::RecordingRead));
+        assert!(set.contains(Permission::RecordingWrite));
+        assert!(!set.contains(Permission::DownloadRead));
+    }
+
+    #[test]
+    fn migrate_permissions_is_noop_when_no_download_bits_present() {
+        let mut set: PermissionSet = Permission::ConfigRead | Permission::SystemWrite | Permission::EpgRead;
+        let snapshot = set;
+        migrate_permissions(&mut set);
+        assert_eq!(set, snapshot);
+    }
+
+    #[test]
+    fn migrate_permissions_is_idempotent() {
+        let mut set: PermissionSet = Permission::DownloadRead | Permission::DownloadWrite;
+        migrate_permissions(&mut set);
+        let snapshot = set;
+        migrate_permissions(&mut set);
+        assert_eq!(set, snapshot);
+    }
+
+    #[test]
+    fn migrate_permissions_does_not_touch_admin_only_bits() {
+        // `ConfigRead`/`ConfigWrite` and `System*`/`User*` stay
+        // exactly as they are; the migration only rewires the
+        // download/recording bit pair.
+        let mut set: PermissionSet = Permission::ConfigRead
+            | Permission::ConfigWrite
+            | Permission::SystemRead
+            | Permission::SystemWrite
+            | Permission::UserRead
+            | Permission::UserWrite;
+        migrate_permissions(&mut set);
+        assert!(set.contains(Permission::ConfigRead));
+        assert!(set.contains(Permission::ConfigWrite));
+        assert!(set.contains(Permission::SystemRead));
+        assert!(set.contains(Permission::SystemWrite));
+        assert!(set.contains(Permission::UserRead));
+        assert!(set.contains(Permission::UserWrite));
     }
 }

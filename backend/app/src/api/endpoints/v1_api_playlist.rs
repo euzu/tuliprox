@@ -54,8 +54,8 @@ use shared::{
     foundation::{get_filter_detailed, Filter, ValueProvider},
     model::{
         permission::Permission, stalker::StalkerStreamKind, EpgChannel, InputType, OperationRunAccepted,
-        PlaylistEpgRequest, PlaylistItem, PlaylistRequest, PlaylistUrlResolveRequest, ProxyType, TargetType,
-        UiPlaylistItem, XtreamCluster,
+        PlaylistEpgRequest, PlaylistItem, PlaylistItemType, PlaylistRequest, PlaylistUrlResolveRequest, ProxyType,
+        TargetType, UiPlaylistItem, XtreamCluster,
     },
     utils::{concat_path_leading_slash, deobfuscate_text, sanitize_sensitive_info, Internable},
 };
@@ -217,6 +217,9 @@ pub(in crate::api) fn build_stable_recording_url(
 pub(in crate::api) struct ResolvedRecordingSource {
     pub virtual_id: u32,
     pub input_name: String,
+    pub title: String,
+    pub extension: Option<String>,
+    pub downloadable: bool,
 }
 
 pub(in crate::api) async fn resolve_target_recording_source(
@@ -236,6 +239,9 @@ pub(in crate::api) async fn resolve_target_recording_source(
                     resolved = Some(ResolvedRecordingSource {
                         virtual_id: item.virtual_id,
                         input_name: item.input_name.to_string(),
+                        title: item.title.to_string(),
+                        extension: shared::utils::extract_extension_from_url(&item.url).map(str::to_string),
+                        downloadable: item.item_type != PlaylistItemType::SeriesInfo,
                     });
                     break;
                 }
@@ -250,6 +256,9 @@ pub(in crate::api) async fn resolve_target_recording_source(
                     resolved = Some(ResolvedRecordingSource {
                         virtual_id: item.virtual_id,
                         input_name: item.input_name.to_string(),
+                        title: item.title.to_string(),
+                        extension: shared::utils::extract_extension_from_url(&item.url).map(str::to_string),
+                        downloadable: item.item_type != PlaylistItemType::SeriesInfo,
                     });
                     break;
                 }
@@ -284,6 +293,9 @@ pub(in crate::api) async fn resolve_target_live_recording_source_by_epg_channel(
                     let candidate = ResolvedRecordingSource {
                         virtual_id: item.virtual_id,
                         input_name: item.input_name.to_string(),
+                        title: item.title.to_string(),
+                        extension: shared::utils::extract_extension_from_url(&item.url).map(str::to_string),
+                        downloadable: item.item_type != PlaylistItemType::SeriesInfo,
                     };
                     if resolved.replace(candidate).is_some() {
                         return None;
@@ -298,6 +310,9 @@ pub(in crate::api) async fn resolve_target_live_recording_source_by_epg_channel(
                     let candidate = ResolvedRecordingSource {
                         virtual_id: item.virtual_id,
                         input_name: item.input_name.to_string(),
+                        title: item.title.to_string(),
+                        extension: shared::utils::extract_extension_from_url(&item.url).map(str::to_string),
+                        downloadable: item.item_type != PlaylistItemType::SeriesInfo,
                     };
                     if resolved.replace(candidate).is_some() {
                         return None;
@@ -1202,7 +1217,7 @@ mod tests {
         },
         model::{
             AppConfig, Config, ConfigInput, ConfigInputOptions, ConfigProvider, ConfigSource, ConfigTarget,
-            SourcesConfig, StreamHistoryConfig, VideoDownloadConfig,
+            RecordingConfig, SourcesConfig, StreamHistoryConfig,
         },
         processing::epg::{get_input_raw_epg_file_path, get_input_raw_xmltv_file_path},
         repository::GeoIp,
@@ -1786,22 +1801,10 @@ mod tests {
             XtreamCluster::Live,
         )
         .expect("valid recording url");
-        let download_cfg = VideoDownloadConfig {
-            directory: "/tmp".to_string(),
-            organize_into_directories: false,
-            episode_pattern: None,
-            headers: HashMap::new(),
-            download_priority: 0,
-            recording_priority: 0,
-            reserve_slots_for_users: 0,
-            max_background_per_provider: 0,
-            retry_backoff_initial_secs: 3,
-            retry_backoff_multiplier: 3.0,
-            retry_backoff_max_secs: 30,
-            retry_backoff_jitter_percent: 0,
-            retry_max_attempts: 5,
-            recording: None,
-        };
+        let download_cfg = RecordingConfig::from(&shared::model::RecordingConfigDto {
+            directory: Some("/tmp".to_string()),
+            ..Default::default()
+        });
         let recording = crate::api::model::FileDownload::new_recording(
             &url,
             "recording.ts",

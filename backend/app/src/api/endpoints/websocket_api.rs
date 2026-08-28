@@ -126,13 +126,13 @@ fn websocket_requires_system_read(auth_required: bool, mem: &ProtocolHandlerMemo
 
 #[inline]
 fn websocket_requires_download_read(auth_required: bool, mem: &ProtocolHandlerMemory) -> bool {
-    !auth_required || mem.permissions.contains(Permission::DownloadRead)
+    !auth_required || mem.permissions.contains(Permission::RecordingRead)
 }
 
 fn websocket_can_receive_runtime_events(mem: &ProtocolHandlerMemory, event: &EventMessage) -> bool {
     match event {
         EventMessage::DownloadsUpdate(_) | EventMessage::DownloadsDeltaUpdate(_) => {
-            mem.permissions.contains(Permission::DownloadRead)
+            mem.permissions.contains(Permission::RecordingRead)
         }
         EventMessage::RecordingChanged | EventMessage::RecordingRulesChanged => {
             mem.permissions.contains(Permission::RecordingRead)
@@ -877,6 +877,7 @@ mod tests {
                 id: "id".to_string(),
                 title: "file.ts".to_string(),
                 kind: TaskKindDto::Download,
+                recording_type: shared::model::RecordingTypeDto::Vod,
                 priority: TaskPriorityDto::Background,
                 status: TransferStatusDto::Running,
                 retry_attempts: 0,

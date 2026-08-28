@@ -234,21 +234,12 @@ async fn resolve_for_open(app_state: &AppState, claims: &Claims, uuid: &str) -> 
     .await
     .map_err(|e| Box::new(access_error_to_response(&e)))?;
     let config = app_state.app_config.config.load();
-    let recording_root = config
-        .video
-        .as_ref()
-        .and_then(|v| v.download.as_ref())
-        .and_then(|d| d.recording.as_ref())
-        .map(|r| r.directory.clone())
-        .ok_or_else(|| {
-            Box::new(
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    axum::Json(serde_json::json!({"error": "recording_not_configured"})),
-                )
-                    .into_response(),
-            )
-        })?;
+    let recording_root = config.recording.as_ref().map(|recording| recording.directory.clone()).ok_or_else(|| {
+        Box::new(
+            (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(serde_json::json!({"error": "recording_not_configured"})))
+                .into_response(),
+        )
+    })?;
     let recording_root = PathBuf::from(recording_root);
     let abs_path = resolve_recording_dir(
         &recording_root,

@@ -55,14 +55,13 @@ pub use startup::run_startup_reconciliation;
 
 /// The effective recording configuration, cloned out of the `ArcSwap`
 /// guard so no guard is held across an await.
+///
+/// The canonical home of the DVR config is `Config.recording` (lifted
+/// from `ConfigDto.recording`). The legacy `config.video.download.recording`
+/// carrier is still populated for download-pipeline sites, but every
+/// DVR reader routes through here and reads the canonical slot.
 pub fn recording_config(app_config: &AppConfig) -> Option<RecordingConfig> {
-    app_config
-        .config
-        .load()
-        .video
-        .as_ref()
-        .and_then(|video| video.download.as_ref())
-        .and_then(|download| download.recording.clone())
+    app_config.config.load().recording.clone()
 }
 
 /// `true` when the DVR is switched on.
@@ -74,15 +73,11 @@ pub fn recording_config(app_config: &AppConfig) -> Option<RecordingConfig> {
 /// (routes refusing but the scheduler still materializing) is worse than
 /// either state.
 ///
-/// An absent `recording:` block means "use the defaults", and the default
-/// is enabled.
+/// Reads `Config.recording.enabled` directly: the shared deserializer
+/// materializes the canonical block in disabled form when no DVR is
+/// configured, so "absent canonical block" cannot happen post-prepare.
 pub fn recording_enabled(app_config: &AppConfig) -> bool {
-    let config = app_config.config.load();
-    config
-        .video
-        .as_ref()
-        .and_then(|video| video.download.as_ref())
-        .is_some_and(|download| download.recording.as_ref().is_none_or(|recording| recording.enabled))
+    app_config.config.load().recording.as_ref().is_some_and(|recording| recording.enabled)
 }
 
 pub fn now_ts() -> i64 { chrono::Utc::now().timestamp() }
@@ -141,13 +136,9 @@ mod tests {
     use super::*;
 
     fn config_with_download(recording: Option<shared::model::RecordingConfigDto>) -> tuliprox_core::model::Config {
-        tuliprox_core::model::Config {
-            video: Some(tuliprox_core::model::VideoConfig::from(&shared::model::VideoConfigDto {
-                download: Some(shared::model::VideoDownloadConfigDto { recording, ..Default::default() }),
-                ..Default::default()
-            })),
-            ..Default::default()
-        }
+        let canonical_dto = recording.unwrap_or_default();
+        let canonical = tuliprox_core::model::RecordingConfig::from(&canonical_dto);
+        tuliprox_core::model::Config { recording: Some(canonical), ..Default::default() }
     }
 
     /// An `AppConfig` carrying just the config under test. The predicates below
@@ -197,6 +188,66 @@ mod tests {
         let recording = shared::model::RecordingConfigDto { enabled: false, ..Default::default() };
         let app_config = test_app_config(config_with_download(Some(recording)));
         assert!(!recording_enabled(&app_config));
+    }
+
+    #[tokio::test]
+    async fn hot_reload_swaps_canonical_recording_through_the_arcswap_accessor() {
+        // `recording_config()` reads `Config.recording` (canonical
+        // top-level slot), and a hot reload that swaps the
+        // `ArcSwap<Config>` makes the new recording visible to every
+        // supervisor.
+        let make_recording = |dir: &str| {
+            tuliprox_core::model::RecordingConfig::from(&shared::model::RecordingConfigDto {
+                enabled: true,
+                directory: Some(dir.to_string()),
+                ..shared::model::RecordingConfigDto::default()
+            })
+        };
+        let initial = tuliprox_core::model::Config {
+            recording: Some(make_recording("/initial/recordings")),
+            ..tuliprox_core::model::Config::default()
+        };
+        let app_config = test_app_config(initial.clone());
+
+        // Before reload: canonical recording visible.
+        let before = recording_config(&app_config).expect("canonical recording visible");
+        assert_eq!(before.directory, "/initial/recordings");
+        assert!(recording_enabled(&app_config));
+
+        // Hot reload: swap to a new Config with a different canonical
+        // recording directory.
+        let mut next = initial;
+        next.recording.as_mut().expect("initial recording set").directory = "/reloaded/recordings".to_string();
+        app_config.config.store(std::sync::Arc::new(next));
+
+        let after = recording_config(&app_config).expect("canonical recording still visible after reload");
+        assert_eq!(after.directory, "/reloaded/recordings", "recording_config must read the swapped Config.recording");
+    }
+
+    #[tokio::test]
+    async fn recording_enabled_predicate_uses_canonical_recording_block() {
+        // `recording_enabled()` must consult `Config.recording.enabled`
+        // directly. The legacy `video.download.recording` carrier is
+        // ignored.
+        let enabled_cfg = tuliprox_core::model::Config {
+            recording: Some(tuliprox_core::model::RecordingConfig::from(&shared::model::RecordingConfigDto {
+                enabled: true,
+                ..Default::default()
+            })),
+            ..tuliprox_core::model::Config::default()
+        };
+        let app_enabled = test_app_config(enabled_cfg);
+        assert!(recording_enabled(&app_enabled), "enabled canonical block must enable DVR");
+
+        let disabled_cfg = tuliprox_core::model::Config {
+            recording: Some(tuliprox_core::model::RecordingConfig::from(&shared::model::RecordingConfigDto {
+                enabled: false,
+                ..Default::default()
+            })),
+            ..tuliprox_core::model::Config::default()
+        };
+        let app_disabled = test_app_config(disabled_cfg);
+        assert!(!recording_enabled(&app_disabled), "disabled canonical block must disable DVR");
     }
 
     #[test]

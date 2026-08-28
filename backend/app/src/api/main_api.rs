@@ -117,7 +117,7 @@ async fn recover_persisted_downloads_state_for_startup(downloads: &DownloadQueue
     }
 }
 
-async fn resume_downloads_after_bind(app_state: &Arc<AppState>, download_cfg: &crate::model::VideoDownloadConfig) {
+async fn resume_downloads_after_bind(app_state: &Arc<AppState>, download_cfg: &crate::model::RecordingConfig) {
     spawn_download_services(app_state.as_ref(), &app_state.cancel_tokens.load().downloads);
     // Reconcile the DVR state the previous process left behind *before*
     // the rule scheduler can plan against it, then start the retention
@@ -761,7 +761,7 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
         .await
         .map_err(|err| TuliproxError::Server(format!("Failed to bind to {host}:{port}, {err}")))?;
 
-    if let Some(download_cfg) = cfg.video.as_ref().and_then(|video| video.download.as_ref()) {
+    if let Some(download_cfg) = cfg.recording.as_ref() {
         resume_downloads_after_bind(&app_state, download_cfg).await;
     }
 

@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use shared::model::UserId;
 use shared::{
     model::{
-        FileDownloadDto, QueueRevision, RecordingMetadata, RecordingTaskDto, TaskKindDto, TaskPriorityDto,
-        TransferStatusDto,
+        FileDownloadDto, QueueRevision, RecordingMetadata, RecordingTaskDto, RecordingTypeDto, TaskKindDto,
+        TaskPriorityDto, TransferStatusDto,
     },
     utils::{deunicode_string, CONSTANTS, FILENAME_TRIM_PATTERNS},
 };
@@ -22,15 +22,52 @@ use std::{
 };
 use tokio::{
     fs,
+    io::AsyncWriteExt,
     sync::{Mutex, Notify, RwLock},
 };
 use tuliprox_core::{
-    model::VideoDownloadConfig,
+    model::RecordingConfig,
     utils::{file_exists_async, write_json_atomic},
 };
 
 const RECORDING_WINDOW_EXPIRED_ERR: &str = "Recording window already expired";
+const CURRENT_QUEUE_SCHEMA_VERSION: u16 = 2;
 static DOWNLOAD_TASK_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+const fn legacy_queue_schema_version() -> u16 { 1 }
+
+async fn backup_legacy_queue(state_file: &Path) -> std::io::Result<()> {
+    if !file_exists_async(state_file).await {
+        return Ok(());
+    }
+    let original = fs::read(state_file).await?;
+    let persisted: PersistedDownloadQueue = serde_json::from_slice(&original)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    if persisted.schema_version >= CURRENT_QUEUE_SCHEMA_VERSION {
+        return Ok(());
+    }
+
+    let backup = state_file.with_file_name("downloads_state.pre-recording-unification.json");
+    let mut backup_file = match fs::OpenOptions::new().write(true).create_new(true).open(&backup).await {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if fs::read(&backup).await? == original {
+                return Ok(());
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("stale queue backup exists at {}", backup.display()),
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    backup_file.write_all(&original).await?;
+    backup_file.sync_all().await?;
+    if let Some(parent) = backup.parent() {
+        fs::File::open(parent).await?.sync_all().await?;
+    }
+    Ok(())
+}
 
 /// Reason a persisted entry cannot be converted back to its in-memory
 /// form during the commit step. Surfaced to the caller so a corrupt
@@ -206,6 +243,7 @@ where
         .map_err(|err| QueueMutationError::from_io(std::io::Error::other(err)))?;
 
     let PersistedDownloadQueue {
+        schema_version: _,
         queue: candidate_queue,
         scheduled: candidate_scheduled,
         active: candidate_active,
@@ -253,6 +291,7 @@ where
         if let Some(parent) = state_file.parent() {
             fs::create_dir_all(parent).await.map_err(QueueMutationError::from_io)?;
         }
+        backup_legacy_queue(state_file).await.map_err(QueueMutationError::from_io)?;
         let tmp_path = state_file.with_extension(format!("json.tmp.{next_revision}"));
         fs::write(&tmp_path, &content).await.map_err(QueueMutationError::from_io)?;
         fs::rename(&tmp_path, state_file).await.map_err(QueueMutationError::from_io)?;
@@ -462,6 +501,8 @@ pub struct FileDownload {
 pub enum DownloadKind {
     #[default]
     Download,
+    Vod,
+    Series,
     Recording,
 }
 
@@ -495,8 +536,10 @@ pub struct PersistedFileDownload {
     pub recording: Option<RecordingMetadata>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PersistedDownloadQueue {
+    #[serde(default = "legacy_queue_schema_version")]
+    pub schema_version: u16,
     pub queue: Vec<PersistedFileDownload>,
     pub scheduled: Vec<PersistedFileDownload>,
     pub active: Option<PersistedFileDownload>,
@@ -506,6 +549,19 @@ pub struct PersistedDownloadQueue {
     /// this counter via an `AtomicU64`.
     #[serde(default)]
     pub revision: QueueRevision,
+}
+
+impl Default for PersistedDownloadQueue {
+    fn default() -> Self {
+        Self {
+            schema_version: CURRENT_QUEUE_SCHEMA_VERSION,
+            queue: Vec::new(),
+            scheduled: Vec::new(),
+            active: None,
+            finished: Vec::new(),
+            revision: QueueRevision::default(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -540,7 +596,7 @@ pub enum DownloadControl {
 /// * `download_cfg` the download configuration
 /// * `filestem` the prepared filestem to use as sub directory
 ///
-fn get_download_directory(download_cfg: &VideoDownloadConfig, filestem: &str) -> PathBuf {
+fn get_download_directory(download_cfg: &RecordingConfig, filestem: &str) -> PathBuf {
     if download_cfg.organize_into_directories {
         let mut stem = filestem;
         if let Some(re) = &download_cfg.episode_pattern {
@@ -576,10 +632,24 @@ impl FileDownload {
     pub fn new(
         req_url: &str,
         req_filename: &str,
-        download_cfg: &VideoDownloadConfig,
+        download_cfg: &RecordingConfig,
         input_name: Option<Arc<str>>,
         priority: i8,
     ) -> Option<Self> {
+        Self::new_with_type(req_url, req_filename, download_cfg, input_name, priority, RecordingTypeDto::LegacyDownload)
+    }
+
+    pub fn new_with_type(
+        req_url: &str,
+        req_filename: &str,
+        download_cfg: &RecordingConfig,
+        input_name: Option<Arc<str>>,
+        priority: i8,
+        recording_type: RecordingTypeDto,
+    ) -> Option<Self> {
+        if recording_type == RecordingTypeDto::Live {
+            return None;
+        }
         match reqwest::Url::parse(req_url) {
             Ok(url) => {
                 let tmp_filename = CONSTANTS
@@ -628,7 +698,12 @@ impl FileDownload {
                     state: DownloadState::Queued,
                     start_at: None,
                     duration_secs: None,
-                    kind: DownloadKind::Download,
+                    kind: match recording_type {
+                        RecordingTypeDto::Vod => DownloadKind::Vod,
+                        RecordingTypeDto::Series => DownloadKind::Series,
+                        RecordingTypeDto::Live => return None,
+                        RecordingTypeDto::LegacyDownload => DownloadKind::Download,
+                    },
                     input_name,
                     priority,
                     retry_attempts: 0,
@@ -643,7 +718,7 @@ impl FileDownload {
     pub fn new_recording(
         req_url: &str,
         req_filename: &str,
-        download_cfg: &VideoDownloadConfig,
+        download_cfg: &RecordingConfig,
         start_at: i64,
         duration_secs: u64,
         input_name: Option<Arc<str>>,
@@ -667,6 +742,7 @@ impl FileDownload {
     pub fn kind_metadata_invariant_ok(&self) -> bool {
         match self.kind {
             DownloadKind::Download => self.recording.is_none(),
+            DownloadKind::Vod | DownloadKind::Series => true,
             DownloadKind::Recording => self.recording.is_some(),
         }
     }
@@ -679,7 +755,9 @@ impl FileDownload {
         }
 
         match self.kind {
-            DownloadKind::Download => self.url == other.url || self.file_path == other.file_path,
+            DownloadKind::Download | DownloadKind::Vod | DownloadKind::Series => {
+                self.url == other.url || self.file_path == other.file_path
+            }
             DownloadKind::Recording => {
                 (self.url == other.url && self.start_at == other.start_at && self.duration_secs == other.duration_secs)
                     || self.file_path == other.file_path
@@ -694,8 +772,14 @@ impl From<&FileDownload> for FileDownloadDto {
             id: value.uuid.clone(),
             title: value.filename.clone(),
             kind: match value.kind {
-                DownloadKind::Download => TaskKindDto::Download,
+                DownloadKind::Download | DownloadKind::Vod | DownloadKind::Series => TaskKindDto::Download,
                 DownloadKind::Recording => TaskKindDto::Recording,
+            },
+            recording_type: match value.kind {
+                DownloadKind::Download => RecordingTypeDto::LegacyDownload,
+                DownloadKind::Vod => RecordingTypeDto::Vod,
+                DownloadKind::Series => RecordingTypeDto::Series,
+                DownloadKind::Recording => RecordingTypeDto::Live,
             },
             priority: match value.priority.cmp(&0) {
                 std::cmp::Ordering::Less => TaskPriorityDto::High,
@@ -902,6 +986,7 @@ impl DownloadQueue {
         let finished = self.finished.read().await;
 
         PersistedDownloadQueue {
+            schema_version: CURRENT_QUEUE_SCHEMA_VERSION,
             queue: queue.iter().map(Self::to_persisted).collect(),
             scheduled: scheduled.iter().map(Self::to_persisted).collect(),
             active: active.as_ref().map(Self::to_persisted),
@@ -1066,13 +1151,21 @@ impl DownloadQueue {
         let active = self.active.read().await.as_ref().map(Self::to_persisted);
         let finished = self.finished.read().await.iter().map(Self::to_persisted).collect::<Vec<_>>();
         let revision = self.revision.load(Ordering::SeqCst);
-        let payload = PersistedDownloadQueue { queue, scheduled, active, finished, revision: QueueRevision(revision) };
+        let payload = PersistedDownloadQueue {
+            schema_version: CURRENT_QUEUE_SCHEMA_VERSION,
+            queue,
+            scheduled,
+            active,
+            finished,
+            revision: QueueRevision(revision),
+        };
         let content = serde_json::to_vec_pretty(&payload).map_err(std::io::Error::other)?;
 
         if let Some(parent) = state_file.parent() {
             fs::create_dir_all(parent).await?;
         }
 
+        backup_legacy_queue(state_file).await?;
         write_json_atomic(state_file, &content).await
     }
 
@@ -1344,7 +1437,7 @@ impl DownloadQueue {
         Ok(mutate_optional(self, |candidate| {
             if let Some(pos) = candidate.finished.iter().position(|download| download.uuid == uuid) {
                 let mut download = candidate.finished.remove(pos);
-                if download.kind == DownloadKind::Recording {
+                if !matches!(download.kind, DownloadKind::Vod | DownloadKind::Series) {
                     candidate.finished.insert(pos, download);
                     return Ok(None);
                 }
@@ -1428,6 +1521,8 @@ pub struct FileDownloadRequest {
     pub input_name: Option<String>,
     #[serde(default)]
     pub priority: Option<i8>,
+    #[serde(default)]
+    pub recording_type: RecordingTypeDto,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -1454,6 +1549,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn first_v2_write_backs_up_unversioned_queue_exactly() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_file = dir.path().join("downloads.json");
+        let legacy = br#"{
+  "queue": [],
+  "scheduled": [],
+  "active": null,
+  "finished": [],
+  "revision": 0
+}"#;
+        std::fs::write(&state_file, legacy).expect("write legacy queue");
+        let queue = DownloadQueue::new_with_state_file(Some(state_file.clone()));
+        queue.load_from_disk().await.expect("load legacy queue");
+
+        queue.persist_to_disk().await.expect("persist v2 queue");
+
+        let backup = state_file.with_file_name("downloads_state.pre-recording-unification.json");
+        assert_eq!(std::fs::read(backup).expect("read backup"), legacy);
+        let upgraded: PersistedDownloadQueue =
+            serde_json::from_slice(&std::fs::read(state_file).expect("read upgraded queue")).expect("parse v2 queue");
+        assert_eq!(upgraded.schema_version, CURRENT_QUEUE_SCHEMA_VERSION);
+    }
+
+    #[tokio::test]
+    async fn stale_v1_backup_aborts_without_replacing_queue() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_file = dir.path().join("downloads.json");
+        let legacy = br#"{"queue":[],"scheduled":[],"active":null,"finished":[],"revision":0}"#;
+        std::fs::write(&state_file, legacy).expect("write legacy queue");
+        std::fs::write(state_file.with_file_name("downloads_state.pre-recording-unification.json"), b"stale")
+            .expect("write stale backup");
+        let queue = DownloadQueue::new_with_state_file(Some(state_file.clone()));
+        queue.load_from_disk().await.expect("load legacy queue");
+
+        assert!(queue.persist_to_disk().await.is_err());
+        assert_eq!(std::fs::read(state_file).expect("read queue"), legacy);
+    }
+
+    #[tokio::test]
     async fn pause_and_resume_keep_active_download_resumable() {
         let queue = DownloadQueue::new();
         let active = FileDownload {
@@ -1470,7 +1604,7 @@ mod tests {
             state: DownloadState::Downloading,
             start_at: None,
             duration_secs: None,
-            kind: DownloadKind::Download,
+            kind: DownloadKind::Vod,
             input_name: None,
             priority: 0,
             retry_attempts: 0,
@@ -1511,7 +1645,7 @@ mod tests {
             state: DownloadState::Downloading,
             start_at: None,
             duration_secs: None,
-            kind: DownloadKind::Download,
+            kind: DownloadKind::Vod,
             input_name: None,
             priority: 0,
             retry_attempts: 0,
@@ -1749,7 +1883,7 @@ mod tests {
             state: DownloadState::Failed,
             start_at: None,
             duration_secs: None,
-            kind: DownloadKind::Download,
+            kind: DownloadKind::Vod,
             input_name: None,
             priority: 0,
             retry_attempts: 5,
@@ -1941,22 +2075,10 @@ mod tests {
 
     #[test]
     fn recording_uuid_differs_for_same_url_with_different_start_times() {
-        let download_cfg = VideoDownloadConfig {
-            directory: "/tmp".to_string(),
-            organize_into_directories: false,
-            episode_pattern: None,
-            headers: std::collections::HashMap::new(),
-            download_priority: 0,
-            recording_priority: 0,
-            reserve_slots_for_users: 0,
-            max_background_per_provider: 0,
-            retry_backoff_initial_secs: 3,
-            retry_backoff_multiplier: 3.0,
-            retry_backoff_max_secs: 30,
-            retry_backoff_jitter_percent: 0,
-            retry_max_attempts: 5,
-            recording: None,
-        };
+        let download_cfg = RecordingConfig::from(&shared::model::RecordingConfigDto {
+            directory: Some("/tmp".to_string()),
+            ..Default::default()
+        });
 
         let first = FileDownload::new_recording(
             "https://example.com/live/1",
@@ -1984,22 +2106,10 @@ mod tests {
 
     #[test]
     fn download_uuid_differs_for_same_url_with_different_filenames() {
-        let download_cfg = VideoDownloadConfig {
-            directory: "/tmp".to_string(),
-            organize_into_directories: false,
-            episode_pattern: None,
-            headers: std::collections::HashMap::new(),
-            download_priority: 0,
-            recording_priority: 0,
-            reserve_slots_for_users: 0,
-            max_background_per_provider: 0,
-            retry_backoff_initial_secs: 3,
-            retry_backoff_multiplier: 3.0,
-            retry_backoff_max_secs: 30,
-            retry_backoff_jitter_percent: 0,
-            retry_max_attempts: 5,
-            recording: None,
-        };
+        let download_cfg = RecordingConfig::from(&shared::model::RecordingConfigDto {
+            directory: Some("/tmp".to_string()),
+            ..Default::default()
+        });
 
         let first = FileDownload::new("https://example.com/video.mp4", "first.mp4", &download_cfg, None, 0)
             .expect("first download");
@@ -2011,22 +2121,10 @@ mod tests {
 
     #[test]
     fn download_new_omits_trailing_dot_when_filename_has_no_extension() {
-        let download_cfg = VideoDownloadConfig {
-            directory: "/tmp".to_string(),
-            organize_into_directories: false,
-            episode_pattern: None,
-            headers: std::collections::HashMap::new(),
-            download_priority: 0,
-            recording_priority: 0,
-            reserve_slots_for_users: 0,
-            max_background_per_provider: 0,
-            retry_backoff_initial_secs: 3,
-            retry_backoff_multiplier: 3.0,
-            retry_backoff_max_secs: 30,
-            retry_backoff_jitter_percent: 0,
-            retry_max_attempts: 5,
-            recording: None,
-        };
+        let download_cfg = RecordingConfig::from(&shared::model::RecordingConfigDto {
+            directory: Some("/tmp".to_string()),
+            ..Default::default()
+        });
 
         let task = FileDownload::new("https://example.com/live", "title with trailing dot.", &download_cfg, None, 0)
             .expect("download");
@@ -2553,6 +2651,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("downloads_state.json");
         let queue = PersistedDownloadQueue {
+            schema_version: CURRENT_QUEUE_SCHEMA_VERSION,
             queue: vec![
                 persisted_recording_with_owner(
                     "a",
@@ -2582,6 +2681,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("downloads_state.json");
         let queue = PersistedDownloadQueue {
+            schema_version: CURRENT_QUEUE_SCHEMA_VERSION,
             queue: vec![persisted_recording_with_owner(
                 "a",
                 shared::model::RecordingOwner::LegacyAdmin,
@@ -2736,7 +2836,7 @@ mod tests {
     async fn retry_finished_legacy_writer_commits_one_revision() {
         let queue = DownloadQueue::new();
         let mut finished = make_test_recording_task("done", PathBuf::from("/tmp/done.ts"));
-        finished.kind = DownloadKind::Download;
+        finished.kind = DownloadKind::Vod;
         finished.recording = None;
         finished.finished = true;
         finished.state = DownloadState::Failed;
@@ -2754,7 +2854,7 @@ mod tests {
         let queue = Arc::new(DownloadQueue::new());
         queue.queue.lock().await.push_back(make_test_recording_task("remove", PathBuf::from("/tmp/remove.ts")));
         let mut finished = make_test_recording_task("retry", PathBuf::from("/tmp/retry.ts"));
-        finished.kind = DownloadKind::Download;
+        finished.kind = DownloadKind::Vod;
         finished.recording = None;
         finished.finished = true;
         finished.state = DownloadState::Failed;

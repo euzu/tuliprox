@@ -6,10 +6,10 @@ use crate::{
             map_sources_to_playlist_rows,
             recording::{RecordingLibraryView, RecordingRulesView},
             theme::Theme,
-            AppIcon, DashboardView, DownloadsView, EpgView, ErrorBoundary, HealthBanner, IconButton, LanguagePicker,
-            NoAccess, Panel, ParticleFlowBackground, PlaylistExplorerView, PlaylistSettingsView, PlaylistUpdateView,
-            RbacView, Setup, Sidebar, SourceEditor, StatsView, StreamHistoryView, StreamsView, ThemePicker, ToastrView,
-            UserlistView, WebsocketStatus,
+            AppIcon, DashboardView, EpgView, ErrorBoundary, HealthBanner, IconButton, LanguagePicker, NoAccess, Panel,
+            ParticleFlowBackground, PlaylistExplorerView, PlaylistSettingsView, PlaylistUpdateView, RbacView, Setup,
+            Sidebar, SourceEditor, StatsView, StreamHistoryView, StreamsView, ThemePicker, ToastrView, UserlistView,
+            WebsocketStatus,
         },
         context::{ConfigContext, PlaylistContext, StatusContext},
     },
@@ -51,7 +51,6 @@ struct HomeViewAccess {
     can_write_playlist: bool,
     can_read_playlist: bool,
     can_read_epg: bool,
-    can_read_downloads: bool,
     can_read_recordings: bool,
     is_admin: bool,
 }
@@ -85,7 +84,6 @@ fn is_allowed_home_view(view: ViewType, access: HomeViewAccess) -> bool {
         ViewType::Dashboard => true,
         ViewType::Stats | ViewType::StreamHistory => access.can_read_system_status,
         ViewType::Streams => access.show_streams_page && access.can_read_system_status,
-        ViewType::Downloads => access.can_read_downloads,
         ViewType::Users => access.can_read_users,
         ViewType::Plans => access.can_read_config,
         ViewType::Config => access.can_read_config,
@@ -106,7 +104,6 @@ fn first_allowed_home_view(access: HomeViewAccess) -> ViewType {
         ViewType::Stats,
         ViewType::Streams,
         ViewType::StreamHistory,
-        ViewType::Downloads,
         ViewType::Config,
         ViewType::Users,
         ViewType::Plans,
@@ -247,7 +244,6 @@ pub fn Home() -> Html {
     let can_write_playlist = services.auth.has_permission(Permission::PlaylistWrite);
     let can_read_playlist = services.auth.has_permission(Permission::PlaylistRead);
     let can_read_epg = services.auth.has_permission(Permission::EpgRead);
-    let can_read_downloads = services.auth.has_permission(Permission::DownloadRead);
     let can_read_recordings = services.auth.has_permission(Permission::RecordingRead);
     let is_admin = services.auth.is_admin();
     let _ = use_server_status(status.clone(), system_info.clone(), !setup_mode && can_read_system_status);
@@ -312,7 +308,6 @@ pub fn Home() -> Html {
         can_write_playlist,
         can_read_playlist,
         can_read_epg,
-        can_read_downloads,
         can_read_recordings,
         is_admin,
     };
@@ -574,13 +569,6 @@ pub fn Home() -> Html {
                                               </ErrorBoundary>
                                             </Panel>
                                         })}
-                                       { html_if!(can_read_downloads, {
-                                       <Panel class="tp__full-width" value={ViewType::Downloads.intern()} active={view_page.clone()}>
-                                         <ErrorBoundary name={translate.t("LABEL.DOWNLOADS")}>
-                                           <DownloadsView/>
-                                         </ErrorBoundary>
-                                       </Panel>
-                                       })}
                                         { html_if!(can_read_system_status, {
                                             <Panel class="tp__full-width" value={ViewType::StreamHistory.intern()} active={view_page.clone()}>
                                                 <ErrorBoundary name={translate.t("LABEL.STREAM_HISTORY")}>
@@ -688,7 +676,6 @@ mod tests {
             can_write_playlist: true,
             can_read_playlist: true,
             can_read_epg: true,
-            can_read_downloads: true,
             can_read_recordings: true,
             is_admin: true,
         }
@@ -734,7 +721,6 @@ mod tests {
                 can_write_playlist: false,
                 can_read_playlist: false,
                 can_read_epg: false,
-                can_read_downloads: false,
                 can_read_system_status: false,
                 is_admin: false,
                 ..full_access()
@@ -757,7 +743,6 @@ mod tests {
                 can_write_playlist: false,
                 can_read_playlist: false,
                 can_read_epg: false,
-                can_read_downloads: false,
                 is_admin: false,
                 ..full_access()
             },

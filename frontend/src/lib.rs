@@ -1,14 +1,13 @@
 // Shared clippy policy: see [workspace.lints.clippy] in the root Cargo.toml.
 //
-// `clippy::all` + `clippy::pedantic` reach this crate for the first time in the
-// modularization plan's Phase 0. Everything with a machine-applicable fix has
-// already been applied via `cargo clippy --fix`. What remains needs hand edits
-// inside Yew `html!` macro bodies and view state, which Phase 0 must not touch:
-// it is a behaviour-preserving lint-policy change, not a frontend rewrite.
+// `clippy::all` + `clippy::pedantic` reach this crate for the first time. Everything
+// with a machine-applicable fix has already been applied via `cargo clippy --fix`.
+// What remains needs hand edits inside Yew `html!` macro bodies and view state,
+// which this policy must not touch: it is a behaviour-preserving lint-policy
+// change, not a frontend rewrite.
 //
-// This crate is out of scope for the modularization plan (see "The frontend is a
-// separate plan"). The list is tracked debt for that plan, not workspace policy —
-// the backend is held to the full policy without any such list.
+// The list below is tracked debt, not workspace policy — the backend is held
+// to the full policy without any such list.
 #![allow(clippy::cast_precision_loss)] // integer -> f64 for chart/layout maths
 #![allow(clippy::cast_possible_truncation)] // f64 -> integer pixel coordinates
 #![allow(clippy::cast_sign_loss)] // clamped non-negative pixel/scroll values

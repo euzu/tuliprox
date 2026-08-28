@@ -13,7 +13,7 @@ use shared::{
     model::{
         ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigPaths, HdHomeRunConfigDto, HdHomeRunDeviceConfigDto,
         LibraryConfigDto, LibraryMetadataConfigDto, LibraryMetadataReadConfigDto, LibraryPlaylistConfigDto,
-        LogConfigDto, RuntimeConfigReportFormat, ThumbnailConfigDto,
+        LogConfigDto, RecordingConfigDto, RuntimeConfigReportFormat, ThumbnailConfigDto,
     },
 };
 use tuliprox_core::model::{AppConfig, Config, HdHomeRunConfig, HdHomeRunFlags, LibraryConfig};
@@ -79,7 +79,8 @@ fn runtime_config_to_dto(config: &Config) -> ConfigDto {
         custom_stream_response_timeout_secs: config.custom_stream_response_timeout_secs,
         custom_stream_response_enabled: config.custom_stream_response_enabled,
         custom_stream_response_error_status: config.custom_stream_response_error_status,
-        video: config.video.as_ref().map(shared::model::VideoConfigDto::from),
+        recording: config.recording.as_ref().map(RecordingConfigDto::from),
+        video: None,
         metadata_update: config.metadata_update.as_ref().map(shared::model::MetadataUpdateConfigDto::from),
         schedules: config
             .schedules
@@ -362,5 +363,27 @@ sources:
 
         assert!(rendered.contains("\"password\": \"***\""));
         assert!(!rendered.contains("proxy-pass"));
+    }
+
+    #[tokio::test]
+    async fn runtime_config_report_emits_canonical_recording_from_runtime_config() {
+        let make_recording = |dir: &str| {
+            tuliprox_core::model::RecordingConfig::from(&shared::model::RecordingConfigDto {
+                enabled: true,
+                directory: Some(dir.to_string()),
+                ..shared::model::RecordingConfigDto::default()
+            })
+        };
+        let mut config = tuliprox_core::model::Config::default();
+        config.recording = Some(make_recording("/canonical/recordings"));
+
+        let dto = super::runtime_config_to_dto(&config);
+
+        let recording = dto.recording.as_ref().expect("report must carry canonical recording");
+        assert_eq!(
+            recording.directory.as_deref(),
+            Some("/canonical/recordings"),
+            "report must read from Config.recording, not the legacy compat shadow"
+        );
     }
 }

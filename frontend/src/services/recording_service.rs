@@ -39,10 +39,14 @@ pub struct RecordingSourceInput {
 pub struct CreateRecordingTaskRequest {
     pub source: RecordingSourceInput,
     pub program_title: String,
-    pub program_start: i64,
-    pub program_end: i64,
-    pub pre_roll_secs: u64,
-    pub post_roll_secs: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub program_start: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub program_end: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pre_roll_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_roll_secs: Option<u64>,
     pub visibility: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel_id: Option<String>,
@@ -476,6 +480,61 @@ impl RecordingService {
     }
 
     /// POST /recording/tasks/{id}/cancel
+
+    /// POST /recording/tasks/{id}/pause
+    pub async fn pause_task(&self, id: &str) -> Result<(), RecordingError> {
+        let req = RecordingTaskId { id: id.to_string() };
+        let _ = request_post::<&RecordingTaskId, serde_json::Value>(
+            &format!("{}/pause", self.task_path(id)),
+            &req,
+            None,
+            Some(Encoding::Json),
+        )
+        .await
+        .map_err(network)?;
+        Ok(())
+    }
+
+    /// POST /recording/tasks/{id}/resume
+    pub async fn resume_task(&self, id: &str) -> Result<(), RecordingError> {
+        let req = RecordingTaskId { id: id.to_string() };
+        let _ = request_post::<&RecordingTaskId, serde_json::Value>(
+            &format!("{}/resume", self.task_path(id)),
+            &req,
+            None,
+            Some(Encoding::Json),
+        )
+        .await
+        .map_err(network)?;
+        Ok(())
+    }
+
+    /// POST /recording/tasks/{id}/retry
+    pub async fn retry_task(&self, id: &str) -> Result<(), RecordingError> {
+        let req = RecordingTaskId { id: id.to_string() };
+        let _ = request_post::<&RecordingTaskId, serde_json::Value>(
+            &format!("{}/retry", self.task_path(id)),
+            &req,
+            None,
+            Some(Encoding::Json),
+        )
+        .await
+        .map_err(network)?;
+        Ok(())
+    }
+
+    /// DELETE /recording/tasks/{id}/remove
+    pub async fn remove_task(&self, id: &str) -> Result<(), RecordingError> {
+        let _ = request_delete::<serde_json::Value>(
+            &format!("{}/remove", self.task_path(id)),
+            None,
+            Some(Encoding::Json),
+        )
+        .await
+        .map_err(network)?;
+        Ok(())
+    }
+
     pub async fn cancel_task(&self, id: &str) -> Result<(), RecordingError> {
         let req = RecordingTaskId { id: id.to_string() };
         let _ = request_post::<&RecordingTaskId, serde_json::Value>(
@@ -621,10 +680,10 @@ mod tests {
                 input_name: "input-a".to_string(),
             },
             program_title: "News".to_string(),
-            program_start: 100,
-            program_end: 200,
-            pre_roll_secs: 0,
-            post_roll_secs: 0,
+            program_start: Some(100),
+            program_end: Some(200),
+            pre_roll_secs: Some(0),
+            post_roll_secs: Some(0),
             visibility: "private".to_string(),
             channel_id: None,
             channel_name: None,

@@ -200,6 +200,7 @@ mod tests {
             id: "hidden".to_string(),
             title: "same-title.ts".to_string(),
             kind: shared::model::TaskKindDto::Recording,
+            recording_type: shared::model::RecordingTypeDto::Live,
             priority: shared::model::TaskPriorityDto::Normal,
             status: shared::model::TransferStatusDto::Scheduled,
             retry_attempts: 0,

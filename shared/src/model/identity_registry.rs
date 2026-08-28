@@ -1,9 +1,8 @@
 //! Identity registry types for stable subject identities.
 //!
-//! Phase 0 + Phase 1 introduce the [`UserId`] newtype used by recording
-//! metadata, scope strings, and the per-user quota config map. The full
-//! registry (with on-disk mapping, bootstrap, and rename migration) is added
-//! in Phase 2 (Task 11).
+//! The [`UserId`] newtype is used by recording metadata, scope strings, and
+//! the per-user quota config map. The full registry (with on-disk mapping,
+//! bootstrap, and rename migration) lives alongside it.
 
 use std::fmt;
 
