@@ -486,6 +486,7 @@ fn to_protocol_message(event: EventMessage) -> Option<(ProtocolMessage, &'static
         | EventMessage::DiskAlert(_)
         | EventMessage::ConfigReloadFailed(_)
         | EventMessage::PlaylistWatchChanged(_)
+        | EventMessage::PlaylistGroupsChanged(_)
         | EventMessage::PlaylistWatchDisabled(_)
         | EventMessage::PlaylistWatchUnmatched(_)
         | EventMessage::RecordingLifecycle(_)
@@ -654,9 +655,9 @@ mod tests {
     use shared::model::{
         Claims, ConfigReloadFailure, DiskAlert, DiskAlertLevel, DownloadsDelta, DownloadsResponse, FileDownloadDto,
         LibraryScanProgressEvent, LibraryScanSummary, LibraryScanSummaryStatus, MetadataUpdateFailure, MsgKind,
-        Permission, PlaylistUpdateProgressEvent, ProtocolHandler, ProtocolHandlerMemory, ProviderAccountEvent,
-        ProviderAccountState, RecordingLifecycleMessage, RoleSet, TaskKindDto, TaskPriorityDto, TransferStatusDto,
-        UserId, UserRole, WatchChanges, WatchDisabled, WatchDisabledReason, WatchUnmatched,
+        Permission, PlaylistGroupsChanged, PlaylistUpdateProgressEvent, ProtocolHandler, ProtocolHandlerMemory,
+        ProviderAccountEvent, ProviderAccountState, RecordingLifecycleMessage, RoleSet, TaskKindDto, TaskPriorityDto,
+        TransferStatusDto, UserId, UserRole, WatchChanges, WatchDisabled, WatchDisabledReason, WatchUnmatched,
         CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, PROTOCOL_VERSION, TOKEN_NO_AUTH,
     };
     use std::sync::Arc;
@@ -692,7 +693,8 @@ mod tests {
         // every notification-only kind against `expected = true` and the
         // test failed on `DiskAlert` - it has been red since the lifecycle
         // events joined the bus.
-        const NOT_ON_THE_WIRE: [EventKind; 19] = [
+        const NOT_ON_THE_WIRE: [EventKind; 20] = [
+            EventKind::PlaylistGroupsChanged,
             EventKind::PlaylistWatchDisabled,
             EventKind::PlaylistWatchUnmatched,
             EventKind::NotificationDeadLettered,
@@ -796,6 +798,7 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
             )),
+            EventMessage::PlaylistGroupsChanged(PlaylistGroupsChanged::new("t".to_string(), Vec::new(), Vec::new())),
             EventMessage::PlaylistWatchDisabled(WatchDisabled::new(
                 "t".to_string(),
                 WatchDisabledReason::InvalidPatterns,

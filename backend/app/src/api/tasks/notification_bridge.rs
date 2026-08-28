@@ -26,7 +26,7 @@ use shared::model::{
     ServerLifecycleState, StreamProbeFailure, StreamProbeFailureReason, UserLifecycleEvent, UserLifecycleState,
     WatchDisabledReason,
 };
-use std::sync::Arc;
+use std::{fmt::Write, sync::Arc};
 use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
 use tuliprox_core::model::{MessageContent, NotificationEvent, ProcessingStats};
@@ -75,6 +75,7 @@ const NOTIFIABLE_KINDS: EventKindMask = EventKindMask::new()
     .with(EventKind::DiskAlert)
     .with(EventKind::ConfigReloadFailed)
     .with(EventKind::PlaylistWatchChanged)
+    .with(EventKind::PlaylistGroupsChanged)
     .with(EventKind::PlaylistWatchDisabled)
     .with(EventKind::PlaylistWatchUnmatched)
     .with(EventKind::ProviderAccountStatus)
@@ -225,6 +226,30 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
         EventMessage::PlaylistWatchChanged(changes) => {
             Some(NotificationEvent::from_content(&MessageContent::Watch(changes.clone())))
         }
+        EventMessage::PlaylistGroupsChanged(changes) => {
+            let title = format!(
+                "{} group(s) added, {} removed in {}",
+                changes.added_total, changes.removed_total, changes.target
+            );
+            let mut body = title.clone();
+            for (label, names, total) in
+                [("Added", &changes.added, changes.added_total), ("Removed", &changes.removed, changes.removed_total)]
+            {
+                if total == 0 {
+                    continue;
+                }
+                let _ = write!(body, "\n\n{label} ({total}):");
+                for name in names {
+                    body.push('\n');
+                    body.push_str(name);
+                }
+                let omitted = total.saturating_sub(names.len());
+                if omitted > 0 {
+                    let _ = write!(body, "\n... {omitted} more not listed");
+                }
+            }
+            Some(NotificationEvent::new(id, title, body).with_fields(changes))
+        }
         EventMessage::PlaylistWatchDisabled(disabled) => {
             let what = match disabled.reason {
                 WatchDisabledReason::InvalidPatterns => "no watch pattern compiled".to_string(),
@@ -369,10 +394,10 @@ mod tests {
         notification::{registry, Severity},
         ActiveUserConnectionChange, ConfigReloadFailure, ConfigType, DiskAlert, DiskAlertLevel, DownloadsResponse,
         EventKind, LibraryScanProgressEvent, LibraryScanSummary, LibraryScanSummaryStatus, MetadataUpdateFailure,
-        MsgKind, NotificationDeadLetter, PlaylistUpdateProgressEvent, PlaylistUpdateState, PlaylistUpdateSummary,
-        ProviderAccountEvent, ProviderAccountState, RecordingLifecycleMessage, ServerLifecycleEvent,
-        StreamProbeFailure, StreamProbeFailureReason, SystemInfo, UserLifecycleEvent, UserLifecycleState, WatchChanges,
-        WatchDisabled, WatchDisabledReason, WatchUnmatched,
+        MsgKind, NotificationDeadLetter, PlaylistGroupsChanged, PlaylistUpdateProgressEvent, PlaylistUpdateState,
+        PlaylistUpdateSummary, ProviderAccountEvent, ProviderAccountState, RecordingLifecycleMessage,
+        ServerLifecycleEvent, StreamProbeFailure, StreamProbeFailureReason, SystemInfo, UserLifecycleEvent,
+        UserLifecycleState, WatchChanges, WatchDisabled, WatchDisabledReason, WatchUnmatched,
     };
     use std::sync::Arc;
 
@@ -457,6 +482,7 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
             )),
+            EventMessage::PlaylistGroupsChanged(PlaylistGroupsChanged::new("t".to_string(), Vec::new(), Vec::new())),
             EventMessage::PlaylistWatchDisabled(WatchDisabled::new(
                 "t".to_string(),
                 WatchDisabledReason::InvalidPatterns,

@@ -1,5 +1,7 @@
 use log::error;
-use shared::model::{EventMessage, EventSink, PlaylistGroup, WatchChanges, WatchDisabled, WatchDisabledReason};
+use shared::model::{
+    EventMessage, EventSink, PlaylistGroup, PlaylistGroupsChanged, WatchChanges, WatchDisabled, WatchDisabledReason,
+};
 use std::{collections::BTreeSet, path::Path, sync::Arc};
 use tuliprox_core::{
     model::AppConfig,
@@ -9,6 +11,100 @@ use tuliprox_core::{
 
 const WATCH_NOTIFICATION_LIST_LIMIT: usize = 120;
 const WATCH_NOTIFICATION_SUMMARY_THRESHOLD: usize = 500;
+
+/// Track which *groups* a target has, as opposed to which channels a group has.
+///
+/// `process_group_watch` below is blind to the group set in both directions.
+/// A group appearing is silent - it finds no baseline, writes one and emits
+/// nothing, so the whole channel list reads as "not new" from then on. A
+/// group vanishing is never even looked at: it is absent from the refreshed
+/// playlist, so nothing iterates it.
+///
+/// The index lives beside the per-group directory rather than inside it
+/// (`<target>.groups.bin`, not `<target>/__groups.bin`) so it cannot collide
+/// with a group whose sanitized title happens to match.
+pub async fn process_target_groups_watch<E: EventSink>(
+    app_config: &Arc<AppConfig>,
+    events: &E,
+    target_name: &str,
+    playlist: &[PlaylistGroup],
+) {
+    let new_tree: BTreeSet<Arc<str>> = playlist.iter().map(|group| group.title.clone()).collect();
+
+    let index_filename = format!("{}.groups.bin", utils::sanitize_filename(target_name));
+    let cfg = app_config.config.load();
+    let Some(path) = utils::get_file_path(&cfg.storage_dir, Some(std::path::PathBuf::from(&index_filename))) else {
+        error!("failed to resolve a path for group index {index_filename}");
+        emit_watch_disabled(events, target_name, "", format!("could not resolve a path for {index_filename}"));
+        return;
+    };
+
+    // First sight writes the baseline and says nothing. Announcing every
+    // group as new on the first refresh after an upgrade would be noise, not
+    // news.
+    let mut changed = true;
+    if file_exists_async(&path).await {
+        if let Some(loaded_tree) = load_watch_tree(&path).await {
+            let added: BTreeSet<Arc<str>> = new_tree.difference(&loaded_tree).cloned().collect();
+            let removed: BTreeSet<Arc<str>> = loaded_tree.difference(&new_tree).cloned().collect();
+            if added.is_empty() && removed.is_empty() {
+                changed = false;
+            } else {
+                emit_groups_changed(events, target_name, &added, &removed);
+            }
+        } else {
+            error!("failed to load group index {}", path.to_str().unwrap_or_default());
+            emit_watch_disabled(
+                events,
+                target_name,
+                "",
+                format!("could not read the group index at {}", path.to_str().unwrap_or_default()),
+            );
+        }
+    }
+
+    if changed {
+        if let Err(err) = save_watch_tree(path.as_path(), &new_tree).await {
+            error!("failed to write group index {}: {err}", path.to_str().unwrap_or_default());
+            emit_watch_disabled(
+                events,
+                target_name,
+                "",
+                format!("could not write the group index at {}: {err}", path.to_str().unwrap_or_default()),
+            );
+        }
+    }
+}
+
+/// Same sampling discipline as the per-group watch: titles only in the lists,
+/// counts that stay true whatever the lists carry.
+fn emit_groups_changed<E: EventSink>(
+    events: &E,
+    target_name: &str,
+    added: &BTreeSet<Arc<str>>,
+    removed: &BTreeSet<Arc<str>>,
+) {
+    let added_total = added.len();
+    let removed_total = removed.len();
+    let mut added: Vec<String> = added.iter().map(std::string::ToString::to_string).collect();
+    let mut removed: Vec<String> = removed.iter().map(std::string::ToString::to_string).collect();
+    let mut truncated = false;
+    for list in [&mut added, &mut removed] {
+        if list.len() > WATCH_NOTIFICATION_LIST_LIMIT {
+            list.truncate(WATCH_NOTIFICATION_LIST_LIMIT);
+            truncated = true;
+        }
+    }
+
+    events.emit(EventMessage::PlaylistGroupsChanged(PlaylistGroupsChanged {
+        target: target_name.to_string(),
+        added,
+        removed,
+        added_total,
+        removed_total,
+        truncated,
+    }));
+}
 
 pub async fn process_group_watch<E: EventSink>(
     app_config: &Arc<AppConfig>,
@@ -95,11 +191,14 @@ pub async fn process_group_watch<E: EventSink>(
 /// either silently re-baselining - losing the change it should have reported
 /// - or not tracked at all.
 fn emit_watch_disabled<E: EventSink>(events: &E, target_name: &str, group_name: &str, detail: String) {
-    events.emit(EventMessage::PlaylistWatchDisabled(
-        WatchDisabled::new(target_name.to_string(), WatchDisabledReason::StorageFailure)
-            .with_group(group_name.to_string())
-            .with_detail(detail),
-    ));
+    let mut disabled =
+        WatchDisabled::new(target_name.to_string(), WatchDisabledReason::StorageFailure).with_detail(detail);
+    // The target-level group index has no group of its own; leaving the field
+    // unset is more honest than naming an empty one.
+    if !group_name.is_empty() {
+        disabled = disabled.with_group(group_name.to_string());
+    }
+    events.emit(EventMessage::PlaylistWatchDisabled(disabled));
 }
 
 /// Turn a group's membership delta into an event.

@@ -5,7 +5,7 @@ use crate::{
     input_cache::ClusterState,
     metadata_sink::{MetadataUpdateSink, NoopMetadataSink},
     parser::xmltv::{flatten_tvguide, merge_epg_trees, EpgMergeAccumulator, TVGuide},
-    playlist_watch::process_group_watch,
+    playlist_watch::{process_group_watch, process_target_groups_watch},
     processor::{
         epg::process_playlist_epg, sort::sort_playlist, trakt::process_trakt_categories_for_target,
         xtream_series::playlist_resolve_series, xtream_vod::playlist_resolve_vod, StalkerRefreshMode,
@@ -1924,6 +1924,11 @@ async fn process_watch<E: EventSink>(
         )));
         return false;
     }
+
+    // Before the per-group fan-out: this is about which groups exist, not
+    // what is inside the ones the patterns name, so it must see every group
+    // rather than only the watched ones.
+    process_target_groups_watch(app_config, events, &target.name, new_playlist).await;
 
     let mut matched = vec![false; watches.len()];
     let mut watched_groups = Vec::new();

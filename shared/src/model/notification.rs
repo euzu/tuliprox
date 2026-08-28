@@ -192,6 +192,7 @@ pub mod registry {
     pub const PLAYLIST_UPDATE_COMPLETED: EventId = EventId::new("playlist.update.completed");
     pub const PLAYLIST_UPDATE_FAILED: EventId = EventId::new("playlist.update.failed");
     pub const PLAYLIST_WATCH_CHANGED: EventId = EventId::new("playlist.watch.changed");
+    pub const PLAYLIST_GROUPS_CHANGED: EventId = EventId::new("playlist.groups.changed");
     pub const PLAYLIST_WATCH_DISABLED: EventId = EventId::new("playlist.watch.disabled");
     pub const PLAYLIST_WATCH_UNMATCHED: EventId = EventId::new("playlist.watch.unmatched");
 
@@ -280,6 +281,11 @@ pub mod registry {
             id: PLAYLIST_WATCH_CHANGED,
             severity: Severity::Info,
             description: "Channels were added to or removed from a watched group.",
+        },
+        EventDescriptor {
+            id: PLAYLIST_GROUPS_CHANGED,
+            severity: Severity::Info,
+            description: "Groups were added to or removed from a target.",
         },
         EventDescriptor {
             id: PLAYLIST_WATCH_DISABLED,
