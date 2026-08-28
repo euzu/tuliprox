@@ -1,5 +1,6 @@
 use chrono::{Duration, Local};
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, TokenData, Validation};
+use log::warn;
 use shared::{
     error::to_io_error,
     model::{
@@ -8,6 +9,34 @@ use shared::{
     },
 };
 use tuliprox_core::model::WebAuthConfig;
+
+/// Hard ceiling on a minted token's lifetime.
+///
+/// A token this server issues is a bearer credential with no revocation list
+/// behind it, so its lifetime is the entire blast radius of a leak.
+pub const MAX_TOKEN_TTL_MINS: u32 = 60 * 24 * 30; // 30 days
+
+/// Lifetime used when the config asks for an unbounded token.
+///
+/// `token_ttl_mins: 0` used to mean "expire in 100 years", which is a
+/// permanent credential written as if it were a configuration convenience.
+pub const DEFAULT_TOKEN_TTL_MINS: u32 = 60 * 24; // 24 hours
+
+/// Clamp a configured TTL into something a bearer token may actually carry.
+fn effective_ttl_mins(configured: u32) -> u32 {
+    if configured == 0 {
+        warn!(
+            "web_ui.auth.token_ttl_mins is 0; issuing {DEFAULT_TOKEN_TTL_MINS}-minute tokens instead of \
+             non-expiring ones. Set an explicit value to silence this."
+        );
+        DEFAULT_TOKEN_TTL_MINS
+    } else if configured > MAX_TOKEN_TTL_MINS {
+        warn!("web_ui.auth.token_ttl_mins of {configured} exceeds the {MAX_TOKEN_TTL_MINS} minute ceiling; clamped.");
+        MAX_TOKEN_TTL_MINS
+    } else {
+        configured
+    }
+}
 
 pub fn create_jwt_admin(
     web_auth_config: &WebAuthConfig,
@@ -62,12 +91,7 @@ fn create_jwt(
     header.typ = Some("JWT".to_string());
     let now = Local::now();
     let iat = now.timestamp();
-    let duration = web_auth_config.token_ttl_mins;
-    let exp = if duration > 0 {
-        (now + Duration::minutes(i64::from(duration))).timestamp()
-    } else {
-        (now + Duration::days(365 * 100)).timestamp() // 100 years
-    };
+    let exp = (now + Duration::minutes(i64::from(effective_ttl_mins(web_auth_config.token_ttl_mins)))).timestamp();
     let claims = Claims {
         username: username.to_string(),
         iss: web_auth_config.issuer.clone(),
@@ -85,13 +109,40 @@ fn create_jwt(
     }
 }
 
-pub fn verify_token(token: &str, secret_key: &[u8]) -> Option<TokenData<Claims>> {
-    if let Ok(token_data) =
-        decode::<Claims>(token, &DecodingKey::from_secret(secret_key), &Validation::new(Algorithm::HS256))
-    {
-        return Some(token_data);
+/// Verify a token's signature, expiry **and issuer**.
+///
+/// `iss` was written into every token and then never looked at:
+/// `Validation::new` checks `exp` and nothing else. A token minted by a
+/// different deployment that happened to share the secret verified cleanly.
+pub fn verify_token(token: &str, secret_key: &[u8], issuer: &str) -> Option<TokenData<Claims>> {
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.set_issuer(&[issuer]);
+    decode::<Claims>(token, &DecodingKey::from_secret(secret_key), &validation).ok()
+}
+
+/// The material needed to verify a token, for call sites that hold it across
+/// an await or a task boundary and so cannot borrow the live config.
+///
+/// The WebSocket paths used to carry a bare `Vec<u8>` secret, which is exactly
+/// why they could not check the issuer.
+#[derive(Debug, Clone)]
+pub struct TokenVerifier {
+    secret: Vec<u8>,
+    issuer: String,
+}
+
+impl TokenVerifier {
+    pub fn new(secret: impl Into<Vec<u8>>, issuer: impl Into<String>) -> Self {
+        Self { secret: secret.into(), issuer: issuer.into() }
     }
-    None
+
+    pub fn from_config(config: &WebAuthConfig) -> Self {
+        Self::new(config.secret.as_bytes(), config.issuer.clone())
+    }
+
+    pub fn verify(&self, token: &str) -> Option<TokenData<Claims>> {
+        verify_token(token, &self.secret, &self.issuer)
+    }
 }
 
 fn has_role(token_data: Option<TokenData<Claims>>, role: Role) -> bool {
@@ -122,6 +173,11 @@ pub enum AuthError {
     /// Token signature is valid but it lacks a `subject_id`. The
     /// identity-registry-bound principal cannot be resolved.
     MissingSubject,
+    /// Token signature is valid but it was minted against a password that has
+    /// since changed - or it carries no password version at all. Either way
+    /// the principal must authenticate again; a refresh cannot help, because
+    /// the refresh endpoint applies the same check.
+    PasswordChanged,
     /// Token signature is valid but the principal has the wrong
     /// role/permission for the requested endpoint.
     Forbidden,
@@ -142,6 +198,7 @@ impl std::fmt::Display for AuthError {
             Self::InvalidToken => f.write_str("token is invalid or expired"),
             Self::StaleSchema => f.write_str("token was issued for an older permission schema; refresh required"),
             Self::MissingSubject => f.write_str("token is missing a subject_id; refresh required"),
+            Self::PasswordChanged => f.write_str("token was issued for a different password; sign in again"),
             Self::Forbidden => f.write_str("principal does not have the required role"),
         }
     }
@@ -159,6 +216,27 @@ pub fn validate_token_claims(claims: &Claims) -> Result<(), AuthError> {
     }
     if claims.subject_id.is_none() {
         return Err(AuthError::MissingSubject);
+    }
+    Ok(())
+}
+
+/// Validate a token's `pwd_version` against the principal's current one.
+///
+/// `pwd_version` was minted into every web token and then checked in exactly
+/// one place - the refresh endpoint - which meant changing a password did not
+/// invalidate any live token on any guarded route. Combined with the old
+/// "0 means non-expiring" TTL, a leaked token was a permanent credential.
+///
+/// A `pwd_version` of `0` is rejected rather than waved through. The refresh
+/// endpoint used to treat `0` as "skip the check", which made the check
+/// bypassable by anything that could mint or replay a zero-versioned token.
+///
+/// Call this only for principals that actually have a password on file - the
+/// web users in `web_ui.auth`. Proxy API users authenticate against
+/// `api_proxy.yml` credentials and carry no password version.
+pub fn validate_password_version(claims: &Claims, current_pwd_version: u32) -> Result<(), AuthError> {
+    if claims.pwd_version == 0 || claims.pwd_version != current_pwd_version {
+        return Err(AuthError::PasswordChanged);
     }
     Ok(())
 }
@@ -187,7 +265,7 @@ mod tests {
         let cfg = test_web_auth_config();
         let jwt = create_jwt_admin(&cfg, "any", 1).expect("admin jwt");
         let secret = cfg.secret.as_bytes();
-        let data = verify_token(&jwt, secret).expect("verify");
+        let data = verify_token(&jwt, secret, &cfg.issuer).expect("verify");
         assert_eq!(data.claims.username, "any");
         assert_eq!(data.claims.subject_id, Some(UserId::builtin_admin()));
         assert!(data.claims.is_admin());
@@ -202,7 +280,7 @@ mod tests {
         let cfg = test_web_auth_config();
         let jwt =
             create_jwt_web_user(&cfg, "alice", Permission::ConfigRead | Permission::RecordingRead, 0).expect("web jwt");
-        let data = verify_token(&jwt, cfg.secret.as_bytes()).expect("verify");
+        let data = verify_token(&jwt, cfg.secret.as_bytes(), &cfg.issuer).expect("verify");
         assert_eq!(data.claims.username, "alice");
         assert_eq!(data.claims.subject_id, Some(UserId::from("web:alice")));
         assert!(!data.claims.is_admin());
@@ -214,7 +292,7 @@ mod tests {
     fn api_user_jwt_carries_api_namespaced_subject_id() {
         let cfg = test_web_auth_config();
         let jwt = create_jwt_api_user(&cfg, "bob").expect("api jwt");
-        let data = verify_token(&jwt, cfg.secret.as_bytes()).expect("verify");
+        let data = verify_token(&jwt, cfg.secret.as_bytes(), &cfg.issuer).expect("verify");
         assert_eq!(data.claims.subject_id, Some(UserId::from("api:bob")));
         assert!(data.claims.is_api_user());
         assert!(data.claims.permissions.is_empty());
@@ -227,7 +305,7 @@ mod tests {
         // refresh-required.
         let cfg = test_web_auth_config();
         let jwt = create_jwt_admin(&cfg, "any", 0).expect("admin jwt");
-        let mut data = verify_token(&jwt, cfg.secret.as_bytes()).expect("verify");
+        let mut data = verify_token(&jwt, cfg.secret.as_bytes(), &cfg.issuer).expect("verify");
         data.claims.permission_schema_version = 0; // stale
         let err = validate_token_claims(&data.claims).unwrap_err();
         assert!(matches!(err, AuthError::StaleSchema));
@@ -241,7 +319,7 @@ mod tests {
         // refresh-required.
         let cfg = test_web_auth_config();
         let jwt = create_jwt_admin(&cfg, "any", 0).expect("admin jwt");
-        let mut data = verify_token(&jwt, cfg.secret.as_bytes()).expect("verify");
+        let mut data = verify_token(&jwt, cfg.secret.as_bytes(), &cfg.issuer).expect("verify");
         data.claims.subject_id = None;
         let err = validate_token_claims(&data.claims).unwrap_err();
         assert!(matches!(err, AuthError::MissingSubject));
@@ -256,7 +334,7 @@ mod tests {
         // Flip a character in the signature segment.
         let last = tampered.pop().unwrap();
         tampered.push(if last == 'A' { 'B' } else { 'A' });
-        assert!(verify_token(&tampered, cfg.secret.as_bytes()).is_none());
+        assert!(verify_token(&tampered, cfg.secret.as_bytes(), &cfg.issuer).is_none());
     }
 
     #[test]
@@ -268,10 +346,59 @@ mod tests {
         // permission set.
         let cfg = test_web_auth_config();
         let jwt = create_jwt_admin(&cfg, "any", 0).expect("admin jwt");
-        let data = verify_token(&jwt, cfg.secret.as_bytes()).expect("verify");
+        let data = verify_token(&jwt, cfg.secret.as_bytes(), &cfg.issuer).expect("verify");
         let json = serde_json::to_string(&data.claims).expect("serialize");
         assert!(!json.contains("owner_id"), "JWT must not carry an owner_id field; got: {json}");
         assert!(json.contains("subject_id"), "JWT must carry subject_id: {json}");
+    }
+
+    #[test]
+    fn token_from_another_issuer_does_not_verify() {
+        // `iss` was minted and never checked. It is checked now.
+        let cfg = test_web_auth_config();
+        let jwt = create_jwt_admin(&cfg, "any", 1).expect("admin jwt");
+        assert!(verify_token(&jwt, cfg.secret.as_bytes(), "tuliprox-test").is_some());
+        assert!(verify_token(&jwt, cfg.secret.as_bytes(), "someone-else").is_none());
+    }
+
+    #[test]
+    fn zero_ttl_config_no_longer_mints_a_century_long_token() {
+        let mut cfg = test_web_auth_config();
+        cfg.token_ttl_mins = 0;
+        let jwt = create_jwt_admin(&cfg, "any", 1).expect("admin jwt");
+        let data = verify_token(&jwt, cfg.secret.as_bytes(), &cfg.issuer).expect("verify");
+        let lifetime_mins = (data.claims.exp - data.claims.iat) / 60;
+        assert_eq!(lifetime_mins, i64::from(DEFAULT_TOKEN_TTL_MINS));
+    }
+
+    #[test]
+    fn oversized_ttl_is_clamped_to_the_ceiling() {
+        let mut cfg = test_web_auth_config();
+        cfg.token_ttl_mins = MAX_TOKEN_TTL_MINS * 10;
+        let jwt = create_jwt_admin(&cfg, "any", 1).expect("admin jwt");
+        let data = verify_token(&jwt, cfg.secret.as_bytes(), &cfg.issuer).expect("verify");
+        let lifetime_mins = (data.claims.exp - data.claims.iat) / 60;
+        assert_eq!(lifetime_mins, i64::from(MAX_TOKEN_TTL_MINS));
+    }
+
+    #[test]
+    fn password_version_mismatch_is_rejected() {
+        let cfg = test_web_auth_config();
+        let jwt = create_jwt_admin(&cfg, "any", 7).expect("admin jwt");
+        let data = verify_token(&jwt, cfg.secret.as_bytes(), &cfg.issuer).expect("verify");
+        assert!(validate_password_version(&data.claims, 7).is_ok());
+        assert_eq!(validate_password_version(&data.claims, 8), Err(AuthError::PasswordChanged));
+    }
+
+    #[test]
+    fn zero_password_version_is_rejected_rather_than_waved_through() {
+        // The refresh endpoint used to read `pwd_version == 0` as "skip the
+        // check", which made the check bypassable.
+        let cfg = test_web_auth_config();
+        let jwt = create_jwt_admin(&cfg, "any", 0).expect("admin jwt");
+        let data = verify_token(&jwt, cfg.secret.as_bytes(), &cfg.issuer).expect("verify");
+        assert_eq!(validate_password_version(&data.claims, 0), Err(AuthError::PasswordChanged));
+        assert_eq!(validate_password_version(&data.claims, 5), Err(AuthError::PasswordChanged));
     }
 
     #[test]
@@ -280,6 +407,9 @@ mod tests {
         assert!(AuthError::MissingSubject.is_token_refresh_required());
         assert!(!AuthError::InvalidToken.is_token_refresh_required());
         assert!(!AuthError::Forbidden.is_token_refresh_required());
+        // A changed password cannot be fixed by a refresh - the refresh
+        // endpoint applies the same check. The client must sign in again.
+        assert!(!AuthError::PasswordChanged.is_token_refresh_required());
     }
 
     #[test]

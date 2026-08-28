@@ -98,7 +98,7 @@ fn has_any_permission(permissions: PermissionSet, required: &[Permission]) -> bo
 fn decode_permissions(app_state: &AppState, token: &str) -> Option<PermissionSet> {
     let config = app_state.app_config.config.load();
     let web_auth = config.web_ui.as_ref()?.auth.as_ref()?;
-    verify_token(token, web_auth.secret.as_bytes()).map(|token_data| token_data.claims.permissions)
+    verify_token(token, web_auth.secret.as_bytes(), &web_auth.issuer).map(|token_data| token_data.claims.permissions)
 }
 
 fn filter_api_proxy_by_permissions(api_proxy: &mut ApiProxyConfigDto, permissions: PermissionSet) {

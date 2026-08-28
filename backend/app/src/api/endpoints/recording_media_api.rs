@@ -79,7 +79,7 @@ impl FromRequestParts<Arc<AppState>> for AuthClaims {
         let config = app_state.app_config.config.load();
         match config.web_ui.as_ref().and_then(|w| w.auth.as_ref()).filter(|auth| auth.enabled) {
             Some(web_auth) => {
-                let token_data = verify_token(&token, web_auth.secret.as_bytes())
+                let token_data = verify_token(&token, web_auth.secret.as_bytes(), &web_auth.issuer)
                     .ok_or_else(|| auth_claims_rejection(AuthError::InvalidToken))?;
                 validate_token_claims(&token_data.claims).map_err(auth_claims_rejection)?;
                 Ok(Self(token_data.claims))

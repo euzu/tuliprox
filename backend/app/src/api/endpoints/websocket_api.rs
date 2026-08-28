@@ -3,7 +3,7 @@ use crate::{
         endpoints::{download_api::download_queue_snapshot, v1_api::create_status_check},
         model::{AppState, EventMessage},
     },
-    auth::{validate_token_claims, verify_token},
+    auth::{validate_token_claims, TokenVerifier},
 };
 use axum::{
     extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
@@ -171,15 +171,16 @@ fn main_event_receive_error_action(
     }
 }
 
-fn get_secret_key(app_state: &AppState, auth: bool) -> Option<Vec<u8>> {
+/// The verifier this socket authenticates against.
+///
+/// This used to hand a bare `Vec<u8>` secret around, which is precisely why
+/// the WebSocket paths could not check the token's issuer.
+fn get_token_verifier(app_state: &AppState, auth: bool) -> Option<TokenVerifier> {
     if !auth {
         return None;
     }
 
-    app_state.app_config.config.load().web_ui.as_ref().and_then(|c| c.auth.as_ref()).map(|c| {
-        let secret_key: &[u8] = c.secret.as_ref();
-        secret_key.to_vec()
-    })
+    app_state.app_config.config.load().web_ui.as_ref().and_then(|c| c.auth.as_ref()).map(TokenVerifier::from_config)
 }
 
 async fn handle_handshake(msg: Message, socket: &mut WebSocket, version: u8) -> Result<(), WebSocketApiError> {
@@ -209,7 +210,7 @@ async fn handle_protocol_message(
     mem: &mut ProtocolHandlerMemory,
     app_state: &Arc<AppState>,
     auth_required: bool,
-    secret_key: Option<&Vec<u8>>,
+    verifier: Option<&TokenVerifier>,
 ) -> Option<ProtocolMessage> {
     if let Message::Binary(bytes) = msg {
         match ProtocolMessage::from_bytes(bytes) {
@@ -219,11 +220,11 @@ async fn handle_protocol_message(
                     return Some(ProtocolMessage::Authorized);
                 }
 
-                let Some(secret_key) = secret_key else {
+                let Some(verifier) = verifier else {
                     return Some(ProtocolMessage::Unauthorized);
                 };
 
-                let Some(token_data) = verify_token(&auth_token, secret_key.as_slice()) else {
+                let Some(token_data) = verifier.verify(&auth_token) else {
                     return Some(ProtocolMessage::Unauthorized);
                 };
 
@@ -235,11 +236,11 @@ async fn handle_protocol_message(
             }
             Ok(ProtocolMessage::StatusRequest(auth_token)) => {
                 if auth_required {
-                    let Some(secret_key) = secret_key else {
+                    let Some(verifier) = verifier else {
                         return Some(ProtocolMessage::Unauthorized);
                     };
 
-                    let Some(token_data) = verify_token(&auth_token, secret_key.as_slice()) else {
+                    let Some(token_data) = verifier.verify(&auth_token) else {
                         return Some(ProtocolMessage::Unauthorized);
                     };
 
@@ -289,7 +290,7 @@ async fn handle_protocol_message(
                 None
             }
             Ok(ProtocolMessage::ActiveProviderCountRequest(auth_token)) => {
-                handle_active_provider_count_request(auth_token, mem, app_state, auth_required, secret_key).await
+                handle_active_provider_count_request(auth_token, mem, app_state, auth_required, verifier).await
             }
             Ok(_) => {
                 trace!("Unexpected protocol message after handshake");
@@ -327,13 +328,13 @@ async fn handle_active_provider_count_request(
     mem: &mut ProtocolHandlerMemory,
     app_state: &Arc<AppState>,
     auth_required: bool,
-    secret_key: Option<&Vec<u8>>,
+    verifier: Option<&TokenVerifier>,
 ) -> Option<ProtocolMessage> {
     if auth_required {
-        let Some(secret_key) = secret_key else {
+        let Some(verifier) = verifier else {
             return Some(ProtocolMessage::Unauthorized);
         };
-        let Some(token_data) = verify_token(&auth_token, secret_key.as_slice()) else {
+        let Some(token_data) = verifier.verify(&auth_token) else {
             return Some(ProtocolMessage::Unauthorized);
         };
         if token_data.claims.permissions.contains(Permission::SystemRead)
@@ -357,7 +358,7 @@ async fn handle_incoming_message(
     handler: &mut ProtocolHandler,
     app_state: &Arc<AppState>,
     auth_required: bool,
-    secret_key: Option<&Vec<u8>>,
+    verifier: Option<&TokenVerifier>,
 ) -> Result<(), WebSocketApiError> {
     let msg = result?;
 
@@ -372,7 +373,7 @@ async fn handle_incoming_message(
             Ok(())
         }
         ProtocolHandler::Default(mem) => {
-            let msg = handle_protocol_message(msg, mem, app_state, auth_required, secret_key).await;
+            let msg = handle_protocol_message(msg, mem, app_state, auth_required, verifier).await;
             match msg {
                 None => Ok(()),
                 Some(protocol_msg) => {
@@ -535,7 +536,7 @@ async fn send_event_response(
 
 // WebSocket communication logic
 async fn handle_socket(mut socket: WebSocket, app_state: Arc<AppState>, auth_required: bool) {
-    let secret_key = get_secret_key(&app_state, auth_required);
+    let verifier = get_token_verifier(&app_state, auth_required);
 
     let mut event_rx = app_state.event_manager.get_event_channel();
     let mut meter_event_rx = app_state.event_manager.get_meter_channel();
@@ -545,7 +546,7 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<AppState>, auth_req
         tokio::select! {
             maybe_msg = socket.recv() => {
                 if let Some(msg) = maybe_msg {
-                    if let Err(e) = handle_incoming_message(msg, &mut socket, &mut handler, &app_state, auth_required, secret_key.as_ref()).await {
+                    if let Err(e) = handle_incoming_message(msg, &mut socket, &mut handler, &app_state, auth_required, verifier.as_ref()).await {
                         trace!("WebSocket message handling error: {e}");
                         break;
                     }

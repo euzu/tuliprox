@@ -103,7 +103,7 @@ async fn token_refresh(
                 return no_web_auth_token().into_response();
             }
             let secret_key = web_auth.secret.as_ref();
-            let maybe_token_data = verify_token(&token, secret_key);
+            let maybe_token_data = verify_token(&token, secret_key, &web_auth.issuer);
             if let Some(token_data) = maybe_token_data {
                 let claims = token_data.claims;
                 let username = claims.username.as_str();

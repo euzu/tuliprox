@@ -29,7 +29,7 @@ fn validate_request(
         return Err(AuthError::InvalidToken);
     };
     let secret_key = web_auth_config.secret.as_ref();
-    let token_data = verify_token(token, secret_key).ok_or(AuthError::InvalidToken)?;
+    let token_data = verify_token(token, secret_key, &web_auth_config.issuer).ok_or(AuthError::InvalidToken)?;
     validate_token_claims(&token_data.claims)?;
     if !role_fn(&token_data.claims) {
         return Err(AuthError::Forbidden);
@@ -107,7 +107,7 @@ pub async fn require_permission_inner(
         return rejection_for(AuthError::InvalidToken);
     };
 
-    let Some(token_data) = verify_token(&token, web_auth_config.secret.as_bytes()) else {
+    let Some(token_data) = verify_token(&token, web_auth_config.secret.as_bytes(), &web_auth_config.issuer) else {
         return rejection_for(AuthError::InvalidToken);
     };
     if let Err(err) = validate_token_claims(&token_data.claims) {

@@ -262,7 +262,7 @@ fn current_web_auth_snapshot(app_state: &AppState) -> Result<(WebAuthConfig, Str
 fn current_username(app_state: &AppState, token: &str) -> Option<String> {
     let config = app_state.app_config.config.load();
     let web_auth = config.web_ui.as_ref()?.auth.as_ref()?;
-    verify_token(token, web_auth.secret.as_bytes()).map(|token_data| token_data.claims.username)
+    verify_token(token, web_auth.secret.as_bytes(), &web_auth.issuer).map(|token_data| token_data.claims.username)
 }
 
 fn store_reprepared_web_auth(app_state: &AppState) -> Result<(), String> {
@@ -331,7 +331,7 @@ async fn check_permission(
         return Err(StatusCode::UNAUTHORIZED);
     };
 
-    let Some(token_data) = verify_token(&token.0, web_auth_config.secret.as_bytes()) else {
+    let Some(token_data) = verify_token(&token.0, web_auth_config.secret.as_bytes(), &web_auth_config.issuer) else {
         return Err(StatusCode::UNAUTHORIZED);
     };
 
