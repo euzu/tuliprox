@@ -276,6 +276,11 @@ where
     use shared::model::UserConnectionPermission;
     let mut candidates = adm.active_users.get_eviction_candidates(username, client_ip).await;
     let ctx = StrategyContext { username, client_ip };
+    // Set once an eviction has been carried out without reducing the user's
+    // counted connections. Evicting is destructive and cannot be undone, so a
+    // kick that frees nothing is taken as evidence that the next one would not
+    // help either, and later eviction strategies are skipped.
+    let mut evictions_ineffective = false;
 
     // `enumerate` rather than a manual counter: the suppressed-eviction arm below
     // uses `continue`, which used to skip a trailing `idx += 1` and hand every
@@ -303,6 +308,12 @@ where
                 debug!("Grace grant rejected for user {username}, continuing with later strategies");
             }
             AdmissionDecision::Evict(target) => {
+                if evictions_ineffective {
+                    debug!(
+                        "Skipping eviction strategy {strategy:?} for user {username}: an earlier eviction freed no slot"
+                    );
+                    continue;
+                }
                 if should_suppress_eviction_for_recent_request(
                     adm,
                     username,
@@ -319,6 +330,7 @@ where
                     continue;
                 }
                 debug!("Evicting connection {} for user {username}", target.addr);
+                let connections_before = adm.active_users.user_connections(username).await;
                 adm.active_users
                     .mark_recent_eviction_guard_for_addr(&target.addr, *request_addr, RECENT_EVICTION_REENTRY_TTL_SECS)
                     .await;
@@ -340,7 +352,17 @@ where
                         grace_context: None,
                     });
                 }
-                debug!("Admission still denied after eviction for user {username}, continuing with later strategies");
+                if adm.active_users.user_connections(username).await >= connections_before {
+                    evictions_ineffective = true;
+                    debug!(
+                        "Eviction of {} freed no counted connection for user {username}, skipping later eviction strategies",
+                        target.addr
+                    );
+                } else {
+                    debug!(
+                        "Admission still denied after eviction for user {username}, continuing with later strategies"
+                    );
+                }
                 candidates = adm.active_users.get_eviction_candidates(username, client_ip).await;
             }
         }
