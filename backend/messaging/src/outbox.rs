@@ -17,6 +17,7 @@
 
 use crate::{channel::Delivery, configured_channels, send_event_to_channel};
 use log::{debug, error, info};
+use shared::model::{EventMessage, EventSink, NotificationDeadLetter};
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -109,11 +110,12 @@ static OUTBOX: OnceLock<NotificationOutbox> = OnceLock::new();
 pub fn notification_outbox() -> Option<&'static NotificationOutbox> { OUTBOX.get() }
 
 /// Start the outbox worker. Idempotent: only the first call installs one.
-pub fn spawn_notification_outbox(
+pub fn spawn_notification_outbox<E: EventSink + 'static>(
     app_config: &Arc<AppConfig>,
     http_client: reqwest::Client,
     config: RecordingNotificationConfig,
     cancel_token: &CancellationToken,
+    events: E,
 ) {
     let (sender, receiver) = mpsc::channel(config.outbox_buffer.max(1));
     if OUTBOX.set(NotificationOutbox { sender }).is_err() {
@@ -123,7 +125,7 @@ pub fn spawn_notification_outbox(
     let app_config = Arc::clone(app_config);
     let cancel_token = cancel_token.clone();
     tokio::spawn(async move {
-        run(app_config, http_client, config, receiver, cancel_token).await;
+        run(app_config, http_client, config, receiver, cancel_token, events).await;
     });
 }
 
@@ -137,12 +139,13 @@ fn legacy_outbox_path(app_config: &Arc<AppConfig>) -> PathBuf {
     PathBuf::from(app_config.config.load().storage_dir.as_str()).join(LEGACY_OUTBOX_FILE)
 }
 
-async fn run(
+async fn run<E: EventSink>(
     app_config: Arc<AppConfig>,
     http_client: reqwest::Client,
     config: RecordingNotificationConfig,
     mut receiver: mpsc::Receiver<NotificationEvent>,
     cancel_token: CancellationToken,
+    events: E,
 ) {
     let path = outbox_path(&app_config);
     let mut file = load(&path, &legacy_outbox_path(&app_config)).await;
@@ -184,7 +187,7 @@ async fn run(
             }
             persist(&path, &file).await;
         }
-        if drain_due(&app_config, &http_client, &config, &mut file).await {
+        if drain_due(&app_config, &http_client, &config, &mut file, &events).await {
             persist(&path, &file).await;
         }
         health().outbox_depth.store(i64::try_from(file.entries.len()).unwrap_or(i64::MAX), Ordering::Relaxed);
@@ -218,11 +221,12 @@ fn admit(file: &mut OutboxFile, event: NotificationEvent) {
 }
 
 /// Attempt every due entry. Returns `true` when the outbox changed.
-async fn drain_due(
+async fn drain_due<E: EventSink>(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
     config: &RecordingNotificationConfig,
     file: &mut OutboxFile,
+    events: &E,
 ) -> bool {
     let now = now_ts();
     if !file.entries.iter().any(|entry| entry.next_attempt_at <= now) {
@@ -311,6 +315,15 @@ async fn drain_due(
                 "notification_dead_lettered: event={} attempts={} channels={:?} enqueued_at={}",
                 entry.event.id, entry.attempts, entry.pending, entry.enqueued_at
             );
+            // The bus, not the outbox. Enqueueing a "delivery failed" notice
+            // against the channels that just failed to deliver is how this
+            // loops; the notification bridge drops this kind for that reason.
+            events.emit(EventMessage::NotificationDeadLettered(NotificationDeadLetter::new(
+                entry.event.id,
+                entry.attempts,
+                entry.pending.clone(),
+                entry.enqueued_at,
+            )));
             continue;
         }
         // A provider that named a `Retry-After` wins over our own backoff:

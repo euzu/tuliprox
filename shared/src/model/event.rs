@@ -14,8 +14,8 @@ use crate::model::{
     notification::{registry, EventId, Severity},
     stats::SourceStats,
     ActiveUserConnectionChange, ConfigReloadFailure, ConfigType, DiskAlert, DownloadsDelta, DownloadsResponse,
-    LibraryScanProgressEvent, LibraryScanSummaryStatus, MetadataUpdateFailure, MsgKind, Permission,
-    PlaylistUpdateProgressEvent, PlaylistUpdateState, ProviderAccountEvent, ProviderAccountState,
+    LibraryScanProgressEvent, LibraryScanSummaryStatus, MetadataUpdateFailure, MsgKind, NotificationDeadLetter,
+    Permission, PlaylistUpdateProgressEvent, PlaylistUpdateState, ProviderAccountEvent, ProviderAccountState,
     RecordingLifecycleMessage, ServerLifecycleEvent, ServerLifecycleState, StreamProbeFailure, SystemInfo,
     UserLifecycleEvent, UserLifecycleState, WatchChanges,
 };
@@ -76,6 +76,13 @@ pub enum EventMessage {
     /// A stream probe returned no metadata. There is no success
     /// counterpart; see [`StreamProbeFailure`].
     StreamProbeFailed(StreamProbeFailure),
+
+    /// A notification ran out of delivery attempts and was dropped.
+    ///
+    /// On the bus for plugins and the status endpoint; deliberately *not*
+    /// notifiable - see [`NotificationDeadLetter`] for why routing this
+    /// through the outbox that just failed would loop.
+    NotificationDeadLettered(NotificationDeadLetter),
 
     /// An authentication decision: a sign-in, a rejected sign-in, a
     /// throttled attempt, or a permission denial. One variant, four kinds -
@@ -173,6 +180,7 @@ pub enum EventKind {
     UserUpdated,
     UserDeleted,
     StreamProbeFailed,
+    NotificationDeadLettered,
     AuthSignInSucceeded,
     AuthSignInFailed,
     AuthSignInThrottled,
@@ -184,7 +192,7 @@ impl EventKind {
     ///
     /// The mask type below indexes into this, so the order is load-bearing:
     /// it is the bit order, not just a listing.
-    pub const ALL: [Self; 35] = [
+    pub const ALL: [Self; 36] = [
         Self::ServerError,
         Self::ServerStarted,
         Self::ServerShutdown,
@@ -216,6 +224,7 @@ impl EventKind {
         Self::UserUpdated,
         Self::UserDeleted,
         Self::StreamProbeFailed,
+        Self::NotificationDeadLettered,
         Self::AuthSignInSucceeded,
         Self::AuthSignInFailed,
         Self::AuthSignInThrottled,
@@ -274,7 +283,8 @@ impl EventKind {
             | Self::ProviderAccountExpiring
             | Self::ProviderAccountExpired
             // Sits with the metadata-update events it is produced by.
-            | Self::StreamProbeFailed => Permission::SystemRead,
+            | Self::StreamProbeFailed
+            | Self::NotificationDeadLettered => Permission::SystemRead,
         }
     }
 
@@ -368,6 +378,7 @@ impl EventKind {
             Self::UserUpdated => "user.updated",
             Self::UserDeleted => "user.deleted",
             Self::StreamProbeFailed => "stream.probe.failed",
+            Self::NotificationDeadLettered => "notification.dead_lettered",
             Self::AuthSignInSucceeded => "auth.sign_in.succeeded",
             Self::AuthSignInFailed => "auth.sign_in.failed",
             Self::AuthSignInThrottled => "auth.sign_in.throttled",
@@ -435,6 +446,7 @@ impl EventMessage {
                 UserLifecycleState::Deleted => EventKind::UserDeleted,
             },
             Self::StreamProbeFailed(_) => EventKind::StreamProbeFailed,
+            Self::NotificationDeadLettered(_) => EventKind::NotificationDeadLettered,
             Self::AuthAudit(event) => match event.outcome {
                 AuthAuditOutcome::SignInSucceeded => EventKind::AuthSignInSucceeded,
                 AuthAuditOutcome::SignInFailed => EventKind::AuthSignInFailed,
@@ -516,6 +528,7 @@ impl EventMessage {
                 UserLifecycleState::Deleted => registry::USER_DELETED,
             },
             Self::StreamProbeFailed(_) => registry::STREAM_PROBE_FAILED,
+            Self::NotificationDeadLettered(_) => registry::NOTIFICATION_DEAD_LETTERED,
             Self::AuthAudit(event) => match event.outcome {
                 AuthAuditOutcome::SignInSucceeded => registry::AUTH_SIGN_IN_SUCCEEDED,
                 AuthAuditOutcome::SignInFailed => registry::AUTH_SIGN_IN_FAILED,
@@ -577,6 +590,7 @@ impl EventMessage {
             Self::ProviderAccount(event) => encode(event),
             Self::UserLifecycle(event) => encode(event),
             Self::StreamProbeFailed(failure) => encode(failure),
+            Self::NotificationDeadLettered(dead_letter) => encode(dead_letter),
             Self::AuthAudit(event) => encode(event),
         }
     }

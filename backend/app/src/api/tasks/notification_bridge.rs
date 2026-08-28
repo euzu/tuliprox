@@ -232,6 +232,16 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
         // operator delivery.
         EventMessage::RecordingLifecycle(_) => None,
 
+        // Deliberately not notified, and deliberately absent from
+        // `NOTIFIABLE_KINDS` so the bridge is not even woken for it. This
+        // event exists *because* delivery failed; enqueueing a notice about
+        // it into the same outbox, against the same channels that just
+        // failed, is a loop that ends in an outbox full of notices about
+        // notices. Operators get the `notification::audit` log line and the
+        // `dead_lettered` counter, neither of which runs through the path
+        // that broke. Plugins and the status endpoint see it on the bus.
+        EventMessage::NotificationDeadLettered(_) => None,
+
         EventMessage::UserLifecycle(event) => Some(user_lifecycle_notification(id, event, message.severity())),
         EventMessage::StreamProbeFailed(failure) => Some(probe_failure_notification(id, failure, message.severity())),
 
@@ -333,9 +343,9 @@ mod tests {
         notification::{registry, Severity},
         ActiveUserConnectionChange, ConfigReloadFailure, ConfigType, DiskAlert, DiskAlertLevel, DownloadsResponse,
         EventKind, LibraryScanProgressEvent, LibraryScanSummary, LibraryScanSummaryStatus, MetadataUpdateFailure,
-        MsgKind, PlaylistUpdateProgressEvent, PlaylistUpdateState, PlaylistUpdateSummary, ProviderAccountEvent,
-        ProviderAccountState, RecordingLifecycleMessage, ServerLifecycleEvent, StreamProbeFailure,
-        StreamProbeFailureReason, SystemInfo, UserLifecycleEvent, UserLifecycleState, WatchChanges,
+        MsgKind, NotificationDeadLetter, PlaylistUpdateProgressEvent, PlaylistUpdateState, PlaylistUpdateSummary,
+        ProviderAccountEvent, ProviderAccountState, RecordingLifecycleMessage, ServerLifecycleEvent,
+        StreamProbeFailure, StreamProbeFailureReason, SystemInfo, UserLifecycleEvent, UserLifecycleState, WatchChanges,
     };
     use std::sync::Arc;
 
@@ -429,6 +439,12 @@ mod tests {
             user_lifecycle(UserLifecycleState::Created),
             user_lifecycle(UserLifecycleState::Updated),
             user_lifecycle(UserLifecycleState::Deleted),
+            EventMessage::NotificationDeadLettered(NotificationDeadLetter::new(
+                shared::model::notification::registry::SYSTEM_ERROR,
+                3,
+                vec!["telegram".to_string()],
+                0,
+            )),
             EventMessage::StreamProbeFailed(StreamProbeFailure::new(
                 "input".into(),
                 "1".into(),

@@ -844,6 +844,7 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
             app_state.http_client.load().as_ref().clone(),
             notification_cfg,
             &app_state.cancel_tokens.load().downloads,
+            Arc::clone(&app_state.event_manager),
         );
     }
 
