@@ -427,7 +427,7 @@ pub mod registry {
         EventDescriptor {
             id: STREAM_PROBE_FAILED,
             severity: Severity::Warn,
-            description: "A stream probe returned no metadata; the stream may be dead.                           Deduplicated per input, so a provider outage notifies once rather than per channel.",
+            description: "A stream probe returned no metadata; the stream may be dead. Deduplicated per input, so a provider outage notifies once rather than per channel.",
         },
         EventDescriptor {
             id: RECORDING_QUEUE_CHANGED,

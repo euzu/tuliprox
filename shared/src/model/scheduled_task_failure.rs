@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 ///
 /// The playlist update and the library scan both report their own outcomes,
 /// so this exists for the tasks that have no terminal event of their own -
-/// today that is the GeoIP database refresh, which logged one line and moved
-/// on. An operator running on a stale GeoIP database had no way to find out.
+/// today that is the `GeoIP` database refresh, which logged one line and moved
+/// on. An operator running on a stale `GeoIP` database had no way to find out.
 ///
 /// The task type is the whole payload's discriminant rather than a free
 /// string, so a task added to [`ScheduleTaskType`] cannot be reported under a

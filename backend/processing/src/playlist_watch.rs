@@ -122,64 +122,50 @@ pub async fn process_group_watch<E: EventSink>(
     let watch_filename =
         format!("{}/{}.bin", utils::sanitize_filename(target_name), utils::sanitize_filename(&pl.title));
     let cfg = app_config.config.load();
-    match utils::get_file_path(&cfg.storage_dir, Some(std::path::PathBuf::from(&watch_filename))) {
-        Some(path) => {
-            let save_path = path.as_path();
-            let mut changed = false;
-            if file_exists_async(&path).await {
-                if let Some(loaded_tree) = load_watch_tree(&path).await {
-                    // Find elements in set2 but not in set1
-                    let added_difference: BTreeSet<Arc<str>> = new_tree.difference(&loaded_tree).cloned().collect();
-                    let removed_difference: BTreeSet<Arc<str>> = loaded_tree.difference(&new_tree).cloned().collect();
-                    if !added_difference.is_empty() || !removed_difference.is_empty() {
-                        changed = true;
-                        handle_watch_notification(
-                            events,
-                            &added_difference,
-                            &removed_difference,
-                            target_name,
-                            &pl.title,
-                        );
-                    }
-                } else {
-                    error!("failed to load watch_file {}", path.to_str().unwrap_or_default());
-                    // The baseline is unreadable, so this refresh re-baselines
-                    // and the diff it should have produced is gone. Silently
-                    // doing that leaves the operator believing the group is
-                    // being watched.
-                    emit_watch_disabled(
-                        events,
-                        target_name,
-                        &pl.title,
-                        format!("could not read watch state at {}", path.to_str().unwrap_or_default()),
-                    );
-                    changed = true;
-                }
-            } else {
-                changed = true;
-            }
+    let Some(path) = utils::get_file_path(&cfg.storage_dir, Some(std::path::PathBuf::from(&watch_filename))) else {
+        error!("failed to write watch_file {watch_filename}");
+        emit_watch_disabled(
+            events,
+            target_name,
+            &pl.title,
+            format!("could not resolve a storage path for {watch_filename}"),
+        );
+        return;
+    };
+
+    let save_path = path.as_path();
+    let mut changed = true;
+    if file_exists_async(&path).await {
+        if let Some(loaded_tree) = load_watch_tree(&path).await {
+            // Find elements in set2 but not in set1
+            let added_difference: BTreeSet<Arc<str>> = new_tree.difference(&loaded_tree).cloned().collect();
+            let removed_difference: BTreeSet<Arc<str>> = loaded_tree.difference(&new_tree).cloned().collect();
+            changed = !added_difference.is_empty() || !removed_difference.is_empty();
             if changed {
-                match save_watch_tree(save_path, &new_tree).await {
-                    Ok(()) => {}
-                    Err(err) => {
-                        error!("failed to write watch_file {}: {err}", save_path.to_str().unwrap_or_default());
-                        emit_watch_disabled(
-                            events,
-                            target_name,
-                            &pl.title,
-                            format!("could not write watch state at {}: {err}", save_path.to_str().unwrap_or_default()),
-                        );
-                    }
-                }
+                handle_watch_notification(events, &added_difference, &removed_difference, target_name, &pl.title);
             }
-        }
-        None => {
-            error!("failed to write watch_file {watch_filename}");
+        } else {
+            error!("failed to load watch_file {}", path.to_str().unwrap_or_default());
+            // The baseline is unreadable, so this refresh re-baselines and the
+            // diff it should have produced is gone. Silently doing that leaves
+            // the operator believing the group is being watched.
             emit_watch_disabled(
                 events,
                 target_name,
                 &pl.title,
-                format!("could not resolve a storage path for {watch_filename}"),
+                format!("could not read watch state at {}", path.to_str().unwrap_or_default()),
+            );
+        }
+    }
+
+    if changed {
+        if let Err(err) = save_watch_tree(save_path, &new_tree).await {
+            error!("failed to write watch_file {}: {err}", save_path.to_str().unwrap_or_default());
+            emit_watch_disabled(
+                events,
+                target_name,
+                &pl.title,
+                format!("could not write watch state at {}: {err}", save_path.to_str().unwrap_or_default()),
             );
         }
     }

@@ -97,14 +97,99 @@
   round-trip cannot overwrite a real token with the mask; a genuinely changed secret still writes through. Tooling that
   read provider credentials out of the config endpoint can no longer do so.
 
+- **A failed local library scan is now `library.scan.failed`, not `library.scan.completed`.** The taxonomy mapped
+  `LibraryScanProgress` to the completion id whatever the summary said, so the failure path reached operators as
+  "A local library scan finished" at info severity. Failure now takes its own id at error severity, discriminated on
+  the status the payload already carries. A `notify_on` glob such as `library.*` or `library.scan.*` picks the new id
+  up; a subscription naming `library.scan.completed` exactly will stop being told about failed scans and needs the new
+  id added.
+
 ## 🌟 New Features
+
+- **Ten events for the failures that used to be silent**: the registry described states nothing emitted, and several
+  subsystems reported their start and their success but never their own failure. The taxonomy is now 42 events (up
+  from 32) and gains two domains, `scheduled_task.*` and `notification.*`.
+  - **`system.started` / `system.shutdown`** had been registered — and documented — since the registry was written,
+    with nothing in the tree emitting either, so an operator who subscribed got silence. One payload carries both
+    kinds, so a subscriber can ask for restarts alone: the running version and the bound address on start, the signal
+    name on stop. Placement is the whole design: the start event is published *after* the notification bridge
+    subscribes, because anything published before it reaches nobody, and the stop event *before* the service tokens are
+    cancelled, because that stops the outbox that would carry it. Neither reaches the WebSocket — there is no panel
+    that renders them, and the Web UI has necessarily disconnected by the time the second one fires.
+  - **`provider.fetch.failed`** reports what kind of fetch failure it was. `ProviderErrorKind` already classified every
+    provider failure across all three families and already exposed `is_retryable()` and `needs_operator()` — the two
+    questions an operator actually asks — and nothing consumed either, so every fetch failure was counted, logged and
+    treated identically. The event carries the classification, the worst error's text, how many there were, and whether
+    any of the playlist came through anyway. Severity follows the classification rather than the registry: a `Config`
+    failure will not fix itself and is an error, everything else may and is a warning. Input name and error text go
+    through `sanitize_sensitive_info`, since both can carry a provider URL with credentials in it.
+  - **`provider.pool.exhausted` and `provider.priority.fallback`** — two moments the lineup manager knew about and told
+    nobody. `ActiveProvider` reported that connection counts moved; nothing reported that a stream was *refused*
+    because every provider behind the input was full. The per-provider current/max-plus-expiry snapshot that
+    `log_exhausted_pool_snapshot` built and then discarded unless debug logging happened to be on is now built
+    unconditionally on that (already slow) path, and the debug line and the event render from the same structured data.
+    Priority fallback — `acquire` walking priority groups high to low and silently falling through when the preferred
+    ones are at capacity — is reported on transition rather than per allocation, because the fall-through happens on
+    every request while the primary is full and one event per stream start would bury the thing worth hearing; a move
+    back towards group zero is a recovery and says so. Input and provider names are sanitized.
+  - **`user.connection.denied`**: `ActiveUser` reports connects and disconnects, and a refusal is neither, so the one
+    outcome a user actually complains about was the one nothing published — the admission ladder modelled it fully and
+    handed it to the caller and nobody else. It carries the user, the address the request was attributed to, and the
+    limit that was reached, and it takes `UserRead` rather than the system-wide read: "who was turned away" is the same
+    question as "who signed in". Only the strategy path emits; an explicit `Terminate` also resolves to exhausted, but
+    that is a requested teardown, not a denial.
+  - **`playlist.watch.disabled` / `playlist.watch.unmatched`**: `watch` had one event for everything it knows and three
+    ways to stop working without saying so — every pattern failing to compile, which disabled the feature on a typo
+    behind a single `warn!`; the target carrying the reserved default name; and a watch state file that could not be
+    read or written, which either re-baselined the group (losing the change it should have reported) or dropped it
+    entirely. All three now report the reason and, where there is one, the underlying error. The first needed the config
+    layer to stop discarding the distinction: an empty `Some` is now load-bearing and means "configured and unusable",
+    which is not the same as "not configured". `playlist.watch.unmatched` covers the fourth silence — a pattern matching
+    no group looks exactly like a group that has not changed, so a typo in `watch` was invisible.
+  - **`playlist.groups.changed`**: `watch` tracked channels inside named groups and was blind to the group set itself,
+    in both directions. A group appearing was silent — no baseline file, so one was written, nothing was emitted, and
+    the group's entire channel list read as "not new" from then on — and a group vanishing was worse, since it is absent
+    from the refreshed playlist and no code path observed the disappearance at all. The target's group titles are now
+    diffed against a persisted index before the per-group fan-out, so it sees every group rather than only the ones the
+    watch patterns name; the question is which groups exist, not what is inside the watched ones. The index sits beside
+    the per-group directory (`<target>.groups.bin`, not `<target>/__groups.bin`) so it cannot collide with a group whose
+    sanitized title matches, and first sight writes the baseline silently — announcing every existing group as new on
+    the first refresh after an upgrade would be noise. Gated on `target.watch` being configured, so it costs nothing for
+    targets that never asked to be watched.
+  - **`metadata.update.failed` for an input whose tasks burn through their retries**: the completion event only fires
+    when a cycle drains *with changes*, and an exhausted task only reached a `debug!`, so an input whose resolves fail
+    every time emitted a start and then nothing for as long as it stayed broken — on the bus, indistinguishable from one
+    still working through a long queue. The worker now counts the tasks that exhaust their retries during a cycle and
+    reports the input, the count, whether anything resolved anyway, and the last error. Reported alongside the
+    completion rather than instead of it: a cycle can both produce changes and exhaust tasks, and the completion is what
+    triggers the downstream playlist update. Per cycle rather than per task, since a provider that has stopped answering
+    fails every item behind it.
+  - **`scheduled_task.failed`**: the playlist update and the library scan report their own outcomes, but the GeoIP
+    refresh had no terminal event of its own — it logged one line and moved on — so an operator running on a stale
+    database never found out. It carries the task type and the cron expression that triggered it. The task is typed as
+    `ScheduleTaskType` rather than a free string, so a task added to that enum cannot be reported under a name nothing
+    recognises. A disabled GeoIP update stays silent: the task ran and correctly found nothing to do, which is not a
+    failure.
+  - **`notification.dead_lettered`** was registered and documented; the outbox detected the condition, bumped
+    `health().dead_lettered` and logged to `notification::audit`, and nothing subscribing to the bus could learn that a
+    notification had been permanently lost. It is now emitted at the point the outbox gives up, carrying the event id,
+    the attempt count, the channels that never accepted it, and when it was first enqueued. It is deliberately *not*
+    notifiable and deliberately absent from `NOTIFIABLE_KINDS`, so the bridge is not even woken for it: this event
+    exists because delivery failed, and enqueueing a notice about it into the same outbox against the same channels that
+    just failed is the loop its registry entry warns about. Operators still get the audit line and the counter, and
+    plugins see it on the bus. Emitted at the attempts-exhausted site only — a notification every channel rejects as
+    permanent is also dropped, but that path cannot yet be told apart from a clean delivery.
+  - **`library.scan.failed`** — see Breaking Changes. `EventKind` gains it alongside the progress kind rather than
+    reusing it: progress is high-frequency and a scan failure is not, so a subscriber that only wants failures should
+    not have to take the tick firehose to get them.
 
 - **Open-world notification system**: adding a notification channel or a notification event is no longer a change
   across ten sites in three crates.
   - **Events are ids, not an enum.** An event is a dotted `domain.event` string with a registered severity and
-    description. 32 events are registered today, spanning `system.*`, `playlist.*`, `recording.*`, `provider.*`,
-    `config.*`, `library.*`, `metadata.*`, `user.*`, `auth.*` and `stream.*`. The Web UI event picker is driven by the
-    registry, so an event added in the backend appears in the UI without a frontend change, and template discovery
+    description. 42 events are registered today, spanning `system.*`, `playlist.*`, `recording.*`, `provider.*`,
+    `config.*`, `library.*`, `metadata.*`, `user.*`, `auth.*`, `stream.*`, `scheduled_task.*` and `notification.*`. The
+    Web UI event picker is driven by the registry, so an event added in the backend appears in the UI without a
+    frontend change, and template discovery
     iterates the registry instead of a hardcoded eight-variant list that silently made new kinds undiscoverable.
   - **Four new channels**: `ntfy` (self-hosted push, no account or bot token), `gotify`, `slack` (real Block Kit
     header/section/context blocks rather than a re-used Discord embed), and `command`, which runs a local program with
@@ -688,6 +773,17 @@
 
 ## ⚙️ Optimizations
 
+- **The effective admission strategy list is carried as `Arc<[AdmissionStrategy]>`**: `GraceResolutionContext` is
+  stored on `StreamInfo` and travels with every clone of it, so a `Vec<AdmissionStrategy>` field meant reallocating the
+  list on each clone — and `get_effective_admission_strategies` handed back a fresh `Vec` that the context builder then
+  cloned again. The list is immutable once resolved, so the context clone is now a refcount bump and the one allocation
+  left is the `Arc::from` at resolution time. The strategy loop still takes a plain `&[AdmissionStrategy]`, reached by
+  deref, so slicing the remaining strategies is unchanged.
+
+- **Watch pattern matching walks the groups once**: matching re-tested every configured pattern per group inside a
+  filter. It now walks the groups once and records which patterns hit — which is also what makes
+  `playlist.watch.unmatched` possible.
+
 - **Notification templates are resolved and compiled once**: `resolve_template` wrapped every template value in an
   input source and ran a full download attempt — once per message, per channel. A `file://` template was re-read from
   disk and an `http://` one re-fetched over the network for every notification, and an *inline* Handlebars string paid
@@ -821,6 +917,41 @@
   the `shared` crate, so `/ready` and the banner can no longer drift apart in how they group inputs and aliases.
 
 ## 🐛 Fixes
+
+- **Admission: a request that ended up denied anyway could leave several other streams killed behind it.** Eviction is
+  destructive and is never rolled back, but the strategy loop would kick a target, find the retry still denied, and
+  move straight on to the next eviction strategy. The loop now samples `user_connections` either side of the kick. A
+  kick that reduces the count is real progress and later strategies still run, which keeps the over-limit case — a
+  hot-swapped config that lowered `max_connections` — converging; a kick that frees nothing skips further `Evict`
+  decisions for the rest of the walk. `Grace` strategies are still evaluated either way.
+- **Admission: a request that lost the queue race walked the eviction strategies on a stale count.** The resolver read
+  the admission state, then queued on the per-user gate, then used the snapshot it had taken *before* it queued — so it
+  could evict a live connection to free a slot the winner had already released. The state is re-read after the gate
+  (and after the empty-strategy check, so the uncontended path costs nothing extra) and the grace context captures the
+  fresh kind. This does not close the wider check-then-register window: the slot is registered by the caller outside
+  this gate, so two requests at `max_connections - 1` can still both be admitted.
+- **Admission: a suppressed eviction misaligned the strategy index and replayed a grace strategy.** The loop counted
+  with a manual index incremented at the end of the body, and the eviction-reentry suppression arm exits via `continue`
+  and so skipped it, handing every later strategy an index one too low. That index is what
+  `GraceResolutionContext.strategy_index` stores, and the post-grace fallback resumes at `strategy_index + 1`: with
+  `[EvictUserOldest, GraceHoldStream]` and the eviction suppressed, the grace recorded index 0, so the fallback slice
+  restarted at the grace strategy itself and replayed it instead of moving past it. Now counted with
+  `iter().enumerate()`, so the index cannot drift from the item.
+- **Events: watch payloads carried synthesized prose where a plugin expected channel titles.** The watch handler
+  truncated its own lists by pushing a sentence into them — "... 42 more added entries omitted" beside real channel
+  titles, or "5000 entries added. Detailed list suppressed" replacing the list outright. That was legible to the text
+  template and to nothing else: the payload is serialized straight to JSON for plugins, and a plugin has no way to tell
+  a sentinel from a channel actually named that. The subject line had the same problem from the other side — it read
+  `added.len()`, so a suppressed change of five thousand announced itself as "1 channel(s) added". `WatchChanges` now
+  carries `added_total`, `removed_total` and `truncated`; the lists stay pure channel titles, the counts stay true
+  whatever the lists carry, and the plain-text renderer spells the omission out itself. `WatchChanges::new` sets the
+  totals from the lists, so a caller that is not truncating cannot get them out of step.
+- **Events: a failed local library scan reported itself as finished.** The failure path emitted the same progress
+  variant with `status: Error`, and the taxonomy mapped that variant to the completion id unconditionally, so a failure
+  reached operators as "A local library scan finished" at info severity. The id is now discriminated on the status the
+  payload already carries — the way playlist updates have always discriminated on their state — and severity comes from
+  the registry with no second table. The emitter was already reporting the status correctly; nothing downstream was
+  reading it. See Breaking Changes for the subscription consequence.
 
 - **Messaging: an edited bot token, webhook URL or template did not take effect until a restart.** The channel set and
   the compiled templates are cached so a notification does not rebuild every channel — and a fresh HTTP client with
@@ -1182,6 +1313,26 @@
   - The rules use OR semantics: any matching CIDR or country allows the request.
 
 ## 🛠 Maintenance
+
+- **`AdmissionRequest` bundles the request-scoped admission arguments**: five functions each threaded the same ten
+  positional parameters, three of them consecutive bare `bool`s (`use_session_admission`, then
+  `activate_unbound_session` a slot later). Call sites read `..., true, Some(session_token), true, guard)` — a shape
+  where transposing two arguments still compiles and silently changes which admission check runs. One struct now names
+  every field at the call site, and the comment that lived in the parameter list moved onto the field it documents.
+  This removes three `#[allow(clippy::too_many_arguments)]` and one `clippy::too_many_lines`.
+
+- **The empty-admission-strategy-list rule is stated rather than implied**: the resolver matched on
+  `admission_strategies.is_some()` and then re-unwrapped with `unwrap_or_default()`, so the guard proved something the
+  body checked again — and the rule that an explicitly empty list suppresses the `grace_period_millis` fallback while an
+  absent list does not was implicit in the arm ordering. Rewritten as a match on `as_ref()` with the distinction
+  spelled out. `Some(vec![])` still means "no strategies", not "fall back to grace".
+
+- **Dead admission parameter and a doc block that described a decision that does not exist**: the strategy loop took a
+  `kind_for_exhausted` it never read (both callers construct the exhausted result themselves), and the doc block on the
+  post-grace fallback listed a `Deny` rule although `AdmissionDecision` only has `NoMatch`, `Grace` and `Evict`.
+
+- **`EventBusStats::Default` is hand-written**: the taxonomy crossed 32 kinds, and the derived `Default` for arrays
+  stops there.
 
 - Moved provider-specific M3U, Xtream and Stalker protocol code from the generic utility namespace into dedicated IPTV
   modules.

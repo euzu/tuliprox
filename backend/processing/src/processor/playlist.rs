@@ -1933,7 +1933,7 @@ async fn process_watch<E: EventSink>(
     if watches.is_empty() {
         error!("target '{}' configured watch patterns but none of them compiled", target.name);
         events.emit(EventMessage::PlaylistWatchDisabled(WatchDisabled::new(
-            target.name.to_string(),
+            target.name.clone(),
             WatchDisabledReason::InvalidPatterns,
         )));
         return false;
@@ -1942,7 +1942,7 @@ async fn process_watch<E: EventSink>(
     if default_as_default().eq_ignore_ascii_case(&target.name) {
         error!("can't watch a target with no unique name");
         events.emit(EventMessage::PlaylistWatchDisabled(WatchDisabled::new(
-            target.name.to_string(),
+            target.name.clone(),
             WatchDisabledReason::UnnamedTarget,
         )));
         return false;
@@ -1980,7 +1980,7 @@ async fn process_watch<E: EventSink>(
     if !unmatched.is_empty() {
         warn!("target '{}' has {} watch pattern(s) matching no group", target.name, unmatched.len());
         events.emit(EventMessage::PlaylistWatchUnmatched(WatchUnmatched::new(
-            target.name.to_string(),
+            target.name.clone(),
             unmatched,
             new_playlist.len(),
         )));

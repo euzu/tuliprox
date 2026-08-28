@@ -180,7 +180,7 @@ pub async fn resolve_playback_request_admission(
     if result.admission.permission == UserConnectionPermission::Exhausted {
         adm.active_users.events().send_event(EventMessage::ConnectionDenied(ConnectionDenied::new(
             Arc::from(user.username.as_str()),
-            Arc::from(fingerprint.client_ip.to_string().as_str()),
+            Arc::from(fingerprint.client_ip.as_str()),
             user.max_connections,
             user.soft_connections,
         )));

@@ -22,9 +22,11 @@ use crate::api::model::AppState;
 use log::{debug, warn};
 use shared::model::{
     notification::{EventId, Severity},
-    AuthAuditEvent, AuthAuditOutcome, EventKind, EventKindMask, EventMessage, LibraryScanSummaryStatus,
-    ServerLifecycleState, StreamProbeFailure, StreamProbeFailureReason, UserLifecycleEvent, UserLifecycleState,
-    WatchDisabledReason,
+    AuthAuditEvent, AuthAuditOutcome, ConnectionDenied, EventKind, EventKindMask, EventMessage,
+    LibraryScanSummaryStatus, MetadataUpdateFailure, PlaylistGroupsChanged, ProviderFetchFailure,
+    ProviderPoolExhausted, ProviderPriorityFallback, ScheduledTaskFailure, ServerLifecycleEvent, ServerLifecycleState,
+    StreamProbeFailure, StreamProbeFailureReason, UserLifecycleEvent, UserLifecycleState, WatchDisabled,
+    WatchDisabledReason, WatchUnmatched,
 };
 use std::{fmt::Write, sync::Arc};
 use tokio::sync::broadcast::error::RecvError;
@@ -121,6 +123,10 @@ const NOTIFIABLE_KINDS: EventKindMask = EventKindMask::new()
 // variants with no way to tell which is which.
 #[allow(clippy::match_same_arms)]
 #[must_use]
+// One arm per `EventMessage` variant and no logic beyond dispatch: the
+// wording lives in the builders below. It is long because the taxonomy is,
+// and splitting a routing table in half only hides which variants are handled.
+#[allow(clippy::too_many_lines)]
 pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
     // Which notification an event *is* belongs to the event; this function
     // only decides how to word it and what to attach. `None` here means the
@@ -172,19 +178,7 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
             Some(NotificationEvent::new(id, title.clone(), title).with_fields(summary))
         }
 
-        EventMessage::ServerLifecycle(event) => {
-            let title = match event.state {
-                ServerLifecycleState::Started => event.address.as_ref().map_or_else(
-                    || format!("Server {} started", event.version),
-                    |addr| format!("Server {} started on {addr}", event.version),
-                ),
-                ServerLifecycleState::ShuttingDown => event
-                    .reason
-                    .as_ref()
-                    .map_or_else(|| "Server shutting down".to_string(), |why| format!("Server shutting down ({why})")),
-            };
-            Some(NotificationEvent::new(id, title.clone(), title).with_fields(event))
-        }
+        EventMessage::ServerLifecycle(event) => Some(server_lifecycle_notification(id, event)),
 
         EventMessage::InputMetadataUpdatesStarted(input) => {
             let title = format!("Metadata update started for {input}");
@@ -195,12 +189,7 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
             Some(NotificationEvent::new(id, title.clone(), title))
         }
         EventMessage::InputMetadataUpdatesFailed(failure) => {
-            let title = format!(
-                "Metadata update for {} could not finish: {} task(s) exhausted",
-                failure.input, failure.failed_tasks
-            );
-            let body = failure.last_error.as_ref().map_or_else(|| title.clone(), |err| format!("{title}\n\n{err}"));
-            Some(NotificationEvent::new(id, title, body).with_fields(failure))
+            Some(metadata_failure_notification(id, failure, message.severity()))
         }
 
         EventMessage::ActiveUser(change) => {
@@ -231,61 +220,13 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
         EventMessage::PlaylistWatchChanged(changes) => {
             Some(NotificationEvent::from_content(&MessageContent::Watch(changes.clone())))
         }
-        EventMessage::PlaylistGroupsChanged(changes) => {
-            let title = format!(
-                "{} group(s) added, {} removed in {}",
-                changes.added_total, changes.removed_total, changes.target
-            );
-            let mut body = title.clone();
-            for (label, names, total) in
-                [("Added", &changes.added, changes.added_total), ("Removed", &changes.removed, changes.removed_total)]
-            {
-                if total == 0 {
-                    continue;
-                }
-                let _ = write!(body, "\n\n{label} ({total}):");
-                for name in names {
-                    body.push('\n');
-                    body.push_str(name);
-                }
-                let omitted = total.saturating_sub(names.len());
-                if omitted > 0 {
-                    let _ = write!(body, "\n... {omitted} more not listed");
-                }
-            }
-            Some(NotificationEvent::new(id, title, body).with_fields(changes))
-        }
+        EventMessage::PlaylistGroupsChanged(changes) => Some(groups_changed_notification(id, changes)),
         EventMessage::PlaylistWatchDisabled(disabled) => {
-            let what = match disabled.reason {
-                WatchDisabledReason::InvalidPatterns => "no watch pattern compiled".to_string(),
-                WatchDisabledReason::UnnamedTarget => "the target has no unique name".to_string(),
-                WatchDisabledReason::StorageFailure => disabled.group.as_ref().map_or_else(
-                    || "watch state is unreadable".to_string(),
-                    |group| format!("watch state for {group} is unreadable"),
-                ),
-            };
-            let title = format!("Watch is not running for {}: {what}", disabled.target);
-            let body = disabled.detail.as_ref().map_or_else(|| title.clone(), |detail| format!("{title}\n\n{detail}"));
-            Some(NotificationEvent::new(id, title, body).with_severity(message.severity()).with_fields(disabled))
+            Some(watch_disabled_notification(id, disabled, message.severity()))
         }
         EventMessage::PlaylistWatchUnmatched(unmatched) => {
-            let title = format!(
-                "{} watch pattern(s) for {} matched none of its {} group(s)",
-                unmatched.patterns.len(),
-                unmatched.target,
-                unmatched.groups_seen
-            );
-            let body = format!("{title}\n\n{}", unmatched.patterns.join("\n"));
-            Some(NotificationEvent::new(id, title, body).with_severity(message.severity()).with_fields(unmatched))
+            Some(watch_unmatched_notification(id, unmatched, message.severity()))
         }
-        // Deliberately not notified from here. Recording notifications are
-        // at-most-once: a durable marker is persisted inside the
-        // queue-mutation boundary *before* delivery, and the outbox retries
-        // per channel. The bus is a lossy broadcast - a lagging subscriber
-        // misses events - so routing that path through it would let a
-        // recording be marked delivered and then never sent. The event is on
-        // the bus for plugins and subscribers; `download_api` still owns
-        // operator delivery.
         EventMessage::RecordingLifecycle(_) => None,
 
         // Deliberately not notified, and deliberately absent from
@@ -299,68 +240,19 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
         EventMessage::NotificationDeadLettered(_) => None,
 
         EventMessage::ScheduledTaskFailed(failure) => {
-            let title = format!("Scheduled {:?} failed", failure.task);
-            let mut body = format!("{title}\n\n{}", failure.error);
-            if let Some(schedule) = &failure.schedule {
-                let _ = write!(body, "\n\nSchedule: {schedule}");
-            }
-            Some(NotificationEvent::new(id, title, body).with_severity(message.severity()).with_fields(failure))
+            Some(scheduled_task_notification(id, failure, message.severity()))
         }
 
-        EventMessage::ProviderFetchFailed(failure) => {
-            let title = format!(
-                "{} playlist fetch failed for {} ({})",
-                failure.provider,
-                failure.input,
-                failure.kind.as_wire_name()
-            );
-            let mut body =
-                failure.message.as_ref().map_or_else(|| title.clone(), |detail| format!("{title}\n\n{detail}"));
-            if failure.error_count > 1 {
-                let _ = write!(body, "\n\n{} error(s) in total.", failure.error_count);
-            }
-            if failure.partial {
-                body.push_str("\n\nSome of the playlist was fetched anyway.");
-            }
-            Some(NotificationEvent::new(id, title, body).with_severity(message.severity()).with_fields(failure))
-        }
+        EventMessage::ProviderFetchFailed(failure) => Some(fetch_failure_notification(id, failure, message.severity())),
         EventMessage::ProviderPoolExhausted(exhausted) => {
-            let title =
-                format!("All {} provider(s) for {} are at capacity", exhausted.providers.len(), exhausted.input);
-            let mut body = title.clone();
-            for entry in &exhausted.providers {
-                let _ = write!(
-                    body,
-                    "\n{}: {}/{}{}",
-                    entry.name,
-                    entry.current_connections,
-                    entry.max_connections,
-                    if entry.expired { " (expired)" } else { "" }
-                );
-            }
-            Some(NotificationEvent::new(id, title, body).with_severity(message.severity()).with_fields(exhausted))
+            Some(pool_exhausted_notification(id, exhausted, message.severity()))
         }
         EventMessage::ProviderPriorityFallback(fallback) => {
-            let direction = if fallback.is_recovery() { "moved back to" } else { "fell back to" };
-            let title = format!(
-                "{} {direction} provider priority group {} of {}",
-                fallback.input, fallback.group_index, fallback.group_count
-            );
-            let body = format!("{title}\n\nNow served by {}", fallback.provider);
-            Some(NotificationEvent::new(id, title, body).with_severity(message.severity()).with_fields(fallback))
+            Some(priority_fallback_notification(id, fallback, message.severity()))
         }
 
         EventMessage::UserLifecycle(event) => Some(user_lifecycle_notification(id, event, message.severity())),
-        EventMessage::ConnectionDenied(denied) => {
-            let limit = if denied.max_connections > 0 {
-                format!("{} connection(s)", denied.max_connections)
-            } else {
-                format!("{} soft connection(s)", denied.soft_connections)
-            };
-            let title = format!("{} was refused a connection (limit: {limit})", denied.username);
-            let body = format!("{title}\n\nFrom {}", denied.client_ip);
-            Some(NotificationEvent::new(id, title, body).with_severity(message.severity()).with_fields(denied))
-        }
+        EventMessage::ConnectionDenied(denied) => Some(connection_denied_notification(id, denied, message.severity())),
         EventMessage::StreamProbeFailed(failure) => Some(probe_failure_notification(id, failure, message.severity())),
 
         EventMessage::AuthAudit(event) => Some(auth_audit_notification(id, event, message.severity())),
@@ -390,6 +282,155 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
         | EventMessage::DownloadsUpdate(_)
         | EventMessage::DownloadsDeltaUpdate(_) => None,
     }
+}
+
+/// One notification builder per event that needs more than a title.
+///
+/// `to_notification` is a routing table; keeping the wording out of it is what
+/// stops it turning into one long function as the taxonomy grows.
+fn server_lifecycle_notification(id: EventId, event: &ServerLifecycleEvent) -> NotificationEvent {
+    let title = match event.state {
+        ServerLifecycleState::Started => event.address.as_ref().map_or_else(
+            || format!("Server {} started", event.version),
+            |addr| format!("Server {} started on {addr}", event.version),
+        ),
+        ServerLifecycleState::ShuttingDown => event
+            .reason
+            .as_ref()
+            .map_or_else(|| "Server shutting down".to_string(), |why| format!("Server shutting down ({why})")),
+    };
+    NotificationEvent::new(id, title.clone(), title).with_fields(event)
+}
+
+fn metadata_failure_notification(
+    id: EventId,
+    failure: &MetadataUpdateFailure,
+    severity: Severity,
+) -> NotificationEvent {
+    let title =
+        format!("Metadata update for {} could not finish: {} task(s) exhausted", failure.input, failure.failed_tasks);
+    let body = failure.last_error.as_ref().map_or_else(|| title.clone(), |err| format!("{title}\n\n{err}"));
+    NotificationEvent::new(id, title, body).with_severity(severity).with_fields(failure)
+}
+
+fn groups_changed_notification(id: EventId, changes: &PlaylistGroupsChanged) -> NotificationEvent {
+    let title =
+        format!("{} group(s) added, {} removed in {}", changes.added_total, changes.removed_total, changes.target);
+    let mut body = title.clone();
+    push_sampled_list(&mut body, "Added", &changes.added, changes.added_total);
+    push_sampled_list(&mut body, "Removed", &changes.removed, changes.removed_total);
+    NotificationEvent::new(id, title, body).with_fields(changes)
+}
+
+/// Render one direction of a sampled change set.
+///
+/// The lists carry titles only and may be shorter than the total - or empty -
+/// so the omission is spelled out rather than smuggled into the list.
+fn push_sampled_list(body: &mut String, label: &str, names: &[String], total: usize) {
+    if total == 0 {
+        return;
+    }
+    let _ = write!(body, "\n\n{label} ({total}):");
+    for name in names {
+        body.push('\n');
+        body.push_str(name);
+    }
+    let omitted = total.saturating_sub(names.len());
+    if omitted > 0 {
+        let _ = write!(body, "\n... {omitted} more not listed");
+    }
+}
+
+fn watch_disabled_notification(id: EventId, disabled: &WatchDisabled, severity: Severity) -> NotificationEvent {
+    let what = match disabled.reason {
+        WatchDisabledReason::InvalidPatterns => "no watch pattern compiled".to_string(),
+        WatchDisabledReason::UnnamedTarget => "the target has no unique name".to_string(),
+        WatchDisabledReason::StorageFailure => disabled.group.as_ref().map_or_else(
+            || "watch state is unreadable".to_string(),
+            |group| format!("watch state for {group} is unreadable"),
+        ),
+    };
+    let title = format!("Watch is not running for {}: {what}", disabled.target);
+    let body = disabled.detail.as_ref().map_or_else(|| title.clone(), |detail| format!("{title}\n\n{detail}"));
+    NotificationEvent::new(id, title, body).with_severity(severity).with_fields(disabled)
+}
+
+fn watch_unmatched_notification(id: EventId, unmatched: &WatchUnmatched, severity: Severity) -> NotificationEvent {
+    let title = format!(
+        "{} watch pattern(s) for {} matched none of its {} group(s)",
+        unmatched.patterns.len(),
+        unmatched.target,
+        unmatched.groups_seen
+    );
+    let body = format!("{title}\n\n{}", unmatched.patterns.join("\n"));
+    NotificationEvent::new(id, title, body).with_severity(severity).with_fields(unmatched)
+}
+
+fn fetch_failure_notification(id: EventId, failure: &ProviderFetchFailure, severity: Severity) -> NotificationEvent {
+    let title =
+        format!("{} playlist fetch failed for {} ({})", failure.provider, failure.input, failure.kind.as_wire_name());
+    let mut body = failure.message.as_ref().map_or_else(|| title.clone(), |detail| format!("{title}\n\n{detail}"));
+    if failure.error_count > 1 {
+        let _ = write!(body, "\n\n{} error(s) in total.", failure.error_count);
+    }
+    if failure.partial {
+        body.push_str("\n\nSome of the playlist was fetched anyway.");
+    }
+    NotificationEvent::new(id, title, body).with_severity(severity).with_fields(failure)
+}
+
+fn pool_exhausted_notification(
+    id: EventId,
+    exhausted: &ProviderPoolExhausted,
+    severity: Severity,
+) -> NotificationEvent {
+    let title = format!("All {} provider(s) for {} are at capacity", exhausted.providers.len(), exhausted.input);
+    let mut body = title.clone();
+    for entry in &exhausted.providers {
+        let _ = write!(
+            body,
+            "\n{}: {}/{}{}",
+            entry.name,
+            entry.current_connections,
+            entry.max_connections,
+            if entry.expired { " (expired)" } else { "" }
+        );
+    }
+    NotificationEvent::new(id, title, body).with_severity(severity).with_fields(exhausted)
+}
+
+fn priority_fallback_notification(
+    id: EventId,
+    fallback: &ProviderPriorityFallback,
+    severity: Severity,
+) -> NotificationEvent {
+    let direction = if fallback.is_recovery() { "moved back to" } else { "fell back to" };
+    let title = format!(
+        "{} {direction} provider priority group {} of {}",
+        fallback.input, fallback.group_index, fallback.group_count
+    );
+    let body = format!("{title}\n\nNow served by {}", fallback.provider);
+    NotificationEvent::new(id, title, body).with_severity(severity).with_fields(fallback)
+}
+
+fn scheduled_task_notification(id: EventId, failure: &ScheduledTaskFailure, severity: Severity) -> NotificationEvent {
+    let title = format!("Scheduled {:?} failed", failure.task);
+    let mut body = format!("{title}\n\n{}", failure.error);
+    if let Some(schedule) = &failure.schedule {
+        let _ = write!(body, "\n\nSchedule: {schedule}");
+    }
+    NotificationEvent::new(id, title, body).with_severity(severity).with_fields(failure)
+}
+
+fn connection_denied_notification(id: EventId, denied: &ConnectionDenied, severity: Severity) -> NotificationEvent {
+    let limit = if denied.max_connections > 0 {
+        format!("{} connection(s)", denied.max_connections)
+    } else {
+        format!("{} soft connection(s)", denied.soft_connections)
+    };
+    let title = format!("{} was refused a connection (limit: {limit})", denied.username);
+    let body = format!("{title}\n\nFrom {}", denied.client_ip);
+    NotificationEvent::new(id, title, body).with_severity(severity).with_fields(denied)
 }
 
 /// Word an account lifecycle change.
@@ -485,9 +526,6 @@ mod tests {
         }
     }
 
-    /// One `EventMessage` per `EventKind`, so the test above cannot miss a
-    /// variant added later.
-
     fn provider_fetch_failure() -> ProviderFetchFailure {
         ProviderFetchFailure {
             input: "i".into(),
@@ -500,6 +538,13 @@ mod tests {
             partial: false,
         }
     }
+
+    /// One `EventMessage` per `EventKind`, so the test above cannot miss a
+    /// variant added later.
+    ///
+    /// One entry per kind and an assert on the length: long by construction,
+    /// and it has to stay one list for that assert to mean anything.
+    #[allow(clippy::too_many_lines)]
     fn sample_of_every_kind() -> Vec<(EventMessage, EventKind)> {
         let empty_downloads = DownloadsResponse { queue: Vec::new(), finished: Vec::new(), active: Vec::new() };
         let samples = vec![

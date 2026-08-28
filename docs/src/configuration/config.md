@@ -481,6 +481,14 @@ negative pattern does, so `["*", "!system.info"]` reads the way it looks.
 | `recording.rules.changed` | info | The recording rule set changed. |
 | `scheduled_task.failed` | error | A scheduled task could not complete. |
 | `notification.dead_lettered` | error | A notification was permanently undeliverable and has been dropped. |
+| `user.created` | info | An API-proxy user account was created. |
+| `user.updated` | info | An API-proxy user account was changed. |
+| `user.deleted` | warn | An API-proxy user account was deleted. |
+| `auth.sign_in.succeeded` | info | A principal signed in and was issued a token. |
+| `auth.sign_in.failed` | warn | A sign-in was rejected. Deduplicated per principal and address, so a password-guessing run notifies once rather than per attempt. |
+| `auth.sign_in.throttled` | warn | A sign-in was refused without checking credentials because the caller is backing off after repeated failures. |
+| `auth.permission.denied` | warn | An authenticated principal asked for something its permissions do not cover. |
+| `stream.probe.failed` | warn | A stream probe returned no metadata; the stream may be dead. Deduplicated per input, so a provider outage notifies once rather than per channel. |
 
 <!-- END GENERATED EVENT TABLE -->
 

@@ -734,9 +734,6 @@ mod tests {
         }
     }
 
-    /// One `EventMessage` per `EventKind`; the length assert means a new
-    /// variant cannot slip past the test above.
-
     fn provider_fetch_failure() -> ProviderFetchFailure {
         ProviderFetchFailure {
             input: "i".into(),
@@ -749,6 +746,13 @@ mod tests {
             partial: false,
         }
     }
+
+    /// One `EventMessage` per `EventKind`; the length assert means a new
+    /// variant cannot slip past the test above.
+    ///
+    /// Long by construction, and it has to stay one list for that assert to
+    /// mean anything.
+    #[allow(clippy::too_many_lines)]
     fn sample_event_of_every_kind() -> Vec<(EventMessage, shared::model::EventKind)> {
         use shared::model::{
             ActiveUserConnectionChange, ConfigType, ConnectionDenied, EventKind, NotificationDeadLetter,
