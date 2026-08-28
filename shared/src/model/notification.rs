@@ -246,6 +246,9 @@ pub mod registry {
     pub const RECORDING_QUEUE_CHANGED: EventId = EventId::new("recording.queue.changed");
     pub const RECORDING_RULES_CHANGED: EventId = EventId::new("recording.rules.changed");
 
+    // ---- scheduler -------------------------------------------------------
+    pub const SCHEDULED_TASK_FAILED: EventId = EventId::new("scheduled_task.failed");
+
     // ---- notification self-reporting ------------------------------------
     /// A notification was permanently lost. Must never route back through
     /// the channel that dropped it.
@@ -427,6 +430,11 @@ pub mod registry {
             id: RECORDING_RULES_CHANGED,
             severity: Severity::Info,
             description: "The recording rule set changed.",
+        },
+        EventDescriptor {
+            id: SCHEDULED_TASK_FAILED,
+            severity: Severity::Error,
+            description: "A scheduled task could not complete.",
         },
         EventDescriptor {
             id: NOTIFICATION_DEAD_LETTERED,

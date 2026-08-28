@@ -17,8 +17,8 @@ use crate::model::{
     LibraryScanProgressEvent, LibraryScanSummaryStatus, MetadataUpdateFailure, MsgKind, NotificationDeadLetter,
     Permission, PlaylistGroupsChanged, PlaylistUpdateProgressEvent, PlaylistUpdateState, ProviderAccountEvent,
     ProviderAccountState, ProviderFetchFailure, ProviderPoolExhausted, ProviderPriorityFallback,
-    RecordingLifecycleMessage, ServerLifecycleEvent, ServerLifecycleState, StreamProbeFailure, SystemInfo,
-    UserLifecycleEvent, UserLifecycleState, WatchChanges, WatchDisabled, WatchUnmatched,
+    RecordingLifecycleMessage, ScheduledTaskFailure, ServerLifecycleEvent, ServerLifecycleState, StreamProbeFailure,
+    SystemInfo, UserLifecycleEvent, UserLifecycleState, WatchChanges, WatchDisabled, WatchUnmatched,
 };
 use std::sync::Arc;
 
@@ -89,6 +89,9 @@ pub enum EventMessage {
     /// A stream probe returned no metadata. There is no success
     /// counterpart; see [`StreamProbeFailure`].
     StreamProbeFailed(StreamProbeFailure),
+
+    /// A scheduled task could not complete.
+    ScheduledTaskFailed(ScheduledTaskFailure),
 
     /// A notification ran out of delivery attempts and was dropped.
     ///
@@ -200,6 +203,7 @@ pub enum EventKind {
     UserDeleted,
     StreamProbeFailed,
     NotificationDeadLettered,
+    ScheduledTaskFailed,
     AuthSignInSucceeded,
     AuthSignInFailed,
     AuthSignInThrottled,
@@ -211,7 +215,7 @@ impl EventKind {
     ///
     /// The mask type below indexes into this, so the order is load-bearing:
     /// it is the bit order, not just a listing.
-    pub const ALL: [Self; 42] = [
+    pub const ALL: [Self; 43] = [
         Self::ServerError,
         Self::ServerStarted,
         Self::ServerShutdown,
@@ -250,6 +254,7 @@ impl EventKind {
         Self::UserDeleted,
         Self::StreamProbeFailed,
         Self::NotificationDeadLettered,
+        Self::ScheduledTaskFailed,
         Self::AuthSignInSucceeded,
         Self::AuthSignInFailed,
         Self::AuthSignInThrottled,
@@ -315,7 +320,8 @@ impl EventKind {
             | Self::ProviderPriorityFallback
             // Sits with the metadata-update events it is produced by.
             | Self::StreamProbeFailed
-            | Self::NotificationDeadLettered => Permission::SystemRead,
+            | Self::NotificationDeadLettered
+            | Self::ScheduledTaskFailed => Permission::SystemRead,
         }
     }
 
@@ -416,6 +422,7 @@ impl EventKind {
             Self::UserDeleted => "user.deleted",
             Self::StreamProbeFailed => "stream.probe.failed",
             Self::NotificationDeadLettered => "notification.dead_lettered",
+            Self::ScheduledTaskFailed => "scheduled_task.failed",
             Self::AuthSignInSucceeded => "auth.sign_in.succeeded",
             Self::AuthSignInFailed => "auth.sign_in.failed",
             Self::AuthSignInThrottled => "auth.sign_in.throttled",
@@ -490,6 +497,7 @@ impl EventMessage {
             },
             Self::StreamProbeFailed(_) => EventKind::StreamProbeFailed,
             Self::NotificationDeadLettered(_) => EventKind::NotificationDeadLettered,
+            Self::ScheduledTaskFailed(_) => EventKind::ScheduledTaskFailed,
             Self::AuthAudit(event) => match event.outcome {
                 AuthAuditOutcome::SignInSucceeded => EventKind::AuthSignInSucceeded,
                 AuthAuditOutcome::SignInFailed => EventKind::AuthSignInFailed,
@@ -581,6 +589,7 @@ impl EventMessage {
             },
             Self::StreamProbeFailed(_) => registry::STREAM_PROBE_FAILED,
             Self::NotificationDeadLettered(_) => registry::NOTIFICATION_DEAD_LETTERED,
+            Self::ScheduledTaskFailed(_) => registry::SCHEDULED_TASK_FAILED,
             Self::AuthAudit(event) => match event.outcome {
                 AuthAuditOutcome::SignInSucceeded => registry::AUTH_SIGN_IN_SUCCEEDED,
                 AuthAuditOutcome::SignInFailed => registry::AUTH_SIGN_IN_FAILED,
@@ -649,6 +658,7 @@ impl EventMessage {
             Self::UserLifecycle(event) => encode(event),
             Self::StreamProbeFailed(failure) => encode(failure),
             Self::NotificationDeadLettered(dead_letter) => encode(dead_letter),
+            Self::ScheduledTaskFailed(failure) => encode(failure),
             Self::AuthAudit(event) => encode(event),
         }
     }

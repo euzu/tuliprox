@@ -478,6 +478,7 @@ negative pattern does, so `["*", "!system.info"]` reads the way it looks.
 | `provider.connections.changed` | info | A provider's active connection count changed. High frequency - subscribe deliberately. |
 | `recording.queue.changed` | info | The recording queue changed. |
 | `recording.rules.changed` | info | The recording rule set changed. |
+| `scheduled_task.failed` | error | A scheduled task could not complete. |
 | `notification.dead_lettered` | error | A notification was permanently undeliverable and has been dropped. |
 
 <!-- END GENERATED EVENT TABLE -->

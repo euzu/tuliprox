@@ -102,6 +102,7 @@ const NOTIFIABLE_KINDS: EventKindMask = EventKindMask::new()
     .with(EventKind::UserUpdated)
     .with(EventKind::UserDeleted)
     .with(EventKind::StreamProbeFailed)
+    .with(EventKind::ScheduledTaskFailed)
     .with(EventKind::AuthSignInSucceeded)
     .with(EventKind::AuthSignInFailed)
     .with(EventKind::AuthSignInThrottled)
@@ -296,6 +297,15 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
         // that broke. Plugins and the status endpoint see it on the bus.
         EventMessage::NotificationDeadLettered(_) => None,
 
+        EventMessage::ScheduledTaskFailed(failure) => {
+            let title = format!("Scheduled {:?} failed", failure.task);
+            let mut body = format!("{title}\n\n{}", failure.error);
+            if let Some(schedule) = &failure.schedule {
+                let _ = write!(body, "\n\nSchedule: {schedule}");
+            }
+            Some(NotificationEvent::new(id, title, body).with_severity(message.severity()).with_fields(failure))
+        }
+
         EventMessage::ProviderFetchFailed(failure) => {
             let title = format!(
                 "{} playlist fetch failed for {} ({})",
@@ -442,9 +452,9 @@ mod tests {
         EventKind, LibraryScanProgressEvent, LibraryScanSummary, LibraryScanSummaryStatus, MetadataUpdateFailure,
         MsgKind, NotificationDeadLetter, PlaylistGroupsChanged, PlaylistUpdateProgressEvent, PlaylistUpdateState,
         PlaylistUpdateSummary, ProviderAccountEvent, ProviderAccountState, ProviderFailureKind, ProviderFetchFailure,
-        ProviderPoolExhausted, ProviderPriorityFallback, RecordingLifecycleMessage, ServerLifecycleEvent,
-        StreamProbeFailure, StreamProbeFailureReason, SystemInfo, UserLifecycleEvent, UserLifecycleState, WatchChanges,
-        WatchDisabled, WatchDisabledReason, WatchUnmatched,
+        ProviderPoolExhausted, ProviderPriorityFallback, RecordingLifecycleMessage, ScheduledTaskFailure,
+        ServerLifecycleEvent, StreamProbeFailure, StreamProbeFailureReason, SystemInfo, UserLifecycleEvent,
+        UserLifecycleState, WatchChanges, WatchDisabled, WatchDisabledReason, WatchUnmatched,
     };
     use std::sync::Arc;
 
@@ -566,6 +576,10 @@ mod tests {
             user_lifecycle(UserLifecycleState::Created),
             user_lifecycle(UserLifecycleState::Updated),
             user_lifecycle(UserLifecycleState::Deleted),
+            EventMessage::ScheduledTaskFailed(ScheduledTaskFailure::new(
+                shared::model::ScheduleTaskType::GeoIpUpdate,
+                "boom".to_string(),
+            )),
             EventMessage::NotificationDeadLettered(NotificationDeadLetter::new(
                 shared::model::notification::registry::SYSTEM_ERROR,
                 3,

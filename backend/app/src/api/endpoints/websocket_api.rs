@@ -502,6 +502,7 @@ fn to_protocol_message(event: EventMessage) -> Option<(ProtocolMessage, &'static
         // A notification that could not be delivered is an operator concern,
         // not a Web UI one, and there is no panel that renders it.
         | EventMessage::NotificationDeadLettered(_)
+        | EventMessage::ScheduledTaskFailed(_)
         // Auth decisions reach notification channels and plugins, not the
         // Web UI socket: there is no panel that renders them, and pushing
         // every sign-in to every connected admin is noise.
@@ -697,7 +698,8 @@ mod tests {
         // every notification-only kind against `expected = true` and the
         // test failed on `DiskAlert` - it has been red since the lifecycle
         // events joined the bus.
-        const NOT_ON_THE_WIRE: [EventKind; 23] = [
+        const NOT_ON_THE_WIRE: [EventKind; 24] = [
+            EventKind::ScheduledTaskFailed,
             EventKind::ProviderFetchFailed,
             EventKind::ProviderPoolExhausted,
             EventKind::ProviderPriorityFallback,
@@ -748,8 +750,8 @@ mod tests {
     fn sample_event_of_every_kind() -> Vec<(EventMessage, shared::model::EventKind)> {
         use shared::model::{
             ActiveUserConnectionChange, ConfigType, EventKind, NotificationDeadLetter, PlaylistUpdateState,
-            PlaylistUpdateSummary, ServerLifecycleEvent, StreamProbeFailure, StreamProbeFailureReason, SystemInfo,
-            UserLifecycleEvent, UserLifecycleState,
+            PlaylistUpdateSummary, ScheduledTaskFailure, ServerLifecycleEvent, StreamProbeFailure,
+            StreamProbeFailureReason, SystemInfo, UserLifecycleEvent, UserLifecycleState,
         };
 
         fn user_lifecycle(state: UserLifecycleState) -> EventMessage {
@@ -842,6 +844,10 @@ mod tests {
             user_lifecycle(UserLifecycleState::Created),
             user_lifecycle(UserLifecycleState::Updated),
             user_lifecycle(UserLifecycleState::Deleted),
+            EventMessage::ScheduledTaskFailed(ScheduledTaskFailure::new(
+                shared::model::ScheduleTaskType::GeoIpUpdate,
+                "boom".to_string(),
+            )),
             EventMessage::NotificationDeadLettered(NotificationDeadLetter::new(
                 shared::model::notification::registry::SYSTEM_ERROR,
                 3,

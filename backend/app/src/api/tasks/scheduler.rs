@@ -13,7 +13,7 @@ use crate::{
 use chrono::{DateTime, FixedOffset, Local};
 use cron::Schedule;
 use shared::{
-    model::ScheduleTaskType,
+    model::{EventMessage, ScheduleTaskType, ScheduledTaskFailure},
     utils::{interner_gc, interner_len},
 };
 use std::{
@@ -228,7 +228,7 @@ async fn start_scheduler(
                                     run_library_scan(&client, &app_state);
                                 }
                                 ScheduleTaskType::GeoIpUpdate => {
-                                    run_geoip_update(&app_state);
+                                    run_geoip_update(&app_state, expression);
                                 }
                             }
                         }
@@ -266,13 +266,22 @@ fn run_library_scan(client: &reqwest::Client, app_state: &Arc<AppState>) {
     }
 }
 
-fn run_geoip_update(app_state: &Arc<AppState>) {
+fn run_geoip_update(app_state: &Arc<AppState>, schedule: &str) {
     let app_state = Arc::clone(app_state);
+    let schedule = schedule.to_string();
     tokio::spawn(async move {
         if let Err(err) = update_geoip_db(&app_state.app_config, &app_state.http_client.load(), &app_state.geoip).await
         {
+            // `Disabled` is not a failure - the task ran and found nothing to
+            // do, which is what the config asked for.
             if !matches!(err, GeoIpUpdateError::Disabled) {
                 log::error!("Scheduled GeoIp update failed: {err}");
+                // The playlist update and the library scan both report their
+                // own outcomes. This one had no terminal event of its own, so
+                // an operator running on a stale database never found out.
+                let _ = app_state.event_manager.send_event(EventMessage::ScheduledTaskFailed(
+                    ScheduledTaskFailure::new(ScheduleTaskType::GeoIpUpdate, err.to_string()).with_schedule(schedule),
+                ));
             }
         }
     });

@@ -39,6 +39,7 @@ pub mod recording_catalog;
 pub mod recording_math;
 pub mod recording_rule;
 mod regex_cache;
+mod scheduled_task_failure;
 mod search_fields;
 mod search_request;
 mod server_lifecycle;
@@ -73,11 +74,12 @@ pub use self::{
     library_request::*, log::*, mapping::*, media_properties::*, messaging::*, metadata_update_failure::*,
     notification::*, notification_dead_letter::*, pagination::*, playlist::*, playlist_categories::*,
     playlist_groups_changed::*, playlist_info_document::*, playlist_request::*, processing_order::*, progress::*,
-    provider_fetch_failure::*, provider_pool::*, recording::*, recording_math::*, regex_cache::*, search_fields::*,
-    search_request::*, server_lifecycle::*, short_epg::*, stalker::*, stalker_item::*, stats::*, status_check::*,
-    stream_history::*, stream_history_record::*, stream_info::*, stream_meter::*, stream_probe_failure::*,
-    stream_properties::*, strm_export_style::*, system_info::*, target_type::*, transfer::*, ui_playlist_item::*,
-    user_command::*, user_lifecycle::*, uuidtype::*, watch_health::*, web_socket::*, xtream::*,
+    provider_fetch_failure::*, provider_pool::*, recording::*, recording_math::*, regex_cache::*,
+    scheduled_task_failure::*, search_fields::*, search_request::*, server_lifecycle::*, short_epg::*, stalker::*,
+    stalker_item::*, stats::*, status_check::*, stream_history::*, stream_history_record::*, stream_info::*,
+    stream_meter::*, stream_probe_failure::*, stream_properties::*, strm_export_style::*, system_info::*,
+    target_type::*, transfer::*, ui_playlist_item::*, user_command::*, user_lifecycle::*, uuidtype::*, watch_health::*,
+    web_socket::*, xtream::*,
 };
 pub use ids::*;
 pub use prepare::*;
