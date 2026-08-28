@@ -41,9 +41,9 @@ use tokio::{
 };
 use tuliprox_core::{
     model::{
-        is_valid, AppConfig, ConfigFavourites, ConfigInput, ConfigInputFlags, ConfigInputOptions, ConfigRename,
-        ConfigTarget, Epg, Mapping, ProcessTargets, ProviderIdType, ResolveReason, ReverseProxyDisabledHeaderConfig,
-        UpdateGuard, UpdateTask,
+        is_valid, AppConfig, CompiledMapping, ConfigFavourites, ConfigInput, ConfigInputFlags, ConfigInputOptions,
+        ConfigRename, ConfigTarget, Epg, MappingProgram, ProcessTargets, ProviderIdType, ResolveReason,
+        ReverseProxyDisabledHeaderConfig, UpdateGuard, UpdateTask,
     },
     utils::{debug_if_enabled, log_memory_snapshot, trace_if_enabled, StepMeasure, StepMeasureCallback},
 };
@@ -112,10 +112,23 @@ fn stalker_checkpoint_message(input: &str) -> String {
     format!("Input '{input}': Stalker refresh checkpoint saved; active snapshot remains in service")
 }
 
-pub fn apply_filter_to_source(source: &mut PlaylistSource, filter: &Filter) -> Option<Vec<PlaylistGroup>> {
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct FilterOutcome {
+    pub inspected: usize,
+    pub retained: usize,
+    pub removed: usize,
+}
+
+fn retain_playlist_items(
+    source: &mut PlaylistSource,
+    mut keep: impl FnMut(&PlaylistItem) -> bool,
+) -> (Option<Vec<PlaylistGroup>>, FilterOutcome) {
     let mut groups: IndexMap<CategoryKey, PlaylistGroup> = IndexMap::new();
+    let mut outcome = FilterOutcome::default();
     for pli in source.into_items() {
-        if is_valid(&pli, filter, false) {
+        outcome.inspected += 1;
+        if keep(&pli) {
+            outcome.retained += 1;
             let group_title = pli.header.group.clone();
             let cluster = pli.header.xtream_cluster;
             let cat_id = pli.header.category_id;
@@ -131,18 +144,32 @@ pub fn apply_filter_to_source(source: &mut PlaylistSource, filter: &Filter) -> O
                 })
                 .channels
                 .push(pli);
+        } else {
+            outcome.removed += 1;
         }
     }
 
-    if groups.is_empty() {
-        None
-    } else {
-        Some(groups.into_values().collect())
-    }
+    let groups = if groups.is_empty() { None } else { Some(groups.into_values().collect()) };
+    (groups, outcome)
+}
+
+pub fn apply_filter_to_source(source: &mut PlaylistSource, filter: &Filter) -> Option<Vec<PlaylistGroup>> {
+    retain_playlist_items(source, |item| is_valid(item, filter, false)).0
+}
+
+fn apply_target_filter(
+    source: &mut PlaylistSource,
+    target: &ConfigTarget,
+) -> (Option<Vec<PlaylistGroup>>, FilterOutcome) {
+    retain_playlist_items(source, |item| {
+        let provider = ValueProvider { pli: item, match_as_ascii: false };
+        target.filter(&provider)
+    })
 }
 
 fn filter_playlist(source: &mut PlaylistSource, target: &ConfigTarget) -> Option<Vec<PlaylistGroup>> {
-    apply_filter_to_source(source, &target.filter)
+    let (groups, _outcome) = apply_target_filter(source, target);
+    groups
 }
 
 fn assign_channel_no_playlist(new_playlist: &mut [PlaylistGroup]) {
@@ -214,42 +241,79 @@ fn rename_playlist(source: &mut PlaylistSource, target: &ConfigTarget) -> Option
     }
 }
 
-fn map_channel(mut channel: PlaylistItem, mapping: &Mapping) -> (PlaylistItem, Vec<PlaylistItem>, bool) {
-    let mut matched = false;
+struct ChannelMappingOutcome {
+    channel: PlaylistItem,
+    virtual_items: Vec<PlaylistItem>,
+    matched_rules: usize,
+    changed_fields: HashSet<String>,
+    diagnostics: Vec<String>,
+}
+
+const MAPPING_DIAGNOSTIC_LIMIT: usize = 10;
+
+#[derive(Default)]
+struct MappingStageOutcome {
+    inspected: usize,
+    matched_rules: usize,
+    emitted_items: usize,
+    changed_fields: HashSet<String>,
+    diagnostics: usize,
+    reported_diagnostics: usize,
+}
+
+impl MappingStageOutcome {
+    fn record(&mut self, mapping_id: &str, outcome: &ChannelMappingOutcome) {
+        self.inspected += 1;
+        self.matched_rules += outcome.matched_rules;
+        self.emitted_items += outcome.virtual_items.len();
+        self.changed_fields.extend(outcome.changed_fields.iter().cloned());
+        self.diagnostics += outcome.diagnostics.len();
+        for diagnostic in &outcome.diagnostics {
+            if self.reported_diagnostics >= MAPPING_DIAGNOSTIC_LIMIT {
+                break;
+            }
+            warn!("Mapping '{mapping_id}' {diagnostic}");
+            self.reported_diagnostics += 1;
+        }
+    }
+}
+
+fn map_channel(mut channel: PlaylistItem, mapping: &CompiledMapping) -> ChannelMappingOutcome {
+    let mut matched_rules = 0;
     let mut virtual_items = vec![];
-    if let Some(mapper) = &mapping.mapper {
-        if !mapper.is_empty() {
-            let ref_chan = &mut channel;
-            let templates = mapping.templates.as_ref();
-            for m in mapper {
-                if let Some(script) = m.t_script.as_ref() {
-                    if let Some(filter) = &m.t_filter {
-                        let provider = ValueProvider { pli: ref_chan, match_as_ascii: mapping.match_as_ascii };
-                        if filter.filter(&provider) {
-                            matched = true;
-                            let mut accessor = ValueAccessor {
-                                pli: ref_chan,
-                                virtual_items: vec![],
-                                match_as_ascii: mapping.match_as_ascii,
-                            };
-                            script.eval(&mut accessor, templates.map(Vec::as_slice));
-                            virtual_items.extend(accessor.virtual_items.into_iter().map(|(_, pli)| pli));
-                        }
-                    }
+    let mut changed_fields = HashSet::new();
+    let mut diagnostics = Vec::new();
+    if !mapping.rules.is_empty() {
+        let ref_chan = &mut channel;
+        let templates = mapping.templates.as_deref();
+        for (rule_index, rule) in mapping.rules.iter().enumerate() {
+            let provider = ValueProvider { pli: ref_chan, match_as_ascii: mapping.match_as_ascii };
+            if rule.filter.filter(&provider) {
+                matched_rules += 1;
+                let mut accessor = ValueAccessor {
+                    pli: ref_chan,
+                    virtual_items: vec![],
+                    match_as_ascii: mapping.match_as_ascii,
+                    changed_fields: vec![],
+                };
+                let outcome = match &rule.program {
+                    MappingProgram::Script(script) => script.eval(&mut accessor, templates),
+                };
+                changed_fields.extend(outcome.changed_fields.iter().cloned());
+                for diagnostic in outcome.diagnostics {
+                    let rule_label = rule.name.as_deref().map_or_else(|| (rule_index + 1).to_string(), str::to_string);
+                    diagnostics.push(format!(
+                        "rule '{rule_label}' failed for channel '{}' at statement {}: {}",
+                        accessor.pli.header.name,
+                        diagnostic.statement + 1,
+                        diagnostic.message
+                    ));
                 }
+                virtual_items.extend(accessor.virtual_items.into_iter().map(|(_, pli)| pli));
             }
         }
     }
-    (channel, virtual_items, matched)
-}
-
-fn map_channel_and_flatten(channel: PlaylistItem, mapping: &Mapping) -> Vec<PlaylistItem> {
-    let (mapped_channel, mut virtual_items, _matched) = map_channel(channel, mapping);
-    let mut result = Vec::with_capacity(1 + virtual_items.len());
-
-    result.push(mapped_channel);
-    result.append(&mut virtual_items);
-    result
+    ChannelMappingOutcome { channel, virtual_items, matched_rules, changed_fields, diagnostics }
 }
 
 fn map_playlist(source: &mut PlaylistSource, target: &ConfigTarget) -> Option<Vec<PlaylistGroup>> {
@@ -264,24 +328,41 @@ fn map_playlist_at_stage(
 ) -> Option<Vec<PlaylistGroup>> {
     let mapping_binding = target.mapping.load();
     let mappings = mapping_binding.as_ref()?;
-    let mut valid_mappings = mappings
-        .iter()
-        .filter(|m| m.stage == stage && m.mapper.as_ref().is_some_and(|items| !items.is_empty()))
-        .peekable();
+    let mut valid_mappings = mappings.iter().filter(|m| m.stage == stage && !m.rules.is_empty()).peekable();
     valid_mappings.peek()?;
     let original_ids = if duplicates.is_some() {
         Some(source.items().map(|item| *item.header.get_uuid()).collect::<HashSet<_>>())
     } else {
         None
     };
-    let iter: Box<dyn Iterator<Item = PlaylistItem>> = Box::new(source.into_items());
-    let mapped_iter = valid_mappings.fold(iter, |iter, mapping| {
-        Box::new(iter.flat_map(move |chan| map_channel_and_flatten(chan, mapping)))
-            as Box<dyn Iterator<Item = PlaylistItem>>
-    });
+    let mut mapped_items = source.into_items().collect::<Vec<_>>();
+    let mut stage_outcome = MappingStageOutcome::default();
+    for mapping in valid_mappings {
+        let mut next_items = Vec::with_capacity(mapped_items.len());
+        for channel in mapped_items {
+            let outcome = map_channel(channel, mapping);
+            stage_outcome.record(&mapping.id, &outcome);
+            next_items.push(outcome.channel);
+            next_items.extend(outcome.virtual_items);
+        }
+        mapped_items = next_items;
+    }
+    debug!(
+        "Mapping stage {stage:?}: inspected={}, matched_rules={}, emitted={}, changed_fields={}, diagnostics={}, suppressed_diagnostics={}",
+        stage_outcome.inspected,
+        stage_outcome.matched_rules,
+        stage_outcome.emitted_items,
+        stage_outcome.changed_fields.len(),
+        stage_outcome.diagnostics,
+        stage_outcome.diagnostics.saturating_sub(stage_outcome.reported_diagnostics)
+    );
+    let suppressed = stage_outcome.diagnostics.saturating_sub(stage_outcome.reported_diagnostics);
+    if suppressed > 0 {
+        warn!("Mapping stage {stage:?} suppressed {suppressed} additional diagnostics");
+    }
     let mut next_groups: IndexMap<CategoryKey, PlaylistGroup> = IndexMap::new();
     let mut grp_id: u32 = 0;
-    for channel in mapped_iter {
+    for channel in mapped_items {
         let group_title = channel.header.group.clone();
         let cluster = channel.header.xtream_cluster;
         next_groups
@@ -310,36 +391,34 @@ fn map_playlist_counter(target: &ConfigTarget, playlist: &mut [PlaylistGroup]) {
     if let Some(guard) = &*target.mapping.load() {
         let mappings = guard.as_ref();
         for mapping in mappings {
-            if let Some(counter_list) = &mapping.t_counter {
-                for counter in counter_list {
-                    // fresh per target/call. No shared atomic, no cross-refresh carry-over.
-                    let mut current = counter.start;
-                    for plg in &mut *playlist {
-                        for channel in &mut plg.channels {
-                            let provider = ValueProvider { pli: channel, match_as_ascii: mapping.match_as_ascii };
-                            if counter.filter.filter(&provider) {
-                                let cntval = current;
-                                current += 1;
-                                let padded_cntval = if counter.padding > 0 {
-                                    format!("{:0width$}", cntval, width = counter.padding as usize)
+            for counter in &mapping.counters {
+                // fresh per target/call. No shared atomic, no cross-refresh carry-over.
+                let mut current = counter.start;
+                for plg in &mut *playlist {
+                    for channel in &mut plg.channels {
+                        let provider = ValueProvider { pli: channel, match_as_ascii: mapping.match_as_ascii };
+                        if counter.filter.filter(&provider) {
+                            let cntval = current;
+                            current += 1;
+                            let padded_cntval = if counter.padding > 0 {
+                                format!("{:0width$}", cntval, width = counter.padding as usize)
+                            } else {
+                                cntval.to_string()
+                            };
+                            let new_value = if counter.modifier == CounterModifier::Assign {
+                                padded_cntval
+                            } else {
+                                let value = channel
+                                    .header
+                                    .get(counter.field)
+                                    .map_or_else(String::new, |field_value| field_value.as_cow().into_owned());
+                                if counter.modifier == CounterModifier::Suffix {
+                                    format!("{value}{}{padded_cntval}", counter.concat)
                                 } else {
-                                    cntval.to_string()
-                                };
-                                let new_value = if counter.modifier == CounterModifier::Assign {
-                                    padded_cntval
-                                } else {
-                                    let value = channel
-                                        .header
-                                        .get(counter.field)
-                                        .map_or_else(String::new, |field_value| field_value.as_cow().into_owned());
-                                    if counter.modifier == CounterModifier::Suffix {
-                                        format!("{value}{}{padded_cntval}", counter.concat)
-                                    } else {
-                                        format!("{padded_cntval}{}{value}", counter.concat)
-                                    }
-                                };
-                                channel.header.set(counter.field, new_value.as_str());
-                            }
+                                    format!("{padded_cntval}{}{value}", counter.concat)
+                                }
+                            };
+                            channel.header.set(counter.field, new_value.as_str());
                         }
                     }
                 }
@@ -1321,16 +1400,52 @@ async fn process_sources<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
     (stats, errors)
 }
 
-pub type ProcessingPipe = Vec<fn(source: &mut PlaylistSource, target: &ConfigTarget) -> Option<Vec<PlaylistGroup>>>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransformStage {
+    Filter,
+    Rename,
+    Map,
+}
+
+pub type ProcessingPipe = Vec<TransformStage>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FinalizationStage {
+    Merge,
+    Deduplicate,
+    Sort,
+    AssignChannelNumbers,
+    AssignCounters,
+}
+
+const FINALIZATION_ORDER: [FinalizationStage; 5] = [
+    FinalizationStage::Merge,
+    FinalizationStage::Deduplicate,
+    FinalizationStage::Sort,
+    FinalizationStage::AssignChannelNumbers,
+    FinalizationStage::AssignCounters,
+];
 
 fn get_processing_pipe(target: &ConfigTarget) -> ProcessingPipe {
     match &target.processing_order {
-        ProcessingOrder::Frm => vec![filter_playlist, rename_playlist, map_playlist],
-        ProcessingOrder::Fmr => vec![filter_playlist, map_playlist, rename_playlist],
-        ProcessingOrder::Rfm => vec![rename_playlist, filter_playlist, map_playlist],
-        ProcessingOrder::Rmf => vec![rename_playlist, map_playlist, filter_playlist],
-        ProcessingOrder::Mfr => vec![map_playlist, filter_playlist, rename_playlist],
-        ProcessingOrder::Mrf => vec![map_playlist, rename_playlist, filter_playlist],
+        ProcessingOrder::Frm => vec![TransformStage::Filter, TransformStage::Rename, TransformStage::Map],
+        ProcessingOrder::Fmr => vec![TransformStage::Filter, TransformStage::Map, TransformStage::Rename],
+        ProcessingOrder::Rfm => vec![TransformStage::Rename, TransformStage::Filter, TransformStage::Map],
+        ProcessingOrder::Rmf => vec![TransformStage::Rename, TransformStage::Map, TransformStage::Filter],
+        ProcessingOrder::Mfr => vec![TransformStage::Map, TransformStage::Filter, TransformStage::Rename],
+        ProcessingOrder::Mrf => vec![TransformStage::Map, TransformStage::Rename, TransformStage::Filter],
+    }
+}
+
+pub(super) fn execute_transform_stage(
+    stage: TransformStage,
+    source: &mut PlaylistSource,
+    target: &ConfigTarget,
+) -> Option<Vec<PlaylistGroup>> {
+    match stage {
+        TransformStage::Filter => filter_playlist(source, target),
+        TransformStage::Rename => rename_playlist(source, target),
+        TransformStage::Map => map_playlist(source, target),
     }
 }
 
@@ -1363,8 +1478,8 @@ fn execute_pipe<'a>(
         new_fpl.deduplicate(duplicates);
     }
 
-    for f in pipe {
-        if let Some(groups) = f(&mut new_fpl.source, target) {
+    for stage in pipe {
+        if let Some(groups) = execute_transform_stage(*stage, &mut new_fpl.source, target) {
             new_fpl.source = MemoryPlaylistSource::new(groups).into_source();
         }
     }
@@ -1542,25 +1657,39 @@ async fn finalize_prepared_target<E: EventSink + Clone + 'static, M: MetadataUpd
         step.tick("playlist merge");
         log_memory_snapshot(format!("target '{}' after_playlist_merge", target.name).as_str());
 
-        if let Some(dedup_config) = target.options.as_ref().and_then(|options| options.deduplicate.as_ref()) {
-            let removed = crate::processor::deduplicate::deduplicate_playlist(*dedup_config, &mut flat_new_playlist);
-            if removed > 0 {
-                info!("Deduplicated {removed} channels for target {}", target.name);
+        for stage in FINALIZATION_ORDER.into_iter().skip(1) {
+            match stage {
+                FinalizationStage::Merge => unreachable!("merge is completed before post-merge finalization"),
+                FinalizationStage::Deduplicate => {
+                    if let Some(dedup_config) = target.options.as_ref().and_then(|options| options.deduplicate.as_ref())
+                    {
+                        let removed =
+                            crate::processor::deduplicate::deduplicate_playlist(*dedup_config, &mut flat_new_playlist);
+                        if removed > 0 {
+                            info!("Deduplicated {removed} channels for target {}", target.name);
+                        }
+                        step.tick("playlist dedup");
+                        log_memory_snapshot(format!("target '{}' after_playlist_dedup", target.name).as_str());
+                    }
+                }
+                FinalizationStage::Sort => {
+                    if sort_playlist(target, &mut flat_new_playlist) {
+                        step.tick("playlist sort");
+                        log_memory_snapshot(format!("target '{}' after_playlist_sort", target.name).as_str());
+                    }
+                }
+                FinalizationStage::AssignChannelNumbers => {
+                    assign_channel_no_playlist(&mut flat_new_playlist);
+                    step.tick("assigning channel numbers");
+                    log_memory_snapshot(format!("target '{}' after_assign_channel_numbers", target.name).as_str());
+                }
+                FinalizationStage::AssignCounters => {
+                    map_playlist_counter(target, &mut flat_new_playlist);
+                    step.tick("assigning channel counter");
+                    log_memory_snapshot(format!("target '{}' after_assign_channel_counter", target.name).as_str());
+                }
             }
-            step.tick("playlist dedup");
-            log_memory_snapshot(format!("target '{}' after_playlist_dedup", target.name).as_str());
         }
-
-        if sort_playlist(target, &mut flat_new_playlist) {
-            step.tick("playlist sort");
-            log_memory_snapshot(format!("target '{}' after_playlist_sort", target.name).as_str());
-        }
-        assign_channel_no_playlist(&mut flat_new_playlist);
-        step.tick("assigning channel numbers");
-        log_memory_snapshot(format!("target '{}' after_assign_channel_numbers", target.name).as_str());
-        map_playlist_counter(target, &mut flat_new_playlist);
-        step.tick("assigning channel counter");
-        log_memory_snapshot(format!("target '{}' after_assign_channel_counter", target.name).as_str());
 
         if process_watch(&ctx.config, &ctx.events, target, &flat_new_playlist).await {
             step.tick("group watches");
@@ -2328,7 +2457,7 @@ mod tests {
         },
         utils::Internable,
     };
-    use tuliprox_core::model::Config;
+    use tuliprox_core::model::{CompiledMappingRule, Config};
 
     fn serialize_without_trailing_fields<T: serde::Serialize>(value: &T, trailing_fields: &[u8]) -> Vec<u8> {
         let mut encoded = rmp_serde::to_vec(value).expect("playlist item should serialize");
@@ -2403,21 +2532,22 @@ mod tests {
             header: PlaylistItemHeader { id: "origin-alpha".intern(), name: "Channel".intern(), ..Default::default() },
         };
         item.header.freeze_input_stream_id();
-        let mapping = Mapping {
-            mapper: Some(vec![tuliprox_core::model::Mapper {
-                filter: r#"name ~ ".*""#.to_string(),
-                script: r#"@id = "target-id""#.to_string(),
-                t_filter: Some(get_filter(r#"name ~ ".*""#, None).expect("filter should parse")),
-                t_script: Some(MapperScript::parse(r#"@id = "target-id""#, None).expect("mapper should parse")),
-            }]),
+        let mapping = CompiledMapping {
+            rules: vec![CompiledMappingRule {
+                name: None,
+                filter: get_filter(r#"name ~ ".*""#, None).expect("filter should parse"),
+                program: MappingProgram::Script(
+                    MapperScript::parse(r#"@id = "target-id""#, None).expect("mapper should parse"),
+                ),
+            }],
             ..Default::default()
         };
 
-        let (mapped, _, matched) = map_channel(item, &mapping);
+        let outcome = map_channel(item, &mapping);
 
-        assert!(matched);
-        assert_eq!(mapped.header.id.as_ref(), "target-id");
-        assert_eq!(mapped.header.input_stream_id.as_ref(), "origin-alpha");
+        assert_eq!(outcome.matched_rules, 1);
+        assert_eq!(outcome.channel.header.id.as_ref(), "target-id");
+        assert_eq!(outcome.channel.header.input_stream_id.as_ref(), "origin-alpha");
     }
 
     #[test]
@@ -2439,23 +2569,24 @@ mod tests {
         legacy_xtream.url = "http://provider.example/live/channel.m3u8".intern();
         let mut legacy_item = PlaylistItem::from(&legacy_xtream);
         legacy_item.header.freeze_input_stream_id();
-        let mapping = Mapping {
-            mapper: Some(vec![tuliprox_core::model::Mapper {
-                filter: r#"name ~ ".*""#.to_string(),
-                script: r#"@id = "target-id""#.to_string(),
-                t_filter: Some(get_filter(r#"name ~ ".*""#, None).expect("filter should parse")),
-                t_script: Some(MapperScript::parse(r#"@id = "target-id""#, None).expect("mapper should parse")),
-            }]),
+        let mapping = CompiledMapping {
+            rules: vec![CompiledMappingRule {
+                name: None,
+                filter: get_filter(r#"name ~ ".*""#, None).expect("filter should parse"),
+                program: MappingProgram::Script(
+                    MapperScript::parse(r#"@id = "target-id""#, None).expect("mapper should parse"),
+                ),
+            }],
             ..Default::default()
         };
 
-        let (mapped, _, matched) = map_channel(legacy_item, &mapping);
-        let materialized_m3u = M3uPlaylistItem::from(&mapped);
-        let materialized_xtream = XtreamPlaylistItem::from(&mapped);
+        let outcome = map_channel(legacy_item, &mapping);
+        let materialized_m3u = M3uPlaylistItem::from(&outcome.channel);
+        let materialized_xtream = XtreamPlaylistItem::from(&outcome.channel);
 
-        assert!(matched);
-        assert_eq!(mapped.header.id.as_ref(), "target-id");
-        assert_eq!(mapped.get_input_stream_id(), None);
+        assert_eq!(outcome.matched_rules, 1);
+        assert_eq!(outcome.channel.header.id.as_ref(), "target-id");
+        assert_eq!(outcome.channel.get_input_stream_id(), None);
         assert!(materialized_m3u.provider_id.is_empty());
         assert_eq!(materialized_m3u.get_input_stream_id(), None);
         assert_eq!(materialized_xtream.provider_id, 0);
@@ -2799,6 +2930,25 @@ mod tests {
     }
 
     #[test]
+    fn playlist_retention_reports_filter_counts() {
+        let groups = vec![PlaylistGroup {
+            id: 1,
+            title: "Test Group".intern(),
+            channels: vec![
+                make_test_item("Allowed", PlaylistItemType::Live),
+                make_test_item("Denied", PlaylistItemType::Live),
+            ],
+            xtream_cluster: XtreamCluster::Live,
+        }];
+        let mut source = MemoryPlaylistSource::new(groups).into_source();
+
+        let (filtered, outcome) = retain_playlist_items(&mut source, |item| item.header.name.as_ref() == "Allowed");
+
+        assert_eq!(outcome, FilterOutcome { inspected: 2, retained: 1, removed: 1 });
+        assert_eq!(filtered.expect("one item should remain")[0].channels[0].header.name.as_ref(), "Allowed");
+    }
+
+    #[test]
     fn assign_channel_no_playlist_preserves_non_zero_chno() {
         let mut groups = vec![
             PlaylistGroup {
@@ -3039,33 +3189,28 @@ mod tests {
         use tokio::runtime::Runtime;
         use tuliprox_core::{
             model::{
-                EpgConfig, EpgSmartMatchConfig, IcsEpgSourceConfig, Mapper, MediaToolCapabilities, PersistedEpgSource,
+                EpgConfig, EpgSmartMatchConfig, IcsEpgSourceConfig, MediaToolCapabilities, PersistedEpgSource,
                 PersistedEpgSourceKind, SourcesConfig,
             },
             utils::FileLockManager,
         };
 
-        fn build_mapping(id: &str, stage: MappingStage, script: &str) -> Mapping {
-            let script = script.to_string();
-            let t_filter = get_filter(r#"name ~ ".*""#, None).expect("filter parses");
-            let t_script = MapperScript::parse(&script, None).expect("script parses");
-            Mapping {
+        fn build_mapping(id: &str, stage: MappingStage, script: &str) -> CompiledMapping {
+            CompiledMapping {
                 id: id.to_string(),
                 match_as_ascii: false,
                 stage,
-                mapper: Some(vec![Mapper {
-                    filter: r#"name ~ ".*""#.to_string(),
-                    script,
-                    t_filter: Some(t_filter),
-                    t_script: Some(t_script),
-                }]),
-                counter: None,
-                t_counter: None,
+                rules: vec![CompiledMappingRule {
+                    name: None,
+                    filter: get_filter(r#"name ~ ".*""#, None).expect("filter parses"),
+                    program: MappingProgram::Script(MapperScript::parse(script, None).expect("script parses")),
+                }],
+                counters: vec![],
                 templates: None,
             }
         }
 
-        fn build_target(mappings: Vec<Mapping>, remove_duplicates: bool) -> ConfigTarget {
+        fn build_target(mappings: Vec<CompiledMapping>, remove_duplicates: bool) -> ConfigTarget {
             let dto = ConfigTargetDto {
                 options: if remove_duplicates {
                     Some(ConfigTargetOptions { remove_duplicates, ..Default::default() })
@@ -3075,7 +3220,8 @@ mod tests {
                 ..Default::default()
             };
             let mut target = ConfigTarget::from(&dto);
-            target.mapping = Arc::new(ArcSwapOption::from(Some(Arc::new(mappings))));
+            target.mapping =
+                Arc::new(ArcSwapOption::from(Some(Arc::new(mappings.into_iter().map(Arc::new).collect()))));
             target
         }
 

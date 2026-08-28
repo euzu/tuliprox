@@ -405,12 +405,17 @@ fn apply_prepared_mappings(
     prepared_templates: Option<&[PatternTemplate]>,
 ) {
     match mapping.mappings.prepare(prepared_templates) {
-        Ok(()) => {
-            let mappings: tuliprox_core::model::Mappings = tuliprox_core::model::Mappings::from(&*mapping);
-            app_config.set_mappings(mappings_file, &mappings);
-            paths.mapping_files_used =
-                mapping_paths.map(|items| items.iter().map(|p| p.display().to_string()).collect::<Vec<String>>());
-        }
+        Ok(()) => match tuliprox_core::model::CompiledMappings::try_from(&*mapping) {
+            Ok(mappings) => {
+                app_config.set_mappings(mappings_file, &mappings);
+                paths.mapping_files_used =
+                    mapping_paths.map(|items| items.iter().map(|p| p.display().to_string()).collect::<Vec<String>>());
+            }
+            Err(err) => {
+                error!("Failed to compile mapping '{mappings_file}': {err}. Skipping mapping registration.");
+                paths.mapping_files_used = None;
+            }
+        },
         Err(err) => {
             error!("Failed to prepare mapping '{mappings_file}': {err}. Skipping mapping registration.");
             paths.mapping_files_used = None;

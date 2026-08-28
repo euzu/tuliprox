@@ -1,5 +1,5 @@
 use crate::{
-    model::Mappings,
+    model::CompiledMappings,
     utils::{config_file_reader, open_file},
 };
 use log::warn;
@@ -54,6 +54,15 @@ fn merge_mappings(mappings: Vec<(PathBuf, MappingDto)>) -> Result<Vec<MappingDto
                     m.stage,
                     source.display()
                 )));
+            }
+            if entry.match_as_ascii != m.match_as_ascii {
+                warn!(
+                    "Mapping '{}' has conflicting match_as_ascii values in '{}' and '{}'; keeping the first value ({})",
+                    m.id,
+                    source_by_index[idx].display(),
+                    source.display(),
+                    entry.match_as_ascii
+                );
             }
             if let Some(mut mapper) = m.mapper.take() {
                 entry.mapper.get_or_insert_with(Vec::new).append(&mut mapper);
@@ -166,9 +175,9 @@ pub fn read_mappings_file_with_templates(
 pub fn read_mappings(
     mappings_file: &str,
     resolve_env: bool,
-) -> Result<Option<(Vec<PathBuf>, Mappings)>, TuliproxError> {
+) -> Result<Option<(Vec<PathBuf>, CompiledMappings)>, TuliproxError> {
     match read_mappings_file(mappings_file, resolve_env)? {
-        Some((paths, dto)) => Ok(Some((paths, Mappings::from(&dto)))),
+        Some((paths, dto)) => CompiledMappings::try_from(&dto).map(|mappings| Some((paths, mappings))),
         None => Ok(None),
     }
 }

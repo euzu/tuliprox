@@ -190,6 +190,7 @@ fn build_rule_cache_entry(
     RuleCacheEntry { filter_pass: true, value, sequence_match }
 }
 
+#[cfg(test)]
 fn build_group_rule_cache(rule: &PreparedRule, groups: &[PlaylistGroup], match_as_ascii: bool) -> Vec<RuleCacheEntry> {
     groups.iter().map(|group| build_rule_cache_entry(rule, group.channels.first(), match_as_ascii)).collect()
 }
@@ -259,6 +260,7 @@ fn playlist_comparator(
     }
 }
 
+#[cfg(test)]
 fn get_group_source_ordinal(group: &PlaylistGroup) -> u32 {
     group.channels.first().map_or(u32::MAX, |c| normalized_source_ordinal(c.header.source_ordinal))
 }
@@ -295,23 +297,98 @@ fn is_effective_rule(rule: &ConfigSortRule) -> bool {
     rule.order != SortOrder::None || rule.sequence.as_ref().is_some_and(|sequence| !sequence.is_empty())
 }
 
-pub(in crate::processor) fn sort_playlist(target: &ConfigTarget, playlist: &mut Vec<PlaylistGroup>) -> bool {
-    let Some(sort) = &target.sort else {
-        for group in &mut *playlist {
-            group.channels.sort_by_key(|a| normalized_source_ordinal(a.header.source_ordinal));
-        }
-        playlist.sort_by_key(get_group_source_ordinal);
-        return true;
+#[derive(Debug)]
+pub(in crate::processor) struct SortPlan {
+    group_indices: Vec<usize>,
+    channel_indices: Vec<Vec<usize>>,
+}
+
+fn planned_first_channel<'a>(group: &'a PlaylistGroup, indices: &[usize]) -> Option<&'a shared::model::PlaylistItem> {
+    indices.first().and_then(|index| group.channels.get(*index))
+}
+
+pub(in crate::processor) fn calculate_sort_plan(target: &ConfigTarget, groups: &[PlaylistGroup]) -> SortPlan {
+    let (rules, match_as_ascii) =
+        target.sort.as_ref().map_or((&[][..], false), |sort| (sort.rules.as_slice(), sort.match_as_ascii));
+    let channel_rules: Vec<_> = rules
+        .iter()
+        .filter(|rule| matches!(rule.target, SortTarget::Channel) && is_effective_rule(rule))
+        .map(PreparedRule::new)
+        .collect();
+    let channel_indices = groups
+        .iter()
+        .map(|group| {
+            let mut indices = (0..group.channels.len()).collect::<Vec<_>>();
+            if channel_rules.is_empty() {
+                indices.sort_by_key(|index| normalized_source_ordinal(group.channels[*index].header.source_ordinal));
+            } else {
+                let caches = channel_rules
+                    .iter()
+                    .map(|rule| build_channel_rule_cache(rule, &group.channels, match_as_ascii))
+                    .collect::<Vec<_>>();
+                indices.sort_by(|left, right| {
+                    compare_cached_rule_entries(&channel_rules, &caches, *left, *right).then_with(|| {
+                        normalized_source_ordinal(group.channels[*left].header.source_ordinal)
+                            .cmp(&normalized_source_ordinal(group.channels[*right].header.source_ordinal))
+                    })
+                });
+            }
+            indices
+        })
+        .collect::<Vec<_>>();
+
+    let group_rules: Vec<_> = rules
+        .iter()
+        .filter(|rule| matches!(rule.target, SortTarget::Group) && is_effective_rule(rule))
+        .map(PreparedRule::new)
+        .collect();
+    let planned_group_ordinal = |index: usize| {
+        planned_first_channel(&groups[index], &channel_indices[index])
+            .map_or(u32::MAX, |channel| normalized_source_ordinal(channel.header.source_ordinal))
     };
+    let mut group_indices = (0..groups.len()).collect::<Vec<_>>();
+    if group_rules.is_empty() {
+        group_indices.sort_by_key(|index| planned_group_ordinal(*index));
+    } else {
+        let caches = group_rules
+            .iter()
+            .map(|rule| {
+                groups
+                    .iter()
+                    .enumerate()
+                    .map(|(index, group)| {
+                        build_rule_cache_entry(
+                            rule,
+                            planned_first_channel(group, &channel_indices[index]),
+                            match_as_ascii,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        group_indices.sort_by(|left, right| {
+            compare_cached_rule_entries(&group_rules, &caches, *left, *right)
+                .then_with(|| planned_group_ordinal(*left).cmp(&planned_group_ordinal(*right)))
+        });
+    }
 
-    let rules = &sort.rules;
-    let match_as_ascii = sort.match_as_ascii;
-    sort_channels_in_groups(playlist.as_mut_slice(), rules, match_as_ascii);
-    sort_groups(playlist, rules, match_as_ascii);
+    SortPlan { group_indices, channel_indices }
+}
 
+pub(in crate::processor) fn apply_sort_plan(groups: &mut Vec<PlaylistGroup>, plan: &SortPlan) {
+    for (group, indices) in groups.iter_mut().zip(&plan.channel_indices) {
+        reorder_by_indices(&mut group.channels, indices);
+    }
+    reorder_by_indices(groups, &plan.group_indices);
+}
+
+pub(in crate::processor) fn sort_playlist(target: &ConfigTarget, playlist: &mut Vec<PlaylistGroup>) -> bool {
+    let plan = calculate_sort_plan(target, playlist);
+    apply_sort_plan(playlist, &plan);
     true
 }
 
+#[cfg(test)]
 fn sort_groups(groups: &mut Vec<PlaylistGroup>, rules: &[ConfigSortRule], match_as_ascii: bool) {
     let group_rules: Vec<_> = rules
         .iter()
@@ -341,6 +418,7 @@ fn sort_groups(groups: &mut Vec<PlaylistGroup>, rules: &[ConfigSortRule], match_
     reorder_by_indices(groups, &group_indices);
 }
 
+#[cfg(test)]
 fn sort_channels_in_groups(groups: &mut [PlaylistGroup], rules: &[ConfigSortRule], match_as_ascii: bool) {
     let channel_rules: Vec<_> = rules
         .iter()

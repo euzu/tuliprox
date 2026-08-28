@@ -64,7 +64,8 @@ mappings:
     - id: map_sports_clean
       match_as_ascii: true
       mapper:
-        - filter: 'Group ~ ".*Sports.*"'
+        - name: normalize sports groups
+          filter: 'Group ~ ".*Sports.*"'
           script: |
             @Group = "Live Sports HD"
       counter:
@@ -121,6 +122,14 @@ run on the consolidated target playlist after merging, sorting, and initial chan
 | **`stage`**          | Enum   | When the block runs. `processing` (default) places the block at the `M` position of the target's `processing_order`; `after_epg` runs once EPG channel IDs and logos are enriched. Counters always run after the final merge and sort regardless of the block's stage. |
 | **`mapper`**         | List   | A list of scripts (executed sequentially) containing the DSL logic. The list can optionally be gated by a `filter`. [See Mapper DSL](#21-the-mapper-dsl-mapper).                                                                                                       |
 | **`counter`**        | List   | Logic for assigning channel numbers sequentially. [See Counters](#22-counters-sequential-numbering-counter).                                                                                                                                                           |
+
+Each mapper entry may include an optional `name`. Names do not affect matching or execution order; they make startup
+errors and runtime diagnostics easier to identify. Existing unnamed entries remain valid and use their one-based list
+position in diagnostics.
+
+Mappings are parsed and compiled when configuration is loaded. A processing run reads an immutable shared snapshot, so
+hot reloads cannot partially replace a mapping while a target is being processed. Runtime diagnostics are summarized per
+mapping stage; at most ten detailed failures are logged per stage, followed by a suppressed-count summary.
 
 > The `after_epg` stage sees fields populated by EPG enrichment (for example `epg_channel_id` and `logo`). Inspect these
 > fields inside the mapper script; the outer `filter` continues to support only the fields listed below. EPG enrichment
@@ -356,7 +365,7 @@ We want to group the channels inside NEWS, NATIONAL, SATELLITE by their resoluti
 The other groups should get a numerical prefix for ordering.
 
 ```yaml
-* filter: 'Group ~ ".*"'
+- filter: 'Group ~ ".*"'
     script: |
       group = @Group ~ "(EU|SATELLITE|NATIONAL|NEWS|MUSIC|SPORT|RELIGION|FILM|KIDS|DOCU)"
       quality = @Caption ~ "\b([F]?HD[i]?)\b"
@@ -489,7 +498,7 @@ The result should look like:
 * `FR | Movies 2021`
 
 ```yaml
-* filter: 'Group ~ "^FR" AND Caption ~ "\(?\d{4}\)?$"'
+- filter: 'Group ~ "^FR" AND Caption ~ "\(?\d{4}\)?$"'
     script: |
       year_text = @Caption ~ "(\d{4})\)?$"
       year = number(year_text)
@@ -634,11 +643,11 @@ always use **padded numbering**:
 2. `02_additional_mappings.yml`
 3. `10_custom_overrides.yml`
 
-> **Why this matters:** Tuliprox processes these files sequentially.
-> If a later file contains a mapping ID that was already defined in an earlier file,
-> the later definition may overwrite or merge with the previous one,
-> depending on the specific logic. Proper numbering ensures your global "Base" rules
-> are established before your specific "Overrides" are applied.
+> **Why this matters:** Tuliprox processes these files sequentially. If a later file contains a mapping ID that was
+> already defined in an earlier file, its `mapper` and `counter` entries are appended to the existing mapping in file
+> order. The first definition supplies `stage` and `match_as_ascii`. Conflicting `stage` values stop configuration
+> loading; conflicting `match_as_ascii` values produce a warning and retain the first value. Proper numbering therefore
+> gives rule execution and mapping options a predictable order.
 
 #### CLI Overrides
 

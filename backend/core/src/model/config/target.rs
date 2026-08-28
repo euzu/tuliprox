@@ -1,7 +1,7 @@
 use crate::model::{
     config::{favourites::ConfigFavourites, trakt::TraktConfig},
     macros,
-    mapping::Mapping,
+    mapping::CompiledMapping,
     ConfigRename, ConfigSort,
 };
 use arc_swap::ArcSwapOption;
@@ -248,7 +248,7 @@ pub struct ConfigTarget {
     pub output: Vec<TargetOutput>,
     pub rename: Option<Vec<ConfigRename>>,
     pub mapping_ids: Option<Vec<String>>,
-    pub mapping: Arc<ArcSwapOption<Vec<Mapping>>>,
+    pub mapping: Arc<ArcSwapOption<Vec<Arc<CompiledMapping>>>>,
     pub favourites: Option<Vec<ConfigFavourites>>,
     pub processing_order: ProcessingOrder,
     pub watch: Option<Vec<Arc<regex::Regex>>>,

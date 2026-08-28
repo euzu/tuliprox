@@ -186,6 +186,8 @@ impl Prepare for MapperOperation {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 pub struct MapperDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub filter: String,
     pub script: String,
     #[serde(skip_serializing, skip_deserializing)]

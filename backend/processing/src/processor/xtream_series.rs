@@ -3,7 +3,7 @@ use crate::{
     metadata_sink::MetadataUpdateSink,
     processor::{
         create_resolve_options_function_for_xtream_target,
-        playlist::{PlaylistProcessingContext, ProcessingPipe},
+        playlist::{execute_transform_stage, PlaylistProcessingContext, ProcessingPipe},
         process_foreground_retry_once, select_cancel_token, ProbeHandleGuard, ResolveOptions, ResolveOptionsFlags,
         FOREGROUND_BATCH_SIZE as BATCH_SIZE, FOREGROUND_MIN_RETRY_DELAY_SECS,
         FOREGROUND_RETRY_BATCH_MAX_SIZE as RETRY_BATCH_MAX_SIZE,
@@ -141,9 +141,9 @@ async fn playlist_resolve_series_info<E: EventSink + Clone + 'static, M: Metadat
 
     // Apply pipe transformations to new groups
     let mut new_playlist = groups_to_add;
-    for f in pipe {
+    for stage in pipe {
         let mut source = MemoryPlaylistSource::new(new_playlist).into_source();
-        if let Some(v) = f(&mut source, target) {
+        if let Some(v) = execute_transform_stage(*stage, &mut source, target) {
             new_playlist = v;
         } else {
             new_playlist = source.take_groups();
