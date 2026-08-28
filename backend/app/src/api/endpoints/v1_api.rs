@@ -369,7 +369,13 @@ mod tests {
         let Some(web_auth) = config.web_ui.as_ref().and_then(|web_ui| web_ui.auth.as_ref()) else {
             return Err("missing test web auth".into());
         };
-        let token = create_jwt_web_user(web_auth, "alice", Permission::RecordingRead.into(), 0)?;
+        let token = create_jwt_web_user(
+            web_auth,
+            "alice",
+            Permission::RecordingRead.into(),
+            0,
+            shared::model::UserId::from("web:alice"),
+        )?;
         let app_state = create_test_app_state(config);
         let router = v1_api_register(true, &app_state, "").with_state(app_state);
 

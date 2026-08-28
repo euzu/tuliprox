@@ -40,6 +40,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tuliprox_hls::api::HlsProxyManager;
 use tuliprox_metadata::manager::MetadataUpdateManager;
+use tuliprox_repository::identity_registry::IdentityRegistry;
 use tuliprox_session::{provider_dns_manager::exec_provider_dns, qos_aggregation_manager::exec_qos_aggregation};
 
 macro_rules! cancel_service {
@@ -442,6 +443,12 @@ pub struct AppState {
     pub geoip: Arc<ArcSwapOption<GeoIp>>,
     pub update_guard: UpdateGuard,
     pub metadata_manager: Arc<MetadataUpdateManager>,
+    /// Stable subject identities for web and API users.
+    ///
+    /// The registry existed but was never wired in, so token minting derived
+    /// the subject from the username - `web:<name>` / `api:<name>` - and a
+    /// rename silently reassigned everything the old subject owned.
+    pub identity_registry: Arc<IdentityRegistry>,
     /// Bounded channel (capacity 1) for manual playlist update requests.
     /// `try_send` deduplicates rapid clicks: if an update is already pending
     /// or the channel is full, the request is silently dropped so at most one
@@ -514,6 +521,9 @@ pub(crate) fn create_test_app_state(config: Config) -> Arc<AppState> {
         geoip,
         update_guard: UpdateGuard::new(),
         metadata_manager,
+        identity_registry: Arc::new(tuliprox_repository::identity_registry::IdentityRegistry::empty(
+            std::path::PathBuf::new(),
+        )),
         manual_update_sender,
     })
 }

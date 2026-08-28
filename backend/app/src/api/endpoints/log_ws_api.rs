@@ -222,12 +222,15 @@ mod tests {
 
         let mut perms = PermissionSet::new();
         perms.set(Permission::SystemRead);
-        let user_token = create_jwt_web_user(&auth_config, "user", perms, 0).unwrap();
+        let user_token =
+            create_jwt_web_user(&auth_config, "user", perms, 0, shared::model::UserId::from("web:user")).unwrap();
         assert!(check_token_auth(&user_token, Some(&verifier)));
 
         // Missing system read
         let empty_perms = PermissionSet::new();
-        let token_no_perm = create_jwt_web_user(&auth_config, "user2", empty_perms, 0).unwrap();
+        let token_no_perm =
+            create_jwt_web_user(&auth_config, "user2", empty_perms, 0, shared::model::UserId::from("web:user2"))
+                .unwrap();
         assert!(!check_token_auth(&token_no_perm, Some(&verifier)));
 
         // Invalid secret

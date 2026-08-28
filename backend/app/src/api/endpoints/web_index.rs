@@ -34,6 +34,33 @@ fn api_user_can_access_web_ui(ui_enabled: bool) -> bool {
     ui_enabled
 }
 
+/// The stable subject id for a web user, allocating one on first sight.
+///
+/// `register` is get-or-create, so a user bootstrap already synced keeps the
+/// id it has and one added since gets a fresh one. This used to be
+/// `format!("web:{username}")`, which made the subject a function of the
+/// display name: renaming a user reassigned everything the old subject owned.
+async fn web_subject_id(app_state: &Arc<AppState>, username: &str) -> Option<shared::model::UserId> {
+    match app_state.identity_registry.register(username).await {
+        Ok(id) => Some(id),
+        Err(err) => {
+            error!("Cannot resolve a stable subject id for web user '{username}': {err}");
+            None
+        }
+    }
+}
+
+/// The stable subject id for a proxy API user, allocating one on first sight.
+async fn api_subject_id(app_state: &Arc<AppState>, username: &str) -> Option<shared::model::UserId> {
+    match app_state.identity_registry.register_api_user(username).await {
+        Ok(id) => Some(id),
+        Err(err) => {
+            error!("Cannot resolve a stable subject id for API user '{username}': {err}");
+            None
+        }
+    }
+}
+
 async fn token(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     axum::extract::Json(mut req): axum::extract::Json<UserCredential>,
@@ -66,7 +93,11 @@ async fn token(
                         let token_result = if is_admin {
                             create_jwt_admin(web_auth, username, pwd_version)
                         } else {
-                            create_jwt_web_user(web_auth, username, permissions, pwd_version)
+                            let Some(subject_id) = web_subject_id(&app_state, username).await else {
+                                req.zeroize();
+                                return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                            };
+                            create_jwt_web_user(web_auth, username, permissions, pwd_version, subject_id)
                         };
                         if let Ok(token) = token_result {
                             req.zeroize();
@@ -80,7 +111,11 @@ async fn token(
                             req.zeroize();
                             return axum::http::StatusCode::FORBIDDEN.into_response();
                         }
-                        if let Ok(token) = create_jwt_api_user(web_auth, username) {
+                        let Some(subject_id) = api_subject_id(&app_state, username).await else {
+                            req.zeroize();
+                            return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                        };
+                        if let Ok(token) = create_jwt_api_user(web_auth, username, subject_id) {
                             req.zeroize();
                             return axum::Json(TokenResponse { token, username: req.username.clone() }).into_response();
                         }
@@ -118,7 +153,10 @@ async fn token_refresh(
                     if !user.ui_enabled {
                         return axum::http::StatusCode::FORBIDDEN.into_response();
                     }
-                    if let Ok(token) = create_jwt_api_user(web_auth, username) {
+                    let Some(subject_id) = api_subject_id(&app_state, username).await else {
+                        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                    };
+                    if let Ok(token) = create_jwt_api_user(web_auth, username, subject_id) {
                         return axum::Json(TokenResponse { token, username: claims.username }).into_response();
                     }
                     return axum::http::StatusCode::UNAUTHORIZED.into_response();
@@ -148,7 +186,10 @@ async fn token_refresh(
                 let new_token = if is_admin {
                     create_jwt_admin(web_auth, username, current_pwd_version)
                 } else {
-                    create_jwt_web_user(web_auth, username, resolved_permissions, current_pwd_version)
+                    let Some(subject_id) = web_subject_id(&app_state, username).await else {
+                        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                    };
+                    create_jwt_web_user(web_auth, username, resolved_permissions, current_pwd_version, subject_id)
                 };
                 if let Ok(token) = new_token {
                     return axum::Json(TokenResponse { token, username: user.username.clone() }).into_response();

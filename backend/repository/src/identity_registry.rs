@@ -137,8 +137,8 @@ impl IdentityRegistry {
 
     /// Build an empty registry without touching disk. Used by the
     /// fail-closed path so the caller can still call methods that
-    /// require a registry.
-    fn empty(path: PathBuf) -> Self {
+    /// require a registry, and by tests that never persist.
+    pub fn empty(path: PathBuf) -> Self {
         Self { state: RwLock::new(PersistedIdentityRegistry::default()), path }
     }
 
@@ -225,11 +225,39 @@ impl IdentityRegistry {
         Ok(new_id)
     }
 
+    /// Insert a brand-new API-user mapping and persist atomically.
+    ///
+    /// The API-user namespace had a `sync_current_principals` path in but no
+    /// way in for a principal that appears after bootstrap, so a proxy user
+    /// added at runtime had no stable id to be issued.
+    pub async fn register_api_user(&self, username: &str) -> Result<UserId, RegistryError> {
+        let key = canonical_username(username);
+        if key.is_empty() {
+            return Err(RegistryError::EmptyUsername);
+        }
+        let mut state = self.state.write().await;
+        if let Some(existing) = state.api_users.get(&key) {
+            return Ok(existing.clone());
+        }
+        let new_id = UserId::from(format!("{}{}", UserId::API_NAMESPACE, Self::new_uuid_hex()));
+        state.api_users.insert(key, new_id.clone());
+        let snapshot = state.clone();
+        drop(state);
+        Self::write_to_disk(&self.path, &snapshot).await.map_err(RegistryError::Persist)?;
+        Ok(new_id)
+    }
+
     /// Look up a `UserId` by the canonical username. Returns `None`
     /// for unknown users.
     pub async fn lookup_by_username(&self, username: &str) -> Option<UserId> {
         let key = canonical_username(username);
         self.state.read().await.web_users.get(&key).cloned()
+    }
+
+    /// Look up an API user's `UserId` by canonical username.
+    pub async fn lookup_api_by_username(&self, username: &str) -> Option<UserId> {
+        let key = canonical_username(username);
+        self.state.read().await.api_users.get(&key).cloned()
     }
 
     /// Look up the canonical username for a `UserId`. Returns `None`

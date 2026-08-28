@@ -68,6 +68,7 @@ use tower_http::{
     services::ServeDir,
 };
 use tuliprox_hls::api::{exec_hls_cache_gc, exec_hls_lifecycle, HlsProxyManager};
+use tuliprox_repository::identity_registry::{BootstrapOutcome, IdentityRegistry};
 
 const METADATA_TRIGGER_WAIT_CYCLE_LIMIT: u32 = 900;
 static CORRUPT_DOWNLOADS_STATE_SUFFIX: AtomicU64 = AtomicU64::new(1);
@@ -312,6 +313,58 @@ async fn ready(
     (status_code, axum::Json(ReadyResponse { status: status_label }))
 }
 
+/// Load the stable-identity registry, or refuse to start.
+///
+/// A registry that is present loads; a registry that is absent with no
+/// persisted principals initialises fresh. A *corrupt* one fails closed - the
+/// registry deliberately does not invent replacement ids, because doing so
+/// would silently reassign every recording those principals own. The operator
+/// has to repair or remove the file.
+async fn bootstrap_identity_registry(
+    config: &Config,
+    app_config: &Arc<AppConfig>,
+) -> Result<Arc<IdentityRegistry>, TuliproxError> {
+    let path = std::path::PathBuf::from(&config.storage_dir).join("identity_registry.json");
+
+    let web_users: Vec<String> = config
+        .web_ui
+        .as_ref()
+        .and_then(|web_ui| web_ui.auth.as_ref())
+        .and_then(|auth| auth.t_users.as_ref())
+        .map(|users| users.iter().map(|user| user.username.clone()).collect())
+        .unwrap_or_default();
+
+    let api_users: Vec<String> = app_config.api_proxy.load().as_ref().as_ref().map_or_else(Vec::new, |api_proxy| {
+        api_proxy
+            .user
+            .iter()
+            .flat_map(|target_user| target_user.credentials.iter())
+            .map(|credential| credential.username.clone())
+            .collect()
+    });
+
+    // The fail-closed pre-scan - handing bootstrap the subject ids already
+    // referenced by persisted recordings - is not wired yet, so a *missing*
+    // registry alongside existing recordings still initialises fresh. A
+    // corrupt one fails closed regardless, which is the case that actually
+    // arises from a half-written file.
+    let (registry, outcome) = IdentityRegistry::bootstrap(path, Vec::new(), &web_users, &api_users).await;
+    match outcome {
+        BootstrapOutcome::FailClosed { reason, persisted_user_ids } => {
+            error!(
+                "Identity registry failed closed ({reason:?}); {} persisted subject ids are at risk. \
+                 Repair or remove the registry file before restarting.",
+                persisted_user_ids.len()
+            );
+            Err(TuliproxError::Server("identity registry is unusable".to_string()))
+        }
+        outcome => {
+            info!("Identity registry: {outcome:?}");
+            Ok(Arc::new(registry))
+        }
+    }
+}
+
 async fn create_shared_data(
     app_config: &Arc<AppConfig>,
     forced_targets: &Arc<ProcessTargets>,
@@ -369,6 +422,7 @@ async fn create_shared_data(
     let cancel_tokens = Arc::new(ArcSwap::from_pointee(tokens));
 
     let (manual_update_sender, manual_update_rx) = mpsc::channel::<ManualPlaylistUpdateRequest>(1);
+    let identity_registry = bootstrap_identity_registry(&config, app_config).await?;
 
     let app_state = AppState {
         forced_targets: Arc::new(ArcSwap::new(Arc::clone(forced_targets))),
@@ -390,6 +444,7 @@ async fn create_shared_data(
         geoip,
         update_guard: UpdateGuard::new(),
         metadata_manager,
+        identity_registry,
         manual_update_sender,
     };
 
@@ -1136,6 +1191,9 @@ mod tests {
                 geoip,
                 update_guard: UpdateGuard::new(),
                 metadata_manager,
+                identity_registry: Arc::new(tuliprox_repository::identity_registry::IdentityRegistry::empty(
+                    std::path::PathBuf::new(),
+                )),
                 manual_update_sender,
             })
         }

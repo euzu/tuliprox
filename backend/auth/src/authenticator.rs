@@ -46,37 +46,30 @@ pub fn create_jwt_admin(
     create_jwt(web_auth_config, username, RoleSet::ADMIN, PERM_ALL, pwd_version, Some(UserId::builtin_admin()))
 }
 
-pub fn create_jwt_api_user(web_auth_config: &WebAuthConfig, username: &str) -> Result<String, std::io::Error> {
-    create_jwt(
-        web_auth_config,
-        username,
-        RoleSet::API_USER,
-        PermissionSet::new(),
-        0,
-        // The identity registry will eventually provide the API
-        // user's stable `UserId`. Until then, the username-as-id
-        // fallback is the only stable choice.
-        Some(UserId::from(format!("api:{username}"))),
-    )
+/// `subject_id` comes from the identity registry.
+///
+/// It used to be `format!("api:{username}")`, which made the subject a
+/// function of the display name: renaming a user reassigned every recording
+/// they owned to a principal that did not exist, and two deployments that
+/// happened to share a username shared an identity.
+pub fn create_jwt_api_user(
+    web_auth_config: &WebAuthConfig,
+    username: &str,
+    subject_id: UserId,
+) -> Result<String, std::io::Error> {
+    create_jwt(web_auth_config, username, RoleSet::API_USER, PermissionSet::new(), 0, Some(subject_id))
 }
 
+/// `subject_id` comes from the identity registry. See
+/// [`create_jwt_api_user`] for why it is no longer derived from the username.
 pub fn create_jwt_web_user(
     web_auth_config: &WebAuthConfig,
     username: &str,
     permissions: PermissionSet,
     pwd_version: u32,
+    subject_id: UserId,
 ) -> Result<String, std::io::Error> {
-    create_jwt(
-        web_auth_config,
-        username,
-        RoleSet::new(),
-        permissions,
-        pwd_version,
-        // The identity registry will eventually provide the web
-        // user's stable `UserId`. Until then, the username-as-id
-        // fallback is the only stable choice.
-        Some(UserId::from(format!("web:{username}"))),
-    )
+    create_jwt(web_auth_config, username, RoleSet::new(), permissions, pwd_version, Some(subject_id))
 }
 
 fn create_jwt(
@@ -278,11 +271,17 @@ mod tests {
     #[test]
     fn web_user_jwt_carries_web_namespaced_subject_id() {
         let cfg = test_web_auth_config();
-        let jwt =
-            create_jwt_web_user(&cfg, "alice", Permission::ConfigRead | Permission::RecordingRead, 0).expect("web jwt");
+        let jwt = create_jwt_web_user(
+            &cfg,
+            "alice",
+            Permission::ConfigRead | Permission::RecordingRead,
+            0,
+            UserId::from("web:alice-uuid"),
+        )
+        .expect("web jwt");
         let data = verify_token(&jwt, cfg.secret.as_bytes(), &cfg.issuer).expect("verify");
         assert_eq!(data.claims.username, "alice");
-        assert_eq!(data.claims.subject_id, Some(UserId::from("web:alice")));
+        assert_eq!(data.claims.subject_id, Some(UserId::from("web:alice-uuid")));
         assert!(!data.claims.is_admin());
         assert!(data.claims.permissions.contains(Permission::RecordingRead));
         assert!(!data.claims.permissions.contains(Permission::RecordingWrite));
@@ -291,9 +290,9 @@ mod tests {
     #[test]
     fn api_user_jwt_carries_api_namespaced_subject_id() {
         let cfg = test_web_auth_config();
-        let jwt = create_jwt_api_user(&cfg, "bob").expect("api jwt");
+        let jwt = create_jwt_api_user(&cfg, "bob", UserId::from("api:bob-uuid")).expect("api jwt");
         let data = verify_token(&jwt, cfg.secret.as_bytes(), &cfg.issuer).expect("verify");
-        assert_eq!(data.claims.subject_id, Some(UserId::from("api:bob")));
+        assert_eq!(data.claims.subject_id, Some(UserId::from("api:bob-uuid")));
         assert!(data.claims.is_api_user());
         assert!(data.claims.permissions.is_empty());
     }
