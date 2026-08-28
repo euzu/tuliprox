@@ -188,7 +188,7 @@ async fn run_playlist_update_inner(
             client.clone(),
             Arc::clone(&app_state.app_config),
             targets,
-            Arc::clone(&app_state.event_manager) as Arc<dyn shared::model::EventSink>,
+            Arc::clone(&app_state.event_manager),
         )
         .with_bootstrap({
             let state = Arc::clone(app_state);

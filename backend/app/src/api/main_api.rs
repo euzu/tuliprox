@@ -212,7 +212,7 @@ fn spawn_metadata_trigger_update(
                                 client.clone(),
                                 Arc::clone(&app_config),
                                 proc_targets,
-                                Arc::clone(&event_manager) as Arc<dyn shared::model::EventSink>,
+                                Arc::clone(&event_manager),
                             )
                             .with_bootstrap({
                                 let state = Arc::clone(&app_state_clone);
@@ -414,7 +414,7 @@ async fn run_manual_update_worker(
                 client.clone(),
                 Arc::clone(&app_state.app_config),
                 request.targets,
-                Arc::clone(&app_state.event_manager) as Arc<dyn shared::model::EventSink>,
+                Arc::clone(&app_state.event_manager),
             )
             .with_bootstrap({
                 let state = Arc::clone(&app_state);
@@ -490,7 +490,7 @@ fn exec_update_on_boot(client: &reqwest::Client, app_state: &Arc<AppState>, targ
         let disabled_headers = app_state.get_disabled_headers();
         let provider_manager = Arc::clone(&app_state.active_provider);
         let metadata_manager = Arc::clone(&app_state.metadata_manager);
-        let event_manager = Arc::clone(&app_state.event_manager) as Arc<dyn shared::model::EventSink>;
+        let event_manager = Arc::clone(&app_state.event_manager);
         let app_state_clone = Arc::clone(app_state);
 
         tokio::spawn(async move {
