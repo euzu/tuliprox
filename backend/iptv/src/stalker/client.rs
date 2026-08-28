@@ -779,43 +779,8 @@ fn sanitize_stalker_debug_body(body: &[u8]) -> Vec<u8> {
     let Ok(mut value) = serde_json::from_str::<serde_json::Value>(strip_jsonp(strip_bom(body))) else {
         return b"[non-JSON Stalker response omitted]".to_vec();
     };
-    redact_stalker_debug_value(&mut value);
+    crate::redaction::redact_json(&mut value);
     serde_json::to_vec(&value).unwrap_or_else(|_| b"[Stalker response serialization failed]".to_vec())
-}
-
-fn redact_stalker_debug_value(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Object(fields) => {
-            for (key, value) in fields {
-                let key = key.to_ascii_lowercase();
-                if [
-                    "token",
-                    "password",
-                    "passwd",
-                    "credential",
-                    "secret",
-                    "auth",
-                    "email",
-                    "phone",
-                    "account",
-                    "login",
-                    "username",
-                    "mac",
-                    "cmd",
-                    "url",
-                ]
-                .iter()
-                .any(|sensitive| key.contains(sensitive))
-                {
-                    *value = serde_json::Value::String("[redacted]".to_string());
-                } else {
-                    redact_stalker_debug_value(value);
-                }
-            }
-        }
-        serde_json::Value::Array(values) => values.iter_mut().for_each(redact_stalker_debug_value),
-        _ => {}
-    }
 }
 
 fn rotate_stalker_debug_dumps(dump_dir: &Path) {
