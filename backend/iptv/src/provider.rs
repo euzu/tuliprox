@@ -16,6 +16,7 @@
 //! Dispatch stays a `match` and stays statically dispatched: the win is that each arm now
 //! names one type instead of assembling a tuple by position.
 
+use crate::error::ProviderErrorKind;
 use shared::{
     error::TuliproxError,
     model::{PlaylistGroup, XtreamCluster},
@@ -81,6 +82,29 @@ impl PlaylistFetch {
     #[must_use]
     pub fn is_ok(&self) -> bool {
         self.errors.is_empty() && !self.partial
+    }
+
+    /// The failure that most deserves attention, or `None` when there was none.
+    ///
+    /// This is the question the dispatcher could not previously ask: providers reported
+    /// failure in two incompatible error types, so every error was counted, logged and
+    /// treated identically whether it was a timeout or a malformed portal URL.
+    #[must_use]
+    pub fn error_kind(&self) -> Option<ProviderErrorKind> {
+        ProviderErrorKind::worst_of(&self.errors)
+    }
+
+    /// Whether re-running this fetch unchanged could plausibly succeed. False when there
+    /// was nothing to retry.
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        self.error_kind().is_some_and(ProviderErrorKind::is_retryable)
+    }
+
+    /// Whether the fetch failed for a reason no amount of retrying will fix.
+    #[must_use]
+    pub fn needs_operator(&self) -> bool {
+        self.error_kind().is_some_and(ProviderErrorKind::needs_operator)
     }
 }
 
@@ -225,5 +249,27 @@ mod tests {
     fn nothing_to_do_is_distinct_from_failure() {
         let fetch = PlaylistFetch::nothing_to_do();
         assert!(fetch.is_ok(), "a batch container producing nothing must not fail its input");
+        assert_eq!(fetch.error_kind(), None);
+    }
+
+    #[test]
+    fn a_blip_is_retryable_and_a_bad_config_is_not() {
+        let blip = PlaylistFetch::failed(TuliproxError::Download("timeout".to_string()));
+        assert!(blip.is_retryable());
+        assert!(!blip.needs_operator());
+
+        let misconfigured = PlaylistFetch::failed(TuliproxError::ConfigInput("bad portal url".to_string()));
+        assert!(!misconfigured.is_retryable(), "retrying a bad URL forever helps nobody");
+        assert!(misconfigured.needs_operator());
+    }
+
+    #[test]
+    fn a_fetch_is_judged_on_its_worst_failure() {
+        let fetch = PlaylistFetch::groups(Vec::new()).with_errors(vec![
+            TuliproxError::Download("timeout".to_string()),
+            TuliproxError::ConfigInput("bad portal url".to_string()),
+        ]);
+        assert!(fetch.needs_operator(), "one blip must not hide a config problem");
+        assert!(!fetch.is_retryable());
     }
 }
