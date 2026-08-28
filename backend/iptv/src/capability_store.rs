@@ -32,9 +32,7 @@ pub struct InMemoryCapabilityStore {
 
 impl InMemoryCapabilityStore {
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
+    pub fn new() -> Self { Self::default() }
 }
 
 impl CapabilityStore for InMemoryCapabilityStore {
@@ -58,9 +56,7 @@ pub struct JsonCapabilityStore {
 
 impl JsonCapabilityStore {
     #[must_use]
-    pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into() }
-    }
+    pub fn new(dir: impl Into<PathBuf>) -> Self { Self { dir: dir.into() } }
 
     /// The file for `input`. The name is derived rather than taken verbatim: input names
     /// come from user config and can contain separators.

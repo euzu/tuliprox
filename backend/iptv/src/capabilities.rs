@@ -84,8 +84,7 @@ impl ProviderCapabilities {
     /// changed.
     pub fn record_handshake(&mut self, recipe: &str, endpoint: &str, now_epoch_secs: u64) -> bool {
         self.observed_at_epoch_secs = now_epoch_secs;
-        let changed =
-            self.bootstrap_recipe.as_deref() != Some(recipe) || self.endpoint.as_deref() != Some(endpoint);
+        let changed = self.bootstrap_recipe.as_deref() != Some(recipe) || self.endpoint.as_deref() != Some(endpoint);
         self.bootstrap_recipe = Some(recipe.to_string());
         self.endpoint = Some(endpoint.to_string());
         changed
@@ -187,10 +186,7 @@ mod tests {
 
         let key = |candidate: &&str| (*candidate).to_string();
         assert_eq!(capabilities.prefer_remembered(candidates.clone(), key, NOW), candidates);
-        assert_eq!(
-            capabilities.prefer_remembered(candidates.clone(), key, NOW + CAPABILITY_TTL_SECS),
-            candidates
-        );
+        assert_eq!(capabilities.prefer_remembered(candidates.clone(), key, NOW + CAPABILITY_TTL_SECS), candidates);
     }
 
     #[test]

@@ -68,9 +68,7 @@ pub fn safe_url(value: &str) -> String {
 /// Redact credentials from free text that has to stay readable — a log message quoting a
 /// URL, an error snippet. Keeps the structure, replaces the values.
 #[must_use]
-pub fn redact_text(value: &str) -> String {
-    redact_query_like_tokens(&sanitize_sensitive_info(value))
-}
+pub fn redact_text(value: &str) -> String { redact_query_like_tokens(&sanitize_sensitive_info(value)) }
 
 /// Replace the values of `key=` / `key:` pairs, leaving everything else intact.
 fn redact_query_like_tokens(value: &str) -> String {

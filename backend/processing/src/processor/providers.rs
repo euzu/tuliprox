@@ -7,20 +7,21 @@
 //! answer the dispatcher in one shape.
 
 use super::{
-    library::download_library_playlist,
-    stalker::download_stalker_playlist,
-    stalker_refresh::StalkerRefreshMode,
+    library::download_library_playlist, stalker::download_stalker_playlist, stalker_refresh::StalkerRefreshMode,
 };
 use crate::{metadata_sink::MetadataUpdateSink, parser::xmltv::TVGuide, processor::PlaylistProcessingContext};
-use shared::{error::TuliproxError, model::EventSink, model::PlaylistGroup};
-use tuliprox_core::model::ConfigInput;
-use tuliprox_media_server::{
-    media_server_catalog_snapshot_to_playlist, refresh_media_server_catalog_complete_before_publish,
-    MediaServerCatalogRefreshPolicy, MediaServerHttpClient,
+use shared::{
+    error::TuliproxError,
+    model::{EventSink, PlaylistGroup},
 };
+use tuliprox_core::model::ConfigInput;
 use tuliprox_iptv::{
     epg::{EpgFetchRequest, EpgOutcome, EpgProvider, EpgRecordSink},
     provider::{PlaylistFetch, PlaylistFetchRequest, PlaylistProvider},
+};
+use tuliprox_media_server::{
+    media_server_catalog_snapshot_to_playlist, refresh_media_server_catalog_complete_before_publish,
+    MediaServerCatalogRefreshPolicy, MediaServerHttpClient,
 };
 
 /// Stalker/Ministra portal. Carries the refresh mode and whether the fetched generation
@@ -37,9 +38,7 @@ impl StalkerProvider {
 }
 
 impl PlaylistProvider for StalkerProvider {
-    fn name(&self) -> &'static str {
-        "stalker"
-    }
+    fn name(&self) -> &'static str { "stalker" }
 
     async fn fetch(&self, request: &PlaylistFetchRequest<'_>) -> PlaylistFetch {
         let (groups, errors, persisted, partial) = download_stalker_playlist(
@@ -60,9 +59,7 @@ impl PlaylistProvider for StalkerProvider {
 pub struct LibraryProvider;
 
 impl PlaylistProvider for LibraryProvider {
-    fn name(&self) -> &'static str {
-        "library"
-    }
+    fn name(&self) -> &'static str { "library" }
 
     async fn fetch(&self, request: &PlaylistFetchRequest<'_>) -> PlaylistFetch {
         let (groups, errors) = download_library_playlist(request.client, request.app_config, request.input).await;
@@ -75,9 +72,7 @@ impl PlaylistProvider for LibraryProvider {
 pub struct PlexProvider;
 
 impl PlaylistProvider for PlexProvider {
-    fn name(&self) -> &'static str {
-        "plex"
-    }
+    fn name(&self) -> &'static str { "plex" }
 
     async fn fetch(&self, request: &PlaylistFetchRequest<'_>) -> PlaylistFetch {
         let (groups, errors) = download_plex_media_server_playlist(request.client, request.input).await;
@@ -114,7 +109,6 @@ async fn download_plex_media_server_playlist(
     }
 }
 
-
 /// XMLTV/ICS EPG for M3U, Xtream and library inputs.
 ///
 /// The counterpart to `tuliprox_iptv::epg::StalkerEpgProvider`: this one downloads whole
@@ -138,17 +132,13 @@ impl<'a, E: EventSink + Clone + 'static, M: MetadataUpdateSink> XmltvEpgProvider
     /// EPG download is per-source and partial by nature: three sources where one 404s
     /// still yields a usable guide from the other two, so the failures travel alongside
     /// the outcome rather than replacing it.
-    pub fn take_errors(&self) -> Vec<TuliproxError> {
-        std::mem::take(&mut *self.errors.lock())
-    }
+    pub fn take_errors(&self) -> Vec<TuliproxError> { std::mem::take(&mut *self.errors.lock()) }
 }
 
 impl<E: EventSink + Clone + 'static, M: MetadataUpdateSink> EpgProvider for XmltvEpgProvider<'_, E, M> {
     type Guide = TVGuide;
 
-    fn name(&self) -> &'static str {
-        "xmltv"
-    }
+    fn name(&self) -> &'static str { "xmltv" }
 
     async fn fetch(
         &self,
