@@ -225,8 +225,7 @@ fn spawn_metadata_trigger_update(
                             .with_update_guard(update_guard.clone())
                             .with_disabled_headers(disabled_headers.clone())
                             .with_provider_manager(app_state_clone.active_provider.clone())
-                            .with_metadata_manager(app_state_clone.metadata_manager.clone()
-                                as std::sync::Arc<dyn tuliprox_processing::metadata_sink::MetadataUpdateSink>)
+                            .with_metadata_manager(app_state_clone.metadata_manager.clone())
                             .with_pre_processed_inputs(pre_processed_inputs.clone())
                             .with_acquired_permit(lock),
                         )
@@ -426,8 +425,7 @@ async fn run_manual_update_worker(
             .with_update_guard(app_state.update_guard.clone())
             .with_disabled_headers(app_state.get_disabled_headers())
             .with_provider_manager(Arc::clone(&app_state.active_provider))
-            .with_metadata_manager(Arc::clone(&app_state.metadata_manager)
-                as std::sync::Arc<dyn tuliprox_processing::metadata_sink::MetadataUpdateSink>)
+            .with_metadata_manager(Arc::clone(&app_state.metadata_manager))
             .with_acquired_permit(permit),
         )
         .await;
@@ -505,9 +503,7 @@ fn exec_update_on_boot(client: &reqwest::Client, app_state: &Arc<AppState>, targ
                     .with_update_guard(update_guard)
                     .with_disabled_headers(disabled_headers)
                     .with_provider_manager(provider_manager)
-                    .with_metadata_manager(
-                        metadata_manager as std::sync::Arc<dyn tuliprox_processing::metadata_sink::MetadataUpdateSink>,
-                    ),
+                    .with_metadata_manager(metadata_manager),
             )
             .await;
         });

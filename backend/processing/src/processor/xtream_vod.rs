@@ -1,6 +1,7 @@
 use crate::{
     fetched_playlist::FetchedPlaylist,
     input_cache::resolve_input_storage_path,
+    metadata_sink::MetadataUpdateSink,
     processor::{
         create_resolve_options_function_for_xtream_target, playlist::PlaylistProcessingContext,
         process_foreground_retry_once, select_cancel_token, ProbeHandleGuard, ResolveOptions, ResolveOptionsFlags,
@@ -56,8 +57,8 @@ use tuliprox_session::ActiveProviderManager;
 create_resolve_options_function_for_xtream_target!(vod);
 
 #[allow(clippy::too_many_lines)]
-pub async fn playlist_resolve_vod<E: EventSink + Clone + 'static>(
-    ctx: &PlaylistProcessingContext<E>,
+pub async fn playlist_resolve_vod<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     target: &ConfigTarget,
     errors: &mut Vec<TuliproxError>,
     provider_fpl: &mut FetchedPlaylist<'_>,
@@ -139,8 +140,8 @@ fn sync_resolved_vod_properties(provider_fpl: &mut FetchedPlaylist<'_>, processe
 }
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-async fn playlist_resolve_vod_info<E: EventSink + Clone + 'static>(
-    ctx: &PlaylistProcessingContext<E>,
+async fn playlist_resolve_vod_info<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     _errors: &mut Vec<TuliproxError>,
     fpl: &mut FetchedPlaylist<'_>,
     resolve_options: ResolveOptions,
@@ -163,8 +164,8 @@ async fn playlist_resolve_vod_info<E: EventSink + Clone + 'static>(
 }
 
 #[allow(clippy::too_many_lines)]
-async fn process_immediate_vod_info<E: EventSink + Clone + 'static>(
-    ctx: &PlaylistProcessingContext<E>,
+async fn process_immediate_vod_info<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     fpl: &mut FetchedPlaylist<'_>,
     filter: impl Fn(&PlaylistItem) -> bool,
     resolve_options: ResolveOptions,
@@ -449,8 +450,8 @@ fn check_resolve_tmdb(
     }
 }
 
-fn queue_background_vod_info<E: EventSink + Clone + 'static>(
-    ctx: &PlaylistProcessingContext<E>,
+fn queue_background_vod_info<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     fpl: &mut FetchedPlaylist<'_>,
     filter: impl Fn(&PlaylistItem) -> bool,
     resolve_options: &ResolveOptions,
@@ -537,8 +538,8 @@ fn queue_background_vod_info<E: EventSink + Clone + 'static>(
     }
 }
 
-async fn update_vod_info_immediate<E: EventSink + Clone + 'static>(
-    ctx: &PlaylistProcessingContext<E>,
+async fn update_vod_info_immediate<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     active_provider: &Arc<ActiveProviderManager>,
     input: &ConfigInput,
     pli: &PlaylistItem,

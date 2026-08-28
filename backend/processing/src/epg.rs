@@ -1,4 +1,4 @@
-use crate::{parser::xmltv::TVGuide, processor::PlaylistProcessingContext};
+use crate::{metadata_sink::MetadataUpdateSink, parser::xmltv::TVGuide, processor::PlaylistProcessingContext};
 use log::{debug, warn};
 use shared::{
     concat_string,
@@ -84,9 +84,9 @@ fn epg_source_cache_extension(source_type: EpgSourceType) -> &'static str {
     }
 }
 
-async fn download_epg_file<E: EventSink + Clone + 'static>(
+async fn download_epg_file<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
     epg_source: &EpgSource,
-    ctx: &PlaylistProcessingContext<E>,
+    ctx: &PlaylistProcessingContext<E, M>,
     input: &ConfigInput,
     headers: Option<&reqwest::header::HeaderMap>,
     storage_dir: &str,
@@ -183,8 +183,8 @@ async fn cleanup_unlisted_epg_files(
     Ok(())
 }
 
-pub async fn get_xmltv<E: EventSink + Clone + 'static>(
-    ctx: &PlaylistProcessingContext<E>,
+pub async fn get_xmltv<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     input: &ConfigInput,
     headers: Option<&reqwest::header::HeaderMap>,
     storage_dir: &str,

@@ -3398,16 +3398,12 @@ impl InputWorker {
 /// lives there so the pipeline does not have to name this type. The impl lives
 /// here because the type does.
 impl tuliprox_processing::metadata_sink::MetadataUpdateSink for MetadataUpdateManager {
-    fn acquire_update_pause_guard(
-        &self,
-    ) -> tuliprox_processing::metadata_sink::SinkFuture<'_, tokio::sync::OwnedRwLockWriteGuard<()>> {
-        Box::pin(MetadataUpdateManager::acquire_update_pause_guard(self))
+    async fn acquire_update_pause_guard(&self) -> tokio::sync::OwnedRwLockWriteGuard<()> {
+        MetadataUpdateManager::acquire_update_pause_guard(self).await
     }
 
-    fn prepare_enqueue_state(&self, input_name: Arc<str>) -> tuliprox_processing::metadata_sink::SinkFuture<'_, ()> {
-        Box::pin(async move {
-            self.ensure_enqueue_state_loaded_for_input(&input_name).await;
-        })
+    async fn prepare_enqueue_state(&self, input_name: Arc<str>) {
+        self.ensure_enqueue_state_loaded_for_input(&input_name).await;
     }
 
     fn should_skip_enqueue(&self, input_name: &str, task: &UpdateTask) -> bool {

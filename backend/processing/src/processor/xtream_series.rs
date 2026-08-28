@@ -1,5 +1,6 @@
 use crate::{
     fetched_playlist::FetchedPlaylist,
+    metadata_sink::MetadataUpdateSink,
     processor::{
         create_resolve_options_function_for_xtream_target,
         playlist::{PlaylistProcessingContext, ProcessingPipe},
@@ -78,8 +79,8 @@ impl SeriesProbeSettings {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn playlist_resolve_series<E: EventSink + Clone + 'static>(
-    ctx: &PlaylistProcessingContext<E>,
+pub async fn playlist_resolve_series<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     target: &ConfigTarget,
     errors: &mut Vec<TuliproxError>,
     pipe: &ProcessingPipe,
@@ -110,8 +111,8 @@ pub async fn playlist_resolve_series<E: EventSink + Clone + 'static>(
 }
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-async fn playlist_resolve_series_info<E: EventSink + Clone + 'static>(
-    ctx: &PlaylistProcessingContext<E>,
+async fn playlist_resolve_series_info<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     _errors: &mut Vec<TuliproxError>,
     fpl: &mut FetchedPlaylist<'_>,
     resolve_options: ResolveOptions,
@@ -197,8 +198,8 @@ fn sync_resolved_series_properties(provider_fpl: &mut FetchedPlaylist<'_>, proce
     }
 }
 
-fn queue_background_series_info<E: EventSink + Clone + 'static>(
-    ctx: &PlaylistProcessingContext<E>,
+fn queue_background_series_info<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     fpl: &mut FetchedPlaylist<'_>,
     filter: impl Fn(&PlaylistItem) -> bool,
     resolve_options: &ResolveOptions,
@@ -289,8 +290,8 @@ fn queue_background_series_info<E: EventSink + Clone + 'static>(
 }
 
 #[allow(clippy::too_many_lines)]
-async fn process_immediate_series_info<E: EventSink + Clone + 'static>(
-    ctx: &PlaylistProcessingContext<E>,
+async fn process_immediate_series_info<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     fpl: &mut FetchedPlaylist<'_>,
     filter: impl Fn(&PlaylistItem) -> bool,
     resolve_options: &ResolveOptions,
@@ -574,8 +575,8 @@ fn expand_series_item(pli: &PlaylistItem, input: &ConfigInput) -> Option<Playlis
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn update_series_info_immediate<E: EventSink + Clone + 'static>(
-    ctx: &PlaylistProcessingContext<E>,
+async fn update_series_info_immediate<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     active_provider: &Arc<ActiveProviderManager>,
     input: &ConfigInput,
     pli: &PlaylistItem,

@@ -3,7 +3,7 @@ use crate::{
     fetched_playlist::FetchedPlaylist,
     input_cache,
     input_cache::ClusterState,
-    metadata_sink::MetadataUpdateSink,
+    metadata_sink::{MetadataUpdateSink, NoopMetadataSink},
     parser::xmltv::{flatten_tvguide, merge_epg_trees, EpgMergeAccumulator, TVGuide},
     playlist_watch::process_group_watch,
     processor::{
@@ -643,9 +643,9 @@ struct InputJobResult {
     errors: Vec<TuliproxError>,
 }
 
-async fn process_input_job<E: EventSink + Clone + 'static>(
+async fn process_input_job<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
     index: usize,
-    ctx: &PlaylistProcessingContext<E>,
+    ctx: &PlaylistProcessingContext<E, M>,
     input: &Arc<ConfigInput>,
     process_parallel: bool,
 ) -> InputJobResult {
@@ -658,9 +658,9 @@ async fn process_input_job<E: EventSink + Clone + 'static>(
     .await
 }
 
-async fn process_input_job_inner<E: EventSink + Clone + 'static>(
+async fn process_input_job_inner<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
     index: usize,
-    ctx: &PlaylistProcessingContext<E>,
+    ctx: &PlaylistProcessingContext<E, M>,
     input: &Arc<ConfigInput>,
 ) -> InputJobResult {
     let start_time = Instant::now();
@@ -757,8 +757,8 @@ async fn wait_for_target_finalizer_slot(
 }
 
 #[allow(clippy::too_many_lines)]
-async fn process_targets<E: EventSink + Clone + 'static>(
-    ctx: &Arc<PlaylistProcessingContext<E>>,
+async fn process_targets<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &Arc<PlaylistProcessingContext<E, M>>,
     playlists: &mut [FetchedPlaylist<'_>],
     targets: &[&Arc<ConfigTarget>],
     input_stats: &mut HashMap<Arc<str>, InputStats>,
@@ -869,9 +869,9 @@ async fn process_targets<E: EventSink + Clone + 'static>(
 }
 
 #[allow(clippy::too_many_lines)]
-async fn process_source<E: EventSink + Clone + 'static>(
+async fn process_source<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
     source_idx: usize,
-    ctx: Arc<PlaylistProcessingContext<E>>,
+    ctx: Arc<PlaylistProcessingContext<E, M>>,
 ) -> (Vec<InputStats>, Vec<TargetStats>, Vec<TuliproxError>) {
     log_memory_snapshot(format!("source[{source_idx}] start").as_str());
     let sources = ctx.config.sources.load();
@@ -979,8 +979,8 @@ async fn process_source<E: EventSink + Clone + 'static>(
     (ordered_input_stats, target_stats, errors)
 }
 
-async fn download_input_epg<E: EventSink + Clone + 'static>(
-    ctx: &PlaylistProcessingContext<E>,
+async fn download_input_epg<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     input: &Arc<ConfigInput>,
     error_list: &mut Vec<TuliproxError>,
 ) -> Option<TVGuide> {
@@ -999,8 +999,8 @@ async fn download_input_epg<E: EventSink + Clone + 'static>(
 /// (`input_cache::load_input_status` + `input_cache::save_input_status`).
 /// Call this only while holding the per-input lock from
 /// `PlaylistProcessingContext::get_input_lock` (as done in `download_input`).
-async fn invalidate_input_cache_status<E: EventSink + Clone + 'static>(
-    ctx: &PlaylistProcessingContext<E>,
+async fn invalidate_input_cache_status<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     input: &ConfigInput,
 ) {
     let storage_dir = { ctx.config.config.load().storage_dir.clone() };
@@ -1012,8 +1012,8 @@ async fn invalidate_input_cache_status<E: EventSink + Clone + 'static>(
     }
 }
 
-async fn load_cached_input_playlist<E: EventSink + Clone + 'static>(
-    ctx: &PlaylistProcessingContext<E>,
+async fn load_cached_input_playlist<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     input: &Arc<ConfigInput>,
 ) -> (PlaylistSource, Option<TuliproxError>) {
     match load_input_playlist(&ctx.config, input, None).await {
@@ -1023,8 +1023,8 @@ async fn load_cached_input_playlist<E: EventSink + Clone + 'static>(
 }
 
 #[allow(clippy::too_many_lines)]
-async fn download_input<E: EventSink + Clone + 'static>(
-    ctx: &PlaylistProcessingContext<E>,
+async fn download_input<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     input: &Arc<ConfigInput>,
     allow_staged_input: bool,
 ) -> (Vec<TuliproxError>, PlaylistSource, Option<TuliproxError>, bool) {
@@ -1192,8 +1192,7 @@ fn create_input_stat(
     }
 }
 
-#[derive(Clone)]
-pub struct PlaylistProcessingContext<E: EventSink> {
+pub struct PlaylistProcessingContext<E: EventSink, M: MetadataUpdateSink = NoopMetadataSink> {
     pub client: reqwest::Client,
     pub config: Arc<AppConfig>,
     pub user_targets: Arc<ProcessTargets>,
@@ -1216,13 +1215,35 @@ pub struct PlaylistProcessingContext<E: EventSink> {
 
     // New field for STRM probes & background updates
     pub provider_manager: Option<Arc<ActiveProviderManager>>,
-    pub metadata_manager: Option<Arc<dyn MetadataUpdateSink>>,
+    pub metadata_manager: Option<Arc<M>>,
     pub pre_processed_inputs: Option<Arc<HashSet<Arc<str>>>>,
     pub stalker_refresh_mode: StalkerRefreshMode,
     pub partial_refresh: Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl<E: EventSink + Clone + 'static> PlaylistProcessingContext<E> {
+// Written out rather than derived: `#[derive(Clone)]` would demand `M: Clone`,
+// but the sink is held behind an `Arc` and is cloneable whatever `M` is.
+impl<E: EventSink + Clone, M: MetadataUpdateSink> Clone for PlaylistProcessingContext<E, M> {
+    fn clone(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            config: Arc::clone(&self.config),
+            user_targets: Arc::clone(&self.user_targets),
+            events: self.events.clone(),
+            playlist_state: self.playlist_state.clone(),
+            disabled_headers: self.disabled_headers.clone(),
+            processed_inputs: Arc::clone(&self.processed_inputs),
+            input_locks: Arc::clone(&self.input_locks),
+            provider_manager: self.provider_manager.clone(),
+            metadata_manager: self.metadata_manager.clone(),
+            pre_processed_inputs: self.pre_processed_inputs.clone(),
+            stalker_refresh_mode: self.stalker_refresh_mode,
+            partial_refresh: Arc::clone(&self.partial_refresh),
+        }
+    }
+}
+
+impl<E: EventSink + Clone + 'static, M: MetadataUpdateSink> PlaylistProcessingContext<E, M> {
     pub async fn is_input_downloaded(&self, input_name: &str) -> bool {
         let processed = self.processed_inputs.lock().await;
         processed.contains(input_name)
@@ -1249,8 +1270,8 @@ impl<E: EventSink + Clone + 'static> PlaylistProcessingContext<E> {
     }
 }
 
-async fn process_sources<E: EventSink + Clone + 'static>(
-    processing_ctx: &PlaylistProcessingContext<E>,
+async fn process_sources<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    processing_ctx: &PlaylistProcessingContext<E, M>,
 ) -> (Vec<SourceStats>, Vec<TuliproxError>) {
     let mut async_tasks = JoinSet::new();
     let sources = processing_ctx.config.sources.load();
@@ -1405,8 +1426,8 @@ struct PreparedTarget {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn prepare_playlist_for_target<E: EventSink + Clone + 'static>(
-    ctx: &PlaylistProcessingContext<E>,
+async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     playlists: &mut [FetchedPlaylist<'_>],
     target: &ConfigTarget,
     stats: &mut HashMap<Arc<str>, InputStats>,
@@ -1508,8 +1529,8 @@ fn spill_epg_to_disk(sources: Vec<Epg>) -> Result<Option<Epg>, TuliproxError> {
     }
 }
 
-async fn finalize_prepared_target<E: EventSink + Clone + 'static>(
-    ctx: Arc<PlaylistProcessingContext<E>>,
+async fn finalize_prepared_target<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: Arc<PlaylistProcessingContext<E, M>>,
     prepared: PreparedTarget,
 ) -> (Result<(), Vec<TuliproxError>>, Vec<TuliproxError>) {
     let target = &prepared.target;
@@ -1599,8 +1620,8 @@ async fn finalize_prepared_target<E: EventSink + Clone + 'static>(
     }
 }
 
-async fn playlist_resolve<E: EventSink + Clone + 'static>(
-    ctx: &PlaylistProcessingContext<E>,
+async fn playlist_resolve<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     target: &ConfigTarget,
     errors: &mut Vec<TuliproxError>,
     pipe: &ProcessingPipe,
@@ -1675,8 +1696,8 @@ fn provider_id_from_item(item: &PlaylistItem) -> Option<ProviderIdType> {
 }
 
 #[allow(clippy::too_many_lines)]
-async fn playlist_probe<E: EventSink + Clone + 'static>(
-    ctx: &PlaylistProcessingContext<E>,
+async fn playlist_probe<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     target: &ConfigTarget,
     fpl: &mut FetchedPlaylist<'_>,
 ) {
@@ -1977,7 +1998,11 @@ pub type NoBootstrap = fn() -> std::future::Ready<()>;
 /// Four of the twelve are always present, so they are constructor arguments.
 /// The rest are optional in fact as well as in type, and a call site names the
 /// ones it actually sets.
-pub struct ProcessingRun<E: EventSink + Clone + 'static, B: UpdateBootstrap = NoBootstrap> {
+pub struct ProcessingRun<
+    E: EventSink + Clone + 'static,
+    B: UpdateBootstrap = NoBootstrap,
+    M: MetadataUpdateSink = NoopMetadataSink,
+> {
     client: reqwest::Client,
     app_config: Arc<AppConfig>,
     targets: Arc<ProcessTargets>,
@@ -1987,12 +2012,12 @@ pub struct ProcessingRun<E: EventSink + Clone + 'static, B: UpdateBootstrap = No
     update_guard: Option<UpdateGuard>,
     disabled_headers: Option<ReverseProxyDisabledHeaderConfig>,
     provider_manager: Option<Arc<ActiveProviderManager>>,
-    metadata_manager: Option<Arc<dyn MetadataUpdateSink>>,
+    metadata_manager: Option<Arc<M>>,
     pre_processed_inputs: Option<HashSet<Arc<str>>>,
     acquired_permit: Option<tuliprox_core::model::UpdateGuardPermit>,
 }
 
-impl<E: EventSink + Clone + 'static> ProcessingRun<E, NoBootstrap> {
+impl<E: EventSink + Clone + 'static> ProcessingRun<E, NoBootstrap, NoopMetadataSink> {
     pub fn new(client: reqwest::Client, app_config: Arc<AppConfig>, targets: Arc<ProcessTargets>, events: E) -> Self {
         Self {
             client,
@@ -2011,13 +2036,13 @@ impl<E: EventSink + Clone + 'static> ProcessingRun<E, NoBootstrap> {
     }
 }
 
-impl<E: EventSink + Clone + 'static, B: UpdateBootstrap> ProcessingRun<E, B> {
+impl<E: EventSink + Clone + 'static, B: UpdateBootstrap, M: MetadataUpdateSink> ProcessingRun<E, B, M> {
     /// Work the composition root runs once the lock is held, before the update
     /// proper starts.
     ///
     /// Changes the run's bootstrap type, so it rebuilds rather than mutates.
     #[must_use]
-    pub fn with_bootstrap<B2: UpdateBootstrap>(self, bootstrap: B2) -> ProcessingRun<E, B2> {
+    pub fn with_bootstrap<B2: UpdateBootstrap>(self, bootstrap: B2) -> ProcessingRun<E, B2, M> {
         ProcessingRun {
             client: self.client,
             app_config: self.app_config,
@@ -2060,10 +2085,25 @@ impl<E: EventSink + Clone + 'static, B: UpdateBootstrap> ProcessingRun<E, B> {
         self
     }
 
+    /// The background metadata worker.
+    ///
+    /// Changes the run's sink type, so it rebuilds rather than mutates.
     #[must_use]
-    pub fn with_metadata_manager(mut self, manager: impl Into<Option<Arc<dyn MetadataUpdateSink>>>) -> Self {
-        self.metadata_manager = manager.into();
-        self
+    pub fn with_metadata_manager<M2: MetadataUpdateSink>(self, manager: Arc<M2>) -> ProcessingRun<E, B, M2> {
+        ProcessingRun {
+            client: self.client,
+            app_config: self.app_config,
+            targets: self.targets,
+            events: self.events,
+            bootstrap: self.bootstrap,
+            playlist_state: self.playlist_state,
+            update_guard: self.update_guard,
+            disabled_headers: self.disabled_headers,
+            provider_manager: self.provider_manager,
+            metadata_manager: Some(manager),
+            pre_processed_inputs: self.pre_processed_inputs,
+            acquired_permit: self.acquired_permit,
+        }
     }
 
     // Always built with the default hasher here; generalising would buy nothing.
@@ -2084,7 +2124,9 @@ impl<E: EventSink + Clone + 'static, B: UpdateBootstrap> ProcessingRun<E, B> {
 }
 
 #[allow(clippy::too_many_lines)]
-pub async fn exec_processing<E: EventSink + Clone + 'static, B: UpdateBootstrap>(run: ProcessingRun<E, B>) {
+pub async fn exec_processing<E: EventSink + Clone + 'static, B: UpdateBootstrap, M: MetadataUpdateSink>(
+    run: ProcessingRun<E, B, M>,
+) {
     let ProcessingRun {
         client,
         app_config,

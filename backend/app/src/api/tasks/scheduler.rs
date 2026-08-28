@@ -201,8 +201,7 @@ async fn run_playlist_update_inner(
         .with_update_guard(app_state.update_guard.clone())
         .with_disabled_headers(app_state.get_disabled_headers())
         .with_provider_manager(Arc::clone(&app_state.active_provider))
-        .with_metadata_manager(Arc::clone(&app_state.metadata_manager)
-            as std::sync::Arc<dyn tuliprox_processing::metadata_sink::MetadataUpdateSink>)
+        .with_metadata_manager(Arc::clone(&app_state.metadata_manager))
         .with_acquired_permit(permit),
     )
     .await;
