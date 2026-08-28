@@ -1,7 +1,7 @@
 use crate::error::{Error, ErrorInfo, ErrorSetInfo};
+use gloo_net::http::{Request, RequestBuilder, Response};
 use gloo_storage::{LocalStorage, Storage};
 use log::{error, warn};
-use reqwasm::http::{Request, Response};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use shared::utils::{bin_deserialize, bin_serialize, CONTENT_TYPE_CBOR, CONTENT_TYPE_JSON};
@@ -64,11 +64,20 @@ impl Encoding {
     }
 }
 
-fn apply_encoded_body(request: Request, body: EncodedBody, content_type: &'static str) -> Request {
+fn apply_encoded_body(
+    request: RequestBuilder,
+    body: EncodedBody,
+    content_type: &'static str,
+) -> Result<Request, Error> {
+    let request = request.header("Content-Type", content_type);
     match body {
-        EncodedBody::Text(payload) => request.body(payload).header("Content-Type", content_type),
-        EncodedBody::Binary(payload) => request.body(payload).header("Content-Type", content_type),
+        EncodedBody::Text(payload) => request.body(payload),
+        EncodedBody::Binary(payload) => request.body(payload),
     }
+    .map_err(|err| {
+        error!("Failed to attach request body: {err}");
+        Error::RequestError
+    })
 }
 
 fn encoding_from_content_type(content_type: &str) -> Option<Encoding> {
@@ -182,21 +191,15 @@ where
 {
     let c_type = content_type.unwrap_or(Encoding::Json);
     let r_type = response_type.unwrap_or(Encoding::Json);
-    let mut request = match method {
-        RequestMethod::Get => Request::get(url),
-        RequestMethod::Post => {
-            let encoded = c_type.encode(&body)?;
-            apply_encoded_body(Request::post(url), encoded, c_type.as_content_type())
-        }
-        RequestMethod::Put => {
-            let encoded = c_type.encode(&body)?;
-            apply_encoded_body(Request::put(url), encoded, c_type.as_content_type())
-        }
-        RequestMethod::Patch => {
-            let encoded = c_type.encode(&body)?;
-            apply_encoded_body(Request::patch(url), encoded, c_type.as_content_type())
-        }
-        RequestMethod::Delete => Request::delete(url),
+    // `RequestBuilder::body` consumes the builder and hands back a `Request`, which
+    // no longer accepts headers. So the payload is encoded up front but only attached
+    // once Authorization, the caller's extra headers and Accept have all been set.
+    let (mut request, encoded) = match method {
+        RequestMethod::Get => (Request::get(url), None),
+        RequestMethod::Post => (Request::post(url), Some(c_type.encode(&body)?)),
+        RequestMethod::Put => (Request::put(url), Some(c_type.encode(&body)?)),
+        RequestMethod::Patch => (Request::patch(url), Some(c_type.encode(&body)?)),
+        RequestMethod::Delete => (Request::delete(url), None),
     };
     if let Some(token) = get_token() {
         request = request.header("Authorization", format!("Bearer {token}").as_str());
@@ -209,7 +212,12 @@ where
 
     request = request.header("Accept", r_type.as_content_type());
 
-    match request.send().await {
+    let sent = match encoded {
+        Some(encoded) => apply_encoded_body(request, encoded, c_type.as_content_type())?.send().await,
+        None => request.send().await,
+    };
+
+    match sent {
         Ok(response) => {
             let status = response.status();
             let mut response_headers = HashMap::new();

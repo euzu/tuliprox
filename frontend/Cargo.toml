@@ -19,7 +19,7 @@ serde.workspace = true
 wasm-bindgen = {version = "0.2.127", features = ["serde-serialize"]}
 #anyhow = "1.0.102"
 thiserror = "2.0.20"
-reqwasm = {version = "0.5", features = ["json"]}
+gloo-net = { version = "0.5.0", default-features = false, features = ["http", "json"] }
 log.workspace = true
 wasm-logger = "0.2.0"
 gloo-storage = "0.3.0"
