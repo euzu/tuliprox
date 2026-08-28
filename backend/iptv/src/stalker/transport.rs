@@ -153,7 +153,7 @@ pub mod testing {
                         Ok(Response::from(response))
                     }
                     Some(Reply::Transport(err)) => Err(err),
-                    None => Err(StalkerError::EmptyBody { action: "fake transport ran out of replies".to_string() }),
+                    None => Err(StalkerError::Io(std::io::Error::other("fake transport ran out of replies"))),
                 }
             }
         }

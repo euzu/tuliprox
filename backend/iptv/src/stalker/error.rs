@@ -1,4 +1,4 @@
-use crate::redaction;
+use crate::{redaction, stalker::action::StalkerAction};
 use std::io;
 use thiserror::Error;
 
@@ -36,10 +36,10 @@ pub enum StalkerError {
     TokenRejected { status: u16, url: Option<StalkerErrorUrl> },
 
     #[error("stalker portal body reported code {code} for {action}: {body_snippet}")]
-    PortalBodyError { code: u16, action: String, body_snippet: String },
+    PortalBodyError { code: u16, action: StalkerAction, body_snippet: String },
 
     #[error("stalker portal response exceeded {action} body cap of {cap_bytes} bytes")]
-    ResponseTooLarge { action: String, cap_bytes: u64 },
+    ResponseTooLarge { action: StalkerAction, cap_bytes: u64 },
 
     #[error("stalker portal refused the cmd: {reason}")]
     PortalRefusedCmd { reason: String },
@@ -54,16 +54,16 @@ pub enum StalkerError {
     HtmlResponse { snippet: String },
 
     #[error("stalker portal returned an empty body for {action}")]
-    EmptyBody { action: String },
+    EmptyBody { action: StalkerAction },
 
     #[error("stalker portal does not implement {action}")]
-    ActionUnsupported { action: String },
+    ActionUnsupported { action: StalkerAction },
 
     #[error("stalker {portal_type} catalog is incomplete: {reason}")]
     CatalogIncomplete { portal_type: &'static str, reason: String },
 
     #[error("stalker portal response status {status} for {action}")]
-    BadStatus { status: u16, action: String, body_snippet: String },
+    BadStatus { status: u16, action: StalkerAction, body_snippet: String },
 
     #[error("stalker client exhausted all bootstrap recipes for portal {portal}")]
     RecipesExhausted { portal: String },
@@ -111,11 +111,13 @@ impl StalkerError {
     pub fn is_unsupported_catalog_action(&self) -> bool {
         match self {
             Self::ActionUnsupported { .. } | Self::BodyDecode { .. } | Self::HtmlResponse { .. } => true,
-            Self::EmptyBody { action } => action == "get_all_channels",
+            Self::EmptyBody { action } => action.is_optional_catalog_shortcut(),
             Self::BadStatus { status, action, .. } => {
-                action == "get_all_channels" && matches!(*status, 400 | 404 | 405 | 501)
+                action.is_optional_catalog_shortcut() && matches!(*status, 400 | 404 | 405 | 501)
             }
-            Self::PortalBodyError { action, .. } => action == "get_all_channels" && !self.is_token_rejected(),
+            Self::PortalBodyError { action, .. } => {
+                action.is_optional_catalog_shortcut() && !self.is_token_rejected()
+            }
             _ => false,
         }
     }
@@ -191,15 +193,15 @@ mod tests {
         let cases: [(StalkerError, StalkerErrorKind); 8] = [
             (StalkerError::TokenRejected { status: 401, url: None }, StalkerErrorKind::Auth),
             (
-                StalkerError::PortalBodyError { code: 44, action: "vod".into(), body_snippet: String::new() },
+                StalkerError::PortalBodyError { code: 44, action: StalkerAction::GetOrderedList, body_snippet: String::new() },
                 StalkerErrorKind::Auth,
             ),
             (StalkerError::RecipesExhausted { portal: "p".into() }, StalkerErrorKind::Auth),
-            (StalkerError::ResponseTooLarge { action: "vod".into(), cap_bytes: 1 }, StalkerErrorKind::Capacity),
+            (StalkerError::ResponseTooLarge { action: StalkerAction::GetOrderedList, cap_bytes: 1 }, StalkerErrorKind::Capacity),
             (StalkerError::NoEndpoint { portal: "p".into() }, StalkerErrorKind::Config),
             (StalkerError::HtmlResponse { snippet: "<html>".into() }, StalkerErrorKind::Protocol),
             (
-                StalkerError::BadStatus { status: 502, action: "vod".into(), body_snippet: String::new() },
+                StalkerError::BadStatus { status: 502, action: StalkerAction::GetOrderedList, body_snippet: String::new() },
                 StalkerErrorKind::Transient,
             ),
             (StalkerError::Io(std::io::Error::other("reset")), StalkerErrorKind::Transient),
@@ -219,7 +221,7 @@ mod tests {
     /// auth - the two variants describe the same portal answer.
     #[test]
     fn a_rejected_token_classifies_as_auth_whichever_variant_carries_it() {
-        let as_status = StalkerError::BadStatus { status: 403, action: "vod".into(), body_snippet: String::new() };
+        let as_status = StalkerError::BadStatus { status: 403, action: StalkerAction::GetOrderedList, body_snippet: String::new() };
         assert_eq!(as_status.kind(), StalkerErrorKind::Auth);
         assert!(!as_status.is_retryable(), "looping on a rejected token is never right");
     }

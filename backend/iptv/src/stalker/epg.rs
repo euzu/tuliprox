@@ -1,4 +1,5 @@
 use crate::stalker::{
+    action::StalkerAction,
     client::StalkerApiClient,
     error::{safe_stalker_url, StalkerError, StalkerResult},
     profile::StalkerHandshake,
@@ -110,7 +111,7 @@ pub async fn get_short_epg<Tr: StalkerTransport, C: Clock>(
         ]);
         builder = client.apply_mac_query(builder);
         builder = client.apply_bearer(builder, Some(&handshake.session), spec.token_in_query);
-        match client.send_json::<Value>(builder, "get_short_epg").await {
+        match client.send_json::<Value>(builder, StalkerAction::GetShortEpg).await {
             Ok(value) => {
                 return Ok(parse_epg_records(&value));
             }
@@ -141,7 +142,7 @@ pub async fn get_epg<Tr: StalkerTransport, C: Clock>(
         ]);
         builder = client.apply_mac_query(builder);
         builder = client.apply_bearer(builder, Some(&handshake.session), spec.token_in_query);
-        match client.send_json::<Value>(builder, "get_epg").await {
+        match client.send_json::<Value>(builder, StalkerAction::GetEpg).await {
             Ok(value) => {
                 return Ok(parse_epg_records(&value));
             }
@@ -178,7 +179,7 @@ where
         ]);
         builder = client.apply_mac_query(builder);
         builder = client.apply_bearer(builder, Some(&handshake.session), spec.token_in_query);
-        let response = match client.send_with_cap(builder, "get_epg_bulk", client.body_caps().get_epg_bytes).await {
+        let response = match client.send_with_cap(builder, StalkerAction::GetBulkEpg, client.cap_for_action(StalkerAction::GetBulkEpg)).await {
             Ok(r) => r,
             Err(err) => {
                 last_err = Some(err);
@@ -188,7 +189,7 @@ where
         if !response.status().is_success() {
             last_err = Some(StalkerError::BadStatus {
                 status: response.status().as_u16(),
-                action: "get_epg_bulk".to_string(),
+                action: StalkerAction::GetBulkEpg,
                 body_snippet: String::new(),
             });
             continue;
@@ -246,7 +247,7 @@ where
             .await
             .map_err(|err| StalkerError::BodyDecode { message: format!("get_epg_bulk parser join error: {err}") })?
             .map_err(|err| match err.kind() {
-                ErrorKind::UnexpectedEof => StalkerError::EmptyBody { action: "get_epg_bulk".to_string() },
+                ErrorKind::UnexpectedEof => StalkerError::EmptyBody { action: StalkerAction::GetBulkEpg },
                 _ => StalkerError::BodyDecode { message: format!("get_epg_bulk json decode: {err}") },
             })?;
         cancellation_guard.disarm();

@@ -1,4 +1,5 @@
 use crate::stalker::{
+    action::StalkerAction,
     client::{validate_playable_scheme, StalkerApiClient},
     cmd_parser::scheme_is_playable,
     error::{safe_stalker_url, StalkerError, StalkerResult},
@@ -60,7 +61,7 @@ pub async fn create_link<Tr: StalkerTransport, C: Clock>(
             archive_start,
             archive_end,
         );
-        match client.send_json::<StalkerCreateLinkResponse>(builder, "create_link").await {
+        match client.send_json::<StalkerCreateLinkResponse>(builder, StalkerAction::CreateLink).await {
             Ok(resp) => {
                 return resolve_response(resp, kind, requested_mode, cmd);
             }

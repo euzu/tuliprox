@@ -1,4 +1,5 @@
 use crate::stalker::{
+    action::StalkerAction,
     client::StalkerApiClient,
     error::{safe_stalker_url, StalkerError, StalkerResult},
     presets::stalker_mag_preset_spec,
@@ -174,10 +175,10 @@ async fn perform_handshake_against<Tr: StalkerTransport, C: Clock>(
     ]);
     builder = client.apply_mac_query(builder);
     builder = client.apply_bearer(builder, None, spec.token_in_query || preset_spec.emit_token_query);
-    let response = client.send_with_cap(builder, "handshake", client.cap_for_action("handshake")).await?;
+    let response = client.send_with_cap(builder, StalkerAction::Handshake, client.cap_for_action(StalkerAction::Handshake)).await?;
     client.ingest_response_cookies(&response);
     let status = response.status();
-    let body = client.read_body_with_cap(response, "handshake", client.cap_for_action("handshake")).await?;
+    let body = client.read_body_with_cap(response, StalkerAction::Handshake, client.cap_for_action(StalkerAction::Handshake)).await?;
     if !status.is_success() {
         if matches!(status.as_u16(), 401 | 403 | 456) {
             return Err(StalkerError::TokenRejected {
@@ -190,7 +191,7 @@ async fn perform_handshake_against<Tr: StalkerTransport, C: Clock>(
             url: Some(load_url.load_url.as_str().into()),
         });
     }
-    let parsed: StalkerHandshakeResponse = client.decode_body_bytes(&body, "handshake")?;
+    let parsed: StalkerHandshakeResponse = client.decode_body_bytes(&body, StalkerAction::Handshake)?;
     let token = parsed.js.as_ref().and_then(|js| js.token.clone()).or(parsed.token.clone()).or_else(|| {
         // Some portals stash the token under the `text` field as a stringified object.
         parsed.text.as_ref().and_then(|t| {
@@ -261,7 +262,7 @@ async fn perform_do_auth<Tr: StalkerTransport, C: Clock>(
     ]);
     builder = client.apply_mac_query(builder);
     builder = client.apply_bearer(builder, Some(session), spec.token_in_query);
-    let value: Value = client.send_json(builder, "do_auth").await?;
+    let value: Value = client.send_json(builder, StalkerAction::DoAuth).await?;
     // Portals answer `{"js": true}` on success and `{"js": false}` on bad credentials;
     // anything else (object payloads, missing key) is treated as success.
     if matches!(value.get("js"), Some(Value::Bool(false))) {
@@ -285,7 +286,7 @@ async fn perform_handshake_extra<Tr: StalkerTransport, C: Clock>(
         .query(&[("type", "stb"), ("action", "handshake-extra")]);
     builder = client.apply_mac_query(builder);
     builder = client.apply_bearer(builder, Some(session), spec.token_in_query);
-    let response = client.send_with_cap(builder, "handshake-extra", client.cap_for_action("handshake-extra")).await?;
+    let response = client.send_with_cap(builder, StalkerAction::HandshakeExtra, client.cap_for_action(StalkerAction::HandshakeExtra)).await?;
     client.ingest_response_cookies(&response);
     let status = response.status();
     if status.is_success() {
@@ -293,7 +294,7 @@ async fn perform_handshake_extra<Tr: StalkerTransport, C: Clock>(
     } else {
         Err(StalkerError::BadStatus {
             status: status.as_u16(),
-            action: "handshake-extra".to_string(),
+            action: StalkerAction::HandshakeExtra,
             body_snippet: String::new(),
         })
     }
@@ -312,7 +313,7 @@ async fn perform_portal_handshake<Tr: StalkerTransport, C: Clock>(
         .query(&[("type", "stb"), ("action", "handshake")]);
     builder = client.apply_mac_query(builder);
     builder = client.apply_bearer(builder, Some(session), spec.token_in_query);
-    let response = client.send_with_cap(builder, "handshake-portal", client.cap_for_action("handshake-portal")).await?;
+    let response = client.send_with_cap(builder, StalkerAction::HandshakePortal, client.cap_for_action(StalkerAction::HandshakePortal)).await?;
     client.ingest_response_cookies(&response);
     let status = response.status();
     if status.is_success() {
@@ -320,7 +321,7 @@ async fn perform_portal_handshake<Tr: StalkerTransport, C: Clock>(
     } else {
         Err(StalkerError::BadStatus {
             status: status.as_u16(),
-            action: "handshake-portal".to_string(),
+            action: StalkerAction::HandshakePortal,
             body_snippet: String::new(),
         })
     }
@@ -339,7 +340,7 @@ async fn fetch_profile<Tr: StalkerTransport, C: Clock>(
     ]);
     builder = client.apply_mac_query(builder);
     builder = client.apply_bearer(builder, Some(session), spec.token_in_query);
-    let raw: serde_json::Value = client.send_json(builder, "get_profile").await?;
+    let raw: serde_json::Value = client.send_json(builder, StalkerAction::GetProfile).await?;
     // The portal sometimes returns the account fields under `js.*` and sometimes at the
     // top level. Merge both into a single object before deserialising.
     let merged = match raw {
@@ -373,7 +374,7 @@ async fn fetch_capabilities<Tr: StalkerTransport, C: Clock>(
         .query(&[("type", "stb"), ("action", "get_capabilities")]);
     builder = client.apply_mac_query(builder);
     builder = client.apply_bearer(builder, Some(session), spec.token_in_query);
-    let raw = client.send_json::<serde_json::Value>(builder, "get_capabilities").await.ok();
+    let raw = client.send_json::<serde_json::Value>(builder, StalkerAction::GetCapabilities).await.ok();
     let Some(value) = raw else {
         return Ok(StalkerPortalCapabilitiesDto::default());
     };

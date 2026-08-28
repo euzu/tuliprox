@@ -9,6 +9,7 @@ use crate::{
     presets::stalker_mag_preset_spec,
     profile::{StalkerHandshake, StalkerResolvedStream},
     recipes::apply_endpoint_preference,
+    action::StalkerAction,
     session::StalkerSession,
     transport::{ReqwestTransport, StalkerTransport},
     url_factory::{load_url_candidates, StalkerLoadUrl},
@@ -155,21 +156,21 @@ impl<Tr: StalkerTransport, C: Clock> StalkerApiClient<Tr, C> {
     /// Whether `action` is known not to work on this portal, according to a snapshot
     /// still worth believing.
     #[must_use]
-    pub fn action_is_unsupported(&self, action: &str) -> bool {
-        self.capabilities.lock().is_unsupported(action, self.now_epoch_secs())
+    pub fn action_is_unsupported(&self, action: StalkerAction) -> bool {
+        self.capabilities.lock().is_unsupported(action.as_str(), self.now_epoch_secs())
     }
 
     /// Note that the portal does not implement `action`. Returns whether this was new
     /// information, so a caller can skip a write that would persist nothing.
-    pub fn record_unsupported_action(&self, action: &str) -> bool {
+    pub fn record_unsupported_action(&self, action: StalkerAction) -> bool {
         let now = self.now_epoch_secs();
-        self.capabilities.lock().record_unsupported(action, now)
+        self.capabilities.lock().record_unsupported(action.as_str(), now)
     }
 
     /// Note that `action` worked, taking back any earlier negative claim.
-    pub fn record_supported_action(&self, action: &str) -> bool {
+    pub fn record_supported_action(&self, action: StalkerAction) -> bool {
         let now = self.now_epoch_secs();
-        self.capabilities.lock().record_supported(action, now)
+        self.capabilities.lock().record_supported(action.as_str(), now)
     }
 
     /// Note the recipe and endpoint that completed a handshake, so the next one can start
@@ -529,7 +530,7 @@ impl<Tr: StalkerTransport, C: Clock> StalkerApiClient<Tr, C> {
     /// the body cap is exceeded the request is aborted and a `ResponseTooLarge` error is
     /// returned. The cap is enforced by inspecting the `Content-Length` header when
     /// present and otherwise by streaming the body in chunks of 64 KiB.
-    pub async fn send_json<T>(&self, builder: RequestBuilder, cap_action: &'static str) -> StalkerResult<T>
+    pub async fn send_json<T>(&self, builder: RequestBuilder, cap_action: StalkerAction) -> StalkerResult<T>
     where
         T: for<'de> Deserialize<'de>,
     {
@@ -541,7 +542,7 @@ impl<Tr: StalkerTransport, C: Clock> StalkerApiClient<Tr, C> {
         if !status.is_success() {
             return Err(StalkerError::BadStatus {
                 status: status.as_u16(),
-                action: cap_action.to_string(),
+                action: cap_action,
                 body_snippet: String::from_utf8_lossy(&body[..body.len().min(256)]).into_owned(),
             });
         }
@@ -553,7 +554,7 @@ impl<Tr: StalkerTransport, C: Clock> StalkerApiClient<Tr, C> {
             if matches!(code, 44 | 440..=449) {
                 return Err(StalkerError::PortalBodyError {
                     code,
-                    action: cap_action.to_string(),
+                    action: cap_action,
                     body_snippet: String::from_utf8_lossy(&body[..body.len().min(256)]).into_owned(),
                 });
             }
@@ -564,7 +565,7 @@ impl<Tr: StalkerTransport, C: Clock> StalkerApiClient<Tr, C> {
     /// Decode the body bytes as JSON, optionally stripping a JSONP wrapper and a UTF-8
     /// BOM. Returns the parsed value or a typed error.
     #[allow(clippy::unused_self)]
-    pub fn decode_body_bytes<T>(&self, body: &[u8], action: &'static str) -> StalkerResult<T>
+    pub fn decode_body_bytes<T>(&self, body: &[u8], action: StalkerAction) -> StalkerResult<T>
     where
         T: for<'de> Deserialize<'de>,
     {
@@ -575,7 +576,7 @@ impl<Tr: StalkerTransport, C: Clock> StalkerApiClient<Tr, C> {
             return Err(StalkerError::HtmlResponse { snippet });
         }
         if json.is_empty() {
-            return Err(StalkerError::EmptyBody { action: action.to_string() });
+            return Err(StalkerError::EmptyBody { action });
         }
         serde_json::from_str::<T>(json).map_err(|err| {
             let snippet = json.chars().take(160).collect::<String>();
@@ -589,14 +590,14 @@ impl<Tr: StalkerTransport, C: Clock> StalkerApiClient<Tr, C> {
     pub async fn send_with_cap(
         &self,
         builder: RequestBuilder,
-        action: &'static str,
+        action: StalkerAction,
         cap: u64,
     ) -> StalkerResult<Response> {
         let request = builder.build().map_err(StalkerError::from)?;
         let response = self.transport.execute(request).await?;
         if let Some(content_length) = response.content_length() {
             if content_length > cap {
-                return Err(StalkerError::ResponseTooLarge { action: action.to_string(), cap_bytes: cap });
+                return Err(StalkerError::ResponseTooLarge { action, cap_bytes: cap });
             }
         }
         if response.status().is_success() {
@@ -611,7 +612,7 @@ impl<Tr: StalkerTransport, C: Clock> StalkerApiClient<Tr, C> {
     pub async fn read_body_with_cap(
         &self,
         mut response: Response,
-        action: &'static str,
+        action: StalkerAction,
         cap: u64,
     ) -> StalkerResult<Bytes> {
         let initial_capacity =
@@ -622,26 +623,19 @@ impl<Tr: StalkerTransport, C: Clock> StalkerApiClient<Tr, C> {
         while let Some(chunk) = response.chunk().await.map_err(StalkerError::from)? {
             received = received.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
             if received > cap {
-                return Err(StalkerError::ResponseTooLarge { action: action.to_string(), cap_bytes: cap });
+                return Err(StalkerError::ResponseTooLarge { action, cap_bytes: cap });
             }
             body.extend_from_slice(&chunk);
         }
         let body = body.freeze();
-        persist_stalker_debug_body(&self.portal_url, action, &body);
+        persist_stalker_debug_body(&self.portal_url, action.as_str(), &body);
         Ok(body)
     }
 
-    /// Resolve the body cap for a given action. The cap is taken from the user's
-    /// `StalkerSizeCaps`; defaults are inherited from `StalkerBodyCaps::default`.
-    pub fn cap_for_action(&self, action: &str) -> u64 {
-        match action {
-            "create_link" => self.body_caps.create_link_bytes,
-            "ordered_list" | "all_channels" | "vod" | "series_list" | "series_info" => {
-                self.body_caps.ordered_list_bytes
-            }
-            "get_epg" | "get_short_epg" => self.body_caps.get_epg_bytes,
-            _ => 8 * 1024 * 1024,
-        }
+    /// The body cap for `action`, from this client's configured [`StalkerBodyCaps`].
+    #[must_use]
+    pub fn cap_for_action(&self, action: StalkerAction) -> u64 {
+        action.cap_bytes(&self.body_caps)
     }
 }
 
@@ -886,7 +880,8 @@ mod transport_tests {
         catalog,
         profile::{StalkerHandshake, StalkerProviderProfile, StalkerRawProviderProfile},
         recipes::fallback_recipes_for,
-        session::StalkerSession,
+        action::StalkerAction,
+    session::StalkerSession,
         transport::testing::{FakeTransport, Reply},
     };
     use shared::model::stalker::{StalkerBootstrapRecipe, StalkerPortalCapabilitiesDto};
@@ -936,7 +931,7 @@ mod transport_tests {
     async fn a_portal_refusal_hidden_in_a_200_body_surfaces_as_a_token_rejection() {
         let client = client_over([Reply::ok(r#"{"code": 44, "text": "Account is blocked"}"#)]);
         let err = client
-            .send_json::<serde_json::Value>(client.get(PORTAL), "create_link")
+            .send_json::<serde_json::Value>(client.get(PORTAL), StalkerAction::CreateLink)
             .await
             .expect_err("a portal code must not decode as success");
         assert!(matches!(err, StalkerError::PortalBodyError { code: 44, .. }));
@@ -955,7 +950,7 @@ mod transport_tests {
             config,
         );
         let err = client
-            .send_json::<serde_json::Value>(client.get(PORTAL), "create_link")
+            .send_json::<serde_json::Value>(client.get(PORTAL), StalkerAction::CreateLink)
             .await
             .expect_err("body above the cap must be refused");
         assert!(matches!(err, StalkerError::ResponseTooLarge { cap_bytes: 1024, .. }));
@@ -965,7 +960,7 @@ mod transport_tests {
     async fn an_html_error_page_is_not_mistaken_for_json() {
         let client = client_over([Reply::ok("<html><body>502 Bad Gateway</body></html>")]);
         let err = client
-            .send_json::<serde_json::Value>(client.get(PORTAL), "ordered_list")
+            .send_json::<serde_json::Value>(client.get(PORTAL), StalkerAction::GetOrderedList)
             .await
             .expect_err("HTML must not decode as JSON");
         assert!(matches!(err, StalkerError::HtmlResponse { .. }));
@@ -1352,16 +1347,16 @@ mod tests {
     #[test]
     fn is_token_rejected_recognises_portal_body_error() {
         // 44 and 440..=449 are recognised as token-rejected body errors.
-        assert!(StalkerError::PortalBodyError { code: 44, action: "create_link".into(), body_snippet: String::new() }
+        assert!(StalkerError::PortalBodyError { code: 44, action: StalkerAction::CreateLink, body_snippet: String::new() }
             .is_token_rejected());
-        assert!(StalkerError::PortalBodyError { code: 449, action: "create_link".into(), body_snippet: String::new() }
+        assert!(StalkerError::PortalBodyError { code: 449, action: StalkerAction::CreateLink, body_snippet: String::new() }
             .is_token_rejected());
         // Codes outside the 44xx band do not classify as token rejection.
-        assert!(!StalkerError::PortalBodyError { code: 11, action: "create_link".into(), body_snippet: String::new() }
+        assert!(!StalkerError::PortalBodyError { code: 11, action: StalkerAction::CreateLink, body_snippet: String::new() }
             .is_token_rejected());
         assert!(!StalkerError::PortalBodyError {
             code: 500,
-            action: "create_link".into(),
+            action: StalkerAction::CreateLink,
             body_snippet: String::new(),
         }
         .is_token_rejected());
