@@ -437,8 +437,22 @@ pub async fn xtream_login<E: EventSink>(
 /// Emitting is synchronous and non-blocking, so this no longer awaits: the
 /// notification is delivered by whoever subscribes to the bus.
 pub fn notify_account_expire<E: EventSink>(exp_date: Option<i64>, events: &E, username: &str, input_name: &str) {
+    notify_account_expire_at(Utc::now().timestamp(), exp_date, events, username, input_name);
+}
+
+/// [`notify_account_expire`] against a caller-supplied instant.
+///
+/// The three-day warning window and the expired/expiring split are pure functions of
+/// `now_secs`; taking it as a parameter is what makes either branch reachable without
+/// waiting for the calendar.
+pub fn notify_account_expire_at<E: EventSink>(
+    now_secs: i64,
+    exp_date: Option<i64>,
+    events: &E,
+    username: &str,
+    input_name: &str,
+) {
     if let Some(expiration_timestamp) = exp_date {
-        let now_secs = Utc::now().timestamp(); // UTC-Time
         if expiration_timestamp > now_secs {
             let time_left = expiration_timestamp - now_secs;
 
@@ -710,6 +724,56 @@ mod tests {
     use tuliprox_core::model::{
         ConfigInput, ConfigInputFlags, ConfigInputFlagsSet, ConfigInputOptions, ProxyUserCredentials,
     };
+
+    /// Records what reached the bus, so the expiry branches can be asserted rather than
+    /// inferred from a log line.
+    #[derive(Default)]
+    struct RecordingSink(std::sync::Mutex<Vec<shared::model::ProviderAccountEvent>>);
+
+    impl shared::model::EventSink for RecordingSink {
+        fn emit(&self, event: shared::model::EventMessage) {
+            if let shared::model::EventMessage::ProviderAccount(event) = event {
+                self.0.lock().expect("sink poisoned").push(event);
+            }
+        }
+    }
+
+    impl RecordingSink {
+        fn states(&self) -> Vec<shared::model::ProviderAccountState> {
+            self.0.lock().expect("sink poisoned").iter().map(|event| event.state).collect()
+        }
+    }
+
+    const EXPIRY: i64 = 1_700_000_000;
+
+    #[test]
+    fn an_account_past_its_expiry_is_reported_expired() {
+        let sink = RecordingSink::default();
+        super::notify_account_expire_at(EXPIRY + 1, Some(EXPIRY), &sink, "user", "provider");
+        assert_eq!(sink.states(), vec![shared::model::ProviderAccountState::Expired]);
+    }
+
+    #[test]
+    fn an_account_inside_the_three_day_window_is_reported_expiring() {
+        let sink = RecordingSink::default();
+        super::notify_account_expire_at(EXPIRY - 60, Some(EXPIRY), &sink, "user", "provider");
+        assert_eq!(sink.states(), vec![shared::model::ProviderAccountState::Expiring]);
+    }
+
+    #[test]
+    fn an_account_outside_the_three_day_window_is_quiet() {
+        let sink = RecordingSink::default();
+        // One second before the window opens.
+        super::notify_account_expire_at(EXPIRY - super::THREE_DAYS_IN_SECS - 1, Some(EXPIRY), &sink, "u", "p");
+        assert!(sink.states().is_empty());
+    }
+
+    #[test]
+    fn no_expiry_date_emits_nothing() {
+        let sink = RecordingSink::default();
+        super::notify_account_expire_at(EXPIRY, None, &sink, "user", "provider");
+        assert!(sink.states().is_empty());
+    }
 
     fn options_with_flags(flags: &[ConfigInputFlags]) -> ConfigInputOptions {
         let mut set = ConfigInputFlagsSet::new();

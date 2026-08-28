@@ -426,7 +426,8 @@ impl StalkerApiClient {
     /// Persist Set-Cookie headers from a response into the jar. Called from every
     /// request helper after a successful response.
     pub fn ingest_response_cookies(&self, response: &Response) {
-        apply_set_cookie_headers_unchecked(&self.cookies, response.headers()).ok();
+        apply_set_cookie_headers_unchecked(&self.cookies, response.headers(), crate::clock::system_epoch_secs())
+            .ok();
     }
 
     /// Send a request and decode the JSON body, applying the per-action body cap. When

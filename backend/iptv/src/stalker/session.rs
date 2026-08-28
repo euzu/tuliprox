@@ -1,8 +1,6 @@
 use super::error::safe_stalker_url;
-use std::{
-    fmt,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use crate::clock::system_epoch_secs;
+use std::{fmt, time::Duration};
 
 /// A successful Stalker handshake. The token is sent as `Authorization: Bearer <token>` on
 /// every subsequent API call; portal cookies live in the client's shared cookie jar; the
@@ -35,8 +33,21 @@ impl fmt::Debug for StalkerSession {
 }
 
 impl StalkerSession {
+    /// Stamp the session with the system clock. Callers that already hold an instant
+    /// should use [`Self::new_at`] instead.
     pub fn new(token: String, referer: String, load_url: String) -> Self {
-        Self { token, referer, load_url, fingerprint_evidence: Vec::new(), created_at_epoch_secs: now_epoch_secs() }
+        Self::new_at(token, referer, load_url, system_epoch_secs())
+    }
+
+    /// Stamp the session with a caller-supplied instant.
+    pub fn new_at(token: String, referer: String, load_url: String, now_epoch_secs: u64) -> Self {
+        Self {
+            token,
+            referer,
+            load_url,
+            fingerprint_evidence: Vec::new(),
+            created_at_epoch_secs: now_epoch_secs,
+        }
     }
 
     pub fn with_evidence(mut self, evidence: Vec<String>) -> Self {
@@ -48,13 +59,13 @@ impl StalkerSession {
     /// may invalidate tokens earlier; this is a soft hint to re-handshake, not a
     /// hard expiry.
     pub fn is_stale(&self, ttl: Duration) -> bool {
-        let now = now_epoch_secs();
-        now.saturating_sub(self.created_at_epoch_secs) >= ttl.as_secs()
+        self.is_stale_at(system_epoch_secs(), ttl)
     }
-}
 
-fn now_epoch_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+    /// [`Self::is_stale`] against a caller-supplied instant.
+    pub fn is_stale_at(&self, now_epoch_secs: u64, ttl: Duration) -> bool {
+        now_epoch_secs.saturating_sub(self.created_at_epoch_secs) >= ttl.as_secs()
+    }
 }
 
 /// How long a `StalkerSession` should be considered fresh. The portal invalidates tokens
@@ -111,16 +122,17 @@ mod tests {
     }
 
     #[test]
-    fn fresh_session_is_not_stale() {
-        let session = StalkerSession::new("t".into(), "r".into(), "l".into());
-        assert!(!session.is_stale(STALKER_SESSION_TTL));
+    fn staleness_is_measured_against_the_supplied_instant() {
+        // No back-dating of the struct and no sleeping: the instant is a parameter.
+        let session = StalkerSession::new_at("t".into(), "r".into(), "l".into(), 10_000);
+        assert!(!session.is_stale_at(10_000, STALKER_SESSION_TTL));
+        assert!(!session.is_stale_at(10_000 + STALKER_SESSION_TTL.as_secs() - 1, STALKER_SESSION_TTL));
+        assert!(session.is_stale_at(10_000 + STALKER_SESSION_TTL.as_secs(), STALKER_SESSION_TTL));
     }
 
     #[test]
-    fn stale_session_is_detected() {
-        let mut session = StalkerSession::new("t".into(), "r".into(), "l".into());
-        // Pretend the session is one hour old.
-        session.created_at_epoch_secs = now_epoch_secs().saturating_sub(3600);
-        assert!(session.is_stale(STALKER_SESSION_TTL));
+    fn a_clock_that_runs_backwards_does_not_report_a_stale_session() {
+        let session = StalkerSession::new_at("t".into(), "r".into(), "l".into(), 10_000);
+        assert!(!session.is_stale_at(1, STALKER_SESSION_TTL));
     }
 }
