@@ -71,12 +71,26 @@ impl EmitOutcome {
 /// for were equally invisible. Counting here rather than at the call sites
 /// means one place to read, and the plugin system's promised drop counters
 /// have somewhere to come from.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct EventBusStats {
     emitted: [AtomicU64; EventKind::ALL.len()],
     no_subscribers: AtomicU64,
     lagged: AtomicU64,
     coalesced: AtomicU64,
+}
+
+/// Hand-written because `Default` for arrays stops at 32 elements, and the
+/// taxonomy passed that. `from_fn` has no such limit and keeps the counter
+/// array indexed by `EventKind` rather than boxed or `Vec`-backed.
+impl Default for EventBusStats {
+    fn default() -> Self {
+        Self {
+            emitted: std::array::from_fn(|_| AtomicU64::new(0)),
+            no_subscribers: AtomicU64::new(0),
+            lagged: AtomicU64::new(0),
+            coalesced: AtomicU64::new(0),
+        }
+    }
 }
 
 impl EventBusStats {

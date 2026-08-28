@@ -214,6 +214,7 @@ pub mod registry {
     // ---- metadata -------------------------------------------------------
     pub const METADATA_UPDATE_STARTED: EventId = EventId::new("metadata.update.started");
     pub const METADATA_UPDATE_COMPLETED: EventId = EventId::new("metadata.update.completed");
+    pub const METADATA_UPDATE_FAILED: EventId = EventId::new("metadata.update.failed");
 
     // ---- users and connections ------------------------------------------
     /// High frequency. Subscribe deliberately.
@@ -325,6 +326,11 @@ pub mod registry {
             id: METADATA_UPDATE_COMPLETED,
             severity: Severity::Info,
             description: "A metadata update finished for an input.",
+        },
+        EventDescriptor {
+            id: METADATA_UPDATE_FAILED,
+            severity: Severity::Error,
+            description: "A metadata update cycle ended with tasks it could not finish.",
         },
         EventDescriptor {
             id: USER_CONNECTION_CHANGED,

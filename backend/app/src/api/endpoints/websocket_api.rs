@@ -481,6 +481,7 @@ fn to_protocol_message(event: EventMessage) -> Option<(ProtocolMessage, &'static
         EventMessage::RecordingChanged
         | EventMessage::InputMetadataUpdatesCompleted(_)
         | EventMessage::InputMetadataUpdatesStarted(_)
+        | EventMessage::InputMetadataUpdatesFailed(_)
         | EventMessage::DiskAlert(_)
         | EventMessage::ConfigReloadFailed(_)
         | EventMessage::PlaylistWatchChanged(_)
@@ -646,8 +647,8 @@ mod tests {
     use crate::api::model::EventMessage;
     use shared::model::{
         Claims, ConfigReloadFailure, DiskAlert, DiskAlertLevel, DownloadsDelta, DownloadsResponse, FileDownloadDto,
-        LibraryScanProgressEvent, LibraryScanSummary, LibraryScanSummaryStatus, MsgKind, Permission,
-        PlaylistUpdateProgressEvent, ProtocolHandler, ProtocolHandlerMemory, ProviderAccountEvent,
+        LibraryScanProgressEvent, LibraryScanSummary, LibraryScanSummaryStatus, MetadataUpdateFailure, MsgKind,
+        Permission, PlaylistUpdateProgressEvent, ProtocolHandler, ProtocolHandlerMemory, ProviderAccountEvent,
         ProviderAccountState, RecordingLifecycleMessage, RoleSet, TaskKindDto, TaskPriorityDto, TransferStatusDto,
         UserId, UserRole, WatchChanges, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, PROTOCOL_VERSION, TOKEN_NO_AUTH,
     };
@@ -684,7 +685,8 @@ mod tests {
         // every notification-only kind against `expected = true` and the
         // test failed on `DiskAlert` - it has been red since the lifecycle
         // events joined the bus.
-        const NOT_ON_THE_WIRE: [EventKind; 13] = [
+        const NOT_ON_THE_WIRE: [EventKind; 14] = [
+            EventKind::InputMetadataUpdatesFailed,
             EventKind::DiskAlert,
             EventKind::ConfigReloadFailed,
             EventKind::PlaylistWatchChanged,
@@ -761,6 +763,7 @@ mod tests {
             EventMessage::RecordingRulesChanged,
             EventMessage::InputMetadataUpdatesCompleted("a".into()),
             EventMessage::InputMetadataUpdatesStarted("a".into()),
+            EventMessage::InputMetadataUpdatesFailed(MetadataUpdateFailure::new("a".into(), 1, false, None)),
             EventMessage::DiskAlert(DiskAlert {
                 level: DiskAlertLevel::Warn,
                 total_bytes: 100,

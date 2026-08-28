@@ -14,9 +14,9 @@ use crate::model::{
     notification::{registry, EventId, Severity},
     stats::SourceStats,
     ActiveUserConnectionChange, ConfigReloadFailure, ConfigType, DiskAlert, DownloadsDelta, DownloadsResponse,
-    LibraryScanProgressEvent, LibraryScanSummaryStatus, MsgKind, Permission, PlaylistUpdateProgressEvent,
-    PlaylistUpdateState, ProviderAccountEvent, ProviderAccountState, RecordingLifecycleMessage, StreamProbeFailure,
-    SystemInfo, UserLifecycleEvent, UserLifecycleState, WatchChanges,
+    LibraryScanProgressEvent, LibraryScanSummaryStatus, MetadataUpdateFailure, MsgKind, Permission,
+    PlaylistUpdateProgressEvent, PlaylistUpdateState, ProviderAccountEvent, ProviderAccountState,
+    RecordingLifecycleMessage, StreamProbeFailure, SystemInfo, UserLifecycleEvent, UserLifecycleState, WatchChanges,
 };
 use std::sync::Arc;
 
@@ -40,6 +40,12 @@ pub enum EventMessage {
     RecordingRulesChanged,
     InputMetadataUpdatesCompleted(Arc<str>),
     InputMetadataUpdatesStarted(Arc<str>),
+    /// A metadata update cycle ended with tasks it could not finish.
+    ///
+    /// `InputMetadataUpdatesCompleted` only fires when a cycle drained *with
+    /// changes*, so without this an input whose resolves always fail emits a
+    /// start and then silence for as long as it stays broken.
+    InputMetadataUpdatesFailed(MetadataUpdateFailure),
 
     // The lifecycle events below reached the notification pipeline directly,
     // never the bus, so nothing that subscribes here could see them. Each is
@@ -147,6 +153,7 @@ pub enum EventKind {
     RecordingRulesChanged,
     InputMetadataUpdatesCompleted,
     InputMetadataUpdatesStarted,
+    InputMetadataUpdatesFailed,
     DiskAlert,
     ConfigReloadFailed,
     PlaylistWatchChanged,
@@ -171,7 +178,7 @@ impl EventKind {
     ///
     /// The mask type below indexes into this, so the order is load-bearing:
     /// it is the bit order, not just a listing.
-    pub const ALL: [Self; 32] = [
+    pub const ALL: [Self; 33] = [
         Self::ServerError,
         Self::ActiveUser,
         Self::ActiveProvider,
@@ -187,6 +194,7 @@ impl EventKind {
         Self::RecordingRulesChanged,
         Self::InputMetadataUpdatesCompleted,
         Self::InputMetadataUpdatesStarted,
+        Self::InputMetadataUpdatesFailed,
         Self::DiskAlert,
         Self::ConfigReloadFailed,
         Self::PlaylistWatchChanged,
@@ -249,6 +257,7 @@ impl EventKind {
             | Self::SystemInfoUpdate
             | Self::InputMetadataUpdatesCompleted
             | Self::InputMetadataUpdatesStarted
+            | Self::InputMetadataUpdatesFailed
             | Self::DiskAlert
             | Self::ConfigReloadFailed
             | Self::ProviderAccountStatus
@@ -333,6 +342,7 @@ impl EventKind {
             Self::RecordingRulesChanged => "recording.rules.changed",
             Self::InputMetadataUpdatesCompleted => "metadata.update.completed",
             Self::InputMetadataUpdatesStarted => "metadata.update.started",
+            Self::InputMetadataUpdatesFailed => "metadata.update.failed",
             Self::DiskAlert => "system.disk.alert",
             Self::ConfigReloadFailed => "config.reload.failed",
             Self::PlaylistWatchChanged => "playlist.watch.changed",
@@ -384,6 +394,7 @@ impl EventMessage {
             Self::RecordingRulesChanged => EventKind::RecordingRulesChanged,
             Self::InputMetadataUpdatesCompleted(_) => EventKind::InputMetadataUpdatesCompleted,
             Self::InputMetadataUpdatesStarted(_) => EventKind::InputMetadataUpdatesStarted,
+            Self::InputMetadataUpdatesFailed(_) => EventKind::InputMetadataUpdatesFailed,
             Self::DiskAlert(_) => EventKind::DiskAlert,
             Self::ConfigReloadFailed(_) => EventKind::ConfigReloadFailed,
             Self::PlaylistWatchChanged(_) => EventKind::PlaylistWatchChanged,
@@ -465,6 +476,7 @@ impl EventMessage {
             },
             Self::InputMetadataUpdatesStarted(_) => registry::METADATA_UPDATE_STARTED,
             Self::InputMetadataUpdatesCompleted(_) => registry::METADATA_UPDATE_COMPLETED,
+            Self::InputMetadataUpdatesFailed(_) => registry::METADATA_UPDATE_FAILED,
             Self::DiskAlert(_) => registry::SYSTEM_DISK_ALERT,
             Self::ConfigReloadFailed(_) => registry::CONFIG_RELOAD_FAILED,
             Self::PlaylistWatchChanged(_) => registry::PLAYLIST_WATCH_CHANGED,
@@ -536,6 +548,7 @@ impl EventMessage {
             Self::InputMetadataUpdatesStarted(input) | Self::InputMetadataUpdatesCompleted(input) => {
                 serde_json::json!({ "input": input.as_ref() })
             }
+            Self::InputMetadataUpdatesFailed(failure) => encode(failure),
             Self::DiskAlert(alert) => encode(alert),
             Self::ConfigReloadFailed(failure) => encode(failure),
             Self::PlaylistWatchChanged(changes) => encode(changes),

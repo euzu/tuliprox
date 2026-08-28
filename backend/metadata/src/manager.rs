@@ -7,10 +7,11 @@ use shared::{
     defaults::default_probe_user_priority,
     error::TuliproxError,
     model::{
-        EventMessage, EventSink, InputType, LiveStreamProperties, PlaylistItemType, SeriesStreamProperties,
-        StreamProperties, UUIDType, VideoStreamProperties, VirtualId, XtreamCluster, XtreamPlaylistItem,
+        EventMessage, EventSink, InputType, LiveStreamProperties, MetadataUpdateFailure, PlaylistItemType,
+        SeriesStreamProperties, StreamProperties, UUIDType, VideoStreamProperties, VirtualId, XtreamCluster,
+        XtreamPlaylistItem,
     },
-    utils::generate_provider_playlist_uuid,
+    utils::{generate_provider_playlist_uuid, sanitize_sensitive_info},
 };
 use std::{
     cmp::min,
@@ -1210,6 +1211,13 @@ impl InputWorker {
         let mut last_progress_log_at = Instant::now();
         let mut queue_cycle_active = false;
         let mut cycle_had_changes = false;
+        // Tasks that burned through their retries this cycle. A cycle that
+        // exhausts work is the only signal an operator gets that an input has
+        // stopped resolving - `InputMetadataUpdatesCompleted` fires only when
+        // something actually changed, so a permanently broken input would
+        // otherwise emit a start and then nothing at all.
+        let mut cycle_failed_tasks: usize = 0;
+        let mut cycle_last_error: Option<String> = None;
         let mut consecutive_resolve_tasks = 0_usize;
 
         let input_name = self.input_name.clone();
@@ -1264,6 +1272,8 @@ impl InputWorker {
                 // First entry of a new processing cycle.
                 queue_cycle_active = true;
                 cycle_had_changes = false;
+                cycle_failed_tasks = 0;
+                cycle_last_error = None;
                 processed_vod_count = 0;
                 processed_series_count = 0;
                 last_progress_log_at = Instant::now();
@@ -1738,6 +1748,8 @@ impl InputWorker {
                             let attempts = state_after_update.attempts;
 
                             if attempts >= max_attempts {
+                                cycle_failed_tasks = cycle_failed_tasks.saturating_add(1);
+                                cycle_last_error = Some(sanitize_sensitive_info(e.message()).into_owned());
                                 self.scheduled_requeues.remove(&current_key);
                                 if retry_domain == RetryDomain::Probe {
                                     remove_current_task = true;
@@ -1903,7 +1915,26 @@ impl InputWorker {
                 } else {
                     debug!("All pending metadata resolves completed for input {input_name} (no changes, skipping playlist update trigger)");
                 }
+                // Reported alongside the completion rather than instead of it:
+                // a cycle can both produce changes and exhaust tasks, and
+                // suppressing the completion would also suppress the playlist
+                // update it triggers.
+                if cycle_failed_tasks > 0 {
+                    warn!(
+                        "Metadata update cycle for input {input_name} exhausted {cycle_failed_tasks} task(s) without resolving them"
+                    );
+                    if let Some(ctx) = bound_ctx.clone() {
+                        ctx.events.emit(EventMessage::InputMetadataUpdatesFailed(MetadataUpdateFailure::new(
+                            input_name.clone(),
+                            cycle_failed_tasks,
+                            cycle_had_changes,
+                            cycle_last_error.clone(),
+                        )));
+                    }
+                }
                 cycle_had_changes = false;
+                cycle_failed_tasks = 0;
+                cycle_last_error = None;
             }
         }
 

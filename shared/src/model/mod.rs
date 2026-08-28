@@ -18,6 +18,7 @@ mod log;
 mod mapping;
 mod media_properties;
 mod messaging;
+mod metadata_update_failure;
 pub mod notification;
 mod pagination;
 mod playlist;
@@ -63,13 +64,13 @@ pub mod xtream_const;
 pub use self::{
     active_user_connection_change::*, auth::*, auth_audit::*, cluster_flags::*, config::*, custom_video_stream_type::*,
     download::*, epg::*, epg_request::*, event::*, identity_registry::*, ip_check::*, item_field::*,
-    library_request::*, log::*, mapping::*, media_properties::*, messaging::*, notification::*, pagination::*,
-    playlist::*, playlist_categories::*, playlist_info_document::*, playlist_request::*, processing_order::*,
-    progress::*, recording::*, recording_math::*, regex_cache::*, search_fields::*, search_request::*, short_epg::*,
-    stalker::*, stalker_item::*, stats::*, status_check::*, stream_history::*, stream_history_record::*,
-    stream_info::*, stream_meter::*, stream_probe_failure::*, stream_properties::*, strm_export_style::*,
-    system_info::*, target_type::*, transfer::*, ui_playlist_item::*, user_command::*, user_lifecycle::*, uuidtype::*,
-    web_socket::*, xtream::*,
+    library_request::*, log::*, mapping::*, media_properties::*, messaging::*, metadata_update_failure::*,
+    notification::*, pagination::*, playlist::*, playlist_categories::*, playlist_info_document::*,
+    playlist_request::*, processing_order::*, progress::*, recording::*, recording_math::*, regex_cache::*,
+    search_fields::*, search_request::*, short_epg::*, stalker::*, stalker_item::*, stats::*, status_check::*,
+    stream_history::*, stream_history_record::*, stream_info::*, stream_meter::*, stream_probe_failure::*,
+    stream_properties::*, strm_export_style::*, system_info::*, target_type::*, transfer::*, ui_playlist_item::*,
+    user_command::*, user_lifecycle::*, uuidtype::*, web_socket::*, xtream::*,
 };
 pub use ids::*;
 pub use prepare::*;

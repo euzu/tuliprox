@@ -84,6 +84,7 @@ const NOTIFIABLE_KINDS: EventKindMask = EventKindMask::new()
     .with(EventKind::LibraryScanFailed)
     .with(EventKind::InputMetadataUpdatesStarted)
     .with(EventKind::InputMetadataUpdatesCompleted)
+    .with(EventKind::InputMetadataUpdatesFailed)
     .with(EventKind::ActiveUser)
     .with(EventKind::ActiveProvider)
     .with(EventKind::RecordingChanged)
@@ -167,6 +168,14 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
         EventMessage::InputMetadataUpdatesCompleted(input) => {
             let title = format!("Metadata update finished for {input}");
             Some(NotificationEvent::new(id, title.clone(), title))
+        }
+        EventMessage::InputMetadataUpdatesFailed(failure) => {
+            let title = format!(
+                "Metadata update for {} could not finish: {} task(s) exhausted",
+                failure.input, failure.failed_tasks
+            );
+            let body = failure.last_error.as_ref().map_or_else(|| title.clone(), |err| format!("{title}\n\n{err}"));
+            Some(NotificationEvent::new(id, title, body).with_fields(failure))
         }
 
         EventMessage::ActiveUser(change) => {
@@ -307,8 +316,8 @@ mod tests {
     use shared::model::{
         notification::{registry, Severity},
         ActiveUserConnectionChange, ConfigReloadFailure, ConfigType, DiskAlert, DiskAlertLevel, DownloadsResponse,
-        EventKind, LibraryScanProgressEvent, LibraryScanSummary, LibraryScanSummaryStatus, MsgKind,
-        PlaylistUpdateProgressEvent, PlaylistUpdateState, PlaylistUpdateSummary, ProviderAccountEvent,
+        EventKind, LibraryScanProgressEvent, LibraryScanSummary, LibraryScanSummaryStatus, MetadataUpdateFailure,
+        MsgKind, PlaylistUpdateProgressEvent, PlaylistUpdateState, PlaylistUpdateSummary, ProviderAccountEvent,
         ProviderAccountState, RecordingLifecycleMessage, StreamProbeFailure, StreamProbeFailureReason, SystemInfo,
         UserLifecycleEvent, UserLifecycleState, WatchChanges,
     };
@@ -374,6 +383,7 @@ mod tests {
             EventMessage::RecordingChanged,
             EventMessage::RecordingRulesChanged,
             EventMessage::InputMetadataUpdatesStarted("a".into()),
+            EventMessage::InputMetadataUpdatesFailed(MetadataUpdateFailure::new("a".into(), 1, false, None)),
             EventMessage::InputMetadataUpdatesCompleted("a".into()),
             EventMessage::DiskAlert(DiskAlert {
                 level: DiskAlertLevel::Warn,
