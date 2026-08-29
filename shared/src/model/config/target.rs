@@ -94,6 +94,8 @@ pub struct DeduplicateConfig {
 pub struct ConfigTargetOptions {
     #[serde(default, skip_serializing_if = "is_false")]
     pub ignore_logo: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub required_epg: bool,
     #[serde(
         default,
         deserialize_with = "deserialize_share_live_streams",
@@ -113,6 +115,7 @@ pub struct ConfigTargetOptions {
 impl ConfigTargetOptions {
     pub fn is_empty(&self) -> bool {
         !self.ignore_logo
+            && !self.required_epg
             && self.share_live_streams.is_empty()
             && !self.remove_duplicates
             && self.deduplicate.is_none()
@@ -123,6 +126,8 @@ impl ConfigTargetOptions {
     pub const fn lowercase_epg_ids(&self) -> bool { self.epg_output.lowercase_ids }
 
     pub const fn lowercase_xmltv_display_names(&self) -> bool { self.epg_output.lowercase_xmltv_display_names }
+
+    pub const fn required_epg(&self) -> bool { self.required_epg }
 
     pub fn share_live_hls_enabled(&self) -> bool { self.share_live_streams.hls }
 
@@ -654,6 +659,7 @@ share_live_streams: false
         let options = ConfigTargetOptions::default();
 
         assert!(options.is_empty());
+        assert!(!options.required_epg());
 
         let serialized = serde_saphyr::to_string(&options).expect("default options should serialize");
         assert!(
@@ -674,6 +680,18 @@ share_live_streams: false
             serde_saphyr::from_str(&serialized).expect("partial share_live_streams should deserialize");
 
         assert_eq!(reparsed.share_live_streams, options.share_live_streams);
+    }
+
+    #[test]
+    fn target_options_required_epg_roundtrips_and_makes_options_nonempty() {
+        let options = serde_saphyr::from_str::<ConfigTargetOptions>("required_epg: true\n")
+            .expect("required_epg should deserialize");
+
+        assert!(options.required_epg());
+        assert!(!options.is_empty());
+
+        let serialized = serde_saphyr::to_string(&options).expect("required_epg should serialize");
+        assert!(serialized.contains("required_epg: true"));
     }
 
     #[test]

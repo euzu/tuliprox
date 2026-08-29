@@ -379,6 +379,7 @@
       "WATCH": "List of group patterns to monitor for changes. Notifications are sent via configured messaging."
     },
     "CONFIG_TARGET_OPTIONS": {
+      "REQUIRED_EPG": "Keeps only live channels that match programme data from an available EPG source. VOD, series, and local library items are unaffected.",
       "SHARE_LIVE_STREAMS": "Enables live stream sharing. The master toggle sets HLS and MPEG-TS together; each format can also be changed separately."
     },
     "EPG_OUTPUT_OPTIONS": {
@@ -1454,6 +1455,7 @@
     "REGEXP": "Regexp",
     "RELEASES": "Releases",
     "REMOVE_DUPLICATES": "Remove duplicates",
+    "REQUIRED_EPG": "Require EPG for live channels",
     "RENAME": "Rename",
     "RENAME_SETTINGS": "Rename Settings",
     "REPEAT_PASSWORD": "Repeat Password",

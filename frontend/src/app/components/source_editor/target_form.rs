@@ -29,6 +29,7 @@ const LABEL_ADD_WATCH: &str = "LABEL.ADD_WATCH";
 const LABEL_USE_MEMORY_CACHE: &str = "LABEL.USE_MEMORY_CACHE";
 const LABEL_PROCESSING_ORDER: &str = "LABEL.PROCESSING_ORDER";
 const LABEL_IGNORE_LOGO: &str = "LABEL.IGNORE_LOGO";
+const LABEL_REQUIRED_EPG: &str = "LABEL.REQUIRED_EPG";
 const LABEL_SHARE_LIVE_STREAMS: &str = "LABEL.SHARE_LIVE_STREAMS";
 const LABEL_HLS: &str = "LABEL.HLS";
 const LABEL_MPEG_TS: &str = "LABEL.MPEG_TS";
@@ -104,6 +105,7 @@ impl HasFormData for ConfigTargetOptionsFormState {
 #[derive(Clone)]
 pub enum ConfigTargetOptionsFormAction {
     IgnoreLogo(bool),
+    RequiredEpg(bool),
     ShareLiveStreamsHls(bool),
     ShareLiveStreamsMpegTs(bool),
     RemoveDuplicates(bool),
@@ -123,6 +125,10 @@ impl yew::prelude::Reducible for ConfigTargetOptionsFormState {
         match action {
             ConfigTargetOptionsFormAction::IgnoreLogo(value) => {
                 form.ignore_logo = value;
+                modified = true;
+            }
+            ConfigTargetOptionsFormAction::RequiredEpg(value) => {
+                form.required_epg = value;
                 modified = true;
             }
             ConfigTargetOptionsFormAction::ShareLiveStreamsHls(value) => {
@@ -307,6 +313,7 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                 <Card class="tp__config-view__card">
                 <div class="tp__target-options">
                     { edit_field_bool!(target_options_state, translate.t(LABEL_IGNORE_LOGO), ignore_logo,  ConfigTargetOptionsFormAction::IgnoreLogo) }
+                    { edit_field_bool!(target_options_state, translate.t(LABEL_REQUIRED_EPG), required_epg, ConfigTargetOptionsFormAction::RequiredEpg) }
                     <div class="tp__target-options__group">
                         <div class="tp__target-options__heading">
                             <span class="tp__form-field__label">{ translate.t(LABEL_SHARE_LIVE_STREAMS) }</span>
@@ -359,6 +366,7 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                 <Card class="tp__config-view__card">
                     <div class="tp__target-options">
                         { config_field_bool!(target_options_state.form, translate.t(LABEL_IGNORE_LOGO), ignore_logo) }
+                        { config_field_bool!(target_options_state.form, translate.t(LABEL_REQUIRED_EPG), required_epg) }
                         <div class="tp__target-options__group">
                             <div class="tp__target-options__heading">
                                 <span class="tp__form-field__label">{ translate.t(LABEL_SHARE_LIVE_STREAMS) }</span>
@@ -551,6 +559,14 @@ mod tests {
         assert!(state.form.epg_output.lowercase_ids);
         assert!(state.modified);
         assert!(!state.form.epg_output.lowercase_xmltv_display_names);
+    }
+
+    #[test]
+    fn required_epg_action_updates_target_option() {
+        let state = default_options_state().reduce(ConfigTargetOptionsFormAction::RequiredEpg(true));
+
+        assert!(state.form.required_epg);
+        assert!(state.modified);
     }
 
     #[test]
