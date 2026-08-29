@@ -1,6 +1,6 @@
 use crate::{
     api::{
-        endpoints::{download_api::download_queue_snapshot, v1_api::create_status_check},
+        endpoints::v1_api::create_status_check,
         model::{AppState, EventMessage},
     },
     auth::{validate_token_claims, verify_token},
@@ -124,16 +124,8 @@ fn websocket_requires_system_read(auth_required: bool, mem: &ProtocolHandlerMemo
     !auth_required || mem.permissions.contains(Permission::SystemRead)
 }
 
-#[inline]
-fn websocket_requires_download_read(auth_required: bool, mem: &ProtocolHandlerMemory) -> bool {
-    !auth_required || mem.permissions.contains(Permission::RecordingRead)
-}
-
 fn websocket_can_receive_runtime_events(mem: &ProtocolHandlerMemory, event: &EventMessage) -> bool {
     match event {
-        EventMessage::DownloadsUpdate(_) | EventMessage::DownloadsDeltaUpdate(_) => {
-            mem.permissions.contains(Permission::RecordingRead)
-        }
         EventMessage::RecordingChanged | EventMessage::RecordingRulesChanged => {
             mem.permissions.contains(Permission::RecordingRead)
         }
@@ -258,13 +250,6 @@ async fn handle_protocol_message(
                     }
                 } else {
                     Some(ProtocolMessage::UserActionResponse(false))
-                }
-            }
-            Ok(ProtocolMessage::DownloadsRequest) => {
-                if websocket_requires_download_read(auth_required, mem) && (!auth_required || mem.token.is_some()) {
-                    Some(ProtocolMessage::DownloadsResponse(download_queue_snapshot(&app_state.downloads).await))
-                } else {
-                    Some(ProtocolMessage::Unauthorized)
                 }
             }
             Ok(ProtocolMessage::RecordingSnapshotRequest) => {
@@ -408,7 +393,7 @@ async fn recording_frame_for_session(app_state: &AppState, claims: &Claims) -> P
         };
     }
     let (revision, tasks) =
-        crate::api::model::recording::recording_ws::recording_snapshot(&app_state.downloads, claims).await;
+        crate::api::model::recording::recording_ws::recording_snapshot(&app_state.recordings, claims).await;
     ProtocolMessage::RecordingSnapshotResponse { revision, tasks }
 }
 
@@ -491,18 +476,6 @@ async fn handle_event_message(
                             socket,
                             ProtocolMessage::LibraryScanProgressResponse(progress),
                             "Library scan progress event",
-                        )
-                        .await?;
-                    }
-                    EventMessage::DownloadsUpdate(downloads) => {
-                        send_event_response(socket, ProtocolMessage::DownloadsResponse(downloads), "Downloads event")
-                            .await?;
-                    }
-                    EventMessage::DownloadsDeltaUpdate(delta) => {
-                        send_event_response(
-                            socket,
-                            ProtocolMessage::DownloadsDeltaResponse(delta),
-                            "Downloads delta event",
                         )
                         .await?;
                     }
@@ -650,10 +623,9 @@ mod tests {
     };
     use crate::api::model::EventMessage;
     use shared::model::{
-        Claims, DownloadsDelta, DownloadsResponse, FileDownloadDto, LibraryScanProgressEvent, LibraryScanSummary,
-        LibraryScanSummaryStatus, Permission, PlaylistUpdateProgressEvent, ProtocolHandler, ProtocolHandlerMemory,
-        TaskKindDto, TaskPriorityDto, TransferStatusDto, UserId, UserRole, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL,
-        PROTOCOL_VERSION, ROLE_ADMIN, TOKEN_NO_AUTH,
+        Claims, LibraryScanProgressEvent, LibraryScanSummary, LibraryScanSummaryStatus, Permission,
+        PlaylistUpdateProgressEvent, ProtocolHandler, ProtocolHandlerMemory, UserId, UserRole,
+        CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, PROTOCOL_VERSION, ROLE_ADMIN, TOKEN_NO_AUTH,
     };
     use tokio::sync::broadcast::error::RecvError;
 
@@ -834,61 +806,21 @@ mod tests {
     }
 
     #[test]
-    fn test_websocket_download_updates_allowed_for_download_read_user() {
+    fn test_websocket_recording_events_allowed_for_recording_read_user() {
         let mut mem =
-            ProtocolHandlerMemory { permissions: Permission::DownloadRead.into(), ..ProtocolHandlerMemory::default() };
+            ProtocolHandlerMemory { permissions: Permission::RecordingRead.into(), ..ProtocolHandlerMemory::default() };
         mem.role = UserRole::User;
 
-        assert!(websocket_can_receive_runtime_events(
-            &mem,
-            &EventMessage::DownloadsUpdate(DownloadsResponse {
-                queue: Vec::new(),
-                finished: Vec::new(),
-                active: Vec::new(),
-            })
-        ));
+        assert!(websocket_can_receive_runtime_events(&mem, &EventMessage::RecordingChanged));
+        assert!(websocket_can_receive_runtime_events(&mem, &EventMessage::RecordingRulesChanged));
     }
 
     #[test]
-    fn test_websocket_download_updates_denied_without_download_read() {
+    fn test_websocket_recording_events_denied_without_recording_read() {
         let mut mem =
             ProtocolHandlerMemory { permissions: Permission::SystemRead.into(), ..ProtocolHandlerMemory::default() };
         mem.role = UserRole::User;
 
-        assert!(!websocket_can_receive_runtime_events(
-            &mem,
-            &EventMessage::DownloadsUpdate(DownloadsResponse {
-                queue: Vec::new(),
-                finished: Vec::new(),
-                active: Vec::new(),
-            })
-        ));
-    }
-
-    #[test]
-    fn test_websocket_download_delta_updates_allowed_for_download_read_user() {
-        let mut mem =
-            ProtocolHandlerMemory { permissions: Permission::DownloadRead.into(), ..ProtocolHandlerMemory::default() };
-        mem.role = UserRole::User;
-
-        assert!(websocket_can_receive_runtime_events(
-            &mem,
-            &EventMessage::DownloadsDeltaUpdate(DownloadsDelta::ActivePatched(FileDownloadDto {
-                id: "id".to_string(),
-                title: "file.ts".to_string(),
-                kind: TaskKindDto::Download,
-                recording_type: shared::model::RecordingTypeDto::Vod,
-                priority: TaskPriorityDto::Background,
-                status: TransferStatusDto::Running,
-                retry_attempts: 0,
-                downloaded_bytes: 1,
-                total_bytes: Some(2),
-                next_retry_at: None,
-                scheduled_start_at: None,
-                duration_secs: None,
-                error: None,
-                recording: None,
-            }))
-        ));
+        assert!(!websocket_can_receive_runtime_events(&mem, &EventMessage::RecordingChanged));
     }
 }

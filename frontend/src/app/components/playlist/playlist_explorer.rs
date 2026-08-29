@@ -26,13 +26,11 @@ use shared::{
 };
 use std::{cell::RefCell, collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
 use wasm_bindgen::JsCast;
-use web_sys::HtmlInputElement;
 use yew::{platform::spawn_local, prelude::*};
 
 const COPY_LINK_TULIPROX_VIRTUAL_ID: &str = "copy_link_tuliprox_virtual_id";
 const COPY_LINK_TULIPROX_WEBPLAYER_URL: &str = "copy_link_tuliprox_webplayer_url";
 const COPY_LINK_PROVIDER_URL: &str = "copy_link_provider_url";
-const DOWNLOAD_ITEM: &str = "download_item";
 const RECORD_ITEM: &str = "record_item";
 const TP_EXPLORER_SEARCH_FIELDS_KEY: &str = "tp-explorer-search-fields";
 
@@ -52,7 +50,6 @@ enum ExplorerAction {
     CopyLinkTuliproxVirtualId,
     CopyLinkTuliproxWebPlayerUrl,
     CopyLinkProviderUrl,
-    Download,
     Record,
 }
 
@@ -65,7 +62,6 @@ impl Display for ExplorerAction {
                 Self::CopyLinkTuliproxVirtualId => COPY_LINK_TULIPROX_VIRTUAL_ID,
                 Self::CopyLinkTuliproxWebPlayerUrl => COPY_LINK_TULIPROX_WEBPLAYER_URL,
                 Self::CopyLinkProviderUrl => COPY_LINK_PROVIDER_URL,
-                Self::Download => DOWNLOAD_ITEM,
                 Self::Record => RECORD_ITEM,
             }
         )
@@ -82,55 +78,12 @@ impl FromStr for ExplorerAction {
             Ok(Self::CopyLinkTuliproxWebPlayerUrl)
         } else if s.eq(COPY_LINK_PROVIDER_URL) {
             Ok(Self::CopyLinkProviderUrl)
-        } else if s.eq(DOWNLOAD_ITEM) {
-            Ok(Self::Download)
         } else if s.eq(RECORD_ITEM) {
             Ok(Self::Record)
         } else {
             Err(TuliproxError::Config(format!("Unknown ExplorerAction: {s}")))
         }
     }
-}
-
-fn build_download_filename(title: &str, url: &str) -> String {
-    let sanitized = title
-        .chars()
-        .map(|c| match c {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '_' | '-' => c,
-            _ => '_',
-        })
-        .collect::<String>()
-        .trim_matches('_')
-        .to_string();
-    let base = if sanitized.is_empty() { "download".to_string() } else { sanitized };
-    let ext = url
-        .split('?')
-        .next()
-        .and_then(|base| base.rsplit('/').next())
-        .and_then(|name| name.rsplit_once('.').map(|(_, ext)| ext))
-        .filter(|ext| !ext.is_empty())
-        .map_or_else(|| ".mp4".to_string(), |ext| format!(".{ext}"));
-    if base.ends_with(&ext) {
-        base
-    } else {
-        format!("{base}{ext}")
-    }
-}
-
-fn parse_optional_priority_input(priority_value: Option<String>) -> Result<Option<i8>, String> {
-    let Some(raw) = priority_value.as_deref() else {
-        return Ok(None);
-    };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    trimmed.parse::<i8>().map(Some).map_err(|_| "Priority must be a whole number between -128 and 127".to_string())
-}
-
-fn normalize_input_name(input_name: &str) -> Option<String> {
-    let trimmed = input_name.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 fn can_show_record_action(can_write_recordings: bool, selected_channel: Option<&ChannelSelection>) -> bool {
@@ -156,15 +109,8 @@ pub fn PlaylistExplorer() -> Html {
         return html! { <NoContent text={translate.t("LABEL.NO_CONTENT")} /> };
     };
     let service_ctx = use_service_context();
-    let can_write_downloads = service_ctx.auth.has_permission(Permission::RecordingWrite);
     let can_write_recordings = service_ctx.auth.has_permission(Permission::RecordingWrite);
     let is_admin_role = service_ctx.auth.is_admin();
-    let default_dvr_priority = config_ctx
-        .config
-        .as_ref()
-        .and_then(|cfg| cfg.config.video.as_ref())
-        .and_then(|video| video.recording.as_ref())
-        .map(|recording| recording.priority);
     let recording_padding = {
         let rec = config_ctx
             .config
@@ -338,7 +284,6 @@ pub fn PlaylistExplorer() -> Html {
         let selected_channel = selected_channel.clone();
         let playlist_ctx = context.clone();
         let translate_clone = translate.clone();
-        let can_queue_downloads = can_write_downloads;
         let copy_to_clipboard = copy_to_clipboard.clone();
         let config = config_ctx.config.clone();
         Callback::from(move |(name, _): (String, _)| {
@@ -424,159 +369,6 @@ pub fn PlaylistExplorer() -> Html {
                             }
                         }
                     }
-                    ExplorerAction::Download => {
-                        if !can_queue_downloads {
-                            popup_is_open_state.set(false);
-                            return;
-                        }
-                        if let Some(dto) = &*selected_channel {
-                            let dialog = dialog.clone();
-                            let services = services.clone();
-                            let translate_clone = translate_clone.clone();
-                            let playlist_request = (*playlist_ctx.playlist_request).clone();
-                            let default_dvr_priority = default_dvr_priority;
-                            let selected = dto.clone();
-                            spawn_local(async move {
-                                let resolved_url = if !selected.url.is_empty() {
-                                    if let Some(playlist_request) = playlist_request.clone() {
-                                        let request = PlaylistUrlResolveRequest::Provider {
-                                            playlist_request,
-                                            url: selected.url.clone(),
-                                        };
-                                        services.playlist.resolve_url(request).await.unwrap_or(selected.url.clone())
-                                    } else {
-                                        selected.url.clone()
-                                    }
-                                } else if selected.cluster == XtreamCluster::Series {
-                                    if let Some(playlist_request) = playlist_request.as_ref() {
-                                        if let Some(pli) =
-                                            services.playlist.get_episode(selected.virtual_id, playlist_request).await
-                                        {
-                                            let episode_url = pli.url.to_string();
-                                            let request = PlaylistUrlResolveRequest::Provider {
-                                                playlist_request: playlist_request.clone(),
-                                                url: episode_url.clone(),
-                                            };
-                                            services.playlist.resolve_url(request).await.unwrap_or(episode_url)
-                                        } else {
-                                            String::new()
-                                        }
-                                    } else {
-                                        String::new()
-                                    }
-                                } else {
-                                    String::new()
-                                };
-
-                                if resolved_url.is_empty() {
-                                    services.toastr.error(translate_clone.t("MESSAGES.DOWNLOAD.FAIL"));
-                                    return;
-                                }
-
-                                let default_filename = build_download_filename(&selected.title, &resolved_url);
-                                let filename_value = Rc::new(RefCell::new(default_filename.clone()));
-                                let default_dvr_priority_value =
-                                    default_dvr_priority.map_or_else(String::new, |priority| priority.to_string());
-                                let priority_value = Rc::new(RefCell::new(default_dvr_priority_value.clone()));
-                                let actions = DialogActions {
-                                    left: Some(vec![DialogAction::new(
-                                        "cancel",
-                                        "LABEL.CANCEL",
-                                        DialogResult::Cancel,
-                                        Some("Close".to_owned()),
-                                        None,
-                                    )]),
-                                    right: vec![DialogAction::new_focused(
-                                        "download",
-                                        "LABEL.DOWNLOAD",
-                                        DialogResult::Ok,
-                                        Some("Download".to_owned()),
-                                        Some("primary".to_string()),
-                                    )],
-                                };
-                                let filename_value_input = Rc::clone(&filename_value);
-                                let priority_value_input = Rc::clone(&priority_value);
-                                let result = dialog
-                                    .content(
-                                        html! {
-                                            <div class="tp__record-dialog">
-                                                <div class="tp__input">
-                                                    <label class="tp__label">{translate_clone.t("LABEL.FILENAME")}</label>
-                                                    <div class="tp__input-wrapper">
-                                                        <input
-                                                            type="text"
-                                                            value={default_filename.clone()}
-                                                            oninput={Callback::from(move |event: InputEvent| {
-                                                                let input: HtmlInputElement = event.target_unchecked_into();
-                                                                *filename_value_input.borrow_mut() = input.value();
-                                                            })}
-                                                        />
-                                                    </div>
-                                                </div>
-                                                <div class="tp__input">
-                                                    <label class="tp__label">{translate_clone.t("LABEL.PRIORITY")}</label>
-                                                    <div class="tp__input-wrapper">
-                                                        <input
-                                                            type="number"
-                                                            min="-127"
-                                                            max="127"
-                                                            step="1"
-                                                            value={default_dvr_priority_value.clone()}
-                                                            oninput={Callback::from(move |event: InputEvent| {
-                                                                let input: HtmlInputElement = event.target_unchecked_into();
-                                                                *priority_value_input.borrow_mut() = input.value();
-                                                            })}
-                                                        />
-                                                    </div>
-                                                </div>
-                                                <div class="tp__field-explanation">
-                                                    {selected.title.clone()}
-                                                </div>
-                                            </div>
-                                        },
-                                        Some(actions),
-                                        false,
-                                    )
-                                    .await;
-
-                                if result != DialogResult::Ok {
-                                    return;
-                                }
-
-                                let filename = filename_value.borrow().clone().trim().to_string();
-                                let priority =
-                                    match parse_optional_priority_input(Some(priority_value.borrow().clone())) {
-                                        Ok(priority) => priority,
-                                        Err(err) => {
-                                            services.toastr.error(err);
-                                            return;
-                                        }
-                                    };
-
-                                if filename.is_empty() {
-                                    services.toastr.error(translate_clone.t("MESSAGES.DOWNLOAD.FAIL"));
-                                    return;
-                                }
-
-                                let input_name = normalize_input_name(&selected.input_name);
-                                let recording_type = match selected.cluster {
-                                    XtreamCluster::Video => shared::model::RecordingTypeDto::Vod,
-                                    XtreamCluster::Series => shared::model::RecordingTypeDto::Series,
-                                    XtreamCluster::Live => shared::model::RecordingTypeDto::Live,
-                                };
-                                match services
-                                    .downloads
-                                    .queue_download(resolved_url, filename, input_name, priority, recording_type)
-                                    .await
-                                {
-                                    Ok(_) => {
-                                        services.toastr.success(translate_clone.t("MESSAGES.DOWNLOAD.DOWNLOAD_QUEUED"));
-                                    }
-                                    Err(_) => services.toastr.error(translate_clone.t("MESSAGES.DOWNLOAD.FAIL")),
-                                }
-                            });
-                        }
-                    }
                     ExplorerAction::Record => {
                         if !can_write_recordings {
                             popup_is_open_state.set(false);
@@ -626,7 +418,7 @@ pub fn PlaylistExplorer() -> Html {
                                     };
                                     match RecordingService::new().create_task(request).await {
                                         Ok(_) => {
-                                            services.toastr.success(translate_clone.t("MESSAGES.RECORDING.QUEUED"))
+                                            services.toastr.success(translate_clone.t("MESSAGES.RECORDING.QUEUED"));
                                         }
                                         Err(error) => services.toastr.error(error.to_string()),
                                     }
@@ -1089,37 +881,8 @@ pub fn PlaylistExplorer() -> Html {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        build_download_filename, can_show_record_action, normalize_input_name, parse_optional_priority_input,
-        ChannelSelection,
-    };
+    use super::{can_show_record_action, ChannelSelection};
     use shared::model::{VirtualId, XtreamCluster};
-
-    #[test]
-    fn parse_optional_priority_input_treats_blank_as_none() {
-        assert_eq!(parse_optional_priority_input(None), Ok(None));
-        assert_eq!(parse_optional_priority_input(Some(String::new())), Ok(None));
-        assert_eq!(parse_optional_priority_input(Some("   ".to_string())), Ok(None));
-    }
-
-    #[test]
-    fn parse_optional_priority_input_parses_valid_i8_values() {
-        assert_eq!(parse_optional_priority_input(Some("-1".to_string())), Ok(Some(-1)));
-        assert_eq!(parse_optional_priority_input(Some("12".to_string())), Ok(Some(12)));
-        assert_eq!(parse_optional_priority_input(Some(" 0 ".to_string())), Ok(Some(0)));
-    }
-
-    #[test]
-    fn parse_optional_priority_input_rejects_invalid_non_empty_values() {
-        assert!(parse_optional_priority_input(Some("abc".to_string())).is_err());
-    }
-
-    #[test]
-    fn normalize_input_name_treats_blank_as_none() {
-        assert_eq!(normalize_input_name(""), None);
-        assert_eq!(normalize_input_name("   "), None);
-        assert_eq!(normalize_input_name(" provider-a "), Some("provider-a".to_string()));
-    }
 
     #[test]
     fn record_action_covers_live_vod_and_episode_with_recording_write() {
@@ -1162,17 +925,5 @@ mod tests {
         assert!(can_show_record_action(true, Some(&vod)));
         assert!(!can_show_record_action(true, Some(&series_container)));
         assert!(can_show_record_action(true, Some(&episode)));
-    }
-
-    #[test]
-    fn build_download_filename_keeps_url_extension() {
-        let filename = build_download_filename("My Movie", "https://example.com/video.mkv?token=1");
-        assert_eq!(filename, "My_Movie.mkv");
-    }
-
-    #[test]
-    fn build_download_filename_falls_back_to_mp4() {
-        let filename = build_download_filename("Episode 01", "https://example.com/stream");
-        assert_eq!(filename, "Episode_01.mp4");
     }
 }

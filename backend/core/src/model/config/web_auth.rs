@@ -4,7 +4,7 @@ use shared::{
     defaults::{is_blank_or_default_user_file_path, is_blank_or_default_user_group_file_path},
     error::TuliproxError,
     model::{
-        permission::{migrate_permissions, permission_from_name, PermissionSet, PERM_ALL},
+        permission::{permission_from_name, PermissionSet, PERM_ALL},
         WebAuthConfigDto,
     },
 };
@@ -280,7 +280,6 @@ impl WebAuthConfig {
                             ),
                         }
                     }
-                    migrate_permissions(&mut permissions);
 
                     if let Some(existing_group) = groups.iter_mut().find(|group| group.name.eq_ignore_ascii_case(name))
                     {
@@ -481,16 +480,18 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_groups_migrates_download_permissions_to_recording() {
+    fn test_parse_groups_drops_removed_download_permissions() {
+        // `download.read`/`download.write` no longer exist. A groups file
+        // that still lists them must lose those entries rather than have
+        // them reinterpreted as the recording permissions.
         let mut file = NamedTempFile::new().expect("create temp file");
-        writeln!(file, "viewer:download.read,download.write").expect("write");
+        writeln!(file, "viewer:download.read,download.write,config.read").expect("write");
         let groups = WebAuthConfig::parse_groups(file.path());
         let permissions = groups[0].permissions;
 
-        assert!(permissions.contains(Permission::RecordingRead));
-        assert!(permissions.contains(Permission::RecordingWrite));
-        assert!(!permissions.contains(Permission::DownloadRead));
-        assert!(!permissions.contains(Permission::DownloadWrite));
+        assert!(permissions.contains(Permission::ConfigRead));
+        assert!(!permissions.contains(Permission::RecordingRead));
+        assert!(!permissions.contains(Permission::RecordingWrite));
     }
 
     #[test]

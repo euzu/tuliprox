@@ -8,14 +8,14 @@ use crate::{
     app::components::{datetime_input::DateTimeInput, number_input::NumberInput, text_button::TextButton},
     hooks::use_service_context,
     i18n::use_translation,
-    services::{EditRecordingTaskRequest, RecordingService, RecordingTaskResponse},
+    services::{EditRecordingTaskRequest, RecordingService},
 };
 use yew::prelude::*;
 
 #[derive(Clone, PartialEq, Properties)]
 #[allow(dead_code)]
 pub struct TaskEditFormProps {
-    pub task: RecordingTaskResponse,
+    pub task: shared::model::RecordingTaskDto,
     #[prop_or_default]
     pub on_done: Option<Callback<()>>,
 }
@@ -26,10 +26,10 @@ pub fn task_edit_form(props: &TaskEditFormProps) -> Html {
     let translate = use_translation();
 
     let task = props.task.clone();
-    let program_start = use_state(|| task.recording.as_ref().and_then(|r| r.program_start).unwrap_or(0));
-    let program_end = use_state(|| task.recording.as_ref().and_then(|r| r.program_end).unwrap_or(0));
-    let pre_roll = use_state(|| task.recording.as_ref().map_or(0, |r| r.pre_roll_secs));
-    let post_roll = use_state(|| task.recording.as_ref().map_or(0, |r| r.post_roll_secs));
+    let program_start = use_state(|| task.program_start.unwrap_or(0));
+    let program_end = use_state(|| task.program_end.unwrap_or(0));
+    let pre_roll = use_state(|| task.pre_roll_secs);
+    let post_roll = use_state(|| task.post_roll_secs);
 
     let id = task.id.clone();
 

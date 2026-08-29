@@ -24,14 +24,14 @@
 //! queue-mutation boundary can call them once the wiring lands; the
 //! `dead_code` allowance below is the test surface.
 
-use crate::download::DownloadState;
+use crate::recording::recording_queue::RecordingTaskState;
 use shared::model::recording::{RecordingMetadata, RecordingVisibility};
 
 /// The set of states a recording can be in for an edit to be
 /// accepted.
 pub const EDITABLE_STATES: &[&str] = &["Scheduled", "Queued", "WaitingForCapacity", "RetryWaiting"];
 
-impl DownloadState {
+impl RecordingTaskState {
     /// Stable wire label consumed by `state_is_editable` and any caller
     /// that needs to surface the state name in logs, errors, or tests.
     /// Kept here so the source of truth for both the label and the
@@ -42,7 +42,7 @@ impl DownloadState {
             Self::Scheduled => "Scheduled",
             Self::WaitingForCapacity => "WaitingForCapacity",
             Self::RetryWaiting => "RetryWaiting",
-            Self::Downloading => "Downloading",
+            Self::Running => "Running",
             Self::Paused => "Paused",
             Self::Completed => "Completed",
             Self::Failed => "Failed",
@@ -98,7 +98,7 @@ pub struct PaddingBounds {
 /// `Scheduled` / `Queued` / `WaitingForCapacity` / `RetryWaiting` /
 /// `Downloading` / `Completed` / `Failed` / `Cancelled` /
 /// `Deleting(<previous>)`. The current state for the existing
-/// `DownloadState` variants is reduced to a string here.
+/// `RecordingTaskState` variants is reduced to a string here.
 pub fn state_is_editable(state_label: &str) -> bool { EDITABLE_STATES.contains(&state_label) }
 
 /// Pure: validate the merged interval (patch overlaid on current) and
@@ -240,10 +240,7 @@ mod tests {
         // Baseline current metadata: program 100..500, no padding.
         // Tests overlay a patch on top of this and assert the merged
         // interval is validated.
-        let mut m = RecordingMetadata::for_legacy_admin(100, 400);
-        m.pre_roll_secs = 0;
-        m.post_roll_secs = 0;
-        m
+        make_meta(100, 500, 0, 0)
     }
 
     #[test]
@@ -362,9 +359,9 @@ mod tests {
     /// Tiny helper so the test signatures stay short.
     fn make_meta(start: i64, end: i64, pre: u64, post: u64) -> RecordingMetadata {
         RecordingMetadata {
-            owner: shared::model::recording::RecordingOwner::LegacyAdmin,
+            owner: shared::model::recording::RecordingOwner::User(shared::model::UserId::from("web:alice")),
             visibility: shared::model::recording::RecordingVisibility::Private,
-            source: None,
+            source: shared::model::recording::RecordingSource::new("t1", "v1", "in1"),
             program_start: Some(start),
             program_end: Some(end),
             scheduled_start: Some(start),

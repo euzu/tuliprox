@@ -18,8 +18,9 @@
 //! (restore previous state), or whose path is unsafe (restore +
 //! security log).
 
-use crate::download::{
-    DownloadQueue, DownloadState, FileDownload, PersistedDownloadQueue, PersistedFileDownload, QueueMutationError,
+use crate::recording::recording_queue::{
+    PersistedRecordingQueue, PersistedRecordingTask, QueueMutationError, RecordingQueue, RecordingTask,
+    RecordingTaskState,
 };
 use shared::model::{DeletionPreviousState, RecordingMetadata};
 use std::path::{Path, PathBuf};
@@ -68,7 +69,7 @@ impl std::error::Error for DeletionError {}
 /// `(bucket, index)` where `bucket` is one of `"queue"`, `"scheduled"`,
 /// `"active"`, `"finished"`. Returns `None` if the uuid is not in the
 /// candidate.
-fn locate(candidate: &PersistedDownloadQueue, uuid: &str) -> Option<(&'static str, usize)> {
+fn locate(candidate: &PersistedRecordingQueue, uuid: &str) -> Option<(&'static str, usize)> {
     if let Some(idx) = candidate.queue.iter().position(|d| d.uuid == uuid) {
         return Some(("queue", idx));
     }
@@ -86,33 +87,26 @@ fn locate(candidate: &PersistedDownloadQueue, uuid: &str) -> Option<(&'static st
 
 /// Read the recording metadata from a candidate. Returns `None` if the
 /// uuid is not a recording or has no metadata.
-fn read_meta(candidate: &PersistedDownloadQueue, uuid: &str) -> Option<RecordingMetadata> {
-    if let Some(d) = candidate.queue.iter().find(|d| d.uuid == uuid) {
-        return d.recording.clone();
-    }
-    if let Some(d) = candidate.scheduled.iter().find(|d| d.uuid == uuid) {
-        return d.recording.clone();
-    }
-    if let Some(d) = candidate.active.as_ref() {
-        if d.uuid == uuid {
-            return d.recording.clone();
-        }
-    }
-    if let Some(d) = candidate.finished.iter().find(|d| d.uuid == uuid) {
-        return d.recording.clone();
-    }
-    None
+fn read_meta(candidate: &PersistedRecordingQueue, uuid: &str) -> Option<RecordingMetadata> {
+    candidate
+        .queue
+        .iter()
+        .chain(candidate.scheduled.iter())
+        .chain(candidate.active.iter())
+        .chain(candidate.finished.iter())
+        .find(|task| task.uuid == uuid)
+        .map(|task| task.recording.clone())
 }
 
 /// Derive the prior terminal state from a recording's current state.
 /// Returns `None` when the state is not a terminal one (and therefore
 /// deletion cannot begin).
 #[cfg(test)]
-fn prior_terminal_state(download: &FileDownload) -> Option<DeletionPreviousState> {
+fn prior_terminal_state(download: &RecordingTask) -> Option<DeletionPreviousState> {
     match download.state {
-        DownloadState::Completed => Some(DeletionPreviousState::Completed),
-        DownloadState::Failed => Some(DeletionPreviousState::Failed),
-        DownloadState::Cancelled => Some(DeletionPreviousState::Cancelled),
+        RecordingTaskState::Completed => Some(DeletionPreviousState::Completed),
+        RecordingTaskState::Failed => Some(DeletionPreviousState::Failed),
+        RecordingTaskState::Cancelled => Some(DeletionPreviousState::Cancelled),
         _ => None,
     }
 }
@@ -148,14 +142,14 @@ impl DeletionTarget {
 /// `deleting_previous_state`; on success the in-memory queue reflects
 /// `Deleting` and the on-disk file is unchanged.
 pub async fn begin_deletion_authorized<F>(
-    queue: &DownloadQueue,
+    queue: &RecordingQueue,
     uuid: &str,
     permit: F,
 ) -> Result<DeletionTarget, DeletionError>
 where
     F: FnOnce(&RecordingMetadata) -> bool,
 {
-    crate::download::mutate(queue, |candidate| {
+    crate::recording::recording_queue::mutate(queue, |candidate| {
         let Some(meta) = read_meta(candidate, uuid) else {
             return Err(QueueMutationError::UnknownRecording);
         };
@@ -193,7 +187,7 @@ where
         let mut new_meta = meta;
         new_meta.deleting_previous_state = Some(prior);
         apply_meta(candidate, bucket, idx, new_meta);
-        set_task_state(candidate, bucket, idx, DownloadState::Cancelled);
+        set_task_state(candidate, bucket, idx, RecordingTaskState::Cancelled);
         Ok(target)
     })
     .await
@@ -208,39 +202,39 @@ where
 /// Unconditional variant, kept for callers that have already
 /// authorized (and for the unit tests, which exercise the state
 /// machine rather than the policy).
-pub async fn begin_deletion(queue: &DownloadQueue, uuid: &str) -> Result<DeletionTarget, DeletionError> {
+pub async fn begin_deletion(queue: &RecordingQueue, uuid: &str) -> Result<DeletionTarget, DeletionError> {
     begin_deletion_authorized(queue, uuid, |_| true).await
 }
 
-fn prior_terminal_state_runtime(download: &PersistedFileDownload) -> Option<DeletionPreviousState> {
+fn prior_terminal_state_runtime(download: &PersistedRecordingTask) -> Option<DeletionPreviousState> {
     match download.state {
-        DownloadState::Completed => Some(DeletionPreviousState::Completed),
-        DownloadState::Failed => Some(DeletionPreviousState::Failed),
-        DownloadState::Cancelled => Some(DeletionPreviousState::Cancelled),
+        RecordingTaskState::Completed => Some(DeletionPreviousState::Completed),
+        RecordingTaskState::Failed => Some(DeletionPreviousState::Failed),
+        RecordingTaskState::Cancelled => Some(DeletionPreviousState::Cancelled),
         _ => None,
     }
 }
 
-fn apply_meta(candidate: &mut PersistedDownloadQueue, bucket: &'static str, idx: usize, meta: RecordingMetadata) {
+fn apply_meta(candidate: &mut PersistedRecordingQueue, bucket: &'static str, idx: usize, meta: RecordingMetadata) {
     match bucket {
         "queue" => {
             if let Some(d) = candidate.queue.get_mut(idx) {
-                d.recording = Some(meta);
+                d.recording = meta;
             }
         }
         "scheduled" => {
             if let Some(d) = candidate.scheduled.get_mut(idx) {
-                d.recording = Some(meta);
+                d.recording = meta;
             }
         }
         "active" => {
             if let Some(d) = candidate.active.as_mut() {
-                d.recording = Some(meta);
+                d.recording = meta;
             }
         }
         "finished" => {
             if let Some(d) = candidate.finished.get_mut(idx) {
-                d.recording = Some(meta);
+                d.recording = meta;
             }
         }
         _ => unreachable!(),
@@ -251,7 +245,12 @@ fn apply_meta(candidate: &mut PersistedDownloadQueue, bucket: &'static str, idx:
 /// `apply_meta` — the deletion transition needs both the recording
 /// metadata flag (`deleting_previous_state`) and the canonical task
 /// state (`Cancelled`) to land atomically.
-fn set_task_state(candidate: &mut PersistedDownloadQueue, bucket: &'static str, idx: usize, state: DownloadState) {
+fn set_task_state(
+    candidate: &mut PersistedRecordingQueue,
+    bucket: &'static str,
+    idx: usize,
+    state: RecordingTaskState,
+) {
     match bucket {
         "queue" => {
             if let Some(d) = candidate.queue.get_mut(idx) {
@@ -282,7 +281,7 @@ fn set_task_state(candidate: &mut PersistedDownloadQueue, bucket: &'static str, 
 /// `deleting_previous_state` and clears the flag so the recording
 /// reverts to its pre-deletion state. Best-effort: missing or already
 /// finalized tasks are silently left alone.
-pub fn rollback_deletion(candidate: &mut PersistedDownloadQueue, uuid: &str) {
+pub fn rollback_deletion(candidate: &mut PersistedRecordingQueue, uuid: &str) {
     let Some((bucket, idx)) = locate(candidate, uuid) else { return };
     let task = match bucket {
         "queue" => candidate.queue.get_mut(idx),
@@ -292,17 +291,16 @@ pub fn rollback_deletion(candidate: &mut PersistedDownloadQueue, uuid: &str) {
         _ => None,
     };
     let Some(task) = task else { return };
-    let Some(meta) = task.recording.as_mut() else { return };
-    let prior = meta.deleting_previous_state.take();
+    let prior = task.recording.deleting_previous_state.take();
     task.state = match prior {
-        Some(DeletionPreviousState::Completed) => DownloadState::Completed,
-        Some(DeletionPreviousState::Failed) => DownloadState::Failed,
-        Some(DeletionPreviousState::Cancelled) => DownloadState::Cancelled,
+        Some(DeletionPreviousState::Completed) => RecordingTaskState::Completed,
+        Some(DeletionPreviousState::Failed) => RecordingTaskState::Failed,
+        Some(DeletionPreviousState::Cancelled) => RecordingTaskState::Cancelled,
         // No recorded prior state (the begin step never ran, or the
         // recording was already terminal) — fall back to the natural
         // non-terminal state. The scheduler will not reissue a delete
         // for a recording it never observed as Deleting.
-        None => DownloadState::Scheduled,
+        None => RecordingTaskState::Scheduled,
     };
 }
 
@@ -323,9 +321,9 @@ pub fn rollback_deletion(candidate: &mut PersistedDownloadQueue, uuid: &str) {
 /// caller; today every site passes `None` and resolves the path from
 /// the task itself, which is the right call while `RecordingMetadata`
 /// still carries the absolute path verbatim.
-pub async fn file_path_for_deletion(download: &FileDownload, _recording_root: Option<&Path>) -> Option<PathBuf> {
+pub async fn file_path_for_deletion(download: &RecordingTask, _recording_root: Option<&Path>) -> Option<PathBuf> {
     let partial = crate::recording_worker::recording_partial_path(&download.file_path);
-    let prior = download.recording.as_ref().and_then(|m| m.deleting_previous_state);
+    let prior = download.recording.deleting_previous_state;
     let raw = match prior {
         Some(DeletionPreviousState::Completed) => download.file_path.clone(),
         Some(_) => partial,
@@ -357,7 +355,7 @@ async fn unlink_owned_file(path: &Path) -> Result<Option<PathBuf>, DeletionError
 /// success. Returns the path that was unlinked, or `None` if no
 /// physical file was present.
 pub async fn execute_deletion(
-    download: &FileDownload,
+    download: &RecordingTask,
     recording_root: Option<&Path>,
 ) -> Result<Option<PathBuf>, DeletionError> {
     let Some(path) = file_path_for_deletion(download, recording_root).await else {
@@ -368,8 +366,8 @@ pub async fn execute_deletion(
 
 /// Remove the task from the queue under a new mutation
 /// boundary. Called after the file is gone (or was already missing).
-pub async fn finalize_deletion(queue: &DownloadQueue, uuid: &str) -> Result<(), DeletionError> {
-    crate::download::mutate(queue, |candidate| {
+pub async fn finalize_deletion(queue: &RecordingQueue, uuid: &str) -> Result<(), DeletionError> {
+    crate::recording::recording_queue::mutate(queue, |candidate| {
         if let Some((bucket, idx)) = locate(candidate, uuid) {
             match bucket {
                 "queue" => {
@@ -419,9 +417,8 @@ pub enum RecoveryAction {
 
 /// Inspect a task that is in `Deleting` state and decide what the
 /// startup recovery should do.
-pub async fn recovery_action_for(download: &FileDownload, recording_root: Option<&Path>) -> RecoveryAction {
-    let Some(meta) = &download.recording else { return RecoveryAction::NotDeleting };
-    let Some(_prior) = meta.deleting_previous_state else { return RecoveryAction::NotDeleting };
+pub async fn recovery_action_for(download: &RecordingTask, recording_root: Option<&Path>) -> RecoveryAction {
+    let Some(_prior) = download.recording.deleting_previous_state else { return RecoveryAction::NotDeleting };
     let Some(path) = file_path_for_deletion(download, recording_root).await else {
         return RecoveryAction::FinishDeletion;
     };
@@ -444,7 +441,7 @@ pub async fn recovery_action_for(download: &FileDownload, recording_root: Option
 
 /// Apply the recovery action to a candidate. Called by the startup
 /// loop after the decision has been computed.
-pub fn apply_recovery_to_candidate(candidate: &mut PersistedDownloadQueue, uuid: &str, action: RecoveryAction) {
+pub fn apply_recovery_to_candidate(candidate: &mut PersistedRecordingQueue, uuid: &str, action: RecoveryAction) {
     if let Some((bucket, idx)) = locate(candidate, uuid) {
         let d = match bucket {
             "queue" => candidate.queue.get_mut(idx),
@@ -461,9 +458,7 @@ pub fn apply_recovery_to_candidate(candidate: &mut PersistedDownloadQueue, uuid:
                     // the deletion marker so the post-removal state is
                     // consistent if a higher-level caller decides
                     // otherwise.
-                    if let Some(meta) = d.recording.as_mut() {
-                        meta.deleting_previous_state = None;
-                    }
+                    d.recording.deleting_previous_state = None;
                 }
                 RecoveryAction::RestorePrevious | RecoveryAction::UnsafeRestore => {
                     restore_previous_state(d);
@@ -474,88 +469,99 @@ pub fn apply_recovery_to_candidate(candidate: &mut PersistedDownloadQueue, uuid:
     }
 }
 
-fn restore_previous_state(d: &mut PersistedFileDownload) {
-    let prior = d.recording.as_ref().and_then(|m| m.deleting_previous_state);
-    let Some(prior) = prior else { return };
+fn restore_previous_state(d: &mut PersistedRecordingTask) {
+    let Some(prior) = d.recording.deleting_previous_state else { return };
     d.state = match prior {
-        DeletionPreviousState::Completed => DownloadState::Completed,
-        DeletionPreviousState::Failed => DownloadState::Failed,
-        DeletionPreviousState::Cancelled => DownloadState::Cancelled,
+        DeletionPreviousState::Completed => RecordingTaskState::Completed,
+        DeletionPreviousState::Failed => RecordingTaskState::Failed,
+        DeletionPreviousState::Cancelled => RecordingTaskState::Cancelled,
     };
-    if let Some(meta) = d.recording.as_mut() {
-        meta.deleting_previous_state = None;
-    }
+    d.recording.deleting_previous_state = None;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::download::{mutate, DownloadKind, DownloadState, PersistedDownloadQueue, PersistedFileDownload};
-    use shared::model::RecordingMetadata;
+    use crate::recording::recording_queue::{
+        mutate, PersistedRecordingQueue, PersistedRecordingTask, RecordingTaskState,
+    };
+    use shared::model::{
+        RecordingKind, RecordingMetadata, RecordingOwner, RecordingSource, RecordingVisibility, UserId,
+    };
     use std::{path::PathBuf, sync::atomic::Ordering};
     use tempfile::TempDir;
 
     fn make_persisted_recording(
         uuid: &str,
-        state: DownloadState,
+        state: RecordingTaskState,
         deleting: Option<DeletionPreviousState>,
-    ) -> PersistedFileDownload {
-        let mut meta = RecordingMetadata::for_legacy_admin(1_700_000_000, 60);
+    ) -> PersistedRecordingTask {
+        let mut meta = RecordingMetadata::new_live(
+            RecordingOwner::User(UserId::from("web:alice")),
+            RecordingVisibility::Private,
+            RecordingSource::new("t1", "v1", "in1"),
+            1_700_000_000,
+            1_700_000_060,
+            0,
+            0,
+        );
         meta.deleting_previous_state = deleting;
-        PersistedFileDownload {
+        PersistedRecordingTask {
             uuid: uuid.to_string(),
             file_dir: PathBuf::from("/tmp"),
             file_path: PathBuf::from(format!("/tmp/{uuid}.ts")),
             filename: format!("{uuid}.ts"),
             url: format!("https://example.com/{uuid}"),
-            finished: matches!(state, DownloadState::Completed),
+            finished: matches!(state, RecordingTaskState::Completed),
             size: 0,
             total_size: None,
             paused: false,
             error: None,
             state,
-            start_at: Some(0),
-            duration_secs: Some(60),
-            kind: DownloadKind::Recording,
+            kind: RecordingKind::Live,
             input_name: None,
             priority: 0,
             retry_attempts: 0,
             next_retry_at: None,
-            recording: Some(meta),
+            recording: meta,
         }
     }
 
-    fn finished_with_state(uuid: &str, state: DownloadState, deleting: Option<DeletionPreviousState>) -> FileDownload {
+    fn finished_with_state(
+        uuid: &str,
+        state: RecordingTaskState,
+        deleting: Option<DeletionPreviousState>,
+    ) -> RecordingTask {
         let p = make_persisted_recording(uuid, state, deleting);
-        crate::download::DownloadQueue::from_persisted_with(p, None, None).expect("restore")
+        crate::recording::recording_queue::RecordingQueue::from_persisted(p).expect("restore")
     }
 
     #[test]
     fn prior_terminal_state_accepts_completed_failed_cancelled_only() {
-        let p = make_persisted_recording("r", DownloadState::Completed, None);
+        let p = make_persisted_recording("r", RecordingTaskState::Completed, None);
         let task =
-            crate::download::DownloadQueue::from_persisted_with(p, None, None).expect("test fixture must be valid");
+            crate::recording::recording_queue::RecordingQueue::from_persisted(p).expect("test fixture must be valid");
         assert_eq!(prior_terminal_state(&task), Some(DeletionPreviousState::Completed));
-        let p = make_persisted_recording("r", DownloadState::Failed, None);
+        let p = make_persisted_recording("r", RecordingTaskState::Failed, None);
         let task =
-            crate::download::DownloadQueue::from_persisted_with(p, None, None).expect("test fixture must be valid");
+            crate::recording::recording_queue::RecordingQueue::from_persisted(p).expect("test fixture must be valid");
         assert_eq!(prior_terminal_state(&task), Some(DeletionPreviousState::Failed));
-        let p = make_persisted_recording("r", DownloadState::Cancelled, None);
+        let p = make_persisted_recording("r", RecordingTaskState::Cancelled, None);
         let task =
-            crate::download::DownloadQueue::from_persisted_with(p, None, None).expect("test fixture must be valid");
+            crate::recording::recording_queue::RecordingQueue::from_persisted(p).expect("test fixture must be valid");
         assert_eq!(prior_terminal_state(&task), Some(DeletionPreviousState::Cancelled));
-        let p = make_persisted_recording("r", DownloadState::Downloading, None);
+        let p = make_persisted_recording("r", RecordingTaskState::Running, None);
         let task =
-            crate::download::DownloadQueue::from_persisted_with(p, None, None).expect("test fixture must be valid");
+            crate::recording::recording_queue::RecordingQueue::from_persisted(p).expect("test fixture must be valid");
         assert_eq!(prior_terminal_state(&task), None);
     }
 
     #[tokio::test]
     async fn file_path_for_deletion_uses_final_for_completed_partial_otherwise() {
-        let task = finished_with_state("r", DownloadState::Completed, Some(DeletionPreviousState::Completed));
+        let task = finished_with_state("r", RecordingTaskState::Completed, Some(DeletionPreviousState::Completed));
         let path = file_path_for_deletion(&task, None).await.expect("path");
         assert_eq!(path, PathBuf::from("/tmp/r.ts"));
-        let task = finished_with_state("r", DownloadState::Failed, Some(DeletionPreviousState::Failed));
+        let task = finished_with_state("r", RecordingTaskState::Failed, Some(DeletionPreviousState::Failed));
         let path = file_path_for_deletion(&task, None).await.expect("path");
         assert_eq!(path, PathBuf::from("/tmp/r.ts.partial"));
     }
@@ -570,7 +576,7 @@ mod tests {
         let dir_path = dir.path().canonicalize().expect("canonical tempdir");
         let final_path = dir_path.join("r.ts");
         tokio::fs::write(&final_path, b"data").await.expect("write");
-        let mut task = finished_with_state("r", DownloadState::Completed, Some(DeletionPreviousState::Completed));
+        let mut task = finished_with_state("r", RecordingTaskState::Completed, Some(DeletionPreviousState::Completed));
         task.file_path = final_path.clone();
         let deleted = execute_deletion(&task, None).await.expect("delete").expect("some path");
         assert_eq!(deleted, final_path);
@@ -580,7 +586,7 @@ mod tests {
     #[tokio::test]
     async fn execute_deletion_is_idempotent_for_missing_file() {
         let dir = TempDir::new().expect("tempdir");
-        let mut task = finished_with_state("r", DownloadState::Completed, None);
+        let mut task = finished_with_state("r", RecordingTaskState::Completed, None);
         task.file_path = dir.path().join("does-not-exist.ts");
         let result = execute_deletion(&task, None).await.expect("ok");
         assert!(result.is_none(), "missing file must report no path");
@@ -589,7 +595,7 @@ mod tests {
     #[tokio::test]
     async fn recovery_action_for_finish_when_file_missing() {
         let dir = TempDir::new().expect("tempdir");
-        let mut task = finished_with_state("r", DownloadState::Completed, Some(DeletionPreviousState::Completed));
+        let mut task = finished_with_state("r", RecordingTaskState::Completed, Some(DeletionPreviousState::Completed));
         task.file_path = dir.path().join("missing.ts");
         assert_eq!(recovery_action_for(&task, Some(dir.path())).await, RecoveryAction::FinishDeletion);
     }
@@ -599,7 +605,7 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let final_path = dir.path().join("r.ts");
         tokio::fs::write(&final_path, b"data").await.expect("write");
-        let mut task = finished_with_state("r", DownloadState::Completed, Some(DeletionPreviousState::Completed));
+        let mut task = finished_with_state("r", RecordingTaskState::Completed, Some(DeletionPreviousState::Completed));
         task.file_path = final_path;
         assert_eq!(recovery_action_for(&task, Some(dir.path())).await, RecoveryAction::RestorePrevious);
     }
@@ -610,7 +616,7 @@ mod tests {
         let outside = dir.path().join("..").join("outside.ts");
         let outside = outside.canonicalize().unwrap_or(outside);
         tokio::fs::write(&outside, b"data").await.expect("write");
-        let mut task = finished_with_state("r", DownloadState::Completed, Some(DeletionPreviousState::Completed));
+        let mut task = finished_with_state("r", RecordingTaskState::Completed, Some(DeletionPreviousState::Completed));
         task.file_path = outside;
         assert_eq!(recovery_action_for(&task, Some(dir.path())).await, RecoveryAction::UnsafeRestore);
     }
@@ -618,31 +624,32 @@ mod tests {
     #[tokio::test]
     async fn recovery_action_for_not_deleting_when_marker_absent() {
         let dir = TempDir::new().expect("tempdir");
-        let mut task = finished_with_state("r", DownloadState::Completed, None);
+        let mut task = finished_with_state("r", RecordingTaskState::Completed, None);
         task.file_path = dir.path().join("r.ts");
         assert_eq!(recovery_action_for(&task, Some(dir.path())).await, RecoveryAction::NotDeleting);
     }
 
     #[test]
     fn apply_recovery_to_candidate_restores_state() {
-        let mut candidate = PersistedDownloadQueue::default();
-        let mut p = make_persisted_recording("r", DownloadState::Cancelled, Some(DeletionPreviousState::Completed));
-        p.state = DownloadState::Cancelled;
+        let mut candidate = PersistedRecordingQueue::default();
+        let mut p =
+            make_persisted_recording("r", RecordingTaskState::Cancelled, Some(DeletionPreviousState::Completed));
+        p.state = RecordingTaskState::Cancelled;
         candidate.finished.push(p);
         apply_recovery_to_candidate(&mut candidate, "r", RecoveryAction::RestorePrevious);
         let restored = &candidate.finished[0];
-        assert_eq!(restored.state, DownloadState::Completed);
-        assert!(restored.recording.as_ref().unwrap().deleting_previous_state.is_none());
+        assert_eq!(restored.state, RecordingTaskState::Completed);
+        assert!(restored.recording.deleting_previous_state.is_none());
     }
 
     #[tokio::test]
     async fn begin_deletion_stamps_deleting_state_under_boundary() {
         let dir = TempDir::new().expect("tempdir");
         let state_file = dir.path().join("downloads_state.json");
-        let queue = DownloadQueue::new_with_state_file(Some(state_file.clone()));
-        let mut task = finished_with_state("r", DownloadState::Completed, None);
+        let queue = RecordingQueue::new_with_state_file(Some(state_file.clone()));
+        let mut task = finished_with_state("r", RecordingTaskState::Completed, None);
         task.file_path = dir.path().join("r.ts");
-        let persisted = DownloadQueue::to_persisted(&task);
+        let persisted = RecordingQueue::to_persisted(&task);
         mutate(&queue, |c| {
             c.finished.push(persisted);
             Ok(())
@@ -652,8 +659,8 @@ mod tests {
         let prior = queue.revision.load(Ordering::SeqCst);
         begin_deletion(&queue, "r").await.expect("begin");
         let after = queue.finished.read().await.first().cloned().expect("task");
-        assert_eq!(after.recording.as_ref().unwrap().deleting_previous_state, Some(DeletionPreviousState::Completed));
-        assert!(after.recording.as_ref().unwrap().is_deleting());
+        assert_eq!(after.recording.deleting_previous_state, Some(DeletionPreviousState::Completed));
+        assert!(after.recording.is_deleting());
         assert!(queue.revision.load(Ordering::SeqCst) > prior, "revision must advance");
     }
 
@@ -663,10 +670,10 @@ mod tests {
         // the task, so a decline must leave the task untouched.
         let dir = TempDir::new().expect("tempdir");
         let state_file = dir.path().join("downloads_state.json");
-        let queue = DownloadQueue::new_with_state_file(Some(state_file));
-        let mut task = finished_with_state("r", DownloadState::Completed, None);
+        let queue = RecordingQueue::new_with_state_file(Some(state_file));
+        let mut task = finished_with_state("r", RecordingTaskState::Completed, None);
         task.file_path = dir.path().join("r.ts");
-        let persisted = DownloadQueue::to_persisted(&task);
+        let persisted = RecordingQueue::to_persisted(&task);
         mutate(&queue, |c| {
             c.finished.push(persisted);
             Ok(())
@@ -678,15 +685,15 @@ mod tests {
 
         assert!(matches!(result, Err(DeletionError::Forbidden)));
         let finished = queue.finished.read().await;
-        assert_eq!(finished[0].state, DownloadState::Completed);
-        assert!(finished[0].recording.as_ref().is_none_or(|meta| meta.deleting_previous_state.is_none()));
+        assert_eq!(finished[0].state, RecordingTaskState::Completed);
+        assert!(finished[0].recording.deleting_previous_state.is_none());
     }
 
     #[tokio::test]
     async fn begin_deletion_rejects_unknown_task() {
         let dir = TempDir::new().expect("tempdir");
         let state_file = dir.path().join("downloads_state.json");
-        let queue = DownloadQueue::new_with_state_file(Some(state_file));
+        let queue = RecordingQueue::new_with_state_file(Some(state_file));
         let result = begin_deletion(&queue, "missing").await;
         // Reported as its own variant now, not folded into the opaque
         // `BeginFailed`, so the service layer can map it to a 404.
@@ -697,10 +704,10 @@ mod tests {
     async fn begin_deletion_rejects_non_terminal_state() {
         let dir = TempDir::new().expect("tempdir");
         let state_file = dir.path().join("downloads_state.json");
-        let queue = DownloadQueue::new_with_state_file(Some(state_file));
-        let mut task = finished_with_state("r", DownloadState::Downloading, None);
+        let queue = RecordingQueue::new_with_state_file(Some(state_file));
+        let mut task = finished_with_state("r", RecordingTaskState::Running, None);
         task.file_path = dir.path().join("r.ts");
-        let persisted = DownloadQueue::to_persisted(&task);
+        let persisted = RecordingQueue::to_persisted(&task);
         mutate(&queue, |c| {
             c.finished.push(persisted);
             Ok(())
@@ -715,10 +722,10 @@ mod tests {
     async fn finalize_deletion_removes_task_under_boundary() {
         let dir = TempDir::new().expect("tempdir");
         let state_file = dir.path().join("downloads_state.json");
-        let queue = DownloadQueue::new_with_state_file(Some(state_file));
-        let mut task = finished_with_state("r", DownloadState::Cancelled, Some(DeletionPreviousState::Cancelled));
+        let queue = RecordingQueue::new_with_state_file(Some(state_file));
+        let mut task = finished_with_state("r", RecordingTaskState::Cancelled, Some(DeletionPreviousState::Cancelled));
         task.file_path = dir.path().join("r.ts");
-        let persisted = DownloadQueue::to_persisted(&task);
+        let persisted = RecordingQueue::to_persisted(&task);
         mutate(&queue, |c| {
             c.finished.push(persisted);
             Ok(())

@@ -1051,27 +1051,16 @@
     "DNS_SCHEME_HTTPS": "HTTPS",
     "DNS_SCHEMES": "أنظمة DNS",
     "DOWNLOAD": "تنزيل",
-    "DOWNLOADS": "التنزيلات",
-    "DOWNLOAD_CANCEL": "ملغى",
-    "DOWNLOAD_DOWNLOADED": "تم التنزيل",
-    "DOWNLOAD_FILE_SIZE": "حجم الملف",
-    "DOWNLOAD_FINISHED": "مكتمل",
-    "DOWNLOAD_QUEUE": "الطابور",
+    "RECORDING_TRANSFERRED": "تم التنزيل",
+    "RECORDING_FILE_SIZE": "حجم الملف",
+    "RECORDING_QUEUE": "الطابور",
     "ATTEMPT": "محاولة",
     "NEXT_RETRY": "إعادة المحاولة التالية",
-    "DOWNLOAD_RETRY_BACKOFF_JITTER_PERCENT": "تباعد إعادة محاولة التنزيل (٪)",
-    "DOWNLOAD_RETRY_MAX_ATTEMPTS": "الحد الأقصى لمحاولات إعادة محاولة التنزيل",
-    "DOWNLOAD_RETRY_BACKOFF_INITIAL": "ارتداد إعادة محاولة التنزيل الأولي (ثواني)",
-    "DOWNLOAD_RETRY_BACKOFF_MULTIPLIER": "مضاعف ارتداد إعادة محاولة التنزيل",
-    "DOWNLOAD_RETRY_BACKOFF_MAX": "الحد الأقصى لارتداد إعادة محاولة التنزيل (ثواني)",
-    "DOWNLOAD_STATE_COMPLETED": "مكتمل",
-    "DOWNLOAD_STATE_DOWNLOADING": "جارٍ التنزيل",
-    "DOWNLOAD_STATE_FAILED": "فشل",
-    "DOWNLOAD_STATE_PAUSED": "متوقف مؤقتًا",
-    "DOWNLOAD_STATE_QUEUED": "في الطابور",
-    "DOWNLOAD_STATE_RETRY_WAITING": "في انتظار إعادة المحاولة",
-    "DOWNLOAD_STATE_SCHEDULED": "مجدول",
-    "DOWNLOAD_STATE_WAITING_FOR_CAPACITY": "في انتظار السعة",
+    "RECORDING_RETRY_BACKOFF_JITTER_PERCENT": "تباعد إعادة محاولة التنزيل (٪)",
+    "RECORDING_RETRY_MAX_ATTEMPTS": "الحد الأقصى لمحاولات إعادة محاولة التنزيل",
+    "RECORDING_RETRY_BACKOFF_INITIAL": "ارتداد إعادة محاولة التنزيل الأولي (ثواني)",
+    "RECORDING_RETRY_BACKOFF_MULTIPLIER": "مضاعف ارتداد إعادة محاولة التنزيل",
+    "RECORDING_RETRY_BACKOFF_MAX": "الحد الأقصى لارتداد إعادة محاولة التنزيل (ثواني)",
     "DURATION": "المدة",
     "DURATION_MINUTES": "المدة (دقائق)",
     "EDIT": "تحرير",
@@ -1633,7 +1622,6 @@
     "VIEW_TYPE_STATS": "الإحصائيات",
     "VIEW_TYPE_STREAMS": "تيارات البث",
     "VIEW_TYPE_STREAM_HISTORY": "سجل البث",
-    "VIEW_TYPE_DOWNLOADS": "التنزيلات",
     "VIEW_TYPE_USERS": "مستخدمو API",
     "VIEW_TYPE_CONFIG": "التكوين",
     "VIEW_TYPE_SOURCE_EDITOR": "المصادر",
@@ -1692,7 +1680,6 @@
     "RECORDING_CONFIG": "التسجيل",
     "RECORDING_CURRENT": "الحالية",
     "RECORDING_COMPLETED": "المكتملة",
-    "LEGACY_DOWNLOAD": "تنزيل قديم",
     "RECORDING_LOW_WATER_PERCENT": "حد الامتلاء الأدنى (%)",
     "RECORDING_MAX_ATTEMPTS": "الحد الأقصى لمحاولات الإشعار",
     "RECORDING_MAX_POST_ROLL_SECS": "الحد الأقصى للمدة بعد التسجيل (بالثواني)",
@@ -1770,35 +1757,6 @@
     "CONFIG_CHANGED": "تم تغيير التكوين على الخادم.",
     "CONFIRM_DELETE": "هل تريد حقًا حذفه؟",
     "CONFIRM_SOURCES_SAVE": "هل تريد حقًا الحفظ؟",
-    "DOWNLOAD": {
-      "DOWNLOAD_QUEUED": "تمت إضافة التنزيل إلى الطابور.",
-      "RECORDING_QUEUED": "تمت إضافة التسجيل إلى الطابور.",
-      "DOWNLOAD_PAUSED": "تم إيقاف التنزيل مؤقتًا.",
-      "DOWNLOAD_RESUMED": "تم استئناف التنزيل",
-      "DOWNLOAD_CANCELLED": "تم إلغاء التنزيل.",
-      "DOWNLOAD_REMOVED": "تمت إزالة التنزيل.",
-      "DOWNLOAD_RETRIED": "تمت إعادة محاولة التنزيل.",
-      "CONFIRM_CANCEL": "هل تريد حقًا إلغاء هذا النقل؟",
-      "CONFIRM_REMOVE": "هل تريد حقًا إزالة هذا الإدخال؟",
-      "FAIL": "فشل التنزيل!",
-      "INVALID_RECORD_DURATION": "يجب أن تكون مدة التسجيل عددًا موجبًا من الدقائق.",
-      "INVALID_RECORD_START": "وقت بدء التسجيل غير صالح.",
-      "GEOIP": {
-        "FAIL": "فشل تنزيل قاعدة بيانات Geo-IP!",
-        "SUCCESS": "تم تنزيل قاعدة بيانات Geo-IP بنجاح"
-      },
-      "PLAYLIST": {
-        "FAIL": "فشل تنزيل قائمة التشغيل!",
-        "SUCCESS": "تم تنزيل قائمة التشغيل بنجاح"
-      },
-      "SERVER_CONFIG": {
-        "FAIL": "فشل تنزيل تهيئة الخادم!"
-      },
-      "SUCCESS": "تم التنزيل بنجاح",
-      "USER_BOUQUET": {
-        "FAIL": "فشل تنزيل باقات المستخدم!"
-      }
-    },
     "FAILED_TO_KICK_USER_STREAM": "فشل طرد بث المستخدم",
     "FAILED_TO_RETRIEVE_PROVIDER_URL": "فشل استرداد عنوان URL للمزود",
     "FAILED_TO_RETRIEVE_WEBPLAYER_URL": "فشل استرداد عنوان URL لمشغل الويب",
@@ -1878,7 +1836,13 @@
       "EMPTY_RULES": "لا توجد قواعد متكررة بعد. أنشئ واحدة لتسجيل مسلسل تلقائياً.",
       "RULE_DELETED": "تم حذف القاعدة المتكررة.",
       "RULE_UPDATED": "تم تحديث القاعدة المتكررة.",
-      "RULE_SAVED": "تم حفظ القاعدة المتكررة."
+      "RULE_SAVED": "تم حفظ القاعدة المتكررة.",
+      "TASK_PAUSED": "تم إيقاف التسجيل مؤقتًا.",
+      "TASK_RESUMED": "تم استئناف التسجيل.",
+      "TASK_REMOVED": "تمت إزالة التسجيل.",
+      "TASK_RETRIED": "تمت إعادة التسجيل إلى الطابور.",
+      "CONFIRM_CANCEL": "هل تريد بالتأكيد إيقاف هذا التسجيل؟",
+      "CONFIRM_REMOVE": "هل تريد بالتأكيد إزالة هذا العنصر؟"
     },
     "RBAC": {
       "ADMIN_HINT": "المستخدم مسؤول — المجموعات الإضافية ليس لها تأثير.",
@@ -1959,6 +1923,13 @@
       "NETWORK_ACCESS_COUNTRIES": "أدخل رمز بلد واحد بتنسيق ISO المؤلف من حرفين لكل إدخال، مثل DE.",
       "REQUIRED": "هذا الحقل مطلوب.",
       "NETWORK_ACCESS_NETWORKS": "أدخل CIDR واحد لكل إدخال، مثل 192.168.0.0/16 أو 2001:db8::/32."
+    },
+    "GEOIP": {
+      "FAIL": "فشل تنزيل قاعدة بيانات Geo-IP!",
+      "SUCCESS": "تم تنزيل قاعدة بيانات Geo-IP بنجاح"
+    },
+    "USER_BOUQUET": {
+      "FAIL": "فشل تنزيل باقات المستخدم!"
     }
   },
   "SETUP": {

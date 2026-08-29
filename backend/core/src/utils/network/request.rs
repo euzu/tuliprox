@@ -181,7 +181,7 @@ fn prepare_physical_request_attempt(
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-pub struct FileDownloadOptions {
+pub struct RecordingTaskOptions {
     pub max_bytes: Option<u64>,
     pub atomic_write: bool,
 }
@@ -1865,7 +1865,7 @@ pub async fn get_remote_content_as_file(
         headers,
         url,
         file_path,
-        FileDownloadOptions::default(),
+        RecordingTaskOptions::default(),
     )
     .await
 }
@@ -1877,7 +1877,7 @@ pub async fn get_remote_content_as_file_with_options(
     headers: Option<&HeaderMap>,
     url: &Url,
     file_path: &Path,
-    options: FileDownloadOptions,
+    options: RecordingTaskOptions,
 ) -> Result<PathBuf, std::io::Error> {
     let input_source = InputSource {
         name: input.name.clone(),
@@ -2453,7 +2453,7 @@ async fn download_epg_content_as_file(
                     headers,
                     &url,
                     persist_filepath,
-                    FileDownloadOptions { max_bytes, atomic_write: true },
+                    RecordingTaskOptions { max_bytes, atomic_write: true },
                 )
                 .await
             }

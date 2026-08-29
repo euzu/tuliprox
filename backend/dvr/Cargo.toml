@@ -17,6 +17,7 @@ tuliprox-repository = { workspace = true }
 tuliprox-session = { workspace = true }
 arc-swap.workspace = true
 chrono.workspace = true
+fastrand.workspace = true
 chrono-tz = "0.10.4"
 bytes.workspace = true
 libc = "0.2"

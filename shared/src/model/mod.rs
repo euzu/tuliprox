@@ -3,7 +3,7 @@ mod auth;
 mod cluster_flags;
 mod config;
 mod custom_video_stream_type;
-mod download;
+
 mod epg;
 mod epg_request;
 mod identity_registry;
@@ -54,8 +54,8 @@ mod xtream;
 pub mod xtream_const;
 
 pub use self::{
-    active_user_connection_change::*, auth::*, cluster_flags::*, config::*, custom_video_stream_type::*, download::*,
-    epg::*, epg_request::*, identity_registry::*, ip_check::*, item_field::*, library_request::*, log::*, mapping::*,
+    active_user_connection_change::*, auth::*, cluster_flags::*, config::*, custom_video_stream_type::*, epg::*,
+    epg_request::*, identity_registry::*, ip_check::*, item_field::*, library_request::*, log::*, mapping::*,
     media_properties::*, messaging::*, pagination::*, playlist::*, playlist_categories::*, playlist_info_document::*,
     playlist_request::*, processing_order::*, progress::*, recording::*, recording_math::*, regex_cache::*,
     search_fields::*, search_request::*, short_epg::*, stalker::*, stalker_item::*, stats::*, status_check::*,

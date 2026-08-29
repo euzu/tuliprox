@@ -1056,27 +1056,16 @@
     "DNS_SCHEME_HTTPS": "HTTPS",
     "DNS_SCHEMES": "DNS Schemes",
     "DOWNLOAD": "Download",
-    "DOWNLOADS": "Downloads",
-    "DOWNLOAD_CANCEL": "Cancelled",
-    "DOWNLOAD_DOWNLOADED": "Downloaded",
-    "DOWNLOAD_FILE_SIZE": "File size",
-    "DOWNLOAD_FINISHED": "Finished",
-    "DOWNLOAD_QUEUE": "Queue",
+    "RECORDING_TRANSFERRED": "Downloaded",
+    "RECORDING_FILE_SIZE": "File size",
+    "RECORDING_QUEUE": "Queue",
     "ATTEMPT": "Attempt",
     "NEXT_RETRY": "Next retry",
-    "DOWNLOAD_RETRY_BACKOFF_JITTER_PERCENT": "Download retry jitter (%)",
-    "DOWNLOAD_RETRY_MAX_ATTEMPTS": "Download retry max attempts",
-    "DOWNLOAD_RETRY_BACKOFF_INITIAL": "Download retry initial backoff (secs)",
-    "DOWNLOAD_RETRY_BACKOFF_MULTIPLIER": "Download retry backoff multiplier",
-    "DOWNLOAD_RETRY_BACKOFF_MAX": "Download retry max backoff (secs)",
-    "DOWNLOAD_STATE_COMPLETED": "Completed",
-    "DOWNLOAD_STATE_DOWNLOADING": "Downloading",
-    "DOWNLOAD_STATE_FAILED": "Failed",
-    "DOWNLOAD_STATE_PAUSED": "Paused",
-    "DOWNLOAD_STATE_QUEUED": "Queued",
-    "DOWNLOAD_STATE_RETRY_WAITING": "Retry waiting",
-    "DOWNLOAD_STATE_SCHEDULED": "Scheduled",
-    "DOWNLOAD_STATE_WAITING_FOR_CAPACITY": "Waiting for capacity",
+    "RECORDING_RETRY_BACKOFF_JITTER_PERCENT": "Download retry jitter (%)",
+    "RECORDING_RETRY_MAX_ATTEMPTS": "Download retry max attempts",
+    "RECORDING_RETRY_BACKOFF_INITIAL": "Download retry initial backoff (secs)",
+    "RECORDING_RETRY_BACKOFF_MULTIPLIER": "Download retry backoff multiplier",
+    "RECORDING_RETRY_BACKOFF_MAX": "Download retry max backoff (secs)",
     "DURATION": "Duration",
     "DURATION_MINUTES": "Duration (min)",
     "EDIT": "Edit",
@@ -1403,7 +1392,6 @@
     "RECORDING_CONFIG": "Recording",
     "RECORDING_CURRENT": "Current",
     "RECORDING_COMPLETED": "Completed",
-    "LEGACY_DOWNLOAD": "Legacy Download",
     "RECORDING_LOW_WATER_PERCENT": "Low-water mark (%)",
     "RECORDING_MAX_ATTEMPTS": "Notification max attempts",
     "RECORDING_MAX_POST_ROLL_SECS": "Maximum post-roll (seconds)",
@@ -1742,7 +1730,6 @@
     "VIEW_TYPE_STATS": "Stats",
     "VIEW_TYPE_STREAMS": "Streams",
     "VIEW_TYPE_STREAM_HISTORY": "Stream History",
-    "VIEW_TYPE_DOWNLOADS": "Downloads",
     "VIEW_TYPE_USERS": "Api Users",
     "VIEW_TYPE_CONFIG": "Config",
     "VIEW_TYPE_SOURCE_EDITOR": "Sources",
@@ -1805,35 +1792,6 @@
     "CONFIG_CHANGED": "Configuration on server changed.",
     "CONFIRM_DELETE": "You really want to delete it?",
     "CONFIRM_SOURCES_SAVE": "Do you really want to save?",
-    "DOWNLOAD": {
-      "DOWNLOAD_QUEUED": "Download queued.",
-      "RECORDING_QUEUED": "Recording queued.",
-      "DOWNLOAD_PAUSED": "Download paused.",
-      "DOWNLOAD_RESUMED": "Download resumed",
-      "DOWNLOAD_CANCELLED": "Download cancelled.",
-      "DOWNLOAD_REMOVED": "Download removed.",
-      "DOWNLOAD_RETRIED": "Download retried.",
-      "CONFIRM_CANCEL": "Do you really want to cancel this transfer?",
-      "CONFIRM_REMOVE": "Do you really want to remove this entry?",
-      "FAIL": "Failed to download!",
-      "INVALID_RECORD_DURATION": "Recording duration must be a positive number of minutes.",
-      "INVALID_RECORD_START": "Recording start time is invalid.",
-      "GEOIP": {
-        "FAIL": "Failed to download Geo-IP db!",
-        "SUCCESS": "Successfully downloaded Geo-IP db"
-      },
-      "PLAYLIST": {
-        "FAIL": "Failed to download playlist!",
-        "SUCCESS": "Successfully downloaded playlist"
-      },
-      "SERVER_CONFIG": {
-        "FAIL": "Failed to download server config!"
-      },
-      "SUCCESS": "Successfully downloaded",
-      "USER_BOUQUET": {
-        "FAIL": "Failed to download user bouquets!"
-      }
-    },
     "FAILED_TO_KICK_USER_STREAM": "Failed to kick user stream",
     "FAILED_TO_RETRIEVE_PROVIDER_URL": "Failed to retrieve provider URL",
     "FAILED_TO_RETRIEVE_WEBPLAYER_URL": "Failed to retrieve webplayer URL",
@@ -1913,7 +1871,13 @@
       "EMPTY_RULES": "No recurring rules yet. Create one to record a series automatically.",
       "RULE_DELETED": "Recurring rule deleted.",
       "RULE_UPDATED": "Recurring rule updated.",
-      "RULE_SAVED": "Recurring rule saved."
+      "RULE_SAVED": "Recurring rule saved.",
+      "TASK_PAUSED": "Recording paused.",
+      "TASK_RESUMED": "Recording resumed.",
+      "TASK_REMOVED": "Recording removed.",
+      "TASK_RETRIED": "Recording queued again.",
+      "CONFIRM_CANCEL": "Do you really want to stop this recording?",
+      "CONFIRM_REMOVE": "Do you really want to remove this entry?"
     },
     "RBAC": {
       "ADMIN_HINT": "User is Admin — additional groups have no effect.",
@@ -1994,6 +1958,13 @@
       "NETWORK_ACCESS_COUNTRIES": "Enter one 2-letter ISO country code per entry, for example DE.",
       "NETWORK_ACCESS_NETWORKS": "Enter one CIDR per entry, for example 192.168.0.0/16 or 2001:db8::/32.",
       "REQUIRED": "This field is required."
+    },
+    "GEOIP": {
+      "FAIL": "Failed to download Geo-IP db!",
+      "SUCCESS": "Successfully downloaded Geo-IP db"
+    },
+    "USER_BOUQUET": {
+      "FAIL": "Failed to download user bouquets!"
     }
   },
   "SETUP": {

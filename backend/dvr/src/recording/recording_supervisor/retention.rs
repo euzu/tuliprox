@@ -119,7 +119,7 @@ async fn run_policy_sweep(ctx: &RecordingCtx, now: i64) -> u64 {
     if policy.keep_last_per_channel.is_none() && policy.delete_after_days.is_none() {
         return 0;
     }
-    let (_revision, tasks) = ctx.downloads.committed_snapshot().await;
+    let (_revision, tasks) = ctx.recordings.committed_snapshot().await;
     let candidates = super::super::recording_retention::compute_candidates(&tasks, &policy, now);
     if candidates.is_empty() {
         return 0;
@@ -178,7 +178,7 @@ async fn run_disk_pressure_sweep(ctx: &RecordingCtx) -> u64 {
     let used = total_bytes.saturating_sub(free_bytes);
     let used_percent = u8::try_from(used.saturating_mul(100) / total_bytes).unwrap_or(100);
 
-    let (_revision, tasks) = ctx.downloads.committed_snapshot().await;
+    let (_revision, tasks) = ctx.recordings.committed_snapshot().await;
     // The candidate ordering and the admission conditions stay in the
     // pure runner; only the delete side effect lives here, so the loop
     // can `await` instead of blocking a worker thread.

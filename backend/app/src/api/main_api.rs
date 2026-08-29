@@ -3,7 +3,6 @@ use crate::{
         api_utils::{get_build_time, get_server_time},
         endpoints::{
             custom_video_stream_api::cvs_api_register,
-            download_api::{resume_download_worker_if_needed, spawn_download_services},
             hdhomerun_api::hdhr_api_register,
             hls_api::hls_api_register,
             log_ws_api::log_ws_api_register,
@@ -22,8 +21,8 @@ use crate::{
             exec_provider_dns, exec_qos_aggregation, load_playlists_into_memory_cache,
             recording_rule_scheduler::spawn_recording_rule_scheduler,
             recording_supervisor::start_recording_supervisors, ActiveProviderManager, ActiveUserManager, AppState,
-            CancelTokens, ConnectionManager, DownloadQueue, EventManager, EventMessage, HdHomerunAppState,
-            HlsProvisioningState, ManualPlaylistUpdateRequest, MetadataUpdateManager, PlaylistStorageState,
+            CancelTokens, ConnectionManager, EventManager, EventMessage, HdHomerunAppState, HlsProvisioningState,
+            ManualPlaylistUpdateRequest, MetadataUpdateManager, PlaylistStorageState, RecordingQueue,
             SharedStreamManager, UpdateGuard,
         },
         panel_api::{sync_panel_api_exp_dates, sync_panel_api_exp_dates_on_boot},
@@ -55,10 +54,7 @@ use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
     path::PathBuf,
-    sync::{
-        atomic::{AtomicI8, AtomicU64, Ordering},
-        Arc,
-    },
+    sync::{atomic::AtomicI8, Arc},
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -67,58 +63,22 @@ use tower_http::{
     compression::predicate::{DefaultPredicate, Predicate, SizeAbove},
     services::ServeDir,
 };
+use tuliprox_dvr::recording::recording_transfer::{resume_recording_worker_if_needed, spawn_recording_services};
 use tuliprox_hls::api::{exec_hls_cache_gc, exec_hls_lifecycle, HlsProxyManager};
 
 const METADATA_TRIGGER_WAIT_CYCLE_LIMIT: u32 = 900;
-static CORRUPT_DOWNLOADS_STATE_SUFFIX: AtomicU64 = AtomicU64::new(1);
-
-fn corrupt_downloads_state_path(state_file: &std::path::Path) -> PathBuf {
-    let now = chrono::Utc::now();
-    let suffix = CORRUPT_DOWNLOADS_STATE_SUFFIX.fetch_add(1, Ordering::Relaxed);
-    let timestamp = format!("{}{:09}.{:016x}", now.format("%Y%m%d%H%M%S"), now.timestamp_subsec_nanos(), suffix);
-    let stem = state_file.file_stem().and_then(|stem| stem.to_str()).unwrap_or("downloads_state");
-    let extension = state_file.extension().and_then(|ext| ext.to_str()).unwrap_or("json");
-    state_file.with_file_name(format!("{stem}_corrupt.{timestamp}.{extension}"))
-}
-
-async fn recover_persisted_downloads_state(downloads: &DownloadQueue) -> Result<(), TuliproxError> {
-    match downloads.load_from_disk().await {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::InvalidData => {
-            if let Some(state_file) = downloads.state_file.as_ref() {
-                let corrupt_path = corrupt_downloads_state_path(state_file);
-                match tokio::fs::rename(state_file, &corrupt_path).await {
-                    Ok(()) => error!(
-                        "Persisted downloads state is corrupted. Renamed {} to {} and starting with an empty queue: {}",
-                        state_file.display(),
-                        corrupt_path.display(),
-                        err
-                    ),
-                    Err(rename_err) => error!(
-                        "Persisted downloads state is corrupted. Failed to rename {} to {}: {}. Starting with an empty queue anyway: {}",
-                        state_file.display(),
-                        corrupt_path.display(),
-                        rename_err,
-                        err
-                    ),
-                }
-            } else {
-                error!("Persisted downloads state is corrupted. Starting with an empty queue: {err}");
-            }
-            Ok(())
-        }
-        Err(err) => Err(TuliproxError::Io(format!("Failed to load persisted downloads: {err}"))),
-    }
-}
-
-async fn recover_persisted_downloads_state_for_startup(downloads: &DownloadQueue) {
-    if let Err(err) = recover_persisted_downloads_state(downloads).await {
-        error!("Failed to recover persisted downloads state during startup; continuing with downloads paused: {err}");
-    }
+/// Load the canonical recording state. A malformed state file fails
+/// startup: it is never renamed, reset, or backed up, so an operator can
+/// inspect and repair it instead of silently losing the queue.
+async fn load_persisted_recording_state(recordings: &RecordingQueue) -> Result<(), TuliproxError> {
+    recordings
+        .load_from_disk()
+        .await
+        .map_err(|err| TuliproxError::Io(format!("Failed to load persisted recordings: {err}")))
 }
 
 async fn resume_downloads_after_bind(app_state: &Arc<AppState>, download_cfg: &crate::model::RecordingConfig) {
-    spawn_download_services(app_state.as_ref(), &app_state.cancel_tokens.load().downloads);
+    spawn_recording_services(&app_state.recording_ctx(), &app_state.cancel_tokens.load().recordings);
     // Reconcile the DVR state the previous process left behind *before*
     // the rule scheduler can plan against it, then start the retention
     // and notification supervisors. Without this the queue keeps tasks
@@ -127,11 +87,11 @@ async fn resume_downloads_after_bind(app_state: &Arc<AppState>, download_cfg: &c
     // transient provider error is never retried.
     // Cloned out of the `ArcSwap` guard first: the guard must not be held
     // across the await below.
-    let downloads_cancel = app_state.cancel_tokens.load().downloads.clone();
+    let downloads_cancel = app_state.cancel_tokens.load().recordings.clone();
     start_recording_supervisors(&app_state.recording_ctx(), &downloads_cancel).await;
     spawn_recording_rule_scheduler(&app_state.recording_ctx(), &downloads_cancel);
-    if let Err(err) = resume_download_worker_if_needed(app_state.as_ref(), download_cfg).await {
-        error!("Failed to resume persisted downloads during startup; continuing with downloads paused: {err}");
+    if let Err(err) = resume_recording_worker_if_needed(&app_state.recording_ctx(), download_cfg).await {
+        error!("Failed to resume persisted recordings during startup; continuing with recordings paused: {err}");
     }
 }
 
@@ -314,7 +274,7 @@ async fn create_shared_data(
     forced_targets: &Arc<ProcessTargets>,
 ) -> Result<(AppState, mpsc::Receiver<ManualPlaylistUpdateRequest>), TuliproxError> {
     let config = app_config.config.load();
-    let downloads_state_file = std::path::PathBuf::from(&config.storage_dir).join("downloads_state.json");
+    let recordings_state_file = std::path::PathBuf::from(&config.storage_dir).join("recordings_state.json");
 
     let use_geoip = config.is_geoip_enabled();
     let geoip = if use_geoip {
@@ -373,7 +333,7 @@ async fn create_shared_data(
         http_client: Arc::new(ArcSwap::from_pointee(client)),
         http_client_no_redirect: Arc::new(ArcSwap::from_pointee(client_no_redirect)),
         public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(public_client_no_redirect)),
-        downloads: Arc::new(DownloadQueue::new_with_state_file(Some(downloads_state_file))),
+        recordings: Arc::new(RecordingQueue::new_with_state_file(Some(recordings_state_file))),
         cache: Arc::new(ArcSwapOption::from(cache)),
         shared_stream_manager,
         hls_proxy,
@@ -390,7 +350,7 @@ async fn create_shared_data(
         manual_update_sender,
     };
 
-    recover_persisted_downloads_state_for_startup(&app_state.downloads).await;
+    load_persisted_recording_state(&app_state.recordings).await?;
 
     Ok((app_state, manual_update_rx))
 }
@@ -437,7 +397,7 @@ async fn cancel_all_service_tokens(app_state: &Arc<AppState>) {
     cancel_tokens.file_watch.cancel();
     cancel_tokens.provider_dns.cancel();
     cancel_tokens.qos_aggregation.cancel();
-    cancel_tokens.downloads.cancel();
+    cancel_tokens.recordings.cancel();
     cancel_tokens.hls_cache.cancel();
     app_state.active_users.shutdown();
     // Use the manager's shutdown() rather than cancelling the token directly so
@@ -934,8 +894,8 @@ async fn wait_for_shutdown_signal() -> Result<&'static str, std::io::Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{corrupt_downloads_state_path, recover_persisted_downloads_state};
-    use crate::api::model::DownloadQueue;
+    use super::load_persisted_recording_state;
+    use crate::api::model::RecordingQueue;
     use std::{
         path::PathBuf,
         time::{SystemTime, UNIX_EPOCH},
@@ -946,48 +906,27 @@ mod tests {
         std::env::temp_dir().join(format!("tuliprox_{name}_{nanos}.json"))
     }
 
-    #[test]
-    fn corrupt_downloads_state_path_is_unique_for_rapid_calls() {
-        let state_file = temp_state_file("corrupt_downloads_unique");
+    #[tokio::test]
+    async fn malformed_recording_state_fails_startup_without_touching_the_file() {
+        let state_file = temp_state_file("malformed_recording_state");
+        std::fs::write(&state_file, "{ not valid json").expect("write malformed state");
+        let recordings = RecordingQueue::new_with_state_file(Some(state_file.clone()));
 
-        let first = corrupt_downloads_state_path(&state_file);
-        let second = corrupt_downloads_state_path(&state_file);
-
-        assert_ne!(first, second);
+        let err = load_persisted_recording_state(&recordings).await.expect_err("startup must fail");
+        assert!(format!("{err}").contains("Failed to load persisted recordings"), "{err}");
+        // The operator's file is left exactly as it was: no rename, no reset.
+        assert_eq!(std::fs::read_to_string(&state_file).expect("state still there"), "{ not valid json");
+        let _ = std::fs::remove_file(&state_file);
     }
 
     #[tokio::test]
-    async fn recover_persisted_downloads_state_renames_corrupt_file_and_continues() {
-        let state_file = temp_state_file("corrupt_downloads_state");
-        std::fs::write(&state_file, "{ not valid json").expect("write corrupt state");
-        let corrupt_dir = state_file.parent().expect("state dir").to_path_buf();
-        let expected_prefix =
-            format!("{}_corrupt.", state_file.file_stem().and_then(|stem| stem.to_str()).expect("state stem"));
-        let expected_extension = state_file.extension().and_then(|ext| ext.to_str()).expect("state ext");
-        let downloads = DownloadQueue::new_with_state_file(Some(state_file.clone()));
+    async fn missing_recording_state_is_a_fresh_install() {
+        let state_file = temp_state_file("missing_recording_state");
+        let recordings = RecordingQueue::new_with_state_file(Some(state_file));
 
-        recover_persisted_downloads_state(&downloads).await.expect("recovery should continue");
-
-        assert!(!state_file.exists());
-        let matching_corrupt_paths = std::fs::read_dir(&corrupt_dir)
-            .expect("read corrupt dir")
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with(&expected_prefix) && name.ends_with(expected_extension))
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(matching_corrupt_paths.len(), 1);
-        assert!(downloads.queue.lock().await.is_empty());
-        assert!(downloads.scheduled.read().await.is_empty());
-        assert!(downloads.active.read().await.is_none());
-        assert!(downloads.finished.read().await.is_empty());
-
-        for path in matching_corrupt_paths {
-            let _ = std::fs::remove_file(path);
-        }
+        load_persisted_recording_state(&recordings).await.expect("fresh install loads");
+        assert!(recordings.queue.lock().await.is_empty());
+        assert!(recordings.active.read().await.is_none());
     }
 
     mod ready_endpoint {
@@ -995,8 +934,9 @@ mod tests {
         use crate::{
             api::model::{
                 ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionKind, ConnectionManager,
-                DownloadQueue, EventManager, HlsProvisioningState, HlsProxyManager, ManualPlaylistUpdateRequest,
-                MetadataUpdateManager, PlaylistStorageState, ProviderHandle, SharedStreamManager, UpdateGuard,
+                EventManager, HlsProvisioningState, HlsProxyManager, ManualPlaylistUpdateRequest,
+                MetadataUpdateManager, PlaylistStorageState, ProviderHandle, RecordingQueue, SharedStreamManager,
+                UpdateGuard,
             },
             model::{AppConfig, Config, ConfigInput, MediaToolCapabilities, ProcessTargets, SourcesConfig},
             repository::GeoIp,
@@ -1079,7 +1019,7 @@ mod tests {
                 provider_dns: CancellationToken::new(),
                 metadata: CancellationToken::new(),
                 qos_aggregation: CancellationToken::new(),
-                downloads: CancellationToken::new(),
+                recordings: CancellationToken::new(),
                 hls_cache: CancellationToken::new(),
             };
             let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
@@ -1095,7 +1035,7 @@ mod tests {
                 http_client: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
                 http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
                 public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-                downloads: Arc::new(DownloadQueue::new()),
+                recordings: Arc::new(RecordingQueue::new()),
                 cache: Arc::new(ArcSwapOption::default()),
                 shared_stream_manager,
                 hls_proxy: Arc::new(HlsProxyManager::new()),

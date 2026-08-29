@@ -108,7 +108,7 @@ mod tests {
         RecordingMetadata {
             owner,
             visibility,
-            source: None,
+            source: shared::model::recording::RecordingSource::new("t1", "v1", "in1"),
             program_start: Some(1_700_000_000),
             program_end: Some(1_700_003_600),
             scheduled_start: Some(1_700_000_000),
@@ -160,8 +160,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_admin_owner_always_delivers() {
-        let meta = make_meta(RecordingVisibility::Private, RecordingOwner::LegacyAdmin);
+    fn shared_recording_always_delivers() {
+        let meta =
+            make_meta(RecordingVisibility::Shared, RecordingOwner::User(shared::model::UserId::from("web:alice")));
         let d = decide(&meta, LifecycleEvent::Failed, 1_000, false, Some("recording failed".to_string()));
         match d {
             DispatchDecision::PersistAndDeliver { kind, attempted_at, .. } => {

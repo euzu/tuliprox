@@ -433,8 +433,8 @@ pub fn ConfigView() -> Html {
             wasm_bindgen_futures::spawn_local(async move {
                 if name.as_str() == ACTION_UPDATE_GEO_IP {
                     match services.config.update_geoip().await {
-                        Ok(_) => services.toastr.success(translate.t("MESSAGES.DOWNLOAD.GEOIP.SUCCESS")),
-                        Err(_err) => services.toastr.error(translate.t("MESSAGES.DOWNLOAD.GEOIP.FAIL")),
+                        Ok(_) => services.toastr.success(translate.t("MESSAGES.GEOIP.SUCCESS")),
+                        Err(_err) => services.toastr.error(translate.t("MESSAGES.GEOIP.FAIL")),
                     }
                 }
             });

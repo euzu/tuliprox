@@ -1,10 +1,9 @@
 use crate::{
     api::{
-        endpoints::download_api::{resume_download_worker_if_needed, spawn_download_services},
         model::{
             load_target_into_memory_cache, recording_rule_scheduler::spawn_recording_rule_scheduler,
-            ActiveProviderManager, ActiveUserManager, ConnectionManager, DownloadQueue, EventManager,
-            HlsProvisioningState, PlaylistStorage, PlaylistStorageState, SharedStreamManager, UpdateGuard,
+            ActiveProviderManager, ActiveUserManager, ConnectionManager, EventManager, HlsProvisioningState,
+            PlaylistStorage, PlaylistStorageState, RecordingQueue, SharedStreamManager, UpdateGuard,
         },
         tasks::{exec_config_watch, exec_scheduler},
     },
@@ -38,6 +37,7 @@ use tokio::{
     task,
 };
 use tokio_util::sync::CancellationToken;
+use tuliprox_dvr::recording::recording_transfer::{resume_recording_worker_if_needed, spawn_recording_services};
 use tuliprox_hls::api::HlsProxyManager;
 use tuliprox_metadata::manager::MetadataUpdateManager;
 use tuliprox_session::{provider_dns_manager::exec_provider_dns, qos_aggregation_manager::exec_qos_aggregation};
@@ -171,7 +171,7 @@ fn cancel_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
         return;
     }
     if changes.flags.contains(UpdateChangesFlags::Downloads) {
-        app_state.downloads.request_worker_restart();
+        app_state.recordings.request_worker_restart();
     }
     let cancel_tokens = app_state.cancel_tokens.load();
 
@@ -187,7 +187,7 @@ fn cancel_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
         cancel_tokens.metadata.clone()
     };
     let qos_aggregation = cancel_service!(qos_aggregation, UpdateChangesFlags::QosAggregation, changes, cancel_tokens);
-    let downloads = cancel_service!(downloads, UpdateChangesFlags::Downloads, changes, cancel_tokens);
+    let recordings = cancel_service!(recordings, UpdateChangesFlags::Downloads, changes, cancel_tokens);
 
     let tokens = CancelTokens {
         scheduler,
@@ -196,7 +196,7 @@ fn cancel_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
         provider_dns,
         metadata,
         qos_aggregation,
-        downloads,
+        recordings,
         hls_cache: cancel_tokens.hls_cache.clone(),
     };
 
@@ -242,20 +242,20 @@ fn start_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
         });
     }
     if changes.flags.contains(UpdateChangesFlags::Downloads) {
-        spawn_download_services(app_state, &app_state.cancel_tokens.load().downloads);
-        spawn_recording_rule_scheduler(&app_state.recording_ctx(), &app_state.cancel_tokens.load().downloads);
+        spawn_recording_services(&app_state.recording_ctx(), &app_state.cancel_tokens.load().recordings);
+        spawn_recording_rule_scheduler(&app_state.recording_ctx(), &app_state.cancel_tokens.load().recordings);
         let config = app_state.app_config.config.load();
         if let Some(download_cfg) = config.recording().cloned() {
             let app_state = Arc::clone(app_state);
             tokio::spawn(async move {
                 for _ in 0..50 {
-                    if !*app_state.downloads.worker_running.read().await {
+                    if !*app_state.recordings.worker_running.read().await {
                         break;
                     }
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
-                if let Err(err) = resume_download_worker_if_needed(app_state.as_ref(), &download_cfg).await {
-                    error!("Failed to resume downloads after hot reload: {err}");
+                if let Err(err) = resume_recording_worker_if_needed(&app_state.recording_ctx(), &download_cfg).await {
+                    error!("Failed to resume recordings after hot reload: {err}");
                 }
             });
         }
@@ -382,7 +382,7 @@ pub struct CancelTokens {
     pub(crate) provider_dns: CancellationToken,
     pub(crate) metadata: CancellationToken,
     pub(crate) qos_aggregation: CancellationToken,
-    pub(crate) downloads: CancellationToken,
+    pub(crate) recordings: CancellationToken,
     pub(crate) hls_cache: CancellationToken,
 }
 impl Default for CancelTokens {
@@ -394,7 +394,7 @@ impl Default for CancelTokens {
             provider_dns: CancellationToken::new(),
             metadata: CancellationToken::new(),
             qos_aggregation: CancellationToken::new(),
-            downloads: CancellationToken::new(),
+            recordings: CancellationToken::new(),
             hls_cache: CancellationToken::new(),
         }
     }
@@ -426,7 +426,7 @@ pub struct AppState {
     pub http_client: Arc<ArcSwap<Client>>,
     pub http_client_no_redirect: Arc<ArcSwap<Client>>,
     pub public_http_client_no_redirect: Arc<ArcSwap<Client>>,
-    pub downloads: Arc<DownloadQueue>,
+    pub recordings: Arc<RecordingQueue>,
     pub cache: Arc<ArcSwapOption<RwLock<LRUResourceCache>>>,
     pub shared_stream_manager: Arc<SharedStreamManager>,
     pub hls_proxy: Arc<HlsProxyManager>,
@@ -498,7 +498,7 @@ pub(crate) fn create_test_app_state(config: Config) -> Arc<AppState> {
         http_client: Arc::new(ArcSwap::from_pointee(Client::new())),
         http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
         public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
-        downloads: Arc::new(DownloadQueue::new()),
+        recordings: Arc::new(RecordingQueue::new()),
         cache: Arc::new(ArcSwapOption::default()),
         shared_stream_manager,
         hls_proxy: Arc::new(HlsProxyManager::new()),

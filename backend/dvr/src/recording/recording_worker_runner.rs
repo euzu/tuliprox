@@ -5,7 +5,7 @@
 //! logs and metrics do not leak private recording data.
 
 use super::{
-    recording_quota::{charge_for_task, QuotaRecordingTaskView},
+    recording_quota::{charge_for_state, QuotaRecordingTaskView},
     recording_retention::{compute_candidates, RetentionCandidate, RetentionConfig, RetentionReason},
 };
 use std::sync::{
@@ -109,7 +109,7 @@ pub fn run_once<V: QuotaRecordingTaskView>(
 /// Estimate the charge for a candidate at delete time. Today
 /// the candidate is always `Completed`, so the charge is the
 /// `measured_bytes` (the final file size). We pass it through
-/// `charge_for_task` once a real `FileDownload` is in scope; for
+/// `charge_for_task` once a real `RecordingTask` is in scope; for
 /// the pure runner, we use a conservative constant derived from
 /// the candidate's reason (count or age). The production
 /// integration in `recording_service.rs` will re-summarize from
@@ -159,10 +159,8 @@ pub fn disk_pressure_candidates<V: QuotaRecordingTaskView>(
     }
     let mut candidates: Vec<RetentionCandidate> = Vec::new();
     for task in tasks {
-        let Some(meta) = task.recording() else {
-            continue;
-        };
-        if !matches!(task.state(), crate::download::DownloadState::Completed) {
+        let meta = task.recording();
+        if !matches!(task.state(), crate::recording::recording_queue::RecordingTaskState::Completed) {
             continue;
         }
         let Some(completed_at) = meta.completed_at else {
@@ -188,9 +186,12 @@ pub fn disk_pressure_candidates<V: QuotaRecordingTaskView>(
 }
 
 /// Bytes charged to the task with this uuid, i.e. what deleting it would
-/// reclaim.
+/// reclaim. Disk pressure only deletes `Completed` candidates, so the
+/// charge is always computed for that state.
 pub fn reclaimable_bytes_for<V: QuotaRecordingTaskView>(tasks: &[V], uuid: &str) -> u64 {
-    charge_for_task(&cand_uuid_view(tasks, uuid))
+    tasks.iter().find(|task| task.uuid() == uuid).map_or(0, |task| {
+        charge_for_state(&crate::recording::recording_queue::RecordingTaskState::Completed, task.recording())
+    })
 }
 
 /// Run a disk-pressure pass: keep deleting oldest eligible completed
@@ -260,33 +261,6 @@ pub fn pressure_relieved(total_bytes: u64, free_bytes: u64, reclaimed_bytes: u64
     pct <= u64::from(low_percent)
 }
 
-/// Helper: look up the charge for a candidate by re-reading the
-/// task list. The production path will fold this into the
-/// worker; the standalone test uses a view-on-uuid adapter.
-fn cand_uuid_view<'a, V: QuotaRecordingTaskView>(tasks: &'a [V], uuid: &'a str) -> UuidView<'a, V> {
-    UuidView { tasks, uuid }
-}
-
-struct UuidView<'a, V: QuotaRecordingTaskView> {
-    tasks: &'a [V],
-    uuid: &'a str,
-}
-
-impl<V: QuotaRecordingTaskView> QuotaRecordingTaskView for UuidView<'_, V> {
-    fn state(&self) -> &crate::download::DownloadState {
-        // The view always reports `Completed` because disk-pressure
-        // only deletes `Completed` candidates. The `charge_for_task`
-        // path uses `measured_bytes` for `Completed`, so the state
-        // is consistent for charging purposes.
-        const COMPLETED: crate::download::DownloadState = crate::download::DownloadState::Completed;
-        &COMPLETED
-    }
-    fn recording(&self) -> Option<&shared::model::recording::RecordingMetadata> {
-        self.tasks.iter().find(|t| t.uuid() == self.uuid).and_then(|t| t.recording())
-    }
-    fn uuid(&self) -> &str { self.uuid }
-}
-
 /// Cancellation-aware worker handle. Holds a `CancelToken` and
 /// an `is_running` flag; the loop skips a tick if a previous
 /// pass is still in progress (passes never overlap). The flag is
@@ -318,7 +292,7 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::download::DownloadState;
+    use crate::recording::recording_queue::RecordingTaskState;
     use shared::model::{
         recording::{RecordingMetadata, RecordingOwner, RecordingSource, RecordingVisibility},
         UserId,
@@ -334,7 +308,7 @@ mod tests {
         RecordingMetadata {
             owner,
             visibility: RecordingVisibility::Private,
-            source: Some(RecordingSource::new("t1", "v1", "in1")),
+            source: (RecordingSource::new("t1", "v1", "in1")),
             program_start: None,
             program_end: None,
             scheduled_start: None,
@@ -358,31 +332,27 @@ mod tests {
 
     struct T {
         uuid: String,
-        state: DownloadState,
-        recording: Option<RecordingMetadata>,
+        state: RecordingTaskState,
+        recording: RecordingMetadata,
     }
     impl QuotaRecordingTaskView for T {
-        fn state(&self) -> &DownloadState { &self.state }
-        fn recording(&self) -> Option<&RecordingMetadata> { self.recording.as_ref() }
+        fn state(&self) -> &RecordingTaskState { &self.state }
+        fn recording(&self) -> &RecordingMetadata { &self.recording }
         fn uuid(&self) -> &str { &self.uuid }
     }
 
     fn completed(uuid: &str, channel_id: &str, completed_at: i64, measured: u64) -> T {
         T {
             uuid: uuid.to_string(),
-            state: DownloadState::Completed,
-            recording: Some(make_meta(
+            state: RecordingTaskState::Completed,
+            recording: make_meta(
                 RecordingOwner::User(UserId::from("web:alice")),
                 Some(channel_id),
                 Some("Alpha"),
                 completed_at,
                 measured,
-            )),
+            ),
         }
-    }
-
-    fn generic_download(uuid: &str) -> T {
-        T { uuid: uuid.to_string(), state: DownloadState::Completed, recording: None }
     }
 
     fn count_delete(
@@ -428,20 +398,6 @@ mod tests {
         assert_eq!(stats.failed, 1);
         // a and c were deleted; b was reported as failure
         assert_eq!(deleted.borrow().clone(), vec!["a".to_string(), "c".to_string()]);
-    }
-
-    #[test]
-    fn run_once_skips_generic_downloads() {
-        // A `Completed` task with no recording metadata is a
-        // generic download. The retention candidate set must
-        // exclude it, so the policy pass produces zero candidates.
-        let tasks = vec![generic_download("g1")];
-        let config = RetentionConfig { keep_last_per_channel: Some(0), delete_after_days: Some(365) };
-        let deleted = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
-        let mut delete = count_delete(deleted.clone(), std::rc::Rc::new(vec![]));
-        let stats = run_once(&tasks, &config, 1_000_000_000, &mut delete);
-        assert_eq!(stats.candidates, 0);
-        assert!(deleted.borrow().is_empty());
     }
 
     #[test]

@@ -33,8 +33,8 @@ pub use tuliprox_core::model::{batch_result_collector::*, user_api_request::*, x
 pub use tuliprox_core::utils::byte_range::{resolve_single_byte_range, SingleByteRange};
 // The recording queue and the DVR moved to `tuliprox-dvr`; re-exported so `api`
 // call sites keep their names, module paths included.
-pub use tuliprox_dvr::{download, recording};
-pub use tuliprox_dvr::{download::*, recording::*};
+pub use tuliprox_dvr::recording;
+pub use tuliprox_dvr::recording::*;
 // Keep the crate alias while call sites migrate to its explicit `api` facade.
 pub use tuliprox_hls as hls_cache;
 // The HLS proxy symbols this crate's own tests reach through `api::model`.

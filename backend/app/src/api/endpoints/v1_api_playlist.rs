@@ -156,28 +156,6 @@ fn build_playlist_webplayer_url(
     )
 }
 
-fn build_recording_stream_url(
-    base_url: &str,
-    access_token: &str,
-    target_name: &str,
-    input_name: &str,
-    virtual_id: u32,
-    cluster: XtreamCluster,
-) -> Option<String> {
-    let mut url = Url::parse(base_url).ok()?;
-    url.path_segments_mut().ok()?.pop_if_empty().extend([
-        "api",
-        "v1",
-        "playlist",
-        "recording",
-        access_token,
-        cluster.as_stream_type(),
-        &virtual_id.to_string(),
-    ]);
-    url.query_pairs_mut().append_pair("target_name", target_name).append_pair("input_name", input_name);
-    Some(url.into())
-}
-
 pub(in crate::api) fn build_webplayer_recording_url(
     app_config: &crate::model::AppConfig,
     target_id: u16,
@@ -193,24 +171,6 @@ pub(in crate::api) fn build_webplayer_recording_url(
         .map_or("default", |server_name| server_name.as_str());
     let server_info = app_config.get_server_info(server_name)?;
     Some(build_playlist_webplayer_url(&server_info.get_base_url(), &access_token, target_id, virtual_id, cluster))
-}
-
-pub(in crate::api) fn build_stable_recording_url(
-    app_config: &crate::model::AppConfig,
-    target_name: &str,
-    input_name: &str,
-    virtual_id: u32,
-    cluster: XtreamCluster,
-) -> Option<String> {
-    let access_token = create_access_token(&app_config.access_token_secret, 30);
-    let config = app_config.config.load();
-    let server_name = config
-        .web_ui
-        .as_ref()
-        .and_then(|web_ui| web_ui.player_server.as_ref())
-        .map_or("default", |server_name| server_name.as_str());
-    let server_info = app_config.get_server_info(server_name)?;
-    build_recording_stream_url(&server_info.get_base_url(), &access_token, target_name, input_name, virtual_id, cluster)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1212,7 +1172,7 @@ mod tests {
     use crate::{
         api::model::{
             recording::recording_source_resolution::resolve_recording_config, ActiveProviderManager, ActiveUserManager,
-            AppState, ConnectionManager, DownloadQueue, EventManager, MetadataUpdateManager, PlaylistStorageState,
+            AppState, ConnectionManager, EventManager, MetadataUpdateManager, PlaylistStorageState, RecordingQueue,
             SharedStreamManager,
         },
         model::{
@@ -1441,7 +1401,7 @@ mod tests {
             provider_dns: CancellationToken::new(),
             metadata: CancellationToken::new(),
             qos_aggregation: CancellationToken::new(),
-            downloads: CancellationToken::new(),
+            recordings: CancellationToken::new(),
             hls_cache: CancellationToken::new(),
         };
         let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
@@ -1458,7 +1418,7 @@ mod tests {
             http_client: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
             http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
             public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-            downloads: Arc::new(crate::api::model::DownloadQueue::new()),
+            recordings: Arc::new(crate::api::model::RecordingQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,
             hls_proxy: Arc::new(crate::api::model::HlsProxyManager::new()),
@@ -1752,26 +1712,6 @@ mod tests {
     }
 
     #[test]
-    fn build_recording_stream_url_encodes_stable_names_without_runtime_id() {
-        let url = super::build_recording_stream_url(
-            "http://player.example/base",
-            "token123",
-            "News/HD &+",
-            "input/name ?+",
-            42,
-            XtreamCluster::Live,
-        )
-        .expect("valid recording url");
-        let parsed = Url::parse(&url).expect("parse recording url");
-        let query = parsed.query_pairs().collect::<HashMap<_, _>>();
-
-        assert_eq!(parsed.path(), "/base/api/v1/playlist/recording/token123/live/42");
-        assert_eq!(query.get("target_name").map(std::convert::AsRef::as_ref), Some("News/HD &+"));
-        assert_eq!(query.get("input_name").map(std::convert::AsRef::as_ref), Some("input/name ?+"));
-        assert!(!parsed.path().contains("/11/"));
-    }
-
-    #[test]
     fn recording_source_descriptor_is_token_free_and_percent_encodes_names() {
         let url = crate::api::model::recording::recording_source_resolution::build_recording_source_descriptor(
             "News/HD &+",
@@ -1805,18 +1745,27 @@ mod tests {
             directory: Some("/tmp".to_string()),
             ..Default::default()
         });
-        let recording = crate::api::model::FileDownload::new_recording(
+        let metadata = shared::model::RecordingMetadata::new_live(
+            shared::model::RecordingOwner::User(shared::model::UserId::from("web:alice")),
+            shared::model::RecordingVisibility::Private,
+            shared::model::recording::RecordingSource::new("stable-target", "42", "input-a"),
+            1_700_000_000,
+            1_700_003_600,
+            0,
+            0,
+        );
+        let recording = crate::api::model::RecordingTask::new(
+            shared::model::RecordingKind::Live,
             &url,
             "recording.ts",
             &download_cfg,
-            1_700_000_000,
-            3600,
             Some("input-a".intern()),
             0,
+            metadata,
         )
         .expect("valid recording task");
-        let persisted = DownloadQueue::to_persisted(&recording);
-        let restored = DownloadQueue::from_persisted(persisted.clone()).expect("restore recording task");
+        let persisted = RecordingQueue::to_persisted(&recording);
+        let restored = RecordingQueue::from_persisted(persisted.clone()).expect("restore recording task");
 
         assert_eq!(persisted.url, url);
         assert_eq!(restored.url.as_str(), url);

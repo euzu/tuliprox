@@ -15,8 +15,7 @@
 // error (rust-lang/rust#159228).
 #![recursion_limit = "256"]
 
-pub mod download;
 pub mod http_transfer;
 pub mod recording;
 
-pub use self::{download::*, http_transfer::*, recording::*};
+pub use self::{http_transfer::*, recording::*};

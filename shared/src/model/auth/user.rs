@@ -16,8 +16,8 @@ pub const ROLE_API_USER: &str = "API_USER";
 /// migration. Old tokens still decode the legacy bits (rollback compat),
 /// but a fresh token issued by the authenticator carries the new bits
 /// and the `download.*` bits have been cleared by
-/// [`crate::model::permission::migrate_permissions`].
-pub const CURRENT_PERMISSION_SCHEMA_VERSION: u16 = 2;
+/// the recording permission bits.
+pub const CURRENT_PERMISSION_SCHEMA_VERSION: u16 = 3;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Claims {
@@ -177,10 +177,16 @@ mod tests {
     }
 
     #[test]
-    fn current_permission_schema_version_is_at_least_two() {
-        // The schema version was bumped by +1 to invalidate tokens
-        // carrying only `download.*` permission bits. Old tokens must
-        // fail closed at the validator.
-        assert!(CURRENT_PERMISSION_SCHEMA_VERSION >= 2, "schema must be bumped for download->recording migration");
+    fn current_permission_schema_version_rejects_download_era_tokens() {
+        // `download.read`/`download.write` were removed outright, which
+        // renumbered the recording bits. Any token minted before that
+        // carries a lower schema version and must fail closed instead of
+        // having its old bits reinterpreted.
+        const {
+            assert!(
+                CURRENT_PERMISSION_SCHEMA_VERSION >= 3,
+                "schema must be bumped when permission bits are renumbered"
+            );
+        };
     }
 }

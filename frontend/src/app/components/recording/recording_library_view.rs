@@ -1,16 +1,20 @@
+//! The single recording table.
+//!
+//! One list for Live, VOD and Series, split into Current and Completed by
+//! lifecycle state, with a Type column. The session receives owner-filtered
+//! full snapshots over the WebSocket; there is no delta protocol, so a
+//! partial list can never be mistaken for the whole one.
+
 use crate::{
     app::components::{IconButton, LoadingIndicator, Table, TableDefinition, TaskStatusBadge, TextButton},
     hooks::use_service_context,
     i18n::use_translation,
-    model::{DialogResult, EventMessage},
-    services::DialogService,
+    model::DialogResult,
+    services::{DialogService, RecordingService},
     utils::format_bytes,
 };
 use shared::{
-    model::{
-        DownloadsDelta, DownloadsResponse, Permission, ProtocolMessage, RecordingTypeDto, SortOrder, TransferStatusDto,
-        TransferTaskDto,
-    },
+    model::{Permission, ProtocolMessage, RecordingKind, RecordingTaskDto, SortOrder, TransferStatusDto},
     utils::unix_ts_to_str,
 };
 use std::{cmp::Ordering, rc::Rc};
@@ -21,21 +25,21 @@ const HEADERS: [&str; 9] = [
     "LABEL.NAME",
     "LABEL.TYPE",
     "LABEL.STATUS",
-    "LABEL.DOWNLOAD_DOWNLOADED",
-    "LABEL.DOWNLOAD_FILE_SIZE",
+    "LABEL.RECORDING_TRANSFERRED",
+    "LABEL.RECORDING_FILE_SIZE",
     "LABEL.START",
     "LABEL.DURATION",
     "LABEL.ERROR",
 ];
 
-#[derive(Clone, PartialEq, Eq, Debug)]
-enum DownloadTab {
-    Queue,
-    Finished,
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RecordingTab {
+    Current,
+    Completed,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-struct DownloadActionAvailability {
+struct RecordingActionAvailability {
     pause: bool,
     resume: bool,
     cancel: bool,
@@ -43,83 +47,74 @@ struct DownloadActionAvailability {
     retry: bool,
 }
 
-fn normalize_download_tab(
-    current: &DownloadTab,
-    queue: &[TransferTaskDto],
-    finished: &[TransferTaskDto],
-    active: &[Rc<TransferTaskDto>],
-) -> DownloadTab {
+/// Never leave the user on an empty Completed tab while work is running.
+fn normalize_tab(current: RecordingTab, tasks: &[RecordingTaskDto]) -> RecordingTab {
+    let has_completed = tasks.iter().any(RecordingTaskDto::is_terminal);
+    let has_current = tasks.iter().any(|task| !task.is_terminal());
     match current {
-        DownloadTab::Finished if finished.is_empty() && (!active.is_empty() || !queue.is_empty()) => DownloadTab::Queue,
-        _ => current.clone(),
+        RecordingTab::Completed if !has_completed && has_current => RecordingTab::Current,
+        _ => current,
     }
 }
 
-fn collect_downloads_for_tab(
-    tab: &DownloadTab,
-    queue: &Rc<Vec<TransferTaskDto>>,
-    finished: &Rc<Vec<TransferTaskDto>>,
-    active: &Rc<Vec<Rc<TransferTaskDto>>>,
-) -> Vec<Rc<TransferTaskDto>> {
-    match tab {
-        DownloadTab::Queue => {
-            let mut items: Vec<Rc<TransferTaskDto>> = active.iter().cloned().collect();
-            items.extend(queue.iter().cloned().map(Rc::new));
-            items
-        }
-        DownloadTab::Finished => finished.iter().cloned().map(Rc::new).collect(),
-    }
+fn collect_tasks_for_tab(tab: RecordingTab, tasks: &Rc<Vec<RecordingTaskDto>>) -> Vec<Rc<RecordingTaskDto>> {
+    tasks
+        .iter()
+        .filter(|task| match tab {
+            RecordingTab::Current => !task.is_terminal(),
+            RecordingTab::Completed => task.is_terminal(),
+        })
+        .cloned()
+        .map(Rc::new)
+        .collect()
 }
 
-fn sort_download_items(items: &mut [Rc<TransferTaskDto>], sort: Option<(usize, SortOrder)>) {
+fn sort_tasks(items: &mut [Rc<RecordingTaskDto>], sort: Option<(usize, SortOrder)>) {
     if let Some((col, order)) = sort {
         items.sort_by(|a, b| match order {
-            SortOrder::Asc => compare_downloads(a, b, col),
-            SortOrder::Desc => compare_downloads(b, a, col),
+            SortOrder::Asc => compare_tasks(a, b, col),
+            SortOrder::Desc => compare_tasks(b, a, col),
             SortOrder::None => Ordering::Equal,
         });
     }
 }
 
-fn collect_sorted_downloads_for_tab(
-    tab: &DownloadTab,
-    queue: &Rc<Vec<TransferTaskDto>>,
-    finished: &Rc<Vec<TransferTaskDto>>,
-    active: &Rc<Vec<Rc<TransferTaskDto>>>,
+fn collect_sorted_tasks_for_tab(
+    tab: RecordingTab,
+    tasks: &Rc<Vec<RecordingTaskDto>>,
     sort: Option<(usize, SortOrder)>,
-) -> Vec<Rc<TransferTaskDto>> {
-    let mut items = collect_downloads_for_tab(tab, queue, finished, active);
-    sort_download_items(&mut items, sort);
+) -> Vec<Rc<RecordingTaskDto>> {
+    let mut items = collect_tasks_for_tab(tab, tasks);
+    sort_tasks(&mut items, sort);
     items
 }
 
-fn format_download_kind(translate: &crate::i18n::YewI18n, kind: RecordingTypeDto) -> String {
+fn format_recording_kind(translate: &crate::i18n::YewI18n, kind: RecordingKind) -> String {
     match kind {
-        RecordingTypeDto::Live => translate.t("LABEL.LIVE"),
-        RecordingTypeDto::Vod => "VOD".to_string(),
-        RecordingTypeDto::Series => translate.t("LABEL.SERIES"),
-        RecordingTypeDto::LegacyDownload => translate.t("LABEL.LEGACY_DOWNLOAD"),
+        RecordingKind::Live => translate.t("LABEL.LIVE"),
+        RecordingKind::Vod => "VOD".to_string(),
+        RecordingKind::Series => translate.t("LABEL.SERIES"),
     }
 }
 
-fn format_download_progress(download: &TransferTaskDto) -> String {
-    if let Some(total) = download.total_bytes {
+fn format_progress(task: &RecordingTaskDto) -> String {
+    if let Some(total) = task.total_bytes {
         if total > 0 {
-            let percent = ((download.downloaded_bytes as f64 / total as f64) * 100.0).round() as u32;
-            return format!("{} / {} ({}%)", format_bytes(download.downloaded_bytes), format_bytes(total), percent);
+            let percent = ((task.transferred_bytes as f64 / total as f64) * 100.0).round() as u32;
+            return format!("{} / {} ({}%)", format_bytes(task.transferred_bytes), format_bytes(total), percent);
         }
     }
-    format_bytes(download.downloaded_bytes)
+    format_bytes(task.transferred_bytes)
 }
 
-fn render_download_progress(download: &TransferTaskDto) -> Html {
-    let text = format_download_progress(download);
-    let bar = download.total_bytes.filter(|total| *total > 0).map(|total| {
+fn render_progress(task: &RecordingTaskDto) -> Html {
+    let text = format_progress(task);
+    let bar = task.total_bytes.filter(|total| *total > 0).map(|total| {
         html! {
             <progress class="tp__downloads-table__progress-bar"
                 aria-label={text.clone()}
                 max={total.to_string()}
-                value={download.downloaded_bytes.to_string()} />
+                value={task.transferred_bytes.to_string()} />
         }
     });
     html! {
@@ -130,13 +125,10 @@ fn render_download_progress(download: &TransferTaskDto) -> Html {
     }
 }
 
-fn format_download_start(download: &TransferTaskDto) -> String {
-    download.scheduled_start_at.and_then(unix_ts_to_str).unwrap_or_default()
-}
+fn format_start(task: &RecordingTaskDto) -> String { task.scheduled_start.and_then(unix_ts_to_str).unwrap_or_default() }
 
-fn format_download_duration(download: &TransferTaskDto) -> String {
-    download
-        .duration_secs
+fn format_duration(task: &RecordingTaskDto) -> String {
+    task.scheduled_duration_secs()
         .map(|seconds| {
             let hours = seconds / 3600;
             let minutes = (seconds % 3600) / 60;
@@ -149,33 +141,33 @@ fn format_download_duration(download: &TransferTaskDto) -> String {
         .unwrap_or_default()
 }
 
-fn format_download_error_parts(download: &TransferTaskDto, attempt_label: &str, next_retry_label: &str) -> String {
+fn format_error_parts(task: &RecordingTaskDto, attempt_label: &str, next_retry_label: &str) -> String {
     let mut parts = Vec::new();
-    if let Some(error) = download.error.as_ref().filter(|error| !error.is_empty()) {
+    if let Some(error) = task.error.as_ref().filter(|error| !error.is_empty()) {
         parts.push(error.clone());
     }
-    if download.retry_attempts > 0 {
-        parts.push(format!("{attempt_label} {}", download.retry_attempts));
+    if task.retry_attempts > 0 {
+        parts.push(format!("{attempt_label} {}", task.retry_attempts));
     }
-    if let Some(next_retry_at) = download.next_retry_at.and_then(unix_ts_to_str) {
+    if let Some(next_retry_at) = task.next_retry_at.and_then(unix_ts_to_str) {
         parts.push(format!("{next_retry_label} {next_retry_at}"));
     }
     parts.join(" | ")
 }
 
-fn format_download_error(translate: &crate::i18n::YewI18n, download: &TransferTaskDto) -> String {
-    format_download_error_parts(download, &translate.t("LABEL.ATTEMPT"), &translate.t("LABEL.NEXT_RETRY"))
+fn format_error(translate: &crate::i18n::YewI18n, task: &RecordingTaskDto) -> String {
+    format_error_parts(task, &translate.t("LABEL.ATTEMPT"), &translate.t("LABEL.NEXT_RETRY"))
 }
 
-fn compare_downloads(a: &TransferTaskDto, b: &TransferTaskDto, col: usize) -> Ordering {
+fn compare_tasks(a: &RecordingTaskDto, b: &RecordingTaskDto, col: usize) -> Ordering {
     match col {
         1 => a.title.cmp(&b.title),
         2 => a.kind.cmp(&b.kind),
         3 => a.status.cmp(&b.status),
-        4 => a.downloaded_bytes.cmp(&b.downloaded_bytes),
-        5 => a.total_bytes.unwrap_or(a.downloaded_bytes).cmp(&b.total_bytes.unwrap_or(b.downloaded_bytes)),
-        6 => a.scheduled_start_at.unwrap_or_default().cmp(&b.scheduled_start_at.unwrap_or_default()),
-        7 => a.duration_secs.unwrap_or_default().cmp(&b.duration_secs.unwrap_or_default()),
+        4 => a.transferred_bytes.cmp(&b.transferred_bytes),
+        5 => a.total_bytes.unwrap_or(a.transferred_bytes).cmp(&b.total_bytes.unwrap_or(b.transferred_bytes)),
+        6 => a.scheduled_start.unwrap_or_default().cmp(&b.scheduled_start.unwrap_or_default()),
+        7 => a.scheduled_duration_secs().unwrap_or_default().cmp(&b.scheduled_duration_secs().unwrap_or_default()),
         8 => a.error.as_deref().unwrap_or_default().cmp(b.error.as_deref().unwrap_or_default()),
         _ => Ordering::Equal,
     }
@@ -183,160 +175,76 @@ fn compare_downloads(a: &TransferTaskDto, b: &TransferTaskDto, col: usize) -> Or
 
 fn is_sortable(col: usize) -> bool { (1..=8).contains(&col) }
 
-fn download_action_availability(can_write: bool, dto: &TransferTaskDto) -> DownloadActionAvailability {
+/// Which controls a task offers. A Live capture can only be stopped and
+/// deleted: pausing ffmpeg would lose an unrecoverable part of the
+/// broadcast, and its programme window is gone once it passed, so there is
+/// nothing to resume or retry.
+fn action_availability(can_write: bool, task: &RecordingTaskDto) -> RecordingActionAvailability {
     if !can_write {
-        return DownloadActionAvailability::default();
+        return RecordingActionAvailability::default();
     }
-
-    // Live recordings cannot be paused/resumed: stopping ffmpeg loses
-    // an unrecoverable part of the broadcast. All other recording
-    // kinds follow the same state machine as a normal transfer.
-    let is_live = matches!(dto.recording_type, RecordingTypeDto::Live);
-    DownloadActionAvailability {
-        pause: !is_live
+    let resumable = task.kind.is_resumable();
+    RecordingActionAvailability {
+        pause: resumable
             && matches!(
-                dto.status,
+                task.status,
                 TransferStatusDto::Running | TransferStatusDto::WaitingForCapacity | TransferStatusDto::RetryWaiting
             ),
-        resume: !is_live && dto.status == TransferStatusDto::Paused,
+        resume: resumable && task.status == TransferStatusDto::Paused,
         cancel: matches!(
-            dto.status,
+            task.status,
             TransferStatusDto::Running
                 | TransferStatusDto::Queued
                 | TransferStatusDto::Scheduled
+                | TransferStatusDto::Paused
                 | TransferStatusDto::WaitingForCapacity
                 | TransferStatusDto::RetryWaiting
         ),
-        remove: matches!(
-            dto.status,
-            TransferStatusDto::Failed | TransferStatusDto::Completed | TransferStatusDto::Cancelled
-        ),
-        retry: matches!(dto.recording_type, RecordingTypeDto::Vod | RecordingTypeDto::Series)
-            && matches!(dto.status, TransferStatusDto::Failed | TransferStatusDto::Cancelled),
+        remove: task.is_terminal(),
+        retry: resumable && matches!(task.status, TransferStatusDto::Failed | TransferStatusDto::Cancelled),
     }
 }
 
-fn optimistic_active_delta(
-    active: &Rc<Vec<Rc<TransferTaskDto>>>,
-    uuid: &str,
-    status: TransferStatusDto,
-) -> Option<DownloadsDelta> {
-    active.iter().find(|download| download.id == uuid).map(|download| {
-        let mut updated = (**download).clone();
-        updated.status = status;
-        DownloadsDelta::ActivePatched(updated)
-    })
+/// The controls the table offers, in one place so the confirmation
+/// prompt, the success message and the service call cannot drift apart.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TaskControl {
+    Pause,
+    Resume,
+    Cancel,
+    Remove,
+    Retry,
 }
 
-/// Split a flat per-user recording snapshot into the (queue, finished,
-/// active) view the table renders. The recording WebSocket delivers a
-/// single `Vec<TransferTaskDto>` filtered by the session; the table
-/// still wants the three buckets the Downloads-WS used to ship.
-fn partition_recording_tasks(
-    tasks: &[TransferTaskDto],
-) -> (Vec<TransferTaskDto>, Vec<TransferTaskDto>, Vec<Rc<TransferTaskDto>>) {
-    let mut queue = Vec::new();
-    let mut finished = Vec::new();
-    let mut active = Vec::new();
-    for task in tasks {
-        match task.status {
-            TransferStatusDto::Running
-            | TransferStatusDto::Paused
-            | TransferStatusDto::WaitingForCapacity
-            | TransferStatusDto::RetryWaiting => active.push(Rc::new(task.clone())),
-            TransferStatusDto::Completed | TransferStatusDto::Failed | TransferStatusDto::Cancelled => {
-                finished.push(task.clone())
-            }
-            TransferStatusDto::Queued | TransferStatusDto::Scheduled => queue.push(task.clone()),
+impl TaskControl {
+    /// Destructive controls ask first.
+    fn confirm_key(self) -> Option<&'static str> {
+        match self {
+            Self::Cancel => Some("MESSAGES.RECORDING.CONFIRM_CANCEL"),
+            Self::Remove => Some("MESSAGES.RECORDING.CONFIRM_REMOVE"),
+            Self::Pause | Self::Resume | Self::Retry => None,
         }
     }
-    (queue, finished, active)
-}
 
-fn split_recording_snapshot(
-    tasks: &Rc<Vec<TransferTaskDto>>,
-    queue_state: &UseStateHandle<Rc<Vec<TransferTaskDto>>>,
-    finished_state: &UseStateHandle<Rc<Vec<TransferTaskDto>>>,
-    active_state: &UseStateHandle<Rc<Vec<Rc<TransferTaskDto>>>>,
-) {
-    let (queue, finished, active) = partition_recording_tasks(tasks);
-    queue_state.set(Rc::new(queue));
-    finished_state.set(Rc::new(finished));
-    active_state.set(Rc::new(active));
-}
-
-fn apply_recording_delta(
-    tasks: &Rc<Vec<TransferTaskDto>>,
-    queue_state: &UseStateHandle<Rc<Vec<TransferTaskDto>>>,
-    finished_state: &UseStateHandle<Rc<Vec<TransferTaskDto>>>,
-    active_state: &UseStateHandle<Rc<Vec<Rc<TransferTaskDto>>>>,
-) {
-    // Server-reconciled full snapshot over the same revision. Cheap to
-    // re-partition; keeps the split logic in one place.
-    split_recording_snapshot(tasks, queue_state, finished_state, active_state);
-}
-
-fn handle_download_action_result(
-    result: Result<shared::model::DownloadActionResponse, crate::error::Error>,
-    success_message: &str,
-    failure_message: &str,
-    request_downloads: &Callback<()>,
-    services: &Rc<crate::hooks::Services>,
-    optimistic_delta: Option<DownloadsDelta>,
-) {
-    match result {
-        Ok(response) if response.success => {
-            if let Some(delta) = optimistic_delta {
-                services.event.broadcast(EventMessage::DownloadsDeltaUpdate(Rc::new(delta)));
-            }
-            services.toastr.success(success_message);
-        }
-        Ok(_) | Err(_) => {
-            services.toastr.error(failure_message);
+    fn success_key(self) -> &'static str {
+        match self {
+            Self::Pause => "MESSAGES.RECORDING.TASK_PAUSED",
+            Self::Resume => "MESSAGES.RECORDING.TASK_RESUMED",
+            Self::Cancel => "MESSAGES.RECORDING.TASK_CANCELLED",
+            Self::Remove => "MESSAGES.RECORDING.TASK_REMOVED",
+            Self::Retry => "MESSAGES.RECORDING.TASK_RETRIED",
         }
     }
-    request_downloads.emit(());
 }
 
-fn apply_download_snapshot(
-    response: &DownloadsResponse,
-    queue_state: &UseStateHandle<Rc<Vec<TransferTaskDto>>>,
-    finished_state: &UseStateHandle<Rc<Vec<TransferTaskDto>>>,
-    active_download: &UseStateHandle<Rc<Vec<Rc<TransferTaskDto>>>>,
-) {
-    queue_state.set(Rc::new(response.queue.clone()));
-    finished_state.set(Rc::new(response.finished.clone()));
-    active_download.set(Rc::new(response.active.iter().cloned().map(Rc::new).collect()));
-}
-
-fn apply_download_delta(
-    delta: &DownloadsDelta,
-    queue_state: &UseStateHandle<Rc<Vec<TransferTaskDto>>>,
-    finished_state: &UseStateHandle<Rc<Vec<TransferTaskDto>>>,
-    active_download: &UseStateHandle<Rc<Vec<Rc<TransferTaskDto>>>>,
-) {
-    match delta {
-        DownloadsDelta::SnapshotReset(response) => {
-            apply_download_snapshot(response, queue_state, finished_state, active_download);
-        }
-        DownloadsDelta::ActivePatched(download) => {
-            let mut active_items: Vec<Rc<TransferTaskDto>> = active_download.iter().cloned().collect();
-            if let Some(existing) = active_items.iter_mut().find(|item| item.id == download.id) {
-                *existing = Rc::new(download.clone());
-            } else {
-                active_items.push(Rc::new(download.clone()));
-            }
-            active_download.set(Rc::new(active_items));
-        }
-        DownloadsDelta::ActiveCleared => {
-            active_download.set(Rc::new(Vec::new()));
-        }
-        DownloadsDelta::QueueReplaced { queue } => {
-            queue_state.set(Rc::new(queue.clone()));
-        }
-        DownloadsDelta::FinishedReplaced { finished } => {
-            finished_state.set(Rc::new(finished.clone()));
-        }
+async fn run_control(control: TaskControl, id: &str) -> Result<(), crate::services::RecordingError> {
+    let service = RecordingService::new();
+    match control {
+        TaskControl::Pause => service.pause_task(id).await,
+        TaskControl::Resume => service.resume_task(id).await,
+        TaskControl::Cancel => service.cancel_task(id).await,
+        TaskControl::Remove => service.remove_task(id).await,
+        TaskControl::Retry => service.retry_task(id).await,
     }
 }
 
@@ -345,17 +253,15 @@ pub fn recording_library_view() -> Html {
     let translate = use_translation();
     let services = use_service_context();
     let dialog = use_context::<DialogService>().expect("Dialog service not found");
-    let has_download_write = services.auth.has_permission(Permission::RecordingWrite);
-    let active_tab = use_state(|| DownloadTab::Queue);
-    let queue_state = use_state(|| Rc::new(Vec::<TransferTaskDto>::new()));
-    let finished_state = use_state(|| Rc::new(Vec::<TransferTaskDto>::new()));
-    let active_download = use_state(|| Rc::new(Vec::<Rc<TransferTaskDto>>::new()));
-    let table_items = use_state(|| None::<Rc<Vec<Rc<TransferTaskDto>>>>);
+    let can_write = services.auth.has_permission(Permission::RecordingWrite);
+    let active_tab = use_state(|| RecordingTab::Current);
+    let tasks_state = use_state(|| Rc::new(Vec::<RecordingTaskDto>::new()));
+    let table_items = use_state(|| None::<Rc<Vec<Rc<RecordingTaskDto>>>>);
     let sort_state = use_state(|| None::<(usize, SortOrder)>);
-    // Distinguishes "still waiting for the first snapshot" from "queue is empty"
+    // Distinguishes "still waiting for the first snapshot" from "nothing recorded"
     let initial_loaded = use_state(|| false);
 
-    let request_downloads = {
+    let request_snapshot = {
         let services = services.clone();
         Callback::from(move |()| {
             let _ = services.websocket.send_message(ProtocolMessage::RecordingSnapshotRequest);
@@ -363,25 +269,19 @@ pub fn recording_library_view() -> Html {
     };
 
     {
-        let queue_state = queue_state.clone();
-        let finished_state = finished_state.clone();
-        let active_download = active_download.clone();
+        let tasks_state = tasks_state.clone();
         let services = services.clone();
-        let request_downloads_effect = request_downloads.clone();
+        let request_snapshot_effect = request_snapshot.clone();
         let initial_loaded = initial_loaded.clone();
         use_effect_with((), move |()| {
-            request_downloads_effect.emit(());
+            request_snapshot_effect.emit(());
             let sub_id = services.event.subscribe(move |msg| match msg {
                 crate::model::EventMessage::RecordingSnapshot { tasks, .. } => {
                     initial_loaded.set(true);
-                    split_recording_snapshot(&tasks, &queue_state, &finished_state, &active_download);
-                }
-                crate::model::EventMessage::RecordingDelta { tasks, .. } => {
-                    initial_loaded.set(true);
-                    apply_recording_delta(&tasks, &queue_state, &finished_state, &active_download);
+                    tasks_state.set(tasks);
                 }
                 crate::model::EventMessage::WebSocketStatus(true) => {
-                    request_downloads_effect.emit(());
+                    request_snapshot_effect.emit(());
                 }
                 _ => {}
             });
@@ -391,161 +291,57 @@ pub fn recording_library_view() -> Html {
 
     {
         let active_tab = active_tab.clone();
-        let queue_state = queue_state.clone();
-        let finished_state = finished_state.clone();
-        let active_download = active_download.clone();
+        let tasks_state = tasks_state.clone();
         let active_tab_set = active_tab.clone();
         let table_items = table_items.clone();
         let sort_state = sort_state.clone();
-        use_effect_with(
-            (
-                (*active_tab).clone(),
-                (*queue_state).clone(),
-                (*finished_state).clone(),
-                (*active_download).clone(),
-                *sort_state,
-            ),
-            move |(tab, queue, finished, active, sort)| {
-                let normalized_tab =
-                    normalize_download_tab(tab, queue.as_slice(), finished.as_slice(), active.as_ref());
-                if normalized_tab != *tab {
-                    active_tab_set.set(normalized_tab.clone());
-                }
-                let items = collect_sorted_downloads_for_tab(&normalized_tab, queue, finished, active, *sort);
-                table_items.set((!items.is_empty()).then(|| Rc::new(items)));
-                || ()
-            },
-        );
+        use_effect_with((*active_tab, (*tasks_state).clone(), *sort_state), move |(tab, tasks, sort)| {
+            let normalized_tab = normalize_tab(*tab, tasks.as_slice());
+            if normalized_tab != *tab {
+                active_tab_set.set(normalized_tab);
+            }
+            let items = collect_sorted_tasks_for_tab(normalized_tab, tasks, *sort);
+            table_items.set((!items.is_empty()).then(|| Rc::new(items)));
+            || ()
+        });
     }
 
-    let handle_pause = {
-        let request_downloads = request_downloads.clone();
-        let services = services.clone();
-        let translate = translate.clone();
-        let active_download = active_download.clone();
-        Callback::from(move |uuid: String| {
-            let request_downloads = request_downloads.clone();
-            let services = services.clone();
-            let translate = translate.clone();
-            let active_download = active_download.clone();
-            spawn_local(async move {
-                let optimistic_delta = optimistic_active_delta(&active_download, &uuid, TransferStatusDto::Paused);
-                let result = services.downloads.pause_download(uuid).await;
-                handle_download_action_result(
-                    result,
-                    &translate.t("MESSAGES.DOWNLOAD.DOWNLOAD_PAUSED"),
-                    &translate.t("MESSAGES.DOWNLOAD.FAIL"),
-                    &request_downloads,
-                    &services,
-                    optimistic_delta,
-                );
-            });
-        })
-    };
-
-    let handle_resume = {
-        let request_downloads = request_downloads.clone();
-        let services = services.clone();
-        let translate = translate.clone();
-        let active_download = active_download.clone();
-        Callback::from(move |uuid: String| {
-            let request_downloads = request_downloads.clone();
-            let services = services.clone();
-            let translate = translate.clone();
-            let active_download = active_download.clone();
-            spawn_local(async move {
-                let optimistic_delta = optimistic_active_delta(&active_download, &uuid, TransferStatusDto::Running);
-                let result = services.downloads.resume_download(uuid).await;
-                handle_download_action_result(
-                    result,
-                    &translate.t("MESSAGES.DOWNLOAD.DOWNLOAD_RESUMED"),
-                    &translate.t("MESSAGES.DOWNLOAD.FAIL"),
-                    &request_downloads,
-                    &services,
-                    optimistic_delta,
-                );
-            });
-        })
-    };
-
-    let handle_cancel = {
-        let request_downloads = request_downloads.clone();
-        let services = services.clone();
-        let translate = translate.clone();
-        let active_download = active_download.clone();
-        let dialog = dialog.clone();
-        Callback::from(move |uuid: String| {
-            let request_downloads = request_downloads.clone();
-            let services = services.clone();
-            let translate = translate.clone();
-            let active_download = active_download.clone();
-            let dialog = dialog.clone();
-            spawn_local(async move {
-                if dialog.confirm(&translate.t("MESSAGES.DOWNLOAD.CONFIRM_CANCEL")).await != DialogResult::Ok {
-                    return;
-                }
-                let optimistic_delta = optimistic_active_delta(&active_download, &uuid, TransferStatusDto::Cancelled);
-                let result = services.downloads.cancel_download(uuid).await;
-                handle_download_action_result(
-                    result,
-                    &translate.t("MESSAGES.DOWNLOAD.DOWNLOAD_CANCELLED"),
-                    &translate.t("MESSAGES.DOWNLOAD.FAIL"),
-                    &request_downloads,
-                    &services,
-                    optimistic_delta,
-                );
-            });
-        })
-    };
-
-    let handle_remove = {
-        let request_downloads = request_downloads.clone();
+    let control_handler = {
+        let request_snapshot = request_snapshot.clone();
         let services = services.clone();
         let translate = translate.clone();
         let dialog = dialog.clone();
-        Callback::from(move |uuid: String| {
-            let request_downloads = request_downloads.clone();
+        move |control: TaskControl| {
+            let request_snapshot = request_snapshot.clone();
             let services = services.clone();
             let translate = translate.clone();
             let dialog = dialog.clone();
-            spawn_local(async move {
-                if dialog.confirm(&translate.t("MESSAGES.DOWNLOAD.CONFIRM_REMOVE")).await != DialogResult::Ok {
-                    return;
-                }
-                let result = services.downloads.remove_download(uuid).await;
-                handle_download_action_result(
-                    result,
-                    &translate.t("MESSAGES.DOWNLOAD.DOWNLOAD_REMOVED"),
-                    &translate.t("MESSAGES.DOWNLOAD.FAIL"),
-                    &request_downloads,
-                    &services,
-                    None,
-                );
-            });
-        })
+            Callback::from(move |id: String| {
+                let request_snapshot = request_snapshot.clone();
+                let services = services.clone();
+                let translate = translate.clone();
+                let dialog = dialog.clone();
+                spawn_local(async move {
+                    if let Some(key) = control.confirm_key() {
+                        if dialog.confirm(&translate.t(key)).await != DialogResult::Ok {
+                            return;
+                        }
+                    }
+                    match run_control(control, &id).await {
+                        Ok(()) => services.toastr.success(translate.t(control.success_key())),
+                        Err(err) => services.toastr.error(translate.t(err.i18n_key())),
+                    }
+                    request_snapshot.emit(());
+                });
+            })
+        }
     };
 
-    let handle_retry = {
-        let request_downloads = request_downloads.clone();
-        let services = services.clone();
-        let translate = translate.clone();
-        Callback::from(move |uuid: String| {
-            let request_downloads = request_downloads.clone();
-            let services = services.clone();
-            let translate = translate.clone();
-            spawn_local(async move {
-                let result = services.downloads.retry_download(uuid).await;
-                handle_download_action_result(
-                    result,
-                    &translate.t("MESSAGES.DOWNLOAD.DOWNLOAD_RETRIED"),
-                    &translate.t("MESSAGES.DOWNLOAD.FAIL"),
-                    &request_downloads,
-                    &services,
-                    None,
-                );
-            });
-        })
-    };
+    let handle_pause = control_handler(TaskControl::Pause);
+    let handle_resume = control_handler(TaskControl::Resume);
+    let handle_cancel = control_handler(TaskControl::Cancel);
+    let handle_remove = control_handler(TaskControl::Remove);
+    let handle_retry = control_handler(TaskControl::Retry);
 
     let render_header_cell = {
         let translate = translate.clone();
@@ -563,17 +359,17 @@ pub fn recording_library_view() -> Html {
         let handle_cancel = handle_cancel.clone();
         let handle_remove = handle_remove.clone();
         let handle_retry = handle_retry.clone();
-        Callback::<(usize, usize, Rc<TransferTaskDto>), Html>::from(
-            move |(_row, col, dto): (usize, usize, Rc<TransferTaskDto>)| match col {
+        Callback::<(usize, usize, Rc<RecordingTaskDto>), Html>::from(
+            move |(_row, col, dto): (usize, usize, Rc<RecordingTaskDto>)| match col {
                 0 => {
-                    let actions = download_action_availability(has_download_write, &dto);
+                    let actions = action_availability(can_write, &dto);
                     let retry_label = if dto.status == TransferStatusDto::Cancelled { "Resume" } else { "Retry" };
                     let retry_icon = if dto.status == TransferStatusDto::Cancelled { "Play" } else { "Refresh" };
-                    let pause_uuid = dto.id.clone();
-                    let resume_uuid = dto.id.clone();
-                    let cancel_uuid = dto.id.clone();
-                    let retry_uuid = dto.id.clone();
-                    let remove_uuid = dto.id.clone();
+                    let pause_id = dto.id.clone();
+                    let resume_id = dto.id.clone();
+                    let cancel_id = dto.id.clone();
+                    let retry_id = dto.id.clone();
+                    let remove_id = dto.id.clone();
                     let pause_handle = handle_pause.clone();
                     let resume_handle = handle_resume.clone();
                     let cancel_handle = handle_cancel.clone();
@@ -582,35 +378,33 @@ pub fn recording_library_view() -> Html {
                     html! {
                         <div class="tp__downloads-table__actions">
                             if actions.pause {
-                                <IconButton name="Pause" icon="Pause" onclick={Callback::from(move |_| pause_handle.emit(pause_uuid.clone()))} />
+                                <IconButton name="Pause" icon="Pause" onclick={Callback::from(move |_| pause_handle.emit(pause_id.clone()))} />
                             }
                             if actions.resume {
-                                <IconButton name="Resume" icon="Play" onclick={Callback::from(move |_| resume_handle.emit(resume_uuid.clone()))} />
+                                <IconButton name="Resume" icon="Play" onclick={Callback::from(move |_| resume_handle.emit(resume_id.clone()))} />
                             }
                             if actions.cancel {
-                                <IconButton name="Cancel" icon="Stop" onclick={Callback::from(move |_| cancel_handle.emit(cancel_uuid.clone()))} />
+                                <IconButton name="Cancel" icon="Stop" onclick={Callback::from(move |_| cancel_handle.emit(cancel_id.clone()))} />
                             }
                             if actions.retry {
-                                <IconButton name={retry_label} icon={retry_icon} onclick={Callback::from(move |_| retry_handle.emit(retry_uuid.clone()))} />
+                                <IconButton name={retry_label} icon={retry_icon} onclick={Callback::from(move |_| retry_handle.emit(retry_id.clone()))} />
                             }
                             if actions.remove {
-                                <IconButton name="Remove" icon="Delete" onclick={Callback::from(move |_| remove_handle.emit(remove_uuid.clone()))} />
+                                <IconButton name="Remove" icon="Delete" onclick={Callback::from(move |_| remove_handle.emit(remove_id.clone()))} />
                             }
                         </div>
                     }
                 }
                 1 => html! { <span class="tp__table__nowrap">{dto.title.clone()}</span> },
-                2 => html! { format_download_kind(&translate, dto.recording_type) },
-                3 => {
-                    html! { <TaskStatusBadge status={dto.status.clone()} kind={dto.kind.clone()} detail={dto.error.clone()} /> }
-                }
-                4 => render_download_progress(&dto),
+                2 => html! { format_recording_kind(&translate, dto.kind) },
+                3 => html! { <TaskStatusBadge status={dto.status} detail={dto.error.clone()} /> },
+                4 => render_progress(&dto),
                 5 => {
                     html! { <span class="tp__table__nowrap">{dto.total_bytes.map_or_else(String::new, format_bytes)}</span> }
                 }
-                6 => html! { <span class="tp__table__nowrap">{format_download_start(&dto)}</span> },
-                7 => html! { format_download_duration(&dto) },
-                8 => html! { format_download_error(&translate, &dto) },
+                6 => html! { <span class="tp__table__nowrap">{format_start(&dto)}</span> },
+                7 => html! { format_duration(&dto) },
+                8 => html! { format_error(&translate, &dto) },
                 _ => html! {},
             },
         )
@@ -618,20 +412,17 @@ pub fn recording_library_view() -> Html {
 
     let on_sort = {
         let active_tab = active_tab.clone();
-        let queue_state = queue_state.clone();
-        let finished_state = finished_state.clone();
-        let active_download = active_download.clone();
+        let tasks_state = tasks_state.clone();
         let table_items = table_items.clone();
         let sort_state = sort_state.clone();
         Callback::<Option<(usize, SortOrder)>, ()>::from(move |args| {
             sort_state.set(args);
-            let items =
-                collect_sorted_downloads_for_tab(&active_tab, &queue_state, &finished_state, &active_download, args);
+            let items = collect_sorted_tasks_for_tab(*active_tab, &tasks_state, args);
             table_items.set((!items.is_empty()).then(|| Rc::new(items)));
         })
     };
 
-    let table_definition = Rc::new(TableDefinition::<TransferTaskDto> {
+    let table_definition = Rc::new(TableDefinition::<RecordingTaskDto> {
         items: (*table_items).clone(),
         num_cols: HEADERS.len(),
         is_sortable: Callback::from(is_sortable),
@@ -640,9 +431,8 @@ pub fn recording_library_view() -> Html {
         on_sort,
     });
 
-    let render_filter_button = |tab: DownloadTab, icon: &str, label: String| {
+    let render_filter_button = |tab: RecordingTab, icon: &str, label: String| {
         let active_tab = active_tab.clone();
-        let button_tab = tab.clone();
         let class = if *active_tab == tab { "active" } else { "primary" };
         html! {
             <TextButton
@@ -650,7 +440,7 @@ pub fn recording_library_view() -> Html {
                 name={label.clone()}
                 icon={icon.to_string()}
                 title={label}
-                onclick={Callback::from(move |_| active_tab.set(button_tab.clone()))}
+                onclick={Callback::from(move |_| active_tab.set(tab))}
             />
         }
     };
@@ -662,13 +452,13 @@ pub fn recording_library_view() -> Html {
                     <div class="tp__downloads-list__header tp__list-list__header">
                         <h1>{translate.t("LABEL.RECORDING_LIBRARY")}</h1>
                         <div class="tp__downloads-list__header-toolbar tp__radio-button-group ">
-                            {render_filter_button(DownloadTab::Queue, "Record", translate.t("LABEL.RECORDING_CURRENT"))}
-                            {render_filter_button(DownloadTab::Finished, "TaskDone", translate.t("LABEL.RECORDING_COMPLETED"))}
+                            {render_filter_button(RecordingTab::Current, "Record", translate.t("LABEL.RECORDING_CURRENT"))}
+                            {render_filter_button(RecordingTab::Completed, "TaskDone", translate.t("LABEL.RECORDING_COMPLETED"))}
                         </div>
                     </div>
                     <div class="tp__downloads-list__body tp__list-list__body">
                         if *initial_loaded {
-                            <Table::<TransferTaskDto> definition={table_definition} />
+                            <Table::<RecordingTaskDto> definition={table_definition} />
                         } else {
                             <LoadingIndicator loading={true} />
                         }
@@ -682,243 +472,154 @@ pub fn recording_library_view() -> Html {
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_downloads_for_tab, collect_sorted_downloads_for_tab, download_action_availability,
-        format_download_error_parts, is_sortable, normalize_download_tab, optimistic_active_delta, DownloadTab,
+        action_availability, collect_sorted_tasks_for_tab, collect_tasks_for_tab, format_error_parts, is_sortable,
+        normalize_tab, RecordingTab,
     };
-    use shared::model::{DownloadsDelta, RecordingTypeDto, SortOrder, TaskKindDto, TransferStatusDto, TransferTaskDto};
+    use shared::model::{
+        RecordingKind, RecordingTaskDto, RecordingVisibility, SortOrder, TaskPriorityDto, TransferStatusDto,
+    };
     use std::rc::Rc;
 
-    fn download(id: &str, status: TransferStatusDto) -> TransferTaskDto {
-        TransferTaskDto {
+    fn task(id: &str, kind: RecordingKind, status: TransferStatusDto) -> RecordingTaskDto {
+        RecordingTaskDto {
             id: id.to_string(),
             title: format!("{id}.mp4"),
-            kind: TaskKindDto::Download,
-            recording_type: RecordingTypeDto::Vod,
-            priority: shared::model::TaskPriorityDto::Background,
+            kind,
+            priority: TaskPriorityDto::Background,
             status,
             retry_attempts: 0,
-            downloaded_bytes: 0,
+            transferred_bytes: 0,
             total_bytes: None,
             next_retry_at: None,
-            scheduled_start_at: None,
-            duration_secs: None,
             error: None,
-            recording: None,
+            owner_id: None,
+            visibility: RecordingVisibility::Private,
+            channel_id: None,
+            channel_name: None,
+            program_title: None,
+            program_start: None,
+            program_end: None,
+            scheduled_start: None,
+            scheduled_end: None,
+            pre_roll_secs: 0,
+            post_roll_secs: 0,
+            completed_at: None,
+            filename: None,
+            epg: None,
+            rule_id: None,
+            occurrence_key: None,
+        }
+    }
+
+    fn all_kinds_snapshot() -> Rc<Vec<RecordingTaskDto>> {
+        Rc::new(vec![
+            task("live", RecordingKind::Live, TransferStatusDto::Scheduled),
+            task("vod", RecordingKind::Vod, TransferStatusDto::Running),
+            task("series", RecordingKind::Series, TransferStatusDto::Completed),
+        ])
+    }
+
+    #[test]
+    fn current_holds_every_non_terminal_state_and_completed_the_rest() {
+        let tasks = Rc::new(vec![
+            task("a", RecordingKind::Live, TransferStatusDto::Scheduled),
+            task("b", RecordingKind::Vod, TransferStatusDto::Queued),
+            task("c", RecordingKind::Vod, TransferStatusDto::WaitingForCapacity),
+            task("d", RecordingKind::Vod, TransferStatusDto::RetryWaiting),
+            task("e", RecordingKind::Series, TransferStatusDto::Running),
+            task("f", RecordingKind::Series, TransferStatusDto::Paused),
+            task("g", RecordingKind::Vod, TransferStatusDto::Completed),
+            task("h", RecordingKind::Vod, TransferStatusDto::Failed),
+            task("i", RecordingKind::Live, TransferStatusDto::Cancelled),
+        ]);
+
+        let current: Vec<String> =
+            collect_tasks_for_tab(RecordingTab::Current, &tasks).iter().map(|t| t.id.clone()).collect();
+        let completed: Vec<String> =
+            collect_tasks_for_tab(RecordingTab::Completed, &tasks).iter().map(|t| t.id.clone()).collect();
+
+        assert_eq!(current, vec!["a", "b", "c", "d", "e", "f"]);
+        assert_eq!(completed, vec!["g", "h", "i"]);
+    }
+
+    #[test]
+    fn every_media_kind_reaches_the_one_table() {
+        let tasks = all_kinds_snapshot();
+        let mut kinds: Vec<RecordingKind> = collect_tasks_for_tab(RecordingTab::Current, &tasks)
+            .iter()
+            .chain(collect_tasks_for_tab(RecordingTab::Completed, &tasks).iter())
+            .map(|task| task.kind)
+            .collect();
+        kinds.sort_unstable();
+        assert_eq!(kinds, vec![RecordingKind::Live, RecordingKind::Vod, RecordingKind::Series]);
+    }
+
+    #[test]
+    fn completed_tab_falls_back_to_current_while_work_runs() {
+        let tasks = vec![task("a", RecordingKind::Vod, TransferStatusDto::Running)];
+        assert_eq!(normalize_tab(RecordingTab::Completed, &tasks), RecordingTab::Current);
+
+        let mixed = vec![
+            task("a", RecordingKind::Vod, TransferStatusDto::Running),
+            task("b", RecordingKind::Vod, TransferStatusDto::Completed),
+        ];
+        assert_eq!(normalize_tab(RecordingTab::Completed, &mixed), RecordingTab::Completed);
+    }
+
+    #[test]
+    fn live_can_only_be_stopped_and_deleted() {
+        let running = action_availability(true, &task("live", RecordingKind::Live, TransferStatusDto::Running));
+        assert!(!running.pause, "pausing ffmpeg would lose the broadcast");
+        assert!(!running.resume);
+        assert!(!running.retry, "the programme window is gone");
+        assert!(running.cancel);
+
+        let failed = action_availability(true, &task("live", RecordingKind::Live, TransferStatusDto::Failed));
+        assert!(failed.remove);
+        assert!(!failed.retry);
+    }
+
+    #[test]
+    fn vod_and_series_can_be_paused_resumed_and_retried() {
+        for kind in [RecordingKind::Vod, RecordingKind::Series] {
+            assert!(action_availability(true, &task("t", kind, TransferStatusDto::Running)).pause);
+            assert!(action_availability(true, &task("t", kind, TransferStatusDto::Paused)).resume);
+            assert!(action_availability(true, &task("t", kind, TransferStatusDto::Failed)).retry);
+            assert!(action_availability(true, &task("t", kind, TransferStatusDto::Cancelled)).retry);
         }
     }
 
     #[test]
-    fn queue_tab_shows_active_download_first_then_queue() {
-        let queue = Rc::new(vec![download("q1", TransferStatusDto::Queued), download("q2", TransferStatusDto::Queued)]);
-        let finished = Rc::new(vec![]);
-        let active = Rc::new(vec![Rc::new(download("active", TransferStatusDto::Running))]);
-
-        let items = collect_downloads_for_tab(&DownloadTab::Queue, &queue, &finished, &active);
-
-        assert_eq!(items.len(), 3);
-        assert_eq!(items[0].id, "active");
-        assert_eq!(items[1].id, "q1");
-        assert_eq!(items[2].id, "q2");
+    fn no_action_without_write_permission() {
+        let actions = action_availability(false, &task("t", RecordingKind::Vod, TransferStatusDto::Running));
+        assert_eq!(actions, super::RecordingActionAvailability::default());
     }
 
     #[test]
-    fn queue_tab_works_without_active_download() {
-        let queue = Rc::new(vec![download("q1", TransferStatusDto::Queued)]);
-        let finished = Rc::new(vec![]);
-        let active = Rc::new(Vec::new());
-
-        let items = collect_downloads_for_tab(&DownloadTab::Queue, &queue, &finished, &active);
-
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].id, "q1");
+    fn sorting_by_title_is_stable_across_tabs() {
+        let tasks = Rc::new(vec![
+            task("b", RecordingKind::Vod, TransferStatusDto::Running),
+            task("a", RecordingKind::Live, TransferStatusDto::Running),
+        ]);
+        let sorted = collect_sorted_tasks_for_tab(RecordingTab::Current, &tasks, Some((1, SortOrder::Asc)));
+        assert_eq!(sorted.iter().map(|t| t.id.clone()).collect::<Vec<_>>(), vec!["a", "b"]);
     }
 
     #[test]
-    fn finished_tab_stays_when_has_items() {
-        let queue = vec![];
-        let finished = vec![download("done", TransferStatusDto::Completed)];
-        let active: Rc<Vec<Rc<TransferTaskDto>>> = Rc::new(Vec::new());
-
-        assert_eq!(
-            normalize_download_tab(&DownloadTab::Finished, &queue, &finished, active.as_ref()),
-            DownloadTab::Finished
-        );
-    }
-
-    #[test]
-    fn finished_tab_falls_back_to_queue_when_empty() {
-        let queue = vec![download("q1", TransferStatusDto::Queued)];
-        let finished = vec![];
-        let active: Rc<Vec<Rc<TransferTaskDto>>> = Rc::new(Vec::new());
-
-        assert_eq!(
-            normalize_download_tab(&DownloadTab::Finished, &queue, &finished, active.as_ref()),
-            DownloadTab::Queue
-        );
-    }
-
-    fn apply_active_delta(
-        active: &Rc<Vec<Rc<TransferTaskDto>>>,
-        delta: &DownloadsDelta,
-    ) -> Rc<Vec<Rc<TransferTaskDto>>> {
-        match delta {
-            DownloadsDelta::SnapshotReset(response) => Rc::new(response.active.iter().cloned().map(Rc::new).collect()),
-            DownloadsDelta::ActivePatched(download) => {
-                let mut active_items: Vec<Rc<TransferTaskDto>> = active.iter().cloned().collect();
-                if let Some(existing) = active_items.iter_mut().find(|item| item.id == download.id) {
-                    *existing = Rc::new(download.clone());
-                } else {
-                    active_items.push(Rc::new(download.clone()));
-                }
-                Rc::new(active_items)
-            }
-            DownloadsDelta::ActiveCleared => Rc::new(Vec::new()),
-            DownloadsDelta::QueueReplaced { .. } | DownloadsDelta::FinishedReplaced { .. } => active.clone(),
+    fn only_data_columns_are_sortable() {
+        assert!(!is_sortable(0), "the action column is not sortable");
+        for col in 1..=8 {
+            assert!(is_sortable(col));
         }
-    }
-
-    #[test]
-    fn active_delta_replaces_existing_active_download() {
-        let active = Rc::new(vec![Rc::new(download("active", TransferStatusDto::Running))]);
-        let mut updated = download("active", TransferStatusDto::Running);
-        updated.downloaded_bytes = 2048;
-        updated.total_bytes = Some(4096);
-
-        let patched = apply_active_delta(&active, &DownloadsDelta::ActivePatched(updated.clone()));
-
-        assert_eq!(patched.len(), 1);
-        assert_eq!(patched[0].id, "active");
-        assert_eq!(patched[0].downloaded_bytes, 2048);
-        assert_eq!(patched[0].total_bytes, Some(4096));
-    }
-
-    #[test]
-    fn active_delta_appends_new_active_when_uuid_differs() {
-        let active = Rc::new(vec![Rc::new(download("old", TransferStatusDto::Running))]);
-        let updated = download("new", TransferStatusDto::Running);
-
-        let patched = apply_active_delta(&active, &DownloadsDelta::ActivePatched(updated));
-
-        assert_eq!(patched.len(), 2);
-        assert_eq!(patched[0].id, "old");
-        assert_eq!(patched[1].id, "new");
-    }
-
-    #[test]
-    fn optimistic_active_delta_updates_matching_item_status() {
-        let active = Rc::new(vec![Rc::new(download("active", TransferStatusDto::Running))]);
-
-        let delta = optimistic_active_delta(&active, "active", TransferStatusDto::Paused).expect("delta");
-
-        match delta {
-            DownloadsDelta::ActivePatched(download) => {
-                assert_eq!(download.id, "active");
-                assert_eq!(download.status, TransferStatusDto::Paused);
-            }
-            _ => panic!("expected active patch"),
-        }
-    }
-
-    #[test]
-    fn is_sortable_matches_compare_columns() {
-        assert!(!is_sortable(0));
-        assert!(is_sortable(1));
-        assert!(is_sortable(8));
         assert!(!is_sortable(9));
     }
 
     #[test]
-    fn format_download_error_uses_supplied_labels_for_retry_metadata() {
-        let mut dto = download("task", TransferStatusDto::RetryWaiting);
-        dto.error = Some("provider timeout".to_string());
-        dto.retry_attempts = 3;
-        dto.next_retry_at = Some(1_775_354_400);
-
-        let formatted = format_download_error_parts(&dto, "Versuch", "Naechster Versuch");
-
-        assert!(formatted.contains("provider timeout"));
-        assert!(formatted.contains("Versuch 3"));
-        assert!(formatted.contains("Naechster Versuch"));
-    }
-
-    #[test]
-    fn collect_sorted_downloads_for_tab_preserves_selected_sort_on_refresh() {
-        let queue = Rc::new(vec![download("b", TransferStatusDto::Queued), download("a", TransferStatusDto::Queued)]);
-        let finished = Rc::new(vec![]);
-        let active = Rc::new(Vec::new());
-
-        let items = collect_sorted_downloads_for_tab(
-            &DownloadTab::Queue,
-            &queue,
-            &finished,
-            &active,
-            Some((1, SortOrder::Asc)),
-        );
-
-        assert_eq!(items[0].id, "a");
-        assert_eq!(items[1].id, "b");
-    }
-
-    #[test]
-    fn download_actions_require_write_permission() {
-        let dto = download("active", TransferStatusDto::Running);
-
-        let actions = download_action_availability(false, &dto);
-
-        assert!(!actions.pause);
-        assert!(!actions.resume);
-        assert!(!actions.cancel);
-        assert!(!actions.remove);
-        assert!(!actions.retry);
-    }
-
-    #[test]
-    fn cancelled_recordings_do_not_offer_retry_semantics() {
-        let dto = TransferTaskDto {
-            id: "rec".to_string(),
-            title: "rec.ts".to_string(),
-            kind: TaskKindDto::Recording,
-            recording_type: RecordingTypeDto::Live,
-            priority: shared::model::TaskPriorityDto::Background,
-            status: TransferStatusDto::Cancelled,
-            retry_attempts: 0,
-            downloaded_bytes: 0,
-            total_bytes: None,
-            next_retry_at: None,
-            scheduled_start_at: None,
-            duration_secs: Some(60),
-            error: Some("Cancelled by user".to_string()),
-            recording: None,
-        };
-
-        let can_retry = dto.kind == TaskKindDto::Download
-            && matches!(dto.status, TransferStatusDto::Failed | TransferStatusDto::Cancelled);
-
-        assert!(!can_retry);
-    }
-
-    #[test]
-    fn download_actions_hide_retry_for_cancelled_recordings() {
-        let dto = TransferTaskDto {
-            id: "rec".to_string(),
-            title: "rec.ts".to_string(),
-            kind: TaskKindDto::Recording,
-            recording_type: RecordingTypeDto::Live,
-            priority: shared::model::TaskPriorityDto::Background,
-            status: TransferStatusDto::Cancelled,
-            retry_attempts: 0,
-            downloaded_bytes: 0,
-            total_bytes: None,
-            next_retry_at: None,
-            scheduled_start_at: None,
-            duration_secs: Some(60),
-            error: Some("Cancelled by user".to_string()),
-            recording: None,
-        };
-
-        let actions = download_action_availability(true, &dto);
-
-        assert!(!actions.retry);
-        assert!(actions.remove);
+    fn error_cell_joins_error_attempts_and_next_retry() {
+        let mut t = task("t", RecordingKind::Vod, TransferStatusDto::RetryWaiting);
+        t.error = Some("boom".to_string());
+        t.retry_attempts = 2;
+        let text = format_error_parts(&t, "Attempt", "Next");
+        assert!(text.starts_with("boom | Attempt 2"), "{text}");
     }
 }

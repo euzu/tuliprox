@@ -82,7 +82,7 @@ where
         // charge. Anything
         // else with `reserved_bytes > 0` is **not** holding
         // headroom yet — the headroom is reserved at start.
-        if matches!(task.state(), crate::download::DownloadState::Downloading) {
+        if matches!(task.state(), crate::recording::recording_queue::RecordingTaskState::Running) {
             total = total.saturating_add(super::recording_quota::charge_for_task(task));
         }
     }
@@ -219,7 +219,7 @@ pub fn free_bytes_for(path: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::download::DownloadState;
+    use crate::recording::recording_queue::RecordingTaskState;
     use shared::model::{
         recording::{RecordingMetadata, RecordingOwner, RecordingSource, RecordingVisibility},
         UserId,
@@ -229,7 +229,7 @@ mod tests {
         RecordingMetadata {
             owner: RecordingOwner::User(UserId::from("web:alice")),
             visibility: RecordingVisibility::Private,
-            source: Some(RecordingSource::new("t1", "v1", "in1")),
+            source: (RecordingSource::new("t1", "v1", "in1")),
             program_start: None,
             program_end: None,
             scheduled_start: None,
@@ -252,17 +252,17 @@ mod tests {
     }
 
     struct T {
-        state: DownloadState,
-        recording: Option<RecordingMetadata>,
+        state: RecordingTaskState,
+        recording: RecordingMetadata,
     }
     impl super::super::recording_quota::QuotaRecordingTaskView for T {
-        fn state(&self) -> &DownloadState { &self.state }
-        fn recording(&self) -> Option<&RecordingMetadata> { self.recording.as_ref() }
+        fn state(&self) -> &RecordingTaskState { &self.state }
+        fn recording(&self) -> &RecordingMetadata { &self.recording }
         fn uuid(&self) -> &'static str { "" }
     }
 
     fn downloading(reserved: u64, measured: u64) -> T {
-        T { state: DownloadState::Downloading, recording: Some(make_meta(reserved, measured)) }
+        T { state: RecordingTaskState::Running, recording: make_meta(reserved, measured) }
     }
 
     #[test]
@@ -312,8 +312,8 @@ mod tests {
         // at create.
         let tasks = vec![
             downloading(1000, 0),
-            T { state: DownloadState::Scheduled, recording: Some(make_meta(500, 0)) },
-            T { state: DownloadState::Completed, recording: Some(make_meta(0, 4000)) },
+            T { state: RecordingTaskState::Scheduled, recording: make_meta(500, 0) },
+            T { state: RecordingTaskState::Completed, recording: make_meta(0, 4000) },
         ];
         assert_eq!(active_disk_reservations(&tasks), 1000);
     }

@@ -12158,7 +12158,7 @@ mod tests {
                     .expect("no-redirect client builds"),
             )),
             public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-            downloads: Arc::new(crate::api::model::DownloadQueue::new()),
+            recordings: Arc::new(crate::api::model::RecordingQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,
             hls_proxy,

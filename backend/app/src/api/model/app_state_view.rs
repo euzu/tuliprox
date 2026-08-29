@@ -71,7 +71,7 @@ macro_rules! app_state_views {
 app_state_views! {
     /// The handles the DVR needs: the recording queue and what feeds it.
     recording_ctx => crate::api::model::recording::recording_ctx::RecordingCtx {
-        app_config, downloads, event_manager, http_client,
+        app_config, recordings, event_manager, http_client, active_provider, connection_manager,
     }
 
     /// The handles the HLS proxy needs: itself, plus provider allocation and

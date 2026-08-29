@@ -99,7 +99,7 @@ pub fn compute_total_size(response: &reqwest::Response, existing_size: u64) -> O
 pub struct ResumeValidator {
     /// Byte offset we asked for with `Range: bytes=START-`.
     pub expected_offset: u64,
-    /// Optional ETag captured at partial-open time. Reject a resume
+    /// Optional `ETag` captured at partial-open time. Reject a resume
     /// whose response carries a different `ETag`: the resource was
     /// replaced mid-recording.
     pub expected_etag: Option<String>,

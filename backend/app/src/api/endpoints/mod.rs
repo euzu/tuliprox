@@ -1,6 +1,5 @@
 mod api_playlist_utils;
 pub(in crate::api) mod custom_video_stream_api;
-pub(in crate::api) mod download_api;
 mod extract_accept_header;
 pub(in crate::api) mod hdhomerun_api;
 pub(in crate::api) mod hls_api;

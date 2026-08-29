@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use shared::{
     model::{
         recording_rule::{RuleBody, RuleVisibility},
-        TaskKindDto, TaskPriorityDto, TransferStatusDto, TransferTaskDto, XtreamCluster,
+        RecordingTaskDto, XtreamCluster,
     },
     utils::concat_path_leading_slash,
 };
@@ -76,63 +76,9 @@ pub struct RecordingTaskId {
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
-pub struct RecordingTaskResponse {
-    pub id: String,
-    pub title: String,
-    /// `create_recording_task` returns only `{id, title, recording}`; the
-    /// `list_tasks` snapshot returns the full `TransferTaskDto` shape.
-    /// `#[serde(default)]` lets both responses deserialize into one type.
-    #[serde(default = "default_kind")]
-    pub kind: TaskKindDto,
-    #[serde(default = "default_priority")]
-    pub priority: TaskPriorityDto,
-    #[serde(default = "default_status")]
-    pub status: TransferStatusDto,
-    #[serde(default)]
-    pub retry_attempts: u8,
-    #[serde(default)]
-    pub downloaded_bytes: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub total_bytes: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub next_retry_at: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scheduled_start_at: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub duration_secs: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    pub recording: Option<shared::model::recording::RecordingTaskDto>,
-}
-
-fn default_priority() -> TaskPriorityDto { TaskPriorityDto::Normal }
-fn default_status() -> TransferStatusDto { TransferStatusDto::Scheduled }
-fn default_kind() -> TaskKindDto { TaskKindDto::Recording }
-
-impl From<TransferTaskDto> for RecordingTaskResponse {
-    fn from(value: TransferTaskDto) -> Self {
-        Self {
-            id: value.id,
-            title: value.title,
-            kind: value.kind,
-            priority: value.priority,
-            status: value.status,
-            retry_attempts: value.retry_attempts,
-            downloaded_bytes: value.downloaded_bytes,
-            total_bytes: value.total_bytes,
-            next_retry_at: value.next_retry_at,
-            scheduled_start_at: value.scheduled_start_at,
-            duration_secs: value.duration_secs,
-            error: value.error,
-            recording: value.recording,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct RecordingSnapshot {
     pub revision: u64,
-    pub tasks: Vec<RecordingTaskResponse>,
+    pub tasks: Vec<RecordingTaskDto>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -455,11 +401,8 @@ impl RecordingService {
 
     /// POST /recording/tasks — create a recording. The request must
     /// carry source identifiers, never a free-form URL.
-    pub async fn create_task(
-        &self,
-        request: CreateRecordingTaskRequest,
-    ) -> Result<RecordingTaskResponse, RecordingError> {
-        let body: RecordingTaskResponse = request_post(&self.tasks_path(), &request, None, Some(Encoding::Json))
+    pub async fn create_task(&self, request: CreateRecordingTaskRequest) -> Result<RecordingTaskDto, RecordingError> {
+        let body: RecordingTaskDto = request_post(&self.tasks_path(), &request, None, Some(Encoding::Json))
             .await
             .map_err(network)?
             .ok_or_else(|| RecordingError::Other("empty response".into()))?;

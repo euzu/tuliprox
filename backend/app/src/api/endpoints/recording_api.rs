@@ -10,7 +10,7 @@ use crate::{
             recording_service::{
                 CreateRecordingInput, EditRecordingPatch, RecordingService, RecordingSourceInput, ServiceError,
             },
-            recording_ws, AppState, DownloadQueue, FileDownload,
+            recording_ws, AppState, RecordingQueue, RecordingTask,
         },
     },
     repository::recording_rule_repository::RecordingRuleRepository,
@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use shared::model::{
     recording::{RecordingMetadata, RecordingOwner, RecordingProvenance, RecordingSource, RecordingVisibility},
     recording_rule::{RecordingRule, RuleBody, RuleSource, RuleVisibility},
-    FileDownloadDto, Permission, RecordingTypeDto, UserId, XtreamCluster, ROLE_ADMIN,
+    Permission, RecordingKind, RecordingTaskDto, UserId, XtreamCluster, ROLE_ADMIN,
 };
 use std::sync::Arc;
 
@@ -81,20 +81,16 @@ pub async fn list_recording_tasks(
     if params.owner.is_some() && !is_admin(&claims) {
         return error_response(StatusCode::FORBIDDEN, "recording_forbidden");
     }
-    let (revision, mut tasks) = recording_ws::recording_snapshot(&app_state.downloads, &claims).await;
+    let (revision, mut tasks) = recording_ws::recording_snapshot(&app_state.recordings, &claims).await;
     if let Some(owner) = params.owner.as_deref() {
-        tasks.retain(|task| {
-            task.recording.as_ref().and_then(|recording| recording.owner_id.as_ref()).is_some_and(|id| id.0 == owner)
-        });
+        tasks.retain(|task| task.owner_id.as_ref().is_some_and(|id| id.0 == owner));
     }
     if let Some(visibility) = params.visibility.as_deref() {
         tasks.retain(|task| {
-            task.recording.as_ref().is_some_and(|recording| {
-                matches!(
-                    (visibility, recording.visibility),
-                    ("private", RecordingVisibility::Private) | ("shared", RecordingVisibility::Shared)
-                )
-            })
+            matches!(
+                (visibility, task.visibility),
+                ("private", RecordingVisibility::Private) | ("shared", RecordingVisibility::Shared)
+            )
         });
     }
     Json(RecordingSnapshotResponse { revision: revision.0, tasks }).into_response()
@@ -111,7 +107,7 @@ pub struct ListTasksParams {
 #[derive(Debug, Clone, Serialize)]
 pub struct RecordingSnapshotResponse {
     pub revision: u64,
-    pub tasks: Vec<FileDownloadDto>,
+    pub tasks: Vec<RecordingTaskDto>,
 }
 
 /// POST /api/v1/recording/tasks
@@ -138,7 +134,7 @@ pub async fn create_recording_task(
     let (Some(program_start), Some(program_end)) = (body.program_start, body.program_end) else {
         return error_response(StatusCode::UNPROCESSABLE_ENTITY, "recording_invalid_interval");
     };
-    let service = RecordingService::new(app_state.downloads.clone(), app_state.app_config.clone());
+    let service = RecordingService::new(app_state.recordings.clone(), app_state.app_config.clone());
     let input = CreateRecordingInput {
         source: RecordingSourceInput {
             target_id: source.target_id,
@@ -219,9 +215,9 @@ async fn create_http_recording_task(
     if body.visibility == RecordingVisibility::Shared && !is_admin(claims) {
         return error_response(StatusCode::FORBIDDEN, "recording_shared_requires_administrator");
     }
-    let recording_type = match source.cluster {
-        XtreamCluster::Video => RecordingTypeDto::Vod,
-        XtreamCluster::Series => RecordingTypeDto::Series,
+    let recording_kind = match source.cluster {
+        XtreamCluster::Video => RecordingKind::Vod,
+        XtreamCluster::Series => RecordingKind::Series,
         XtreamCluster::Live => return error_response(StatusCode::BAD_REQUEST, "recording_invalid_source"),
     };
     if !resolved.downloadable {
@@ -230,7 +226,7 @@ async fn create_http_recording_task(
     let Some(extension) = resolved.extension.as_deref().filter(|extension| !extension.is_empty()) else {
         return error_response(StatusCode::UNPROCESSABLE_ENTITY, "recording_invalid_path");
     };
-    let Some(url) = crate::api::endpoints::v1_api_playlist::build_stable_recording_url(
+    let Some(url) = tuliprox_dvr::recording::recording_url::build_stable_recording_url(
         &app_state.app_config,
         &source.target_id,
         &source.input_name,
@@ -244,60 +240,56 @@ async fn create_http_recording_task(
         return error_response(StatusCode::NOT_IMPLEMENTED, "recording_disabled");
     };
     let filename = format!("{}.{}", resolved.title, extension.trim_start_matches('.'));
-    let Some(mut task) = FileDownload::new_with_type(
+    let recording_source = RecordingSource::new(source.target_id, source.virtual_id, source.input_name.clone())
+        .with_cluster(source.cluster);
+    let metadata =
+        RecordingMetadata::new_media(RecordingOwner::User(owner_id), body.visibility, recording_source, resolved.title);
+    let Some(mut task) = RecordingTask::new(
+        recording_kind,
         &url,
         &filename,
         recording_config,
         Some(Arc::from(source.input_name.as_str())),
         recording_config.priority,
-        recording_type,
+        metadata,
     ) else {
         return error_response(StatusCode::UNPROCESSABLE_ENTITY, "recording_invalid_path");
     };
-    let recording_source =
-        RecordingSource::new(source.target_id, source.virtual_id, source.input_name).with_cluster(source.cluster);
-    let mut metadata = RecordingMetadata::new_transfer(
-        RecordingOwner::User(owner_id),
-        body.visibility,
-        recording_source,
-        resolved.title,
-    );
-    metadata.relative_path = task
+    task.recording.relative_path = task
         .file_path
         .strip_prefix(&recording_config.directory)
         .ok()
         .and_then(|path| path.to_str())
         .map(str::to_string);
-    task.recording = Some(metadata);
 
-    if let Some(existing) = app_state.downloads.find_duplicate(&task).await {
-        return Json(FileDownloadDto::from(&existing)).into_response();
+    let is_owner = true;
+    if let Some(existing) = app_state.recordings.find_duplicate(&task).await {
+        return Json(existing.to_view(is_owner)).into_response();
     }
-    if let Err(error) = mutate(&app_state.downloads, |candidate| {
-        candidate.queue.push(DownloadQueue::to_persisted(&task));
+    if let Err(error) = mutate(&app_state.recordings, |candidate| {
+        candidate.queue.push(RecordingQueue::to_persisted(&task));
         Ok(())
     })
     .await
     {
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, error.message());
     }
-    if app_state.downloads.active.read().await.is_none() {
-        if crate::api::endpoints::download_api::ensure_download_worker_running(
+    if app_state.recordings.active.read().await.is_none()
+        && tuliprox_dvr::recording::recording_transfer::ensure_recording_worker_running(
             &app_state.app_config,
             recording_config,
-            &app_state.downloads,
+            &app_state.recordings,
             &app_state.event_manager,
             &app_state.active_provider,
             &app_state.connection_manager,
         )
         .await
         .is_err()
-        {
-            return error_response(StatusCode::INTERNAL_SERVER_ERROR, "recording_worker_failed");
-        }
+    {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, "recording_worker_failed");
     }
     let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
-    Json(FileDownloadDto::from(&task)).into_response()
+    Json(task.to_view(is_owner)).into_response()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -314,7 +306,7 @@ pub async fn edit_recording_task(
     AuthClaims(claims): AuthClaims,
     Json(body): Json<EditRecordingTaskBody>,
 ) -> impl IntoResponse {
-    let service = RecordingService::new(app_state.downloads.clone(), app_state.app_config.clone());
+    let service = RecordingService::new(app_state.recordings.clone(), app_state.app_config.clone());
     match service.edit_recording(&claims, &id, body.into()).await {
         Ok(_view) => {
             let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
@@ -356,15 +348,13 @@ impl From<EditRecordingTaskBody> for EditRecordingPatch {
     }
 }
 
-/// POST /api/v1/recording/tasks/{id}/cancel
-
 /// POST /api/v1/recording/tasks/{id}/pause
 pub async fn pause_recording_task(
     axum::extract::Path(id): axum::extract::Path<String>,
     State(app_state): State<Arc<AppState>>,
     AuthClaims(claims): AuthClaims,
 ) -> impl IntoResponse {
-    let service = RecordingService::new(app_state.downloads.clone(), app_state.app_config.clone());
+    let service = RecordingService::new(app_state.recordings.clone(), app_state.app_config.clone());
     match service.pause_recording(&claims, &id).await {
         Ok(()) => {
             let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
@@ -380,7 +370,7 @@ pub async fn resume_recording_task(
     State(app_state): State<Arc<AppState>>,
     AuthClaims(claims): AuthClaims,
 ) -> impl IntoResponse {
-    let service = RecordingService::new(app_state.downloads.clone(), app_state.app_config.clone());
+    let service = RecordingService::new(app_state.recordings.clone(), app_state.app_config.clone());
     match service.resume_recording(&claims, &id).await {
         Ok(_) => {
             let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
@@ -396,7 +386,7 @@ pub async fn retry_recording_task(
     State(app_state): State<Arc<AppState>>,
     AuthClaims(claims): AuthClaims,
 ) -> impl IntoResponse {
-    let service = RecordingService::new(app_state.downloads.clone(), app_state.app_config.clone());
+    let service = RecordingService::new(app_state.recordings.clone(), app_state.app_config.clone());
     match service.retry_recording(&claims, &id).await {
         Ok(_) => {
             let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
@@ -412,7 +402,7 @@ pub async fn remove_recording_task(
     State(app_state): State<Arc<AppState>>,
     AuthClaims(claims): AuthClaims,
 ) -> impl IntoResponse {
-    let service = RecordingService::new(app_state.downloads.clone(), app_state.app_config.clone());
+    let service = RecordingService::new(app_state.recordings.clone(), app_state.app_config.clone());
     match service.remove_recording_task(&claims, &id).await {
         Ok(_) => {
             let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
@@ -427,7 +417,7 @@ pub async fn cancel_recording_task(
     State(app_state): State<Arc<AppState>>,
     AuthClaims(claims): AuthClaims,
 ) -> impl IntoResponse {
-    let service = RecordingService::new(app_state.downloads.clone(), app_state.app_config.clone());
+    let service = RecordingService::new(app_state.recordings.clone(), app_state.app_config.clone());
     match service.cancel_recording(&claims, &id).await {
         Ok(()) => {
             let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
@@ -443,7 +433,7 @@ pub async fn delete_recording_task(
     State(app_state): State<Arc<AppState>>,
     AuthClaims(claims): AuthClaims,
 ) -> impl IntoResponse {
-    let service = RecordingService::new(app_state.downloads.clone(), app_state.app_config.clone());
+    let service = RecordingService::new(app_state.recordings.clone(), app_state.app_config.clone());
     match service.delete_recording(&claims, &id).await {
         Ok(()) => {
             let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
@@ -576,7 +566,7 @@ pub async fn get_recording_quota(
         private_limit_bytes: quota.private.limit_bytes,
         shared_used_bytes: quota.shared.used_bytes,
         shared_limit_bytes: quota.shared.limit_bytes,
-        revision: app_state.downloads.revision.load(std::sync::atomic::Ordering::SeqCst),
+        revision: app_state.recordings.revision.load(std::sync::atomic::Ordering::SeqCst),
     })
     .into_response()
 }
@@ -618,7 +608,7 @@ pub async fn get_recording_health(
         notification_last_drain: health.notification_last_drain(),
         notification_outbox_depth: health.notification_outbox_depth(),
         notification_dead_lettered: health.notification_dead_lettered(),
-        queue_revision: app_state.downloads.revision.load(std::sync::atomic::Ordering::SeqCst),
+        queue_revision: app_state.recordings.revision.load(std::sync::atomic::Ordering::SeqCst),
     })
     .into_response()
 }
@@ -677,19 +667,8 @@ fn quota_limits_from_config(config: Option<&crate::model::RecordingQuotaConfig>)
     }
 }
 
-async fn all_recording_tasks(app_state: &AppState) -> Vec<FileDownload> {
-    let mut tasks = Vec::new();
-    let q = app_state.downloads.queue.lock().await;
-    tasks.extend(q.iter().filter(|d| d.recording.is_some()).cloned());
-    drop(q);
-    let s = app_state.downloads.scheduled.read().await;
-    tasks.extend(s.iter().filter(|d| d.recording.is_some()).cloned());
-    drop(s);
-    let a = app_state.downloads.active.read().await;
-    tasks.extend(a.iter().filter(|d| d.recording.is_some()).cloned());
-    drop(a);
-    let f = app_state.downloads.finished.read().await;
-    tasks.extend(f.iter().filter(|d| d.recording.is_some()).cloned());
+async fn all_recording_tasks(app_state: &AppState) -> Vec<RecordingTask> {
+    let (_revision, tasks) = app_state.recordings.committed_snapshot().await;
     tasks
 }
 
@@ -704,34 +683,25 @@ async fn resolve_recording_source(
         if cluster != XtreamCluster::Live {
             return None;
         }
-        let Some(resolved) =
-            crate::api::endpoints::v1_api_playlist::resolve_target_live_recording_source_by_epg_channel(
-                &app_state.app_config,
-                target_name,
-                virtual_id,
-            )
-            .await
-        else {
-            return None;
-        };
+        let resolved = crate::api::endpoints::v1_api_playlist::resolve_target_live_recording_source_by_epg_channel(
+            &app_state.app_config,
+            target_name,
+            virtual_id,
+        )
+        .await?;
         if !accept_resolved_recording_source(virtual_id, input_name, &resolved) {
             return None;
         }
     }
-    let Some(virtual_id_value) = recording_virtual_id(virtual_id) else {
-        return None;
-    };
-    let Some(resolved) = crate::api::endpoints::v1_api_playlist::resolve_target_recording_source(
+    let virtual_id_value = recording_virtual_id(virtual_id)?;
+    let resolved = crate::api::endpoints::v1_api_playlist::resolve_target_recording_source(
         &app_state.app_config,
         target_name,
         input_name,
         virtual_id_value,
         cluster,
     )
-    .await
-    else {
-        return None;
-    };
+    .await?;
     accept_resolved_recording_source(virtual_id, input_name, &resolved).then_some(resolved)
 }
 
@@ -750,7 +720,7 @@ pub async fn list_recording_rules(
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, "recording_persistence_failed");
     };
     let admin = is_admin(&claims);
-    let revision = app_state.downloads.revision.load(std::sync::atomic::Ordering::SeqCst);
+    let revision = app_state.recordings.revision.load(std::sync::atomic::Ordering::SeqCst);
     Json(
         rules
             .into_iter()
@@ -807,7 +777,7 @@ pub async fn create_recording_rule(
         Ok(rule) => {
             let _ = app_state.event_manager.send_event(EventMessage::RecordingRulesChanged);
             Json(RecordingRuleResponse {
-                revision: app_state.downloads.revision.load(std::sync::atomic::Ordering::SeqCst),
+                revision: app_state.recordings.revision.load(std::sync::atomic::Ordering::SeqCst),
                 rule,
             })
             .into_response()
@@ -881,7 +851,7 @@ pub async fn edit_recording_rule(
         Ok(Some(rule)) => {
             let _ = app_state.event_manager.send_event(EventMessage::RecordingRulesChanged);
             Json(RecordingRuleResponse {
-                revision: app_state.downloads.revision.load(std::sync::atomic::Ordering::SeqCst),
+                revision: app_state.recordings.revision.load(std::sync::atomic::Ordering::SeqCst),
                 rule,
             })
             .into_response()
@@ -1024,7 +994,7 @@ pub async fn delete_recording_rule(
     // the rule store then fails. Without the compensation the operator
     // was left with the rule still present and its upcoming recordings
     // silently gone.
-    let service = RecordingService::new(app_state.downloads.clone(), app_state.app_config.clone());
+    let service = RecordingService::new(app_state.recordings.clone(), app_state.app_config.clone());
     let mut cancelled = Vec::new();
     if future == DeleteFuture::Cancel {
         match service.cancel_future_rule_recordings(&claims, &id, chrono::Utc::now().timestamp()).await {

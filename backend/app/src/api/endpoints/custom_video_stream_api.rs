@@ -505,9 +505,10 @@ mod tests {
         api::model::{
             build_hls_standalone_custom_plan, hls_custom_video_manifest_response_for_access_lease,
             ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, CustomVideoStreamType,
-            DownloadQueue, EventManager, HlsAccessLease, HlsAccessLeaseId, HlsPlaybackFamilyKey, HlsProvisioningState,
+            EventManager, HlsAccessLease, HlsAccessLeaseId, HlsPlaybackFamilyKey, HlsProvisioningState,
             HlsProxyManager, HlsRuntimeCustomTailReason, HlsStandaloneCustomAccess, MetadataUpdateManager,
-            PlaylistStorageState, ProxySessionId, SharedStreamManager, TransportStreamBuffer, UpdateGuard,
+            PlaylistStorageState, ProxySessionId, RecordingQueue, SharedStreamManager, TransportStreamBuffer,
+            UpdateGuard,
         },
         model::{
             ApiProxyConfig, ApiProxyServerInfo, AppConfig, Config, ConfigInput, ConfigSource, ConfigTarget,
@@ -702,7 +703,7 @@ mod tests {
             provider_dns: CancellationToken::new(),
             metadata: CancellationToken::new(),
             qos_aggregation: CancellationToken::new(),
-            downloads: CancellationToken::new(),
+            recordings: CancellationToken::new(),
             hls_cache: CancellationToken::new(),
         };
         let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
@@ -719,7 +720,7 @@ mod tests {
             http_client: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
             http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
             public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-            downloads: Arc::new(DownloadQueue::new()),
+            recordings: Arc::new(RecordingQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,
             hls_proxy: Arc::new(HlsProxyManager::new()),

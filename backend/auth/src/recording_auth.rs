@@ -6,9 +6,9 @@
 //!
 //! - The principal's recording permission bits
 //! - The principal's role (administrator vs. web/API user)
-//! - The recording's `RecordingOwner` (real owner vs. `LegacyAdmin`)
+//! - The recording's `RecordingOwner`
 //! - The recording's `RecordingVisibility` (private vs. shared)
-//! - The task's `DownloadState` (for state-aware actions like
+//! - The task's `RecordingTaskState` (for state-aware actions like
 //!   `system-retention-delete`)
 //! - A path/visibility/owner triple that the caller resolves before
 //!   calling the policy
@@ -69,10 +69,6 @@ pub enum DenyReason {
     /// Shared mutation (edit/cancel/delete) requires the administrator
     /// role in addition to the recording permission.
     NotAdministrator,
-    /// `LegacyAdmin` recordings are only accessible to administrators
-    /// with the required permission. Non-admin callers — even the
-    /// real owner — cannot act on a `LegacyAdmin` recording.
-    LegacyAdminReserved,
     /// Retention delete is gated on a terminal state and a non-partial
     /// path. The recording's current state forbids it.
     IneligibleState,
@@ -88,7 +84,6 @@ impl std::fmt::Display for DenyReason {
             Self::MissingPermission(p) => write!(f, "missing permission: {}", permission_name(*p)),
             Self::NotOwner => f.write_str("not the real owner"),
             Self::NotAdministrator => f.write_str("administrator role required"),
-            Self::LegacyAdminReserved => f.write_str("legacy admin recording — administrator required"),
             Self::IneligibleState => f.write_str("recording is not in an eligible terminal state"),
             Self::InvalidPath => f.write_str("recording path/kind is invalid"),
         }
@@ -111,15 +106,13 @@ fn permission_name(p: Permission) -> &'static str {
         Permission::SystemWrite => "system.write",
         Permission::EpgRead => "epg.read",
         Permission::EpgWrite => "epg.write",
-        Permission::DownloadRead => "download.read",
-        Permission::DownloadWrite => "download.write",
         Permission::RecordingRead => "recording.read",
         Permission::RecordingWrite => "recording.write",
     }
 }
 
 /// Resolved view of the recording. Constructed by the caller from the
-/// runtime `FileDownload` and the new `RecordingService` so the policy
+/// runtime `RecordingTask` and the new `RecordingService` so the policy
 /// stays pure and testable.
 #[derive(Debug, Clone)]
 pub struct RecordingSubject<'a> {
@@ -228,13 +221,7 @@ fn check_create(claims: &Claims, action: RecordingAction) -> RecordingDecision {
     }
 }
 
-fn owner_of(meta: &RecordingMetadata) -> Option<UserId> {
-    use shared::model::RecordingOwner;
-    match &meta.owner {
-        RecordingOwner::User(uid) => Some(uid.clone()),
-        RecordingOwner::LegacyAdmin => None,
-    }
-}
+fn owner_of(meta: &RecordingMetadata) -> &UserId { meta.owner_id() }
 
 fn is_visibility(meta: &RecordingMetadata, want: RecordingVisibility) -> bool { meta.visibility == want }
 
@@ -315,20 +302,9 @@ pub fn authorize(
         return RecordingDecision::Deny(DenyReason::InvalidPath);
     }
 
-    let is_legacy = matches!(meta.owner, shared::model::RecordingOwner::LegacyAdmin);
-
-    // LegacyAdmin recordings are only accessible to administrators.
-    if is_legacy && !is_admin(claims) {
-        return RecordingDecision::Deny(DenyReason::LegacyAdminReserved);
-    }
-    if is_legacy && action_requires_owner(action) {
-        // Even an admin cannot impersonate a LegacyAdmin owner.
-        return RecordingDecision::Deny(DenyReason::LegacyAdminReserved);
-    }
-
     match action {
         RecordingAction::Read | RecordingAction::Playback | RecordingAction::Download => {
-            check_read_action(claims, subject_id, meta, is_legacy)
+            check_read_action(claims, subject_id, meta)
         }
         RecordingAction::CreatePrivate | RecordingAction::CreateShared => check_create(claims, action),
         RecordingAction::Edit | RecordingAction::Cancel | RecordingAction::Delete => {
@@ -347,24 +323,12 @@ pub fn authorize(
     }
 }
 
-fn check_read_action(
-    claims: &Claims,
-    subject_id: &UserId,
-    meta: &RecordingMetadata,
-    is_legacy: bool,
-) -> RecordingDecision {
+fn check_read_action(claims: &Claims, subject_id: &UserId, meta: &RecordingMetadata) -> RecordingDecision {
     if !has_recording_read(claims) {
         return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingRead));
     }
     if is_visibility(meta, RecordingVisibility::Private) {
-        if is_legacy {
-            // LegacyAdmin is never owner-readable by a non-admin (already
-            // rejected at the policy boundary). This branch is
-            // unreachable when is_legacy=true; the redundant check
-            // documents the invariant.
-            return RecordingDecision::Deny(DenyReason::LegacyAdminReserved);
-        }
-        if owner_of(meta).as_ref() == Some(subject_id) {
+        if owner_of(meta) == subject_id {
             return RecordingDecision::Allow;
         }
         return RecordingDecision::Deny(DenyReason::NotOwner);
@@ -378,7 +342,7 @@ fn check_mutate_action(claims: &Claims, subject_id: &UserId, meta: &RecordingMet
         return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingWrite));
     }
     if is_visibility(meta, RecordingVisibility::Private) {
-        if owner_of(meta).as_ref() == Some(subject_id) {
+        if owner_of(meta) == subject_id {
             return RecordingDecision::Allow;
         }
         return RecordingDecision::Deny(DenyReason::NotOwner);
@@ -389,13 +353,6 @@ fn check_mutate_action(claims: &Claims, subject_id: &UserId, meta: &RecordingMet
         return RecordingDecision::Deny(DenyReason::NotAdministrator);
     }
     RecordingDecision::Allow
-}
-
-fn action_requires_owner(action: RecordingAction) -> bool {
-    matches!(
-        action,
-        RecordingAction::Edit | RecordingAction::Cancel | RecordingAction::Delete | RecordingAction::ManageRule
-    )
 }
 
 /// Separate policy for orphan catalog entries. The catalog is a
@@ -455,7 +412,7 @@ mod tests {
         RecordingMetadata {
             owner,
             visibility,
-            source: None,
+            source: shared::model::recording::RecordingSource::new("t1", "v1", "in1"),
             program_start: None,
             program_end: None,
             scheduled_start: None,
@@ -487,8 +444,6 @@ mod tests {
     fn owner_meta(uid: &str, visibility: RecordingVisibility) -> RecordingMetadata {
         make_meta(RecordingOwner::User(UserId::from(uid)), visibility)
     }
-
-    fn legacy_meta() -> RecordingMetadata { make_meta(RecordingOwner::LegacyAdmin, RecordingVisibility::Private) }
 
     fn subject(uid: &str) -> UserId { UserId::from(uid) }
 
@@ -558,9 +513,9 @@ mod tests {
     }
 
     #[test]
-    fn read_legacy_admin_recording_requires_administrator() {
+    fn read_private_recording_of_another_owner_is_denied() {
         let claims = make_claims("alice", Some(subject("web:alice")), vec!["WEB"], read_perms());
-        let meta = legacy_meta();
+        let meta = owner_meta("web:bob", RecordingVisibility::Private);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Completed, true);
         let d = authorize(
             &claims,
@@ -568,7 +523,7 @@ mod tests {
             RecordingAction::Read,
             &sub,
         );
-        assert!(matches!(d, RecordingDecision::Deny(DenyReason::LegacyAdminReserved)));
+        assert!(matches!(d, RecordingDecision::Deny(DenyReason::NotOwner)));
     }
 
     // --- create ---

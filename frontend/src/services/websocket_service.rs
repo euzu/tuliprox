@@ -368,12 +368,6 @@ fn handle_socket_protocol_msg(
                     ProtocolMessage::LibraryScanProgressResponse(progress) => {
                         event_service.broadcast(EventMessage::LibraryScanProgress(progress));
                     }
-                    ProtocolMessage::DownloadsResponse(downloads) => {
-                        event_service.broadcast(EventMessage::DownloadsUpdate(Rc::new(downloads)));
-                    }
-                    ProtocolMessage::DownloadsDeltaResponse(delta) => {
-                        event_service.broadcast(EventMessage::DownloadsDeltaUpdate(Rc::new(delta)));
-                    }
                     ProtocolMessage::Version(_version) => {
                         attempt_counter.set(0);
                         if let Some(token) = get_token() {
@@ -392,7 +386,6 @@ fn handle_socket_protocol_msg(
                     ProtocolMessage::Auth(_)
                     | ProtocolMessage::StreamMeterSubscribe
                     | ProtocolMessage::StreamMeterUnsubscribe
-                    | ProtocolMessage::DownloadsRequest
                     | ProtocolMessage::ActiveProviderCountRequest(_)
                     | ProtocolMessage::StatusRequest(_)
                     | ProtocolMessage::UserAction(_)
@@ -400,10 +393,6 @@ fn handle_socket_protocol_msg(
                     ProtocolMessage::RecordingSnapshotResponse { revision, tasks } => {
                         event_service
                             .broadcast(EventMessage::RecordingSnapshot { revision: revision.0, tasks: Rc::new(tasks) });
-                    }
-                    ProtocolMessage::RecordingDeltaResponse { revision, tasks } => {
-                        event_service
-                            .broadcast(EventMessage::RecordingDelta { revision: revision.0, tasks: Rc::new(tasks) });
                     }
                     ProtocolMessage::RecordingRulesChanged => {
                         event_service.broadcast(EventMessage::RecordingRulesChanged);

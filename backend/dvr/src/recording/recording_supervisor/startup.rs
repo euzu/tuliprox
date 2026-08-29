@@ -28,7 +28,7 @@ use super::{
     now_ts, recording_config, recording_enabled,
 };
 use crate::{
-    download::{mutate, FileDownload},
+    recording::recording_queue::{mutate, RecordingTask},
     recording_deletion::{apply_recovery_to_candidate, recovery_action_for, RecoveryAction},
     recording_reconciliation::ReconcileAction,
 };
@@ -55,11 +55,9 @@ pub async fn run_startup_reconciliation(ctx: &RecordingCtx) {
 
 /// Finish or undo every deletion the previous process left half-done.
 async fn recover_stuck_deletions(ctx: &RecordingCtx) -> usize {
-    let (_revision, tasks) = ctx.downloads.committed_snapshot().await;
-    let pending: Vec<FileDownload> = tasks
-        .into_iter()
-        .filter(|task| task.recording.as_ref().is_some_and(|meta| meta.deleting_previous_state.is_some()))
-        .collect();
+    let (_revision, tasks) = ctx.recordings.committed_snapshot().await;
+    let pending: Vec<RecordingTask> =
+        tasks.into_iter().filter(|task| task.recording.deleting_previous_state.is_some()).collect();
     if pending.is_empty() {
         return 0;
     }
@@ -85,7 +83,7 @@ async fn recover_stuck_deletions(ctx: &RecordingCtx) -> usize {
         }
         let uuid = task.uuid.clone();
         let finish = matches!(action, RecoveryAction::FinishDeletion);
-        let outcome = mutate(&ctx.downloads, move |candidate| {
+        let outcome = mutate(&ctx.recordings, move |candidate| {
             apply_recovery_to_candidate(candidate, &uuid, action);
             if finish {
                 // `apply_recovery_to_candidate` only clears the marker; the
@@ -131,7 +129,7 @@ async fn reconcile_rule_drift(ctx: &RecordingCtx) -> usize {
 
     // Queue-side actions first — the fixed cross-store order is
     // "queue mutation boundary -> rule repository mutation".
-    let mut applied = finalize_cancelled_occurrences_in_queue(&actions, &ctx.downloads).await;
+    let mut applied = finalize_cancelled_occurrences_in_queue(&actions, &ctx.recordings).await;
 
     // Rule-side actions: one save for the whole plan.
     let (more, changed) = apply_rule_actions_to_tombstones(&actions, &mut file, now);
@@ -151,7 +149,7 @@ async fn reconcile_rule_drift(ctx: &RecordingCtx) -> usize {
 /// `HashSet<&str>` rather than cloning uuids into a second owned set.
 async fn finalize_cancelled_occurrences_in_queue(
     actions: &[super::super::recording_reconciliation::ReconcileAction],
-    downloads: &crate::download::DownloadQueue,
+    recordings: &crate::recording::recording_queue::RecordingQueue,
 ) -> usize {
     let finalize: Vec<&str> = actions
         .iter()
@@ -165,7 +163,7 @@ async fn finalize_cancelled_occurrences_in_queue(
     }
     let count = finalize.len();
     let targets: HashSet<&str> = finalize.iter().copied().collect();
-    match mutate(downloads, |candidate| {
+    match mutate(recordings, |candidate| {
         candidate.queue.retain(|task| !targets.contains(task.uuid.as_str()));
         candidate.scheduled.retain(|task| !targets.contains(task.uuid.as_str()));
         candidate.finished.retain(|task| !targets.contains(task.uuid.as_str()));

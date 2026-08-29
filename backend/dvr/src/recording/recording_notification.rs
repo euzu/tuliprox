@@ -119,7 +119,6 @@ pub fn route(owner: &RecordingOwner, visibility: RecordingVisibility, is_admin_r
         return RoutingDecision::Deliver;
     }
     match owner {
-        RecordingOwner::LegacyAdmin => RoutingDecision::Deliver,
         RecordingOwner::User(_) => {
             if is_admin_role {
                 // Administrator's own private recording.
@@ -147,7 +146,7 @@ mod tests {
         RecordingMetadata {
             owner,
             visibility,
-            source: None,
+            source: shared::model::recording::RecordingSource::new("t1", "v1", "in1"),
             program_start: Some(1_700_000_000),
             program_end: Some(1_700_003_600),
             scheduled_start: Some(1_700_000_000),
@@ -199,9 +198,8 @@ mod tests {
     }
 
     #[test]
-    fn legacy_admin_owner_always_delivers() {
-        let owner = RecordingOwner::LegacyAdmin;
-        assert_eq!(route(&owner, RecordingVisibility::Private, false), RoutingDecision::Deliver);
+    fn administrator_private_recording_delivers() {
+        let owner = RecordingOwner::User(user("web:alice"));
         assert_eq!(route(&owner, RecordingVisibility::Private, true), RoutingDecision::Deliver);
     }
 

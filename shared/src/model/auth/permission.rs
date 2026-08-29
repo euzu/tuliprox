@@ -17,21 +17,11 @@ create_bitset!(
     SystemWrite,
     EpgRead,
     EpgWrite,
-    DownloadRead,
-    DownloadWrite,
     RecordingRead,
     RecordingWrite
 );
 
 pub const PERM_ALL: PermissionSet = PermissionSet::ALL;
-
-/// Bitmask for the legacy 16-bit permission set. A user with
-/// `permissions: 65535` in their old config carries only
-/// these bits; the new DVR permissions are not implicitly granted.
-/// This constant is exported for old-config deserialization tests and
-/// the "configured old numeric value 65535 limited to old
-/// permissions" rule.
-pub const LEGACY_OLD_PERMS: PermissionSet = PermissionSet(0x0000_FFFF);
 
 pub const PERMISSION_NAMES: &[(&str, Permission)] = &[
     ("config.read", Permission::ConfigRead),
@@ -48,8 +38,6 @@ pub const PERMISSION_NAMES: &[(&str, Permission)] = &[
     ("system.write", Permission::SystemWrite),
     ("epg.read", Permission::EpgRead),
     ("epg.write", Permission::EpgWrite),
-    ("download.read", Permission::DownloadRead),
-    ("download.write", Permission::DownloadWrite),
     ("recording.read", Permission::RecordingRead),
     ("recording.write", Permission::RecordingWrite),
 ];
@@ -60,26 +48,6 @@ pub fn permission_from_name(name: &str) -> Option<Permission> {
 
 pub fn permission_to_name(perm: Permission) -> Option<&'static str> {
     PERMISSION_NAMES.iter().find(|(_, p)| *p == perm).map(|(n, _)| *n)
-}
-
-/// Migrate the legacy `download.*` permission bits onto the canonical
-/// `recording.*` bits and clear them. Idempotent; called by the rbac
-/// authenticator when it prepares a permission set from a legacy groups
-/// file.
-///
-/// The legacy enum variants stay in the type and the
-/// `permission_from_name` table so on-disk groups files that still
-/// mention `download.read`/`download.write` decode correctly until
-/// the rollback-compat window closes.
-pub fn migrate_permissions(set: &mut PermissionSet) {
-    if set.contains(Permission::DownloadRead) {
-        set.unset(Permission::DownloadRead);
-        set.set(Permission::RecordingRead);
-    }
-    if set.contains(Permission::DownloadWrite) {
-        set.unset(Permission::DownloadWrite);
-        set.set(Permission::RecordingWrite);
-    }
 }
 
 #[cfg(test)]
@@ -142,8 +110,6 @@ mod tests {
         assert!(PERM_ALL.contains(Permission::ConfigWrite));
         assert!(PERM_ALL.contains(Permission::EpgRead));
         assert!(PERM_ALL.contains(Permission::EpgWrite));
-        assert!(PERM_ALL.contains(Permission::DownloadRead));
-        assert!(PERM_ALL.contains(Permission::DownloadWrite));
         assert!(PERM_ALL.contains(Permission::RecordingRead));
         assert!(PERM_ALL.contains(Permission::RecordingWrite));
     }
@@ -160,26 +126,23 @@ mod tests {
     }
 
     #[test]
-    fn test_legacy_old_perms_only_covers_pre_bits() {
-        // A config value of `65535` (the old u16 `PERM_ALL`) must
-        // not implicitly grant the new DVR permissions. `LEGACY_OLD_PERMS`
-        // sets only the first 16 bits.
-        assert_eq!(LEGACY_OLD_PERMS.0, 0xFFFF);
-        assert!(LEGACY_OLD_PERMS.contains(Permission::ConfigRead));
-        assert!(LEGACY_OLD_PERMS.contains(Permission::DownloadWrite));
-        assert!(!LEGACY_OLD_PERMS.contains(Permission::RecordingRead));
-        assert!(!LEGACY_OLD_PERMS.contains(Permission::RecordingWrite));
+    fn download_permission_names_are_gone_and_decode_to_nothing() {
+        // The groups file stores permission *names*. A file that still
+        // lists the removed download permissions must lose them, not have
+        // them silently reinterpreted as the recording ones.
+        assert_eq!(permission_from_name("download.read"), None);
+        assert_eq!(permission_from_name("download.write"), None);
+        assert!(PERMISSION_NAMES.iter().all(|(name, _)| !name.starts_with("download.")));
     }
 
     #[test]
-    fn test_old_numeric_config_value_65535_does_not_grant_recording_perms() {
-        // Simulate an old config: a u16 value of 65535 (all old perms
-        // granted) is deserialized into the new u32 storage. It must not
-        // include the new DVR bits.
-        let set: PermissionSet = serde_json::from_str("65535").expect("deserialize old PERM_ALL");
-        assert_eq!(set.0, 0xFFFF);
-        assert!(!set.contains(Permission::RecordingRead));
-        assert!(!set.contains(Permission::RecordingWrite));
+    fn recording_bits_are_the_last_two_of_the_set() {
+        // Removing the download bits renumbered these. The schema version
+        // is bumped in lockstep (see `CURRENT_PERMISSION_SCHEMA_VERSION`)
+        // so no pre-existing token is read against this layout.
+        assert_eq!(PermissionSet::VARIANT_COUNT, 16);
+        let recording: PermissionSet = Permission::RecordingRead | Permission::RecordingWrite;
+        assert_eq!(recording.0, 0b1100_0000_0000_0000);
     }
 
     #[test]
@@ -221,78 +184,5 @@ mod tests {
         let set: PermissionSet = Default::default();
         assert!(set.is_empty());
         assert_eq!(set.0, 0);
-    }
-
-    // --- Permission-migration tests ---
-    //
-    // The recording-unification plan migrates `download.read/write` to
-    // `recording.read/write` in the prepared permission output. Tokens
-    // still decode the legacy bits until the rollback-compat path is
-    // removed; a `migrate_permissions` helper strips them from the
-    // cleaned output.
-
-    #[test]
-    fn migrate_permissions_moves_download_read_to_recording_read() {
-        let mut set: PermissionSet = Permission::DownloadRead.into();
-        set.set(Permission::ConfigRead);
-        migrate_permissions(&mut set);
-        assert!(set.contains(Permission::RecordingRead));
-        assert!(set.contains(Permission::ConfigRead));
-        assert!(!set.contains(Permission::DownloadRead));
-    }
-
-    #[test]
-    fn migrate_permissions_moves_download_write_to_recording_write() {
-        let mut set: PermissionSet = Permission::DownloadWrite.into();
-        migrate_permissions(&mut set);
-        assert!(set.contains(Permission::RecordingWrite));
-        assert!(!set.contains(Permission::DownloadWrite));
-    }
-
-    #[test]
-    fn migrate_permissions_preserves_recording_bits() {
-        let mut set: PermissionSet = Permission::RecordingRead | Permission::RecordingWrite;
-        set.set(Permission::DownloadRead);
-        migrate_permissions(&mut set);
-        assert!(set.contains(Permission::RecordingRead));
-        assert!(set.contains(Permission::RecordingWrite));
-        assert!(!set.contains(Permission::DownloadRead));
-    }
-
-    #[test]
-    fn migrate_permissions_is_noop_when_no_download_bits_present() {
-        let mut set: PermissionSet = Permission::ConfigRead | Permission::SystemWrite | Permission::EpgRead;
-        let snapshot = set;
-        migrate_permissions(&mut set);
-        assert_eq!(set, snapshot);
-    }
-
-    #[test]
-    fn migrate_permissions_is_idempotent() {
-        let mut set: PermissionSet = Permission::DownloadRead | Permission::DownloadWrite;
-        migrate_permissions(&mut set);
-        let snapshot = set;
-        migrate_permissions(&mut set);
-        assert_eq!(set, snapshot);
-    }
-
-    #[test]
-    fn migrate_permissions_does_not_touch_admin_only_bits() {
-        // `ConfigRead`/`ConfigWrite` and `System*`/`User*` stay
-        // exactly as they are; the migration only rewires the
-        // download/recording bit pair.
-        let mut set: PermissionSet = Permission::ConfigRead
-            | Permission::ConfigWrite
-            | Permission::SystemRead
-            | Permission::SystemWrite
-            | Permission::UserRead
-            | Permission::UserWrite;
-        migrate_permissions(&mut set);
-        assert!(set.contains(Permission::ConfigRead));
-        assert!(set.contains(Permission::ConfigWrite));
-        assert!(set.contains(Permission::SystemRead));
-        assert!(set.contains(Permission::SystemWrite));
-        assert!(set.contains(Permission::UserRead));
-        assert!(set.contains(Permission::UserWrite));
     }
 }

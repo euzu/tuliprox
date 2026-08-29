@@ -20,7 +20,7 @@ use super::{
     recording_reconciliation::{ReconcilableTask, MIN_TOMBSTONE_HORIZON_SECS},
     recording_service::{CreateRecordingInput, RecordingService, RecordingSourceInput},
 };
-use crate::download::{DownloadState, FileDownload};
+use crate::recording::recording_queue::{RecordingTask, RecordingTaskState};
 use chrono::{DateTime, Utc};
 use log::{debug, error};
 use shared::model::{
@@ -301,32 +301,36 @@ fn warn_about_inert_new_episode_rules(rules: &[RecordingRule], epg_programmes: &
 
 pub async fn reconcilable_tasks(ctx: &RecordingCtx) -> Vec<ReconcilableTask> {
     let mut tasks = Vec::new();
-    for task in ctx.downloads.queue.lock().await.iter() {
+    for task in ctx.recordings.queue.lock().await.iter() {
         push_reconcilable(&mut tasks, task);
     }
-    for task in ctx.downloads.scheduled.read().await.iter() {
+    for task in ctx.recordings.scheduled.read().await.iter() {
         push_reconcilable(&mut tasks, task);
     }
-    if let Some(task) = ctx.downloads.active.read().await.as_ref() {
+    if let Some(task) = ctx.recordings.active.read().await.as_ref() {
         push_reconcilable(&mut tasks, task);
     }
-    for task in ctx.downloads.finished.read().await.iter() {
+    for task in ctx.recordings.finished.read().await.iter() {
         push_reconcilable(&mut tasks, task);
     }
     tasks
 }
 
-fn push_reconcilable(tasks: &mut Vec<ReconcilableTask>, task: &FileDownload) {
-    let Some(meta) = task.recording.as_ref() else {
-        return;
-    };
+fn push_reconcilable(tasks: &mut Vec<ReconcilableTask>, task: &RecordingTask) {
+    let meta = &task.recording;
     tasks.push(ReconcilableTask {
         uuid: task.uuid.clone(),
         rule_id: meta.provenance.rule_id.clone(),
         occurrence_key: meta.provenance.occurrence_key.clone(),
-        terminal: matches!(task.state, DownloadState::Completed | DownloadState::Failed | DownloadState::Cancelled),
-        active: matches!(task.state, DownloadState::Downloading),
-        editable: matches!(task.state, DownloadState::Scheduled | DownloadState::Queued | DownloadState::Paused),
+        terminal: matches!(
+            task.state,
+            RecordingTaskState::Completed | RecordingTaskState::Failed | RecordingTaskState::Cancelled
+        ),
+        active: matches!(task.state, RecordingTaskState::Running),
+        editable: matches!(
+            task.state,
+            RecordingTaskState::Scheduled | RecordingTaskState::Queued | RecordingTaskState::Paused
+        ),
     });
 }
 

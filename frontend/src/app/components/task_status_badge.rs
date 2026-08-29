@@ -1,31 +1,24 @@
-//! Localized status pill for transfer and recording tasks.
+//! Localized status pill for recording tasks.
 //!
 //! Task state used to reach the user two different ways: the downloads
 //! view translated it, while the recording library rendered
 //! `format!("{:?}", status)` — raw Rust debug output, untranslated and
 //! inconsistent with the rest of the UI. This component is the single
-//! renderer for both, so a state is named and coloured the same way
+//! renderer for every kind, so a state is named and coloured the same way
 //! everywhere it appears.
 
 use crate::i18n::YewI18n;
-use shared::model::{TaskKindDto, TransferStatusDto};
+use shared::model::TransferStatusDto;
 use yew::{classes, component, html, Html, Properties};
 
 /// The i18n key for a task state.
-///
-/// Only the running state depends on `kind`: a download in flight is
-/// "Downloading", a recording in flight is "Recording". Every other
-/// state reads the same for both.
-pub fn task_status_i18n_key(status: &TransferStatusDto, kind: &TaskKindDto) -> &'static str {
+pub fn task_status_i18n_key(status: &TransferStatusDto) -> &'static str {
     match status {
         TransferStatusDto::Scheduled => "LABEL.TASK_STATUS_SCHEDULED",
         TransferStatusDto::Queued => "LABEL.TASK_STATUS_QUEUED",
         TransferStatusDto::WaitingForCapacity => "LABEL.TASK_STATUS_WAITING_FOR_CAPACITY",
         TransferStatusDto::RetryWaiting => "LABEL.TASK_STATUS_RETRY_WAITING",
-        TransferStatusDto::Running => match kind {
-            TaskKindDto::Recording => "LABEL.TASK_STATUS_RUNNING",
-            TaskKindDto::Download => "LABEL.DOWNLOAD_STATE_DOWNLOADING",
-        },
+        TransferStatusDto::Running => "LABEL.TASK_STATUS_RUNNING",
         TransferStatusDto::Paused => "LABEL.TASK_STATUS_PAUSED",
         TransferStatusDto::Completed => "LABEL.TASK_STATUS_COMPLETED",
         TransferStatusDto::Failed => "LABEL.TASK_STATUS_FAILED",
@@ -50,15 +43,13 @@ pub fn task_status_modifier(status: &TransferStatusDto) -> &'static str {
 
 /// Translated state name. Use this wherever a plain string is needed
 /// (sorting, tooltips, aria labels) instead of the component.
-pub fn task_status_label(translate: &YewI18n, status: &TransferStatusDto, kind: &TaskKindDto) -> String {
-    translate.t(task_status_i18n_key(status, kind))
+pub fn task_status_label(translate: &YewI18n, status: &TransferStatusDto) -> String {
+    translate.t(task_status_i18n_key(status))
 }
 
 #[derive(Properties, Clone, PartialEq)]
 pub struct TaskStatusBadgeProps {
     pub status: TransferStatusDto,
-    #[prop_or(TaskKindDto::Download)]
-    pub kind: TaskKindDto,
     /// Optional detail shown after the state name — a failure reason,
     /// for instance. Kept out of the pill's own styling so the state
     /// stays scannable.
@@ -69,7 +60,7 @@ pub struct TaskStatusBadgeProps {
 #[component]
 pub fn TaskStatusBadge(props: &TaskStatusBadgeProps) -> Html {
     let translate = crate::i18n::use_translation();
-    let label = task_status_label(&translate, &props.status, &props.kind);
+    let label = task_status_label(&translate, &props.status);
     let title = props.detail.as_ref().map_or_else(|| label.clone(), |detail| format!("{label}: {detail}"));
     html! {
         <span
@@ -100,26 +91,11 @@ mod tests {
 
     #[test]
     fn every_state_has_a_distinct_i18n_key() {
-        for kind in [TaskKindDto::Download, TaskKindDto::Recording] {
-            let mut keys: Vec<&str> = ALL.iter().map(|s| task_status_i18n_key(s, &kind)).collect();
-            let total = keys.len();
-            keys.sort_unstable();
-            keys.dedup();
-            assert_eq!(keys.len(), total, "two states share an i18n key for {kind:?}");
-        }
-    }
-
-    #[test]
-    fn only_the_running_state_is_named_per_kind() {
-        for status in ALL {
-            let download = task_status_i18n_key(status, &TaskKindDto::Download);
-            let recording = task_status_i18n_key(status, &TaskKindDto::Recording);
-            if matches!(status, TransferStatusDto::Running) {
-                assert_ne!(download, recording, "a running download is not a running recording");
-            } else {
-                assert_eq!(download, recording, "{status:?} must read the same for both kinds");
-            }
-        }
+        let mut keys: Vec<&str> = ALL.iter().map(|status| task_status_i18n_key(status)).collect();
+        let total = keys.len();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), total, "two states share an i18n key");
     }
 
     #[test]

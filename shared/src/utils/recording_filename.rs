@@ -224,7 +224,7 @@ where
 
 /// Sanitize a single filename segment by replacing anything outside
 /// `A-Z a-z 0-9 . _ -` with `_`. The same shape is used by the legacy
-/// `FileDownload::new` sanitizer, so rendered output stays consistent
+/// `RecordingTask::new` sanitizer, so rendered output stays consistent
 /// with the historical filename shape.
 fn sanitize_filename_segment(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -275,7 +275,7 @@ pub fn cap_at_byte_boundary(s: &str, max_bytes: usize) -> Result<String, Recordi
 }
 
 /// Numbered collision suffix appended to a stem that collides with an
-/// existing path. Mirrors the legacy `FileDownload::new` behavior of
+/// existing path. Mirrors the legacy `RecordingTask::new` behavior of
 /// appending `_<n>` before the extension.
 pub fn next_collision_suffix(stem: &str, existing_paths: &[String]) -> String {
     let mut counter: u32 = 1;

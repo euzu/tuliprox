@@ -16,7 +16,7 @@
 use crate::{
     api::model::{
         recording_catalog_access::{self, CatalogAccessError},
-        AppState, DownloadQueue,
+        AppState, RecordingQueue,
     },
     auth::{validate_token_claims, verify_token, AuthBearer, AuthError},
     utils::{no_follow_path_in_root, resolve_recording_dir, RecordingPathError, RecordingVisibility as PathVisibility},
@@ -203,22 +203,16 @@ fn access_error_to_response(err: &CatalogAccessError) -> Response {
 /// Find the recording, authorize the open, and resolve the on-disk
 /// path. Every step is a security boundary; no step logs the path.
 async fn resolve_for_open(app_state: &AppState, claims: &Claims, uuid: &str) -> Result<ResolvedMedia, Box<Response>> {
-    let queue: &DownloadQueue = &app_state.downloads;
+    let queue: &RecordingQueue = &app_state.recordings;
     let recording = recording_catalog_access::lookup_recording(queue, uuid)
         .await
         .ok_or_else(|| Box::new(access_error_to_response(&CatalogAccessError::NotFound)))?;
-    let meta = recording
-        .recording
-        .as_ref()
-        .ok_or_else(|| Box::new(access_error_to_response(&CatalogAccessError::NotFound)))?;
+    let meta = &recording.recording;
     let relative = meta
         .relative_path
         .as_deref()
         .ok_or_else(|| Box::new(access_error_to_response(&CatalogAccessError::InvalidPath)))?;
-    let owner_dir = match &meta.owner {
-        shared::model::recording::RecordingOwner::User(user_id) => user_id.0.clone(),
-        shared::model::recording::RecordingOwner::LegacyAdmin => "legacy".to_string(),
-    };
+    let owner_dir = meta.owner_id().0.clone();
     let subject_id = claims
         .subject_id
         .as_ref()
