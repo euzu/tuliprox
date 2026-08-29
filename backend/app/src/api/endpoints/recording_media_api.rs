@@ -477,6 +477,12 @@ mod tests {
         assert!(!response.headers().contains_key("X-Token-Refresh"));
     }
 
+    fn test_claims_for_issuer(issuer: &str) -> Claims {
+        let mut claims = builtin_admin_claims();
+        claims.iss = issuer.to_string();
+        claims
+    }
+
     #[tokio::test]
     async fn auth_claims_enabled_jwt_truth_table() {
         let config = config_with_web_auth(true, "secret");
@@ -488,10 +494,12 @@ mod tests {
             extract_auth_claims(&state, Some(&format!("Bearer {valid}"))).await.expect("valid claims");
         assert_eq!(claims.subject_id, Some(UserId::builtin_admin()));
 
-        let mut stale_claims = builtin_admin_claims();
+        let mut stale_claims = test_claims_for_issuer(&web_auth.issuer);
         stale_claims.permission_schema_version = 0;
-        let mut missing_subject = builtin_admin_claims();
+
+        let mut missing_subject = test_claims_for_issuer(&web_auth.issuer);
         missing_subject.subject_id = None;
+
         for claims in [stale_claims, missing_subject] {
             let token =
                 encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(b"secret")).expect("jwt");

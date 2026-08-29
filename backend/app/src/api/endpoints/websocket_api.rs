@@ -658,13 +658,14 @@ mod tests {
     };
     use crate::api::model::EventMessage;
     use shared::model::{
-        Claims, ConfigReloadFailure, DiskAlert, DiskAlertLevel, DownloadsDelta, DownloadsResponse, FileDownloadDto,
-        LibraryScanProgressEvent, LibraryScanSummary, LibraryScanSummaryStatus, MetadataUpdateFailure, MsgKind,
-        Permission, PlaylistGroupsChanged, PlaylistUpdateProgressEvent, ProtocolHandler, ProtocolHandlerMemory,
-        ProviderAccountEvent, ProviderAccountState, ProviderFailureKind, ProviderFetchFailure, ProviderPoolExhausted,
-        ProviderPriorityFallback, RecordingLifecycleMessage, RoleSet, TaskKindDto, TaskPriorityDto, TransferStatusDto,
-        UserId, UserRole, WatchChanges, WatchDisabled, WatchDisabledReason, WatchUnmatched,
-        CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, PROTOCOL_VERSION, TOKEN_NO_AUTH,
+        AuthAuditEvent, AuthAuditOutcome, Claims, ConfigReloadFailure, DiskAlert, DiskAlertLevel, DownloadsDelta,
+        DownloadsResponse, FileDownloadDto, LibraryScanProgressEvent, LibraryScanSummary, LibraryScanSummaryStatus,
+        MetadataUpdateFailure, MsgKind, Permission, PlaylistGroupsChanged, PlaylistUpdateProgressEvent,
+        ProtocolHandler, ProtocolHandlerMemory, ProviderAccountEvent, ProviderAccountState, ProviderFailureKind,
+        ProviderFetchFailure, ProviderPoolExhausted, ProviderPriorityFallback, RecordingLifecycleMessage, RoleSet,
+        TaskKindDto, TaskPriorityDto, TransferStatusDto, UserId, UserRole, WatchChanges, WatchDisabled,
+        WatchDisabledReason, WatchUnmatched, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, PROTOCOL_VERSION,
+        TOKEN_NO_AUTH,
     };
     use std::sync::Arc;
     use tokio::sync::broadcast::error::RecvError;
@@ -699,7 +700,7 @@ mod tests {
         // every notification-only kind against `expected = true` and the
         // test failed on `DiskAlert` - it has been red since the lifecycle
         // events joined the bus.
-        const NOT_ON_THE_WIRE: [EventKind; 25] = [
+        const NOT_ON_THE_WIRE: [EventKind; 29] = [
             EventKind::ConnectionDenied,
             EventKind::ScheduledTaskFailed,
             EventKind::ProviderFetchFailed,
@@ -725,6 +726,10 @@ mod tests {
             EventKind::UserUpdated,
             EventKind::UserDeleted,
             EventKind::StreamProbeFailed,
+            EventKind::AuthSignInSucceeded,
+            EventKind::AuthSignInFailed,
+            EventKind::AuthSignInThrottled,
+            EventKind::AuthPermissionDenied,
         ];
 
         for (event, kind) in sample_event_of_every_kind() {
@@ -745,6 +750,15 @@ mod tests {
             needs_operator: false,
             partial: false,
         }
+    }
+
+    fn auth_audit(outcome: AuthAuditOutcome) -> EventMessage {
+        EventMessage::AuthAudit(AuthAuditEvent {
+            username: "u".into(),
+            client_ip: "127.0.0.1".into(),
+            outcome,
+            permission: None,
+        })
     }
 
     /// One `EventMessage` per `EventKind`; the length assert means a new
@@ -867,6 +881,10 @@ mod tests {
                 "http://example.test/s".into(),
                 StreamProbeFailureReason::Unreachable,
             )),
+            auth_audit(AuthAuditOutcome::SignInSucceeded),
+            auth_audit(AuthAuditOutcome::SignInFailed),
+            auth_audit(AuthAuditOutcome::SignInThrottled),
+            auth_audit(AuthAuditOutcome::PermissionDenied),
         ];
         assert_eq!(samples.len(), EventKind::ALL.len(), "add the new variant to this list");
         samples

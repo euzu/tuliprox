@@ -500,13 +500,14 @@ mod tests {
     use super::{to_notification, EventMessage, NOTIFIABLE_KINDS};
     use shared::model::{
         notification::{registry, Severity},
-        ActiveUserConnectionChange, ConfigReloadFailure, ConfigType, ConnectionDenied, DiskAlert, DiskAlertLevel,
-        DownloadsResponse, EventKind, LibraryScanProgressEvent, LibraryScanSummary, LibraryScanSummaryStatus,
-        MetadataUpdateFailure, MsgKind, NotificationDeadLetter, PlaylistGroupsChanged, PlaylistUpdateProgressEvent,
-        PlaylistUpdateState, PlaylistUpdateSummary, ProviderAccountEvent, ProviderAccountState, ProviderFailureKind,
-        ProviderFetchFailure, ProviderPoolExhausted, ProviderPriorityFallback, RecordingLifecycleMessage,
-        ScheduledTaskFailure, ServerLifecycleEvent, StreamProbeFailure, StreamProbeFailureReason, SystemInfo,
-        UserLifecycleEvent, UserLifecycleState, WatchChanges, WatchDisabled, WatchDisabledReason, WatchUnmatched,
+        ActiveUserConnectionChange, AuthAuditEvent, AuthAuditOutcome, ConfigReloadFailure, ConfigType,
+        ConnectionDenied, DiskAlert, DiskAlertLevel, DownloadsResponse, EventKind, LibraryScanProgressEvent,
+        LibraryScanSummary, LibraryScanSummaryStatus, MetadataUpdateFailure, MsgKind, NotificationDeadLetter,
+        PlaylistGroupsChanged, PlaylistUpdateProgressEvent, PlaylistUpdateState, PlaylistUpdateSummary,
+        ProviderAccountEvent, ProviderAccountState, ProviderFailureKind, ProviderFetchFailure, ProviderPoolExhausted,
+        ProviderPriorityFallback, RecordingLifecycleMessage, ScheduledTaskFailure, ServerLifecycleEvent,
+        StreamProbeFailure, StreamProbeFailureReason, SystemInfo, UserLifecycleEvent, UserLifecycleState, WatchChanges,
+        WatchDisabled, WatchDisabledReason, WatchUnmatched,
     };
     use std::sync::Arc;
 
@@ -537,6 +538,15 @@ mod tests {
             needs_operator: false,
             partial: false,
         }
+    }
+
+    fn auth_audit(outcome: AuthAuditOutcome) -> EventMessage {
+        EventMessage::AuthAudit(AuthAuditEvent {
+            username: "u".into(),
+            client_ip: "127.0.0.1".into(),
+            outcome,
+            permission: None,
+        })
     }
 
     /// One `EventMessage` per `EventKind`, so the test above cannot miss a
@@ -649,6 +659,10 @@ mod tests {
                 "http://example.test/s".into(),
                 StreamProbeFailureReason::NotFound,
             )),
+            auth_audit(AuthAuditOutcome::SignInSucceeded),
+            auth_audit(AuthAuditOutcome::SignInFailed),
+            auth_audit(AuthAuditOutcome::SignInThrottled),
+            auth_audit(AuthAuditOutcome::PermissionDenied),
         ];
         assert_eq!(samples.len(), EventKind::ALL.len(), "add the new variant to this list");
         samples
