@@ -7,8 +7,12 @@ use crate::{
     parser::xmltv::{flatten_tvguide, merge_epg_trees, EpgMergeAccumulator, TVGuide},
     playlist_watch::{process_group_watch, process_target_groups_watch},
     processor::{
-        epg::process_playlist_epg, sort::sort_playlist, trakt::process_trakt_categories_for_target,
-        xtream_series::playlist_resolve_series, xtream_vod::playlist_resolve_vod, StalkerRefreshMode,
+        epg::{process_playlist_epg, retain_live_items_with_processed_epg},
+        sort::sort_playlist,
+        trakt::process_trakt_categories_for_target,
+        xtream_series::playlist_resolve_series,
+        xtream_vod::playlist_resolve_vod,
+        StalkerRefreshMode,
     },
 };
 use futures::{FutureExt, StreamExt};
@@ -1691,6 +1695,7 @@ async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, M: Metadata
             format!("target '{}' input '{}' after_vod_resolve", target.name, provider_fpl.input.name).as_str(),
         );
         let required_epg = target.options.as_ref().is_some_and(ConfigTargetOptions::required_epg);
+        let input_epg_start = new_epg.len();
         process_playlist_epg(&mut processed_fpl, &mut new_epg, required_epg).await;
         log_memory_snapshot(
             format!("target '{}' input '{}' after_epg_apply", target.name, processed_fpl.input.name).as_str(),
@@ -1703,6 +1708,9 @@ async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, M: Metadata
             deduplicate.then_some(&mut duplicates),
         ) {
             processed_fpl.source = MemoryPlaylistSource::new(groups).into_source();
+            if required_epg && new_epg.len() > input_epg_start {
+                retain_live_items_with_processed_epg(&mut processed_fpl, &new_epg[input_epg_start..]);
+            }
         }
         if let Some(stat) = stats.get_mut(&processed_fpl.input.name) {
             stat.processed_stats.group_count = processed_fpl.get_group_count();
@@ -3612,6 +3620,82 @@ match {
                 let processed_stats = &stats[&input.name].processed_stats;
                 assert_eq!(processed_stats.group_count, 2);
                 assert_eq!(processed_stats.channel_count, 2);
+            });
+        }
+
+        #[test]
+        fn required_epg_removes_ids_invalidated_by_after_epg_mapping() {
+            let runtime = Runtime::new().expect("runtime");
+            runtime.block_on(async {
+                let dir = tempdir().expect("tempdir");
+                let ics_path = dir.path().join("bbc.ics");
+                std::fs::write(
+                    &ics_path,
+                    "BEGIN:VCALENDAR\nBEGIN:VEVENT\nSUMMARY:News\nDTSTART:20260306T120000Z\nDTEND:20260306T130000Z\nEND:VEVENT\nEND:VCALENDAR",
+                )
+                .expect("write ics");
+
+                let mut input = ConfigInput::from(ConfigInputDto::default());
+                input.name = "input".intern();
+                input.epg = Some(EpgConfig { sources: vec![], smart_match: None });
+                let groups = vec![PlaylistGroup {
+                    id: 1,
+                    title: "Live".intern(),
+                    channels: vec![PlaylistItem {
+                        header: PlaylistItemHeader {
+                            name: "BBC One".intern(),
+                            epg_channel_id: Some("bbc.one".intern()),
+                            group: "Live".intern(),
+                            xtream_cluster: XtreamCluster::Live,
+                            item_type: PlaylistItemType::Live,
+                            ..Default::default()
+                        },
+                    }],
+                    xtream_cluster: XtreamCluster::Live,
+                }];
+                let tv_guide = TVGuide::new(vec![PersistedEpgSource {
+                    file_path: ics_path,
+                    priority: 0,
+                    logo_override: false,
+                    kind: PersistedEpgSourceKind::Ics {
+                        channel_id: "bbc.one".intern(),
+                        channel_title: Some("BBC One".intern()),
+                        match_names: vec![],
+                        config: Box::new(IcsEpgSourceConfig::default()),
+                    },
+                }]);
+                let mut playlist = FetchedPlaylist {
+                    input: &input,
+                    source: MemoryPlaylistSource::new(groups).into_source(),
+                    epg: Some(tv_guide),
+                };
+
+                let rewrite_epg =
+                    build_mapping("rewrite", MappingStage::AfterEpg, r#"@epg_channel_id = "missing.epg""#);
+                let add_virtual = build_mapping("virtual", MappingStage::AfterEpg, r#"add_favourite("Echo")"#);
+                let mut target = build_target(vec![rewrite_epg, add_virtual], false);
+                target.options = Some(ConfigTargetOptions { required_epg: true, ..Default::default() });
+                let mut stats = HashMap::from([(
+                    Arc::clone(&input.name),
+                    create_input_stat(1, 1, 0, input.input_type, &input.name, 0),
+                )]);
+                let mut errors = Vec::new();
+
+                let prepared = prepare_playlist_for_target(
+                    &processing_context(),
+                    std::slice::from_mut(&mut playlist),
+                    &target,
+                    &mut stats,
+                    &mut errors,
+                    false,
+                )
+                .await
+                .expect("target preparation");
+
+                assert!(errors.is_empty());
+                assert!(prepared.playlist.is_empty());
+                assert_eq!(stats[&input.name].processed_stats.group_count, 0);
+                assert_eq!(stats[&input.name].processed_stats.channel_count, 0);
             });
         }
 

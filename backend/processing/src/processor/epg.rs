@@ -761,6 +761,32 @@ fn referenced_live_epg_ids(fp: &mut FetchedPlaylist<'_>) -> HashSet<Arc<str>> {
         .collect()
 }
 
+pub(crate) fn retain_live_items_with_processed_epg(fp: &mut FetchedPlaylist<'_>, epg: &[Epg]) {
+    let processed_epg_ids = epg
+        .iter()
+        .flat_map(|source| &source.children)
+        .map(|channel| with_folded_epg_id(&channel.id, |folded| folded.intern()))
+        .collect::<HashSet<_>>();
+    let mut removed = 0usize;
+    fp.source.retain_memory_items_mut(|item| {
+        if !is_live_epg_item(item) {
+            return true;
+        }
+        let has_epg = item
+            .header
+            .epg_channel_id
+            .as_deref()
+            .is_some_and(|id| with_folded_epg_id(id, |folded| processed_epg_ids.contains(folded)));
+        if !has_epg {
+            removed += 1;
+        }
+        has_epg
+    });
+    if removed > 0 {
+        debug!("Removed {removed} live channels invalidated by after-EPG mappings from input '{}'", fp.input.name);
+    }
+}
+
 /// Assigns EPG IDs and logos to live playlist channels by matching them with EPG data.
 /// When EPG data is required by the target, unmatched live entries are removed in the same pass.
 ///
