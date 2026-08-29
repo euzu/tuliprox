@@ -261,6 +261,21 @@ impl PlaylistSource {
         ClusterFiltered::new(dispatch!(self.items()), skip_set)
     }
 
+    /// Retains visible items of an in-memory playlist without rebuilding its source wrapper.
+    ///
+    /// Returns `false` without modifying the source when it is not memory-backed.
+    pub fn retain_memory_items_mut<F>(&mut self, predicate: F) -> bool
+    where
+        F: FnMut(&mut PlaylistItem) -> bool,
+    {
+        let skip_set = self.skip_set.as_deref();
+        let PlaylistSourceKind::Memory(source) = &mut self.kind else {
+            return false;
+        };
+        source.retain_items_mut(skip_set, predicate);
+        true
+    }
+
     pub async fn update_playlist(&mut self, plg: &PlaylistGroup) {
         if self.skip_set.as_ref().is_some_and(|skip_set| skip_set.contains(&plg.xtream_cluster)) {
             return;
@@ -1246,6 +1261,23 @@ impl MemoryPlaylistSource {
 
     pub fn into_source(self) -> PlaylistSource { PlaylistSource::memory(self) }
 
+    fn retain_items_mut<F>(&mut self, skip_set: Option<&HashSet<XtreamCluster>>, mut predicate: F)
+    where
+        F: FnMut(&mut PlaylistItem) -> bool,
+    {
+        let playlist = Arc::make_mut(&mut self.playlist);
+        playlist.retain_mut(|group| {
+            if skip_set.is_some_and(|clusters| clusters.contains(&group.xtream_cluster)) {
+                return false;
+            }
+            let was_empty = group.channels.is_empty();
+            group.channels.retain_mut(|item| {
+                !skip_set.is_some_and(|clusters| clusters.contains(&item.header.xtream_cluster)) && predicate(item)
+            });
+            was_empty || !group.channels.is_empty()
+        });
+    }
+
     /// Merge a batch of groups into the in-memory playlist in a single pass.
     ///
     /// Equivalent to calling [`PlaylistSourceOps::update_playlist`] for every
@@ -1553,6 +1585,25 @@ mod tests {
 
         assert_eq!(original.get_channel_count(), 1);
         assert_eq!(cloned.get_channel_count(), 2);
+    }
+
+    #[test]
+    fn retaining_memory_items_preserves_copy_on_write() {
+        let group = PlaylistGroup {
+            id: 1,
+            title: "Series".intern(),
+            channels: vec![make_item("keep", "Series", 1), make_item("remove", "Series", 1)],
+            xtream_cluster: XtreamCluster::Series,
+        };
+        let source = MemoryPlaylistSource::new(vec![group]).into_source();
+        let mut original = source.clone_source().expect("memory source clone should succeed");
+        let mut retained = source.clone_source().expect("memory source clone should succeed");
+
+        assert!(retained.retain_memory_items_mut(|item| item.header.title.as_ref() != "remove"));
+
+        assert_eq!(original.get_channel_count(), 2);
+        assert_eq!(retained.get_channel_count(), 1);
+        assert_eq!(retained.items_mut().next().map(|item| item.header.title.as_ref()), Some("keep"));
     }
 
     #[tokio::test]

@@ -14,7 +14,6 @@ use tuliprox_core::{
     model::{Epg, EpgConfig, EpgSmartMatchConfig},
     utils::with_folded_epg_id,
 };
-use tuliprox_repository::MemoryPlaylistSource;
 
 const MIN_FUZZY_SCORE_MARGIN: u16 = 3;
 
@@ -729,6 +728,14 @@ fn assign_epg_icon(
     });
 }
 
+fn is_live_epg_item(item: &PlaylistItem) -> bool {
+    item.header.xtream_cluster == XtreamCluster::Live && item.header.item_type.is_live()
+}
+
+fn has_processed_epg(item: &PlaylistItem, id_cache: &EpgIdCache) -> bool {
+    item.header.epg_channel_id.as_deref().is_some_and(|id| id_cache.contains_processed_epg_id(id))
+}
+
 fn assign_live_channel_epg(
     channel: &mut PlaylistItem,
     id_cache: &EpgIdCache,
@@ -740,14 +747,14 @@ fn assign_live_channel_epg(
     if id_cache.smart_match_enabled {
         stats.record(assign_smart_epg_id(channel, id_cache));
     }
-    let has_epg = channel.header.epg_channel_id.as_deref().is_some_and(|id| id_cache.contains_processed_epg_id(id));
+    let has_epg = has_processed_epg(channel, id_cache);
     assign_epg_icon(channel, icon_tags, icon_override_channels, icon_assigned);
     has_epg
 }
 
 fn referenced_live_epg_ids(fp: &mut FetchedPlaylist<'_>) -> HashSet<Arc<str>> {
     fp.items()
-        .filter(|channel| channel.header.xtream_cluster == XtreamCluster::Live && channel.header.item_type.is_live())
+        .filter(|channel| is_live_epg_item(channel))
         .filter_map(|channel| {
             channel.header.epg_channel_id.as_ref().map(|id| with_folded_epg_id(id, |folded| folded.intern()))
         })
@@ -801,38 +808,33 @@ async fn assign_channel_epg(
             .flat_map(|(_, channels)| channels)
             .map(|id| with_folded_epg_id(id, |folded| folded.intern()))
             .collect::<HashSet<_>>();
-        let mut icon_assigned = HashSet::new();
+        let mut icon_assigned = HashSet::with_capacity(icon_tags.len());
 
-        fp.items_mut()
-            .filter(|channel| {
-                channel.header.xtream_cluster == XtreamCluster::Live && channel.header.item_type.is_live()
-            })
-            .for_each(|channel| {
-                let has_epg = assign_live_channel_epg(
-                    channel,
-                    id_cache,
-                    &icon_tags,
-                    &icon_override_channels,
-                    &mut icon_assigned,
-                    &mut stats,
-                );
-                if required_epg && !has_epg {
-                    removed += 1;
-                }
-            });
-
-        if removed > 0 {
-            let mut groups = fp.source.take_groups();
-            for group in &mut groups {
-                group.channels.retain(|channel| {
-                    if channel.header.xtream_cluster != XtreamCluster::Live || !channel.header.item_type.is_live() {
-                        return true;
-                    }
-                    channel.header.epg_channel_id.as_deref().is_some_and(|id| id_cache.contains_processed_epg_id(id))
-                });
+        let mut process_channel = |channel: &mut PlaylistItem| {
+            if !is_live_epg_item(channel) {
+                return true;
             }
-            groups.retain(|group| !group.channels.is_empty());
-            fp.source = MemoryPlaylistSource::new(groups).into_source();
+            let has_epg = assign_live_channel_epg(
+                channel,
+                id_cache,
+                &icon_tags,
+                &icon_override_channels,
+                &mut icon_assigned,
+                &mut stats,
+            );
+            if required_epg && !has_epg {
+                removed += 1;
+                return false;
+            }
+            true
+        };
+
+        if required_epg {
+            fp.source.retain_memory_items_mut(&mut process_channel);
+        } else {
+            fp.items_mut().for_each(|channel| {
+                process_channel(channel);
+            });
         }
     } else {
         warn!("Disk based playlist modification is not supported!");
@@ -1334,6 +1336,57 @@ mod tests {
             super::process_playlist_epg(&mut playlist, &mut Vec::new(), true).await;
 
             assert_eq!(playlist.items_mut().count(), 1);
+        });
+    }
+
+    #[test]
+    fn optional_epg_preserves_existing_empty_groups() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async move {
+            let dir = tempdir().unwrap();
+            let epg_path = dir.path().join("optional-epg-empty-group.xml");
+            fs::write(
+                &epg_path,
+                r#"<tv>
+  <channel id="matched.live"><display-name>Matched Live</display-name></channel>
+  <programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="matched.live">
+    <title>Programme</title>
+  </programme>
+</tv>"#,
+            )
+            .unwrap();
+
+            let mut input = ConfigInput::from(ConfigInputDto::default());
+            input.epg = Some(EpgConfig { sources: vec![], smart_match: None });
+            let groups = vec![
+                PlaylistGroup {
+                    id: 1,
+                    title: "Empty".intern(),
+                    channels: vec![],
+                    xtream_cluster: super::XtreamCluster::Live,
+                },
+                PlaylistGroup {
+                    id: 2,
+                    title: "Live".intern(),
+                    channels: vec![live_playlist_item("Matched Live", Some("matched.live"))],
+                    xtream_cluster: super::XtreamCluster::Live,
+                },
+            ];
+            let tv_guide = TVGuide::new(vec![PersistedEpgSource {
+                file_path: epg_path,
+                priority: 0,
+                logo_override: false,
+                kind: PersistedEpgSourceKind::Xmltv,
+            }]);
+            let mut playlist = FetchedPlaylist {
+                input: &input,
+                source: MemoryPlaylistSource::new(groups).into_source(),
+                epg: Some(tv_guide),
+            };
+
+            super::process_playlist_epg(&mut playlist, &mut Vec::new(), false).await;
+
+            assert_eq!(playlist.get_group_count(), 2);
         });
     }
 
