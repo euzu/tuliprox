@@ -2387,8 +2387,11 @@ mod tests {
 
         let (first, second) = tokio::join!(first, second);
 
-        assert!(first.expect("first task").is_ok());
-        assert!(second.expect("second task").is_ok());
+        let first = first.expect("first task");
+        let second = second.expect("second task");
+
+        assert!(first.is_ok(), "first cache write failed: {first:?}");
+        assert!(second.is_ok(), "second cache write failed: {second:?}");
         let session = session.read().await;
         assert!(!session.segments.contains_key(&1));
         assert!(!session.segments.contains_key(&2));
