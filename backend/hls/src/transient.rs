@@ -8,7 +8,7 @@ use super::{
     manifest_snapshot::{
         extend_hls_transient_manifest_template, parse_hls_transient_manifest_template, HlsTransientManifestTemplate,
     },
-    CacheAccessState, HlsAccessLeaseId, HlsSession, ProxySessionId, TransientObjectCacheKey,
+    CacheAccessState, HlsAccessLeaseId, HlsSession, ProxySessionId, TransientObjectCacheKey, TransientResourceFile,
 };
 use crate::transient_manifest::TransientRewriteCheckpoint;
 use axum::http::StatusCode;
@@ -1799,18 +1799,46 @@ fn estimated_transient_object_entry_bytes(entry: &TransientObjectCacheEntry) -> 
 }
 
 pub(crate) fn extract_transient_resource_ids(body: &str) -> HashSet<TransientResourceId> {
-    body.split("/r/")
-        .skip(1)
-        .filter_map(|tail| {
-            let file_name: String =
-                tail.chars().take_while(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.')).collect();
-            let (resource_id, extension) = file_name.rsplit_once('.')?;
-            if resource_id.is_empty() || extension.is_empty() {
-                return None;
+    let mut resource_ids = HashSet::new();
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('#') {
+            for uri in tag_uri_attributes(line) {
+                if let Some(resource_id) = transient_resource_id_from_shared_route(uri) {
+                    resource_ids.insert(resource_id);
+                }
             }
-            Some(TransientResourceId(resource_id.to_string()))
-        })
-        .collect()
+        } else if let Some(resource_id) = transient_resource_id_from_shared_route(line) {
+            resource_ids.insert(resource_id);
+        }
+    }
+    resource_ids
+}
+
+/// Yields the quoted URI values carried by a tag line (`URI="..."`).
+fn tag_uri_attributes(line: &str) -> impl Iterator<Item = &str> {
+    line.split("URI=\"").skip(1).filter_map(|tail| tail.split('"').next())
+}
+
+/// Extracts one opaque transient resource ID from a canonical own `/r/{id}.{ext}` route.
+///
+/// Unlike a naive `split("/r/")`, this only recognises proxy-owned shared-HLS locators: it
+/// ignores `/r/` occurrences inside comments (non-URI tag content is never yielded as a URI),
+/// query strings or fragments, and rejects absolute foreign URIs by requiring a path-only
+/// `/hls/shared/live/` prefix before the route segment.
+fn transient_resource_id_from_shared_route(uri: &str) -> Option<TransientResourceId> {
+    let path = uri.split(['?', '#']).next().unwrap_or("");
+    if path.contains("://") {
+        return None;
+    }
+    let (prefix, remainder) = path.rsplit_once("/r/")?;
+    if !prefix.contains("/hls/shared/live/") {
+        return None;
+    }
+    TransientResourceFile::parse(remainder).map(|file| file.resource_id)
 }
 
 /// Empty runtime store for future transient passthrough resources.
@@ -1833,10 +1861,10 @@ fn default_content_type_for_transient_ext(extension: &str) -> Option<&'static st
 #[cfg(test)]
 mod tests {
     use super::{
-        build_transient_resource_id, transient_object_expires_at, HlsPublishedTransientResourceIds,
-        HlsTransientManifestCommitError, TransientManifestLeaseBinding, TransientObjectCacheStatus,
-        TransientPassthroughState, TransientResourceId, TransientResourceKind, TransientResourceRef,
-        MAX_FAILED_TRANSIENT_OBJECT_ENTRIES,
+        build_transient_resource_id, extract_transient_resource_ids, transient_object_expires_at,
+        HlsPublishedTransientResourceIds, HlsTransientManifestCommitError, TransientManifestLeaseBinding,
+        TransientObjectCacheStatus, TransientPassthroughState, TransientResourceId, TransientResourceKind,
+        TransientResourceRef, MAX_FAILED_TRANSIENT_OBJECT_ENTRIES,
     };
     use crate::{
         manifest_limits::{
@@ -1858,6 +1886,59 @@ mod tests {
             panic!("expected local representation limit, got {error:?}");
         };
         violation
+    }
+
+    #[test]
+    fn extract_transient_resource_ids_ignores_comment_and_foreign_uri_surfaces() {
+        let body = concat!(
+            "# /r/fake.ts\n",
+            "https://origin.example.com/r/fake.ts\n",
+            "#EXT-X-KEY:METHOD=AES-128,URI=\"https://origin.example.com/r/fake.key\"\n",
+        );
+
+        assert!(extract_transient_resource_ids(body).is_empty());
+    }
+
+    #[test]
+    fn extract_transient_resource_ids_ignores_query_values() {
+        let body = concat!(
+            "#EXT-X-KEY:METHOD=AES-128,URI=\"/hls/shared/live/proxy/lease/r/AbCdEfGhIjKlMnOp.key?token=/r/fake.ts\"\n",
+            "/hls/shared/live/proxy/lease/r/AbCdEfGhIjKlMnOp.ts?redirect=/r/foreign.ts\n",
+        );
+
+        let resource_ids = extract_transient_resource_ids(body);
+
+        assert_eq!(resource_ids.len(), 1);
+        assert!(resource_ids.contains(&TransientResourceId("AbCdEfGhIjKlMnOp".to_string())));
+    }
+
+    #[test]
+    fn extract_transient_resource_ids_rejects_noncanonical_resource_files() {
+        let body = concat!(
+            "/hls/shared/live/proxy/lease/r/AbCdEfGhIjKlMnOp.exe\n",
+            "/hls/shared/live/proxy/lease/r/AbCdEfGhIjKlMnOp.ts/extra\n",
+            "/hls/shared/live/proxy/lease/r/AbCdEfGhIjKlMnOp.tar.gz\n",
+        );
+
+        assert!(extract_transient_resource_ids(body).is_empty());
+    }
+
+    #[test]
+    fn extract_transient_resource_ids_keeps_segment_key_and_map_routes() {
+        let body = concat!(
+            "#EXTM3U\n",
+            "#EXT-X-KEY:METHOD=AES-128,URI=\"/hls/shared/live/proxy/__hls_access_lease_id__/r/Key0000000000Id.key\"\n",
+            "#EXT-X-MAP:URI=\"/hls/shared/live/proxy/__hls_access_lease_id__/r/Map0000000000Id.mp4\"\n",
+            "#EXTINF:1.0,\n",
+            "/hls/shared/live/proxy/lease/r/Seg0000000000Id.ts\n",
+        );
+
+        let resource_ids = extract_transient_resource_ids(body);
+
+        assert_eq!(resource_ids.len(), 3);
+        assert!(resource_ids.contains(&TransientResourceId("Key0000000000Id".to_string())));
+        assert!(resource_ids.contains(&TransientResourceId("Map0000000000Id".to_string())));
+        assert!(resource_ids.contains(&TransientResourceId("Seg0000000000Id".to_string())));
     }
 
     fn finalized_manifest_body(resource_id: &TransientResourceId, extension: &str) -> String {

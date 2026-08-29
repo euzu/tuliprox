@@ -377,6 +377,8 @@ impl HlsSession {
     }
 
     pub fn record_manifest_commit_identity(&mut self, identity: HlsManifestCommitIdentity) {
+        // Invariant: identities recorded here are allocated exclusively by
+        // `next_manifest_commit_identity` and only after a successful manifest commit.
         debug_assert_eq!(identity.commit_generation(), self.manifest_commit_generation.saturating_add(1));
         self.manifest_commit_generation = identity.commit_generation();
     }

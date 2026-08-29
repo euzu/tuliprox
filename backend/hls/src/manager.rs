@@ -1139,6 +1139,9 @@ impl HlsProxyManager {
         let lease_issued_at_ms = expected.lease_issued_at_ms();
         let Some(finalized_manifest_generation) = finalized_manifest_generation else {
             let session = self.sessions.get_by_proxy_session_id(proxy_session_id).await;
+            // The lease-store write lock keeps the previous lease membership stable while the
+            // session read produces an immutable merged membership snapshot. The snapshot can then
+            // be committed without reopening the lease-store transaction.
             let mut leases = self.access_leases.write().await;
             let published_transient_resource_ids = if let Some(session) = session.as_ref() {
                 let session = session.read().await;
@@ -1197,11 +1200,12 @@ impl HlsProxyManager {
             now_ms,
         );
         if outcome.is_committed() {
-            let _bound = session.transient.bind_finalized_manifest_generation(TransientManifestLeaseBinding::new(
+            let bound = session.transient.bind_finalized_manifest_generation(TransientManifestLeaseBinding::new(
                 lease_id.clone(),
                 lease_issued_at_ms,
                 finalized_manifest_generation,
             ));
+            debug_assert!(bound, "validated finalized manifest generation must remain bindable");
         }
         drop(session);
         drop(leases);

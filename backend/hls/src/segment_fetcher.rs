@@ -2930,6 +2930,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn expired_aes_key_is_refetched_before_a_second_segment_becomes_ready() {
+        let server = spawn_sequence_response_server(vec![
+            TestOriginResponse { status: 200, headers: Vec::new(), body: b"0123456789abcdef".to_vec() },
+            TestOriginResponse { status: 200, headers: Vec::new(), body: b"encrypted-media-a".to_vec() },
+            TestOriginResponse { status: 200, headers: Vec::new(), body: b"fedcba9876543210".to_vec() },
+            TestOriginResponse { status: 200, headers: Vec::new(), body: b"encrypted-media-b".to_vec() },
+        ])
+        .await;
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let policy =
+            SegmentFetchPolicy { retry_delays_ms: [0; 5], retry_jitter_max_ms: 0, ..SegmentFetchPolicy::default() };
+        let (worker, context, _) = encrypted_fetch_context(&server, &temp_dir, &policy).await;
+        {
+            let mut session = context.session.write().await;
+            session.transient.set_resource_ttl_ms(1);
+        }
+
+        let first_segment = HlsSegmentFile { proxy_seq: 1, extension: "ts".to_string() };
+        let first_outcome = worker.demand_fetch_and_wait(context.clone(), &first_segment, current_time_millis()).await;
+        assert_eq!(first_outcome, super::SegmentDemandFetchOutcome::Ready);
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        {
+            let session = context.session.read().await;
+            let key = session
+                .transient
+                .resources
+                .values()
+                .find(|resource| resource.kind == TransientResourceKind::Key)
+                .cloned()
+                .expect("encrypted fixture key resource");
+            assert!(session
+                .transient
+                .ready_key_object_valid_until_ms(
+                    &session.proxy_session_id,
+                    &key.id,
+                    key.file_ext_hint.as_deref().expect("key extension"),
+                    current_time_millis(),
+                )
+                .is_none());
+        }
+
+        let second_segment = HlsSegmentFile { proxy_seq: 2, extension: "ts".to_string() };
+        let second_outcome =
+            worker.demand_fetch_and_wait(context.clone(), &second_segment, current_time_millis()).await;
+        assert_eq!(second_outcome, super::SegmentDemandFetchOutcome::Ready);
+
+        {
+            let session = context.session.read().await;
+            assert!(matches!(
+                session.segments.get(&2).map(|segment| &segment.status),
+                Some(SegmentCacheStatus::Ready { .. })
+            ));
+        }
+
+        let requests = server.requests.lock().await;
+        assert_eq!(requests.len(), 4, "requests={requests:?}");
+        assert!(requests[0].starts_with("GET /key.key "));
+        assert!(requests[1].starts_with("GET /1.ts "));
+        assert!(requests[2].starts_with("GET /key.key "));
+        assert!(requests[3].starts_with("GET /2.ts "));
+    }
+
+    #[tokio::test]
     async fn ready_encrypted_segments_schedule_one_key_only_fetch() {
         let server = spawn_sequence_response_server(vec![TestOriginResponse {
             status: 200,
