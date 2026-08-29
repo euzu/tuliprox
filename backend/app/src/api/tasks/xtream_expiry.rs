@@ -1,6 +1,6 @@
 use crate::{
     api::{config_file::ConfigFile, model::AppState},
-    config_loader::{persist_source_config, read_sources_file_from_path},
+    config_loader::{persist_source_config_preserving_templates, read_sources_file_from_path},
     iptv::xtream::get_xtream_stream_url_base,
     repository::{csv_patch_batch_update_exp_dates, get_csv_file_path, BatchExpDateUpdate},
     utils::request,
@@ -424,7 +424,7 @@ async fn persist_updates(app_state: &Arc<AppState>, updates: &[(&Account, i64)])
             }
         }
         if source_changed {
-            persist_source_config(&app_state.app_config, Some(sources_path), sources).await?;
+            persist_source_config_preserving_templates(&app_state.app_config, Some(sources_path), sources).await?;
             app_state
                 .app_config
                 .file_locks

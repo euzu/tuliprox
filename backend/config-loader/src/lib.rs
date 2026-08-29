@@ -961,6 +961,25 @@ pub async fn persist_source_config(
     source_file_path: Option<&Path>,
     doc: SourcesConfigDto,
 ) -> Result<SourcesConfigDto, TuliproxError> {
+    let source_config = sanitize_sources_for_persist(doc.clone()).await;
+    persist_sanitized_source_config(app_config, source_file_path, doc, &source_config).await
+}
+
+pub async fn persist_source_config_preserving_templates(
+    app_config: &Arc<AppConfig>,
+    source_file_path: Option<&Path>,
+    doc: SourcesConfigDto,
+) -> Result<SourcesConfigDto, TuliproxError> {
+    let source_config = sanitize_sources_for_persist_preserving_templates(doc.clone()).await;
+    persist_sanitized_source_config(app_config, source_file_path, doc, &source_config).await
+}
+
+async fn persist_sanitized_source_config(
+    app_config: &Arc<AppConfig>,
+    source_file_path: Option<&Path>,
+    doc: SourcesConfigDto,
+    source_config: &SourcesConfigDto,
+) -> Result<SourcesConfigDto, TuliproxError> {
     let source_file = {
         source_file_path.and_then(|p| p.to_str()).map_or_else(
             || {
@@ -975,10 +994,15 @@ pub async fn persist_source_config(
         config.get_backup_dir().to_string()
     };
 
-    let source_config = sanitize_sources_for_persist(doc.clone()).await;
-
-    save_sources_config(&source_file, &backup_dir, &source_config).await?;
+    save_sources_config(&source_file, &backup_dir, source_config).await?;
     Ok(doc)
+}
+
+async fn sanitize_sources_for_persist_preserving_templates(mut source_config: SourcesConfigDto) -> SourcesConfigDto {
+    let templates = source_config.templates.take();
+    let mut sanitized = sanitize_sources_for_persist(source_config).await;
+    sanitized.templates = templates;
+    sanitized
 }
 
 pub async fn sanitize_sources_for_persist(mut source_config: SourcesConfigDto) -> SourcesConfigDto {
@@ -1246,9 +1270,12 @@ pub async fn migrate_api_user(api_proxy: &mut ApiProxyConfig, cfg: &AppConfig, e
 
 #[cfg(test)]
 mod tests {
-    use super::{get_batch_aliases, prepare_sources_batch, sanitize_sources_for_persist, write_config_file};
+    use super::{
+        get_batch_aliases, prepare_sources_batch, sanitize_sources_for_persist,
+        sanitize_sources_for_persist_preserving_templates, write_config_file,
+    };
     use shared::{
-        model::{ConfigInputAliasDto, ConfigInputDto, InputType, SourcesConfigDto},
+        model::{ConfigInputAliasDto, ConfigInputDto, InputType, PatternTemplate, SourcesConfigDto, TemplateValue},
         utils::Internable,
     };
     use tempfile::tempdir;
@@ -1319,6 +1346,28 @@ mod tests {
         let sanitized = sanitize_sources_for_persist(sources).await;
         assert!(sanitized.inputs[0].aliases.is_none());
         assert!(std::fs::read_to_string(path).expect("read persisted csv").contains("updated"));
+    }
+
+    #[tokio::test]
+    async fn internal_source_persist_keeps_expiry_update_and_inline_templates() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let templates = vec![PatternTemplate {
+            name: "channels".to_string(),
+            value: TemplateValue::Single("Input = provider".to_string()),
+            placeholder: String::new(),
+        }];
+        let mut sources = SourcesConfigDto {
+            templates: Some(templates.clone()),
+            inputs: vec![ConfigInputDto { name: "provider".intern(), ..Default::default() }],
+            ..Default::default()
+        };
+        assert!(sources.inputs[0].update_account_expiration_date("provider", 2_000_000_000, false)?);
+
+        let sanitized = sanitize_sources_for_persist_preserving_templates(sources).await;
+
+        assert_eq!(sanitized.templates, Some(templates));
+        assert_eq!(sanitized.inputs[0].exp_date, Some(2_000_000_000));
+        Ok(())
     }
 
     #[tokio::test]
