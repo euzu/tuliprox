@@ -4,7 +4,7 @@ use crate::{
         prepare_sources_batch, read_sources_file, read_sources_file_from_path_with_templates, read_templates,
         resolve_template_and_mapping_paths,
     },
-    model::{Config, Mappings, ProcessTargets, SourcesConfig},
+    model::{CompiledMappings, Config, ProcessTargets, SourcesConfig},
     utils,
     utils::{read_mappings_file_unprepared, read_mappings_file_with_templates},
 };
@@ -32,7 +32,7 @@ pub enum ConfigFile {
 struct PreparedMappingsReload {
     mapping_file_path: String,
     mapping_files: Vec<PathBuf>,
-    mappings: Mappings,
+    mappings: CompiledMappings,
 }
 
 /// Fully prepared sources + mappings data, ready to apply without any I/O or fallible work.
@@ -143,11 +143,14 @@ impl ConfigFile {
         };
 
         match read_mappings_file_with_templates(mapping_file_path, true, prepared_templates) {
-            Ok(Some((mapping_files, mappings_cfg))) => Ok(Some(PreparedMappingsReload {
-                mapping_file_path: mapping_file_path.to_string(),
-                mapping_files,
-                mappings: Mappings::from(&mappings_cfg),
-            })),
+            Ok(Some((mapping_files, mappings_cfg))) => {
+                let mappings = CompiledMappings::try_from(&mappings_cfg)?;
+                Ok(Some(PreparedMappingsReload {
+                    mapping_file_path: mapping_file_path.to_string(),
+                    mapping_files,
+                    mappings,
+                }))
+            }
             Ok(None) => {
                 info!("No mapping file loaded {mapping_file_path}");
                 Ok(None)
@@ -382,6 +385,11 @@ impl ConfigFile {
 
     pub(crate) async fn reload(&self, file_path: &Path, app_state: &Arc<AppState>) -> Result<(), TuliproxError> {
         debug!("File change detected {}", file_path.display());
+        // Channels and templates are built once and cached, so an edited
+        // token, URL or template would otherwise not take effect until a
+        // restart.
+        tuliprox_messaging::channels::invalidate();
+        tuliprox_messaging::render::invalidate_cache();
         match self {
             ConfigFile::ApiProxy => {
                 ConfigFile::load_api_proxy(app_state).await?;

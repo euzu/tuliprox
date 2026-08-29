@@ -180,7 +180,7 @@ pub(super) fn next_retry_delay_ms(
         .unwrap_or_else(|| retry_policy.delay_for_attempt_ms(attempt_index + 1, jitter_ms).unwrap_or_default())
 }
 
-pub(super) fn current_time_millis() -> u64 { chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default() }
+pub(super) use tuliprox_core::utils::current_time_millis;
 
 #[cfg(any(test, feature = "test-support"))]
 pub(super) async fn refresh_from_live_hls_entrypoint_with_retries(

@@ -86,7 +86,7 @@ fn get_rating(props: Option<&StreamProperties>) -> f64 {
 impl From<&CommonPlaylistItem> for UiPlaylistItem {
     fn from(item: &CommonPlaylistItem) -> Self {
         Self {
-            virtual_id: item.virtual_id,
+            virtual_id: item.virtual_id.get(),
             provider_id: Arc::clone(&item.provider_id),
             name: Arc::clone(&item.name),
             title: Arc::clone(&item.title),
@@ -106,7 +106,7 @@ impl From<&CommonPlaylistItem> for UiPlaylistItem {
 impl From<XtreamPlaylistItem> for UiPlaylistItem {
     fn from(item: XtreamPlaylistItem) -> Self {
         Self {
-            virtual_id: item.virtual_id,
+            virtual_id: item.virtual_id.get(),
             provider_id: item.provider_id.to_string().into(),
             name: Arc::clone(&item.name),
             title: Arc::clone(&item.title),
@@ -126,7 +126,7 @@ impl From<XtreamPlaylistItem> for UiPlaylistItem {
 impl From<M3uPlaylistItem> for UiPlaylistItem {
     fn from(item: M3uPlaylistItem) -> Self {
         Self {
-            virtual_id: item.virtual_id,
+            virtual_id: item.virtual_id.get(),
             provider_id: Arc::clone(&item.provider_id),
             name: Arc::clone(&item.name),
             title: Arc::clone(&item.title),
@@ -134,7 +134,7 @@ impl From<M3uPlaylistItem> for UiPlaylistItem {
             logo: pick_logo(&item.logo, &item.logo_small, None),
             url: Arc::clone(&item.url),
             item_type: item.item_type,
-            xtream_cluster: XtreamCluster::try_from(item.item_type).unwrap_or_default(),
+            xtream_cluster: item.item_type.cluster(),
             category_id: 0,
             rating: 0.0,
             input_name: Arc::clone(&item.input_name),
@@ -147,7 +147,7 @@ impl From<&PlaylistItem> for UiPlaylistItem {
     fn from(item: &PlaylistItem) -> Self {
         let header = &item.header;
         Self {
-            virtual_id: header.virtual_id,
+            virtual_id: header.virtual_id.get(),
             provider_id: Arc::clone(&header.id),
             name: Arc::clone(&header.name),
             title: Arc::clone(&header.title),

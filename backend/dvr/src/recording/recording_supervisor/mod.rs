@@ -26,13 +26,13 @@
 //! - [`health`] — last-tick timestamps and counters
 //! - [`startup`] — crash-recovery reconciliation at boot
 //! - [`retention`] — age / count / disk-pressure sweeps
-//! - [`outbox`] — durable, per-channel notification retry
+//! - notification retry lives in `tuliprox-messaging::outbox`
 //! - [`mod`] (this file) — shared helpers, the entry point, and the
 //!   cross-cutting tests
 
 use super::recording_ctx::RecordingCtx;
 use log::info;
-use shared::model::{Claims, Permission, PermissionSet, CURRENT_PERMISSION_SCHEMA_VERSION, ROLE_ADMIN};
+use shared::model::{Claims, EventSink, Permission, PermissionSet, RoleSet, CURRENT_PERMISSION_SCHEMA_VERSION};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -41,7 +41,6 @@ use tokio_util::sync::CancellationToken;
 use tuliprox_core::model::{AppConfig, RecordingConfig};
 
 pub mod health;
-pub mod outbox;
 pub mod retention;
 pub mod startup;
 
@@ -49,9 +48,12 @@ pub mod startup;
 // (`crate::recording::recording_supervisor::*`) keep
 // working without an import change.
 pub use health::{supervisor_health, SupervisorHealth};
-pub use outbox::{notification_outbox, spawn_notification_outbox, NotificationOutbox};
 pub use retention::spawn_retention_supervisor;
 pub use startup::run_startup_reconciliation;
+// The outbox now lives in `tuliprox-messaging` and carries every
+// notification, not just recording lifecycle ones. Re-exported here so
+// existing `recording_supervisor::*` callers need no import change.
+pub use tuliprox_messaging::outbox::{notification_outbox, NotificationOutbox};
 
 /// The effective recording configuration, cloned out of the `ArcSwap`
 /// guard so no guard is held across an await.
@@ -101,7 +103,7 @@ pub fn system_claims() -> Claims {
         iss: "tuliprox".to_string(),
         iat: now,
         exp: now + 3600,
-        roles: vec![ROLE_ADMIN.to_string()],
+        roles: RoleSet::ADMIN,
         permissions,
         pwd_version: 0,
         subject_id: Some(shared::model::UserId::builtin_admin()),
@@ -124,7 +126,10 @@ impl Drop for PassGuard {
 
 /// Start every DVR supervisor. Called once the HTTP listener is bound so
 /// the reconciliation pass cannot delay the bind.
-pub async fn start_recording_supervisors(ctx: &RecordingCtx, cancel_token: &CancellationToken) {
+pub async fn start_recording_supervisors<E: EventSink + Clone + 'static>(
+    ctx: &RecordingCtx<E>,
+    cancel_token: &CancellationToken,
+) {
     if !recording_enabled(&ctx.app_config) {
         info!("Recording is disabled; DVR supervisors not started");
         return;
@@ -132,7 +137,6 @@ pub async fn start_recording_supervisors(ctx: &RecordingCtx, cancel_token: &Canc
     // Reconcile before anything else can materialize or sweep, so the
     // scheduler never plans against half-repaired state.
     run_startup_reconciliation(ctx).await;
-    spawn_notification_outbox(ctx, cancel_token);
     spawn_retention_supervisor(ctx, cancel_token);
 }
 

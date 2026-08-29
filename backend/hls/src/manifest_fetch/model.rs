@@ -316,7 +316,7 @@ pub(super) fn request_hls_session_idle_timeout_secs_from_config(app_config: &App
         .reverse_proxy
         .as_ref()
         .and_then(|reverse_proxy| reverse_proxy.hls_cache.as_ref())
-        .map_or(DEFAULT_HLS_SESSION_IDLE_TIMEOUT_SECS, |hls_cache| hls_cache.session_idle_timeout)
+        .map_or(DEFAULT_HLS_SESSION_IDLE_TIMEOUT_SECS, |hls_cache| hls_cache.session_idle_timeout.get())
         .max(1)
 }
 

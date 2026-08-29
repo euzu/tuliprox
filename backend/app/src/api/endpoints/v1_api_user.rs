@@ -10,7 +10,10 @@ use crate::{
 use axum::{response::IntoResponse, Router};
 use serde_json::json;
 use shared::{
-    model::{permission::Permission, ApiProxyConfigDto, ProxyUserCredentialsDto},
+    model::{
+        permission::Permission, ApiProxyConfigDto, EventMessage, ProxyUserCredentialsDto, UserLifecycleEvent,
+        UserLifecycleState,
+    },
     utils::mask_credentials,
 };
 use std::{path::Path, sync::Arc};
@@ -177,6 +180,14 @@ async fn save_config_api_proxy_user(
     // Update state after successful save
     app_state.app_config.api_proxy.store(Some(Arc::clone(&new_api_proxy)));
 
+    // Only after the write succeeded and the new config is live: an event
+    // published before the store could describe a state no reader can see.
+    app_state.event_manager.send_event(EventMessage::UserLifecycle(UserLifecycleEvent::new(
+        new_user.username.as_str().into(),
+        target_name.as_str().into(),
+        if is_update { UserLifecycleState::Updated } else { UserLifecycleState::Created },
+    )));
+
     if target_has_alias_pool_min(&app_state, &target_name) {
         let app_state_clone = Arc::clone(&app_state);
         let target_name_clone = target_name.clone();
@@ -233,6 +244,12 @@ async fn delete_config_api_proxy_user(
                 }
             }
             app_state.app_config.api_proxy.store(Some(Arc::clone(&new_api_proxy)));
+
+            app_state.event_manager.send_event(EventMessage::UserLifecycle(UserLifecycleEvent::new(
+                username.as_str().into(),
+                target_name.as_str().into(),
+                UserLifecycleState::Deleted,
+            )));
         } else {
             return (
                 axum::http::StatusCode::BAD_REQUEST,

@@ -1,8 +1,8 @@
 use crate::{
     model::{
-        ApiProxyConfig, ApiProxyServerInfo, Config, ConfigInput, ConfigInputOptions, ConfigTarget,
-        CustomStreamResponse, GracePeriodOptions, HdHomeRunConfig, HdHomeRunFlags, Mappings, MediaToolCapabilities,
-        ProxyUserCredentials, ReverseProxyDisabledHeaderConfig, SourcesConfig, TargetOutput,
+        ApiProxyConfig, ApiProxyServerInfo, CompiledMappings, CompiledTargetMappings, Config, ConfigInput,
+        ConfigInputOptions, ConfigTarget, CustomStreamResponse, GracePeriodOptions, HdHomeRunConfig, HdHomeRunFlags,
+        MediaToolCapabilities, ProxyUserCredentials, ReverseProxyDisabledHeaderConfig, SourcesConfig, TargetOutput,
     },
     utils,
 };
@@ -67,12 +67,12 @@ impl AppConfig {
         self.check_target_user()
     }
 
-    pub fn set_mappings(&self, mapping_path: &str, mappings_cfg: &Mappings) {
+    pub fn set_mappings(&self, mapping_path: &str, mappings_cfg: &CompiledMappings) {
         self.set_mapping_path(Some(mapping_path));
         let sources = self.sources.load();
 
         // Warn only if mappings were actually loaded; target mapping stores still need updating below.
-        if !mappings_cfg.mappings.mapping.is_empty() {
+        if !mappings_cfg.mappings.is_empty() {
             // Collect all mapping_ids referenced by targets
             let mut referenced_ids: HashSet<&str> = HashSet::new();
             for source in &sources.sources {
@@ -86,7 +86,7 @@ impl AppConfig {
             }
 
             // Warn about loaded-but-unreferenced mappings (may be intentional template/experiment files)
-            for mapping in &mappings_cfg.mappings.mapping {
+            for mapping in &mappings_cfg.mappings {
                 if !referenced_ids.contains(mapping.id.as_str()) {
                     warn!(
                         "Mapping '{}' is loaded but not referenced by any target; it has no effect unless added to a target mapping list",
@@ -96,9 +96,9 @@ impl AppConfig {
             }
 
             // Warn about mappings that have neither mapper nor counter
-            for mapping in &mappings_cfg.mappings.mapping {
-                let has_mapper = mapping.mapper.as_ref().is_some_and(|m| !m.is_empty());
-                let has_counter = mapping.t_counter.as_ref().is_some_and(|c| !c.is_empty());
+            for mapping in &mappings_cfg.mappings {
+                let has_mapper = !mapping.rules.is_empty();
+                let has_counter = !mapping.counters.is_empty();
                 if !has_mapper && !has_counter {
                     warn!("Mapping '{}' has neither mapper nor counter and has no effect", mapping.id);
                 }
@@ -113,12 +113,17 @@ impl AppConfig {
                         let mapping = mappings_cfg.get_mapping(mapping_id);
                         if let Some(mappings) = mapping {
                             target_mappings.push(mappings);
+                        } else {
+                            warn!(
+                                "Target '{}' references unknown mapping '{}'; the mapping will not be applied",
+                                target.name, mapping_id
+                            );
                         }
                     }
                     target.mapping.store(if target_mappings.is_empty() {
                         None
                     } else {
-                        Some(Arc::new(target_mappings))
+                        Some(Arc::new(CompiledTargetMappings::new(target_mappings)))
                     });
                 }
             }
@@ -568,11 +573,11 @@ impl AppConfig {
 mod tests {
     use super::*;
     use crate::{
-        model::{ConfigSource, Mapper, Mapping, MappingDefinition},
+        model::{CompiledMapping, CompiledMappingRule, ConfigSource, MappingProgram},
         utils::FileLockManager,
     };
     use shared::{
-        foundation::Filter,
+        foundation::{Filter, MapperScript},
         model::{ConfigPaths, ProcessingOrder},
     };
 
@@ -624,27 +629,25 @@ mod tests {
             mapping: Arc::new(ArcSwapOption::default()),
             favourites: None,
             processing_order: ProcessingOrder::Frm,
+            execution_plan: crate::model::TargetExecutionPlan::default(),
             watch: None,
             use_memory_cache: false,
         })
     }
 
-    fn mappings_with_one_mapper(mapping_id: &str) -> Mappings {
-        Mappings {
-            mappings: MappingDefinition {
-                templates: None,
-                mapping: vec![Mapping {
-                    id: mapping_id.to_string(),
-                    mapper: Some(vec![Mapper::default()]),
-                    ..Mapping::default()
-                }],
-            },
-        }
+    fn mappings_with_one_mapper(mapping_id: &str) -> CompiledMappings {
+        CompiledMappings::new(vec![CompiledMapping {
+            id: mapping_id.to_string(),
+            rules: vec![CompiledMappingRule {
+                name: None,
+                filter: Filter::default(),
+                program: MappingProgram::Script(MapperScript::parse("", None).expect("empty script should parse")),
+            }],
+            ..CompiledMapping::default()
+        }])
     }
 
-    fn empty_mappings() -> Mappings {
-        Mappings { mappings: MappingDefinition { templates: None, mapping: Vec::new() } }
-    }
+    fn empty_mappings() -> CompiledMappings { CompiledMappings::default() }
 
     #[test]
     fn set_mappings_clears_existing_target_mappings_when_reload_is_empty() {
@@ -656,6 +659,16 @@ mod tests {
 
         app_config.set_mappings("mappings", &empty_mappings());
         assert!(target.mapping.load().is_none(), "empty mapping reload must clear stale target mappings");
+    }
+
+    #[test]
+    fn set_mappings_does_not_attach_an_unrelated_mapping_for_unknown_id() {
+        let target = target_with_mapping_id("missing");
+        let app_config = test_app_config_with_target(Arc::clone(&target));
+
+        app_config.set_mappings("mappings", &mappings_with_one_mapper("available"));
+
+        assert!(target.mapping.load().is_none(), "an unknown mapping id must not attach another mapping");
     }
 
     #[test]

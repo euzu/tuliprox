@@ -1,8 +1,9 @@
 use crate::{
     fetched_playlist::FetchedPlaylist,
+    metadata_sink::MetadataUpdateSink,
     processor::{
         create_resolve_options_function_for_xtream_target,
-        playlist::{PlaylistProcessingContext, ProcessingPipe},
+        playlist::{execute_pipeline_on_groups, PlaylistProcessingContext, ProcessingPipe},
         process_foreground_retry_once, select_cancel_token, ProbeHandleGuard, ResolveOptions, ResolveOptionsFlags,
         FOREGROUND_BATCH_SIZE as BATCH_SIZE, FOREGROUND_MIN_RETRY_DELAY_SECS,
         FOREGROUND_RETRY_BATCH_MAX_SIZE as RETRY_BATCH_MAX_SIZE,
@@ -16,7 +17,7 @@ use shared::{
     error::TuliproxError,
     foundation::ValueProvider,
     model::{
-        MediaQuality, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemType, SeriesStreamProperties,
+        EventSink, MediaQuality, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemType, SeriesStreamProperties,
         StreamProperties, XtreamCluster, XtreamPlaylistItem, XtreamSeriesInfo,
     },
 };
@@ -51,7 +52,7 @@ use tuliprox_library::{
 use tuliprox_parser::xtream::{create_xtream_series_episode_url, parse_xtream_series_info};
 use tuliprox_repository::{
     get_input_storage_path, persist_input_series_info_batch, persists_input_series_info, xtream_get_file_path,
-    BPlusTreeQuery, MemoryPlaylistSource,
+    BPlusTreeQuery,
 };
 use tuliprox_session::ActiveProviderManager;
 
@@ -72,14 +73,14 @@ impl SeriesProbeSettings {
             analyze_duration_micros: metadata_update
                 .map_or(defaults.ffprobe.analyze_duration_micros, |cfg| cfg.ffprobe.analyze_duration_micros),
             probe_size_bytes: metadata_update
-                .map_or(defaults.ffprobe.probe_size_bytes, |cfg| cfg.ffprobe.probe_size_bytes),
+                .map_or(defaults.ffprobe.probe_size_bytes.get(), |cfg| cfg.ffprobe.probe_size_bytes.get()),
         }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn playlist_resolve_series(
-    ctx: &PlaylistProcessingContext,
+pub async fn playlist_resolve_series<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     target: &ConfigTarget,
     errors: &mut Vec<TuliproxError>,
     pipe: &ProcessingPipe,
@@ -110,8 +111,8 @@ pub async fn playlist_resolve_series(
 }
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-async fn playlist_resolve_series_info(
-    ctx: &PlaylistProcessingContext,
+async fn playlist_resolve_series_info<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     _errors: &mut Vec<TuliproxError>,
     fpl: &mut FetchedPlaylist<'_>,
     resolve_options: ResolveOptions,
@@ -139,15 +140,8 @@ async fn playlist_resolve_series_info(
     };
 
     // Apply pipe transformations to new groups
-    let mut new_playlist = groups_to_add;
-    for f in pipe {
-        let mut source = MemoryPlaylistSource::new(new_playlist).into_source();
-        if let Some(v) = f(&mut source, target) {
-            new_playlist = v;
-        } else {
-            new_playlist = source.take_groups();
-        }
-    }
+    let (new_playlist, pipeline_outcome) = execute_pipeline_on_groups(groups_to_add, target, pipe);
+    debug!("Resolved series pipeline outcome: {pipeline_outcome:?}");
 
     // Apply resolved episodes to playlist
     fpl.extend_playlist(new_playlist);
@@ -197,8 +191,8 @@ fn sync_resolved_series_properties(provider_fpl: &mut FetchedPlaylist<'_>, proce
     }
 }
 
-fn queue_background_series_info(
-    ctx: &PlaylistProcessingContext,
+fn queue_background_series_info<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     fpl: &mut FetchedPlaylist<'_>,
     filter: impl Fn(&PlaylistItem) -> bool,
     resolve_options: &ResolveOptions,
@@ -289,8 +283,8 @@ fn queue_background_series_info(
 }
 
 #[allow(clippy::too_many_lines)]
-async fn process_immediate_series_info(
-    ctx: &PlaylistProcessingContext,
+async fn process_immediate_series_info<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     fpl: &mut FetchedPlaylist<'_>,
     filter: impl Fn(&PlaylistItem) -> bool,
     resolve_options: &ResolveOptions,
@@ -574,8 +568,8 @@ fn expand_series_item(pli: &PlaylistItem, input: &ConfigInput) -> Option<Playlis
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn update_series_info_immediate(
-    ctx: &PlaylistProcessingContext,
+async fn update_series_info_immediate<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     active_provider: &Arc<ActiveProviderManager>,
     input: &ConfigInput,
     pli: &PlaylistItem,
@@ -800,7 +794,7 @@ pub async fn update_series_metadata(
             if content.is_empty() {
                 debug!("Series {display_id}: provider returned empty content for info fetch");
             } else {
-                let canonical_series_id = existing_item.as_ref().map_or(series_id, PlaylistEntry::get_virtual_id);
+                let canonical_series_id = existing_item.as_ref().map_or(series_id, |item| item.get_virtual_id().get());
                 match serde_json::from_str::<Value>(&content) {
                     Ok(mut json_value) => {
                         if let Some(info) = json_value.get_mut("info").and_then(|v| v.as_object_mut()) {
@@ -974,7 +968,7 @@ pub async fn update_series_metadata(
                             let probe_url = match input.resolve_url(&episode_url) {
                                 Ok(url) => url,
                                 Err(err) => {
-                                    if matches!(err, shared::error::TuliproxError::ConfigInput(_)) {
+                                    if err.kind() == shared::error::ErrorKind::ConfigInput {
                                         debug!(
                                             "Provider config resolution failed for series episode '{}' (S{}E{}): {err}",
                                             ep.title, ep.season, ep.episode_num

@@ -5,10 +5,9 @@ use crate::{
     },
     error::TuliproxError,
     foundation::{get_filter, Filter},
-    handle_tuliprox_error_result_list,
     model::{
         ClusterFlags, ConfigFavouritesDto, ConfigRenameDto, ConfigSortDto, HdHomeRunDeviceOverview, PatternTemplate,
-        ProcessingOrder, StrmExportStyle, TargetType, TraktConfigDto,
+        Prepare, PrepareAll, ProcessingOrder, StrmExportStyle, TargetType, TraktConfigDto,
     },
     utils::is_blank_optional_string,
 };
@@ -164,7 +163,19 @@ impl Default for XtreamTargetOutputDto {
 }
 
 impl XtreamTargetOutputDto {
-    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
+    pub fn has_any_option(&self) -> bool {
+        self.skip_live_direct_source
+            || self.skip_video_direct_source
+            || self.skip_series_direct_source
+            || self.trakt.is_some()
+            || self.filter.is_some()
+    }
+}
+
+impl Prepare for XtreamTargetOutputDto {
+    type Ctx<'a> = Option<&'a [PatternTemplate]>;
+
+    fn prepare(&mut self, templates: Self::Ctx<'_>) -> Result<(), TuliproxError> {
         if let Some(raw_filter) = &self.filter {
             self.t_filter = Some(get_filter(raw_filter, templates)?);
         }
@@ -172,14 +183,6 @@ impl XtreamTargetOutputDto {
             trakt.prepare();
         }
         Ok(())
-    }
-
-    pub fn has_any_option(&self) -> bool {
-        self.skip_live_direct_source
-            || self.skip_video_direct_source
-            || self.skip_series_direct_source
-            || self.trakt.is_some()
-            || self.filter.is_some()
     }
 }
 
@@ -199,15 +202,19 @@ pub struct M3uTargetOutputDto {
 }
 
 impl M3uTargetOutputDto {
-    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
+    pub fn has_any_option(&self) -> bool {
+        self.filename.is_some() || self.include_type_in_url || self.mask_redirect_url || self.filter.is_some()
+    }
+}
+
+impl Prepare for M3uTargetOutputDto {
+    type Ctx<'a> = Option<&'a [PatternTemplate]>;
+
+    fn prepare(&mut self, templates: Self::Ctx<'_>) -> Result<(), TuliproxError> {
         if let Some(raw_filter) = &self.filter {
             self.t_filter = Some(get_filter(raw_filter, templates)?);
         }
         Ok(())
-    }
-
-    pub fn has_any_option(&self) -> bool {
-        self.filename.is_some() || self.include_type_in_url || self.mask_redirect_url || self.filter.is_some()
     }
 }
 
@@ -244,8 +251,10 @@ pub struct StrmTargetOutputDto {
     pub t_filter: Option<Filter>,
 }
 
-impl StrmTargetOutputDto {
-    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
+impl Prepare for StrmTargetOutputDto {
+    type Ctx<'a> = Option<&'a [PatternTemplate]>;
+
+    fn prepare(&mut self, templates: Self::Ctx<'_>) -> Result<(), TuliproxError> {
         if let Some(raw_filter) = &self.filter {
             self.t_filter = Some(get_filter(raw_filter, templates)?);
         }
@@ -275,8 +284,10 @@ pub enum TargetOutputDto {
     HdHomeRun(HdHomeRunTargetOutputDto),
 }
 
-impl TargetOutputDto {
-    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
+impl Prepare for TargetOutputDto {
+    type Ctx<'a> = Option<&'a [PatternTemplate]>;
+
+    fn prepare(&mut self, templates: Self::Ctx<'_>) -> Result<(), TuliproxError> {
         match self {
             TargetOutputDto::Xtream(output) => output.prepare(templates),
             TargetOutputDto::M3u(output) => output.prepare(templates),
@@ -497,11 +508,7 @@ impl ConfigTargetDto {
             }
         }
 
-        if let Some(favourites) = self.favourites.as_mut() {
-            for favourite in favourites {
-                favourite.prepare(templates)?;
-            }
-        }
+        self.favourites.prepare(templates)?;
 
         if let Some(watch) = &self.watch {
             for pat in watch {
@@ -515,9 +522,7 @@ impl ConfigTargetDto {
             Ok(fltr) => {
                 // debug!("Filter: {}", fltr);
                 self.t_filter = Some(fltr);
-                if let Some(renames) = self.rename.as_mut() {
-                    handle_tuliprox_error_result_list!(renames.iter_mut().map(|cr| cr.prepare(templates)));
-                }
+                self.rename.prepare_all(templates)?;
                 if let Some(sort) = self.sort.as_mut() {
                     sort.prepare(templates)?;
                 }

@@ -13,7 +13,10 @@ use notify::{
     event::{AccessKind, AccessMode},
     recommended_watcher, EventKind, RecursiveMode, Watcher,
 };
-use shared::{error::TuliproxError, model::ConfigPaths};
+use shared::{
+    error::TuliproxError,
+    model::{ConfigPaths, ConfigReloadFailure},
+};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -65,9 +68,16 @@ fn start_config_watch(app_state: &Arc<AppState>, cancel_token: &CancellationToke
     let watcher_app_state = Arc::clone(app_state);
 
     let handle_error = move |err: TuliproxError, paths: &HashSet<PathBuf>| {
-        let msg = format!("Failed to reload config files [{}]: {err}", format_paths(paths));
+        let formatted = format_paths(paths);
+        let msg = format!("Failed to reload config files [{formatted}]: {err}");
         error!("{msg}");
-        event_manager.send_event(EventMessage::ServerError(msg));
+        // Two events, deliberately. `ServerError` is what the Web UI shows
+        // as a toast; `ConfigReloadFailed` is the typed one, so an operator
+        // or a plugin can subscribe to "my config stopped loading" without
+        // taking every server error.
+        event_manager.send_event(EventMessage::ServerError(msg.clone()));
+        event_manager
+            .send_event(EventMessage::ConfigReloadFailed(ConfigReloadFailure { paths: formatted, error: msg }));
     };
 
     tokio::spawn(async move {

@@ -1,7 +1,7 @@
 use crate::model::{
     config::{favourites::ConfigFavourites, trakt::TraktConfig},
     macros,
-    mapping::Mapping,
+    mapping::CompiledMapping,
     ConfigRename, ConfigSort,
 };
 use arc_swap::ArcSwapOption;
@@ -9,15 +9,87 @@ use shared::{
     apply_flags, create_bitset,
     foundation::{Filter, ValueProvider},
     model::{
-        ConfigTargetDto, ConfigTargetOptions, HdHomeRunTargetOutputDto, M3uTargetOutputDto, PlaylistItemType,
-        ProcessingOrder, StrmExportStyle, StrmTargetOutputDto, TargetOutputDto, TargetType, TraktConfigDto,
-        XtreamTargetOutputDto,
+        ConfigTargetDto, ConfigTargetOptions, DeduplicateConfig, HdHomeRunTargetOutputDto, M3uTargetOutputDto,
+        MappingStage, PlaylistItemType, ProcessingOrder, StrmExportStyle, StrmTargetOutputDto, TargetOutputDto,
+        TargetType, TraktConfigDto, XtreamTargetOutputDto,
     },
 };
 use std::sync::Arc;
 
 create_bitset!(u8, XtreamTargetFlags, SkipLiveDirectSource, SkipVideoDirectSource, SkipSeriesDirectSource);
 create_bitset!(u8, StrmTargetFlags, Flat, UnderscoreWhitespace, Cleanup, AddQualityToFilename, UseMetadata);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransformStage {
+    Filter,
+    Rename,
+    Map,
+}
+
+#[derive(Debug, Clone)]
+pub struct TargetExecutionPlan {
+    pub transform_stages: Vec<TransformStage>,
+    pub pre_transform_identity_dedup: bool,
+    pub post_merge_content_dedup: Option<DeduplicateConfig>,
+}
+
+impl Default for TargetExecutionPlan {
+    fn default() -> Self {
+        Self {
+            transform_stages: vec![TransformStage::Filter, TransformStage::Rename, TransformStage::Map],
+            pre_transform_identity_dedup: false,
+            post_merge_content_dedup: None,
+        }
+    }
+}
+
+impl TargetExecutionPlan {
+    fn from_dto(dto: &ConfigTargetDto) -> Self {
+        let transform_stages = match dto.processing_order {
+            ProcessingOrder::Frm => vec![TransformStage::Filter, TransformStage::Rename, TransformStage::Map],
+            ProcessingOrder::Fmr => vec![TransformStage::Filter, TransformStage::Map, TransformStage::Rename],
+            ProcessingOrder::Rfm => vec![TransformStage::Rename, TransformStage::Filter, TransformStage::Map],
+            ProcessingOrder::Rmf => vec![TransformStage::Rename, TransformStage::Map, TransformStage::Filter],
+            ProcessingOrder::Mfr => vec![TransformStage::Map, TransformStage::Filter, TransformStage::Rename],
+            ProcessingOrder::Mrf => vec![TransformStage::Map, TransformStage::Rename, TransformStage::Filter],
+        };
+        Self {
+            transform_stages,
+            pre_transform_identity_dedup: dto.options.as_ref().is_some_and(|options| options.remove_duplicates),
+            post_merge_content_dedup: dto.options.as_ref().and_then(|options| options.deduplicate),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct CompiledTargetMappings {
+    pub all: Vec<Arc<CompiledMapping>>,
+    processing: Vec<Arc<CompiledMapping>>,
+    after_epg: Vec<Arc<CompiledMapping>>,
+}
+
+impl CompiledTargetMappings {
+    pub fn new(all: Vec<Arc<CompiledMapping>>) -> Self {
+        let processing = all
+            .iter()
+            .filter(|mapping| mapping.stage == MappingStage::Processing && !mapping.rules.is_empty())
+            .cloned()
+            .collect();
+        let after_epg = all
+            .iter()
+            .filter(|mapping| mapping.stage == MappingStage::AfterEpg && !mapping.rules.is_empty())
+            .cloned()
+            .collect();
+        Self { all, processing, after_epg }
+    }
+
+    pub fn for_stage(&self, stage: MappingStage) -> &[Arc<CompiledMapping>] {
+        match stage {
+            MappingStage::Processing => &self.processing,
+            MappingStage::AfterEpg => &self.after_epg,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct ProcessTargets {
@@ -248,9 +320,10 @@ pub struct ConfigTarget {
     pub output: Vec<TargetOutput>,
     pub rename: Option<Vec<ConfigRename>>,
     pub mapping_ids: Option<Vec<String>>,
-    pub mapping: Arc<ArcSwapOption<Vec<Mapping>>>,
+    pub mapping: Arc<ArcSwapOption<CompiledTargetMappings>>,
     pub favourites: Option<Vec<ConfigFavourites>>,
     pub processing_order: ProcessingOrder,
+    pub execution_plan: TargetExecutionPlan,
     pub watch: Option<Vec<Arc<regex::Regex>>>,
     pub use_memory_cache: bool,
 }
@@ -308,9 +381,16 @@ impl From<&ConfigTargetDto> for ConfigTarget {
             mapping: Arc::new(ArcSwapOption::new(None)),
             favourites: dto.favourites.as_ref().map(|f| f.iter().map(Into::into).collect()),
             processing_order: dto.processing_order,
-            watch: dto.watch.as_ref().and_then(|list| {
-                let compiled: Vec<_> = list
-                    .iter()
+            execution_plan: TargetExecutionPlan::from_dto(dto),
+            // An empty `Some` is deliberate and load-bearing: it means the
+            // operator configured `watch` and every pattern failed to
+            // compile, which is different from not configuring it at all.
+            // Collapsing both to `None` is how the feature used to turn
+            // itself off on a typo with nothing but one `warn!` to show for
+            // it - `process_watch` now reports the empty case as
+            // `playlist.watch.disabled`.
+            watch: dto.watch.as_ref().map(|list| {
+                list.iter()
                     .filter_map(|s| match shared::model::REGEX_CACHE.get_or_compile(s) {
                         Ok(re) => Some(re),
                         Err(e) => {
@@ -318,14 +398,44 @@ impl From<&ConfigTargetDto> for ConfigTarget {
                             None
                         }
                     })
-                    .collect();
-                if compiled.is_empty() {
-                    None
-                } else {
-                    Some(compiled)
-                }
+                    .collect()
             }),
             use_memory_cache: dto.use_memory_cache,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn execution_plan_compiles_processing_order() {
+        let dto = ConfigTargetDto { processing_order: ProcessingOrder::Mrf, ..Default::default() };
+
+        let target = ConfigTarget::from(&dto);
+
+        assert_eq!(
+            target.execution_plan.transform_stages,
+            [TransformStage::Map, TransformStage::Rename, TransformStage::Filter]
+        );
+    }
+
+    #[test]
+    fn execution_plan_preserves_both_deduplication_passes() {
+        let deduplicate = DeduplicateConfig::default();
+        let dto = ConfigTargetDto {
+            options: Some(ConfigTargetOptions {
+                remove_duplicates: true,
+                deduplicate: Some(deduplicate),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let target = ConfigTarget::from(&dto);
+
+        assert!(target.execution_plan.pre_transform_identity_dedup);
+        assert_eq!(target.execution_plan.post_merge_content_dedup, Some(deduplicate));
     }
 }

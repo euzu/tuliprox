@@ -40,6 +40,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tuliprox_hls::api::HlsProxyManager;
 use tuliprox_metadata::manager::MetadataUpdateManager;
+use tuliprox_repository::{identity_registry::IdentityRegistry, token_revocations::TokenRevocations};
 use tuliprox_session::{provider_dns_manager::exec_provider_dns, qos_aggregation_manager::exec_qos_aggregation};
 
 macro_rules! cancel_service {
@@ -440,6 +441,22 @@ pub struct AppState {
     pub geoip: Arc<ArcSwapOption<GeoIp>>,
     pub update_guard: UpdateGuard,
     pub metadata_manager: Arc<MetadataUpdateManager>,
+    /// Stable subject identities for web and API users.
+    ///
+    /// The registry existed but was never wired in, so token minting derived
+    /// the subject from the username - `web:<name>` / `api:<name>` - and a
+    /// rename silently reassigned everything the old subject owned.
+    pub identity_registry: Arc<IdentityRegistry>,
+    /// Backoff for repeated failed sign-ins.
+    ///
+    /// `/auth/token` used to answer 401 and forget, so a password list could
+    /// be worked against it as fast as argon2 allows.
+    pub login_throttle: Arc<crate::auth::LoginThrottle>,
+    /// Revocation watermarks for already-issued tokens.
+    ///
+    /// The tokens this server mints are stateless, so nothing could take one
+    /// back: a leak stayed valid until it expired.
+    pub token_revocations: Arc<TokenRevocations>,
     /// Bounded channel (capacity 1) for manual playlist update requests.
     /// `try_send` deduplicates rapid clicks: if an update is already pending
     /// or the channel is full, the request is silently dropped so at most one
@@ -512,6 +529,13 @@ pub(crate) fn create_test_app_state(config: Config) -> Arc<AppState> {
         geoip,
         update_guard: UpdateGuard::new(),
         metadata_manager,
+        identity_registry: Arc::new(tuliprox_repository::identity_registry::IdentityRegistry::empty(
+            std::path::PathBuf::new(),
+        )),
+        login_throttle: Arc::new(crate::auth::LoginThrottle::new()),
+        token_revocations: Arc::new(tuliprox_repository::token_revocations::TokenRevocations::empty(
+            std::path::PathBuf::new(),
+        )),
         manual_update_sender,
     })
 }
@@ -867,7 +891,7 @@ mod tests {
 
         let result = state.set_config(config_with_web_auth("secret")).await;
 
-        assert!(matches!(result, Err(shared::error::TuliproxError::ConfigWebUi(_))));
+        assert!(matches!(&result, Err(err) if err.kind() == shared::error::ErrorKind::ConfigWebUi));
         assert!(state.app_config.config.load().web_ui.is_none());
     }
 
@@ -877,7 +901,7 @@ mod tests {
 
         let result = state.set_config(config_with_web_auth("new-secret")).await;
 
-        assert!(matches!(result, Err(shared::error::TuliproxError::ConfigWebUi(_))));
+        assert!(matches!(&result, Err(err) if err.kind() == shared::error::ErrorKind::ConfigWebUi));
         assert_eq!(
             state
                 .app_config

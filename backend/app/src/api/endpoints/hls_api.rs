@@ -62,7 +62,7 @@ use shared::{
     defaults::HLS_EXT,
     model::{
         ConnectFailureReason, FailureStage, InputType, PlaylistEntry, PlaylistItemType, StreamChannel, StreamInfo,
-        StreamProperties, TargetType, UserConnectionPermission, XtreamCluster,
+        StreamProperties, TargetType, UserConnectionPermission, VirtualId, XtreamCluster,
     },
     utils::{
         extract_extension_from_url, generate_random_string, is_hls_url, is_m3u_catchup_session_token,
@@ -1911,7 +1911,7 @@ async fn ensure_hls_cache_stream_registered(
         stream_channel.epg_reference_ts = panel_archive_reference;
     } else {
         stream_channel.item_type = PlaylistItemType::LiveHls;
-        stream_channel.cluster = XtreamCluster::try_from(PlaylistItemType::LiveHls).unwrap_or(stream_channel.cluster);
+        stream_channel.cluster = PlaylistItemType::LiveHls.cluster();
     }
     let shared_stream_id = hls_cache_shared_stream_id(&proxy_session_id);
     stream_channel.shared = true;
@@ -2010,7 +2010,7 @@ async fn build_hls_cache_stream_channel(
         channel.epg_reference_ts = archive_reference;
     } else {
         channel.item_type = PlaylistItemType::LiveHls;
-        channel.cluster = XtreamCluster::try_from(PlaylistItemType::LiveHls).unwrap_or(channel.cluster);
+        channel.cluster = PlaylistItemType::LiveHls.cluster();
         channel.epg_reference_ts = None;
     }
     channel
@@ -2610,7 +2610,7 @@ async fn fetch_and_cache_transient_origin_response(
     .await
 }
 
-fn current_time_millis() -> u64 { chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default() }
+use tuliprox_core::utils::current_time_millis;
 
 async fn release_prepared_hls_manifest_session(
     app_state: &Arc<AppState>,
@@ -2837,7 +2837,7 @@ impl HlsEntryStreamIdentity {
     }
 
     pub(in crate::api) fn from_playlist_item(item: &impl PlaylistEntry) -> Option<Self> {
-        let mut identity = Self::new(item.get_virtual_id(), item.get_input_stream_id()?)?;
+        let mut identity = Self::new(item.get_virtual_id().get(), item.get_input_stream_id()?)?;
         identity.upstream_user_agent = item.get_upstream_user_agent().map(Internable::intern);
         Some(identity)
     }
@@ -4990,11 +4990,10 @@ async fn try_reserve_hls_virtual_entry_origin_account_for_redirect(
         &app_state.admission_ctx(),
         user,
         fingerprint,
-        PlaylistItemType::LiveHls,
         None,
         &session_token,
         false,
-        EvictionReentryGuard::SocketPlayback { virtual_id },
+        EvictionReentryGuard::SocketPlayback { virtual_id: VirtualId::new(virtual_id) },
         false,
         false,
     )
@@ -6770,7 +6769,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
     original_hls_entry_path: &str,
 ) -> impl IntoResponse + Send {
     let virtual_id = stream_context.virtual_id();
-    if app_state.active_users.is_user_blocked_for_stream(&user.username, virtual_id).await {
+    if app_state.active_users.is_user_blocked_for_stream(&user.username, VirtualId::new(virtual_id)).await {
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
 
@@ -7191,7 +7190,11 @@ async fn resolve_hls_playback_manifest_request_context(
     let Some(input) = app_state.app_config.get_input_by_id(access_context.input_id) else {
         return Err(StatusCode::NOT_FOUND);
     };
-    if app_state.active_users.is_user_blocked_for_stream(&user.username, access_context.virtual_id).await {
+    if app_state
+        .active_users
+        .is_user_blocked_for_stream(&user.username, VirtualId::new(access_context.virtual_id))
+        .await
+    {
         return Err(StatusCode::FORBIDDEN);
     }
     let Some(channel) = get_stream_channel(app_state, &target, access_context.virtual_id).await else {
@@ -7506,7 +7509,6 @@ async fn admit_recovered_archive_stream(
         &app_state.admission_ctx(),
         user,
         fingerprint,
-        PlaylistItemType::Catchup,
         Some(&session),
         &session.token,
         true,
@@ -7774,11 +7776,6 @@ async fn hls_api_stream_resolved(
                 &app_state.admission_ctx(),
                 &user,
                 &fingerprint,
-                if is_m3u_catchup_session_token(&session.token) || archive_reference.is_some() {
-                    PlaylistItemType::Catchup
-                } else {
-                    PlaylistItemType::LiveHls
-                },
                 Some(session),
                 &session.token,
                 true,
@@ -8024,7 +8021,7 @@ mod tests {
             HlsManifestRecoveryBurstLevel, HlsSegmentRepairMode, HlsStripConfigDto, HlsStripMode, InputType,
             M3uPlaylistItem, M3uTargetOutputDto, PlaylistItem, PlaylistItemHeader, PlaylistItemType,
             ProviderUrlSelectionPolicy, ReverseProxyConfigDto, StreamConfigDto, StreamProperties, TargetOutputDto,
-            UserConnectionPermission, XtreamCluster, XtreamTargetOutputDto,
+            UserConnectionPermission, VirtualId, XtreamCluster, XtreamTargetOutputDto,
         },
         utils::Internable,
     };
@@ -8861,7 +8858,7 @@ mod tests {
         M3uPlaylistItem::from(&PlaylistItem {
             header: PlaylistItemHeader {
                 id: input_stream_id.intern(),
-                virtual_id,
+                virtual_id: VirtualId::new(virtual_id),
                 input_name: Arc::clone(&input.name),
                 url: url.intern(),
                 item_type: PlaylistItemType::LiveHls,
@@ -8886,7 +8883,7 @@ mod tests {
 
     async fn cache_test_m3u_hls_item(app_state: &Arc<AppState>, target: &ConfigTarget, item: M3uPlaylistItem) {
         let mut playlist = crate::repository::BPlusTree::new();
-        playlist.insert(item.virtual_id, item);
+        playlist.insert(item.virtual_id.get(), item);
         app_state
             .playlists
             .cache_playlist(&target.name, crate::api::model::PlaylistStorage::M3uPlaylist(Box::new(playlist)))
@@ -11244,8 +11241,10 @@ mod tests {
     async fn legacy_hls_manifest_deadline_includes_full_body_read() {
         let origin = spawn_test_encoded_manifest_origin(None, b"#EXTM3U\n".to_vec(), Duration::from_millis(100)).await;
         let input = legacy_manifest_test_input(&origin);
-        let hls_config =
-            HlsCacheConfig::from(&HlsCacheConfigDto { origin_manifest_timeout_ms: 10, ..Default::default() });
+        let hls_config = HlsCacheConfig::from(&HlsCacheConfigDto {
+            origin_manifest_timeout_ms: shared::model::Millis::new(10),
+            ..Default::default()
+        });
         let app_state = test_app_state_with_hls_proxy(Arc::new(HlsProxyManager::with_hls_cache_config(&hls_config)));
 
         let error = super::download_legacy_hls_manifest(&app_state, &input, &legacy_manifest_test_client_headers())
@@ -11640,7 +11639,11 @@ mod tests {
 
     #[tokio::test]
     async fn hls_access_lease_validity_uses_session_idle_timeout_not_cache_duration() {
-        let hls_dto = HlsCacheConfigDto { cache_duration: 900, session_idle_timeout: 42, ..Default::default() };
+        let hls_dto = HlsCacheConfigDto {
+            cache_duration: shared::model::Secs::new(900),
+            session_idle_timeout: shared::model::Secs::new(42),
+            ..Default::default()
+        };
         let hls_config = HlsCacheConfig::from(&hls_dto);
         let app_state = test_app_state_with_hls_proxy(Arc::new(HlsProxyManager::with_hls_cache_config(&hls_config)));
 
@@ -11865,7 +11868,7 @@ mod tests {
 
     #[tokio::test]
     async fn hls_lifecycle_session_idle_timer_removes_idle_session() {
-        let mut hls_dto = HlsCacheConfigDto { session_idle_timeout: 1, ..Default::default() };
+        let mut hls_dto = HlsCacheConfigDto { session_idle_timeout: shared::model::Secs::new(1), ..Default::default() };
         hls_dto.segment_repair.max_level = HlsSegmentRepairMode::Low;
         let hls_config = HlsCacheConfig::from(&hls_dto);
         let app_state = test_app_state_with_hls_proxy(Arc::new(HlsProxyManager::with_hls_cache_config(&hls_config)));
@@ -11928,7 +11931,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let mut hls_dto = HlsCacheConfigDto {
             cache_path: Some(temp_dir.path().to_string_lossy().into_owned()),
-            session_idle_timeout: 1,
+            session_idle_timeout: shared::model::Secs::new(1),
             ..Default::default()
         };
         hls_dto.segment_repair.max_level = HlsSegmentRepairMode::Low;
@@ -12172,6 +12175,13 @@ mod tests {
             geoip,
             update_guard: UpdateGuard::new(),
             metadata_manager,
+            identity_registry: Arc::new(tuliprox_repository::identity_registry::IdentityRegistry::empty(
+                std::path::PathBuf::new(),
+            )),
+            login_throttle: Arc::new(crate::auth::LoginThrottle::new()),
+            token_revocations: Arc::new(tuliprox_repository::token_revocations::TokenRevocations::empty(
+                std::path::PathBuf::new(),
+            )),
             manual_update_sender,
         })
     }
@@ -14666,7 +14676,8 @@ mod tests {
             enabled: true,
             ..ConfigInput::default()
         };
-        let hls_dto = HlsCacheConfigDto { origin_manifest_timeout_ms: 1_000, ..Default::default() };
+        let hls_dto =
+            HlsCacheConfigDto { origin_manifest_timeout_ms: shared::model::Millis::new(1_000), ..Default::default() };
         let hls_config = HlsCacheConfig::from(&hls_dto);
         let app_state = test_app_state_with_hls_proxy_and_inputs(
             Arc::new(HlsProxyManager::with_hls_cache_config(&hls_config)),

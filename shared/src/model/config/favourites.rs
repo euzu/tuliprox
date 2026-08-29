@@ -1,7 +1,7 @@
 use crate::{
     error::TuliproxError,
     foundation::{get_filter, Filter},
-    model::{PatternTemplate, XtreamCluster},
+    model::{PatternTemplate, Prepare, XtreamCluster},
     utils::{arc_str_serde, xtream_cluster_serde},
 };
 use std::sync::Arc;
@@ -21,8 +21,10 @@ pub struct ConfigFavouritesDto {
     pub t_filter: Option<Filter>,
 }
 
-impl ConfigFavouritesDto {
-    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
+impl Prepare for ConfigFavouritesDto {
+    type Ctx<'a> = Option<&'a [PatternTemplate]>;
+
+    fn prepare(&mut self, templates: Self::Ctx<'_>) -> Result<(), TuliproxError> {
         self.t_filter = Some(get_filter(&self.filter, templates)?);
         Ok(())
     }

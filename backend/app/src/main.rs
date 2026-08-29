@@ -38,7 +38,7 @@ use crate::{
     auth::generate_password,
     library::{LibraryProcessor, MediaToolProbes},
     model::{AppConfig, Config, Healthcheck, HealthcheckConfig, ProcessTargets, SourcesConfig},
-    processing::processor::exec_processing,
+    processing::processor::{exec_processing, ProcessingRun},
     repository::{db_viewer, run_startup_migrations},
     utils::{config_file_reader, init_logger, request::create_client, resolve_env_var},
 };
@@ -64,7 +64,6 @@ use tuliprox_core::{model, utils};
 use tuliprox_iptv as iptv;
 use tuliprox_library::library;
 use tuliprox_media_server as media_server;
-use tuliprox_messaging as messaging;
 use tuliprox_mpegts as mpegts;
 use tuliprox_processing as processing;
 use tuliprox_repository as repository;
@@ -166,7 +165,7 @@ impl Args {
     }
 }
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD_TIMESTAMP: &str = env!("VERGEN_BUILD_TIMESTAMP");
 
 // #[cfg(not(target_env = "msvc"))]
@@ -400,7 +399,7 @@ async fn start_in_cli_mode(cfg: Arc<AppConfig>, targets: Arc<ProcessTargets>) {
         reqwest::Client::new()
     });
     // In CLI mode, we don't start background managers for events or providers
-    exec_processing(&client, cfg, targets, None, None, None, None, None, None, None, None, None).await;
+    exec_processing(ProcessingRun::new(client, cfg, targets, shared::model::NoopSink)).await;
 }
 
 async fn start_in_server_mode(cfg: Arc<AppConfig>, targets: Arc<ProcessTargets>) {

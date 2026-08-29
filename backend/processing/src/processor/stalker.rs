@@ -360,9 +360,12 @@ fn groups_for_cluster(
     groups_map.into_values().collect()
 }
 
-fn stalker_err_to_repo(err: StalkerError) -> TuliproxError {
-    TuliproxError::ProviderConnection(format!("Stalker client error: {err}"))
-}
+/// Map a Stalker failure onto the workspace error type, keeping its classification.
+///
+/// Flattening everything to `ProviderConnection` read as "the network had a bad moment",
+/// so a misconfigured portal URL and a rejected password were both reported as connection
+/// trouble - and both counted as worth retrying.
+fn stalker_err_to_repo(err: StalkerError) -> TuliproxError { tuliprox_iptv::error::stalker_error_to_tuliprox(&err) }
 
 /// Cache key for the runtime client map. Built from explicit, non-secret
 /// fields — `StalkerInputConfig` carries the portal account credentials, so

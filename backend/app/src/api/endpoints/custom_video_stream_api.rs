@@ -233,7 +233,11 @@ async fn cvs_api_response(context: CvsApiResponseContext<'_>) -> Response {
             let Some(token) = token.as_deref() else {
                 return app_state.app_config.get_auth_error_status().into_response();
             };
-            if !verify_access_token(token, &app_state.app_config.access_token_secret) {
+            if !verify_access_token(
+                token,
+                &app_state.app_config.access_token_secret,
+                crate::auth::scope::INTERNAL_PLAYER,
+            ) {
                 return app_state.app_config.get_auth_error_status().into_response();
             }
             return create_custom_video_stream_response(
@@ -325,7 +329,7 @@ async fn validate_hls_standalone_custom_access(
     resolve_hls_cvs_access_user(app_state, fingerprint, access.username.as_ref()).map(|_| ())
 }
 
-fn current_time_millis() -> u64 { chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default() }
+use tuliprox_core::utils::current_time_millis;
 
 fn parse_cvs_standalone_hls_segment_file(segment_file: &str) -> Option<u16> {
     let index = segment_file.strip_suffix(".ts")?;
@@ -617,6 +621,7 @@ mod tests {
             mapping: Arc::new(ArcSwapOption::default()),
             favourites: None,
             processing_order: ProcessingOrder::default(),
+            execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
             watch: None,
             use_memory_cache: false,
         });
@@ -733,6 +738,13 @@ mod tests {
             geoip,
             update_guard: UpdateGuard::new(),
             metadata_manager,
+            identity_registry: Arc::new(tuliprox_repository::identity_registry::IdentityRegistry::empty(
+                std::path::PathBuf::new(),
+            )),
+            login_throttle: Arc::new(crate::auth::LoginThrottle::new()),
+            token_revocations: Arc::new(tuliprox_repository::token_revocations::TokenRevocations::empty(
+                std::path::PathBuf::new(),
+            )),
             manual_update_sender,
         })
     }

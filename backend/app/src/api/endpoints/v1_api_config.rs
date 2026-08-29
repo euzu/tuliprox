@@ -93,10 +93,21 @@ fn has_any_permission(permissions: PermissionSet, required: &[Permission]) -> bo
     required.iter().any(|permission| permissions.contains(*permission))
 }
 
+/// The permissions this token may act with *right now*.
+///
+/// The claim alone is a snapshot from mint time, so a revoked group permission
+/// kept filtering config in until the token expired. Intersecting with the live
+/// grant makes a revocation immediate without ever widening a token beyond what
+/// it was issued with.
 fn decode_permissions(app_state: &AppState, token: &str) -> Option<PermissionSet> {
     let config = app_state.app_config.config.load();
     let web_auth = config.web_ui.as_ref()?.auth.as_ref()?;
-    verify_token(token, web_auth.secret.as_bytes()).map(|token_data| token_data.claims.permissions)
+    let claims = verify_token(token, web_auth.secret.as_bytes(), &web_auth.issuer)?.claims;
+    Some(
+        web_auth
+            .resolve_permissions_if_known(&claims.username)
+            .map_or(claims.permissions, |live| claims.permissions & live),
+    )
 }
 
 fn filter_api_proxy_by_permissions(api_proxy: &mut ApiProxyConfigDto, permissions: PermissionSet) {
@@ -111,6 +122,14 @@ fn filter_api_proxy_by_permissions(api_proxy: &mut ApiProxyConfigDto, permission
 }
 
 fn filter_app_config_by_permissions(app_config: &mut shared::model::AppConfigDto, permissions: Option<PermissionSet>) {
+    // Unconditional: `config.yml` goes out in full to anyone with
+    // `ConfigRead`, which included the Telegram bot token, the Pushover
+    // credentials and any `Authorization` header on the REST channel.
+    // `save_config_main` puts a returned mask back, so the round-trip is
+    // lossless.
+    if let Some(messaging) = app_config.config.messaging.as_mut() {
+        messaging.redact_secrets();
+    }
     if let Some(permissions) = permissions {
         if !permissions.contains(Permission::ConfigRead) {
             app_config.config = ConfigDto::default();
@@ -184,6 +203,16 @@ async fn save_config_main(
         require_matching_revision(&headers, &current_revision, HEADER_CONFIG_MAIN_REVISION, "config.yml")
     {
         return response;
+    }
+
+    // A client that echoes a redacted secret back means "keep what is
+    // stored". Without this the round-trip would write the mask over the
+    // real token and silently break the channel.
+    if let Some(incoming) = cfg.messaging.as_mut() {
+        let stored = app_state.app_config.config.load();
+        if let Some(current) = stored.messaging.as_ref() {
+            incoming.restore_redacted_secrets(&shared::model::MessagingConfigDto::from(current));
+        }
     }
 
     if let Err(err) = cfg.prepare(false) {
@@ -559,7 +588,9 @@ async fn get_xtream_login_info(
         }
     };
     let http_client = app_state.http_client.load();
-    match xtream_login(&app_state.app_config, &http_client, &input_source, &request.username).await {
+    match xtream_login(&app_state.app_config, &http_client, &app_state.event_manager, &input_source, &request.username)
+        .await
+    {
         Ok(login_info) => axum::Json(login_info.unwrap_or_default()).into_response(),
         Err(err) => {
             error!("Failed to get xtream login info: {err}");
@@ -685,12 +716,98 @@ pub fn v1_api_config_register_with_permissions(app_state: &Arc<AppState>) -> Rou
         .layer(permission_layer!(app_state, Permission::SourceWrite));
 
     let config_write = Router::new()
+        .route("/config/messaging/test", axum::routing::post(test_messaging))
         .route("/config/main", axum::routing::post(save_config_main))
         .route("/config/apiproxy", axum::routing::put(save_config_api_proxy_config))
         .route("/config/plans", axum::routing::put(save_config_plans))
         .layer(permission_layer!(app_state, Permission::ConfigWrite));
 
     Router::new().merge(base_read).merge(config_read).merge(source_read).merge(source_write).merge(config_write)
+}
+
+/// Request body for `POST /config/messaging/test`.
+#[derive(serde::Deserialize)]
+pub struct MessagingTestRequest {
+    /// Event id to simulate. Defaults to `system.info`.
+    #[serde(default)]
+    pub event: Option<String>,
+    /// Restrict to one channel by its stable id (`telegram`, `discord`, ...).
+    /// Absent means every configured channel.
+    #[serde(default)]
+    pub channel: Option<String>,
+    /// Render only, send nothing. Lets a template be iterated without
+    /// spamming a channel.
+    #[serde(default)]
+    pub preview: bool,
+}
+
+/// What one channel did with the test event.
+#[derive(serde::Serialize)]
+pub struct MessagingTestChannelResult {
+    pub channel: String,
+    /// `delivered`, `skipped`, `retry`, `permanent`, or `preview`.
+    pub outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Exactly what the channel was asked to send.
+    pub rendered: String,
+    /// Whether an operator template produced `rendered`.
+    pub templated: bool,
+}
+
+#[derive(serde::Serialize)]
+pub struct MessagingTestResponse {
+    pub event: String,
+    pub severity: String,
+    pub results: Vec<MessagingTestChannelResult>,
+}
+
+/// Send (or render) a test notification.
+///
+/// Messaging config previously had no feedback loop shorter than "save it
+/// and wait for something to break". `preview` renders without sending, so a
+/// template can be iterated safely.
+async fn test_messaging(
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    axum::Json(request): axum::Json<MessagingTestRequest>,
+) -> impl axum::response::IntoResponse {
+    let requested = request.event.as_deref().unwrap_or("system.info");
+    let Some(event_id) = shared::model::notification::EventId::from_wire(requested) else {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({
+                "error": format!("unknown event `{requested}`"),
+            })),
+        )
+            .into_response();
+    };
+
+    let event = tuliprox_messaging::test_event(event_id);
+    let client = app_state.http_client.load();
+    let results = tuliprox_messaging::render_and_send_test(
+        &app_state.app_config,
+        &client,
+        &event,
+        request.channel.as_deref(),
+        request.preview,
+    )
+    .await;
+
+    let response = MessagingTestResponse {
+        event: event.id.to_string(),
+        severity: event.severity.to_string(),
+        results: results
+            .into_iter()
+            .map(|outcome| MessagingTestChannelResult {
+                channel: outcome.channel,
+                outcome: outcome.outcome,
+                reason: outcome.reason,
+                rendered: outcome.rendered,
+                templated: outcome.templated,
+            })
+            .collect(),
+    };
+    (axum::http::StatusCode::OK, axum::Json(response)).into_response()
 }
 
 #[cfg(test)]

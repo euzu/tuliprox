@@ -26,7 +26,8 @@ use log::{debug, error};
 use shared::model::{
     recording::{RecordingProvenance, RecordingVisibility},
     recording_rule::{RecordingRule, RuleBody, RuleSource, RuleVisibility, TombstoneSet},
-    Claims, EpgProgramme, Permission, PermissionSet, XtreamCluster, CURRENT_PERMISSION_SCHEMA_VERSION, ROLE_ADMIN,
+    Claims, EpgProgramme, EventSink, Permission, PermissionSet, RoleSet, XtreamCluster,
+    CURRENT_PERMISSION_SCHEMA_VERSION,
 };
 use tokio_util::sync::CancellationToken;
 use tuliprox_repository::recording_rule_repository::RecordingRuleRepository;
@@ -189,7 +190,10 @@ pub fn plan_materializations(
     out
 }
 
-pub fn spawn_recording_rule_scheduler(ctx: &RecordingCtx, cancel_token: &CancellationToken) {
+pub fn spawn_recording_rule_scheduler<E: EventSink + Clone + 'static>(
+    ctx: &RecordingCtx<E>,
+    cancel_token: &CancellationToken,
+) {
     let ctx = ctx.clone();
     let cancel_token = cancel_token.clone();
     tokio::spawn(async move {
@@ -205,7 +209,7 @@ pub fn spawn_recording_rule_scheduler(ctx: &RecordingCtx, cancel_token: &Cancell
     });
 }
 
-async fn materialize_due_rules(ctx: &RecordingCtx) -> Result<(), String> {
+async fn materialize_due_rules<E: EventSink + Clone + 'static>(ctx: &RecordingCtx<E>) -> Result<(), String> {
     // `recording.enabled: false` has to stop the scheduler too. Without
     // this the routes refuse every request while this loop keeps quietly
     // materializing tasks the worker will then run — the worst of both
@@ -299,7 +303,7 @@ fn warn_about_inert_new_episode_rules(rules: &[RecordingRule], epg_programmes: &
     );
 }
 
-pub async fn reconcilable_tasks(ctx: &RecordingCtx) -> Vec<ReconcilableTask> {
+pub async fn reconcilable_tasks<E: EventSink + Clone + 'static>(ctx: &RecordingCtx<E>) -> Vec<ReconcilableTask> {
     let mut tasks = Vec::new();
     for task in ctx.downloads.queue.lock().await.iter() {
         push_reconcilable(&mut tasks, task);
@@ -333,7 +337,7 @@ fn push_reconcilable(tasks: &mut Vec<ReconcilableTask>, task: &FileDownload) {
 fn scheduler_claims(owner_id: shared::model::UserId, visibility: RuleVisibility) -> Claims {
     let mut permissions = PermissionSet::new();
     permissions.set(Permission::RecordingWrite);
-    let roles = if visibility == RuleVisibility::Shared { vec![ROLE_ADMIN.to_string()] } else { Vec::new() };
+    let roles = if visibility == RuleVisibility::Shared { RoleSet::ADMIN } else { RoleSet::new() };
     let now = Utc::now().timestamp();
     Claims {
         username: "recording-scheduler".to_string(),

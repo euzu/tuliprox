@@ -188,6 +188,28 @@ impl WebAuthConfig {
         permissions
     }
 
+    /// The live permissions for `username`, or `None` when the principal is
+    /// not a web user at all.
+    ///
+    /// `resolve_permissions` cannot express that difference: it answers
+    /// "no permissions" both for a user with an empty group set and for a
+    /// principal it has never heard of. A proxy API user is the second case,
+    /// and treating it as the first would deny every request it makes.
+    pub fn resolve_permissions_if_known(&self, username: &str) -> Option<PermissionSet> {
+        self.t_users
+            .as_ref()?
+            .iter()
+            .any(|candidate| candidate.username.eq_ignore_ascii_case(username))
+            .then(|| self.resolve_permissions(username))
+    }
+
+    /// The current password version for `username`, or `None` when the
+    /// principal has no password on file here - proxy API users authenticate
+    /// against `api_proxy.yml` and carry no password version.
+    pub fn pwd_version_for(&self, username: &str) -> Option<u32> {
+        self.get_user_password(username).map(Self::pwd_version_from_hash)
+    }
+
     pub fn pwd_version_from_hash(hash: &str) -> u32 {
         let digest = blake3::hash(hash.as_bytes());
         let bytes = digest.as_bytes();

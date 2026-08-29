@@ -45,15 +45,30 @@ impl AppState {
 /// Declare a view: the accessor name, the context type, and the `AppState`
 /// fields it clones. Field names are the same on both sides by construction -
 /// a view renaming a handle would be a view lying about what it reads.
+///
+/// The one permitted exception is `ctx_field <- state_field`, for a context
+/// that is generic over a handle `AppState` holds concretely - `events <-
+/// event_manager`. The context names the handle by the role it plays,
+/// because it is written against a bound rather than against
+/// `EventManager`; the view still reads exactly the handle it names.
+macro_rules! view_field {
+    ($state:ident, $field:ident) => {
+        ::core::clone::Clone::clone(&$state.$field)
+    };
+    ($state:ident, $field:ident, $source:ident) => {
+        ::core::clone::Clone::clone(&$state.$source)
+    };
+}
+
 macro_rules! app_state_views {
     ($(
         $(#[$meta:meta])*
-        $accessor:ident => $ctx:ty { $($field:ident),+ $(,)? }
+        $accessor:ident => $ctx:ty { $($field:ident $(<- $source:ident)?),+ $(,)? }
     )+) => {
         $(
             impl AppStateView for $ctx {
                 fn from_app_state(state: &AppState) -> Self {
-                    Self { $($field: ::core::clone::Clone::clone(&state.$field)),+ }
+                    Self { $($field: view_field!(state, $field $(, $source)?)),+ }
                 }
             }
 
@@ -70,8 +85,8 @@ macro_rules! app_state_views {
 
 app_state_views! {
     /// The handles the DVR needs: the recording queue and what feeds it.
-    recording_ctx => crate::api::model::recording::recording_ctx::RecordingCtx {
-        app_config, downloads, event_manager, http_client,
+    recording_ctx => crate::api::model::recording::recording_ctx::RecordingCtx<std::sync::Arc<tuliprox_session::EventManager>> {
+        app_config, downloads, events <- event_manager, http_client,
     }
 
     /// The handles the HLS proxy needs: itself, plus provider allocation and
@@ -92,8 +107,8 @@ app_state_views! {
     }
 
     /// The handles the background metadata worker reads.
-    metadata_update_ctx => tuliprox_metadata::ctx::MetadataUpdateCtx {
-        app_config, active_provider, connection_manager, event_manager, playlists, update_guard,
+    metadata_update_ctx => tuliprox_metadata::ctx::BoundMetadataUpdateCtx {
+        app_config, active_provider, connection_manager, events <- event_manager, playlists, update_guard,
         http_client, http_client_no_redirect,
     }
 }

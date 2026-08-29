@@ -1,9 +1,8 @@
 use crate::storage_const;
-use fs2::FileExt;
 use shared::{concat_string, error::TuliproxError};
 use std::{
     collections::HashMap,
-    fs::{File, OpenOptions},
+    fs::{File, OpenOptions, TryLockError},
     io,
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
@@ -115,7 +114,7 @@ impl XtreamRefreshGenerationGuard {
     pub fn acquire(storage_path: &Path, generation: Uuid) -> io::Result<Self> {
         let path = refresh_generation_guard_path(storage_path, generation);
         let file = OpenOptions::new().read(true).write(true).create_new(true).open(&path)?;
-        if let Err(error) = file.lock_exclusive() {
+        if let Err(error) = file.lock() {
             drop(file);
             if let Err(remove_error) = std::fs::remove_file(&path) {
                 if remove_error.kind() != io::ErrorKind::NotFound {
@@ -136,7 +135,7 @@ impl XtreamRefreshGenerationGuard {
 impl Drop for XtreamRefreshGenerationGuard {
     fn drop(&mut self) {
         if let Some(file) = self.file.take() {
-            if let Err(error) = FileExt::unlock(&file) {
+            if let Err(error) = file.unlock() {
                 log::warn!(
                     "Failed to unlock Xtream refresh generation guard {}: {error}; the OS will release it on close",
                     self.path.display()
@@ -176,10 +175,10 @@ fn try_claim_refresh_generation(storage_path: &Path, generation: Uuid) -> io::Re
             }
             Err(error) => return Err(error),
         };
-        return match file.try_lock_exclusive() {
+        return match file.try_lock() {
             Ok(()) => Ok(RefreshGenerationClaim::Acquired(XtreamRefreshGenerationGuard::from_locked_file(path, file))),
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(RefreshGenerationClaim::Active),
-            Err(error) => Err(error),
+            Err(TryLockError::WouldBlock) => Ok(RefreshGenerationClaim::Active),
+            Err(TryLockError::Error(error)) => Err(error),
         };
     }
     Err(io::Error::new(
@@ -353,7 +352,6 @@ mod tests {
         cleanup_orphaned_staging_artifacts, cleanup_orphaned_staging_artifacts_with_hook, is_orphan_staging_name,
         refresh_generation_guard_path, XtreamRefreshGenerationGuard,
     };
-    use fs2::FileExt;
     use std::{
         env, fs, io,
         path::{Path, PathBuf},
@@ -606,9 +604,8 @@ mod tests {
         );
         let competing_file =
             fs::OpenOptions::new().read(true).write(true).open(&guard_path).expect("open claimed generation guard");
-        let contention =
-            competing_file.try_lock_exclusive().expect_err("cleanup must retain generation lock through deletion");
-        assert_eq!(contention.kind(), io::ErrorKind::WouldBlock);
+        let contention = competing_file.try_lock().expect_err("cleanup must retain generation lock through deletion");
+        assert!(matches!(contention, fs::TryLockError::WouldBlock));
         release_sender.send(()).expect("release cleanup");
         cleanup.join().expect("cleanup thread should complete");
 

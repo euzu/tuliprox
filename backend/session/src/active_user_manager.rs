@@ -1,6 +1,5 @@
 use crate::{
     active_provider_manager::ConnectionKind, connection_manager::CleanupEvent, ActiveProviderManager, EventManager,
-    EventMessage,
 };
 use arc_swap::ArcSwapOption;
 use jsonwebtoken::get_current_timestamp;
@@ -11,7 +10,7 @@ use shared::{
         default_grace_period_millis, default_grace_period_timeout_secs, default_hls_session_ttl_secs, DASH_EXT, HLS_EXT,
     },
     model::{
-        ActiveUserConnectionChange, CustomVideoStreamType, PlaylistItemType, StreamChannel, StreamInfo,
+        ActiveUserConnectionChange, CustomVideoStreamType, EventMessage, PlaylistItemType, StreamChannel, StreamInfo,
         StreamTechnicalInfo, UserConnectionPermission, VirtualId,
     },
     utils::{
@@ -620,6 +619,13 @@ impl ActiveUserManager {
             audio_channels: String::from("Stereo"),
         }
     }
+
+    /// The bus this manager publishes on.
+    ///
+    /// Exposed so the admission path can report a refusal without
+    /// `AdmissionCtx` growing a second handle to the same manager.
+    #[must_use]
+    pub fn events(&self) -> &Arc<EventManager> { &self.event_manager }
 
     pub fn new(config: &Config, geoip: &Arc<ArcSwapOption<GeoIp>>, event_manager: &Arc<EventManager>) -> Self {
         let log_active_user: bool = config.log.as_ref().is_some_and(|l| l.log_active_user);
@@ -3042,7 +3048,7 @@ impl ActiveUserManager {
                 socket_guard_keys.push(create_socket_reentry_guard_key(
                     &username,
                     &stream.client_ip,
-                    stream.channel.virtual_id,
+                    shared::model::VirtualId::new(stream.channel.virtual_id),
                 ));
             }
         }
@@ -5546,7 +5552,13 @@ mod tests {
         manager.mark_recent_eviction_guard_for_addr(&evicted_addr, protected_addr, 10).await;
 
         assert_eq!(
-            manager.recent_socket_reentry_protected_addr("vod-no-token-user", "127.0.0.1", channel.virtual_id).await,
+            manager
+                .recent_socket_reentry_protected_addr(
+                    "vod-no-token-user",
+                    "127.0.0.1",
+                    shared::model::VirtualId::new(channel.virtual_id)
+                )
+                .await,
             Some(protected_addr)
         );
     }

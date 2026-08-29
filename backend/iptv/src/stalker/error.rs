@@ -1,18 +1,10 @@
+use crate::{redaction, stalker::action::StalkerAction};
 use std::io;
 use thiserror::Error;
-use url::Url;
 
-pub fn safe_stalker_url(value: &str) -> String {
-    let Ok(mut url) = Url::parse(value) else {
-        return "[redacted invalid URL]".to_string();
-    };
-    if !matches!(url.scheme(), "http" | "https") || url.set_username("").is_err() || url.set_password(None).is_err() {
-        return "[redacted invalid URL]".to_string();
-    }
-    url.set_query(None);
-    url.set_fragment(None);
-    url.into()
-}
+/// Render a portal URL safely. Kept as this module's name for its existing callers; the
+/// rule itself lives in [`crate::redaction`] alongside the rest.
+pub fn safe_stalker_url(value: &str) -> String { redaction::safe_url(value) }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StalkerErrorUrl(String);
@@ -38,10 +30,10 @@ pub enum StalkerError {
     TokenRejected { status: u16, url: Option<StalkerErrorUrl> },
 
     #[error("stalker portal body reported code {code} for {action}: {body_snippet}")]
-    PortalBodyError { code: u16, action: String, body_snippet: String },
+    PortalBodyError { code: u16, action: StalkerAction, body_snippet: String },
 
     #[error("stalker portal response exceeded {action} body cap of {cap_bytes} bytes")]
-    ResponseTooLarge { action: String, cap_bytes: u64 },
+    ResponseTooLarge { action: StalkerAction, cap_bytes: u64 },
 
     #[error("stalker portal refused the cmd: {reason}")]
     PortalRefusedCmd { reason: String },
@@ -56,13 +48,16 @@ pub enum StalkerError {
     HtmlResponse { snippet: String },
 
     #[error("stalker portal returned an empty body for {action}")]
-    EmptyBody { action: String },
+    EmptyBody { action: StalkerAction },
+
+    #[error("stalker portal does not implement {action}")]
+    ActionUnsupported { action: StalkerAction },
 
     #[error("stalker {portal_type} catalog is incomplete: {reason}")]
     CatalogIncomplete { portal_type: &'static str, reason: String },
 
     #[error("stalker portal response status {status} for {action}")]
-    BadStatus { status: u16, action: String, body_snippet: String },
+    BadStatus { status: u16, action: StalkerAction, body_snippet: String },
 
     #[error("stalker client exhausted all bootstrap recipes for portal {portal}")]
     RecipesExhausted { portal: String },
@@ -109,15 +104,72 @@ impl StalkerError {
 
     pub fn is_unsupported_catalog_action(&self) -> bool {
         match self {
-            Self::BodyDecode { .. } | Self::HtmlResponse { .. } => true,
-            Self::EmptyBody { action } => action == "get_all_channels",
+            Self::ActionUnsupported { .. } | Self::BodyDecode { .. } | Self::HtmlResponse { .. } => true,
+            Self::EmptyBody { action } => action.is_optional_catalog_shortcut(),
             Self::BadStatus { status, action, .. } => {
-                action == "get_all_channels" && matches!(*status, 400 | 404 | 405 | 501)
+                action.is_optional_catalog_shortcut() && matches!(*status, 400 | 404 | 405 | 501)
             }
-            Self::PortalBodyError { action, .. } => action == "get_all_channels" && !self.is_token_rejected(),
+            Self::PortalBodyError { action, .. } => action.is_optional_catalog_shortcut() && !self.is_token_rejected(),
             _ => false,
         }
     }
+}
+
+/// What kind of failure this is, independent of which variant carried it.
+///
+/// Callers were pattern-matching on variants to answer questions the variants were never
+/// organised around — "should I retry this?", "is the provider down or is my token
+/// stale?". The sibling `tuliprox-media-server` crate answers the same questions with a
+/// `MediaServerErrorKind`; this is its counterpart, and it is what
+/// [`StalkerError::is_retryable`] is built on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StalkerErrorKind {
+    /// The portal rejected our identity: a stale token, a blocked account.
+    /// Re-handshaking is the fix.
+    Auth,
+    /// The portal or the network failed in a way that may not repeat.
+    Transient,
+    /// The portal answered, but not in a shape we can use: HTML, bad JSON, a missing
+    /// field. Retrying the same call gets the same answer.
+    Protocol,
+    /// A limit we imposed was hit — a body cap, the configured page limit.
+    Capacity,
+    /// The input is misconfigured: no reachable endpoint, an invalid device profile.
+    Config,
+}
+
+impl StalkerError {
+    /// Classify the failure. See [`StalkerErrorKind`].
+    #[must_use]
+    pub fn kind(&self) -> StalkerErrorKind {
+        if self.is_token_rejected() {
+            return StalkerErrorKind::Auth;
+        }
+        match self {
+            Self::TokenRejected { .. } | Self::HandshakeFailed { .. } | Self::RecipesExhausted { .. } => {
+                StalkerErrorKind::Auth
+            }
+            Self::ResponseTooLarge { .. } | Self::CatalogIncomplete { .. } => StalkerErrorKind::Capacity,
+            Self::NoEndpoint { .. } | Self::InvalidProfile { .. } | Self::UnsupportedScheme { .. } => {
+                StalkerErrorKind::Config
+            }
+            Self::BodyDecode { .. }
+            | Self::HtmlResponse { .. }
+            | Self::EmptyBody { .. }
+            | Self::PortalRefusedCmd { .. }
+            | Self::ActionUnsupported { .. }
+            | Self::PortalBodyError { .. } => StalkerErrorKind::Protocol,
+            Self::BadStatus { .. } | Self::RequestBuild(_) | Self::Io(_) => StalkerErrorKind::Transient,
+        }
+    }
+
+    /// Whether trying the same call again could plausibly succeed.
+    ///
+    /// [`StalkerErrorKind::Auth`] is retryable only after a re-handshake, which is a
+    /// different call; it is reported here as not retryable so a caller does not loop on
+    /// a rejected token. Use [`Self::is_token_rejected`] for that path.
+    #[must_use]
+    pub fn is_retryable(&self) -> bool { matches!(self.kind(), StalkerErrorKind::Transient) }
 }
 
 pub type StalkerResult<T> = Result<T, StalkerError>;
@@ -125,6 +177,56 @@ pub type StalkerResult<T> = Result<T, StalkerError>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_variant_classifies_and_only_transient_failures_are_retried() {
+        let cases: [(StalkerError, StalkerErrorKind); 8] = [
+            (StalkerError::TokenRejected { status: 401, url: None }, StalkerErrorKind::Auth),
+            (
+                StalkerError::PortalBodyError {
+                    code: 44,
+                    action: StalkerAction::GetOrderedList,
+                    body_snippet: String::new(),
+                },
+                StalkerErrorKind::Auth,
+            ),
+            (StalkerError::RecipesExhausted { portal: "p".into() }, StalkerErrorKind::Auth),
+            (
+                StalkerError::ResponseTooLarge { action: StalkerAction::GetOrderedList, cap_bytes: 1 },
+                StalkerErrorKind::Capacity,
+            ),
+            (StalkerError::NoEndpoint { portal: "p".into() }, StalkerErrorKind::Config),
+            (StalkerError::HtmlResponse { snippet: "<html>".into() }, StalkerErrorKind::Protocol),
+            (
+                StalkerError::BadStatus {
+                    status: 502,
+                    action: StalkerAction::GetOrderedList,
+                    body_snippet: String::new(),
+                },
+                StalkerErrorKind::Transient,
+            ),
+            (StalkerError::Io(std::io::Error::other("reset")), StalkerErrorKind::Transient),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(error.kind(), expected, "{error}");
+            assert_eq!(
+                error.is_retryable(),
+                expected == StalkerErrorKind::Transient,
+                "only a transient failure is worth repeating verbatim: {error}"
+            );
+        }
+    }
+
+    /// A 401 arriving as `BadStatus` rather than `TokenRejected` must still classify as
+    /// auth - the two variants describe the same portal answer.
+    #[test]
+    fn a_rejected_token_classifies_as_auth_whichever_variant_carries_it() {
+        let as_status =
+            StalkerError::BadStatus { status: 403, action: StalkerAction::GetOrderedList, body_snippet: String::new() };
+        assert_eq!(as_status.kind(), StalkerErrorKind::Auth);
+        assert!(!as_status.is_retryable(), "looping on a rejected token is never right");
+    }
 
     #[test]
     fn no_content_token_rejection_is_recognized() {

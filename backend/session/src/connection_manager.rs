@@ -1,13 +1,13 @@
 use crate::{
     uses_direct_body_idle_timeout, ActiveProviderManager, ActiveUserConnectionParams, ActiveUserManager, EventManager,
-    EventMessage, SharedStreamManager,
+    SharedStreamManager,
 };
 use arc_swap::ArcSwapOption;
 use log::{debug, warn};
 use shared::{
     model::{
-        ActiveUserConnectionChange, ConnectFailureReason, CustomVideoStreamType, DisconnectReason, FailureStage,
-        StreamChannel, StreamInfo, VirtualId,
+        ActiveUserConnectionChange, ConnectFailureReason, CustomVideoStreamType, DisconnectReason, EventMessage,
+        FailureStage, StreamChannel, StreamInfo, VirtualId,
     },
     utils::sanitize_sensitive_info,
 };
@@ -305,7 +305,9 @@ async fn release_connection_parts(
         }
     }
     for stream_info in &removed.removed_streams {
-        let (bytes_sent, first_byte_latency_ms) = deps.event_manager.read_meter_qos(stream_info.meter_uid).await;
+        let qos = deps.event_manager.read_meter_qos(stream_info.meter_uid).await;
+        let bytes_sent = qos.map(|qos| qos.bytes_total);
+        let first_byte_latency_ms = qos.and_then(|qos| qos.first_byte_latency_ms);
         deps.event_manager.unregister_meter_client(stream_info.uid).await;
         emit_disconnect_record(
             &deps.history_writer,
@@ -406,7 +408,11 @@ async fn handle_update_detail_and_release_provider(
     if let Some(stream_info) = deps.user_manager.update_stream_detail(&addr, video_type).await {
         if matches!(video_type, CustomVideoStreamType::LowPriorityPreempted) {
             deps.user_manager
-                .block_user_for_stream(&addr, stream_info.channel.virtual_id, PREEMPT_REENTRY_BLOCK_SECS)
+                .block_user_for_stream(
+                    &addr,
+                    shared::model::VirtualId::new(stream_info.channel.virtual_id),
+                    PREEMPT_REENTRY_BLOCK_SECS,
+                )
                 .await;
         }
         deps.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info)));
@@ -425,7 +431,11 @@ async fn handle_update_detail_and_release_provider_connection(
     if let Some(stream_info) = deps.user_manager.update_stream_detail(&addr, video_type).await {
         if matches!(video_type, CustomVideoStreamType::LowPriorityPreempted) {
             deps.user_manager
-                .block_user_for_stream(&addr, stream_info.channel.virtual_id, PREEMPT_REENTRY_BLOCK_SECS)
+                .block_user_for_stream(
+                    &addr,
+                    shared::model::VirtualId::new(stream_info.channel.virtual_id),
+                    PREEMPT_REENTRY_BLOCK_SECS,
+                )
                 .await;
         }
         deps.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info)));
@@ -436,7 +446,9 @@ async fn handle_update_detail_and_release_provider_connection(
 }
 
 async fn handle_adaptive_session_expired(deps: &CleanupWorkerDeps, stream_info: Box<StreamInfo>) {
-    let (bytes_sent, first_byte_latency_ms) = deps.event_manager.read_meter_qos(stream_info.meter_uid).await;
+    let qos = deps.event_manager.read_meter_qos(stream_info.meter_uid).await;
+    let bytes_sent = qos.map(|qos| qos.bytes_total);
+    let first_byte_latency_ms = qos.and_then(|qos| qos.first_byte_latency_ms);
     deps.event_manager.unregister_meter_client(stream_info.uid).await;
     emit_disconnect_record(
         &deps.history_writer,
@@ -475,7 +487,9 @@ async fn release_stream_with_disconnect(
         );
         return None;
     };
-    let (bytes_sent, first_byte_latency_ms) = deps.event_manager.read_meter_qos(stream_info.meter_uid).await;
+    let qos = deps.event_manager.read_meter_qos(stream_info.meter_uid).await;
+    let bytes_sent = qos.map(|qos| qos.bytes_total);
+    let first_byte_latency_ms = qos.and_then(|qos| qos.first_byte_latency_ms);
     deps.event_manager.unregister_meter_client(stream_info.uid).await;
     let reason = resolve_disconnect_reason(provider_end_reason, &stream_info);
     let provider_reconnect_count = (reconnect_count > 0).then_some(reconnect_count);
@@ -927,7 +941,9 @@ impl ConnectionManager {
             self.user_manager.terminate_sessions_for_addr(username, addr).await;
         }
         for stream_info in &removed.removed_streams {
-            let (bytes_sent, first_byte_latency_ms) = self.event_manager.read_meter_qos(stream_info.meter_uid).await;
+            let qos = self.event_manager.read_meter_qos(stream_info.meter_uid).await;
+            let bytes_sent = qos.map(|qos| qos.bytes_total);
+            let first_byte_latency_ms = qos.and_then(|qos| qos.first_byte_latency_ms);
             self.event_manager.unregister_meter_client(stream_info.uid).await;
             emit_disconnect_record(
                 &self.history_writer,
@@ -951,7 +967,9 @@ impl ConnectionManager {
 
     pub async fn release_stream(&self, addr: &SocketAddr) {
         if let Some(stream_info) = self.user_manager.release_stream(addr).await {
-            let (bytes_sent, first_byte_latency_ms) = self.event_manager.read_meter_qos(stream_info.meter_uid).await;
+            let qos = self.event_manager.read_meter_qos(stream_info.meter_uid).await;
+            let bytes_sent = qos.map(|qos| qos.bytes_total);
+            let first_byte_latency_ms = qos.and_then(|qos| qos.first_byte_latency_ms);
             self.event_manager.unregister_meter_client(stream_info.uid).await;
             emit_disconnect_record(
                 &self.history_writer,
@@ -1010,7 +1028,9 @@ impl ConnectionManager {
     pub async fn shutdown(&self) {
         let active_streams = self.user_manager.get_all_active_streams().await;
         for stream_info in active_streams {
-            let (bytes_sent, first_byte_latency_ms) = self.event_manager.read_meter_qos(stream_info.meter_uid).await;
+            let qos = self.event_manager.read_meter_qos(stream_info.meter_uid).await;
+            let bytes_sent = qos.map(|qos| qos.bytes_total);
+            let first_byte_latency_ms = qos.and_then(|qos| qos.first_byte_latency_ms);
             emit_disconnect_record(
                 &self.history_writer,
                 &stream_info,
@@ -1419,7 +1439,7 @@ mod tests {
         let mut rx = manager.get_close_connection_channel();
         let addr: SocketAddr = "127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!());
 
-        assert!(manager.kick_connection(&addr, 1, 0).await);
+        assert!(manager.kick_connection(&addr, shared::model::VirtualId::new(1), 0).await);
         assert_eq!(rx.recv().await.ok(), Some(CloseConnectionSignal::WithReason(addr, DisconnectReason::ClientKicked)));
     }
 
@@ -1452,7 +1472,16 @@ mod tests {
         let mut rx = manager.get_close_connection_channel();
         let addr: SocketAddr = "127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!());
 
-        assert!(manager.close_connection_with_reason_and_block(&addr, 7, 0, DisconnectReason::Provisioning).await);
+        assert!(
+            manager
+                .close_connection_with_reason_and_block(
+                    &addr,
+                    shared::model::VirtualId::new(7),
+                    0,
+                    DisconnectReason::Provisioning
+                )
+                .await
+        );
         assert_eq!(rx.recv().await.ok(), Some(CloseConnectionSignal::WithReason(addr, DisconnectReason::Provisioning)));
     }
 
@@ -1514,7 +1543,10 @@ mod tests {
         handle_update_detail_and_release_provider(&deps, addr, CustomVideoStreamType::LowPriorityPreempted, None).await;
 
         assert!(
-            manager.user_manager.is_user_blocked_for_stream(&user.username, channel.virtual_id).await,
+            manager
+                .user_manager
+                .is_user_blocked_for_stream(&user.username, shared::model::VirtualId::new(channel.virtual_id))
+                .await,
             "preempted playback should be blocked briefly to prevent immediate reconnect ping-pong"
         );
     }
@@ -1577,7 +1609,10 @@ mod tests {
         handle_update_detail_and_release_provider(&deps, addr, CustomVideoStreamType::LowPriorityPreempted, None).await;
 
         assert!(
-            manager.user_manager.is_user_blocked_for_stream(&user.username, channel.virtual_id).await,
+            manager
+                .user_manager
+                .is_user_blocked_for_stream(&user.username, shared::model::VirtualId::new(channel.virtual_id))
+                .await,
             "preempted HLS playback should be blocked briefly to prevent immediate reconnect ping-pong"
         );
     }

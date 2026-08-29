@@ -4,9 +4,9 @@ use shared::{
     concat_string,
     error::TuliproxError,
     model::{
-        InputType, PlaylistEntry, PlaylistGroup, ProxyUserStatus, SeriesStreamProperties, StreamProperties,
-        VideoStreamProperties, XtreamCluster, XtreamLoginInfo, XtreamPlaylistItem, XtreamSeriesInfo, XtreamVideoInfo,
-        XtreamVideoInfoDoc,
+        EventMessage, EventSink, InputType, PlaylistEntry, PlaylistGroup, ProviderAccountEvent, ProviderAccountState,
+        ProxyUserStatus, SeriesStreamProperties, StreamProperties, VideoStreamProperties, XtreamCluster,
+        XtreamLoginInfo, XtreamPlaylistItem, XtreamSeriesInfo, XtreamVideoInfo, XtreamVideoInfoDoc,
     },
     utils::{
         extract_extension_from_url, get_i64_from_serde_value, get_string_from_serde_value, sanitize_sensitive_info,
@@ -17,11 +17,10 @@ use std::{collections::HashMap, io::Error, str::FromStr, sync::Arc};
 use tuliprox_core::{
     model::{
         is_input_expired, xtream_mapping_option_from_target_options, AppConfig, ConfigInput, ConfigInputFlags,
-        ConfigTarget, InputSource, MessageContent, ProxyUserCredentials, XtreamTargetOutput,
+        ConfigTarget, InputSource, ProxyUserCredentials, XtreamTargetOutput,
     },
     utils::request,
 };
-use tuliprox_messaging::send_message;
 use tuliprox_parser::{xtream, xtream::parse_xtream_series_info};
 use tuliprox_repository::{
     get_input_storage_path, get_target_id_mapping, get_target_storage_path, persist_input_vod_info,
@@ -231,7 +230,7 @@ pub async fn get_xtream_stream_info(
                                                     provider_series.entry(pli.get_uuid().intern()).or_default().push(
                                                         ProviderEpisodeKey {
                                                             provider_id: episode_provider_id,
-                                                            virtual_id: episode.header.virtual_id,
+                                                            virtual_id: episode.header.virtual_id.get(),
                                                         },
                                                     );
                                                     if target.use_memory_cache {
@@ -374,9 +373,10 @@ const ACTIONS: [(XtreamCluster, &str, &str); 3] = [
     ),
 ];
 
-pub async fn xtream_login(
+pub async fn xtream_login<E: EventSink>(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
+    events: &E,
     input: &InputSource,
     username: &str,
 ) -> Result<Option<XtreamLoginInfo>, TuliproxError> {
@@ -403,12 +403,15 @@ pub async fn xtream_login(
                     login_info.status = Some(cur_status);
                     if !matches!(cur_status, ProxyUserStatus::Active | ProxyUserStatus::Trial) {
                         warn!("User status for user {username} is {cur_status:?}");
-                        send_message(
-                            app_config,
-                            client,
-                            MessageContent::Error(format!("User status for user {username} is {cur_status:?}")),
-                        )
-                        .await;
+                        let text = format!("User status for user {username} is {cur_status:?}");
+                        events.emit(EventMessage::ProviderAccount(ProviderAccountEvent {
+                            state: ProviderAccountState::StatusChanged,
+                            username: username.to_string(),
+                            provider: input.name.to_string(),
+                            status: Some(format!("{cur_status:?}")),
+                            expires_at: None,
+                            message: text,
+                        }));
                     }
                 }
             }
@@ -417,7 +420,7 @@ pub async fn xtream_login(
         if let Some(exp_value) = user_info.get("exp_date") {
             if let Some(expiration_timestamp) = get_i64_from_serde_value(exp_value) {
                 login_info.exp_date = Some(expiration_timestamp);
-                notify_account_expire(login_info.exp_date, app_config, client, username, &input.name).await;
+                notify_account_expire(login_info.exp_date, events, username, &input.name);
             }
         }
     }
@@ -429,15 +432,27 @@ pub async fn xtream_login(
     }
 }
 
-pub async fn notify_account_expire(
+/// Publish the account-expiry state for `username` on `input_name`.
+///
+/// Emitting is synchronous and non-blocking, so this no longer awaits: the
+/// notification is delivered by whoever subscribes to the bus.
+pub fn notify_account_expire<E: EventSink>(exp_date: Option<i64>, events: &E, username: &str, input_name: &str) {
+    notify_account_expire_at(Utc::now().timestamp(), exp_date, events, username, input_name);
+}
+
+/// [`notify_account_expire`] against a caller-supplied instant.
+///
+/// The three-day warning window and the expired/expiring split are pure functions of
+/// `now_secs`; taking it as a parameter is what makes either branch reachable without
+/// waiting for the calendar.
+pub fn notify_account_expire_at<E: EventSink>(
+    now_secs: i64,
     exp_date: Option<i64>,
-    app_config: &Arc<AppConfig>,
-    client: &reqwest::Client,
+    events: &E,
     username: &str,
     input_name: &str,
 ) {
     if let Some(expiration_timestamp) = exp_date {
-        let now_secs = Utc::now().timestamp(); // UTC-Time
         if expiration_timestamp > now_secs {
             let time_left = expiration_timestamp - now_secs;
 
@@ -445,22 +460,32 @@ pub async fn notify_account_expire(
                 if let Some(datetime) = DateTime::<Utc>::from_timestamp(expiration_timestamp, 0) {
                     let formatted = datetime.format("%Y-%m-%d %H:%M:%S").to_string();
                     warn!("User account for user {username} expires {formatted}");
-                    send_message(
-                        app_config,
-                        client,
-                        MessageContent::Info(format!("User account for user {username} expires {formatted}")),
-                    )
-                    .await;
+                    let text = format!("User account for user {username} expires {formatted}");
+                    // The suppression key lives on `ProviderAccountEvent`;
+                    // re-checked on every refresh, this would otherwise
+                    // notify on each playlist update for the three days
+                    // before expiry.
+                    events.emit(EventMessage::ProviderAccount(ProviderAccountEvent {
+                        state: ProviderAccountState::Expiring,
+                        username: username.to_string(),
+                        provider: input_name.to_string(),
+                        status: None,
+                        expires_at: Some(expiration_timestamp),
+                        message: text,
+                    }));
                 }
             }
         } else {
             warn!("User account for user {username} is expired");
-            send_message(
-                app_config,
-                client,
-                MessageContent::Info(format!("User account for user {username} for provider {input_name} is expired")),
-            )
-            .await;
+            let text = format!("User account for user {username} for provider {input_name} is expired");
+            events.emit(EventMessage::ProviderAccount(ProviderAccountEvent {
+                state: ProviderAccountState::Expired,
+                username: username.to_string(),
+                provider: input_name.to_string(),
+                status: None,
+                expires_at: Some(expiration_timestamp),
+                message: text,
+            }));
         }
     }
 }
@@ -479,9 +504,10 @@ pub fn requested_clusters(requested: Option<&[XtreamCluster]>, skip_cluster: &[X
 }
 
 /// Downloads xtream clusters from a single source (either main input or staged input).
-async fn download_xtream_from_source(
+async fn download_xtream_from_source<E: EventSink>(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
+    events: &E,
     input: &ConfigInput,
     input_source: &InputSource,
     source_input_type: InputType,
@@ -503,7 +529,7 @@ async fn download_xtream_from_source(
     let base_url = get_xtream_stream_url_base(&base_input_url, username, password);
     let input_source_login = input_source.with_url(base_url.clone());
 
-    if let Err(err) = xtream_login(app_config, client, &input_source_login, username).await {
+    if let Err(err) = xtream_login(app_config, client, events, &input_source_login, username).await {
         error!("Could not log in with xtream user {username} for provider {}. {err}", input.name);
         return (Vec::new(), vec![err], false);
     }
@@ -577,9 +603,10 @@ async fn download_xtream_from_source(
     (playlist_groups, errors, use_disk_based_processing)
 }
 
-pub async fn download_xtream_playlist(
+pub async fn download_xtream_playlist<E: EventSink>(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
+    events: &E,
     input: &ConfigInput,
     clusters: Option<&[XtreamCluster]>,
 ) -> (Vec<PlaylistGroup>, Vec<TuliproxError>, bool) {
@@ -591,10 +618,11 @@ pub async fn download_xtream_playlist(
     let mut any_disk = false;
 
     if !main_clusters.is_empty() {
-        check_alias_user_state(app_config, client, input).await;
+        check_alias_user_state(events, input);
         let source: InputSource = input.into();
         let (g, e, d) =
-            download_xtream_from_source(app_config, client, input, &source, input.input_type, &main_clusters).await;
+            download_xtream_from_source(app_config, client, events, input, &source, input.input_type, &main_clusters)
+                .await;
         all_groups.extend(g);
         all_errors.extend(e);
         any_disk |= d;
@@ -607,18 +635,16 @@ pub async fn download_xtream_playlist(
     (all_groups, all_errors, any_disk)
 }
 
-async fn check_alias_user_state(app_config: &Arc<AppConfig>, client: &reqwest::Client, input: &ConfigInput) {
+fn check_alias_user_state<E: EventSink>(events: &E, input: &ConfigInput) {
     if let Some(aliases) = input.aliases.as_ref() {
         for alias in aliases {
             if is_input_expired(alias.exp_date) {
                 notify_account_expire(
                     alias.exp_date,
-                    app_config,
-                    client,
+                    events,
                     alias.username.as_ref().map_or("", |s| s.as_str()),
                     &alias.name,
-                )
-                .await;
+                );
             }
         }
     }
@@ -671,12 +697,13 @@ pub fn create_vod_info_from_item(pli: &XtreamPlaylistItem) -> String {
         .get_container_extension()
         .filter(|ce| !ce.is_empty())
         .map(|s| s.to_string())
-        .or_else(|| extract_extension_from_url(&pli.url).map(ToString::to_string))
+        // `extract_extension_from_url` keeps the leading dot; `container_extension` must not.
+        .or_else(|| extract_extension_from_url(&pli.url).map(|ext| ext.trim_start_matches('.').to_string()))
         .unwrap_or_default();
 
     let mut doc = XtreamVideoInfoDoc::default();
     doc.info.name.clone_from(name);
-    doc.movie_data.stream_id = pli.virtual_id;
+    doc.movie_data.stream_id = pli.virtual_id.get();
     doc.movie_data.name.clone_from(name);
     doc.movie_data.added = added.intern();
     doc.movie_data.category_id = category_id.intern();
@@ -698,6 +725,56 @@ mod tests {
     use tuliprox_core::model::{
         ConfigInput, ConfigInputFlags, ConfigInputFlagsSet, ConfigInputOptions, ProxyUserCredentials,
     };
+
+    /// Records what reached the bus, so the expiry branches can be asserted rather than
+    /// inferred from a log line.
+    #[derive(Default)]
+    struct RecordingSink(std::sync::Mutex<Vec<shared::model::ProviderAccountEvent>>);
+
+    impl shared::model::EventSink for RecordingSink {
+        fn emit(&self, event: shared::model::EventMessage) {
+            if let shared::model::EventMessage::ProviderAccount(event) = event {
+                self.0.lock().expect("sink poisoned").push(event);
+            }
+        }
+    }
+
+    impl RecordingSink {
+        fn states(&self) -> Vec<shared::model::ProviderAccountState> {
+            self.0.lock().expect("sink poisoned").iter().map(|event| event.state).collect()
+        }
+    }
+
+    const EXPIRY: i64 = 1_700_000_000;
+
+    #[test]
+    fn an_account_past_its_expiry_is_reported_expired() {
+        let sink = RecordingSink::default();
+        super::notify_account_expire_at(EXPIRY + 1, Some(EXPIRY), &sink, "user", "provider");
+        assert_eq!(sink.states(), vec![shared::model::ProviderAccountState::Expired]);
+    }
+
+    #[test]
+    fn an_account_inside_the_three_day_window_is_reported_expiring() {
+        let sink = RecordingSink::default();
+        super::notify_account_expire_at(EXPIRY - 60, Some(EXPIRY), &sink, "user", "provider");
+        assert_eq!(sink.states(), vec![shared::model::ProviderAccountState::Expiring]);
+    }
+
+    #[test]
+    fn an_account_outside_the_three_day_window_is_quiet() {
+        let sink = RecordingSink::default();
+        // One second before the window opens.
+        super::notify_account_expire_at(EXPIRY - super::THREE_DAYS_IN_SECS - 1, Some(EXPIRY), &sink, "u", "p");
+        assert!(sink.states().is_empty());
+    }
+
+    #[test]
+    fn no_expiry_date_emits_nothing() {
+        let sink = RecordingSink::default();
+        super::notify_account_expire_at(EXPIRY, None, &sink, "user", "provider");
+        assert!(sink.states().is_empty());
+    }
 
     fn options_with_flags(flags: &[ConfigInputFlags]) -> ConfigInputOptions {
         let mut set = ConfigInputFlagsSet::new();
@@ -738,7 +815,7 @@ mod tests {
 
     fn test_vod_item() -> XtreamPlaylistItem {
         XtreamPlaylistItem {
-            virtual_id: 176_141,
+            virtual_id: shared::model::VirtualId::new(176_141),
             provider_id: 813_563,
             name: "Movie".intern(),
             logo: "".intern(),

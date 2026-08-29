@@ -306,4 +306,4 @@ pub(super) async fn resolve_hls_terminal_manifest_state(
     }
 }
 
-fn current_time_millis() -> u64 { chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default() }
+use tuliprox_core::utils::current_time_millis;

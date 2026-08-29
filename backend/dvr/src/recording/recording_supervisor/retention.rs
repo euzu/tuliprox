@@ -23,14 +23,13 @@ use crate::{
     recording_worker_runner::{DeleteOutcome, DiskConfig},
 };
 use log::{debug, error, info};
-use shared::model::Claims;
+use shared::model::{Claims, EventMessage, EventSink};
 use std::{
     path::PathBuf,
     sync::{atomic::AtomicBool, Arc},
     time::Duration,
 };
 use tokio_util::sync::CancellationToken;
-use tuliprox_session::EventMessage;
 
 /// Floor on how often the recording root is measured. `statvfs` is cheap
 /// but not free, and it would be wasteful to re-measure on a tick that
@@ -43,7 +42,10 @@ const MIN_DISK_PRESSURE_INTERVAL_SECS: u64 = 30;
 const DEFAULT_WATERMARK_CHECK_INTERVAL_SECS: u64 = 60;
 
 /// Start the retention supervisor.
-pub fn spawn_retention_supervisor(ctx: &RecordingCtx, cancel_token: &CancellationToken) {
+pub fn spawn_retention_supervisor<E: EventSink + Clone + 'static>(
+    ctx: &RecordingCtx<E>,
+    cancel_token: &CancellationToken,
+) {
     let ctx = ctx.clone();
     let cancel_token = cancel_token.clone();
     let running = Arc::new(AtomicBool::new(false));
@@ -80,21 +82,21 @@ pub fn spawn_retention_supervisor(ctx: &RecordingCtx, cancel_token: &Cancellatio
                 deleted += run_disk_pressure_sweep(&ctx).await;
             }
             if deleted > 0 {
-                let _ = ctx.event_manager.send_event(EventMessage::RecordingChanged);
+                ctx.events.emit(EventMessage::RecordingChanged);
             }
         }
         debug!("Retention supervisor stopped");
     });
 }
 
-fn policy_sweep_interval_secs(ctx: &RecordingCtx) -> i64 {
+fn policy_sweep_interval_secs<E: EventSink + Clone + 'static>(ctx: &RecordingCtx<E>) -> i64 {
     let secs = recording_config(&ctx.app_config)
         .and_then(|cfg| cfg.retention.map(|retention| retention.sweep_interval_secs))
         .unwrap_or_else(shared::model::default_recording_retention_sweep_interval_secs);
     i64::try_from(secs.max(1)).unwrap_or(3600)
 }
 
-fn watermark_check_interval(ctx: &RecordingCtx) -> Duration {
+fn watermark_check_interval<E: EventSink + Clone + 'static>(ctx: &RecordingCtx<E>) -> Duration {
     let secs = recording_config(&ctx.app_config)
         .and_then(|cfg| cfg.disk.and_then(|disk| disk.cleanup_interval_secs))
         .filter(|secs| *secs > 0)
@@ -105,7 +107,7 @@ fn watermark_check_interval(ctx: &RecordingCtx) -> Duration {
 }
 
 /// Age + count retention.
-async fn run_policy_sweep(ctx: &RecordingCtx, now: i64) -> u64 {
+async fn run_policy_sweep<E: EventSink + Clone + 'static>(ctx: &RecordingCtx<E>, now: i64) -> u64 {
     let Some(config) = recording_config(&ctx.app_config) else {
         return 0;
     };
@@ -147,7 +149,7 @@ async fn run_policy_sweep(ctx: &RecordingCtx, now: i64) -> u64 {
 
 /// Free-space driven retention. Only runs when both watermarks are
 /// configured and the recording root is measurable.
-async fn run_disk_pressure_sweep(ctx: &RecordingCtx) -> u64 {
+async fn run_disk_pressure_sweep<E: EventSink + Clone + 'static>(ctx: &RecordingCtx<E>) -> u64 {
     let Some(config) = recording_config(&ctx.app_config) else {
         return 0;
     };

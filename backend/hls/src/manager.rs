@@ -433,12 +433,12 @@ impl HlsProxyRuntimeConfig {
         Self {
             enabled,
             segment_fetch_policy: SegmentFetchPolicy::from_config(config),
-            cache_duration_seconds: config.cache_duration,
+            cache_duration_seconds: config.cache_duration.get(),
             strip: config.strip.clone(),
-            origin_manifest_timeout_ms: config.origin_manifest_timeout_ms,
-            initial_manifest_wait_timeout_secs: config.initial_manifest_wait_timeout_secs,
+            origin_manifest_timeout_ms: config.origin_manifest_timeout_ms.get(),
+            initial_manifest_wait_timeout_secs: config.initial_manifest_wait_timeout_secs.get(),
             manifest_recovery_burst: config.manifest_recovery_burst.clone(),
-            transient_resource_ttl_ms: config.cache_duration.saturating_mul(1_000),
+            transient_resource_ttl_ms: config.cache_duration.as_millis().get(),
             gc_policy: GarbageCollectionPolicy::from_config(config),
             rewrite_secret_fingerprint: build_rewrite_secret_fingerprint(rewrite_secret),
         }
@@ -494,7 +494,7 @@ impl HlsProxyManager {
 
     pub fn with_cache_settings(cache_path: impl Into<PathBuf>, cache_duration_seconds: u64) -> Self {
         let default_dto = shared::model::HlsCacheConfigDto {
-            cache_duration: cache_duration_seconds,
+            cache_duration: shared::model::Secs::new(cache_duration_seconds),
             cache_path: Some(cache_path.into().to_string_lossy().to_string()),
             ..Default::default()
         };
@@ -503,7 +503,8 @@ impl HlsProxyManager {
         let global_fetch_semaphore = Arc::new(Semaphore::new(segment_fetch_policy.max_global_segment_fetches));
         let sessions = Arc::new(HlsSessionStore::new());
         let segment_cache = Arc::new(HlsSegmentCache::with_cache_path(PathBuf::from(&default_config.cache_path)));
-        segment_cache.update_cache_limits(default_config.cache_bytes, default_config.cache_bytes_per_session);
+        segment_cache
+            .update_cache_limits(default_config.cache_bytes.get(), default_config.cache_bytes_per_session.get());
         let segment_repair = Arc::new(HlsSegmentRepairManager::new(default_config.segment_repair.clone()));
         let metrics = Arc::new(HlsCacheMetrics::default());
         let qos = Arc::new(HlsQosRegistry::default());
@@ -570,7 +571,7 @@ impl HlsProxyManager {
         let global_fetch_semaphore = Arc::new(Semaphore::new(segment_fetch_policy.max_global_segment_fetches));
         let sessions = Arc::new(HlsSessionStore::new());
         let segment_cache = Arc::new(HlsSegmentCache::with_cache_path(PathBuf::from(&config.cache_path)));
-        segment_cache.update_cache_limits(config.cache_bytes, config.cache_bytes_per_session);
+        segment_cache.update_cache_limits(config.cache_bytes.get(), config.cache_bytes_per_session.get());
         let segment_repair = Arc::new(HlsSegmentRepairManager::new(config.segment_repair.clone()));
         let metrics = Arc::new(HlsCacheMetrics::default());
         let qos = Arc::new(HlsQosRegistry::default());
@@ -899,7 +900,7 @@ impl HlsProxyManager {
         };
         let runtime_config = HlsProxyRuntimeConfig::from_config_with_enabled(&hls_config, &rewrite_secret, enabled);
         let cache_path_changed = self.gc.update_cache_path(PathBuf::from(&hls_config.cache_path)).await;
-        self.segment_cache.update_cache_limits(hls_config.cache_bytes, hls_config.cache_bytes_per_session);
+        self.segment_cache.update_cache_limits(hls_config.cache_bytes.get(), hls_config.cache_bytes_per_session.get());
         if cache_path_changed {
             self.clear_runtime_cache_state_for_cache_path_change().await;
         }
@@ -2746,7 +2747,7 @@ pub fn exec_hls_lifecycle(ctx: &HlsCtx, cancel_token: &CancellationToken) {
     });
 }
 
-fn current_time_millis() -> u64 { chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default() }
+use tuliprox_core::utils::current_time_millis;
 
 #[cfg(test)]
 mod tests {
@@ -3520,10 +3521,10 @@ mod tests {
         updated_dto.max_segments_prefetch = 4;
         updated_dto.max_concurrent_segment_fetches_per_session = 5;
         updated_dto.max_concurrent_segment_fetches_global = 6;
-        updated_dto.origin_manifest_timeout_ms = 1_234;
-        updated_dto.origin_segment_timeout_ms = 5_678;
-        updated_dto.cache_duration = 99;
-        updated_dto.session_idle_timeout = 55;
+        updated_dto.origin_manifest_timeout_ms = shared::model::Millis::new(1_234);
+        updated_dto.origin_segment_timeout_ms = shared::model::Millis::new(5_678);
+        updated_dto.cache_duration = shared::model::Secs::new(99);
+        updated_dto.session_idle_timeout = shared::model::Secs::new(55);
         updated_dto.manifest_recovery_burst.level = shared::model::HlsManifestRecoveryBurstLevel::Balanced;
         updated_dto.strip = HlsStripConfigDto { mode: HlsStripMode::Seconds, value: 7 };
         let app_config = test_app_config(config_with_hls_cache(updated_dto));

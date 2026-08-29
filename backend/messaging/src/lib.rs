@@ -1,475 +1,308 @@
 //! Outbound notification delivery.
 //!
-//! Renders message templates and sends them over the configured channels -
-//! Telegram and generic REST endpoints. The playlist pipeline, the recording
-//! supervisor and the API all notify through here, and none of them are named
-//! by this crate.
+//! Renders notification events and sends them over the configured channels.
+//! The playlist pipeline, the recording supervisor and the API all notify
+//! through here, and none of them are named by this crate.
+//!
+//! Channels are an open set: see [`channel::NotificationChannel`]. Event
+//! kinds are an open set too - see [`shared::model::notification`]. Adding
+//! either no longer means editing a match in this file.
 
-use chrono::Utc;
-use handlebars::{Context, Handlebars, Helper, HelperResult, Output, RenderContext};
+pub mod channel;
+pub mod channels;
+pub mod outbox;
+pub mod rate_limit;
+pub mod render;
+
+use crate::{
+    channel::{Delivery, RenderedMessage},
+    channels::{Channel, ChannelSet},
+};
 use log::{debug, error};
-use reqwest::{header, Method};
-use serde_json::json;
-use shared::{
-    model::{DiskAlert, InputFetchMethod, MsgKind},
-    utils::{escape_markdown_v2, human_readable_byte_size, json_str_to_markdown, Internable},
+use shared::model::{
+    notification::{EventId, Severity},
+    MsgKind,
 };
-use std::{
-    borrow::Cow,
-    collections::HashMap,
-    str::FromStr,
-    sync::{Arc, LazyLock},
-};
-use tuliprox_core::{
-    model::{AppConfig, InputSource, MessageContent, MessagingConfig, TemplateContext},
-    utils::{
-        request::download_text_content, telegram_create_instance, telegram_send_message, SendMessageOption,
-        SendMessageParseMode,
-    },
-};
+use std::sync::Arc;
+use tuliprox_core::model::{AppConfig, MessageContent, MessagingConfig, NotificationEvent};
 
-fn is_enabled(kind: MsgKind, cfg: &MessagingConfig) -> bool { cfg.notify_on.contains(&kind) }
+/// Is this event subscribed by `notify_on`?
+fn is_enabled(id: EventId, cfg: &MessagingConfig) -> bool { cfg.subscription().matches(id) }
 
-/// One configured outbound messaging channel.
+/// The channels currently configured for `id`, by stable channel id.
 ///
-/// The notification outbox retries per channel, not per message: a
-/// message that reached Telegram but not Discord must be re-sent only to
-/// Discord, or the retry would deliver a duplicate. Serialized into the
-/// outbox file, so the variant names are part of that file's format.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MessagingChannel {
-    Telegram,
-    Rest,
-    Pushover,
-    Discord,
-}
-
-/// Result of one channel send. `None` means "nothing to do" — the
-/// channel is not configured, or this message kind is filtered out — and
-/// must never be retried.
-pub type ChannelOutcome = Option<bool>;
-
-/// The channels currently configured for `kind`, in a stable order.
-pub fn configured_channels(app_config: &Arc<AppConfig>, kind: MsgKind) -> Vec<MessagingChannel> {
+/// The outbox persists these strings, so a channel added in a later release
+/// no longer makes an older build reject the whole outbox file.
+pub fn configured_channels(app_config: &Arc<AppConfig>, id: EventId) -> Vec<String> {
     let cfg = app_config.config.load();
     let Some(messaging) = cfg.messaging.as_ref() else {
         return Vec::new();
     };
-    if !is_enabled(kind, messaging) {
+    if !is_enabled(id, messaging) {
         return Vec::new();
     }
-    let mut channels = Vec::with_capacity(4);
-    if messaging.telegram.is_some() {
-        channels.push(MessagingChannel::Telegram);
-    }
-    if messaging.rest.is_some() {
-        channels.push(MessagingChannel::Rest);
-    }
-    if messaging.pushover.is_some() {
-        channels.push(MessagingChannel::Pushover);
-    }
-    if messaging.discord.is_some() {
-        channels.push(MessagingChannel::Discord);
-    }
-    channels
+    channels::channels(app_config, messaging)
+        .into_iter()
+        .filter(|channel| channel.wants(id, severity_of(id)))
+        .map(|channel| channel.id().to_string())
+        .collect()
 }
 
-/// Send `content` to exactly one channel and report whether it landed.
-///
-/// `send_message` fans out to every channel and swallows the outcome,
-/// which is fine for fire-and-forget notifications but leaves a
-/// recording-lifecycle event unrecoverable after a transient provider
-/// error. This is the entry point the outbox worker drives.
-pub async fn send_message_to_channel(
+fn severity_of(id: EventId) -> Severity { shared::model::notification::registry::default_severity(id) }
+
+/// Render `event` for `channel`, falling back to the built-in body.
+async fn render_for<'a>(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
-    content: &MessageContent,
-    channel: MessagingChannel,
-) -> ChannelOutcome {
+    channel: &Channel,
+    event: &'a NotificationEvent,
+) -> RenderedMessage<'a> {
+    let capabilities = channel.capabilities();
+    let mut templated = false;
+    let mut body = event.body.clone();
+
+    if capabilities.supports_templates {
+        if let Some(template) = channel.template_for(event.id) {
+            if let Some(rendered) = render::render(app_config, client, template, event).await {
+                body = rendered;
+                templated = true;
+            }
+        }
+    }
+
+    if let Some(limit) = capabilities.max_body_bytes {
+        if body.len() > limit {
+            // Truncate on a character boundary, never mid-codepoint.
+            let mut end = limit;
+            while end > 0 && !body.is_char_boundary(end) {
+                end -= 1;
+            }
+            body.truncate(end);
+        }
+    }
+
+    RenderedMessage { event, body, templated }
+}
+
+/// Send `event` to exactly one channel, by its stable id.
+///
+/// This is the entry point the outbox worker drives: it retries per
+/// channel, so a message that reached Telegram but not Discord is re-sent
+/// only to Discord.
+pub async fn send_event_to_channel(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    event: &NotificationEvent,
+    channel_id: &str,
+) -> Delivery {
     let cfg = app_config.config.load();
-    let messaging = cfg.messaging.as_ref()?;
-    if !is_enabled(content.kind(), messaging) {
+    let Some(messaging) = cfg.messaging.as_ref() else {
+        return Delivery::Skipped;
+    };
+    if !is_enabled(event.id, messaging) {
+        return Delivery::Skipped;
+    }
+    let Some(channel) = channels::channels(app_config, messaging).into_iter().find(|c| c.id() == channel_id) else {
+        // The channel was removed from the config between enqueue and
+        // delivery. Nothing to do, and nothing to retry.
+        return Delivery::Skipped;
+    };
+    if !channel.wants(event.id, event.severity) {
+        return Delivery::Skipped;
+    }
+    let routing = channel.routing();
+    if let Some(reason) =
+        rate_limit::admit(channel.id(), event.dedup_key.as_deref(), routing.dedup_window, routing.max_per_hour)
+    {
+        return suppression_outcome(&channel, event, reason);
+    }
+    let msg = render_for(app_config, client, &channel, event).await;
+    channel.send(&msg).await
+}
+
+/// Turn a suppression decision into a delivery outcome.
+///
+/// A rate-limit ceiling reports itself once so the resulting silence is
+/// distinguishable from a notifier that has died.
+fn suppression_outcome(channel: &Channel, event: &NotificationEvent, reason: rate_limit::Suppression) -> Delivery {
+    match reason {
+        rate_limit::Suppression::Duplicate => {
+            debug!("Notification {} suppressed on {} as a duplicate", event.id, channel.id());
+            Delivery::Skipped
+        }
+        rate_limit::Suppression::RateLimited => Delivery::Skipped,
+        rate_limit::Suppression::RateLimitReached => {
+            error!(
+                target: "notification::audit",
+                "notification_rate_limit_reached: channel={} event={} - further notifications suppressed this hour",
+                channel.id(), event.id
+            );
+            Delivery::Skipped
+        }
+    }
+}
+
+/// Minutes since local midnight, for quiet-hours evaluation.
+fn local_minutes_now() -> u16 {
+    use chrono::Timelike;
+    let now = chrono::Local::now();
+    u16::try_from(now.hour() * 60 + now.minute()).unwrap_or(0)
+}
+
+/// How long delivery to `channel` should be deferred for quiet hours.
+///
+/// Quiet hours defer rather than drop: an overnight outage nobody hears
+/// about afterwards is worse than one that arrives late.
+#[must_use]
+pub fn quiet_hours_defer(channel: &Channel) -> Option<std::time::Duration> {
+    let window = channel.routing().quiet_hours?;
+    let minutes = local_minutes_now();
+    if !window.contains(minutes) {
         return None;
     }
-    match channel {
-        MessagingChannel::Telegram => send_telegram_message(app_config, client, content, messaging).await,
-        MessagingChannel::Rest => send_rest_message(app_config, client, content, messaging).await,
-        MessagingChannel::Pushover => send_pushover_message(app_config, client, content, messaging).await,
-        MessagingChannel::Discord => send_discord_message(app_config, client, content, messaging).await,
-    }
+    Some(std::time::Duration::from_secs(u64::from(window.minutes_until_end(minutes)) * 60))
 }
 
-/// Default fallback string for a disk alert when no template is configured.
-fn default_disk_alert_text(alert: &DiskAlert) -> String {
-    format!(
-        "Disk usage {}: {:.1}% used ({} of {}), {} free.",
-        alert.level,
-        alert.percent,
-        human_readable_byte_size(alert.used_bytes),
-        human_readable_byte_size(alert.total_bytes),
-        human_readable_byte_size(alert.free_bytes),
-    )
-}
-
-static HANDLEBARS: LazyLock<Handlebars> = LazyLock::new(|| {
-    let mut h = Handlebars::new();
-    h.register_helper(
-        "json_escape",
-        Box::new(
-            |h: &Helper, _: &Handlebars, _: &Context, _: &mut RenderContext, out: &mut dyn Output| -> HelperResult {
-                let param = h.param(0).and_then(|v| v.value().as_str()).unwrap_or("");
-                let escaped = serde_json::to_string(param).unwrap_or_else(|_| String::new());
-                if escaped.len() >= 2 {
-                    out.write(&escaped[1..escaped.len() - 1])?;
-                }
-                Ok(())
-            },
-        ),
-    );
-    h
-});
-
-async fn render_template(
-    app_config: &Arc<AppConfig>,
-    http_client: &reqwest::Client,
-    template: Option<&str>,
-    content: &MessageContent,
-) -> String {
-    let timestamp = Utc::now().to_rfc3339();
-    let kind = content.kind().to_string();
-
-    let mut template_context = TemplateContext {
-        kind,
-        timestamp,
-        message: None,
-        stats: None,
-        watch: None,
-        processing: None,
-        disk: None,
-        recording: None,
-        flat_stats: None,
-    };
-
-    match content {
-        MessageContent::Info(msg) | MessageContent::Error(msg) => {
-            template_context.message = Some(msg);
-        }
-        MessageContent::Watch(changes) => {
-            template_context.watch = Some(changes);
-        }
-        MessageContent::ProcessingStats(stats) => {
-            template_context.processing = Some(stats.clone());
-            if let Some(stats) = &stats.stats {
-                template_context.stats = Some(stats);
-                if let Some(first_source) = stats.first() {
-                    if let Some(first_input) = first_source.inputs.first() {
-                        template_context.flat_stats = Some(first_input.clone());
-                    }
-                }
-            }
-            if let Some(errors) = &stats.errors {
-                template_context.message = Some(errors);
-            }
-        }
-        MessageContent::DiskAlert(alert) => {
-            template_context.disk = Some(alert);
-        }
-        MessageContent::RecordingLifecycle(recording) => {
-            template_context.recording = Some(recording);
-            template_context.message = Some(match recording.event {
-                MsgKind::RecordingStarted => "Recording started",
-                MsgKind::RecordingCompleted => "Recording completed",
-                MsgKind::RecordingFailed => "Recording failed",
-                _ => "Recording lifecycle event",
-            });
-        }
-    }
-
-    match template {
-        Some(template_content_or_uri) => {
-            let t = resolve_template(app_config, http_client, template_content_or_uri).await;
-
-            match HANDLEBARS.render_template(&t, &template_context) {
-                Ok(rendered) => rendered,
-                Err(e) => {
-                    error!("Failed to render template: {e}");
-                    default_text_for(content)
-                }
-            }
-        }
-        None => default_text_for(content),
-    }
-}
-
-fn default_text_for(content: &MessageContent) -> String {
-    match content {
-        MessageContent::Info(s) | MessageContent::Error(s) => s.clone(),
-        MessageContent::Watch(w) => serde_json::to_string(w).unwrap_or_default(),
-        MessageContent::ProcessingStats(ps) => serde_json::to_string(ps).unwrap_or_default(),
-        MessageContent::DiskAlert(alert) => default_disk_alert_text(alert),
-        MessageContent::RecordingLifecycle(recording) => default_recording_lifecycle_text(recording),
-    }
-}
-
-fn default_recording_lifecycle_text(recording: &tuliprox_core::model::RecordingLifecycleMessage) -> String {
-    let label = match recording.event {
-        MsgKind::RecordingStarted => "Recording started",
-        MsgKind::RecordingCompleted => "Recording completed",
-        MsgKind::RecordingFailed => "Recording failed",
-        _ => "Recording lifecycle event",
-    };
-    let title = recording.programme_title.as_deref().unwrap_or("Untitled");
-    let channel = recording.channel.as_deref().unwrap_or("unknown channel");
-    match recording.failure_reason.as_deref() {
-        Some(reason) => format!("{label}: {title} on {channel} ({reason})"),
-        None => format!("{label}: {title} on {channel}"),
-    }
-}
-
-async fn send_rest_message(
-    app_config: &Arc<AppConfig>,
-    client: &reqwest::Client,
-    content: &MessageContent,
-    messaging: &MessagingConfig,
-) -> ChannelOutcome {
-    if let Some(rest) = &messaging.rest {
-        let kind = content.kind();
-        let template = rest.templates.get(&kind).map(String::as_str);
-        let body = render_template(app_config, client, template, content).await;
-        let method = Method::from_str(&rest.method).unwrap_or(Method::POST);
-
-        let mut rb = client.request(method, &rest.url);
-
-        let has_content_type = rest.headers.keys().any(|k| k.eq_ignore_ascii_case("content-type"));
-        if !has_content_type {
-            rb = rb.header(header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string());
-        }
-
-        for (key, value) in &rest.headers {
-            rb = rb.header(key, value);
-        }
-
-        match rb.body(body).send().await {
-            Ok(response) => {
-                if response.status().is_success() {
-                    debug!("Message sent successfully to rest api");
-                    Some(true)
-                } else {
-                    error!("Failed to send message to rest api, status code {}", response.status());
-                    Some(false)
-                }
-            }
-            Err(e) => {
-                error!("Message wasn't sent to rest api because of: {e}");
-                Some(false)
-            }
-        }
-    } else {
-        None
-    }
-}
-
-async fn send_discord_message(
-    app_config: &Arc<AppConfig>,
-    client: &reqwest::Client,
-    content: &MessageContent,
-    messaging: &MessagingConfig,
-) -> ChannelOutcome {
-    if let Some(discord) = &messaging.discord {
-        let kind = content.kind();
-        let template = discord.templates.get(&kind).map(String::as_str);
-
-        let body = if let Some(templ) = template {
-            render_template(app_config, client, Some(templ), content).await
-        } else {
-            // Default json formatting
-            let msg_str = default_text_for(content);
-            json!({ "content": msg_str }).to_string()
-        };
-
-        match client
-            .post(&discord.url)
-            .header(header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())
-            .body(body)
-            .send()
-            .await
-        {
-            Ok(response) => {
-                if response.status().is_success() {
-                    debug!("Message sent successfully to Discord");
-                    Some(true)
-                } else {
-                    error!("Failed to send message to Discord, status code {}", response.status());
-                    Some(false)
-                }
-            }
-            Err(e) => {
-                error!("Message wasn't sent to Discord because of: {e}");
-                Some(false)
-            }
-        }
-    } else {
-        None
-    }
-}
-
-async fn send_telegram_message(
-    app_config: &Arc<AppConfig>,
-    client: &reqwest::Client,
-    content: &MessageContent,
-    messaging: &MessagingConfig,
-) -> ChannelOutcome {
-    if let Some(telegram) = &messaging.telegram {
-        let kind = content.kind();
-        let template = telegram.templates.get(&kind).map(String::as_str);
-        let has_template = template.is_some();
-
-        let msg = if let Some(templ) = template {
-            render_template(app_config, client, Some(templ), content).await
-        } else {
-            let serialized;
-            match content {
-                MessageContent::Info(s) | MessageContent::Error(s) => s.clone(),
-                MessageContent::Watch(s) => {
-                    serialized = serde_json::to_string_pretty(s).unwrap_or_default();
-                    serialized
-                }
-                MessageContent::ProcessingStats(ps) => {
-                    serialized = serde_json::to_string_pretty(ps).unwrap_or_default();
-                    serialized
-                }
-                MessageContent::DiskAlert(alert) => default_disk_alert_text(alert),
-                MessageContent::RecordingLifecycle(recording) => default_recording_lifecycle_text(recording),
-            }
-        };
-
-        let (message, options) = {
-            if telegram.markdown {
-                if let Ok(md) = json_str_to_markdown(&msg) {
-                    (Cow::Owned(md), Some(SendMessageOption { parse_mode: SendMessageParseMode::MarkdownV2 }))
-                } else {
-                    // Keep template markdown as-is, but escape plain text to avoid MarkdownV2 parse errors.
-                    if has_template {
-                        (Cow::Borrowed(&msg), Some(SendMessageOption { parse_mode: SendMessageParseMode::MarkdownV2 }))
-                    } else {
-                        (
-                            Cow::Owned(escape_markdown_v2(&msg)),
-                            Some(SendMessageOption { parse_mode: SendMessageParseMode::MarkdownV2 }),
-                        )
-                    }
-                }
-            } else {
-                (Cow::Borrowed(&msg), None)
-            }
-        };
-
-        // A single failed chat id fails the channel: the outbox retries
-        // the whole channel, which is the coarsest granularity the
-        // Telegram config exposes.
-        let mut all_delivered = true;
-        for chat_id in &telegram.chat_ids {
-            let bot = telegram_create_instance(&telegram.bot_token, chat_id);
-            let send_result = telegram_send_message(app_config, client, &bot, &message, options.as_ref()).await;
-            let mut delivered = send_result.delivered;
-            if telegram.markdown && has_template && send_result.parse_error && !delivered {
-                // Template output can include dynamic fields that break MarkdownV2. Retry once escaped.
-                let escaped = escape_markdown_v2(&msg);
-                let escaped_options = SendMessageOption { parse_mode: SendMessageParseMode::MarkdownV2 };
-                delivered =
-                    telegram_send_message(app_config, client, &bot, &escaped, Some(&escaped_options)).await.delivered;
-            }
-            all_delivered &= delivered;
-        }
-        Some(all_delivered)
-    } else {
-        None
-    }
-}
-
-async fn send_pushover_message(
-    _app_config: &Arc<AppConfig>,
-    client: &reqwest::Client,
-    content: &MessageContent,
-    messaging: &MessagingConfig,
-) -> ChannelOutcome {
-    if let Some(pushover) = &messaging.pushover {
-        let msg = default_text_for(content);
-
-        let encoded_message: String = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("token", pushover.token.as_str())
-            .append_pair("user", pushover.user.as_str())
-            .append_pair("message", &msg)
-            .finish();
-        match client
-            .post(&pushover.url)
-            .header(header::CONTENT_TYPE, mime::APPLICATION_WWW_FORM_URLENCODED.to_string())
-            .body(encoded_message)
-            .send()
-            .await
-        {
-            Ok(response) => {
-                if response.status().is_success() {
-                    debug!("Text message sent successfully to PUSHOVER, status code {}", response.status());
-                    Some(true)
-                } else {
-                    error!("Failed to send text message to PUSHOVER, status code {}", response.status());
-                    Some(false)
-                }
-            }
-            Err(e) => {
-                error!("Text message wasn't sent to PUSHOVER api because of: {e}");
-                Some(false)
-            }
-        }
-    } else {
-        None
-    }
-}
-
-async fn dispatch_send_message(app_config: &Arc<AppConfig>, client: &reqwest::Client, content: MessageContent) {
+/// Notify.
+///
+/// Hands the event to the durable outbox where one is installed, so a
+/// transient provider error is retried instead of being logged and lost -
+/// which is what happened to every non-recording notification before the
+/// outbox was promoted out of the recording supervisor. Falls back to a
+/// direct best-effort send when the outbox is absent (unit tests, early
+/// startup) or full.
+pub async fn send_event(app_config: &Arc<AppConfig>, client: &reqwest::Client, event: NotificationEvent) {
     let cfg = app_config.config.load();
-    let msg_cfg = cfg.messaging.as_ref();
-    if let Some(messaging) = msg_cfg {
-        let kind = content.kind();
-        if is_enabled(kind, messaging) {
-            let _ = tokio::join!(
-                send_telegram_message(app_config, client, &content, messaging),
-                send_rest_message(app_config, client, &content, messaging),
-                send_pushover_message(app_config, client, &content, messaging),
-                send_discord_message(app_config, client, &content, messaging)
-            );
+    let Some(messaging) = cfg.messaging.as_ref() else {
+        return;
+    };
+    if !is_enabled(event.id, messaging) {
+        return;
+    }
+    let event = match outbox::notification_outbox() {
+        Some(outbox) => match outbox.enqueue(event) {
+            None => return,
+            Some(rejected) => rejected,
+        },
+        None => event,
+    };
+    let set: ChannelSet = channels::channels(app_config, messaging);
+    dispatch(app_config, client, &event, &set).await;
+}
+
+/// Deliver to every channel in `set` at once.
+///
+/// Concurrent rather than sequential: one slow provider must not delay the
+/// others.
+async fn dispatch(app_config: &Arc<AppConfig>, client: &reqwest::Client, event: &NotificationEvent, set: &ChannelSet) {
+    let sends = set.iter().filter(|channel| channel.wants(event.id, event.severity)).map(|channel| async move {
+        let routing = channel.routing();
+        if let Some(reason) =
+            rate_limit::admit(channel.id(), event.dedup_key.as_deref(), routing.dedup_window, routing.max_per_hour)
+        {
+            return (channel.id(), suppression_outcome(channel, event, reason));
+        }
+        let msg = render_for(app_config, client, channel, event).await;
+        let outcome = channel.send(&msg).await;
+        (channel.id(), outcome)
+    });
+    for (id, outcome) in futures::future::join_all(sends).await {
+        match outcome {
+            Delivery::Delivered | Delivery::Skipped => debug!("Notification {} handled by {id}", event.id),
+            Delivery::Retry { reason, .. } => error!("Notification {} to {id} failed: {reason}", event.id),
+            Delivery::Permanent { reason } => {
+                error!("Notification {} to {id} permanently rejected: {reason}", event.id);
+            }
         }
     }
 }
 
+/// Send a legacy [`MessageContent`], lifted into the envelope.
+///
+/// Kept so the existing emitters need no change.
 pub async fn send_message(app_config: &Arc<AppConfig>, client: &reqwest::Client, content: MessageContent) {
-    dispatch_send_message(app_config, client, content).await;
+    send_event(app_config, client, NotificationEvent::from_content(&content)).await;
 }
 
-async fn resolve_template<'a>(
-    app_config: &'a Arc<AppConfig>,
-    http_client: &'a reqwest::Client,
-    template: &'a str,
-) -> Cow<'a, str> {
-    let url = template.to_string();
-
-    let input_source = InputSource {
-        name: "Template".intern(),
-        url,
-        provider: None,
-        username: None,
-        password: None,
-        method: InputFetchMethod::GET,
-        headers: HashMap::default(),
-    };
-    if let Ok((content, _response_url)) =
-        download_text_content(app_config, http_client, &input_source, None, None, false).await
-    {
-        Cow::Owned(content)
-    } else {
-        Cow::Borrowed(template)
+/// Legacy shim: the channels configured for a [`MsgKind`].
+pub fn configured_channels_for_kind(app_config: &Arc<AppConfig>, kind: MsgKind) -> Vec<String> {
+    match EventId::from_wire(kind.wire_name()) {
+        Some(id) => configured_channels(app_config, id),
+        None => Vec::new(),
     }
+}
+/// One channel's result from a test send.
+pub struct TestOutcome {
+    pub channel: String,
+    /// `delivered`, `skipped`, `retry`, `permanent`, or `preview`.
+    pub outcome: String,
+    pub reason: Option<String>,
+    /// Exactly what the channel was asked to send.
+    pub rendered: String,
+    pub templated: bool,
+}
+
+/// A representative event for `id`, for testing a channel or a template.
+///
+/// Carries a plausible payload so a template that walks `event.fields`
+/// renders something recognisable rather than blank.
+#[must_use]
+pub fn test_event(id: EventId) -> NotificationEvent {
+    let description = shared::model::notification::registry::describe(id)
+        .map_or("Test notification", |descriptor| descriptor.description);
+    NotificationEvent::new(
+        id,
+        format!("Test: {id}"),
+        format!("{description}\n\nThis is a test notification from tuliprox."),
+    )
+    .with_fields(&serde_json::json!({ "test": true }))
+}
+
+/// Render `event` for each requested channel, and send unless `preview`.
+///
+/// Bypasses `notify_on` and the suppression window deliberately: the
+/// operator asked for this one explicitly, and a test that silently does
+/// nothing because of a dedup window would be worse than useless.
+pub async fn render_and_send_test(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    event: &NotificationEvent,
+    only_channel: Option<&str>,
+    preview: bool,
+) -> Vec<TestOutcome> {
+    let cfg = app_config.config.load();
+    let Some(messaging) = cfg.messaging.as_ref() else {
+        return Vec::new();
+    };
+    let set = channels::channels(app_config, messaging);
+    let mut results = Vec::with_capacity(set.len());
+    for channel in set.iter().filter(|c| only_channel.is_none_or(|want| c.id() == want)) {
+        let msg = render_for(app_config, client, channel, event).await;
+        if preview {
+            results.push(TestOutcome {
+                channel: channel.id().to_string(),
+                outcome: "preview".to_string(),
+                reason: None,
+                rendered: msg.body.clone(),
+                templated: msg.templated,
+            });
+            continue;
+        }
+        let (outcome, reason) = match channel.send(&msg).await {
+            Delivery::Delivered => ("delivered".to_string(), None),
+            Delivery::Skipped => ("skipped".to_string(), None),
+            Delivery::Retry { reason, .. } => ("retry".to_string(), Some(reason)),
+            Delivery::Permanent { reason } => ("permanent".to_string(), Some(reason)),
+        };
+        results.push(TestOutcome {
+            channel: channel.id().to_string(),
+            outcome,
+            reason,
+            rendered: msg.body.clone(),
+            templated: msg.templated,
+        });
+    }
+    results
 }
 
 #[cfg(test)]
@@ -481,6 +314,25 @@ mod tests {
         model::{MediaToolCapabilities, ProcessingStats},
         utils::FileLockManager,
     };
+
+    /// Adapter onto the new pipeline.
+    ///
+    /// These tests predate the channel/envelope refactor and assert that the
+    /// documented Discord and Telegram templates still render exactly as
+    /// before, so they are kept pointed at the real renderer rather than
+    /// rewritten.
+    async fn render_template(
+        app_cfg: &Arc<AppConfig>,
+        client: &reqwest::Client,
+        template: Option<&str>,
+        content: &MessageContent,
+    ) -> String {
+        let event = NotificationEvent::from_content(content);
+        match template {
+            Some(t) => render::render(app_cfg, client, t, &event).await.unwrap_or_else(|| event.body.clone()),
+            None => event.body.clone(),
+        }
+    }
 
     fn create_app_config() -> Arc<AppConfig> {
         Arc::new(AppConfig {

@@ -96,6 +96,12 @@ pub struct Config {
     pub user_access_control: bool,
     pub connect_timeout_secs: u32,
     pub interner_gc_interval_secs: u32,
+    /// Buffer depth of the in-process event broadcast channel.
+    ///
+    /// A subscriber that falls this many events behind is told it lagged and
+    /// resumes from the newest event, having missed the gap. The old fixed
+    /// depth of 10 was routinely outrun by playlist-update progress ticks.
+    pub event_channel_capacity: u32,
     pub interner_gc_min_pool_size: u32,
     pub sleep_timer_mins: Option<u32>,
     pub update_on_boot: bool,
@@ -325,6 +331,7 @@ impl From<&ConfigDto> for Config {
             user_access_control: dto.user_access_control,
             connect_timeout_secs: dto.connect_timeout_secs,
             interner_gc_interval_secs: dto.interner_gc_interval_secs,
+            event_channel_capacity: dto.event_channel_capacity,
             interner_gc_min_pool_size: dto.interner_gc_min_pool_size,
             sleep_timer_mins: dto.sleep_timer_mins,
             update_on_boot: dto.update_on_boot,

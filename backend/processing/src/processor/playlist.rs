@@ -1,13 +1,13 @@
+use super::providers::{LibraryProvider, PlexProvider, StalkerProvider, XmltvEpgProvider};
 use crate::{
-    epg,
     fetched_playlist::FetchedPlaylist,
     input_cache,
     input_cache::ClusterState,
-    metadata_sink::MetadataUpdateSink,
+    metadata_sink::{MetadataUpdateSink, NoopMetadataSink},
     parser::xmltv::{flatten_tvguide, merge_epg_trees, EpgMergeAccumulator, TVGuide},
-    playlist_watch::process_group_watch,
+    playlist_watch::{process_group_watch, process_target_groups_watch},
     processor::{
-        epg::process_playlist_epg, library, sort::sort_playlist, stalker, trakt::process_trakt_categories_for_target,
+        epg::process_playlist_epg, sort::sort_playlist, trakt::process_trakt_categories_for_target,
         xtream_series::playlist_resolve_series, xtream_vod::playlist_resolve_vod, StalkerRefreshMode,
     },
 };
@@ -21,17 +21,17 @@ use shared::{
     error::{get_errors_notify_message, TuliproxError},
     foundation::{get_field_value, set_field_value, Filter, ValueAccessor, ValueProvider},
     model::{
-        ClusterFlags, CounterModifier, FieldGetAccessor, FieldSetAccessor, InputStats, InputType, ItemField,
-        MappingStage, PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistStats, PlaylistUpdateProgressEvent,
-        ProcessingOrder, SourceStats, StreamProperties, TargetStats, UUIDType, XtreamCluster,
+        ClusterFlags, CounterModifier, EventMessage, EventSink, FieldGet, FieldSet, InputStats, InputType,
+        MappingStage, PipelineStats, PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistStats,
+        PlaylistUpdateProgressEvent, PlaylistUpdateSummary, ProviderFetchFailure, SourceStats, StreamProperties,
+        TargetStats, UUIDType, WatchDisabled, WatchDisabledReason, WatchUnmatched, XtreamCluster,
     },
-    utils::{create_alias_uuid, interner_gc, Internable},
+    utils::{create_alias_uuid, interner_gc, sanitize_sensitive_info, Internable},
 };
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
     path::PathBuf,
-    pin::Pin,
     sync::{Arc, Weak},
     time::{Duration, Instant},
 };
@@ -41,23 +41,26 @@ use tokio::{
 };
 use tuliprox_core::{
     model::{
-        is_valid, AppConfig, ConfigFavourites, ConfigInput, ConfigInputFlags, ConfigInputOptions, ConfigRename,
-        ConfigTarget, Epg, Mapping, MessageContent, ProcessTargets, ProviderIdType, ResolveReason,
-        ReverseProxyDisabledHeaderConfig, UpdateGuard, UpdateTask,
+        is_valid, AppConfig, CompiledMapping, ConfigFavourites, ConfigInput, ConfigInputFlags, ConfigInputOptions,
+        ConfigRename, ConfigTarget, Epg, MappingProgram, ProcessTargets, ProviderIdType, ResolveReason,
+        ReverseProxyDisabledHeaderConfig, TransformStage, UpdateGuard, UpdateTask,
     },
     utils::{debug_if_enabled, log_memory_snapshot, trace_if_enabled, StepMeasure, StepMeasureCallback},
 };
-use tuliprox_iptv::{m3u, xtream};
-use tuliprox_media_server::{
-    media_server_catalog_snapshot_to_playlist, refresh_media_server_catalog_complete_before_publish,
-    MediaServerCatalogRefreshPolicy, MediaServerHttpClient,
+use tuliprox_iptv::{
+    epg::{CountingEpgSink, EpgFetchRequest, EpgProvider},
+    error::ProviderErrorKind,
+    provider::{
+        BatchContainerProvider, M3uProvider, PlaylistFetch, PlaylistFetchRequest, PlaylistProvider,
+        UnsupportedProvider, XtreamProvider,
+    },
+    xtream,
 };
-use tuliprox_messaging::send_message;
 use tuliprox_repository::{
     load_input_playlist, persist_input_playlist, persist_playlist, CategoryKey, MemoryPlaylistSource, PlaylistSource,
     PlaylistStorageState,
 };
-use tuliprox_session::{ActiveProviderManager, EventManager, EventMessage};
+use tuliprox_session::ActiveProviderManager;
 
 const PLAYLIST_UPDATE_MAX_DURATION_SECS: u64 = 3600;
 const MAX_CONCURRENT_TARGET_FINALIZERS: usize = 2;
@@ -109,10 +112,23 @@ fn stalker_checkpoint_message(input: &str) -> String {
     format!("Input '{input}': Stalker refresh checkpoint saved; active snapshot remains in service")
 }
 
-pub fn apply_filter_to_source(source: &mut PlaylistSource, filter: &Filter) -> Option<Vec<PlaylistGroup>> {
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct FilterOutcome {
+    pub inspected: usize,
+    pub retained: usize,
+    pub removed: usize,
+}
+
+fn retain_playlist_items(
+    source: &mut PlaylistSource,
+    mut keep: impl FnMut(&PlaylistItem) -> bool,
+) -> (Option<Vec<PlaylistGroup>>, FilterOutcome) {
     let mut groups: IndexMap<CategoryKey, PlaylistGroup> = IndexMap::new();
+    let mut outcome = FilterOutcome::default();
     for pli in source.into_items() {
-        if is_valid(&pli, filter, false) {
+        outcome.inspected += 1;
+        if keep(&pli) {
+            outcome.retained += 1;
             let group_title = pli.header.group.clone();
             let cluster = pli.header.xtream_cluster;
             let cat_id = pli.header.category_id;
@@ -128,18 +144,17 @@ pub fn apply_filter_to_source(source: &mut PlaylistSource, filter: &Filter) -> O
                 })
                 .channels
                 .push(pli);
+        } else {
+            outcome.removed += 1;
         }
     }
 
-    if groups.is_empty() {
-        None
-    } else {
-        Some(groups.into_values().collect())
-    }
+    let groups = if groups.is_empty() { None } else { Some(groups.into_values().collect()) };
+    (groups, outcome)
 }
 
-fn filter_playlist(source: &mut PlaylistSource, target: &ConfigTarget) -> Option<Vec<PlaylistGroup>> {
-    apply_filter_to_source(source, &target.filter)
+pub fn apply_filter_to_source(source: &mut PlaylistSource, filter: &Filter) -> Option<Vec<PlaylistGroup>> {
+    retain_playlist_items(source, |item| is_valid(item, filter, false)).0
 }
 
 fn assign_channel_no_playlist(new_playlist: &mut [PlaylistGroup]) {
@@ -159,7 +174,61 @@ fn assign_channel_no_playlist(new_playlist: &mut [PlaylistGroup]) {
     }
 }
 
-fn exec_rename(pli: &mut PlaylistItem, rename: Option<&Vec<ConfigRename>>) {
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RenameOutcome {
+    pub inspected: usize,
+    pub changed_items: usize,
+    pub changed_fields: usize,
+}
+
+#[derive(Debug, Default)]
+pub struct PipelineOutcome {
+    pub filter: Option<FilterOutcome>,
+    pub rename: Option<RenameOutcome>,
+    pub mapping: Option<MappingStageOutcome>,
+}
+
+impl PipelineOutcome {
+    fn merge(&mut self, other: Self) {
+        if let Some(value) = other.filter {
+            let outcome = self.filter.get_or_insert_with(FilterOutcome::default);
+            outcome.inspected += value.inspected;
+            outcome.retained += value.retained;
+            outcome.removed += value.removed;
+        }
+        if let Some(value) = other.rename {
+            let outcome = self.rename.get_or_insert_with(RenameOutcome::default);
+            outcome.inspected += value.inspected;
+            outcome.changed_items += value.changed_items;
+            outcome.changed_fields += value.changed_fields;
+        }
+        if let Some(value) = other.mapping {
+            let outcome = self.mapping.get_or_insert_with(MappingStageOutcome::default);
+            outcome.inspected += value.inspected;
+            outcome.matched_rules += value.matched_rules;
+            outcome.emitted_items += value.emitted_items;
+            outcome.changed_fields.extend(value.changed_fields);
+            outcome.diagnostics += value.diagnostics;
+            outcome.reported_diagnostics += value.reported_diagnostics;
+        }
+    }
+
+    fn to_stats(&self) -> PipelineStats {
+        PipelineStats {
+            inspected: self.filter.as_ref().map_or(0, |outcome| outcome.inspected),
+            retained: self.filter.as_ref().map_or(0, |outcome| outcome.retained),
+            removed: self.filter.as_ref().map_or(0, |outcome| outcome.removed),
+            renamed_items: self.rename.as_ref().map_or(0, |outcome| outcome.changed_items),
+            renamed_fields: self.rename.as_ref().map_or(0, |outcome| outcome.changed_fields),
+            matched_mapping_rules: self.mapping.as_ref().map_or(0, |outcome| outcome.matched_rules),
+            emitted_items: self.mapping.as_ref().map_or(0, |outcome| outcome.emitted_items),
+            mapping_diagnostics: self.mapping.as_ref().map_or(0, |outcome| outcome.diagnostics),
+        }
+    }
+}
+
+fn exec_rename(pli: &mut PlaylistItem, rename: Option<&Vec<ConfigRename>>) -> usize {
+    let mut changed_fields = 0;
     if let Some(renames) = rename {
         if !renames.is_empty() {
             let result = pli;
@@ -169,88 +238,88 @@ fn exec_rename(pli: &mut PlaylistItem, rename: Option<&Vec<ConfigRename>>) {
                 if log_enabled!(log::Level::Debug) && *value != *cap {
                     trace_if_enabled!("Renamed {}={value} to {cap}", &r.field);
                 }
-                set_field_value(result, r.field, cap.as_ref());
-            }
-        }
-    }
-}
-
-fn rename_playlist(source: &mut PlaylistSource, target: &ConfigTarget) -> Option<Vec<PlaylistGroup>> {
-    match &target.rename {
-        Some(renames) if !renames.is_empty() => {
-            let mut groups: IndexMap<(XtreamCluster, Arc<str>), PlaylistGroup> = IndexMap::new();
-            for mut pli in source.into_items() {
-                // Handle group rename first if it's in the renames
-                for r in renames {
-                    if matches!(r.field, ItemField::Group) {
-                        let value = &*pli.header.group;
-                        let cap = r.pattern.replace_all(value, &r.new_name);
-                        if *value != cap {
-                            pli.header.group = cap.intern();
-                        }
-                    }
+                if *value != *cap && set_field_value(result, r.field, cap.as_ref()) {
+                    changed_fields += 1;
                 }
-                exec_rename(&mut pli, Some(renames));
-                let group_title = pli.header.group.clone();
-                let cluster = pli.header.xtream_cluster;
-                let cat_id = pli.header.category_id;
-                groups
-                    .entry((cluster, group_title.clone()))
-                    .or_insert_with(|| PlaylistGroup {
-                        id: cat_id,
-                        title: group_title,
-                        channels: vec![],
-                        xtream_cluster: cluster,
-                    })
-                    .channels
-                    .push(pli);
             }
-            Some(groups.into_values().collect())
         }
-        _ => None,
+    }
+    changed_fields
+}
+
+struct ChannelMappingOutcome {
+    channel: PlaylistItem,
+    virtual_items: Vec<PlaylistItem>,
+    matched_rules: usize,
+    changed_fields: HashSet<String>,
+    diagnostics: Vec<String>,
+}
+
+const MAPPING_DIAGNOSTIC_LIMIT: usize = 10;
+
+#[derive(Debug, Default)]
+pub struct MappingStageOutcome {
+    pub inspected: usize,
+    pub matched_rules: usize,
+    pub emitted_items: usize,
+    pub changed_fields: HashSet<String>,
+    pub diagnostics: usize,
+    pub reported_diagnostics: usize,
+}
+
+impl MappingStageOutcome {
+    fn record(&mut self, mapping_id: &str, outcome: &ChannelMappingOutcome) {
+        self.inspected += 1;
+        self.matched_rules += outcome.matched_rules;
+        self.emitted_items += outcome.virtual_items.len();
+        self.changed_fields.extend(outcome.changed_fields.iter().cloned());
+        self.diagnostics += outcome.diagnostics.len();
+        for diagnostic in &outcome.diagnostics {
+            if self.reported_diagnostics >= MAPPING_DIAGNOSTIC_LIMIT {
+                break;
+            }
+            warn!("Mapping '{mapping_id}' {diagnostic}");
+            self.reported_diagnostics += 1;
+        }
     }
 }
 
-fn map_channel(mut channel: PlaylistItem, mapping: &Mapping) -> (PlaylistItem, Vec<PlaylistItem>, bool) {
-    let mut matched = false;
+fn map_channel(mut channel: PlaylistItem, mapping: &CompiledMapping) -> ChannelMappingOutcome {
+    let mut matched_rules = 0;
     let mut virtual_items = vec![];
-    if let Some(mapper) = &mapping.mapper {
-        if !mapper.is_empty() {
-            let ref_chan = &mut channel;
-            let templates = mapping.templates.as_ref();
-            for m in mapper {
-                if let Some(script) = m.t_script.as_ref() {
-                    if let Some(filter) = &m.t_filter {
-                        let provider = ValueProvider { pli: ref_chan, match_as_ascii: mapping.match_as_ascii };
-                        if filter.filter(&provider) {
-                            matched = true;
-                            let mut accessor = ValueAccessor {
-                                pli: ref_chan,
-                                virtual_items: vec![],
-                                match_as_ascii: mapping.match_as_ascii,
-                            };
-                            script.eval(&mut accessor, templates.map(Vec::as_slice));
-                            virtual_items.extend(accessor.virtual_items.into_iter().map(|(_, pli)| pli));
-                        }
-                    }
+    let mut changed_fields = HashSet::new();
+    let mut diagnostics = Vec::new();
+    if !mapping.rules.is_empty() {
+        let ref_chan = &mut channel;
+        let templates = mapping.templates.as_deref();
+        for (rule_index, rule) in mapping.rules.iter().enumerate() {
+            let provider = ValueProvider { pli: ref_chan, match_as_ascii: mapping.match_as_ascii };
+            if rule.filter.filter(&provider) {
+                matched_rules += 1;
+                let mut accessor = ValueAccessor {
+                    pli: ref_chan,
+                    virtual_items: vec![],
+                    match_as_ascii: mapping.match_as_ascii,
+                    changed_fields: vec![],
+                };
+                let outcome = match &rule.program {
+                    MappingProgram::Script(script) => script.eval(&mut accessor, templates),
+                };
+                changed_fields.extend(outcome.changed_fields.iter().cloned());
+                for diagnostic in outcome.diagnostics {
+                    let rule_label = rule.name.as_deref().map_or_else(|| (rule_index + 1).to_string(), str::to_string);
+                    diagnostics.push(format!(
+                        "rule '{rule_label}' failed for channel '{}' at statement {}: {}",
+                        accessor.pli.header.name,
+                        diagnostic.statement + 1,
+                        diagnostic.message
+                    ));
                 }
+                virtual_items.extend(accessor.virtual_items.into_iter().map(|(_, pli)| pli));
             }
         }
     }
-    (channel, virtual_items, matched)
-}
-
-fn map_channel_and_flatten(channel: PlaylistItem, mapping: &Mapping) -> Vec<PlaylistItem> {
-    let (mapped_channel, mut virtual_items, _matched) = map_channel(channel, mapping);
-    let mut result = Vec::with_capacity(1 + virtual_items.len());
-
-    result.push(mapped_channel);
-    result.append(&mut virtual_items);
-    result
-}
-
-fn map_playlist(source: &mut PlaylistSource, target: &ConfigTarget) -> Option<Vec<PlaylistGroup>> {
-    map_playlist_at_stage(source, target, MappingStage::Processing, None)
+    ChannelMappingOutcome { channel, virtual_items, matched_rules, changed_fields, diagnostics }
 }
 
 fn map_playlist_at_stage(
@@ -259,84 +328,117 @@ fn map_playlist_at_stage(
     stage: MappingStage,
     duplicates: Option<&mut HashSet<UUIDType>>,
 ) -> Option<Vec<PlaylistGroup>> {
+    if !has_mapping_stage(target, stage) {
+        return None;
+    }
+    let items = source.into_items().collect::<Vec<_>>();
+    let (mapped_items, _outcome) = map_items_at_stage(items, target, stage, duplicates)?;
+    Some(group_mapped_items(mapped_items))
+}
+
+fn has_mapping_stage(target: &ConfigTarget, stage: MappingStage) -> bool {
+    target.mapping.load().as_ref().is_some_and(|mappings| !mappings.for_stage(stage).is_empty())
+}
+
+fn map_items_at_stage(
+    mut mapped_items: Vec<PlaylistItem>,
+    target: &ConfigTarget,
+    stage: MappingStage,
+    duplicates: Option<&mut HashSet<UUIDType>>,
+) -> Option<(Vec<PlaylistItem>, MappingStageOutcome)> {
     let mapping_binding = target.mapping.load();
     let mappings = mapping_binding.as_ref()?;
-    let mut valid_mappings = mappings
-        .iter()
-        .filter(|m| m.stage == stage && m.mapper.as_ref().is_some_and(|items| !items.is_empty()))
-        .peekable();
-    valid_mappings.peek()?;
+    let valid_mappings = mappings.for_stage(stage);
+    if valid_mappings.is_empty() {
+        return None;
+    }
     let original_ids = if duplicates.is_some() {
-        Some(source.items().map(|item| *item.header.get_uuid()).collect::<HashSet<_>>())
+        Some(mapped_items.iter().map(|item| *item.header.get_uuid()).collect::<HashSet<_>>())
     } else {
         None
     };
-    let iter: Box<dyn Iterator<Item = PlaylistItem>> = Box::new(source.into_items());
-    let mapped_iter = valid_mappings.fold(iter, |iter, mapping| {
-        Box::new(iter.flat_map(move |chan| map_channel_and_flatten(chan, mapping)))
-            as Box<dyn Iterator<Item = PlaylistItem>>
-    });
-    let mut next_groups: IndexMap<CategoryKey, PlaylistGroup> = IndexMap::new();
-    let mut grp_id: u32 = 0;
-    for channel in mapped_iter {
+    let mut stage_outcome = MappingStageOutcome::default();
+    for mapping in valid_mappings {
+        let mut next_items = Vec::with_capacity(mapped_items.len());
+        for channel in mapped_items {
+            let outcome = map_channel(channel, mapping);
+            stage_outcome.record(&mapping.id, &outcome);
+            next_items.push(outcome.channel);
+            next_items.extend(outcome.virtual_items);
+        }
+        mapped_items = next_items;
+    }
+    debug!(
+        "Mapping stage {stage:?}: inspected={}, matched_rules={}, emitted={}, changed_fields={}, diagnostics={}, suppressed_diagnostics={}",
+        stage_outcome.inspected,
+        stage_outcome.matched_rules,
+        stage_outcome.emitted_items,
+        stage_outcome.changed_fields.len(),
+        stage_outcome.diagnostics,
+        stage_outcome.diagnostics.saturating_sub(stage_outcome.reported_diagnostics)
+    );
+    let suppressed = stage_outcome.diagnostics.saturating_sub(stage_outcome.reported_diagnostics);
+    if suppressed > 0 {
+        warn!("Mapping stage {stage:?} suppressed {suppressed} additional diagnostics");
+    }
+    if let (Some(original_ids), Some(duplicates)) = (original_ids, duplicates) {
+        mapped_items.retain(|item| {
+            let uuid = *item.header.get_uuid();
+            original_ids.contains(&uuid) || duplicates.insert(uuid)
+        });
+    }
+    Some((mapped_items, stage_outcome))
+}
+
+fn group_mapped_items(items: Vec<PlaylistItem>) -> Vec<PlaylistGroup> {
+    let mut groups: IndexMap<CategoryKey, PlaylistGroup> = IndexMap::new();
+    let mut group_id = 0;
+    for channel in items {
         let group_title = channel.header.group.clone();
         let cluster = channel.header.xtream_cluster;
-        next_groups
+        groups
             .entry((cluster, group_title.clone()))
             .or_insert_with(|| {
-                grp_id += 1;
-                PlaylistGroup { id: grp_id, title: group_title, channels: Vec::new(), xtream_cluster: cluster }
+                group_id += 1;
+                PlaylistGroup { id: group_id, title: group_title, channels: Vec::new(), xtream_cluster: cluster }
             })
             .channels
             .push(channel);
     }
-
-    let mut groups = next_groups.into_values().collect::<Vec<_>>();
-    if let (Some(original_ids), Some(duplicates)) = (original_ids, duplicates) {
-        for group in &mut groups {
-            group.channels.retain(|item| {
-                let uuid = *item.header.get_uuid();
-                original_ids.contains(&uuid) || duplicates.insert(uuid)
-            });
-        }
-    }
-    Some(groups)
+    groups.into_values().collect()
 }
 
 fn map_playlist_counter(target: &ConfigTarget, playlist: &mut [PlaylistGroup]) {
     if let Some(guard) = &*target.mapping.load() {
-        let mappings = guard.as_ref();
-        for mapping in mappings {
-            if let Some(counter_list) = &mapping.t_counter {
-                for counter in counter_list {
-                    // fresh per target/call. No shared atomic, no cross-refresh carry-over.
-                    let mut current = counter.start;
-                    for plg in &mut *playlist {
-                        for channel in &mut plg.channels {
-                            let provider = ValueProvider { pli: channel, match_as_ascii: mapping.match_as_ascii };
-                            if counter.filter.filter(&provider) {
-                                let cntval = current;
-                                current += 1;
-                                let padded_cntval = if counter.padding > 0 {
-                                    format!("{:0width$}", cntval, width = counter.padding as usize)
+        for mapping in &guard.all {
+            for counter in &mapping.counters {
+                // fresh per target/call. No shared atomic, no cross-refresh carry-over.
+                let mut current = counter.start;
+                for plg in &mut *playlist {
+                    for channel in &mut plg.channels {
+                        let provider = ValueProvider { pli: channel, match_as_ascii: mapping.match_as_ascii };
+                        if counter.filter.filter(&provider) {
+                            let cntval = current;
+                            current += 1;
+                            let padded_cntval = if counter.padding > 0 {
+                                format!("{:0width$}", cntval, width = counter.padding as usize)
+                            } else {
+                                cntval.to_string()
+                            };
+                            let new_value = if counter.modifier == CounterModifier::Assign {
+                                padded_cntval
+                            } else {
+                                let value = channel
+                                    .header
+                                    .get(counter.field)
+                                    .map_or_else(String::new, |field_value| field_value.as_cow().into_owned());
+                                if counter.modifier == CounterModifier::Suffix {
+                                    format!("{value}{}{padded_cntval}", counter.concat)
                                 } else {
-                                    cntval.to_string()
-                                };
-                                let new_value = if counter.modifier == CounterModifier::Assign {
-                                    padded_cntval
-                                } else {
-                                    let value = channel
-                                        .header
-                                        .get_field(&counter.field)
-                                        .map_or_else(String::new, |field_value| field_value.to_string());
-                                    if counter.modifier == CounterModifier::Suffix {
-                                        format!("{value}{}{padded_cntval}", counter.concat)
-                                    } else {
-                                        format!("{padded_cntval}{}{value}", counter.concat)
-                                    }
-                                };
-                                channel.header.set_field(&counter.field, new_value.as_str());
-                            }
+                                    format!("{padded_cntval}{}{value}", counter.concat)
+                                }
+                            };
+                            channel.header.set(counter.field, new_value.as_str());
                         }
                     }
                 }
@@ -404,35 +506,6 @@ fn collect_effective_skip_clusters(input: &ConfigInput) -> Vec<XtreamCluster> {
     xtream::get_skip_cluster(input)
 }
 
-async fn download_plex_media_server_playlist(
-    client: &reqwest::Client,
-    input: &ConfigInput,
-) -> (Vec<PlaylistGroup>, Vec<TuliproxError>) {
-    let Some(media_server) = input.media_server.as_ref() else {
-        return (
-            vec![],
-            vec![TuliproxError::Download(format!(
-                "media-server input '{}' is missing media_server configuration",
-                input.name
-            ))],
-        );
-    };
-    let http_client = MediaServerHttpClient::new(client.clone());
-    let plex_client = match input.plex_catalog_client(http_client) {
-        Ok(client) => client,
-        Err(error) => return (vec![], vec![TuliproxError::Download(error.to_string())]),
-    };
-    let policy = MediaServerCatalogRefreshPolicy {
-        page_size: usize::from(media_server.catalog.page_size),
-        request_delay_ms: media_server.catalog.request_delay_ms,
-    };
-
-    match refresh_media_server_catalog_complete_before_publish(&plex_client, policy).await {
-        Ok(snapshot) => (media_server_catalog_snapshot_to_playlist(&snapshot), vec![]),
-        Err(error) => (vec![], vec![TuliproxError::Download(error.to_string())]),
-    }
-}
-
 fn filter_skipped_clusters_from_source(source: PlaylistSource, input: &ConfigInput) -> PlaylistSource {
     let skip_clusters = collect_effective_skip_clusters(input);
     if skip_clusters.is_empty() {
@@ -475,9 +548,10 @@ fn apply_staged_overlay_groups(
 fn should_apply_staged_overlay(download_result: &PlaylistDownloadResult) -> bool { !download_result.was_cached }
 
 #[allow(clippy::too_many_lines)]
-async fn playlist_download_from_input(
+async fn playlist_download_from_input<E: EventSink>(
     client: &reqwest::Client,
     app_config: &Arc<AppConfig>,
+    events: &E,
     input: &ConfigInput,
     stalker_refresh_mode: StalkerRefreshMode,
 ) -> PlaylistDownloadResult {
@@ -526,71 +600,69 @@ async fn playlist_download_from_input(
         return PlaylistDownloadResult::new(vec![], vec![], true, false);
     }
 
-    let (playlist, errors, persisted, _m3u_error_count, _xtream_error_count, partial) = {
-        match download_input_type {
-            InputType::M3u => {
-                let (p, e) = m3u::download_m3u_playlist(app_config, client, config, input).await;
-                (p, e, false, 0, 0, false)
-            }
-            InputType::Xtream => {
-                let (p, e, persisted) = xtream::download_xtream_playlist(
-                    app_config,
-                    client,
-                    input,
-                    Some(xtream_clusters_to_download.as_slice()),
-                )
-                .await;
-                let xtream_error_count = e.len();
-                (p, e, persisted, 0, xtream_error_count, false)
-            }
-            InputType::M3uBatch | InputType::XtreamBatch | InputType::StalkerBatch => {
-                (vec![], vec![], false, 0, 0, false)
-            }
-            InputType::Stalker => {
-                let (p, e, persisted, partial) = stalker::download_stalker_playlist(
-                    app_config,
-                    client,
-                    input,
-                    None,
-                    stalker_refresh_mode,
-                    !config.disk_based_processing,
-                )
-                .await;
-                let stalker_error_count = e.len();
-                (p, e, persisted, 0, stalker_error_count, partial)
-            }
-            InputType::Library => {
-                let (p, e) = library::download_library_playlist(client, app_config, input).await;
-                (p, e, false, 0, 0, false)
-            }
-            InputType::Plex => {
-                let (p, e) = download_plex_media_server_playlist(client, input).await;
-                (p, e, false, 0, 0, false)
-            }
-            InputType::Emby | InputType::Jellyfin => (
-                vec![],
-                vec![TuliproxError::Download(format!(
-                    "media-server input '{}' is configured but catalog import is not implemented yet",
-                    input.name
-                ))],
-                false,
-                0,
-                0,
-                false,
-            ),
-            InputType::Staged => (
-                vec![],
-                vec![TuliproxError::Download(format!(
-                    "staged input '{}' was not resolved against a parent input",
-                    input.name
-                ))],
-                false,
-                0,
-                0,
-                false,
-            ),
+    let request = PlaylistFetchRequest {
+        app_config,
+        config: &app_config.config.load(),
+        client,
+        input,
+        xtream_clusters: Some(xtream_clusters_to_download.as_slice()),
+    };
+
+    // Each arm builds the provider its input type needs and awaits it in place: the
+    // provider types share no supertype, and building one is free, so this stays a match
+    // and stays statically dispatched. What changed is the result - one named
+    // `PlaylistFetch` instead of a six-element tuple assembled by position.
+    let fetch = match download_input_type {
+        InputType::M3u => M3uProvider.fetch(&request).await,
+        InputType::Xtream => XtreamProvider::new(events).fetch(&request).await,
+        InputType::M3uBatch | InputType::XtreamBatch | InputType::StalkerBatch => {
+            BatchContainerProvider.fetch(&request).await
+        }
+        InputType::Stalker => {
+            StalkerProvider::new(stalker_refresh_mode, !config.disk_based_processing).fetch(&request).await
+        }
+        InputType::Library => LibraryProvider.fetch(&request).await,
+        InputType::Plex => PlexProvider.fetch(&request).await,
+        InputType::Emby | InputType::Jellyfin => {
+            UnsupportedProvider::new(
+                "media-server",
+                format!("media-server input '{}' is configured but catalog import is not implemented yet", input.name),
+            )
+            .fetch(&request)
+            .await
+        }
+        InputType::Staged => {
+            UnsupportedProvider::new(
+                "staged",
+                format!("staged input '{}' was not resolved against a parent input", input.name),
+            )
+            .fetch(&request)
+            .await
         }
     };
+    // `ProviderErrorKind` has always been able to answer "is this worth
+    // retrying, and does it need a human" - `needs_operator()` is exactly that
+    // question - and nothing consumed the answer. Every fetch failure was
+    // counted, logged and treated identically.
+    if let Some(kind) = fetch.error_kind() {
+        let worst = fetch
+            .errors
+            .iter()
+            .max_by_key(|error| ProviderErrorKind::of_tuliprox(error))
+            .map(|error| sanitize_sensitive_info(&error.to_string()).into_owned());
+        events.emit(EventMessage::ProviderFetchFailed(ProviderFetchFailure {
+            input: sanitize_sensitive_info(&input.name).into_owned().into(),
+            provider: download_input_type.to_string().into(),
+            kind: kind.into(),
+            error_count: fetch.errors.len(),
+            message: worst,
+            retryable: kind.is_retryable(),
+            needs_operator: kind.needs_operator(),
+            partial: fetch.partial,
+        }));
+    }
+
+    let PlaylistFetch { groups: playlist, errors, persisted, partial } = fetch;
 
     // Update Status
     let save_status;
@@ -641,9 +713,9 @@ struct InputJobResult {
     errors: Vec<TuliproxError>,
 }
 
-async fn process_input_job(
+async fn process_input_job<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
     index: usize,
-    ctx: &PlaylistProcessingContext,
+    ctx: &PlaylistProcessingContext<E, M>,
     input: &Arc<ConfigInput>,
     process_parallel: bool,
 ) -> InputJobResult {
@@ -656,14 +728,14 @@ async fn process_input_job(
     .await
 }
 
-async fn process_input_job_inner(
+async fn process_input_job_inner<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
     index: usize,
-    ctx: &PlaylistProcessingContext,
+    ctx: &PlaylistProcessingContext<E, M>,
     input: &Arc<ConfigInput>,
 ) -> InputJobResult {
     let start_time = Instant::now();
     let input_type = input.get_download_input_type();
-    let broadcast_step = create_broadcast_callback(ctx.event_manager.as_ref());
+    let broadcast_step = create_broadcast_callback(&ctx.events);
     broadcast_step("Playlist download", &format!("Downloading input '{}'", input.name));
 
     let (mut errors, mut source, storage_error, partial) = download_input(ctx, input, false).await;
@@ -729,6 +801,7 @@ struct TargetJobResult {
     name: String,
     result: Result<(), Vec<TuliproxError>>,
     errors: Vec<TuliproxError>,
+    processing: PipelineStats,
 }
 
 fn collect_target_task_result(
@@ -755,8 +828,8 @@ async fn wait_for_target_finalizer_slot(
 }
 
 #[allow(clippy::too_many_lines)]
-async fn process_targets(
-    ctx: &Arc<PlaylistProcessingContext>,
+async fn process_targets<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &Arc<PlaylistProcessingContext<E, M>>,
     playlists: &mut [FetchedPlaylist<'_>],
     targets: &[&Arc<ConfigTarget>],
     input_stats: &mut HashMap<Arc<str>, InputStats>,
@@ -771,12 +844,13 @@ async fn process_targets(
                 prepare_playlist_for_target(ctx, playlists, target, input_stats, errors, consume_input_source).await;
             match result {
                 Ok(prepared) => {
+                    let processing = prepared.processing.clone();
                     let (result, mut finalization_errors) = finalize_prepared_target(Arc::clone(ctx), prepared).await;
                     errors.append(&mut finalization_errors);
                     match result {
-                        Ok(()) => target_stats.push(TargetStats::success(&target.name)),
+                        Ok(()) => target_stats.push(TargetStats::success_with_processing(&target.name, processing)),
                         Err(mut target_errors) => {
-                            target_stats.push(TargetStats::failure(&target.name));
+                            target_stats.push(TargetStats::failure_with_processing(&target.name, processing));
                             errors.append(&mut target_errors);
                         }
                     }
@@ -811,6 +885,7 @@ async fn process_targets(
 
         match prepare_playlist_for_target(ctx, playlists, target, input_stats, errors, false).await {
             Ok(prepared) => {
+                let processing = prepared.processing.clone();
                 let task_ctx = Arc::clone(ctx);
                 let target_name = target.name.clone();
                 tasks.spawn(async move {
@@ -823,7 +898,9 @@ async fn process_targets(
                         std::panic::AssertUnwindSafe(finalize_prepared_target(task_ctx, prepared)).catch_unwind().await;
                     completion.send_replace(true);
                     match finalized {
-                        Ok((result, errors)) => TargetJobResult { index, name: target_name, result, errors },
+                        Ok((result, errors)) => {
+                            TargetJobResult { index, name: target_name, result, errors, processing }
+                        }
                         Err(_) => TargetJobResult {
                             index,
                             name: target_name.clone(),
@@ -831,6 +908,7 @@ async fn process_targets(
                                 "Target '{target_name}' finalization panicked"
                             ))]),
                             errors: Vec::new(),
+                            processing,
                         },
                     }
                 });
@@ -842,6 +920,7 @@ async fn process_targets(
                     name: target.name.clone(),
                     result: Err(target_errors),
                     errors: Vec::new(),
+                    processing: PipelineStats::default(),
                 });
             }
         }
@@ -856,9 +935,11 @@ async fn process_targets(
     for mut target_result in results {
         errors.append(&mut target_result.errors);
         match target_result.result {
-            Ok(()) => target_stats.push(TargetStats::success(&target_result.name)),
+            Ok(()) => {
+                target_stats.push(TargetStats::success_with_processing(&target_result.name, target_result.processing));
+            }
             Err(mut target_errors) => {
-                target_stats.push(TargetStats::failure(&target_result.name));
+                target_stats.push(TargetStats::failure_with_processing(&target_result.name, target_result.processing));
                 errors.append(&mut target_errors);
             }
         }
@@ -867,9 +948,9 @@ async fn process_targets(
 }
 
 #[allow(clippy::too_many_lines)]
-async fn process_source(
+async fn process_source<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
     source_idx: usize,
-    ctx: Arc<PlaylistProcessingContext>,
+    ctx: Arc<PlaylistProcessingContext<E, M>>,
 ) -> (Vec<InputStats>, Vec<TargetStats>, Vec<TuliproxError>) {
     log_memory_snapshot(format!("source[{source_idx}] start").as_str());
     let sources = ctx.config.sources.load();
@@ -878,7 +959,7 @@ async fn process_source(
     let mut target_stats = Vec::<TargetStats>::new();
     if let Some(source) = sources.get_source_at(source_idx) {
         let mut source_playlists = Vec::with_capacity(source.inputs.len());
-        let broadcast_step = create_broadcast_callback(ctx.event_manager.as_ref());
+        let broadcast_step = create_broadcast_callback(&ctx.events);
         let process_parallel = ctx.config.config.load().process_parallel;
         let mut disabled_inputs: Vec<Arc<str>> = vec![];
         let mut enabled_inputs = Vec::with_capacity(source.inputs.len());
@@ -977,27 +1058,39 @@ async fn process_source(
     (ordered_input_stats, target_stats, errors)
 }
 
-async fn download_input_epg(
-    ctx: &PlaylistProcessingContext,
+async fn download_input_epg<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     input: &Arc<ConfigInput>,
     error_list: &mut Vec<TuliproxError>,
 ) -> Option<TVGuide> {
-    // Download epg for input
-    let (tvguide, mut tvguide_errors) = if error_list.is_empty() {
-        let storage_dir = &ctx.config.config.load().storage_dir;
-        epg::get_xmltv(ctx, input, None, storage_dir).await
-    } else {
-        (None, vec![])
-    };
-    error_list.append(&mut tvguide_errors);
-    tvguide
+    // A failed playlist download makes the EPG moot: the channels it would annotate are
+    // not there.
+    if !error_list.is_empty() {
+        return None;
+    }
+    let provider = XmltvEpgProvider::new(ctx);
+    // The XMLTV path produces documents, not programme records, so nothing reaches the
+    // sink. It is here because the same call answers for a record-streaming provider.
+    let mut discarded = CountingEpgSink::new();
+    let outcome = provider.fetch(&EpgFetchRequest::new(input), &mut discarded).await;
+    error_list.extend(provider.take_errors());
+    match outcome {
+        Ok(outcome) => outcome.into_guide(),
+        Err(err) => {
+            error_list.push(err);
+            None
+        }
+    }
 }
 
 /// `invalidate_input_cache_status` performs a non-atomic file I/O sequence
 /// (`input_cache::load_input_status` + `input_cache::save_input_status`).
 /// Call this only while holding the per-input lock from
 /// `PlaylistProcessingContext::get_input_lock` (as done in `download_input`).
-async fn invalidate_input_cache_status(ctx: &PlaylistProcessingContext, input: &ConfigInput) {
+async fn invalidate_input_cache_status<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
+    input: &ConfigInput,
+) {
     let storage_dir = { ctx.config.config.load().storage_dir.clone() };
     let storage_path = input_cache::resolve_input_storage_path(&storage_dir, &input.name).await;
     let mut status = input_cache::load_input_status(&storage_path);
@@ -1007,8 +1100,8 @@ async fn invalidate_input_cache_status(ctx: &PlaylistProcessingContext, input: &
     }
 }
 
-async fn load_cached_input_playlist(
-    ctx: &PlaylistProcessingContext,
+async fn load_cached_input_playlist<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     input: &Arc<ConfigInput>,
 ) -> (PlaylistSource, Option<TuliproxError>) {
     match load_input_playlist(&ctx.config, input, None).await {
@@ -1018,8 +1111,8 @@ async fn load_cached_input_playlist(
 }
 
 #[allow(clippy::too_many_lines)]
-async fn download_input(
-    ctx: &PlaylistProcessingContext,
+async fn download_input<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     input: &Arc<ConfigInput>,
     allow_staged_input: bool,
 ) -> (Vec<TuliproxError>, PlaylistSource, Option<TuliproxError>, bool) {
@@ -1055,7 +1148,7 @@ async fn download_input(
             PlaylistDownloadResult::new(vec![], vec![], true, false)
         } else {
             mark_as_processed = true;
-            playlist_download_from_input(&ctx.client, &ctx.config, input, ctx.stalker_refresh_mode).await
+            playlist_download_from_input(&ctx.client, &ctx.config, &ctx.events, input, ctx.stalker_refresh_mode).await
         }
     } else {
         PlaylistDownloadResult::new(vec![], vec![], true, false)
@@ -1088,8 +1181,14 @@ async fn download_input(
                         input.name
                     );
                     invalidate_input_cache_status(ctx, input).await;
-                    playlist_download_result =
-                        playlist_download_from_input(&ctx.client, &ctx.config, input, ctx.stalker_refresh_mode).await;
+                    playlist_download_result = playlist_download_from_input(
+                        &ctx.client,
+                        &ctx.config,
+                        &ctx.events,
+                        input,
+                        ctx.stalker_refresh_mode,
+                    )
+                    .await;
                 }
             }
         } else {
@@ -1098,12 +1197,10 @@ async fn download_input(
     }
     if playlist_download_result.partial {
         ctx.partial_refresh.store(true, std::sync::atomic::Ordering::Release);
-        if let Some(events) = ctx.event_manager.as_deref() {
-            events.send_event(EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
-                target: input.name.to_string(),
-                message: stalker_checkpoint_message(&input.name),
-            }));
-        }
+        ctx.events.emit(EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
+            target: input.name.to_string(),
+            message: stalker_checkpoint_message(&input.name),
+        }));
     }
     let apply_staged_overlay = should_apply_staged_overlay(&playlist_download_result);
 
@@ -1155,18 +1252,14 @@ async fn download_input(
     (playlist_download_result.download_err, playlist, error, playlist_download_result.partial)
 }
 
-fn create_broadcast_callback(event_manager: Option<&Arc<EventManager>>) -> StepMeasureCallback {
-    if let Some(event_mgr) = event_manager {
-        let events = event_mgr.clone();
-        Box::new(move |context: &str, msg: &str| {
-            events.send_event(EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
-                target: context.to_owned(),
-                message: msg.to_owned(),
-            }));
-        })
-    } else {
-        Box::new(move |_context: &str, _msg: &str| { /* noop */ })
-    }
+fn create_broadcast_callback<E: EventSink + Clone + 'static>(events: &E) -> StepMeasureCallback {
+    let events = events.clone();
+    Box::new(move |context: &str, msg: &str| {
+        events.emit(EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
+            target: context.to_owned(),
+            message: msg.to_owned(),
+        }));
+    })
 }
 
 fn create_input_stat(
@@ -1187,12 +1280,11 @@ fn create_input_stat(
     }
 }
 
-#[derive(Clone)]
-pub struct PlaylistProcessingContext {
+pub struct PlaylistProcessingContext<E: EventSink, M: MetadataUpdateSink = NoopMetadataSink> {
     pub client: reqwest::Client,
     pub config: Arc<AppConfig>,
     pub user_targets: Arc<ProcessTargets>,
-    pub event_manager: Option<Arc<EventManager>>,
+    pub events: E,
     pub playlist_state: Option<Arc<PlaylistStorageState>>,
     /// Reverse-proxy header suppression, carried from the composition root.
     ///
@@ -1211,13 +1303,35 @@ pub struct PlaylistProcessingContext {
 
     // New field for STRM probes & background updates
     pub provider_manager: Option<Arc<ActiveProviderManager>>,
-    pub metadata_manager: Option<Arc<dyn MetadataUpdateSink>>,
+    pub metadata_manager: Option<Arc<M>>,
     pub pre_processed_inputs: Option<Arc<HashSet<Arc<str>>>>,
     pub stalker_refresh_mode: StalkerRefreshMode,
     pub partial_refresh: Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl PlaylistProcessingContext {
+// Written out rather than derived: `#[derive(Clone)]` would demand `M: Clone`,
+// but the sink is held behind an `Arc` and is cloneable whatever `M` is.
+impl<E: EventSink + Clone, M: MetadataUpdateSink> Clone for PlaylistProcessingContext<E, M> {
+    fn clone(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            config: Arc::clone(&self.config),
+            user_targets: Arc::clone(&self.user_targets),
+            events: self.events.clone(),
+            playlist_state: self.playlist_state.clone(),
+            disabled_headers: self.disabled_headers.clone(),
+            processed_inputs: Arc::clone(&self.processed_inputs),
+            input_locks: Arc::clone(&self.input_locks),
+            provider_manager: self.provider_manager.clone(),
+            metadata_manager: self.metadata_manager.clone(),
+            pre_processed_inputs: self.pre_processed_inputs.clone(),
+            stalker_refresh_mode: self.stalker_refresh_mode,
+            partial_refresh: Arc::clone(&self.partial_refresh),
+        }
+    }
+}
+
+impl<E: EventSink + Clone + 'static, M: MetadataUpdateSink> PlaylistProcessingContext<E, M> {
     pub async fn is_input_downloaded(&self, input_name: &str) -> bool {
         let processed = self.processed_inputs.lock().await;
         processed.contains(input_name)
@@ -1244,7 +1358,9 @@ impl PlaylistProcessingContext {
     }
 }
 
-async fn process_sources(processing_ctx: &PlaylistProcessingContext) -> (Vec<SourceStats>, Vec<TuliproxError>) {
+async fn process_sources<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    processing_ctx: &PlaylistProcessingContext<E, M>,
+) -> (Vec<SourceStats>, Vec<TuliproxError>) {
     let mut async_tasks = JoinSet::new();
     let sources = processing_ctx.config.sources.load();
     let process_parallel = processing_ctx.config.config.load().process_parallel;
@@ -1264,7 +1380,9 @@ async fn process_sources(processing_ctx: &PlaylistProcessingContext) -> (Vec<Sou
         // We're using the file lock this way on purpose
         let source_lock_path = PathBuf::from(concat_string!("source_", &index.to_string()));
         let Ok(update_lock) = processing_ctx.config.file_locks.try_write_lock(&source_lock_path).await else {
-            warn!("The update operation for the source at index {index} was skipped because an update is already in progress.");
+            warn!(
+                "The update operation for the source at index {index} was skipped because an update is already in progress."
+            );
             continue;
         };
 
@@ -1311,17 +1429,157 @@ async fn process_sources(processing_ctx: &PlaylistProcessingContext) -> (Vec<Sou
     (stats, errors)
 }
 
-pub type ProcessingPipe = Vec<fn(source: &mut PlaylistSource, target: &ConfigTarget) -> Option<Vec<PlaylistGroup>>>;
+pub type ProcessingPipe = Vec<TransformStage>;
 
-fn get_processing_pipe(target: &ConfigTarget) -> ProcessingPipe {
-    match &target.processing_order {
-        ProcessingOrder::Frm => vec![filter_playlist, rename_playlist, map_playlist],
-        ProcessingOrder::Fmr => vec![filter_playlist, map_playlist, rename_playlist],
-        ProcessingOrder::Rfm => vec![rename_playlist, filter_playlist, map_playlist],
-        ProcessingOrder::Rmf => vec![rename_playlist, map_playlist, filter_playlist],
-        ProcessingOrder::Mfr => vec![map_playlist, filter_playlist, rename_playlist],
-        ProcessingOrder::Mrf => vec![map_playlist, rename_playlist, filter_playlist],
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FinalizationStage {
+    Merge,
+    Deduplicate,
+    Sort,
+    AssignChannelNumbers,
+    AssignCounters,
+}
+
+const FINALIZATION_ORDER: [FinalizationStage; 5] = [
+    FinalizationStage::Merge,
+    FinalizationStage::Deduplicate,
+    FinalizationStage::Sort,
+    FinalizationStage::AssignChannelNumbers,
+    FinalizationStage::AssignCounters,
+];
+
+fn get_processing_pipe(target: &ConfigTarget) -> ProcessingPipe { target.execution_plan.transform_stages.clone() }
+
+#[derive(Clone, Copy)]
+enum GroupingPolicy {
+    NormalizedCategory,
+    ExactCategory,
+    ExactSequential,
+}
+
+struct TransformBuffer {
+    items: Vec<PlaylistItem>,
+    grouping: GroupingPolicy,
+}
+
+impl TransformBuffer {
+    fn new(items: Vec<PlaylistItem>) -> Self { Self { items, grouping: GroupingPolicy::ExactCategory } }
+
+    fn apply_filter(&mut self, target: &ConfigTarget) -> FilterOutcome {
+        let mut outcome = FilterOutcome::default();
+        self.items.retain(|item| {
+            outcome.inspected += 1;
+            let provider = ValueProvider { pli: item, match_as_ascii: false };
+            if target.filter(&provider) {
+                outcome.retained += 1;
+                true
+            } else {
+                outcome.removed += 1;
+                false
+            }
+        });
+        self.grouping = GroupingPolicy::NormalizedCategory;
+        self.reorder_for_grouping();
+        outcome
     }
+
+    fn apply_rename(&mut self, target: &ConfigTarget) -> Option<RenameOutcome> {
+        let renames = target.rename.as_ref().filter(|renames| !renames.is_empty())?;
+        let mut outcome = RenameOutcome::default();
+        for item in &mut self.items {
+            outcome.inspected += 1;
+            let changed_fields = exec_rename(item, Some(renames));
+            outcome.changed_fields += changed_fields;
+            outcome.changed_items += usize::from(changed_fields > 0);
+        }
+        self.grouping = GroupingPolicy::ExactCategory;
+        self.reorder_for_grouping();
+        Some(outcome)
+    }
+
+    fn apply_mapping(&mut self, target: &ConfigTarget, stage: MappingStage) -> Option<MappingStageOutcome> {
+        if !has_mapping_stage(target, stage) {
+            return None;
+        }
+        let items = std::mem::take(&mut self.items);
+        let (items, outcome) = map_items_at_stage(items, target, stage, None)
+            .expect("mapping stage applicability was checked before consuming the buffer");
+        self.items = items;
+        self.grouping = GroupingPolicy::ExactSequential;
+        self.reorder_for_grouping();
+        Some(outcome)
+    }
+
+    fn reorder_for_grouping(&mut self) {
+        let mut buckets: IndexMap<CategoryKey, Vec<PlaylistItem>> = IndexMap::new();
+        for item in std::mem::take(&mut self.items) {
+            let title = item.header.group.clone();
+            let key_title = match self.grouping {
+                GroupingPolicy::NormalizedCategory => shared::utils::deunicode_string(&title).to_lowercase().intern(),
+                GroupingPolicy::ExactCategory | GroupingPolicy::ExactSequential => title,
+            };
+            buckets.entry((item.header.xtream_cluster, key_title)).or_default().push(item);
+        }
+        self.items = buckets.into_values().flatten().collect();
+    }
+
+    fn into_groups(self) -> Vec<PlaylistGroup> { group_items(self.items, self.grouping) }
+}
+
+fn group_items(items: Vec<PlaylistItem>, policy: GroupingPolicy) -> Vec<PlaylistGroup> {
+    let mut groups: IndexMap<CategoryKey, PlaylistGroup> = IndexMap::new();
+    let mut next_group_id = 0;
+    for item in items {
+        let title = item.header.group.clone();
+        let cluster = item.header.xtream_cluster;
+        let key_title = match policy {
+            GroupingPolicy::NormalizedCategory => shared::utils::deunicode_string(&title).to_lowercase().intern(),
+            GroupingPolicy::ExactCategory | GroupingPolicy::ExactSequential => title.clone(),
+        };
+        groups
+            .entry((cluster, key_title))
+            .or_insert_with(|| {
+                let id = match policy {
+                    GroupingPolicy::ExactSequential => {
+                        next_group_id += 1;
+                        next_group_id
+                    }
+                    GroupingPolicy::NormalizedCategory | GroupingPolicy::ExactCategory => item.header.category_id,
+                };
+                PlaylistGroup { id, title, channels: Vec::new(), xtream_cluster: cluster }
+            })
+            .channels
+            .push(item);
+    }
+    groups.into_values().collect()
+}
+
+fn execute_pipeline_on_items(
+    items: Vec<PlaylistItem>,
+    target: &ConfigTarget,
+    pipe: &[TransformStage],
+) -> (Vec<PlaylistGroup>, PipelineOutcome) {
+    let mut buffer = TransformBuffer::new(items);
+    let mut outcome = PipelineOutcome::default();
+    for stage in pipe {
+        match stage {
+            TransformStage::Filter => outcome.filter = Some(buffer.apply_filter(target)),
+            TransformStage::Rename => outcome.rename = buffer.apply_rename(target),
+            TransformStage::Map => outcome.mapping = buffer.apply_mapping(target, MappingStage::Processing),
+        }
+    }
+    (buffer.into_groups(), outcome)
+}
+
+pub(super) fn execute_pipeline_on_groups(
+    groups: Vec<PlaylistGroup>,
+    target: &ConfigTarget,
+    pipe: &[TransformStage],
+) -> (Vec<PlaylistGroup>, PipelineOutcome) {
+    if pipe.is_empty() {
+        return (groups, PipelineOutcome::default());
+    }
+    execute_pipeline_on_items(groups.into_iter().flat_map(|group| group.channels).collect(), target, pipe)
 }
 
 fn execute_pipe<'a>(
@@ -1330,7 +1588,7 @@ fn execute_pipe<'a>(
     fpl: &mut FetchedPlaylist<'a>,
     duplicates: &mut HashSet<UUIDType>,
     consume_source: bool,
-) -> Result<FetchedPlaylist<'a>, TuliproxError> {
+) -> Result<(FetchedPlaylist<'a>, PipelineOutcome), TuliproxError> {
     let source = if consume_source {
         if fpl.is_memory() {
             MemoryPlaylistSource::new(fpl.source.take_groups()).into_source()
@@ -1349,20 +1607,14 @@ fn execute_pipe<'a>(
             item.header.freeze_input_stream_id();
         }
     }
-    if target.options.as_ref().is_some_and(|opt| opt.remove_duplicates) {
+    if target.execution_plan.pre_transform_identity_dedup {
         new_fpl.deduplicate(duplicates);
     }
 
-    for f in pipe {
-        if let Some(groups) = f(&mut new_fpl.source, target) {
-            new_fpl.source = MemoryPlaylistSource::new(groups).into_source();
-        }
-    }
-    // Ensure source is memory-based for downstream mutable processing (VOD/series resolution)
-    if !new_fpl.is_memory() {
-        new_fpl.source = MemoryPlaylistSource::new(new_fpl.source.take_groups()).into_source();
-    }
-    Ok(new_fpl)
+    let items = new_fpl.source.into_items().collect();
+    let (groups, outcome) = execute_pipeline_on_items(items, target, pipe);
+    new_fpl.source = MemoryPlaylistSource::new(groups).into_source();
+    Ok((new_fpl, outcome))
 }
 
 // This method is needed, because of duplicate group names in different inputs.
@@ -1395,11 +1647,12 @@ struct PreparedTarget {
     target: ConfigTarget,
     playlist: Vec<PlaylistGroup>,
     epg: Vec<Epg>,
+    processing: PipelineStats,
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn prepare_playlist_for_target(
-    ctx: &PlaylistProcessingContext,
+async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     playlists: &mut [FetchedPlaylist<'_>],
     target: &ConfigTarget,
     stats: &mut HashMap<Arc<str>, InputStats>,
@@ -1412,9 +1665,10 @@ async fn prepare_playlist_for_target(
     let mut duplicates: HashSet<UUIDType> = HashSet::new();
     let mut new_epg = vec![];
     let mut new_playlist: Vec<PlaylistGroup> = vec![];
+    let mut aggregate_outcome = PipelineOutcome::default();
 
     debug!("Executing processing pipes");
-    let broadcast_step = create_broadcast_callback(ctx.event_manager.as_ref());
+    let broadcast_step = create_broadcast_callback(&ctx.events);
 
     let pipe = get_processing_pipe(target);
     let mut step = StepMeasure::new(&target.name, broadcast_step);
@@ -1423,8 +1677,11 @@ async fn prepare_playlist_for_target(
             format!("target '{}' input '{}' before_pipe", target.name, provider_fpl.input.name).as_str(),
         );
         step.broadcast("Executing transformations on '{}' playlist", &target.name);
-        let mut processed_fpl = execute_pipe(target, &pipe, provider_fpl, &mut duplicates, consume_input_source)
-            .map_err(|err| vec![err])?;
+        let (mut processed_fpl, input_outcome) =
+            execute_pipe(target, &pipe, provider_fpl, &mut duplicates, consume_input_source)
+                .map_err(|err| vec![err])?;
+        debug!("Target '{}' input '{}' pipeline outcome: {input_outcome:?}", target.name, provider_fpl.input.name);
+        aggregate_outcome.merge(input_outcome);
         log_memory_snapshot(
             format!("target '{}' input '{}' after_pipe", target.name, provider_fpl.input.name).as_str(),
         );
@@ -1437,7 +1694,7 @@ async fn prepare_playlist_for_target(
         log_memory_snapshot(
             format!("target '{}' input '{}' after_epg_apply", target.name, processed_fpl.input.name).as_str(),
         );
-        let deduplicate = target.options.as_ref().is_some_and(|options| options.remove_duplicates);
+        let deduplicate = target.execution_plan.pre_transform_identity_dedup;
         if let Some(groups) = map_playlist_at_stage(
             &mut processed_fpl.source,
             target,
@@ -1459,7 +1716,12 @@ async fn prepare_playlist_for_target(
     step.tick("filter rename map + epg");
     log_memory_snapshot(format!("target '{}' after_filter_rename_map_epg", target.name).as_str());
     step.stop("Preparing playlist");
-    Ok(PreparedTarget { target: target.clone(), playlist: new_playlist, epg: new_epg })
+    Ok(PreparedTarget {
+        target: target.clone(),
+        playlist: new_playlist,
+        epg: new_epg,
+        processing: aggregate_outcome.to_stats(),
+    })
 }
 
 /// Spill each `Epg` source to a temp `BPlusTree` and merge them. Extracted
@@ -1501,15 +1763,15 @@ fn spill_epg_to_disk(sources: Vec<Epg>) -> Result<Option<Epg>, TuliproxError> {
     }
 }
 
-async fn finalize_prepared_target(
-    ctx: Arc<PlaylistProcessingContext>,
+async fn finalize_prepared_target<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: Arc<PlaylistProcessingContext<E, M>>,
     prepared: PreparedTarget,
 ) -> (Result<(), Vec<TuliproxError>>, Vec<TuliproxError>) {
     let target = &prepared.target;
     let mut new_playlist = prepared.playlist;
     let new_epg = prepared.epg;
     let mut errors = Vec::new();
-    let broadcast_step = create_broadcast_callback(ctx.event_manager.as_ref());
+    let broadcast_step = create_broadcast_callback(&ctx.events);
     let mut step = StepMeasure::new(&target.name, broadcast_step);
     if target.favourites.is_some() {
         step.broadcast("Processing favourites for '{}' playlist", &target.name);
@@ -1532,27 +1794,40 @@ async fn finalize_prepared_target(
         step.tick("playlist merge");
         log_memory_snapshot(format!("target '{}' after_playlist_merge", target.name).as_str());
 
-        if let Some(dedup_config) = target.options.as_ref().and_then(|options| options.deduplicate.as_ref()) {
-            let removed = crate::processor::deduplicate::deduplicate_playlist(*dedup_config, &mut flat_new_playlist);
-            if removed > 0 {
-                info!("Deduplicated {removed} channels for target {}", target.name);
+        for stage in FINALIZATION_ORDER.into_iter().skip(1) {
+            match stage {
+                FinalizationStage::Merge => unreachable!("merge is completed before post-merge finalization"),
+                FinalizationStage::Deduplicate => {
+                    if let Some(dedup_config) = target.execution_plan.post_merge_content_dedup.as_ref() {
+                        let removed =
+                            crate::processor::deduplicate::deduplicate_playlist(*dedup_config, &mut flat_new_playlist);
+                        if removed > 0 {
+                            info!("Deduplicated {removed} channels for target {}", target.name);
+                        }
+                        step.tick("playlist dedup");
+                        log_memory_snapshot(format!("target '{}' after_playlist_dedup", target.name).as_str());
+                    }
+                }
+                FinalizationStage::Sort => {
+                    if sort_playlist(target, &mut flat_new_playlist) {
+                        step.tick("playlist sort");
+                        log_memory_snapshot(format!("target '{}' after_playlist_sort", target.name).as_str());
+                    }
+                }
+                FinalizationStage::AssignChannelNumbers => {
+                    assign_channel_no_playlist(&mut flat_new_playlist);
+                    step.tick("assigning channel numbers");
+                    log_memory_snapshot(format!("target '{}' after_assign_channel_numbers", target.name).as_str());
+                }
+                FinalizationStage::AssignCounters => {
+                    map_playlist_counter(target, &mut flat_new_playlist);
+                    step.tick("assigning channel counter");
+                    log_memory_snapshot(format!("target '{}' after_assign_channel_counter", target.name).as_str());
+                }
             }
-            step.tick("playlist dedup");
-            log_memory_snapshot(format!("target '{}' after_playlist_dedup", target.name).as_str());
         }
 
-        if sort_playlist(target, &mut flat_new_playlist) {
-            step.tick("playlist sort");
-            log_memory_snapshot(format!("target '{}' after_playlist_sort", target.name).as_str());
-        }
-        assign_channel_no_playlist(&mut flat_new_playlist);
-        step.tick("assigning channel numbers");
-        log_memory_snapshot(format!("target '{}' after_assign_channel_numbers", target.name).as_str());
-        map_playlist_counter(target, &mut flat_new_playlist);
-        step.tick("assigning channel counter");
-        log_memory_snapshot(format!("target '{}' after_assign_channel_counter", target.name).as_str());
-
-        if process_watch(&ctx.config, &ctx.client, target, &flat_new_playlist).await {
+        if process_watch(&ctx.config, &ctx.events, target, &flat_new_playlist).await {
             step.tick("group watches");
             log_memory_snapshot(format!("target '{}' after_group_watches", target.name).as_str());
         }
@@ -1592,8 +1867,8 @@ async fn finalize_prepared_target(
     }
 }
 
-async fn playlist_resolve(
-    ctx: &PlaylistProcessingContext,
+async fn playlist_resolve<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     target: &ConfigTarget,
     errors: &mut Vec<TuliproxError>,
     pipe: &ProcessingPipe,
@@ -1668,7 +1943,11 @@ fn provider_id_from_item(item: &PlaylistItem) -> Option<ProviderIdType> {
 }
 
 #[allow(clippy::too_many_lines)]
-async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, fpl: &mut FetchedPlaylist<'_>) {
+async fn playlist_probe<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
+    target: &ConfigTarget,
+    fpl: &mut FetchedPlaylist<'_>,
+) {
     let Some(mgr) = ctx.metadata_manager.as_ref() else {
         return;
     };
@@ -1767,7 +2046,12 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
                                     };
                                     debug!(
                                         "[Task] Creating ProbeLive task for input {}: id={}, last_probed_ts={:?}, cutoff_ts={}, interval={}s, title=\"{}\"",
-                                        input_name, provider_id, last_probed, cutoff_ts, interval_secs, item.header.title
+                                        input_name,
+                                        provider_id,
+                                        last_probed,
+                                        cutoff_ts,
+                                        interval_secs,
+                                        item.header.title
                                     );
                                 }
                                 Arc::clone(mgr).queue_task_background(input_name.clone(), task);
@@ -1836,7 +2120,9 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
     }
 
     if queued_live_count > 0 || queued_stream_count > 0 {
-        info!("Queued probe tasks for input {input_name} (live_interval={queued_live_count}, generic={queued_stream_count})");
+        info!(
+            "Queued probe tasks for input {input_name} (live_interval={queued_live_count}, generic={queued_stream_count})"
+        );
     }
 }
 
@@ -1896,31 +2182,82 @@ async fn trakt_playlist(
     true
 }
 
-async fn process_watch(
+async fn process_watch<E: EventSink>(
     app_config: &Arc<AppConfig>,
-    client: &reqwest::Client,
+    events: &E,
     target: &ConfigTarget,
     new_playlist: &[PlaylistGroup],
 ) -> bool {
-    if let Some(watches) = &target.watch {
-        if default_as_default().eq_ignore_ascii_case(&target.name) {
-            error!("can't watch a target with no unique name");
-            return false;
-        }
+    let Some(watches) = &target.watch else {
+        return false;
+    };
 
-        futures::stream::iter(
-            new_playlist
-                .iter()
-                .filter(|pl| watches.iter().any(|r| r.is_match(&pl.title)))
-                .map(|pl| process_group_watch(app_config, client, &target.name, pl)),
-        )
-        .for_each_concurrent(16, |f| f)
-        .await;
-
-        true
-    } else {
-        false
+    // Configured, but every pattern failed to compile. Silently doing
+    // nothing here is what made a typo in `watch` indistinguishable from a
+    // playlist that never changes.
+    if watches.is_empty() {
+        error!("target '{}' configured watch patterns but none of them compiled", target.name);
+        events.emit(EventMessage::PlaylistWatchDisabled(WatchDisabled::new(
+            target.name.clone(),
+            WatchDisabledReason::InvalidPatterns,
+        )));
+        return false;
     }
+
+    if default_as_default().eq_ignore_ascii_case(&target.name) {
+        error!("can't watch a target with no unique name");
+        events.emit(EventMessage::PlaylistWatchDisabled(WatchDisabled::new(
+            target.name.clone(),
+            WatchDisabledReason::UnnamedTarget,
+        )));
+        return false;
+    }
+
+    // Before the per-group fan-out: this is about which groups exist, not
+    // what is inside the ones the patterns name, so it must see every group
+    // rather than only the watched ones.
+    process_target_groups_watch(app_config, events, &target.name, new_playlist).await;
+
+    let mut matched = vec![false; watches.len()];
+    let mut watched_groups = Vec::new();
+    for group in new_playlist {
+        let mut any = false;
+        for (index, pattern) in watches.iter().enumerate() {
+            if pattern.is_match(&group.title) {
+                matched[index] = true;
+                any = true;
+            }
+        }
+        if any {
+            watched_groups.push(group);
+        }
+    }
+
+    // A pattern that matches nothing looks exactly like a group that has not
+    // changed. `EventKindMask::from_wire_names` already reports unmatched
+    // subscription names for the same reason: a typo must surface.
+    let unmatched: Vec<String> = watches
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !matched[*index])
+        .map(|(_, pattern)| pattern.as_str().to_string())
+        .collect();
+    if !unmatched.is_empty() {
+        warn!("target '{}' has {} watch pattern(s) matching no group", target.name, unmatched.len());
+        events.emit(EventMessage::PlaylistWatchUnmatched(WatchUnmatched::new(
+            target.name.clone(),
+            unmatched,
+            new_playlist.len(),
+        )));
+    }
+
+    futures::stream::iter(
+        watched_groups.into_iter().map(|pl| process_group_watch(app_config, events, &target.name, pl)),
+    )
+    .for_each_concurrent(16, |f| f)
+    .await;
+
+    true
 }
 
 /// Work the composition root runs once the playlist lock is held, before the
@@ -1928,26 +2265,186 @@ async fn process_watch(
 ///
 /// This was an `Option<Arc<AppState>>` used for exactly one call. Passing the
 /// call instead of the state keeps `processing` from naming the server state.
-pub type PlaylistUpdateBootstrap = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+///
+/// It was then an
+/// `Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>`:
+/// two layers of erasure and a heap allocation for a future that is awaited
+/// exactly once per update, and every call site had to spell out both
+/// coercions. As a trait it is one type parameter, monomorphised, with the
+/// future returned by value.
+pub trait UpdateBootstrap: Send + Sync + 'static {
+    fn run(&self) -> impl Future<Output = ()> + Send;
+}
 
-// `pre_processed_inputs` is always built with the default hasher here;
-// generalising a private signature would buy nothing.
-#[allow(clippy::implicit_hasher)]
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub async fn exec_processing(
-    client: &reqwest::Client,
+impl<F, Fut> UpdateBootstrap for F
+where
+    F: Fn() -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()> + Send,
+{
+    fn run(&self) -> impl Future<Output = ()> + Send { self() }
+}
+
+/// The bootstrap type parameter of a run that has no bootstrap.
+///
+/// A function pointer rather than a unit struct: it satisfies the blanket
+/// `Fn` impl above, so no second impl - and no coherence problem - is needed.
+/// A value of this type is never constructed; the field is always `None`.
+pub type NoBootstrap = fn() -> std::future::Ready<()>;
+
+/// Everything one playlist update run needs.
+///
+/// `exec_processing` took twelve positional arguments, seven of them
+/// `Option<_>`, so a call site was a wall of `None`s and `Some(..)`s in which
+/// the reader had to count commas to work out which knob was being set - and
+/// the compiler could not catch two same-typed arguments swapped.
+///
+/// Four of the twelve are always present, so they are constructor arguments.
+/// The rest are optional in fact as well as in type, and a call site names the
+/// ones it actually sets.
+pub struct ProcessingRun<
+    E: EventSink + Clone + 'static,
+    B: UpdateBootstrap = NoBootstrap,
+    M: MetadataUpdateSink = NoopMetadataSink,
+> {
+    client: reqwest::Client,
     app_config: Arc<AppConfig>,
     targets: Arc<ProcessTargets>,
-    event_manager: Option<Arc<EventManager>>,
-    bootstrap: Option<PlaylistUpdateBootstrap>,
+    events: E,
+    bootstrap: Option<B>,
     playlist_state: Option<Arc<PlaylistStorageState>>,
     update_guard: Option<UpdateGuard>,
     disabled_headers: Option<ReverseProxyDisabledHeaderConfig>,
     provider_manager: Option<Arc<ActiveProviderManager>>,
-    metadata_manager: Option<Arc<dyn MetadataUpdateSink>>,
+    metadata_manager: Option<Arc<M>>,
     pre_processed_inputs: Option<HashSet<Arc<str>>>,
     acquired_permit: Option<tuliprox_core::model::UpdateGuardPermit>,
+}
+
+impl<E: EventSink + Clone + 'static> ProcessingRun<E, NoBootstrap, NoopMetadataSink> {
+    pub fn new(client: reqwest::Client, app_config: Arc<AppConfig>, targets: Arc<ProcessTargets>, events: E) -> Self {
+        Self {
+            client,
+            app_config,
+            targets,
+            events,
+            bootstrap: None,
+            playlist_state: None,
+            update_guard: None,
+            disabled_headers: None,
+            provider_manager: None,
+            metadata_manager: None,
+            pre_processed_inputs: None,
+            acquired_permit: None,
+        }
+    }
+}
+
+impl<E: EventSink + Clone + 'static, B: UpdateBootstrap, M: MetadataUpdateSink> ProcessingRun<E, B, M> {
+    /// Work the composition root runs once the lock is held, before the update
+    /// proper starts.
+    ///
+    /// Changes the run's bootstrap type, so it rebuilds rather than mutates.
+    #[must_use]
+    pub fn with_bootstrap<B2: UpdateBootstrap>(self, bootstrap: B2) -> ProcessingRun<E, B2, M> {
+        ProcessingRun {
+            client: self.client,
+            app_config: self.app_config,
+            targets: self.targets,
+            events: self.events,
+            bootstrap: Some(bootstrap),
+            playlist_state: self.playlist_state,
+            update_guard: self.update_guard,
+            disabled_headers: self.disabled_headers,
+            provider_manager: self.provider_manager,
+            metadata_manager: self.metadata_manager,
+            pre_processed_inputs: self.pre_processed_inputs,
+            acquired_permit: self.acquired_permit,
+        }
+    }
+
+    #[must_use]
+    pub fn with_playlist_state(mut self, state: impl Into<Option<Arc<PlaylistStorageState>>>) -> Self {
+        self.playlist_state = state.into();
+        self
+    }
+
+    /// The lock this run acquires. Ignored when an already-acquired permit is
+    /// supplied via [`Self::with_acquired_permit`].
+    #[must_use]
+    pub fn with_update_guard(mut self, guard: impl Into<Option<UpdateGuard>>) -> Self {
+        self.update_guard = guard.into();
+        self
+    }
+
+    #[must_use]
+    pub fn with_disabled_headers(mut self, headers: impl Into<Option<ReverseProxyDisabledHeaderConfig>>) -> Self {
+        self.disabled_headers = headers.into();
+        self
+    }
+
+    #[must_use]
+    pub fn with_provider_manager(mut self, manager: impl Into<Option<Arc<ActiveProviderManager>>>) -> Self {
+        self.provider_manager = manager.into();
+        self
+    }
+
+    /// The background metadata worker.
+    ///
+    /// Changes the run's sink type, so it rebuilds rather than mutates.
+    #[must_use]
+    pub fn with_metadata_manager<M2: MetadataUpdateSink>(self, manager: Arc<M2>) -> ProcessingRun<E, B, M2> {
+        ProcessingRun {
+            client: self.client,
+            app_config: self.app_config,
+            targets: self.targets,
+            events: self.events,
+            bootstrap: self.bootstrap,
+            playlist_state: self.playlist_state,
+            update_guard: self.update_guard,
+            disabled_headers: self.disabled_headers,
+            provider_manager: self.provider_manager,
+            metadata_manager: Some(manager),
+            pre_processed_inputs: self.pre_processed_inputs,
+            acquired_permit: self.acquired_permit,
+        }
+    }
+
+    // Always built with the default hasher here; generalising would buy nothing.
+    #[allow(clippy::implicit_hasher)]
+    #[must_use]
+    pub fn with_pre_processed_inputs(mut self, inputs: impl Into<Option<HashSet<Arc<str>>>>) -> Self {
+        self.pre_processed_inputs = inputs.into();
+        self
+    }
+
+    /// A playlist lock the caller already holds. Takes precedence over
+    /// [`Self::with_update_guard`], which would otherwise acquire a second one.
+    #[must_use]
+    pub fn with_acquired_permit(mut self, permit: impl Into<Option<tuliprox_core::model::UpdateGuardPermit>>) -> Self {
+        self.acquired_permit = permit.into();
+        self
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+pub async fn exec_processing<E: EventSink + Clone + 'static, B: UpdateBootstrap, M: MetadataUpdateSink>(
+    run: ProcessingRun<E, B, M>,
 ) {
+    let ProcessingRun {
+        client,
+        app_config,
+        targets,
+        events,
+        bootstrap,
+        playlist_state,
+        update_guard,
+        disabled_headers,
+        provider_manager,
+        metadata_manager,
+        pre_processed_inputs,
+        acquired_permit,
+    } = run;
+
     let max_update_duration = Duration::from_secs(PLAYLIST_UPDATE_MAX_DURATION_SECS);
     let playlist_guard = if let Some(permit) = acquired_permit {
         Some(permit)
@@ -1956,9 +2453,9 @@ pub async fn exec_processing(
             Some(permit)
         } else {
             warn!("Playlist update lock is closed; update skipped.");
-            if let Some(events) = event_manager.as_deref() {
-                events.send_event(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
-            }
+            events.emit(EventMessage::PlaylistUpdate(PlaylistUpdateSummary::state_only(
+                shared::model::PlaylistUpdateState::Failure,
+            )));
             return;
         }
     } else {
@@ -1967,13 +2464,13 @@ pub async fn exec_processing(
 
     if playlist_guard.is_some() {
         if let Some(bootstrap) = bootstrap.as_ref() {
-            if tokio::time::timeout(max_update_duration, bootstrap()).await.is_err() {
+            if tokio::time::timeout(max_update_duration, bootstrap.run()).await.is_err() {
                 error!(
                     "Playlist update bootstrap timed out after {PLAYLIST_UPDATE_MAX_DURATION_SECS} secs while holding playlist lock",
                 );
-                if let Some(events) = event_manager.as_deref() {
-                    events.send_event(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
-                }
+                events.emit(EventMessage::PlaylistUpdate(PlaylistUpdateSummary::state_only(
+                    shared::model::PlaylistUpdateState::Failure,
+                )));
                 return;
             }
         }
@@ -1992,10 +2489,10 @@ pub async fn exec_processing(
 
     // Initialize Context
     let ctx = PlaylistProcessingContext {
-        client: client.clone(),
+        client,
         config: app_config.clone(),
         user_targets: targets.clone(),
-        event_manager: event_manager.clone(),
+        events: events.clone(),
         playlist_state: playlist_state.clone(),
         processed_inputs: Arc::new(Mutex::new(HashSet::new())),
         input_locks: Arc::new(Mutex::new(HashMap::new())),
@@ -2021,18 +2518,18 @@ pub async fn exec_processing(
         Ok(Ok((stats, errors))) => (stats, errors),
         Ok(Err(_)) => {
             error!("Playlist processing panicked");
-            if let Some(events) = event_manager.as_deref() {
-                events.send_event(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
-            }
+            events.emit(EventMessage::PlaylistUpdate(PlaylistUpdateSummary::state_only(
+                shared::model::PlaylistUpdateState::Failure,
+            )));
             return;
         }
         Err(_) => {
             error!(
                 "Playlist processing timed out after {PLAYLIST_UPDATE_MAX_DURATION_SECS} secs while holding playlist lock",
             );
-            if let Some(events) = event_manager.as_deref() {
-                events.send_event(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
-            }
+            events.emit(EventMessage::PlaylistUpdate(PlaylistUpdateSummary::state_only(
+                shared::model::PlaylistUpdateState::Failure,
+            )));
             return;
         }
     };
@@ -2048,38 +2545,34 @@ pub async fn exec_processing(
     }
 
     if !stats.is_empty() {
-        // print stats
         if let Ok(stats_msg) = serde_json::to_string(&stats) {
             info!("stats: {stats_msg}");
         }
-        // send stats
-        send_message(&app_config, client, MessageContent::event_stats(stats)).await;
     }
 
-    // send errors
-    if let Some(message) = get_errors_notify_message!(errors, 255) {
-        if let Some(events) = event_manager.as_deref() {
-            events.send_event(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
-        }
-        send_message(&app_config, client, MessageContent::event_error(message)).await;
-    } else if let Some(events) = event_manager.as_deref() {
-        let update_state = if ctx.partial_refresh.load(std::sync::atomic::Ordering::Acquire) {
-            shared::model::PlaylistUpdateState::Partial
-        } else {
-            shared::model::PlaylistUpdateState::Success
-        };
-        events.send_event(EventMessage::PlaylistUpdate(update_state));
-    }
+    // One event for the whole run, carrying both the outcome and what it
+    // did. These used to be two independent messages - the statistics went
+    // straight to the notification layer, the outcome went to the bus - and
+    // because both resolve to `playlist.update.completed`, a successful
+    // refresh notified twice. Subscribers now get one event with everything,
+    // and the bridge renders the single message from it.
+    let error = get_errors_notify_message!(errors, 255);
+    let outcome = if error.is_some() {
+        shared::model::PlaylistUpdateState::Failure
+    } else if ctx.partial_refresh.load(std::sync::atomic::Ordering::Acquire) {
+        shared::model::PlaylistUpdateState::Partial
+    } else {
+        shared::model::PlaylistUpdateState::Success
+    };
+    events.emit(EventMessage::PlaylistUpdate(PlaylistUpdateSummary { state: outcome, stats, error }));
 
     let elapsed = start_time.elapsed().as_secs();
     let update_finished_message = format!("🌷 Update process finished! Took {elapsed} secs.");
 
-    if let Some(events) = event_manager.as_deref() {
-        events.send_event(EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
-            target: "Playlist Update".to_string(),
-            message: update_finished_message.clone(),
-        }));
-    }
+    events.emit(EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
+        target: "Playlist Update".to_string(),
+        message: update_finished_message.clone(),
+    }));
     log_memory_snapshot("exec_processing before_interner_gc");
     debug!("StringInterner GC removed {} strings", interner_gc());
     log_memory_snapshot("exec_processing after_interner_gc");
@@ -2094,13 +2587,13 @@ mod tests {
     use shared::{
         foundation::{get_filter, MapperScript, ValueProvider},
         model::{
-            ClusterFlags, ConfigInputDto, ConfigRenameDto, ConfigTargetDto, ConfigTargetOptions, M3uPlaylistItem,
-            MappingStage, PlaylistEntry, PlaylistItem, PlaylistItemHeader, PlaylistItemType, XtreamCluster,
-            XtreamPlaylistItem,
+            ClusterFlags, ConfigInputDto, ConfigRenameDto, ConfigTargetDto, ConfigTargetOptions, FieldSetAccessor,
+            ItemField, M3uPlaylistItem, MappingStage, PlaylistEntry, PlaylistItem, PlaylistItemHeader,
+            PlaylistItemType, XtreamCluster, XtreamPlaylistItem,
         },
         utils::Internable,
     };
-    use tuliprox_core::model::Config;
+    use tuliprox_core::model::{CompiledMappingRule, CompiledTargetMappings, Config};
 
     fn serialize_without_trailing_fields<T: serde::Serialize>(value: &T, trailing_fields: &[u8]) -> Vec<u8> {
         let mut encoded = rmp_serde::to_vec(value).expect("playlist item should serialize");
@@ -2175,21 +2668,22 @@ mod tests {
             header: PlaylistItemHeader { id: "origin-alpha".intern(), name: "Channel".intern(), ..Default::default() },
         };
         item.header.freeze_input_stream_id();
-        let mapping = Mapping {
-            mapper: Some(vec![tuliprox_core::model::Mapper {
-                filter: r#"name ~ ".*""#.to_string(),
-                script: r#"@id = "target-id""#.to_string(),
-                t_filter: Some(get_filter(r#"name ~ ".*""#, None).expect("filter should parse")),
-                t_script: Some(MapperScript::parse(r#"@id = "target-id""#, None).expect("mapper should parse")),
-            }]),
+        let mapping = CompiledMapping {
+            rules: vec![CompiledMappingRule {
+                name: None,
+                filter: get_filter(r#"name ~ ".*""#, None).expect("filter should parse"),
+                program: MappingProgram::Script(
+                    MapperScript::parse(r#"@id = "target-id""#, None).expect("mapper should parse"),
+                ),
+            }],
             ..Default::default()
         };
 
-        let (mapped, _, matched) = map_channel(item, &mapping);
+        let outcome = map_channel(item, &mapping);
 
-        assert!(matched);
-        assert_eq!(mapped.header.id.as_ref(), "target-id");
-        assert_eq!(mapped.header.input_stream_id.as_ref(), "origin-alpha");
+        assert_eq!(outcome.matched_rules, 1);
+        assert_eq!(outcome.channel.header.id.as_ref(), "target-id");
+        assert_eq!(outcome.channel.header.input_stream_id.as_ref(), "origin-alpha");
     }
 
     #[test]
@@ -2211,23 +2705,24 @@ mod tests {
         legacy_xtream.url = "http://provider.example/live/channel.m3u8".intern();
         let mut legacy_item = PlaylistItem::from(&legacy_xtream);
         legacy_item.header.freeze_input_stream_id();
-        let mapping = Mapping {
-            mapper: Some(vec![tuliprox_core::model::Mapper {
-                filter: r#"name ~ ".*""#.to_string(),
-                script: r#"@id = "target-id""#.to_string(),
-                t_filter: Some(get_filter(r#"name ~ ".*""#, None).expect("filter should parse")),
-                t_script: Some(MapperScript::parse(r#"@id = "target-id""#, None).expect("mapper should parse")),
-            }]),
+        let mapping = CompiledMapping {
+            rules: vec![CompiledMappingRule {
+                name: None,
+                filter: get_filter(r#"name ~ ".*""#, None).expect("filter should parse"),
+                program: MappingProgram::Script(
+                    MapperScript::parse(r#"@id = "target-id""#, None).expect("mapper should parse"),
+                ),
+            }],
             ..Default::default()
         };
 
-        let (mapped, _, matched) = map_channel(legacy_item, &mapping);
-        let materialized_m3u = M3uPlaylistItem::from(&mapped);
-        let materialized_xtream = XtreamPlaylistItem::from(&mapped);
+        let outcome = map_channel(legacy_item, &mapping);
+        let materialized_m3u = M3uPlaylistItem::from(&outcome.channel);
+        let materialized_xtream = XtreamPlaylistItem::from(&outcome.channel);
 
-        assert!(matched);
-        assert_eq!(mapped.header.id.as_ref(), "target-id");
-        assert_eq!(mapped.get_input_stream_id(), None);
+        assert_eq!(outcome.matched_rules, 1);
+        assert_eq!(outcome.channel.header.id.as_ref(), "target-id");
+        assert_eq!(outcome.channel.get_input_stream_id(), None);
         assert!(materialized_m3u.provider_id.is_empty());
         assert_eq!(materialized_m3u.get_input_stream_id(), None);
         assert_eq!(materialized_xtream.provider_id, 0);
@@ -2249,7 +2744,7 @@ mod tests {
         let mut duplicates = HashSet::new();
         let target = ConfigTarget::from(&ConfigTargetDto::default());
 
-        let mut processed = execute_pipe(&target, &vec![], &mut fetched, &mut duplicates, false)
+        let (mut processed, _outcome) = execute_pipe(&target, &vec![], &mut fetched, &mut duplicates, false)
             .expect("target processing should succeed");
         let mut groups = processed.source.take_groups();
 
@@ -2571,6 +3066,70 @@ mod tests {
     }
 
     #[test]
+    fn playlist_retention_reports_filter_counts() {
+        let groups = vec![PlaylistGroup {
+            id: 1,
+            title: "Test Group".intern(),
+            channels: vec![
+                make_test_item("Allowed", PlaylistItemType::Live),
+                make_test_item("Denied", PlaylistItemType::Live),
+            ],
+            xtream_cluster: XtreamCluster::Live,
+        }];
+        let mut source = MemoryPlaylistSource::new(groups).into_source();
+
+        let (filtered, outcome) = retain_playlist_items(&mut source, |item| item.header.name.as_ref() == "Allowed");
+
+        assert_eq!(outcome, FilterOutcome { inspected: 2, retained: 1, removed: 1 });
+        assert_eq!(filtered.expect("one item should remain")[0].channels[0].header.name.as_ref(), "Allowed");
+    }
+
+    #[test]
+    fn filter_stage_can_remove_every_item() {
+        let groups = vec![PlaylistGroup {
+            id: 1,
+            title: "Test Group".intern(),
+            channels: vec![make_test_item("Denied", PlaylistItemType::Live)],
+            xtream_cluster: XtreamCluster::Live,
+        }];
+        let mut target = ConfigTarget::from(&ConfigTargetDto::default());
+        target.filter = get_filter(r#"name ~ "Allowed""#, None).expect("filter should parse");
+
+        let (groups, outcome) = execute_pipeline_on_groups(groups, &target, &[TransformStage::Filter]);
+
+        assert!(groups.is_empty());
+        assert_eq!(outcome.filter, Some(FilterOutcome { inspected: 1, retained: 0, removed: 1 }));
+    }
+
+    #[test]
+    fn pipeline_reports_filter_and_rename_outcomes() {
+        let groups = vec![PlaylistGroup {
+            id: 1,
+            title: "Test Group".intern(),
+            channels: vec![
+                make_test_item("Allowed", PlaylistItemType::Live),
+                make_test_item("Denied", PlaylistItemType::Live),
+            ],
+            xtream_cluster: XtreamCluster::Live,
+        }];
+        let mut target = ConfigTarget::from(&ConfigTargetDto::default());
+        target.filter = get_filter(r#"name ~ "Allowed""#, None).expect("filter should parse");
+        target.rename = Some(vec![ConfigRename::from(&ConfigRenameDto {
+            field: ItemField::Name,
+            pattern: "Allowed".to_string(),
+            new_name: "Renamed".to_string(),
+            t_pattern: None,
+        })]);
+
+        let (groups, outcome) =
+            execute_pipeline_on_groups(groups, &target, &[TransformStage::Filter, TransformStage::Rename]);
+
+        assert_eq!(groups[0].channels[0].header.name.as_ref(), "Renamed");
+        assert_eq!(outcome.filter, Some(FilterOutcome { inspected: 2, retained: 1, removed: 1 }));
+        assert_eq!(outcome.rename, Some(RenameOutcome { inspected: 1, changed_items: 1, changed_fields: 1 }));
+    }
+
+    #[test]
     fn assign_channel_no_playlist_preserves_non_zero_chno() {
         let mut groups = vec![
             PlaylistGroup {
@@ -2759,7 +3318,13 @@ mod tests {
                 maximum.fetch_max(current, Ordering::SeqCst);
                 tokio::time::sleep(Duration::from_millis(10)).await;
                 active.fetch_sub(1, Ordering::SeqCst);
-                TargetJobResult { index, name: format!("target-{index}"), result: Ok(()), errors: Vec::new() }
+                TargetJobResult {
+                    index,
+                    name: format!("target-{index}"),
+                    result: Ok(()),
+                    errors: Vec::new(),
+                    processing: PipelineStats::default(),
+                }
             });
         }
         while let Some(result) = tasks.join_next().await {
@@ -2811,33 +3376,28 @@ mod tests {
         use tokio::runtime::Runtime;
         use tuliprox_core::{
             model::{
-                EpgConfig, EpgSmartMatchConfig, IcsEpgSourceConfig, Mapper, MediaToolCapabilities, PersistedEpgSource,
+                EpgConfig, EpgSmartMatchConfig, IcsEpgSourceConfig, MediaToolCapabilities, PersistedEpgSource,
                 PersistedEpgSourceKind, SourcesConfig,
             },
             utils::FileLockManager,
         };
 
-        fn build_mapping(id: &str, stage: MappingStage, script: &str) -> Mapping {
-            let script = script.to_string();
-            let t_filter = get_filter(r#"name ~ ".*""#, None).expect("filter parses");
-            let t_script = MapperScript::parse(&script, None).expect("script parses");
-            Mapping {
+        fn build_mapping(id: &str, stage: MappingStage, script: &str) -> CompiledMapping {
+            CompiledMapping {
                 id: id.to_string(),
                 match_as_ascii: false,
                 stage,
-                mapper: Some(vec![Mapper {
-                    filter: r#"name ~ ".*""#.to_string(),
-                    script,
-                    t_filter: Some(t_filter),
-                    t_script: Some(t_script),
-                }]),
-                counter: None,
-                t_counter: None,
+                rules: vec![CompiledMappingRule {
+                    name: None,
+                    filter: get_filter(r#"name ~ ".*""#, None).expect("filter parses"),
+                    program: MappingProgram::Script(MapperScript::parse(script, None).expect("script parses")),
+                }],
+                counters: vec![],
                 templates: None,
             }
         }
 
-        fn build_target(mappings: Vec<Mapping>, remove_duplicates: bool) -> ConfigTarget {
+        fn build_target(mappings: Vec<CompiledMapping>, remove_duplicates: bool) -> ConfigTarget {
             let dto = ConfigTargetDto {
                 options: if remove_duplicates {
                     Some(ConfigTargetOptions { remove_duplicates, ..Default::default() })
@@ -2847,11 +3407,16 @@ mod tests {
                 ..Default::default()
             };
             let mut target = ConfigTarget::from(&dto);
-            target.mapping = Arc::new(ArcSwapOption::from(Some(Arc::new(mappings))));
+            target.mapping = Arc::new(ArcSwapOption::from(Some(Arc::new(CompiledTargetMappings::new(
+                mappings.into_iter().map(Arc::new).collect(),
+            )))));
             target
         }
 
-        fn processing_context() -> PlaylistProcessingContext {
+        /// Pinned to `NoopSink` rather than staying generic: these tests
+        /// exercise the pipeline, not the bus, and an inferred sink type
+        /// would just make every call site name one.
+        fn processing_context() -> PlaylistProcessingContext<shared::model::NoopSink> {
             let paths = ConfigPaths {
                 home_path: String::new(),
                 config_path: String::new(),
@@ -2886,7 +3451,7 @@ mod tests {
                     targets: Vec::new(),
                     target_names: Vec::new(),
                 }),
-                event_manager: None,
+                events: shared::model::NoopSink,
                 playlist_state: None,
                 disabled_headers: None,
                 processed_inputs: Arc::new(Mutex::new(HashSet::new())),
@@ -2934,7 +3499,7 @@ mod tests {
             let target = build_target(vec![processing, after_epg], false);
 
             let mut source = memory_source(vec![make_channel("Alpha")]);
-            let groups = map_playlist(&mut source, &target).expect("processing mapping should run");
+            let (groups, _) = execute_pipeline_on_groups(source.take_groups(), &target, &[TransformStage::Map]);
             assert_eq!(groups[0].channels[0].header.name.as_ref(), "Alpha-P");
 
             let mut source = MemoryPlaylistSource::new(groups).into_source();
@@ -3072,7 +3637,7 @@ match {
             let mut fetched =
                 FetchedPlaylist { input: &input, source: memory_source(vec![channel.clone(), channel]), epg: None };
             let mut duplicates = HashSet::new();
-            let mut processed =
+            let (mut processed, _outcome) =
                 execute_pipe(&target, &get_processing_pipe(&target), &mut fetched, &mut duplicates, false)
                     .expect("processing pipe must run");
             assert_eq!(processed.get_channel_count(), 1, "processing pipe must remove the duplicate");

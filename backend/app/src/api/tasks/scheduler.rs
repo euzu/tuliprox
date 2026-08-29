@@ -6,14 +6,14 @@ use crate::{
     model::{AppConfig, ProcessTargets, ScheduleConfig},
     processing::{
         geoip::{update_geoip_db, GeoIpUpdateError},
-        processor::exec_processing,
+        processor::{exec_processing, ProcessingRun},
     },
     utils::exit,
 };
 use chrono::{DateTime, FixedOffset, Local};
 use cron::Schedule;
 use shared::{
-    model::ScheduleTaskType,
+    model::{EventMessage, ScheduleTaskType, ScheduledTaskFailure},
     utils::{interner_gc, interner_len},
 };
 use std::{
@@ -184,26 +184,25 @@ async fn run_playlist_update_inner(
     // so that input/target ID changes from hot-reloads are picked up.
     let targets = get_process_targets(&app_state.app_config, &app_state.forced_targets.load(), schedule_target_names);
     exec_processing(
-        client,
-        Arc::clone(&app_state.app_config),
-        targets,
-        Some(Arc::clone(&app_state.event_manager)),
-        Some({
+        ProcessingRun::new(
+            client.clone(),
+            Arc::clone(&app_state.app_config),
+            targets,
+            Arc::clone(&app_state.event_manager),
+        )
+        .with_bootstrap({
             let state = Arc::clone(app_state);
-            std::sync::Arc::new(move || {
+            move || {
                 let state = Arc::clone(&state);
-                Box::pin(async move { crate::api::sync_panel_api_exp_dates(&state).await })
-                    as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
-            })
-        }),
-        Some(app_state.playlists.clone()),
-        Some(app_state.update_guard.clone()),
-        app_state.get_disabled_headers(),
-        Some(Arc::clone(&app_state.active_provider)),
-        Some(Arc::clone(&app_state.metadata_manager)
-            as std::sync::Arc<dyn tuliprox_processing::metadata_sink::MetadataUpdateSink>),
-        None,
-        Some(permit),
+                async move { crate::api::sync_panel_api_exp_dates(&state).await }
+            }
+        })
+        .with_playlist_state(app_state.playlists.clone())
+        .with_update_guard(app_state.update_guard.clone())
+        .with_disabled_headers(app_state.get_disabled_headers())
+        .with_provider_manager(Arc::clone(&app_state.active_provider))
+        .with_metadata_manager(Arc::clone(&app_state.metadata_manager))
+        .with_acquired_permit(permit),
     )
     .await;
 }
@@ -229,7 +228,7 @@ async fn start_scheduler(
                                     run_library_scan(&client, &app_state);
                                 }
                                 ScheduleTaskType::GeoIpUpdate => {
-                                    run_geoip_update(&app_state);
+                                    run_geoip_update(&app_state, expression);
                                 }
                             }
                         }
@@ -267,13 +266,22 @@ fn run_library_scan(client: &reqwest::Client, app_state: &Arc<AppState>) {
     }
 }
 
-fn run_geoip_update(app_state: &Arc<AppState>) {
+fn run_geoip_update(app_state: &Arc<AppState>, schedule: &str) {
     let app_state = Arc::clone(app_state);
+    let schedule = schedule.to_string();
     tokio::spawn(async move {
         if let Err(err) = update_geoip_db(&app_state.app_config, &app_state.http_client.load(), &app_state.geoip).await
         {
+            // `Disabled` is not a failure - the task ran and found nothing to
+            // do, which is what the config asked for.
             if !matches!(err, GeoIpUpdateError::Disabled) {
                 log::error!("Scheduled GeoIp update failed: {err}");
+                // The playlist update and the library scan both report their
+                // own outcomes. This one had no terminal event of its own, so
+                // an operator running on a stale database never found out.
+                let _ = app_state.event_manager.send_event(EventMessage::ScheduledTaskFailed(
+                    ScheduledTaskFailure::new(ScheduleTaskType::GeoIpUpdate, err.to_string()).with_schedule(schedule),
+                ));
             }
         }
     });

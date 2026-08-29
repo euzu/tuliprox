@@ -3,7 +3,7 @@ use crate::{
         endpoints::{download_api::download_queue_snapshot, v1_api::create_status_check},
         model::{AppState, EventMessage},
     },
-    auth::{validate_token_claims, verify_token},
+    auth::{validate_token_claims, TokenVerifier},
 };
 use axum::{
     extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
@@ -13,8 +13,8 @@ use log::{error, trace};
 use shared::{
     defaults::default_kick_secs,
     model::{
-        Claims, Permission, ProtocolHandler, ProtocolHandlerMemory, ProtocolMessage, UserCommand, UserId, UserRole,
-        WsCloseCode, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, PROTOCOL_VERSION, ROLE_ADMIN, TOKEN_NO_AUTH,
+        Claims, Permission, ProtocolHandler, ProtocolHandlerMemory, ProtocolMessage, RoleSet, UserCommand, UserId,
+        UserRole, WsCloseCode, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, PROTOCOL_VERSION, TOKEN_NO_AUTH,
     },
     utils::concat_path_leading_slash,
 };
@@ -91,7 +91,7 @@ fn set_websocket_auth(mem: &mut ProtocolHandlerMemory, auth_token: String, claim
         return false;
     }
     mem.permissions = claims.permissions;
-    mem.role = if claims.roles.iter().any(|role| role == ROLE_ADMIN) { UserRole::Admin } else { UserRole::User };
+    mem.role = if claims.is_admin() { UserRole::Admin } else { UserRole::User };
     mem.subject_id = claims.subject_id.as_ref().map(|u| u.0.clone());
     mem.token = Some(auth_token);
     true
@@ -111,7 +111,7 @@ fn websocket_claims(mem: &ProtocolHandlerMemory) -> Option<Claims> {
         iss: "tuliprox".to_string(),
         iat: 0,
         exp: i64::MAX,
-        roles: if mem.role == UserRole::Admin { vec![ROLE_ADMIN.to_string()] } else { Vec::new() },
+        roles: if mem.role == UserRole::Admin { RoleSet::ADMIN } else { RoleSet::new() },
         permissions: mem.permissions,
         pwd_version: 0,
         subject_id: Some(subject_id),
@@ -129,21 +129,21 @@ fn websocket_requires_download_read(auth_required: bool, mem: &ProtocolHandlerMe
     !auth_required || mem.permissions.contains(Permission::DownloadRead)
 }
 
+/// Which permission an event needs is a fact about the event, not about the
+/// websocket: it does not change with the transport carrying it. The table
+/// lives on `EventKind`, so a new variant cannot reach a session that should
+/// not see it just because this file was not updated.
 fn websocket_can_receive_runtime_events(mem: &ProtocolHandlerMemory, event: &EventMessage) -> bool {
-    match event {
-        EventMessage::DownloadsUpdate(_) | EventMessage::DownloadsDeltaUpdate(_) => {
-            mem.permissions.contains(Permission::DownloadRead)
-        }
-        EventMessage::RecordingChanged | EventMessage::RecordingRulesChanged => {
-            mem.permissions.contains(Permission::RecordingRead)
-        }
-        EventMessage::PlaylistUpdateProgress(_) | EventMessage::PlaylistUpdate(_) => {
-            mem.permissions.contains(Permission::PlaylistWrite)
-        }
-        EventMessage::LibraryScanProgress(_) => mem.permissions.contains(Permission::LibraryWrite),
-        _ => mem.permissions.contains(Permission::SystemRead),
-    }
+    mem.permissions.contains(event.required_permission())
 }
+
+/// The payload itself, cloned only if this session is not the last holder.
+///
+/// The bus keeps the large payloads behind `Arc` so that subscribers who do
+/// not serialize them - the notification bridge, say - pay a refcount bump
+/// instead of a deep copy. Only here, at the wire boundary, is the value
+/// itself needed.
+fn unwrap_or_clone<T: Clone>(value: Arc<T>) -> T { Arc::try_unwrap(value).unwrap_or_else(|shared| (*shared).clone()) }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum MainEventReceiveErrorAction {
@@ -165,15 +165,16 @@ fn main_event_receive_error_action(
     }
 }
 
-fn get_secret_key(app_state: &AppState, auth: bool) -> Option<Vec<u8>> {
+/// The verifier this socket authenticates against.
+///
+/// This used to hand a bare `Vec<u8>` secret around, which is precisely why
+/// the WebSocket paths could not check the token's issuer.
+fn get_token_verifier(app_state: &AppState, auth: bool) -> Option<TokenVerifier> {
     if !auth {
         return None;
     }
 
-    app_state.app_config.config.load().web_ui.as_ref().and_then(|c| c.auth.as_ref()).map(|c| {
-        let secret_key: &[u8] = c.secret.as_ref();
-        secret_key.to_vec()
-    })
+    app_state.app_config.config.load().web_ui.as_ref().and_then(|c| c.auth.as_ref()).map(TokenVerifier::from_config)
 }
 
 async fn handle_handshake(msg: Message, socket: &mut WebSocket, version: u8) -> Result<(), WebSocketApiError> {
@@ -203,7 +204,7 @@ async fn handle_protocol_message(
     mem: &mut ProtocolHandlerMemory,
     app_state: &Arc<AppState>,
     auth_required: bool,
-    secret_key: Option<&Vec<u8>>,
+    verifier: Option<&TokenVerifier>,
 ) -> Option<ProtocolMessage> {
     if let Message::Binary(bytes) = msg {
         match ProtocolMessage::from_bytes(bytes) {
@@ -213,11 +214,11 @@ async fn handle_protocol_message(
                     return Some(ProtocolMessage::Authorized);
                 }
 
-                let Some(secret_key) = secret_key else {
+                let Some(verifier) = verifier else {
                     return Some(ProtocolMessage::Unauthorized);
                 };
 
-                let Some(token_data) = verify_token(&auth_token, secret_key.as_slice()) else {
+                let Some(token_data) = verifier.verify(&auth_token) else {
                     return Some(ProtocolMessage::Unauthorized);
                 };
 
@@ -229,11 +230,11 @@ async fn handle_protocol_message(
             }
             Ok(ProtocolMessage::StatusRequest(auth_token)) => {
                 if auth_required {
-                    let Some(secret_key) = secret_key else {
+                    let Some(verifier) = verifier else {
                         return Some(ProtocolMessage::Unauthorized);
                     };
 
-                    let Some(token_data) = verify_token(&auth_token, secret_key.as_slice()) else {
+                    let Some(token_data) = verifier.verify(&auth_token) else {
                         return Some(ProtocolMessage::Unauthorized);
                     };
 
@@ -283,7 +284,7 @@ async fn handle_protocol_message(
                 None
             }
             Ok(ProtocolMessage::ActiveProviderCountRequest(auth_token)) => {
-                handle_active_provider_count_request(auth_token, mem, app_state, auth_required, secret_key).await
+                handle_active_provider_count_request(auth_token, mem, app_state, auth_required, verifier).await
             }
             Ok(_) => {
                 trace!("Unexpected protocol message after handshake");
@@ -321,13 +322,13 @@ async fn handle_active_provider_count_request(
     mem: &mut ProtocolHandlerMemory,
     app_state: &Arc<AppState>,
     auth_required: bool,
-    secret_key: Option<&Vec<u8>>,
+    verifier: Option<&TokenVerifier>,
 ) -> Option<ProtocolMessage> {
     if auth_required {
-        let Some(secret_key) = secret_key else {
+        let Some(verifier) = verifier else {
             return Some(ProtocolMessage::Unauthorized);
         };
-        let Some(token_data) = verify_token(&auth_token, secret_key.as_slice()) else {
+        let Some(token_data) = verifier.verify(&auth_token) else {
             return Some(ProtocolMessage::Unauthorized);
         };
         if token_data.claims.permissions.contains(Permission::SystemRead)
@@ -351,7 +352,7 @@ async fn handle_incoming_message(
     handler: &mut ProtocolHandler,
     app_state: &Arc<AppState>,
     auth_required: bool,
-    secret_key: Option<&Vec<u8>>,
+    verifier: Option<&TokenVerifier>,
 ) -> Result<(), WebSocketApiError> {
     let msg = result?;
 
@@ -366,7 +367,7 @@ async fn handle_incoming_message(
             Ok(())
         }
         ProtocolHandler::Default(mem) => {
-            let msg = handle_protocol_message(msg, mem, app_state, auth_required, secret_key).await;
+            let msg = handle_protocol_message(msg, mem, app_state, auth_required, verifier).await;
             match msg {
                 None => Ok(()),
                 Some(protocol_msg) => {
@@ -424,107 +425,113 @@ async fn send_recording_snapshot_event(
     Ok(())
 }
 
+/// The wire frame an event becomes, with the label used if sending it fails.
+///
+/// A pure function so the whole taxonomy can be checked at once: the test
+/// below asserts every `EventKind` either maps here or is on the short list
+/// of kinds handled another way. The mapping used to be a hundred lines of
+/// `match` nested three deep inside the socket loop, where a kind that
+/// reached no arm was indistinguishable from one deliberately ignored.
+fn to_protocol_message(event: EventMessage) -> Option<(ProtocolMessage, &'static str)> {
+    Some(match event {
+        EventMessage::ServerError(error) => (ProtocolMessage::ServerError(error), "Server Error event"),
+        EventMessage::ActiveUser(event) => {
+            (ProtocolMessage::ActiveUserResponse(event), "Active user connection change event")
+        }
+        EventMessage::ActiveProvider(provider, connections) => {
+            (ProtocolMessage::ActiveProviderResponse(provider, connections), "Provider connection change event")
+        }
+        EventMessage::ConfigChange(config) => {
+            (ProtocolMessage::ConfigChangeResponse(config), "Configuration files change event")
+        }
+        // The wire carries the outcome only. The run summary rides along on
+        // the bus for notifications and plugins; the Web UI re-fetches its
+        // own view rather than reading statistics off this frame.
+        EventMessage::PlaylistUpdate(summary) => {
+            (ProtocolMessage::PlaylistUpdateResponse(summary.state), "Playlist update event")
+        }
+        EventMessage::PlaylistUpdateProgress(progress) => {
+            (ProtocolMessage::PlaylistUpdateProgressResponse(progress), "Playlist update progress event")
+        }
+        EventMessage::SystemInfoUpdate(system_info) => {
+            (ProtocolMessage::SystemInfoResponse(unwrap_or_clone(system_info)), "System info event")
+        }
+        EventMessage::LibraryScanProgress(progress) => {
+            (ProtocolMessage::LibraryScanProgressResponse(progress), "Library scan progress event")
+        }
+        EventMessage::DownloadsUpdate(downloads) => {
+            (ProtocolMessage::DownloadsResponse(unwrap_or_clone(downloads)), "Downloads event")
+        }
+        EventMessage::DownloadsDeltaUpdate(delta) => {
+            (ProtocolMessage::DownloadsDeltaResponse(delta), "Downloads delta event")
+        }
+        // The rule repository is per-process and `list_recording_rules`
+        // enforces the session filter server-side, so this is a bare nudge:
+        // the frontend re-fetches.
+        EventMessage::RecordingRulesChanged => (ProtocolMessage::RecordingRulesChanged, "Recording rules changed"),
+
+        // Handled by `handle_event_message`, not translatable here:
+        // `RecordingChanged` needs a per-session snapshot re-fetch, and the
+        // metadata events are internal.
+        //
+        // The lifecycle events are notification-side only: they reach
+        // operators through the messaging pipeline and plugins through the
+        // bus, and adding them to the wire would need a `ProtocolMessage`
+        // variant and frontend handling that nothing asks for yet.
+        EventMessage::RecordingChanged
+        | EventMessage::ServerLifecycle(_)
+        | EventMessage::InputMetadataUpdatesCompleted(_)
+        | EventMessage::InputMetadataUpdatesStarted(_)
+        | EventMessage::InputMetadataUpdatesFailed(_)
+        | EventMessage::DiskAlert(_)
+        | EventMessage::ConfigReloadFailed(_)
+        | EventMessage::PlaylistWatchChanged(_)
+        | EventMessage::PlaylistGroupsChanged(_)
+        | EventMessage::PlaylistWatchDisabled(_)
+        | EventMessage::PlaylistWatchUnmatched(_)
+        | EventMessage::RecordingLifecycle(_)
+        | EventMessage::ProviderAccount(_)
+        | EventMessage::ProviderFetchFailed(_)
+        | EventMessage::ProviderPoolExhausted(_)
+        | EventMessage::ProviderPriorityFallback(_)
+        // The panel already knows it just saved a user - it made the
+        // request - and nothing in the Web UI subscribes to probe
+        // failures yet. Both are on the bus for operators and plugins.
+        | EventMessage::UserLifecycle(_)
+        | EventMessage::ConnectionDenied(_)
+        | EventMessage::StreamProbeFailed(_)
+        // A notification that could not be delivered is an operator concern,
+        // not a Web UI one, and there is no panel that renders it.
+        | EventMessage::NotificationDeadLettered(_)
+        | EventMessage::ScheduledTaskFailed(_)
+        // Auth decisions reach notification channels and plugins, not the
+        // Web UI socket: there is no panel that renders them, and pushing
+        // every sign-in to every connected admin is noise.
+        | EventMessage::AuthAudit(_) => return None,
+    })
+}
+
 async fn handle_event_message(
     app_state: &Arc<AppState>,
     socket: &mut WebSocket,
     event: EventMessage,
     handler: &ProtocolHandler,
 ) -> Result<(), WebSocketApiError> {
-    match handler {
-        ProtocolHandler::Version(_) => {}
-        ProtocolHandler::Default(mem) => {
-            if websocket_can_receive_runtime_events(mem, &event) {
-                match event {
-                    EventMessage::ServerError(error) => {
-                        send_event_response(socket, ProtocolMessage::ServerError(error), "Server Error event").await?;
-                    }
-                    EventMessage::ActiveUser(event) => {
-                        send_event_response(
-                            socket,
-                            ProtocolMessage::ActiveUserResponse(event),
-                            "Active user connection change event",
-                        )
-                        .await?;
-                    }
-                    EventMessage::ActiveProvider(provider, connections) => {
-                        send_event_response(
-                            socket,
-                            ProtocolMessage::ActiveProviderResponse(provider, connections),
-                            "Provider connection change event",
-                        )
-                        .await?;
-                    }
-                    EventMessage::ConfigChange(config) => {
-                        send_event_response(
-                            socket,
-                            ProtocolMessage::ConfigChangeResponse(config),
-                            "Configuration files change event",
-                        )
-                        .await?;
-                    }
-                    EventMessage::PlaylistUpdate(state) => {
-                        send_event_response(
-                            socket,
-                            ProtocolMessage::PlaylistUpdateResponse(state),
-                            "Playlist update event",
-                        )
-                        .await?;
-                    }
-                    EventMessage::PlaylistUpdateProgress(progress) => {
-                        send_event_response(
-                            socket,
-                            ProtocolMessage::PlaylistUpdateProgressResponse(progress),
-                            "Playlist update progress event",
-                        )
-                        .await?;
-                    }
-                    EventMessage::SystemInfoUpdate(system_info) => {
-                        send_event_response(
-                            socket,
-                            ProtocolMessage::SystemInfoResponse(system_info),
-                            "System info event",
-                        )
-                        .await?;
-                    }
-                    EventMessage::LibraryScanProgress(progress) => {
-                        send_event_response(
-                            socket,
-                            ProtocolMessage::LibraryScanProgressResponse(progress),
-                            "Library scan progress event",
-                        )
-                        .await?;
-                    }
-                    EventMessage::DownloadsUpdate(downloads) => {
-                        send_event_response(socket, ProtocolMessage::DownloadsResponse(downloads), "Downloads event")
-                            .await?;
-                    }
-                    EventMessage::DownloadsDeltaUpdate(delta) => {
-                        send_event_response(
-                            socket,
-                            ProtocolMessage::DownloadsDeltaResponse(delta),
-                            "Downloads delta event",
-                        )
-                        .await?;
-                    }
-                    EventMessage::RecordingChanged => {
-                        // Re-fetch the per-session filtered snapshot so the
-                        // visibility contract is enforced by `recording_ws`.
-                        send_recording_snapshot_event(app_state, socket, mem).await?;
-                    }
-                    EventMessage::RecordingRulesChanged => {
-                        // The rule repository is per-process; the
-                        // session-filter is enforced server-side by
-                        // `list_recording_rules`. Just notify the
-                        // frontend — it will re-fetch.
-                        send_event_response(socket, ProtocolMessage::RecordingRulesChanged, "Recording rules changed")
-                            .await?;
-                    }
-                    EventMessage::InputMetadataUpdatesCompleted(_) | EventMessage::InputMetadataUpdatesStarted(_) => {
-                        // Internal events or already handled above
-                    }
-                }
-            }
-        }
+    let ProtocolHandler::Default(mem) = handler else {
+        return Ok(());
+    };
+    if !websocket_can_receive_runtime_events(mem, &event) {
+        return Ok(());
+    }
+
+    // Re-fetch the per-session filtered snapshot so the visibility contract
+    // is enforced by `recording_ws` rather than by this socket.
+    if matches!(event, EventMessage::RecordingChanged) {
+        return send_recording_snapshot_event(app_state, socket, mem).await;
+    }
+
+    if let Some((message, context)) = to_protocol_message(event) {
+        send_event_response(socket, message, context).await?;
     }
     Ok(())
 }
@@ -540,7 +547,7 @@ async fn send_event_response(
 
 // WebSocket communication logic
 async fn handle_socket(mut socket: WebSocket, app_state: Arc<AppState>, auth_required: bool) {
-    let secret_key = get_secret_key(&app_state, auth_required);
+    let verifier = get_token_verifier(&app_state, auth_required);
 
     let mut event_rx = app_state.event_manager.get_event_channel();
     let mut meter_event_rx = app_state.event_manager.get_meter_channel();
@@ -550,7 +557,7 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<AppState>, auth_req
         tokio::select! {
             maybe_msg = socket.recv() => {
                 if let Some(msg) = maybe_msg {
-                    if let Err(e) = handle_incoming_message(msg, &mut socket, &mut handler, &app_state, auth_required, secret_key.as_ref()).await {
+                    if let Err(e) = handle_incoming_message(msg, &mut socket, &mut handler, &app_state, auth_required, verifier.as_ref()).await {
                         trace!("WebSocket message handling error: {e}");
                         break;
                     }
@@ -569,6 +576,7 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<AppState>, auth_req
                     }
                     Err(error) => {
                         if let tokio::sync::broadcast::error::RecvError::Lagged(skipped) = &error {
+                            app_state.event_manager.stats().record_lag(*skipped);
                             trace!("Main websocket event receiver lagged by {skipped} messages");
                         }
                         match main_event_receive_error_action(&handler, &error) {
@@ -645,17 +653,248 @@ async fn handle_user_action(app_state: &Arc<AppState>, cmd: UserCommand) -> bool
 #[cfg(test)]
 mod tests {
     use super::{
-        main_event_receive_error_action, set_no_auth_websocket_identity, set_websocket_auth,
+        main_event_receive_error_action, set_no_auth_websocket_identity, set_websocket_auth, to_protocol_message,
         websocket_can_receive_runtime_events, websocket_claims, MainEventReceiveErrorAction,
     };
     use crate::api::model::EventMessage;
     use shared::model::{
-        Claims, DownloadsDelta, DownloadsResponse, FileDownloadDto, LibraryScanProgressEvent, LibraryScanSummary,
-        LibraryScanSummaryStatus, Permission, PlaylistUpdateProgressEvent, ProtocolHandler, ProtocolHandlerMemory,
-        TaskKindDto, TaskPriorityDto, TransferStatusDto, UserId, UserRole, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL,
-        PROTOCOL_VERSION, ROLE_ADMIN, TOKEN_NO_AUTH,
+        AuthAuditEvent, AuthAuditOutcome, Claims, ConfigReloadFailure, DiskAlert, DiskAlertLevel, DownloadsDelta,
+        DownloadsResponse, FileDownloadDto, LibraryScanProgressEvent, LibraryScanSummary, LibraryScanSummaryStatus,
+        MetadataUpdateFailure, MsgKind, Permission, PlaylistGroupsChanged, PlaylistUpdateProgressEvent,
+        ProtocolHandler, ProtocolHandlerMemory, ProviderAccountEvent, ProviderAccountState, ProviderFailureKind,
+        ProviderFetchFailure, ProviderPoolExhausted, ProviderPriorityFallback, RecordingLifecycleMessage, RoleSet,
+        TaskKindDto, TaskPriorityDto, TransferStatusDto, UserId, UserRole, WatchChanges, WatchDisabled,
+        WatchDisabledReason, WatchUnmatched, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, PROTOCOL_VERSION,
+        TOKEN_NO_AUTH,
     };
+    use std::sync::Arc;
     use tokio::sync::broadcast::error::RecvError;
+
+    /// Every kind either becomes a wire frame or is on the short list of
+    /// kinds handled another way. Without this, a variant added later
+    /// silently reaches no arm - which is exactly what the old nested match
+    /// could not distinguish from a deliberate omission.
+    #[test]
+    fn every_event_kind_is_either_wire_mapped_or_deliberately_not() {
+        use shared::model::EventKind;
+
+        // Two reasons a kind produces no frame, kept apart because they are
+        // not the same fact - the same distinction `to_notification` draws
+        // between its own two `None` arms.
+
+        // Reachable over the wire, just not through this pure function:
+        // `RecordingChanged` needs a per-session snapshot re-fetch, and the
+        // metadata events are internal.
+        const HANDLED_ELSEWHERE: [EventKind; 3] = [
+            EventKind::RecordingChanged,
+            EventKind::InputMetadataUpdatesCompleted,
+            EventKind::InputMetadataUpdatesStarted,
+        ];
+
+        // Never on the wire: these reach operators through the messaging
+        // pipeline and plugins through the bus. Putting one on the wire
+        // would need a `ProtocolMessage` variant and frontend handling that
+        // nothing asks for.
+        //
+        // This list did not exist until now, so the assert below compared
+        // every notification-only kind against `expected = true` and the
+        // test failed on `DiskAlert` - it has been red since the lifecycle
+        // events joined the bus.
+        const NOT_ON_THE_WIRE: [EventKind; 29] = [
+            EventKind::ConnectionDenied,
+            EventKind::ScheduledTaskFailed,
+            EventKind::ProviderFetchFailed,
+            EventKind::ProviderPoolExhausted,
+            EventKind::ProviderPriorityFallback,
+            EventKind::PlaylistGroupsChanged,
+            EventKind::PlaylistWatchDisabled,
+            EventKind::PlaylistWatchUnmatched,
+            EventKind::NotificationDeadLettered,
+            EventKind::ServerStarted,
+            EventKind::ServerShutdown,
+            EventKind::InputMetadataUpdatesFailed,
+            EventKind::DiskAlert,
+            EventKind::ConfigReloadFailed,
+            EventKind::PlaylistWatchChanged,
+            EventKind::RecordingStarted,
+            EventKind::RecordingCompleted,
+            EventKind::RecordingFailed,
+            EventKind::ProviderAccountStatus,
+            EventKind::ProviderAccountExpiring,
+            EventKind::ProviderAccountExpired,
+            EventKind::UserCreated,
+            EventKind::UserUpdated,
+            EventKind::UserDeleted,
+            EventKind::StreamProbeFailed,
+            EventKind::AuthSignInSucceeded,
+            EventKind::AuthSignInFailed,
+            EventKind::AuthSignInThrottled,
+            EventKind::AuthPermissionDenied,
+        ];
+
+        for (event, kind) in sample_event_of_every_kind() {
+            let mapped = to_protocol_message(event).is_some();
+            let expected = !HANDLED_ELSEWHERE.contains(&kind) && !NOT_ON_THE_WIRE.contains(&kind);
+            assert_eq!(mapped, expected, "{kind:?}: wire-mapped={mapped}, expected={expected}");
+        }
+    }
+
+    fn provider_fetch_failure() -> ProviderFetchFailure {
+        ProviderFetchFailure {
+            input: "i".into(),
+            provider: "m3u".into(),
+            kind: ProviderFailureKind::Transient,
+            error_count: 1,
+            message: None,
+            retryable: true,
+            needs_operator: false,
+            partial: false,
+        }
+    }
+
+    fn auth_audit(outcome: AuthAuditOutcome) -> EventMessage {
+        EventMessage::AuthAudit(AuthAuditEvent {
+            username: "u".into(),
+            client_ip: "127.0.0.1".into(),
+            outcome,
+            permission: None,
+        })
+    }
+
+    /// One `EventMessage` per `EventKind`; the length assert means a new
+    /// variant cannot slip past the test above.
+    ///
+    /// Long by construction, and it has to stay one list for that assert to
+    /// mean anything.
+    #[allow(clippy::too_many_lines)]
+    fn sample_event_of_every_kind() -> Vec<(EventMessage, shared::model::EventKind)> {
+        use shared::model::{
+            ActiveUserConnectionChange, ConfigType, ConnectionDenied, EventKind, NotificationDeadLetter,
+            PlaylistUpdateState, PlaylistUpdateSummary, ScheduledTaskFailure, ServerLifecycleEvent, StreamProbeFailure,
+            StreamProbeFailureReason, SystemInfo, UserLifecycleEvent, UserLifecycleState,
+        };
+
+        fn user_lifecycle(state: UserLifecycleState) -> EventMessage {
+            EventMessage::UserLifecycle(UserLifecycleEvent::new("u".into(), "t".into(), state))
+        }
+
+        let downloads = DownloadsResponse { queue: Vec::new(), finished: Vec::new(), active: Vec::new() };
+        let samples = vec![
+            EventMessage::ServerError("x".to_string()),
+            EventMessage::ServerLifecycle(ServerLifecycleEvent::started("1".into(), "h:1".into())),
+            EventMessage::ServerLifecycle(ServerLifecycleEvent::shutting_down("1".into(), "SIGTERM".into())),
+            EventMessage::ActiveUser(ActiveUserConnectionChange::Connections(0, 0)),
+            EventMessage::ActiveProvider("p".into(), 1),
+            EventMessage::ConfigChange(ConfigType::Config),
+            EventMessage::PlaylistUpdate(PlaylistUpdateSummary::state_only(PlaylistUpdateState::Success)),
+            EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
+                target: String::new(),
+                message: String::new(),
+            }),
+            EventMessage::SystemInfoUpdate(Arc::new(SystemInfo {
+                cpu_usage: 0.0,
+                memory_usage: 0,
+                memory_total: 0,
+                net_rx_bytes_per_sec: 0.0,
+                net_tx_bytes_per_sec: 0.0,
+                net_rx_bytes_total: 0,
+                net_tx_bytes_total: 0,
+                disk_total_bytes: 0,
+                disk_free_bytes: 0,
+            })),
+            EventMessage::LibraryScanProgress(LibraryScanProgressEvent {
+                summary: LibraryScanSummary {
+                    status: LibraryScanSummaryStatus::Success,
+                    message: String::new(),
+                    result: None,
+                },
+            }),
+            EventMessage::LibraryScanProgress(LibraryScanProgressEvent {
+                summary: LibraryScanSummary {
+                    status: LibraryScanSummaryStatus::Error,
+                    message: String::new(),
+                    result: None,
+                },
+            }),
+            EventMessage::DownloadsUpdate(Arc::new(downloads)),
+            EventMessage::DownloadsDeltaUpdate(DownloadsDelta::ActiveCleared),
+            EventMessage::RecordingChanged,
+            EventMessage::RecordingRulesChanged,
+            EventMessage::InputMetadataUpdatesCompleted("a".into()),
+            EventMessage::InputMetadataUpdatesStarted("a".into()),
+            EventMessage::InputMetadataUpdatesFailed(MetadataUpdateFailure::new("a".into(), 1, false, None)),
+            EventMessage::DiskAlert(DiskAlert {
+                level: DiskAlertLevel::Warn,
+                total_bytes: 100,
+                free_bytes: 5,
+                used_bytes: 95,
+                percent: 95.0,
+            }),
+            EventMessage::ConfigReloadFailed(ConfigReloadFailure {
+                paths: "config.yml".to_string(),
+                error: "boom".to_string(),
+            }),
+            EventMessage::PlaylistWatchChanged(WatchChanges::new(
+                "t".to_string(),
+                "g".to_string(),
+                Vec::new(),
+                Vec::new(),
+            )),
+            EventMessage::PlaylistGroupsChanged(PlaylistGroupsChanged::new("t".to_string(), Vec::new(), Vec::new())),
+            EventMessage::PlaylistWatchDisabled(WatchDisabled::new(
+                "t".to_string(),
+                WatchDisabledReason::InvalidPatterns,
+            )),
+            EventMessage::PlaylistWatchUnmatched(WatchUnmatched::new("t".to_string(), vec!["x".to_string()], 0)),
+            recording_lifecycle(MsgKind::RecordingStarted),
+            recording_lifecycle(MsgKind::RecordingCompleted),
+            recording_lifecycle(MsgKind::RecordingFailed),
+            EventMessage::ProviderFetchFailed(provider_fetch_failure()),
+            EventMessage::ProviderPoolExhausted(ProviderPoolExhausted::new("i".into(), Vec::new())),
+            EventMessage::ProviderPriorityFallback(ProviderPriorityFallback::new(
+                "i".into(),
+                "p".into(),
+                1,
+                2,
+                Some(0),
+            )),
+            provider_account(ProviderAccountState::StatusChanged),
+            provider_account(ProviderAccountState::Expiring),
+            provider_account(ProviderAccountState::Expired),
+            user_lifecycle(UserLifecycleState::Created),
+            user_lifecycle(UserLifecycleState::Updated),
+            user_lifecycle(UserLifecycleState::Deleted),
+            EventMessage::ScheduledTaskFailed(ScheduledTaskFailure::new(
+                shared::model::ScheduleTaskType::GeoIpUpdate,
+                "boom".to_string(),
+            )),
+            EventMessage::NotificationDeadLettered(NotificationDeadLetter::new(
+                shared::model::notification::registry::SYSTEM_ERROR,
+                3,
+                vec!["telegram".to_string()],
+                0,
+            )),
+            EventMessage::ConnectionDenied(ConnectionDenied::new("u".into(), "1.2.3.4".into(), 1, 0)),
+            EventMessage::StreamProbeFailed(StreamProbeFailure::new(
+                "input".into(),
+                "1".into(),
+                "http://example.test/s".into(),
+                StreamProbeFailureReason::Unreachable,
+            )),
+            auth_audit(AuthAuditOutcome::SignInSucceeded),
+            auth_audit(AuthAuditOutcome::SignInFailed),
+            auth_audit(AuthAuditOutcome::SignInThrottled),
+            auth_audit(AuthAuditOutcome::PermissionDenied),
+        ];
+        assert_eq!(samples.len(), EventKind::ALL.len(), "add the new variant to this list");
+        samples
+            .into_iter()
+            .map(|event| {
+                let kind = event.kind();
+                (event, kind)
+            })
+            .collect()
+    }
 
     #[test]
     fn no_auth_websocket_identity_is_builtin_admin() {
@@ -668,7 +907,7 @@ mod tests {
         assert_eq!(mem.role, UserRole::Admin);
         assert_eq!(mem.permissions, PERM_ALL);
         assert_eq!(claims.subject_id, Some(UserId::builtin_admin()));
-        assert_eq!(claims.roles, vec![ROLE_ADMIN]);
+        assert_eq!(claims.roles, RoleSet::ADMIN);
         assert_eq!(claims.permission_schema_version, CURRENT_PERMISSION_SCHEMA_VERSION);
     }
 
@@ -678,7 +917,7 @@ mod tests {
             iss: "test".to_string(),
             iat: 1,
             exp: i64::MAX,
-            roles: vec![ROLE_ADMIN.to_string()],
+            roles: RoleSet::ADMIN,
             permissions: Permission::RecordingRead.into(),
             pwd_version: 0,
             subject_id,
@@ -841,11 +1080,11 @@ mod tests {
 
         assert!(websocket_can_receive_runtime_events(
             &mem,
-            &EventMessage::DownloadsUpdate(DownloadsResponse {
+            &EventMessage::DownloadsUpdate(Arc::new(DownloadsResponse {
                 queue: Vec::new(),
                 finished: Vec::new(),
                 active: Vec::new(),
-            })
+            }))
         ));
     }
 
@@ -857,11 +1096,11 @@ mod tests {
 
         assert!(!websocket_can_receive_runtime_events(
             &mem,
-            &EventMessage::DownloadsUpdate(DownloadsResponse {
+            &EventMessage::DownloadsUpdate(Arc::new(DownloadsResponse {
                 queue: Vec::new(),
                 finished: Vec::new(),
                 active: Vec::new(),
-            })
+            }))
         ));
     }
 
@@ -889,5 +1128,29 @@ mod tests {
                 recording: None,
             }))
         ));
+    }
+
+    fn recording_lifecycle(event: MsgKind) -> EventMessage {
+        EventMessage::RecordingLifecycle(RecordingLifecycleMessage {
+            event,
+            programme_title: None,
+            channel: None,
+            effective_start: None,
+            effective_end: None,
+            visibility: None,
+            output_filename: None,
+            failure_reason: None,
+        })
+    }
+
+    fn provider_account(state: ProviderAccountState) -> EventMessage {
+        EventMessage::ProviderAccount(ProviderAccountEvent {
+            state,
+            username: "u".to_string(),
+            provider: "p".to_string(),
+            status: None,
+            expires_at: None,
+            message: "m".to_string(),
+        })
     }
 }

@@ -136,7 +136,44 @@ Typical use:
 - inspect disconnect patterns and provider churn
 - verify that stream history collection is working
 
-## Example 5: Query QoS snapshots
+## Example 5: Diagnose the event bus
+
+```bash
+#!/bin/bash
+
+BASE_URL="http://localhost:8901"
+TOKEN="PUT_YOUR_TOKEN_HERE"
+
+curl -s -X GET "$BASE_URL/api/v1/events/stats" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Accept: application/json" | jq .
+```
+
+Every runtime event — playlist updates, config reloads, recording changes,
+metadata refreshes — passes through one in-process broadcast bus on its way to
+the Web UI websocket and the notification pipeline. This endpoint reports what
+that bus has carried:
+
+- `emitted` — a count per event, using the same stable names plugins and
+  notification subscriptions use.
+- `no_subscribers` — events published while nothing was listening. Normal when
+  the Web UI is closed and notifications are off; a large number beside "I never
+  got that notification" is the answer.
+- `coalesced` — payload-free nudges suppressed because an identical one had just
+  gone out. Deleting a recording naturally produces a few.
+- `lagged` — events a subscriber was told it had missed. Should be `0`. If it is
+  not, a subscriber cannot keep up: raise
+  [`event_channel_capacity`](configuration/config.md).
+- `recent` — the last 256 events with the outcome of each, so you can see
+  whether a specific event fired at all.
+
+Typical use:
+
+- confirm an event fired before hunting for a bug in whatever consumes it
+- tell "no notification was sent" apart from "no notification was configured"
+- size `event_channel_capacity` from observed lag rather than by guessing
+
+## Example 6: Query QoS snapshots
 
 ```bash
 #!/bin/bash
@@ -155,7 +192,7 @@ Typical use:
 - compare `24h`, `7d`, and `30d` quality windows
 - prepare later failover and ranking analysis
 
-## Example 6: Inspect a download target before queueing
+## Example 7: Inspect a download target before queueing
 
 ```bash
 #!/bin/bash
@@ -176,7 +213,7 @@ Typical use:
 - verify that the remote file is reachable
 - test `download.read` access
 
-## Example 7: Queue a file download
+## Example 8: Queue a file download
 
 ```bash
 #!/bin/bash
@@ -202,7 +239,7 @@ Typical use:
 - confirm that duplicate queue requests return the existing task instead of creating a second one
 - test `download.write` access
 
-## Example 8: Trigger a playlist update
+## Example 9: Trigger a playlist update
 
 ```bash
 #!/bin/bash
@@ -223,7 +260,7 @@ Typical use:
 - verify `playlist.write` permission
 - integrate Tuliprox into external automation
 
-## Example 9: Preview a Stalker live input in the Web UI playlist API
+## Example 10: Preview a Stalker live input in the Web UI playlist API
 
 ```bash
 #!/bin/bash
@@ -256,7 +293,7 @@ Notes:
 - Runtime refresh only produces `http`/`https` playback URLs; Stalker `rtmp://` / `rtsp://` commands are rejected explicitly rather
   than proxied half-supported.
 
-## Example 10: Dry-run a filter expression against a target
+## Example 11: Dry-run a filter expression against a target
 
 ```bash
 #!/bin/bash
@@ -298,6 +335,7 @@ This is a compact operator-oriented overview of the `/api/v1` REST API groups cu
 | `GET` | `/api/v1/status` | Server status, version, active users, provider connections, cache state |
 | `GET` | `/api/v1/streams` | Current active streams |
 | `GET` | `/api/v1/ipinfo` | External IPv4/IPv6 check if configured |
+| `GET` | `/api/v1/events/stats` | Event-bus counters and the last 256 events, with the outcome of each |
 | `GET` | `/api/v1/stream-history` | Query raw persisted stream history |
 | `GET` | `/api/v1/stream-history/summary` | Aggregated stream history summary |
 | `GET` | `/api/v1/qos-snapshots` | List QoS snapshots |

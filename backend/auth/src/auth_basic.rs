@@ -1,9 +1,10 @@
 use crate::Rejection;
 use axum::{
     extract::FromRequestParts,
-    http::{request::Parts, StatusCode},
+    http::{header::AUTHORIZATION, request::Parts},
 };
 use base64::{engine::general_purpose, Engine};
+use tuliprox_core::model::{AuthRejection, AuthScheme};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct AuthBasic(pub (String, String));
@@ -28,18 +29,16 @@ impl AuthBasic {
     fn decode_request_parts(req: &mut Parts) -> Result<Self, Rejection> {
         let authorization = req
             .headers
-            .get(axum::http::header::AUTHORIZATION)
-            .ok_or((StatusCode::FORBIDDEN, "Authorization header is missing"))?
+            .get(AUTHORIZATION)
+            .ok_or(AuthRejection::MissingHeader(AuthScheme::Basic))?
             .to_str()
-            .map_err(|_| (StatusCode::FORBIDDEN, "Authorization header contains invalid characters"))?;
+            .map_err(|_| AuthRejection::MalformedHeader(AuthScheme::Basic))?;
 
-        let split = authorization.split_once(' ');
-        match split {
+        match authorization.split_once(' ') {
             Some((scheme, contents)) if scheme.eq_ignore_ascii_case("Basic") => {
-                let decoded = decode(contents)?;
-                Ok(Self::from_header(decoded))
+                Ok(Self::from_header(decode(contents)?))
             }
-            _ => Err((StatusCode::FORBIDDEN, "`Authorization` header must be a basic auth")),
+            _ => Err(AuthRejection::WrongScheme(AuthScheme::Basic)),
         }
     }
 }
@@ -47,16 +46,13 @@ impl AuthBasic {
 /// Decodes the two parts of basic auth using the colon
 fn decode(input: &str) -> Result<(String, String), Rejection> {
     // Decode from base64 into a string
-    let decoded = general_purpose::STANDARD
-        .decode(input)
-        .map_err(|_| (StatusCode::FORBIDDEN, "Authorization header contains invalid characters"))?;
-    let decoded = String::from_utf8(decoded)
-        .map_err(|_| (StatusCode::FORBIDDEN, "Authorization header contains invalid characters"))?;
+    let decoded =
+        general_purpose::STANDARD.decode(input).map_err(|_| AuthRejection::MalformedHeader(AuthScheme::Basic))?;
+    let decoded = String::from_utf8(decoded).map_err(|_| AuthRejection::MalformedHeader(AuthScheme::Basic))?;
 
     // Return depending on if password is present
-    if let Some((username, password)) = decoded.split_once(':') {
-        Ok((username.trim().to_string(), password.trim().to_string()))
-    } else {
-        Err((StatusCode::FORBIDDEN, "Authorization header contains no password"))
-    }
+    decoded
+        .split_once(':')
+        .map(|(username, password)| (username.trim().to_string(), password.trim().to_string()))
+        .ok_or(AuthRejection::MissingBasicPassword)
 }

@@ -48,6 +48,16 @@ impl CatchupProperties {
             && self.extra_attributes.is_empty()
     }
 
+    /// Prefer `catchup-type` when both fields are present because providers may leave
+    /// a stale `catchup` mode alongside the authoritative player type.
+    pub fn effective_mode(&self) -> Option<&str> {
+        self.catchup_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| self.mode.as_deref().map(str::trim).filter(|value| !value.is_empty()))
+    }
+
     fn is_flussonic_mode_str(mode: Option<&str>) -> bool {
         mode.is_some_and(|m| {
             matches!(m.trim().to_ascii_lowercase().as_str(), "flussonic" | "flussonic-hls" | "flussonic-ts" | "fs")
@@ -56,24 +66,13 @@ impl CatchupProperties {
 
     /// Prefer `catchup-type` when both are set so a leftover `catchup="shift"`/`append`
     /// from a provider cannot steal Flussonic path-rewrite channels (v3.3.81 behavior).
-    pub fn is_flussonic(&self) -> bool {
-        if let Some(ct) = self.catchup_type.as_deref().filter(|v| !v.is_empty()) {
-            return Self::is_flussonic_mode_str(Some(ct));
-        }
-        Self::is_flussonic_mode_str(self.mode.as_deref())
-    }
+    pub fn is_flussonic(&self) -> bool { Self::is_flussonic_mode_str(self.effective_mode()) }
 
     pub fn native_flussonic_player_mode(&self) -> Option<&'static str> {
         if !self.is_flussonic() {
             return None;
         }
-        let raw = self
-            .catchup_type
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .or_else(|| self.mode.as_deref().map(str::trim).filter(|value| !value.is_empty()))
-            .unwrap_or("flussonic");
+        let raw = self.effective_mode().unwrap_or("flussonic");
         if raw.eq_ignore_ascii_case("flussonic-ts") {
             Some("flussonic-ts")
         } else {
@@ -86,11 +85,7 @@ impl CatchupProperties {
         if self.native_flussonic_player_mode().is_some() {
             return None;
         }
-        if let Some(catchup_type) = self.catchup_type.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
-            return catchup_type.eq_ignore_ascii_case("append").then_some("append");
-        }
-        let mode = self.mode.as_deref().map(str::trim).filter(|value| !value.is_empty())?;
-        mode.eq_ignore_ascii_case("append").then_some("append")
+        self.effective_mode()?.eq_ignore_ascii_case("append").then_some("append")
     }
 }
 
@@ -500,6 +495,47 @@ impl StreamProperties {
         match self {
             StreamProperties::Episode(episode) => Some(selector(episode)),
             StreamProperties::Live(_) | StreamProperties::Video(_) | StreamProperties::Series(_) => None,
+        }
+    }
+
+    /// The genre, wherever this variant happens to keep it.
+    ///
+    /// Video keeps it under `details`, Series keeps it inline, and Live and
+    /// Episode do not have one. That four-arm match was written out at every
+    /// read site and in three macros; this is the single copy.
+    #[must_use]
+    pub fn genre(&self) -> Option<&Arc<str>> {
+        match self {
+            Self::Video(video) => video.details.as_ref().and_then(|details| details.genre.as_ref()),
+            Self::Series(series) => series.genre.as_ref(),
+            Self::Live(_) | Self::Episode(_) => None,
+        }
+    }
+
+    /// Sets the genre, creating Video `details` if absent.
+    ///
+    /// Returns `false` for the variants that have no genre. Does **not** create
+    /// the `StreamProperties` itself -- that needs the header to build from, so
+    /// it stays with the caller.
+    pub fn set_genre(&mut self, value: &str) -> bool {
+        match self {
+            Self::Video(video) => {
+                match &mut video.details {
+                    Some(details) => details.genre = Some(value.intern()),
+                    None => {
+                        video.details = Some(VideoStreamDetailProperties {
+                            genre: Some(value.intern()),
+                            ..VideoStreamDetailProperties::default()
+                        });
+                    }
+                }
+                true
+            }
+            Self::Series(series) => {
+                series.genre = Some(value.intern());
+                true
+            }
+            Self::Live(_) | Self::Episode(_) => false,
         }
     }
 
@@ -961,7 +997,7 @@ impl SeriesStreamProperties {
     where
         P: PlaylistEntry,
     {
-        Self::from_info_base(info, pli.get_virtual_id())
+        Self::from_info_base(info, pli.get_virtual_id().get())
     }
 
     pub fn from_info_without_existing(info: &XtreamSeriesInfo, series_id: u32) -> SeriesStreamProperties {
@@ -1093,8 +1129,37 @@ fn non_empty_arc(s: &Arc<str>) -> Option<Arc<str>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{PlaylistItemType, XtreamCluster, XtreamPlaylistItem};
+    use crate::model::{PlaylistItemType, VirtualId, XtreamCluster, XtreamPlaylistItem};
     use serde_json::json;
+
+    #[test]
+    fn genre_reads_from_wherever_the_variant_keeps_it() {
+        let mut video = StreamProperties::Video(Box::default());
+        assert_eq!(video.genre(), None, "video with no details has no genre");
+        assert!(video.set_genre("Action"), "video accepts a genre");
+        assert_eq!(video.genre().map(Arc::as_ref), Some("Action"), "video keeps it under details");
+        // Setting again goes through the existing details rather than replacing them.
+        assert!(video.set_genre("Drama"));
+        assert_eq!(video.genre().map(Arc::as_ref), Some("Drama"));
+
+        let mut series = StreamProperties::Series(Box::default());
+        assert_eq!(series.genre(), None);
+        assert!(series.set_genre("Comedy"), "series accepts a genre");
+        assert_eq!(series.genre().map(Arc::as_ref), Some("Comedy"), "series keeps it inline");
+    }
+
+    #[test]
+    fn live_and_episode_have_no_genre_and_refuse_to_take_one() {
+        // EpisodeStreamProperties has no Default impl, but every field is
+        // #[serde(default)], so an empty object builds one.
+        let episode: EpisodeStreamProperties =
+            serde_json::from_value(json!({})).expect("episode properties default from an empty object");
+        for mut props in [StreamProperties::Live(Box::default()), StreamProperties::Episode(Box::new(episode))] {
+            assert_eq!(props.genre(), None);
+            assert!(!props.set_genre("Action"), "this variant has no genre to set");
+            assert_eq!(props.genre(), None);
+        }
+    }
 
     fn sample_video_info(tmdb_id: &str) -> XtreamVideoInfo {
         serde_json::from_value(json!({
@@ -1119,7 +1184,7 @@ mod tests {
 
     fn existing_video_item() -> XtreamPlaylistItem {
         XtreamPlaylistItem {
-            virtual_id: 1,
+            virtual_id: VirtualId::new(1),
             provider_id: 1001,
             name: "Existing".into(),
             logo: "".into(),
@@ -1261,6 +1326,7 @@ mod tests {
             catchup_type: Some("flussonic".into()),
             ..CatchupProperties::default()
         };
+        assert_eq!(conflicting.effective_mode(), Some("flussonic"));
         assert!(conflicting.is_flussonic());
         assert_eq!(conflicting.native_flussonic_player_mode(), Some("flussonic"));
 
@@ -1269,8 +1335,17 @@ mod tests {
             catchup_type: Some("shift".into()),
             ..CatchupProperties::default()
         };
+        assert_eq!(shift_type_wins.effective_mode(), Some("shift"));
         assert!(!shift_type_wins.is_flussonic());
         assert_eq!(shift_type_wins.native_flussonic_player_mode(), None);
+
+        let whitespace_type = CatchupProperties {
+            mode: Some("append".into()),
+            catchup_type: Some("  ".into()),
+            ..CatchupProperties::default()
+        };
+        assert_eq!(whitespace_type.effective_mode(), Some("append"));
+        assert_eq!(whitespace_type.append_player_type(), Some("append"));
     }
 
     #[test]

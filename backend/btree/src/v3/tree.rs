@@ -3574,7 +3574,6 @@ mod tests {
             page::{encode_free_page, encode_overflow_page, page_open_count, reset_page_open_count, SlottedPage},
         },
     };
-    use fs2::FileExt as _;
     use std::{
         fs, io,
         path::{Path, PathBuf},
@@ -4895,13 +4894,13 @@ mod tests {
             .create(true)
             .truncate(false)
             .open(crate::common::sidecar_lock_path(database))?;
-        match file.try_lock_exclusive() {
+        match file.try_lock() {
             Ok(()) => {
-                fs2::FileExt::unlock(&file)?;
+                file.unlock()?;
                 Ok(true)
             }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
-            Err(error) => Err(error),
+            Err(fs::TryLockError::WouldBlock) => Ok(false),
+            Err(fs::TryLockError::Error(error)) => Err(error),
         }
     }
 

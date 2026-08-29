@@ -1,10 +1,6 @@
-use crate::stalker::error::StalkerResult;
+use crate::{clock::system_epoch_secs, stalker::error::StalkerResult};
 use parking_lot::RwLock;
-use std::{
-    collections::HashMap,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{collections::HashMap, sync::Arc};
 
 /// The cookie jar is intentionally cheaply cloneable (the inner map is wrapped in a
 /// `parking_lot::RwLock` so cloning a jar shares the storage; this is safe because all
@@ -35,13 +31,16 @@ impl StalkerCookieJar {
 
     /// Merge a set of `Set-Cookie` header values into the jar. We accept a slice of raw
     /// header strings because `reqwest` exposes them as `HeaderValue` slices.
-    pub fn ingest_set_cookie<I, S>(&self, cookies: I)
+    ///
+    /// `now_epoch_secs` is the instant a relative `Max-Age` is resolved against; the jar
+    /// never reads the clock itself.
+    pub fn ingest_set_cookie<I, S>(&self, cookies: I, now_epoch_secs: u64)
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
         for raw in cookies {
-            if let Some(cookie) = parse_set_cookie(raw.as_ref()) {
+            if let Some(cookie) = parse_set_cookie(raw.as_ref(), now_epoch_secs) {
                 self.insert(cookie);
             }
         }
@@ -75,7 +74,7 @@ impl StalkerCookieJar {
     }
 }
 
-fn parse_set_cookie(raw: &str) -> Option<StalkerCookie> {
+fn parse_set_cookie(raw: &str, now_epoch_secs: u64) -> Option<StalkerCookie> {
     let mut parts = raw.split(';');
     let head = parts.next()?.trim();
     if head.is_empty() {
@@ -97,7 +96,7 @@ fn parse_set_cookie(raw: &str) -> Option<StalkerCookie> {
                 if secs <= 0 {
                     max_age = Some(0);
                 } else if let Ok(delta) = u64::try_from(secs) {
-                    max_age = Some(now_epoch_secs().saturating_add(delta));
+                    max_age = Some(now_epoch_secs.saturating_add(delta));
                 }
             }
         } else if key.eq_ignore_ascii_case("expires") {
@@ -122,7 +121,9 @@ fn parse_cookie_expires(value: &str) -> Option<u64> {
     Some(u64::try_from(epoch).unwrap_or(0))
 }
 
-pub fn now_epoch_secs() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()) }
+/// Unix-epoch seconds from the system clock, for the few call sites without one to hand.
+#[must_use]
+pub fn now_epoch_secs() -> u64 { system_epoch_secs() }
 
 /// Helper used by the client to ensure we never block longer than the configured timeout
 /// while parsing/merging cookies. The parsing helpers above are sync; the wrapper makes
@@ -130,10 +131,11 @@ pub fn now_epoch_secs() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).ma
 pub fn apply_set_cookie_headers_unchecked(
     jar: &StalkerCookieJar,
     headers: &reqwest::header::HeaderMap,
+    now_epoch_secs: u64,
 ) -> StalkerResult<()> {
     for value in headers.get_all(reqwest::header::SET_COOKIE) {
         if let Ok(raw) = value.to_str() {
-            jar.ingest_set_cookie([raw]);
+            jar.ingest_set_cookie([raw], now_epoch_secs);
         }
     }
     Ok(())
@@ -142,7 +144,7 @@ pub fn apply_set_cookie_headers_unchecked(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{thread::sleep, time::Duration};
+    use std::time::Duration;
 
     pub fn cookie_age(jar: &StalkerCookieJar, name: &str) -> Option<Duration> {
         let guard = jar.inner.read();
@@ -157,17 +159,16 @@ mod tests {
 
     #[test]
     fn parses_set_cookie_with_max_age() {
-        let cookie = parse_set_cookie("mac=00:1A:79:DE:AD:BE; Max-Age=3600; Path=/").expect("ok");
+        let cookie = parse_set_cookie("mac=00:1A:79:DE:AD:BE; Max-Age=3600; Path=/", 1_000).expect("ok");
         assert_eq!(cookie.name, "mac");
         assert_eq!(cookie.value, "00:1A:79:DE:AD:BE");
-        let exp = cookie.expires_at_epoch.expect("max-age should produce expiry");
-        let now = now_epoch_secs();
-        assert!(exp > now);
+        // Exactly `now + Max-Age`, which was unassertable while the jar read the clock.
+        assert_eq!(cookie.expires_at_epoch, Some(1_000 + 3_600));
     }
 
     #[test]
     fn session_cookies_have_no_expiry() {
-        let cookie = parse_set_cookie("stb_lang=en; Path=/").expect("ok");
+        let cookie = parse_set_cookie("stb_lang=en; Path=/", 1_000).expect("ok");
         assert_eq!(cookie.name, "stb_lang");
         assert!(cookie.expires_at_epoch.is_none());
     }
@@ -177,7 +178,7 @@ mod tests {
         let jar = StalkerCookieJar::new();
         jar.insert(StalkerCookie { name: "dead".to_string(), value: "beef".to_string(), expires_at_epoch: Some(1) });
         jar.insert(StalkerCookie { name: "alive".to_string(), value: "feed".to_string(), expires_at_epoch: None });
-        let header = jar.active_cookie_header(now_epoch_secs());
+        let header = jar.active_cookie_header(1_000);
         assert!(!header.contains("dead=beef"));
         assert!(header.contains("alive=feed"));
     }
@@ -185,44 +186,43 @@ mod tests {
     #[test]
     fn jar_dedupes_by_name() {
         let jar = StalkerCookieJar::new();
-        jar.ingest_set_cookie(["stb_lang=en"]);
-        jar.ingest_set_cookie(["stb_lang=de"]);
-        let header = jar.active_cookie_header(now_epoch_secs());
+        jar.ingest_set_cookie(["stb_lang=en"], 1_000);
+        jar.ingest_set_cookie(["stb_lang=de"], 1_000);
+        let header = jar.active_cookie_header(1_000);
         assert_eq!(header.matches("stb_lang=").count(), 1);
         assert!(header.contains("stb_lang=de"));
     }
 
     #[test]
     fn max_age_zero_yields_immediate_expiry() {
-        let cookie = parse_set_cookie("kill=1; Max-Age=0").expect("ok");
+        let cookie = parse_set_cookie("kill=1; Max-Age=0", 1_000).expect("ok");
         assert_eq!(cookie.expires_at_epoch, Some(0));
     }
 
     #[test]
     fn max_age_is_case_insensitive() {
-        let cookie = parse_set_cookie("mac=00:1A:79:DE:AD:BE; max-age=3600; path=/").expect("ok");
-        let exp = cookie.expires_at_epoch.expect("lowercase max-age should produce expiry");
-        assert!(exp > now_epoch_secs());
+        let cookie = parse_set_cookie("mac=00:1A:79:DE:AD:BE; max-age=3600; path=/", 1_000).expect("ok");
+        assert_eq!(cookie.expires_at_epoch, Some(1_000 + 3_600));
     }
 
     #[test]
     fn parses_expires_attribute() {
-        let cookie = parse_set_cookie("sid=abc; Expires=Tue, 01 Jul 2042 10:00:00 GMT; Path=/").expect("ok");
+        let cookie = parse_set_cookie("sid=abc; Expires=Tue, 01 Jul 2042 10:00:00 GMT; Path=/", 1_000).expect("ok");
         let exp = cookie.expires_at_epoch.expect("expires should produce expiry");
-        assert!(exp > now_epoch_secs());
+        assert!(exp > 1_000);
     }
 
     #[test]
     fn past_expires_marks_cookie_expired() {
-        let cookie = parse_set_cookie("sid=abc; expires=Thu, 01 Jan 2004 00:00:00 GMT").expect("ok");
+        let cookie = parse_set_cookie("sid=abc; expires=Thu, 01 Jan 2004 00:00:00 GMT", 1_700_000_000).expect("ok");
         let exp = cookie.expires_at_epoch.expect("expires should parse");
-        assert!(cookie.is_expired(now_epoch_secs()));
+        assert!(cookie.is_expired(1_700_000_000));
         assert!(exp > 0);
     }
 
     #[test]
     fn max_age_wins_over_expires() {
-        let cookie = parse_set_cookie("sid=abc; Expires=Tue, 01 Jul 2042 10:00:00 GMT; Max-Age=0").expect("ok");
+        let cookie = parse_set_cookie("sid=abc; Expires=Tue, 01 Jul 2042 10:00:00 GMT; Max-Age=0", 1_000).expect("ok");
         assert_eq!(cookie.expires_at_epoch, Some(0));
     }
 
@@ -231,7 +231,7 @@ mod tests {
         let jar = StalkerCookieJar::new();
         jar.insert(StalkerCookie { name: "dead".to_string(), value: "beef".to_string(), expires_at_epoch: Some(1) });
         jar.insert(StalkerCookie { name: "alive".to_string(), value: "feed".to_string(), expires_at_epoch: None });
-        let pairs = jar.active_cookies(now_epoch_secs());
+        let pairs = jar.active_cookies(1_000);
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0], ("alive".to_string(), "feed".to_string()));
     }
@@ -244,11 +244,12 @@ mod tests {
     }
 
     #[test]
-    fn sleep_short_does_not_break_jar() {
-        // Smoke test — ensures the jar remains usable after a thread sleep.
+    fn a_max_age_cookie_lives_exactly_as_long_as_advertised() {
+        // Was a sleep-based smoke test; the instant is a parameter now, so the boundary
+        // itself can be asserted.
         let jar = StalkerCookieJar::new();
-        jar.ingest_set_cookie(["stb_lang=en; Max-Age=10"]);
-        sleep(Duration::from_millis(2));
-        assert!(jar.active_cookie_header(now_epoch_secs()).contains("stb_lang=en"));
+        jar.ingest_set_cookie(["stb_lang=en; Max-Age=10"], 1_000);
+        assert!(jar.active_cookie_header(1_009).contains("stb_lang=en"));
+        assert!(jar.active_cookie_header(1_010).is_empty());
     }
 }

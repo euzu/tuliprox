@@ -1,8 +1,11 @@
 use crate::stalker::{
+    action::StalkerAction,
     client::StalkerApiClient,
     error::{safe_stalker_url, StalkerError, StalkerResult},
+    pagination::{BatchSink, CatalogPage, CatalogSink, CollectSink, PageMeta},
     profile::StalkerHandshake,
     recipes::recipe_spec_for,
+    transport::StalkerTransport,
     url_factory::StalkerLoadUrl,
 };
 use log::{info, warn};
@@ -12,6 +15,7 @@ use shared::{
     model::stalker::StalkerStreamKind,
     utils::{deserialize_as_option_string, deserialize_number_from_string},
 };
+use tuliprox_core::utils::Clock;
 
 /// A category returned by `get_*_categories`. Stalker portals wrap the list in `{"js": [...]}`.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -239,12 +243,9 @@ pub struct StalkerRawSeriesDetails {
     pub seasons: Vec<StalkerRawSeriesSeason>,
 }
 
-#[derive(Debug)]
-pub struct StalkerCatalogPage<T> {
-    pub items: Vec<T>,
-    pub next_page: Option<u32>,
-    pub total: Option<u32>,
-}
+/// Kept as the crate's public name for a catalog page; the type itself now lives in
+/// [`crate::stalker::pagination`] so the page arithmetic has one home.
+pub type StalkerCatalogPage<T> = CatalogPage<T>;
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct StalkerRawSeriesSeason {
@@ -286,19 +287,19 @@ impl StalkerRawSeriesEpisode {
 
 // ----- Generic fetchers -------------------------------------------------------------------------
 
-async fn get_categories(
-    client: &StalkerApiClient,
+async fn get_categories<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
     portal_type: &'static str,
-    action: &'static str,
+    action: StalkerAction,
 ) -> StalkerResult<Vec<StalkerCategory>> {
     let spec = recipe_spec_for(handshake.profile.bootstrap_recipe);
-    let candidates = client.load_url_candidates().to_vec();
+    let candidates = client.ordered_load_urls();
     let mut last_err: Option<StalkerError> = None;
     for load_url in candidates {
-        let mut builder = client.http().get(&load_url.load_url).headers(client.common_headers(&load_url)).query(&[
+        let mut builder = client.get(&load_url.load_url).headers(client.common_headers(&load_url)).query(&[
             ("type", portal_type),
-            ("action", action),
+            ("action", action.as_str()),
             ("JsHttpRequest", "1-xml"),
             ("HttpRequest", "1-xml"),
         ]);
@@ -358,30 +359,41 @@ fn collect_categories(value: &Value, out: &mut Vec<StalkerCategory>) {
     }
 }
 
-async fn get_paginated_items<T>(
-    client: &StalkerApiClient,
+/// Walk a paginated catalog endpoint, handing each page to `sink`.
+///
+/// Endpoint candidates are tried in order; a mid-pagination failure abandons the candidate
+/// and restarts on the next one, but only while the sink says that is still sound (see
+/// [`CatalogSink::can_restart`]). Once a streaming sink has released a page, a later
+/// failure is returned as-is rather than silently retried, so no caller can mistake a
+/// truncated catalog for a complete one.
+///
+/// Returns the number of rows delivered.
+async fn drive_catalog_pages<Tr: StalkerTransport, C: Clock, T, S>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
     portal_type: &'static str,
-    action: &'static str,
-    parse_page: impl Fn(&Value) -> (Vec<T>, Option<u32>, Option<u32>, Option<u32>),
-) -> StalkerResult<Vec<T>>
+    action: StalkerAction,
+    parse_page: impl Fn(&Value) -> (Vec<T>, PageMeta),
+    sink: &mut S,
+) -> StalkerResult<u64>
 where
-    T: for<'de> Deserialize<'de> + Clone,
+    T: for<'de> Deserialize<'de>,
+    S: CatalogSink<T>,
 {
     let spec = recipe_spec_for(handshake.profile.bootstrap_recipe);
     let page_limit = client.catalog_max_pages();
-    let candidates = client.load_url_candidates().to_vec();
+    let candidates = client.ordered_load_urls();
     let mut last_err: Option<StalkerError> = None;
     'candidates: for load_url in candidates {
         // Pagination state is per-candidate: a mid-pagination failure must not leak a
         // truncated catalog from one endpoint into the attempt against the next one.
         let mut page: u32 = 1;
         let mut pages_fetched: u32 = 0;
-        let mut all: Vec<T> = Vec::new();
+        let mut delivered: u64 = 0;
         loop {
-            let mut builder = client.http().get(&load_url.load_url).headers(client.common_headers(&load_url)).query(&[
+            let mut builder = client.get(&load_url.load_url).headers(client.common_headers(&load_url)).query(&[
                 ("type", portal_type),
-                ("action", action),
+                ("action", action.as_str()),
                 ("JsHttpRequest", "1-xml"),
                 ("HttpRequest", "1-xml"),
                 ("p", page.to_string().as_str()),
@@ -389,35 +401,30 @@ where
             builder = client.apply_mac_query(builder);
             builder = client.apply_bearer(builder, Some(&handshake.session), spec.token_in_query);
             let value: Value = match client.send_json::<Value>(builder, action).await {
-                Ok(v) => v,
+                Ok(value) => value,
                 Err(err) => {
-                    // Never return a truncated catalog as Ok — retry from scratch on
-                    // the next endpoint candidate instead.
+                    if !sink.can_restart() {
+                        return Err(err);
+                    }
+                    sink.restart();
                     last_err = Some(err);
                     continue 'candidates;
                 }
             };
-            let (mut items, total_items, max_page_items, max_page) = parse_page(&value);
+            let (items, meta) = parse_page(&value);
             let page_len = items.len();
-            if items.is_empty() {
+            if page_len == 0 {
                 break;
             }
             pages_fetched = pages_fetched.saturating_add(1);
-            all.append(&mut items);
-            if total_items.is_some_and(|total| all.len() >= usize::try_from(total).unwrap_or(usize::MAX)) {
-                break;
-            }
-            // A short page (fewer rows than the advertised page size) is the last page.
-            if max_page_items.is_some_and(|max_items| page_len < usize::try_from(max_items).unwrap_or(usize::MAX)) {
-                break;
-            }
-            if max_page.is_some_and(|count| page >= count) {
+            delivered = delivered.saturating_add(page_len as u64);
+            sink.accept(items).await?;
+            if meta.is_terminal(page_len, page, usize::try_from(delivered).unwrap_or(usize::MAX)) {
                 break;
             }
             if page >= page_limit {
                 warn!(
-                    "Stalker {portal_type}/{action} stopped at configured page limit {page_limit} with {} items fetched",
-                    all.len()
+                    "Stalker {portal_type}/{action} stopped at configured page limit {page_limit} with {delivered} items fetched"
                 );
                 return Err(StalkerError::CatalogIncomplete {
                     portal_type,
@@ -427,10 +434,27 @@ where
             page += 1;
         }
         // An empty result from a healthy endpoint is a legitimate empty catalog.
-        info!("Stalker {portal_type}/{action} fetched {} items across {pages_fetched} pages", all.len());
-        return Ok(all);
+        info!("Stalker {portal_type}/{action} fetched {delivered} items across {pages_fetched} pages");
+        return Ok(delivered);
     }
-    Err(last_err.unwrap_or_else(|| StalkerError::EmptyBody { action: action.to_string() }))
+    Err(last_err.unwrap_or_else(|| StalkerError::EmptyBody { action }))
+}
+
+/// Accumulating variant of [`drive_catalog_pages`], for callers that want the whole
+/// catalog in one `Vec`.
+async fn get_paginated_items<Tr: StalkerTransport, C: Clock, T>(
+    client: &StalkerApiClient<Tr, C>,
+    handshake: &StalkerHandshake,
+    portal_type: &'static str,
+    action: StalkerAction,
+    parse_page: impl Fn(&Value) -> (Vec<T>, PageMeta),
+) -> StalkerResult<Vec<T>>
+where
+    T: for<'de> Deserialize<'de> + Send,
+{
+    let mut sink = CollectSink::new();
+    drive_catalog_pages(client, handshake, portal_type, action, parse_page, &mut sink).await?;
+    Ok(sink.into_rows())
 }
 
 fn extract_items_array(value: &Value) -> &Value {
@@ -438,29 +462,6 @@ fn extract_items_array(value: &Value) -> &Value {
         Value::Object(map) => map.get("js").unwrap_or(value),
         _ => value,
     }
-}
-
-fn catalog_js(value: &Value) -> &Value { value.as_object().and_then(|map| map.get("js")).unwrap_or(value) }
-
-fn extract_total_items(value: &Value) -> Option<u32> {
-    if let Some(obj) = catalog_js(value).as_object() {
-        return obj.get("total_items").and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok());
-    }
-    None
-}
-
-fn extract_max_page_items(value: &Value) -> Option<u32> {
-    catalog_js(value)
-        .as_object()
-        .and_then(|obj| obj.get("max_page_items").and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok()))
-}
-
-/// `max_page` is the total page count, not the page size — keep it strictly separate
-/// from `max_page_items`.
-fn extract_max_page(value: &Value) -> Option<u32> {
-    catalog_js(value)
-        .as_object()
-        .and_then(|obj| obj.get("max_page").and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok()))
 }
 
 fn catalog_data(value: &Value) -> Option<&Value> {
@@ -479,7 +480,7 @@ fn parse_all_channels(value: &Value) -> StalkerResult<Vec<StalkerRawItem>> {
     let data = catalog_data(value).ok_or_else(|| StalkerError::BodyDecode {
         message: "get_all_channels response contained no channel collection".to_string(),
     })?;
-    let (items, _, _, _) = parse_items_page(data);
+    let (items, _) = parse_items_page(data);
     let source_len = match data {
         Value::Array(entries) => entries.len(),
         Value::Object(entries) => entries.len(),
@@ -493,55 +494,40 @@ fn parse_all_channels(value: &Value) -> StalkerResult<Vec<StalkerRawItem>> {
     Ok(items)
 }
 
-fn parse_item_catalog_page(value: &Value, current_page: u32) -> StalkerResult<StalkerCatalogPage<StalkerRawItem>> {
+/// Turn a catalog response into a page cursor. The `collection` guard rejects a body that
+/// carried no row collection at all — distinct from a legitimately empty page, which is a
+/// terminal page rather than an error.
+fn parse_catalog_page<T>(value: &Value, current_page: u32, collection: &'static str) -> StalkerResult<CatalogPage<T>>
+where
+    T: for<'de> Deserialize<'de>,
+{
     catalog_data(value).ok_or_else(|| StalkerError::BodyDecode {
-        message: "get_ordered_list response contained no item collection".to_string(),
+        message: format!("get_ordered_list response contained no {collection} collection"),
     })?;
-    let (items, total, max_page_items, max_page) = parse_items_page(value);
-    let terminal = items.is_empty()
-        || max_page.is_some_and(|last| current_page >= last)
-        || max_page_items.is_some_and(|size| items.len() < usize::try_from(size).unwrap_or(usize::MAX))
-        || total.is_some_and(|count| max_page_items.is_some_and(|size| current_page.saturating_mul(size) >= count));
-    let next_page = (!terminal).then(|| current_page.checked_add(1)).flatten();
-    Ok(StalkerCatalogPage { items, next_page, total })
+    let (items, meta) = parse_rows_page::<T>(value);
+    Ok(meta.into_page(items, current_page))
 }
 
-fn parse_series_catalog_page(
-    value: &Value,
-    current_page: u32,
-) -> StalkerResult<StalkerCatalogPage<StalkerRawSeriesItem>> {
-    catalog_data(value).ok_or_else(|| StalkerError::BodyDecode {
-        message: "get_ordered_list response contained no series collection".to_string(),
-    })?;
-    let (items, total, max_page_items, max_page) = parse_series_page(value);
-    let terminal = items.is_empty()
-        || max_page.is_some_and(|last| current_page >= last)
-        || max_page_items.is_some_and(|size| items.len() < usize::try_from(size).unwrap_or(usize::MAX))
-        || total.is_some_and(|count| max_page_items.is_some_and(|size| current_page.saturating_mul(size) >= count));
-    let next_page = (!terminal).then(|| current_page.checked_add(1)).flatten();
-    Ok(StalkerCatalogPage { items, next_page, total })
-}
-
-async fn get_catalog_value(
-    client: &StalkerApiClient,
+async fn get_catalog_value<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
     portal_type: &'static str,
-    action: &'static str,
+    action: StalkerAction,
     page: Option<u32>,
 ) -> StalkerResult<Value> {
     let spec = recipe_spec_for(handshake.profile.bootstrap_recipe);
     let mut last_err = None;
-    for load_url in client.load_url_candidates() {
+    for load_url in &client.ordered_load_urls() {
         let mut query = vec![
             ("type", portal_type.to_string()),
-            ("action", action.to_string()),
+            ("action", action.as_str().to_string()),
             ("JsHttpRequest", "1-xml".to_string()),
             ("HttpRequest", "1-xml".to_string()),
         ];
         if let Some(page) = page {
             query.push(("p", page.to_string()));
         }
-        let mut builder = client.http().get(&load_url.load_url).headers(client.common_headers(load_url)).query(&query);
+        let mut builder = client.get(&load_url.load_url).headers(client.common_headers(load_url)).query(&query);
         builder = client.apply_mac_query(builder);
         builder = client.apply_bearer(builder, Some(&handshake.session), spec.token_in_query);
         match client.send_json::<Value>(builder, action).await {
@@ -552,43 +538,67 @@ async fn get_catalog_value(
     Err(last_err.unwrap_or_else(|| StalkerError::NoEndpoint { portal: safe_stalker_url(client.portal_url()) }))
 }
 
-pub async fn get_all_channels(
-    client: &StalkerApiClient,
+/// The bulk `get_all_channels` shortcut, which many portals simply do not implement.
+///
+/// A portal that has already told us so is not asked again until the claim expires: the
+/// caller falls back to paginated fetch, and re-probing an endpoint known to 404 on every
+/// refresh is exactly the traffic pattern providers ban for.
+pub async fn get_all_channels<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
 ) -> StalkerResult<Vec<StalkerRawItem>> {
-    let value = get_catalog_value(client, handshake, "itv", "get_all_channels", None).await?;
-    parse_all_channels(&value)
+    const ACTION: StalkerAction = StalkerAction::GetAllChannels;
+    if client.action_is_unsupported(ACTION) {
+        return Err(StalkerError::ActionUnsupported { action: ACTION });
+    }
+    let result = async {
+        let value = get_catalog_value(client, handshake, "itv", ACTION, None).await?;
+        parse_all_channels(&value)
+    }
+    .await;
+    match &result {
+        Ok(_) => {
+            client.record_supported_action(ACTION);
+        }
+        Err(err) if err.is_unsupported_catalog_action() => {
+            if client.record_unsupported_action(ACTION) {
+                info!("Stalker portal does not implement {ACTION}; falling back to paginated fetch");
+            }
+        }
+        Err(_) => {}
+    }
+    result
 }
 
-pub async fn get_live_streams_page(
-    client: &StalkerApiClient,
+pub async fn get_live_streams_page<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
     page: u32,
 ) -> StalkerResult<StalkerCatalogPage<StalkerRawItem>> {
-    let value = get_catalog_value(client, handshake, "itv", "get_ordered_list", Some(page)).await?;
-    let response = parse_item_catalog_page(&value, page)?;
+    let value = get_catalog_value(client, handshake, "itv", StalkerAction::GetOrderedList, Some(page)).await?;
+    let response = parse_catalog_page::<StalkerRawItem>(&value, page, "item")?;
     apply_page_limit(&response, page, client.catalog_max_pages(), "itv")?;
     Ok(response)
 }
 
-pub async fn get_vod_streams_page(
-    client: &StalkerApiClient,
+pub async fn get_vod_streams_page<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
     page: u32,
 ) -> StalkerResult<StalkerCatalogPage<StalkerRawItem>> {
-    let value = get_catalog_value(client, handshake, "vod", "get_ordered_list", Some(page)).await?;
-    let response = parse_item_catalog_page(&value, page)?;
+    let value = get_catalog_value(client, handshake, "vod", StalkerAction::GetOrderedList, Some(page)).await?;
+    let response = parse_catalog_page::<StalkerRawItem>(&value, page, "item")?;
     apply_page_limit(&response, page, client.catalog_max_pages(), "vod")?;
     Ok(response)
 }
 
-pub async fn get_series_list_page(
-    client: &StalkerApiClient,
+pub async fn get_series_list_page<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
     page: u32,
 ) -> StalkerResult<StalkerCatalogPage<StalkerRawSeriesItem>> {
-    let value = get_catalog_value(client, handshake, "series", "get_ordered_list", Some(page)).await?;
-    let response = parse_series_catalog_page(&value, page)?;
+    let value = get_catalog_value(client, handshake, "series", StalkerAction::GetOrderedList, Some(page)).await?;
+    let response = parse_catalog_page::<StalkerRawSeriesItem>(&value, page, "series")?;
     apply_page_limit(&response, page, client.catalog_max_pages(), "series")?;
     Ok(response)
 }
@@ -609,55 +619,98 @@ fn apply_page_limit<T>(
     Ok(())
 }
 
-pub async fn get_live_categories(
-    client: &StalkerApiClient,
+pub async fn get_live_categories<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
 ) -> StalkerResult<Vec<StalkerCategory>> {
-    get_categories(client, handshake, "itv", "get_genres").await
+    get_categories(client, handshake, "itv", StalkerAction::GetGenres).await
 }
 
-pub async fn get_vod_categories(
-    client: &StalkerApiClient,
+pub async fn get_vod_categories<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
 ) -> StalkerResult<Vec<StalkerCategory>> {
-    get_categories(client, handshake, "vod", "get_categories").await
+    get_categories(client, handshake, "vod", StalkerAction::GetCategories).await
 }
 
-pub async fn get_series_categories(
-    client: &StalkerApiClient,
+pub async fn get_series_categories<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
 ) -> StalkerResult<Vec<StalkerCategory>> {
-    get_categories(client, handshake, "series", "get_categories").await
+    get_categories(client, handshake, "series", StalkerAction::GetCategories).await
 }
 
-pub async fn get_live_streams_paginated(
-    client: &StalkerApiClient,
+pub async fn get_live_streams_paginated<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
 ) -> StalkerResult<Vec<StalkerRawItem>> {
-    get_paginated_items(client, handshake, "itv", "get_ordered_list", parse_items_page).await
+    get_paginated_items(client, handshake, "itv", StalkerAction::GetOrderedList, parse_items_page).await
 }
 
-pub async fn get_vod_streams_paginated(
-    client: &StalkerApiClient,
+pub async fn get_vod_streams_paginated<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
 ) -> StalkerResult<Vec<StalkerRawItem>> {
-    get_paginated_items(client, handshake, "vod", "get_ordered_list", parse_items_page).await
+    get_paginated_items(client, handshake, "vod", StalkerAction::GetOrderedList, parse_items_page).await
 }
 
-pub async fn get_series_list_paginated(
-    client: &StalkerApiClient,
+pub async fn get_series_list_paginated<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
 ) -> StalkerResult<Vec<StalkerRawSeriesItem>> {
-    get_paginated_items(client, handshake, "series", "get_ordered_list", parse_series_page).await
+    get_paginated_items(client, handshake, "series", StalkerAction::GetOrderedList, parse_series_page).await
 }
 
-pub async fn get_series_details(
-    client: &StalkerApiClient,
+/// Stream the live catalog one page at a time. See [`drive_catalog_pages`] for the
+/// endpoint-fallback caveat that comes with not buffering.
+pub async fn stream_live_streams<Tr: StalkerTransport, C: Clock, F, Fut>(
+    client: &StalkerApiClient<Tr, C>,
+    handshake: &StalkerHandshake,
+    on_batch: F,
+) -> StalkerResult<u64>
+where
+    F: FnMut(Vec<StalkerRawItem>) -> Fut + Send,
+    Fut: std::future::Future<Output = StalkerResult<()>> + Send,
+{
+    let mut sink = BatchSink::new(on_batch);
+    drive_catalog_pages(client, handshake, "itv", StalkerAction::GetOrderedList, parse_items_page, &mut sink).await
+}
+
+/// Stream the VOD catalog one page at a time.
+pub async fn stream_vod_streams<Tr: StalkerTransport, C: Clock, F, Fut>(
+    client: &StalkerApiClient<Tr, C>,
+    handshake: &StalkerHandshake,
+    on_batch: F,
+) -> StalkerResult<u64>
+where
+    F: FnMut(Vec<StalkerRawItem>) -> Fut + Send,
+    Fut: std::future::Future<Output = StalkerResult<()>> + Send,
+{
+    let mut sink = BatchSink::new(on_batch);
+    drive_catalog_pages(client, handshake, "vod", StalkerAction::GetOrderedList, parse_items_page, &mut sink).await
+}
+
+/// Stream the series catalog one page at a time.
+pub async fn stream_series_list<Tr: StalkerTransport, C: Clock, F, Fut>(
+    client: &StalkerApiClient<Tr, C>,
+    handshake: &StalkerHandshake,
+    on_batch: F,
+) -> StalkerResult<u64>
+where
+    F: FnMut(Vec<StalkerRawSeriesItem>) -> Fut + Send,
+    Fut: std::future::Future<Output = StalkerResult<()>> + Send,
+{
+    let mut sink = BatchSink::new(on_batch);
+    drive_catalog_pages(client, handshake, "series", StalkerAction::GetOrderedList, parse_series_page, &mut sink).await
+}
+
+pub async fn get_series_details<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
     series_id: u32,
 ) -> StalkerResult<StalkerRawSeriesDetails> {
     let spec = recipe_spec_for(handshake.profile.bootstrap_recipe);
-    let candidates = client.load_url_candidates().to_vec();
+    let candidates = client.ordered_load_urls();
     let mut last_err: Option<StalkerError> = None;
     for load_url in candidates {
         match fetch_series_page(client, handshake, &load_url, spec.token_in_query, series_id, "0").await {
@@ -676,8 +729,8 @@ pub async fn get_series_details(
     Err(last_err.unwrap_or_else(|| StalkerError::NoEndpoint { portal: safe_stalker_url(client.portal_url()) }))
 }
 
-async fn fetch_series_page(
-    client: &StalkerApiClient,
+async fn fetch_series_page<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
     load_url: &StalkerLoadUrl,
     token_in_query: bool,
@@ -685,7 +738,7 @@ async fn fetch_series_page(
     season_id: &str,
 ) -> StalkerResult<Value> {
     let series_id = series_id.to_string();
-    let mut builder = client.http().get(&load_url.load_url).headers(client.common_headers(load_url)).query(&[
+    let mut builder = client.get(&load_url.load_url).headers(client.common_headers(load_url)).query(&[
         ("type", "series"),
         ("action", "get_ordered_list"),
         ("JsHttpRequest", "1-xml"),
@@ -696,11 +749,11 @@ async fn fetch_series_page(
     ]);
     builder = client.apply_mac_query(builder);
     builder = client.apply_bearer(builder, Some(&handshake.session), token_in_query);
-    client.send_json::<Value>(builder, "series_info").await
+    client.send_json::<Value>(builder, StalkerAction::SeriesInfo).await
 }
 
-async fn hydrate_series_details(
-    client: &StalkerApiClient,
+async fn hydrate_series_details<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
     load_url: &StalkerLoadUrl,
     token_in_query: bool,
@@ -896,88 +949,47 @@ fn shell_episodes(value: &Value, season_number: u32) -> Vec<StalkerRawSeriesEpis
         .unwrap_or_default()
 }
 
-fn parse_items_page(value: &Value) -> (Vec<StalkerRawItem>, Option<u32>, Option<u32>, Option<u32>) {
-    let arr = extract_items_array(value);
-    let items: Vec<StalkerRawItem> = match arr {
-        Value::Array(a) => a.iter().filter_map(|v| serde_json::from_value::<StalkerRawItem>(v.clone()).ok()).collect(),
-        Value::Object(obj) => {
-            // Some portals use object-keyed data: { "data": { "100": {...}, "101": {...} } }.
-            let mut collected: Vec<StalkerRawItem> = Vec::new();
-            if let Some(data) = obj.get("data") {
-                match data {
-                    Value::Array(entries) => {
-                        for v in entries {
-                            if let Ok(item) = serde_json::from_value::<StalkerRawItem>(v.clone()) {
-                                collected.push(item);
-                            }
-                        }
-                    }
-                    Value::Object(entries) => {
-                        for v in entries.values() {
-                            if let Ok(item) = serde_json::from_value::<StalkerRawItem>(v.clone()) {
-                                collected.push(item);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            } else {
-                for v in obj.values() {
-                    if let Ok(item) = serde_json::from_value::<StalkerRawItem>(v.clone()) {
-                        collected.push(item);
-                    }
-                }
-            }
-            collected
-        }
-        _ => Vec::new(),
-    };
-    let total = extract_total_items(value);
-    let max_page_items = extract_max_page_items(value);
-    (items, total, max_page_items, extract_max_page(value))
+/// Collect the rows out of a catalog page, together with its pagination hints.
+///
+/// Portals emit the row collection in four shapes — a bare array, `data` as an array,
+/// `data` as an id-keyed object, or the envelope object itself keyed by id — and this
+/// walks all four. Rows that fail to deserialize are skipped rather than failing the
+/// page, matching what every caller wanted before this was one function per row type.
+fn parse_rows_page<T>(value: &Value) -> (Vec<T>, PageMeta)
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let items = collect_rows::<T>(extract_items_array(value));
+    (items, PageMeta::from_value(value))
 }
 
-fn parse_series_page(value: &Value) -> (Vec<StalkerRawSeriesItem>, Option<u32>, Option<u32>, Option<u32>) {
-    let arr = extract_items_array(value);
-    let items: Vec<StalkerRawSeriesItem> = match arr {
-        Value::Array(a) => {
-            a.iter().filter_map(|v| serde_json::from_value::<StalkerRawSeriesItem>(v.clone()).ok()).collect()
-        }
-        Value::Object(obj) => {
-            let mut collected: Vec<StalkerRawSeriesItem> = Vec::new();
-            if let Some(data) = obj.get("data") {
-                match data {
-                    Value::Array(entries) => {
-                        for v in entries {
-                            if let Ok(item) = serde_json::from_value::<StalkerRawSeriesItem>(v.clone()) {
-                                collected.push(item);
-                            }
-                        }
-                    }
-                    Value::Object(entries) => {
-                        for v in entries.values() {
-                            if let Ok(item) = serde_json::from_value::<StalkerRawSeriesItem>(v.clone()) {
-                                collected.push(item);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            } else {
-                for v in obj.values() {
-                    if let Ok(item) = serde_json::from_value::<StalkerRawSeriesItem>(v.clone()) {
-                        collected.push(item);
-                    }
-                }
-            }
-            collected
-        }
+fn collect_rows<T>(source: &Value) -> Vec<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    match source {
+        Value::Array(entries) => entries.iter().filter_map(deserialize_row).collect(),
+        Value::Object(object) => match object.get("data") {
+            Some(Value::Array(entries)) => entries.iter().filter_map(deserialize_row).collect(),
+            Some(Value::Object(entries)) => entries.values().filter_map(deserialize_row).collect(),
+            // No `data` key at all: the envelope itself is the id-keyed row map.
+            None => object.values().filter_map(deserialize_row).collect(),
+            _ => Vec::new(),
+        },
         _ => Vec::new(),
-    };
-    let total = extract_total_items(value);
-    let max_page_items = extract_max_page_items(value);
-    (items, total, max_page_items, extract_max_page(value))
+    }
 }
+
+fn deserialize_row<T>(value: &Value) -> Option<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    serde_json::from_value::<T>(value.clone()).ok()
+}
+
+fn parse_items_page(value: &Value) -> (Vec<StalkerRawItem>, PageMeta) { parse_rows_page(value) }
+
+fn parse_series_page(value: &Value) -> (Vec<StalkerRawSeriesItem>, PageMeta) { parse_rows_page(value) }
 
 #[cfg(test)]
 mod tests {
@@ -1006,7 +1018,7 @@ mod tests {
                 "data": [{"id": "2", "name": "B"}]
             }
         });
-        let page = parse_item_catalog_page(&value, 2)?;
+        let page = parse_catalog_page::<StalkerRawItem>(&value, 2, "item")?;
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.total, Some(2));
         assert_eq!(page.next_page, None);
@@ -1031,7 +1043,7 @@ mod tests {
                 "data": [{"id": "1", "name": "A"}]
             }
         });
-        let page = parse_item_catalog_page(&value, 4)?;
+        let page = parse_catalog_page::<StalkerRawItem>(&value, 4, "item")?;
         assert_eq!(page.next_page, None);
         Ok(())
     }
@@ -1061,18 +1073,18 @@ mod tests {
             r#"{"js":{"total_items":2,"max_page":1,"data":{"100":{"id":"100","name":"Channel 100"},"101":{"id":"101","name":"Channel 101"}}}}"#,
         )
         .unwrap();
-        let (items, total, max_page_items, max_page) = parse_items_page(&v);
+        let (items, meta) = parse_items_page(&v);
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].display_name(), "Channel 100");
-        assert_eq!(total, Some(2));
-        assert_eq!(max_page_items, None);
-        assert_eq!(max_page, Some(1));
+        assert_eq!(meta.total_items, Some(2));
+        assert_eq!(meta.max_page_items, None);
+        assert_eq!(meta.max_page, Some(1));
     }
 
     #[test]
     fn parse_items_page_handles_array_form() {
         let v: Value = serde_json::from_str(r#"{"js":[{"id":"1","name":"A"}]}"#).unwrap();
-        let (items, _, _, _) = parse_items_page(&v);
+        let (items, _) = parse_items_page(&v);
         assert_eq!(items.len(), 1);
     }
 
@@ -1086,7 +1098,7 @@ mod tests {
             ]
         });
 
-        let (items, _, _, _) = parse_items_page(&value);
+        let (items, _) = parse_items_page(&value);
 
         assert_eq!(items.len(), 3);
         assert_eq!(items[0].category_id(), Some("10"));
@@ -1124,9 +1136,9 @@ mod tests {
                 .unwrap(),
         );
         assert!(single.is_ok(), "single item decode failed: {single:?}");
-        let (items, total, max_page_items, _max_page) = parse_items_page(&v);
-        assert_eq!(total, Some(1));
-        assert_eq!(max_page_items, Some(14));
+        let (items, meta) = parse_items_page(&v);
+        assert_eq!(meta.total_items, Some(1));
+        assert_eq!(meta.max_page_items, Some(14));
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id.as_deref(), Some("686148"));
         assert_eq!(items[0].allow_local_timeshift, Some(true));
@@ -1154,14 +1166,14 @@ mod tests {
 
     #[test]
     fn max_page_is_not_misread_as_page_size() {
-        // `max_page` is a page COUNT, not a page size — it must surface in the fourth
-        // tuple slot only.
+        // `max_page` is a page COUNT, not a page size — it must land in `max_page` and
+        // leave `max_page_items` empty.
         let v: Value = serde_json::from_str(r#"{"js":{"max_page":50,"data":[{"id":"1","name":"A"}]}}"#).unwrap();
-        let (items, total, max_page_items, max_page) = parse_items_page(&v);
+        let (items, meta) = parse_items_page(&v);
         assert_eq!(items.len(), 1);
-        assert_eq!(total, None);
-        assert_eq!(max_page_items, None);
-        assert_eq!(max_page, Some(50));
+        assert_eq!(meta.total_items, None);
+        assert_eq!(meta.max_page_items, None);
+        assert_eq!(meta.max_page, Some(50));
     }
 
     #[test]

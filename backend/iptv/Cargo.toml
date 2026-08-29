@@ -11,7 +11,6 @@ workspace = true
 [dependencies]
 shared = { workspace = true }
 tuliprox-core = { workspace = true }
-tuliprox-messaging = { workspace = true }
 tuliprox-parser = { workspace = true }
 tuliprox-repository = { workspace = true }
 base64.workspace = true
@@ -29,5 +28,6 @@ tokio-util = { version = "0.7.19", features = ["io", "io-util"] }
 url.workspace = true
 
 [dev-dependencies]
+http = "1.4.0"
 tempfile = "3.27.0"
 tokio = { workspace = true, features = ["test-util", "macros"] }

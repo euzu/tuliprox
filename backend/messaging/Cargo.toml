@@ -13,14 +13,18 @@ shared = { workspace = true }
 tuliprox-core = { workspace = true }
 arc-swap.workspace = true
 chrono.workspace = true
+futures.workspace = true
 handlebars = "6.4.4"
+hmac.workspace = true
+sha2.workspace = true
 log.workspace = true
 mime = "0.3.17"
 reqwest = { version = "0.13.4", features = ["json", "stream", "rustls", "socks", "form", "query"] }
 serde.workspace = true
 url.workspace = true
 serde_json = { workspace = true, features = ["raw_value", "preserve_order"] }
-tokio = { workspace = true, features = ["rt-multi-thread", "time", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "macros", "process", "io-util"] }
+tokio-util = { version = "0.7.19" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

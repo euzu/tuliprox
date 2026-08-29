@@ -4,7 +4,7 @@ use log::error;
 use serde::{Deserialize, Serialize};
 use shared::{
     error::TuliproxError,
-    model::{PlaylistItemType, UUIDType},
+    model::{PlaylistItemType, UUIDType, VirtualId},
 };
 use std::{
     cmp::max,
@@ -18,20 +18,20 @@ const EXPIRATION_DURATION: i64 = 86400;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct VirtualIdRecord {
-    pub virtual_id: u32,
+    pub virtual_id: VirtualId,
     pub provider_id: u32,
     pub uuid: UUIDType,
     pub item_type: PlaylistItemType,
-    pub parent_virtual_id: u32, // only for series to hold series info id.
+    pub parent_virtual_id: VirtualId, // only for series to hold series info id.
     pub last_updated: i64,
 }
 
 impl VirtualIdRecord {
     pub fn new(
         provider_id: u32,
-        virtual_id: u32,
+        virtual_id: VirtualId,
         item_type: PlaylistItemType,
-        parent_virtual_id: u32,
+        parent_virtual_id: VirtualId,
         uuid: UUIDType,
     ) -> Self {
         let last_updated = Local::now().timestamp();
@@ -63,13 +63,13 @@ where
 pub struct TargetIdMapping {
     virtual_id_counter: u32,
     // Disk-based handles
-    disk_by_virtual_id: BPlusTreeUpdate<u32, VirtualIdRecord>,
+    disk_by_virtual_id: BPlusTreeUpdate<VirtualId, VirtualIdRecord>,
     disk_by_uuid: BPlusTreeUpdate<UUIDType, u32>,
     // In-memory working sets (Always populated)
-    mem_by_uuid: HashMap<UUIDType, u32>,
-    mem_by_virtual_id: HashMap<u32, VirtualIdRecord>,
+    mem_by_uuid: HashMap<UUIDType, VirtualId>,
+    mem_by_virtual_id: HashMap<VirtualId, VirtualIdRecord>,
     // Batch buffers for efficient disk writes
-    pending_virtual_id_upserts: HashMap<u32, VirtualIdRecord>,
+    pending_virtual_id_upserts: HashMap<VirtualId, VirtualIdRecord>,
     pending_uuid_upserts: HashMap<UUIDType, u32>,
     path: PathBuf,
 }
@@ -86,7 +86,7 @@ impl TargetIdMapping {
         })?;
 
         // Open disk-based update handles
-        let mut disk_by_virtual_id = match BPlusTreeUpdate::<u32, VirtualIdRecord>::try_new_with_backoff(path) {
+        let mut disk_by_virtual_id = match BPlusTreeUpdate::<VirtualId, VirtualIdRecord>::try_new_with_backoff(path) {
             Ok(tree) => tree,
             Err(e) => {
                 error!("Failed to open primary tree at {}: {e}", path.display());
@@ -148,8 +148,8 @@ impl TargetIdMapping {
         uuid: &UUIDType,
         provider_id: u32,
         item_type: PlaylistItemType,
-        parent_virtual_id: u32,
-    ) -> u32 {
+        parent_virtual_id: VirtualId,
+    ) -> VirtualId {
         // Lookup existing virtual_id in memory
         let existing_virtual_id = self.mem_by_uuid.get(uuid).copied();
 
@@ -158,17 +158,18 @@ impl TargetIdMapping {
                 // New entry: allocate new virtual_id
                 self.virtual_id_counter += 1;
                 let virtual_id = self.virtual_id_counter;
-                let record = VirtualIdRecord::new(provider_id, virtual_id, item_type, parent_virtual_id, *uuid);
+                let record =
+                    VirtualIdRecord::new(provider_id, VirtualId::new(virtual_id), item_type, parent_virtual_id, *uuid);
 
                 // Buffer for disk write
-                self.pending_virtual_id_upserts.insert(virtual_id, record.clone());
+                self.pending_virtual_id_upserts.insert(VirtualId::new(virtual_id), record.clone());
                 self.pending_uuid_upserts.insert(*uuid, virtual_id);
 
                 // Update memory maps
-                self.mem_by_uuid.insert(*uuid, virtual_id);
-                self.mem_by_virtual_id.insert(virtual_id, record);
+                self.mem_by_uuid.insert(*uuid, VirtualId::new(virtual_id));
+                self.mem_by_virtual_id.insert(VirtualId::new(virtual_id), record);
 
-                virtual_id
+                VirtualId::new(virtual_id)
             }
             Some(virtual_id) => {
                 // Existing entry: check if update needed
@@ -198,7 +199,7 @@ impl TargetIdMapping {
         if self.has_pending_changes() {
             // Flush pending virtual_id upserts
             if !self.pending_virtual_id_upserts.is_empty() {
-                let mut batch: Vec<(&u32, &VirtualIdRecord)> = self.pending_virtual_id_upserts.iter().collect();
+                let mut batch: Vec<(&VirtualId, &VirtualIdRecord)> = self.pending_virtual_id_upserts.iter().collect();
                 batch.sort_by_key(|(k, _)| **k);
                 self.disk_by_virtual_id.upsert_batch(&batch)?;
                 self.pending_virtual_id_upserts.clear();
@@ -231,7 +232,7 @@ impl TargetIdMapping {
         !self.pending_virtual_id_upserts.is_empty() || !self.pending_uuid_upserts.is_empty()
     }
 
-    pub fn find_virtual_ids(&self, provider_id: u32) -> Vec<u32> {
+    pub fn find_virtual_ids(&self, provider_id: u32) -> Vec<VirtualId> {
         self.mem_by_virtual_id
             .values()
             .filter(|record| record.provider_id == provider_id)
@@ -239,9 +240,9 @@ impl TargetIdMapping {
             .collect()
     }
 
-    pub fn get_virtual_id_by_uuid(&self, uuid: &UUIDType) -> Option<u32> { self.mem_by_uuid.get(uuid).copied() }
+    pub fn get_virtual_id_by_uuid(&self, uuid: &UUIDType) -> Option<VirtualId> { self.mem_by_uuid.get(uuid).copied() }
 
-    pub fn get_parent_virtual_id_by_uuid(&self, uuid: &UUIDType) -> Option<u32> {
+    pub fn get_parent_virtual_id_by_uuid(&self, uuid: &UUIDType) -> Option<VirtualId> {
         self.get_virtual_id_by_uuid(uuid)
             .and_then(|virtual_id| self.mem_by_virtual_id.get(&virtual_id))
             .map(|record| record.parent_virtual_id)
@@ -312,16 +313,17 @@ mod tests {
         let uuid1 = UUIDType::default();
         {
             let mut mapping = TargetIdMapping::new(&path, false)?;
-            let vid1 = mapping.get_and_update_virtual_id(&uuid1, 100, PlaylistItemType::Live, 0);
-            assert_eq!(vid1, 1);
+            let vid1 = mapping.get_and_update_virtual_id(&uuid1, 100, PlaylistItemType::Live, VirtualId::default());
+            assert_eq!(vid1, VirtualId::new(1));
             mapping.persist().map_err(|_| TuliproxError::Config("Failed to persist mapping".to_string()))?;
         }
 
         // Reopen and verify persistence
         {
             let mut mapping = TargetIdMapping::new(&path, false)?;
-            let vid1_again = mapping.get_and_update_virtual_id(&uuid1, 100, PlaylistItemType::Live, 0);
-            assert_eq!(vid1_again, 1); // Should get same virtual_id
+            let vid1_again =
+                mapping.get_and_update_virtual_id(&uuid1, 100, PlaylistItemType::Live, VirtualId::default());
+            assert_eq!(vid1_again, VirtualId::new(1)); // Should get same virtual_id
         }
 
         Ok(())
@@ -335,16 +337,17 @@ mod tests {
         let uuid1 = UUIDType::default();
         {
             let mut mapping = TargetIdMapping::new(&path, false)?;
-            let vid1 = mapping.get_and_update_virtual_id(&uuid1, 100, PlaylistItemType::Video, 0);
-            assert_eq!(vid1, 1);
+            let vid1 = mapping.get_and_update_virtual_id(&uuid1, 100, PlaylistItemType::Video, VirtualId::default());
+            assert_eq!(vid1, VirtualId::new(1));
             mapping.persist().map_err(|err| TuliproxError::Config(err.to_string()))?;
         }
 
         // Reopen with memory cache and verify
         {
             let mut mapping = TargetIdMapping::new(&path, true)?;
-            let vid1_again = mapping.get_and_update_virtual_id(&uuid1, 100, PlaylistItemType::Video, 0);
-            assert_eq!(vid1_again, 1);
+            let vid1_again =
+                mapping.get_and_update_virtual_id(&uuid1, 100, PlaylistItemType::Video, VirtualId::default());
+            assert_eq!(vid1_again, VirtualId::new(1));
         }
 
         Ok(())

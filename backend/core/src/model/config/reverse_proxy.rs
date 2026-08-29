@@ -8,9 +8,9 @@ use shared::{
         HLS_CACHE_DIR_SUFFIX,
     },
     model::{
-        HlsCacheConfigDto, HlsCorruptSegmentWatchdogConfigDto, HlsManifestRecoveryBurstConfigDto,
-        HlsSegmentRepairConfigDto, HlsSegmentRepairSizeIncreaseConfigDto, HlsStripMode, ResourceRetryConfigDto,
-        ReverseProxyConfigDto, ReverseProxyDisabledHeaderConfigDto, REGEX_CACHE,
+        Bytes, HlsCacheConfigDto, HlsCorruptSegmentWatchdogConfigDto, HlsManifestRecoveryBurstConfigDto,
+        HlsSegmentRepairConfigDto, HlsSegmentRepairSizeIncreaseConfigDto, HlsStripMode, Millis, ResourceRetryConfigDto,
+        ReverseProxyConfigDto, ReverseProxyDisabledHeaderConfigDto, Secs, REGEX_CACHE,
     },
     utils::{hex_to_u8_16, u8_16_to_hex},
 };
@@ -199,7 +199,7 @@ pub struct HlsSegmentRepairConfig {
     pub max_level: shared::model::HlsSegmentRepairMode,
     pub apply_to_first_segments: u8,
     pub max_parallel_repairs: usize,
-    pub postprocess_timeout_ms: u64,
+    pub postprocess_timeout_ms: Millis,
     pub size_increase: HlsSegmentRepairSizeIncreaseConfig,
     pub corrupt_segment_watchdog: HlsCorruptSegmentWatchdogConfig,
 }
@@ -260,23 +260,23 @@ impl From<&HlsCorruptSegmentWatchdogConfig> for HlsCorruptSegmentWatchdogConfigD
 pub struct HlsCacheConfig {
     pub cache_path: String,
     pub strip: StripConfig,
-    pub cache_duration: u64,
-    pub cache_bytes: u64,
+    pub cache_duration: Secs,
+    pub cache_bytes: Bytes,
     pub cache_bytes_str: String,
-    pub cache_bytes_per_session: u64,
+    pub cache_bytes_per_session: Bytes,
     pub cache_bytes_per_session_str: String,
     pub max_segments_prefetch: usize,
     pub max_concurrent_segment_fetches_per_session: usize,
     pub max_concurrent_segment_fetches_global: usize,
-    pub origin_manifest_timeout_ms: u64,
-    pub origin_segment_timeout_ms: u64,
-    pub initial_manifest_wait_timeout_secs: u64,
-    pub session_idle_timeout: u64,
+    pub origin_manifest_timeout_ms: Millis,
+    pub origin_segment_timeout_ms: Millis,
+    pub initial_manifest_wait_timeout_secs: Secs,
+    pub session_idle_timeout: Secs,
     pub manifest_recovery_burst: HlsManifestRecoveryBurstConfig,
     pub segment_repair: HlsSegmentRepairConfig,
 }
 
-fn parse_hls_byte_size_or_default(value: &shared::model::ByteSize, default_value: &str) -> u64 {
+fn parse_hls_byte_size_or_default(value: &shared::model::ByteSize, default_value: &str) -> Bytes {
     value
         .parse_bytes()
         .unwrap_or_else(|_| shared::model::ByteSize::new(default_value).parse_bytes().unwrap_or_default())
@@ -400,8 +400,8 @@ mod tests {
         ReverseProxyConfig,
     };
     use shared::model::{
-        ByteSize, HlsCacheConfigDto, HlsManifestRecoveryBurstLevel, HlsSegmentRepairMode, HlsStripMode,
-        QosAggregationConfigDto, ReverseProxyConfigDto, StreamHistoryConfigDto,
+        ByteSize, Bytes, HlsCacheConfigDto, HlsManifestRecoveryBurstLevel, HlsSegmentRepairMode, HlsStripMode, Millis,
+        QosAggregationConfigDto, ReverseProxyConfigDto, Secs, StreamHistoryConfigDto,
     };
 
     #[test]
@@ -470,18 +470,18 @@ mod tests {
             HlsCacheConfig {
                 cache_path: default_hls_cache_path(),
                 strip: super::StripConfig { mode: HlsStripMode::Segments, value: 0 },
-                cache_duration: 300,
-                cache_bytes: 10_737_418_240, // 10 * 1024^3 (was 10 * 1e9 under SI decimal before consolidation)
+                cache_duration: Secs::new(300),
+                cache_bytes: Bytes::new(10_737_418_240), // 10 * 1024^3 (was 10 * 1e9 under SI decimal before consolidation)
                 cache_bytes_str: "10GB".to_string(),
-                cache_bytes_per_session: 536_870_912, // 512 * 1024^2 (was 512 * 1e6 under SI decimal before consolidation)
+                cache_bytes_per_session: Bytes::new(536_870_912), // 512 * 1024^2 (was 512 * 1e6 under SI decimal before consolidation)
                 cache_bytes_per_session_str: "512MB".to_string(),
                 max_segments_prefetch: 6,
                 max_concurrent_segment_fetches_per_session: 2,
                 max_concurrent_segment_fetches_global: 64,
-                origin_manifest_timeout_ms: 3_000,
-                origin_segment_timeout_ms: 10_000,
-                initial_manifest_wait_timeout_secs: 90,
-                session_idle_timeout: 300,
+                origin_manifest_timeout_ms: Millis::new(3_000),
+                origin_segment_timeout_ms: Millis::new(10_000),
+                initial_manifest_wait_timeout_secs: Secs::new(90),
+                session_idle_timeout: Secs::new(300),
                 manifest_recovery_burst: HlsManifestRecoveryBurstConfig::default(),
                 segment_repair: HlsSegmentRepairConfig {
                     max_level: HlsSegmentRepairMode::Off,
@@ -503,8 +503,8 @@ mod tests {
 
         let config = HlsCacheConfig::from(&dto);
 
-        assert_eq!(config.cache_bytes, 1_073_741_824);
-        assert_eq!(config.cache_bytes_per_session, 536_870_912); // 512 * 1024^2 (binary since parse_size_base_2 consolidation)
+        assert_eq!(config.cache_bytes, Bytes::new(1_073_741_824));
+        assert_eq!(config.cache_bytes_per_session, Bytes::new(536_870_912)); // 512 * 1024^2 (binary since parse_size_base_2 consolidation)
     }
 
     #[test]

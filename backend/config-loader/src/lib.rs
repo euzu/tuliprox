@@ -11,7 +11,7 @@ use shared::{
     foundation::prepare_templates,
     model::{
         ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigInputAliasDto, ConfigPaths, HdHomeRunDeviceOverview,
-        InputType, MsgKind, PatternTemplate, PlansConfigDto, SourcesConfigDto, TargetUserDto, TemplateDefinitionDto,
+        InputType, PatternTemplate, PlansConfigDto, Prepare, SourcesConfigDto, TargetUserDto, TemplateDefinitionDto,
         UserPlanDto,
     },
     utils::PROVIDER_SCHEME_PREFIX,
@@ -405,12 +405,17 @@ fn apply_prepared_mappings(
     prepared_templates: Option<&[PatternTemplate]>,
 ) {
     match mapping.mappings.prepare(prepared_templates) {
-        Ok(()) => {
-            let mappings: tuliprox_core::model::Mappings = tuliprox_core::model::Mappings::from(&*mapping);
-            app_config.set_mappings(mappings_file, &mappings);
-            paths.mapping_files_used =
-                mapping_paths.map(|items| items.iter().map(|p| p.display().to_string()).collect::<Vec<String>>());
-        }
+        Ok(()) => match tuliprox_core::model::CompiledMappings::try_from(&*mapping) {
+            Ok(mappings) => {
+                app_config.set_mappings(mappings_file, &mappings);
+                paths.mapping_files_used =
+                    mapping_paths.map(|items| items.iter().map(|p| p.display().to_string()).collect::<Vec<String>>());
+            }
+            Err(err) => {
+                error!("Failed to compile mapping '{mappings_file}': {err}. Skipping mapping registration.");
+                paths.mapping_files_used = None;
+            }
+        },
         Err(err) => {
             error!("Failed to prepare mapping '{mappings_file}': {err}. Skipping mapping registration.");
             paths.mapping_files_used = None;
@@ -1039,19 +1044,25 @@ pub async fn persist_messaging_templates(
         // Discord
         if let Some(discord) = &mut messaging.discord {
             for (kind, template) in &mut discord.templates {
-                *template = persist_single_template("discord", Some(kind), template, &templates_dir).await?;
+                *template = persist_single_template("discord", Some(kind.as_str()), template, &templates_dir).await?;
             }
         }
         // Telegram
         if let Some(telegram) = &mut messaging.telegram {
             for (kind, template) in &mut telegram.templates {
-                *template = persist_single_template("telegram", Some(kind), template, &templates_dir).await?;
+                *template = persist_single_template("telegram", Some(kind.as_str()), template, &templates_dir).await?;
             }
         }
         // Rest
         if let Some(rest) = &mut messaging.rest {
             for (kind, template) in &mut rest.templates {
-                *template = persist_single_template("rest", Some(kind), template, &templates_dir).await?;
+                *template = persist_single_template("rest", Some(kind.as_str()), template, &templates_dir).await?;
+            }
+        }
+        // Pushover
+        if let Some(pushover) = &mut messaging.pushover {
+            for (kind, template) in &mut pushover.templates {
+                *template = persist_single_template("pushover", Some(kind.as_str()), template, &templates_dir).await?;
             }
         }
     }
@@ -1060,7 +1071,7 @@ pub async fn persist_messaging_templates(
 
 async fn persist_single_template(
     prefix: &str,
-    kind: Option<&MsgKind>,
+    event_key: Option<&str>,
     template: &str,
     templates_dir: &Path,
 ) -> Result<String, TuliproxError> {
@@ -1088,8 +1099,18 @@ async fn persist_single_template(
         })?;
     }
 
-    let filename =
-        if let Some(k) = kind { k.template_filename(prefix) } else { concat_string!(prefix, "_default.templ") };
+    // Persist under the canonical event id where the key resolves to one,
+    // so a config written with a legacy `MsgKind` name still lands on the
+    // filename the registry will look for.
+    let filename = event_key.map_or_else(
+        || concat_string!(prefix, "_default.templ"),
+        |key| {
+            shared::model::notification::EventId::from_wire(key).map_or_else(
+                || concat_string!(prefix, "_", &key.replace('.', "_"), ".templ"),
+                |id| id.template_filename(prefix),
+            )
+        },
+    );
 
     let file_path = templates_dir.join(filename);
     fs::write(&file_path, template)

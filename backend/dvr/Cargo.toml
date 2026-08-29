@@ -14,7 +14,6 @@ tuliprox-auth = { workspace = true }
 tuliprox-core = { workspace = true }
 tuliprox-messaging = { workspace = true }
 tuliprox-repository = { workspace = true }
-tuliprox-session = { workspace = true }
 arc-swap.workspace = true
 chrono.workspace = true
 chrono-tz = "0.10.4"

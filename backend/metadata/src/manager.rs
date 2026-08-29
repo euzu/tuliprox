@@ -1,4 +1,4 @@
-use crate::ctx::MetadataUpdateCtx;
+use crate::ctx::{BoundMetadataUpdateCtx, MetadataUpdateCtx};
 use arc_swap::ArcSwap;
 use dashmap::{mapref::entry::Entry, DashMap};
 use log::{debug, error, info, warn};
@@ -7,10 +7,11 @@ use shared::{
     defaults::default_probe_user_priority,
     error::TuliproxError,
     model::{
-        InputType, LiveStreamProperties, PlaylistItemType, SeriesStreamProperties, StreamProperties, UUIDType,
-        VideoStreamProperties, XtreamCluster, XtreamPlaylistItem,
+        EventMessage, EventSink, InputType, LiveStreamProperties, MetadataUpdateFailure, PlaylistItemType,
+        SeriesStreamProperties, StreamProperties, UUIDType, VideoStreamProperties, VirtualId, XtreamCluster,
+        XtreamPlaylistItem,
     },
-    utils::generate_provider_playlist_uuid,
+    utils::{generate_provider_playlist_uuid, sanitize_sensitive_info},
 };
 use std::{
     cmp::min,
@@ -41,7 +42,6 @@ use tuliprox_repository::{
     persist_input_vod_info_batch, write_playlist_batch_item_upsert, xtream_get_file_path, BPlusTree, BPlusTreeQuery,
     BPlusTreeUpdate, MetadataRetryDbKey, MetadataRetryDbValue, RetryStateDbValue, TargetIdMapping,
 };
-use tuliprox_session::EventMessage;
 
 const METADATA_RETRY_STATE_FILE: &str = "metadata_retry_state.db";
 const TASK_ERR_NO_CONNECTION: &str = "No connection available";
@@ -110,7 +110,7 @@ impl Default for MetadataUpdateRuntimeSettings {
 }
 
 impl MetadataUpdateRuntimeSettings {
-    fn from_ctx(ctx: Option<&MetadataUpdateCtx>) -> Self {
+    fn from_ctx<E: EventSink + Clone + 'static>(ctx: Option<&MetadataUpdateCtx<E>>) -> Self {
         let metadata_update = ctx.map_or_else(MetadataUpdateConfig::default, |ctx| {
             ctx.app_config
                 .config
@@ -447,7 +447,7 @@ pub struct MetadataUpdateManager {
     /// Terminal shutdown flag; once set, token rotation must not reactivate workers.
     is_shutdown_flag: AtomicBool,
     /// Global application state (weak reference to avoid cycles)
-    ctx: tokio::sync::Mutex<Option<MetadataUpdateCtx>>,
+    ctx: tokio::sync::Mutex<Option<BoundMetadataUpdateCtx>>,
     /// Global gate:
     /// - Foreground playlist updates hold WRITE lock.
     /// - Background metadata/probe tasks hold READ lock per task.
@@ -540,7 +540,7 @@ impl MetadataUpdateManager {
 
     /// Bind the handles the worker reads. Called once, after the server's root
     /// state is built - the worker itself is constructed before it.
-    pub async fn set_ctx(&self, ctx: MetadataUpdateCtx) {
+    pub async fn set_ctx(&self, ctx: BoundMetadataUpdateCtx) {
         let mut guard = self.ctx.lock().await;
         *guard = Some(ctx);
     }
@@ -1053,7 +1053,7 @@ struct InputWorker {
     receiver: mpsc::Receiver<TaskKey>,
     pending_tasks: Arc<DashMap<TaskKey, PendingTask>>,
     pending_task_count: Arc<AtomicUsize>,
-    bound_ctx: Option<MetadataUpdateCtx>,
+    bound_ctx: Option<BoundMetadataUpdateCtx>,
     update_pause_gate: Arc<RwLock<()>>,
     cancel_token: CancellationToken,
     batch_buffer: BatchResultCollector,
@@ -1095,10 +1095,10 @@ macro_rules! collect_virtual_updates {
             mapping: &TargetIdMapping,
             input_name: &str,
             batch: &'a BatchResultCollector,
-            provider_virtual_ids: &mut HashMap<u32, Vec<u32>>,
-            uuid_virtual_ids: &mut HashMap<UUIDType, Option<u32>>,
-        ) -> HashMap<u32, &'a $props_ty> {
-            let mut virtual_updates: HashMap<u32, &'a $props_ty> = HashMap::new();
+            provider_virtual_ids: &mut HashMap<u32, Vec<VirtualId>>,
+            uuid_virtual_ids: &mut HashMap<UUIDType, Option<VirtualId>>,
+        ) -> HashMap<VirtualId, &'a $props_ty> {
+            let mut virtual_updates: HashMap<VirtualId, &'a $props_ty> = HashMap::new();
             if batch.$field.is_empty() {
                 return virtual_updates;
             }
@@ -1134,11 +1134,11 @@ macro_rules! collect_virtual_updates {
 /// used in error and log messages.
 macro_rules! apply_cascade_updates {
     ($fn_name:ident, $props_ty:ty, $cluster:expr, $variant:ident, $log_label:literal) => {
-        async fn $fn_name(
-            ctx: &MetadataUpdateCtx,
+        async fn $fn_name<E: EventSink + Clone + 'static>(
+            ctx: &MetadataUpdateCtx<E>,
             target: &tuliprox_core::model::ConfigTarget,
             storage_path: &std::path::Path,
-            virtual_updates: HashMap<u32, &$props_ty>,
+            virtual_updates: HashMap<VirtualId, &$props_ty>,
         ) {
             if virtual_updates.is_empty() {
                 return;
@@ -1147,7 +1147,7 @@ macro_rules! apply_cascade_updates {
             let target_name = target.name.as_str();
             let xtream_path = xtream_get_file_path(storage_path, $cluster);
             let updates_input: Vec<(u32, $props_ty)> =
-                virtual_updates.into_iter().map(|(vid, props)| (vid, props.clone())).collect();
+                virtual_updates.into_iter().map(|(vid, props)| (vid.get(), props.clone())).collect();
 
             let updates = {
                 // Scope read lock to read-only query phase so write phase can acquire lock.
@@ -1211,6 +1211,13 @@ impl InputWorker {
         let mut last_progress_log_at = Instant::now();
         let mut queue_cycle_active = false;
         let mut cycle_had_changes = false;
+        // Tasks that burned through their retries this cycle. A cycle that
+        // exhausts work is the only signal an operator gets that an input has
+        // stopped resolving - `InputMetadataUpdatesCompleted` fires only when
+        // something actually changed, so a permanently broken input would
+        // otherwise emit a start and then nothing at all.
+        let mut cycle_failed_tasks: usize = 0;
+        let mut cycle_last_error: Option<String> = None;
         let mut consecutive_resolve_tasks = 0_usize;
 
         let input_name = self.input_name.clone();
@@ -1265,6 +1272,8 @@ impl InputWorker {
                 // First entry of a new processing cycle.
                 queue_cycle_active = true;
                 cycle_had_changes = false;
+                cycle_failed_tasks = 0;
+                cycle_last_error = None;
                 processed_vod_count = 0;
                 processed_series_count = 0;
                 last_progress_log_at = Instant::now();
@@ -1273,7 +1282,7 @@ impl InputWorker {
                     .checked_sub(runtime_settings.queue_log_interval + Duration::from_secs(1))
                     .unwrap_or_else(Instant::now);
                 if let Some(ctx) = bound_ctx.clone() {
-                    ctx.event_manager.send_event(EventMessage::InputMetadataUpdatesStarted(input_name.clone()));
+                    ctx.events.emit(EventMessage::InputMetadataUpdatesStarted(input_name.clone()));
                 }
                 if self.last_cycle_completed_at_ts.is_some_and(|last| {
                     now_ts.saturating_sub(last) >= runtime_settings.resolve_exhaustion_reset_gap_secs
@@ -1739,6 +1748,8 @@ impl InputWorker {
                             let attempts = state_after_update.attempts;
 
                             if attempts >= max_attempts {
+                                cycle_failed_tasks = cycle_failed_tasks.saturating_add(1);
+                                cycle_last_error = Some(sanitize_sensitive_info(e.message()).into_owned());
                                 self.scheduled_requeues.remove(&current_key);
                                 if retry_domain == RetryDomain::Probe {
                                     remove_current_task = true;
@@ -1899,12 +1910,31 @@ impl InputWorker {
                 if cycle_had_changes {
                     info!("All pending metadata resolves completed for input {input_name} (with changes)");
                     if let Some(ctx) = bound_ctx.clone() {
-                        ctx.event_manager.send_event(EventMessage::InputMetadataUpdatesCompleted(input_name.clone()));
+                        ctx.events.emit(EventMessage::InputMetadataUpdatesCompleted(input_name.clone()));
                     }
                 } else {
                     debug!("All pending metadata resolves completed for input {input_name} (no changes, skipping playlist update trigger)");
                 }
+                // Reported alongside the completion rather than instead of it:
+                // a cycle can both produce changes and exhaust tasks, and
+                // suppressing the completion would also suppress the playlist
+                // update it triggers.
+                if cycle_failed_tasks > 0 {
+                    warn!(
+                        "Metadata update cycle for input {input_name} exhausted {cycle_failed_tasks} task(s) without resolving them"
+                    );
+                    if let Some(ctx) = bound_ctx.clone() {
+                        ctx.events.emit(EventMessage::InputMetadataUpdatesFailed(MetadataUpdateFailure::new(
+                            input_name.clone(),
+                            cycle_failed_tasks,
+                            cycle_had_changes,
+                            cycle_last_error.clone(),
+                        )));
+                    }
+                }
                 cycle_had_changes = false;
+                cycle_failed_tasks = 0;
+                cycle_last_error = None;
             }
         }
 
@@ -1920,10 +1950,10 @@ impl InputWorker {
         debug!("Metadata worker stopped for input {input_name}");
     }
 
-    async fn ensure_metadata_retry_state_loaded(
+    async fn ensure_metadata_retry_state_loaded<E: EventSink + Clone + 'static>(
         &mut self,
         input_name: &str,
-        bound_ctx: Option<&MetadataUpdateCtx>,
+        bound_ctx: Option<&MetadataUpdateCtx<E>>,
         runtime_settings: &MetadataUpdateRuntimeSettings,
     ) {
         if self.metadata_retry_loaded {
@@ -2560,9 +2590,9 @@ impl InputWorker {
     }
 
     // Changed to static method
-    async fn flush_batch_static(
+    async fn flush_batch_static<E: EventSink + Clone + 'static>(
         input_name: &str,
-        bound_ctx: Option<&MetadataUpdateCtx>,
+        bound_ctx: Option<&MetadataUpdateCtx<E>>,
         batch_buffer: &mut BatchResultCollector,
     ) {
         if batch_buffer.is_empty() {
@@ -2657,8 +2687,8 @@ impl InputWorker {
     }
 
     #[allow(clippy::too_many_lines)]
-    async fn cascade_updates(
-        ctx: &MetadataUpdateCtx,
+    async fn cascade_updates<E: EventSink + Clone + 'static>(
+        ctx: &MetadataUpdateCtx<E>,
         config: &tuliprox_core::model::Config,
         input_name: &str,
         batch: &BatchResultCollector,
@@ -2713,8 +2743,8 @@ impl InputWorker {
                 }
             };
 
-            let mut provider_virtual_ids: HashMap<u32, Vec<u32>> = HashMap::new();
-            let mut uuid_virtual_ids: HashMap<UUIDType, Option<u32>> = HashMap::new();
+            let mut provider_virtual_ids: HashMap<u32, Vec<VirtualId>> = HashMap::new();
+            let mut uuid_virtual_ids: HashMap<UUIDType, Option<VirtualId>> = HashMap::new();
 
             let vod_virtual_updates = Self::collect_vod_virtual_updates(
                 &mapping,
@@ -2747,9 +2777,9 @@ impl InputWorker {
 
     fn get_cached_uuid_virtual_id(
         mapping: &TargetIdMapping,
-        cache: &mut HashMap<UUIDType, Option<u32>>,
+        cache: &mut HashMap<UUIDType, Option<VirtualId>>,
         uuid: UUIDType,
-    ) -> Option<u32> {
+    ) -> Option<VirtualId> {
         if let Some(cached) = cache.get(&uuid) {
             return *cached;
         }
@@ -2780,8 +2810,8 @@ impl InputWorker {
     );
     apply_cascade_updates!(apply_live_cascade_updates, LiveStreamProperties, XtreamCluster::Live, Live, "Live");
 
-    async fn update_memory_cache(
-        ctx: &MetadataUpdateCtx,
+    async fn update_memory_cache<E: EventSink + Clone + 'static>(
+        ctx: &MetadataUpdateCtx<E>,
         target_name: &str,
         cluster: XtreamCluster,
         updates: Vec<XtreamPlaylistItem>,
@@ -2795,14 +2825,14 @@ impl InputWorker {
                     XtreamCluster::Series => &mut xtream_storage.series,
                 };
                 for item in updates {
-                    storage.insert(item.virtual_id, item);
+                    storage.insert(item.virtual_id.get(), item);
                 }
             }
         }
     }
-    async fn get_or_open_query(
+    async fn get_or_open_query<E: EventSink + Clone + 'static>(
         input_name: &str,
-        ctx: &MetadataUpdateCtx,
+        ctx: &MetadataUpdateCtx<E>,
         cluster: XtreamCluster,
         db_handles: &mut HashMap<XtreamCluster, DbHandle>,
         failed_clusters: &mut HashSet<XtreamCluster>,
@@ -2849,9 +2879,9 @@ impl InputWorker {
     }
 
     // Helper for get_item_name with caching
-    async fn get_item_name_static(
+    async fn get_item_name_static<E: EventSink + Clone + 'static>(
         input_name: &str,
-        ctx: &MetadataUpdateCtx,
+        ctx: &MetadataUpdateCtx<E>,
         task: &UpdateTask,
         db_handles: &mut HashMap<XtreamCluster, DbHandle>,
         failed_clusters: &mut HashSet<XtreamCluster>,
@@ -2889,9 +2919,9 @@ impl InputWorker {
     }
 
     #[allow(clippy::too_many_lines)]
-    async fn process_task_static(
+    async fn process_task_static<E: EventSink + Clone + 'static>(
         input_name: &Arc<str>,
-        bound_ctx: Option<&MetadataUpdateCtx>,
+        bound_ctx: Option<&MetadataUpdateCtx<E>>,
         task: &UpdateTask,
         collector: &mut BatchResultCollector,
         db_handles: &mut HashMap<XtreamCluster, DbHandle>,
@@ -3122,8 +3152,8 @@ impl InputWorker {
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-    async fn execute_task_inner_static(
-        ctx: &MetadataUpdateCtx,
+    async fn execute_task_inner_static<E: EventSink + Clone + 'static>(
+        ctx: &MetadataUpdateCtx<E>,
         client: &reqwest::Client,
         input: &Arc<tuliprox_core::model::ConfigInput>,
         task: &UpdateTask,
@@ -3283,6 +3313,7 @@ impl InputWorker {
                             &ctx.active_provider,
                             active_handle,
                             probe_priority,
+                            &ctx.events,
                         )
                         .await?;
 
@@ -3328,7 +3359,7 @@ impl InputWorker {
                             &mut item.additional_properties,
                             *item_type,
                             &item.name,
-                            item.virtual_id,
+                            item.virtual_id.get(),
                             metadata.raw_video,
                             metadata.raw_audio,
                             metadata.stats,
@@ -3359,6 +3390,7 @@ impl InputWorker {
                     &ctx.active_provider,
                     active_handle,
                     probe_priority,
+                    &ctx.events,
                 )
                 .await?;
 
@@ -3379,16 +3411,12 @@ impl InputWorker {
 /// lives there so the pipeline does not have to name this type. The impl lives
 /// here because the type does.
 impl tuliprox_processing::metadata_sink::MetadataUpdateSink for MetadataUpdateManager {
-    fn acquire_update_pause_guard(
-        &self,
-    ) -> tuliprox_processing::metadata_sink::SinkFuture<'_, tokio::sync::OwnedRwLockWriteGuard<()>> {
-        Box::pin(MetadataUpdateManager::acquire_update_pause_guard(self))
+    async fn acquire_update_pause_guard(&self) -> tokio::sync::OwnedRwLockWriteGuard<()> {
+        MetadataUpdateManager::acquire_update_pause_guard(self).await
     }
 
-    fn prepare_enqueue_state(&self, input_name: Arc<str>) -> tuliprox_processing::metadata_sink::SinkFuture<'_, ()> {
-        Box::pin(async move {
-            self.ensure_enqueue_state_loaded_for_input(&input_name).await;
-        })
+    async fn prepare_enqueue_state(&self, input_name: Arc<str>) {
+        self.ensure_enqueue_state_loaded_for_input(&input_name).await;
     }
 
     fn should_skip_enqueue(&self, input_name: &str, task: &UpdateTask) -> bool {
@@ -4038,7 +4066,7 @@ mod tests {
             let mapping_path = dir.path().join("target_id_mapping.db");
             let mut mapping = TargetIdMapping::new(&mapping_path, false).expect("mapping should be created");
             let uuid = generate_provider_playlist_uuid($input_name, $text_id, $item_type);
-            let virtual_id = mapping.get_and_update_virtual_id(&uuid, 0, $item_type, 0);
+            let virtual_id = mapping.get_and_update_virtual_id(&uuid, 0, $item_type, VirtualId::default());
             mapping.persist().expect("mapping should persist");
 
             let mut batch = BatchResultCollector::new();
@@ -4097,7 +4125,7 @@ mod tests {
         batch.add_vod(ProviderIdType::Id(42), pending_props);
 
         let mut item = XtreamPlaylistItem {
-            virtual_id: 7,
+            virtual_id: VirtualId::new(7),
             provider_id: 42,
             name: Arc::from("Movie"),
             logo: Arc::from(""),

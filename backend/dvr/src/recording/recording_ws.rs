@@ -75,7 +75,7 @@ pub fn task_visible_to(task_meta: Option<&RecordingMetadata>, claims: &Claims, s
             RecordingVisibility::Private => owner == subject_id,
             RecordingVisibility::Shared => true,
         },
-        RecordingOwner::LegacyAdmin => claims.roles.iter().any(|r| r == shared::model::ROLE_ADMIN),
+        RecordingOwner::LegacyAdmin => claims.is_admin(),
     }
 }
 
@@ -157,7 +157,7 @@ mod tests {
             iss: "tuliprox".to_string(),
             iat: 0,
             exp: 0,
-            roles: vec!["ADMIN".to_string()],
+            roles: shared::model::RoleSet::ADMIN,
             permissions: Permission::RecordingRead.into(),
             pwd_version: 0,
             subject_id: Some(UserId::builtin_admin()),
@@ -173,7 +173,7 @@ mod tests {
             iss: "tuliprox".to_string(),
             iat: 0,
             exp: 0,
-            roles: Vec::new(),
+            roles: shared::model::RoleSet::new(),
             permissions: Permission::RecordingRead.into(),
             pwd_version: 0,
             subject_id: Some(UserId::from("web:alice")),
@@ -292,7 +292,7 @@ mod tests {
             iss: "tuliprox".to_string(),
             iat: 0,
             exp: 0,
-            roles: Vec::new(),
+            roles: shared::model::RoleSet::new(),
             permissions: Permission::RecordingRead.into(),
             pwd_version: 0,
             subject_id: Some(UserId::from("web:bob")),

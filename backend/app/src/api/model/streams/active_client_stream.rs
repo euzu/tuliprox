@@ -896,7 +896,7 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
             } else {
                 stream
             };
-            return wrap_timed_client_stream_if_needed(app_state, stream, fingerprint.addr, virtual_id);
+            return wrap_timed_client_stream_if_needed(app_state, stream, fingerprint.addr, VirtualId::new(virtual_id));
         }
     }
 
@@ -928,8 +928,9 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
     // Compute deferred provider open before moving stream_details into the grace task.
     let deferred_provider_open =
         create_deferred_provider_open_future(app_state, &stream_details, fingerprint, &stream_channel, req_headers);
-    let timed_stream_context =
-        deferred_provider_open.as_ref().and_then(|_| create_timed_stream_context(app_state, virtual_id));
+    let timed_stream_context = deferred_provider_open
+        .as_ref()
+        .and_then(|_| create_timed_stream_context(app_state, VirtualId::new(virtual_id)));
     let stream_taken = stream_details.stream.take();
     let has_deferred_open = stream_details.has_deferred_provider_open();
     let grace_waker =
@@ -940,7 +941,7 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
         user_grace_period: grant_user_grace_period,
         user: user.clone(),
         fingerprint: fingerprint.clone(),
-        virtual_id,
+        virtual_id: VirtualId::new(virtual_id),
         session_token: owned_session_token,
         provisioning_info,
         waker: grace_waker,
@@ -987,7 +988,7 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
             } else {
                 stream
             };
-            Some(wrap_timed_client_stream_if_needed(app_state, stream, fingerprint.addr, virtual_id))
+            Some(wrap_timed_client_stream_if_needed(app_state, stream, fingerprint.addr, VirtualId::new(virtual_id)))
         }
     };
 
@@ -1171,15 +1172,17 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                             let remaining_result =
                                 tuliprox_session::admission::evaluate_remaining_strategies_after_grace(
                                     &app_state.admission_ctx(),
-                                    &username,
-                                    max_connections,
-                                    user.soft_connections,
-                                    &fingerprint.client_ip,
-                                    &fingerprint.addr,
-                                    true,
-                                    session_token.as_deref(),
-                                    true,
-                                    eviction_guard,
+                                    tuliprox_session::admission::AdmissionRequest {
+                                        username: &username,
+                                        max_connections,
+                                        soft_connections: user.soft_connections,
+                                        client_ip: &fingerprint.client_ip,
+                                        request_addr: &fingerprint.addr,
+                                        use_session_admission: true,
+                                        session_token: session_token.as_deref(),
+                                        activate_unbound_session: true,
+                                        eviction_reentry_guard: eviction_guard,
+                                    },
                                     ctx,
                                     grace_kind,
                                 )
@@ -1390,7 +1393,7 @@ mod tests {
     use shared::{
         model::{
             AdmissionStrategy, ConfigPaths, InputFetchMethod, InputType, PlaylistItemType, StreamChannel,
-            UserConnectionPermission, XtreamCluster,
+            UserConnectionPermission, VirtualId, XtreamCluster,
         },
         utils::Internable,
     };
@@ -1513,6 +1516,13 @@ mod tests {
             geoip,
             update_guard: UpdateGuard::new(),
             metadata_manager,
+            identity_registry: Arc::new(tuliprox_repository::identity_registry::IdentityRegistry::empty(
+                std::path::PathBuf::new(),
+            )),
+            login_throttle: Arc::new(crate::auth::LoginThrottle::new()),
+            token_revocations: Arc::new(tuliprox_repository::token_revocations::TokenRevocations::empty(
+                std::path::PathBuf::new(),
+            )),
             manual_update_sender,
         })
     }
@@ -1584,6 +1594,13 @@ mod tests {
             geoip,
             update_guard: UpdateGuard::new(),
             metadata_manager,
+            identity_registry: Arc::new(tuliprox_repository::identity_registry::IdentityRegistry::empty(
+                std::path::PathBuf::new(),
+            )),
+            login_throttle: Arc::new(crate::auth::LoginThrottle::new()),
+            token_revocations: Arc::new(tuliprox_repository::token_revocations::TokenRevocations::empty(
+                std::path::PathBuf::new(),
+            )),
             manual_update_sender,
         })
     }
@@ -1862,7 +1879,7 @@ mod tests {
             user_grace_period: false,
             user: test_user,
             fingerprint: test_fingerprint,
-            virtual_id: 1,
+            virtual_id: VirtualId::new(1),
             session_token: session_token.map(str::to_string),
             provisioning_info: None,
             waker: None,
@@ -2392,7 +2409,11 @@ mod tests {
             deferred_provider_open: Some(DeferredProviderOpenState::Opening(Box::pin(async {
                 DeferredProviderOpenOutcome::Stream(futures::stream::pending::<Result<Bytes, StreamError>>().boxed())
             }))),
-            timed_stream_context: Some(TimedStreamContext { app_state, duration_secs: 1, virtual_id: 1 }),
+            timed_stream_context: Some(TimedStreamContext {
+                app_state,
+                duration_secs: 1,
+                virtual_id: VirtualId::new(1),
+            }),
             preempt_cancelled: None,
             grace_task_handle: None,
             provisioning_stop_signal: None,
@@ -2709,7 +2730,7 @@ mod tests {
 
         let grace_context = GraceResolutionContext {
             strategy_index: 0,
-            strategies: vec![AdmissionStrategy::GraceHoldStream],
+            strategies: [AdmissionStrategy::GraceHoldStream].into(),
             kind: Some(crate::api::model::ConnectionKind::Soft),
         };
 
@@ -2741,7 +2762,7 @@ mod tests {
             user_grace_period: true,
             user: user.clone(),
             fingerprint: second_fingerprint.clone(),
-            virtual_id: 2,
+            virtual_id: VirtualId::new(2),
             session_token: Some("tok-second".to_string()),
             provisioning_info: None,
             waker: None,

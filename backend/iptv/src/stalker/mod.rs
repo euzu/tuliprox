@@ -19,22 +19,26 @@
 //! Tests in this module exercise the parsing and URL-derivation helpers directly with
 //! canned payloads; no HTTP requests are issued from unit tests.
 
+pub mod action;
 pub mod auth;
 pub mod catalog;
 pub mod cmd_parser;
 pub mod cookie_jar;
 pub mod epg;
 pub mod error;
+pub mod pagination;
 pub mod parser;
 pub mod playback;
 pub mod presets;
 pub mod profile;
 pub mod recipes;
 pub mod session;
+pub mod transport;
 pub mod url_factory;
 
 pub mod client;
 
+pub use action::StalkerAction;
 pub use client::StalkerApiClient;
 pub use error::{StalkerError, StalkerResult};
 pub use profile::{StalkerHandshake, StalkerProviderProfile, StalkerRawProviderProfile, StalkerResolvedStream};

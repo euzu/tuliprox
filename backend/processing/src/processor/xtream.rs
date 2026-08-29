@@ -130,7 +130,7 @@ pub async fn update_live_stream_metadata(
     let ffprobe_timeout = metadata_update.ffprobe.timeout.unwrap_or(60);
     let user_agent = config.default_user_agent.clone();
     let analyze_duration = metadata_update.ffprobe.live_analyze_duration_micros;
-    let probe_size = metadata_update.ffprobe.live_probe_size_bytes;
+    let probe_size = metadata_update.ffprobe.live_probe_size_bytes.get();
 
     let display_id = stream_id_opt.map_or_else(|| "StringID".to_string(), |v| v.to_string());
     debug!("Probing Live Stream ID {} for input {}", display_id, input.name);

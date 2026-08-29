@@ -2,7 +2,10 @@ use crate::EventManager;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use log::{debug, log_enabled};
-use shared::utils::{display_vec, sanitize_sensitive_info};
+use shared::{
+    model::{EventMessage, ProviderPoolEntry, ProviderPoolExhausted, ProviderPriorityFallback},
+    utils::{display_vec, sanitize_sensitive_info},
+};
 use std::{
     collections::HashMap,
     fmt,
@@ -97,6 +100,30 @@ impl fmt::Display for ProviderLineup {
 }
 
 impl ProviderLineup {
+    /// Which priority group holds `provider_name`, and how many groups there
+    /// are. `None` when the lineup does not contain it.
+    ///
+    /// A `Single` lineup has exactly one group, so it can never report a
+    /// fallback.
+    fn priority_group_of(&self, provider_name: &Arc<str>) -> Option<(usize, usize)> {
+        match self {
+            Self::Single(single) => (&single.provider.name == provider_name).then_some((0, 1)),
+            Self::Multi(multi) => {
+                let count = multi.providers.len();
+                multi
+                    .providers
+                    .iter()
+                    .position(|group| match group {
+                        ProviderPriorityGroup::SingleProviderGroup(cfg) => &cfg.name == provider_name,
+                        ProviderPriorityGroup::MultiProviderGroup(_, cfgs) => {
+                            cfgs.iter().any(|cfg| &cfg.name == provider_name)
+                        }
+                    })
+                    .map(|index| (index, count))
+            }
+        }
+    }
+
     fn provider_names(&self) -> Vec<Arc<str>> {
         match self {
             ProviderLineup::Single(lineup) => vec![lineup.provider.name.clone()],
@@ -474,6 +501,9 @@ pub struct ProviderLineupManager {
     snapshot: Arc<ArcSwap<LineupSnapshot>>,
     provider_connections: DashMap<Arc<str>, Arc<RwLock<ProviderConfigConnection>>>,
     event_manager: Arc<EventManager>,
+    /// Which priority group last served each input, so a fallback is reported
+    /// on transition rather than once per allocation.
+    served_priority_group: DashMap<Arc<str>, usize>,
 }
 
 #[derive(Debug)]
@@ -496,6 +526,7 @@ impl ProviderLineupManager {
             snapshot: Arc::new(ArcSwap::from_pointee(LineupSnapshot { inputs, providers: lineups })),
             provider_connections,
             event_manager: Arc::clone(event_manager),
+            served_priority_group: DashMap::new(),
         }
     }
 
@@ -507,7 +538,7 @@ impl ProviderLineupManager {
         let event_manager = Arc::clone(event_manager);
         let on_connection_change: ProviderConnectionChangeCallback =
             Arc::new(move |name: &Arc<str>, connections: usize| {
-                event_manager.send_provider_event(name, connections);
+                event_manager.send_event(EventMessage::ActiveProvider(Arc::clone(name), connections));
             });
 
         if cfg_input.has_enabled_aliases() {
@@ -636,7 +667,7 @@ impl ProviderLineupManager {
 
             for (name, conn_lock) in snapshot {
                 let count = conn_lock.read().await.current_connections;
-                self.event_manager.send_provider_event(&name, count);
+                self.event_manager.send_event(EventMessage::ActiveProvider(name, count));
             }
         }
 
@@ -740,32 +771,41 @@ impl ProviderLineupManager {
         };
         if matches!(allocation, ProviderAllocation::Exhausted) {
             if let Some((lineup, _cfg)) = lineup_opt {
-                Self::log_exhausted_pool_snapshot(input_name, lineup).await;
+                self.report_exhausted_pool(input_name, lineup).await;
+            }
+        } else if let Some((lineup, _cfg)) = lineup_opt {
+            if let Some(provider) = allocation.provider() {
+                if let Some((index, count)) = lineup.priority_group_of(&provider.name) {
+                    self.report_priority_group(input_name, &provider.name, index, count);
+                }
             }
         }
         Self::log_allocation(&allocation);
         allocation
     }
 
-    async fn log_exhausted_pool_snapshot(input_name: &str, lineup: &ProviderLineup) {
-        if !log_enabled!(log::Level::Debug) {
-            return;
-        }
-
-        let mut entries: Vec<String> = Vec::new();
+    /// Report that every provider behind an input is at capacity.
+    ///
+    /// The snapshot used to be built only when debug logging was on and
+    /// discarded immediately afterwards, so the one moment that explains a
+    /// refused stream left nothing behind. It is built unconditionally now -
+    /// this runs only on the exhausted path, which is already the slow one -
+    /// and the debug line renders from the same data the event carries.
+    async fn report_exhausted_pool(&self, input_name: &Arc<str>, lineup: &ProviderLineup) {
+        let mut entries: Vec<ProviderPoolEntry> = Vec::new();
         match lineup {
             ProviderLineup::Single(single) => {
-                entries.push(Self::format_provider_snapshot_entry(&single.provider).await);
+                entries.push(Self::provider_snapshot_entry(&single.provider).await);
             }
             ProviderLineup::Multi(multi) => {
                 for group in &multi.providers {
                     match group {
                         ProviderPriorityGroup::SingleProviderGroup(cfg) => {
-                            entries.push(Self::format_provider_snapshot_entry(cfg).await);
+                            entries.push(Self::provider_snapshot_entry(cfg).await);
                         }
                         ProviderPriorityGroup::MultiProviderGroup(_, cfgs) => {
                             for cfg in cfgs {
-                                entries.push(Self::format_provider_snapshot_entry(cfg).await);
+                                entries.push(Self::provider_snapshot_entry(cfg).await);
                             }
                         }
                     }
@@ -773,18 +813,56 @@ impl ProviderLineupManager {
             }
         }
 
-        debug_if_enabled!(
-            "Provider pool exhausted for input {} (pool_snapshot=[{}])",
-            sanitize_sensitive_info(input_name),
-            sanitize_sensitive_info(&entries.join(", "))
-        );
+        if log_enabled!(log::Level::Debug) {
+            let rendered = entries
+                .iter()
+                .map(|entry| {
+                    format!(
+                        "{}:{}/{} expired={}",
+                        entry.name, entry.current_connections, entry.max_connections, entry.expired
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            debug_if_enabled!(
+                "Provider pool exhausted for input {} (pool_snapshot=[{}])",
+                sanitize_sensitive_info(input_name),
+                sanitize_sensitive_info(&rendered)
+            );
+        }
+
+        self.event_manager.send_event(EventMessage::ProviderPoolExhausted(ProviderPoolExhausted::new(
+            sanitize_sensitive_info(input_name).into_owned().into(),
+            entries,
+        )));
     }
 
-    async fn format_provider_snapshot_entry(cfg: &ProviderConfigWrapper) -> String {
-        let current = cfg.get_current_connections().await;
-        let max = cfg.max_connections();
-        let expired = is_input_expired(cfg.exp_date());
-        format!("{}:{}/{} expired={expired}", cfg.name, current, max)
+    async fn provider_snapshot_entry(cfg: &ProviderConfigWrapper) -> ProviderPoolEntry {
+        ProviderPoolEntry {
+            name: sanitize_sensitive_info(&cfg.name).into_owned().into(),
+            current_connections: cfg.get_current_connections().await,
+            max_connections: cfg.max_connections(),
+            expired: is_input_expired(cfg.exp_date()),
+        }
+    }
+
+    /// Report a change in which priority group is serving an input.
+    ///
+    /// On transition only. The fallthrough in `acquire` happens on every
+    /// request while the preferred group is full, so one event per allocation
+    /// would bury the thing worth hearing: that the input moved.
+    fn report_priority_group(&self, input_name: &Arc<str>, provider: &Arc<str>, index: usize, count: usize) {
+        let previous = self.served_priority_group.insert(Arc::clone(input_name), index);
+        if previous == Some(index) {
+            return;
+        }
+        self.event_manager.send_event(EventMessage::ProviderPriorityFallback(ProviderPriorityFallback::new(
+            sanitize_sensitive_info(input_name).into_owned().into(),
+            sanitize_sensitive_info(provider).into_owned().into(),
+            index,
+            count,
+            previous,
+        )));
     }
 
     // This method is used for redirects to cycle through provider

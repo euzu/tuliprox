@@ -55,7 +55,7 @@ use shared::{
     model::{
         permission::Permission, stalker::StalkerStreamKind, EpgChannel, InputType, OperationRunAccepted,
         PlaylistEpgRequest, PlaylistItem, PlaylistRequest, PlaylistUrlResolveRequest, ProxyType, TargetType,
-        UiPlaylistItem, XtreamCluster,
+        UiPlaylistItem, VirtualId, XtreamCluster,
     },
     utils::{concat_path_leading_slash, deobfuscate_text, sanitize_sensitive_info, Internable},
 };
@@ -184,7 +184,7 @@ pub(in crate::api) fn build_webplayer_recording_url(
     virtual_id: u32,
     cluster: XtreamCluster,
 ) -> Option<String> {
-    let access_token = create_access_token(&app_config.access_token_secret, 30);
+    let access_token = create_access_token(&app_config.access_token_secret, 30, crate::auth::scope::INTERNAL_PLAYER);
     let config = app_config.config.load();
     let server_name = config
         .web_ui
@@ -202,7 +202,7 @@ pub(in crate::api) fn build_stable_recording_url(
     virtual_id: u32,
     cluster: XtreamCluster,
 ) -> Option<String> {
-    let access_token = create_access_token(&app_config.access_token_secret, 30);
+    let access_token = create_access_token(&app_config.access_token_secret, 30, crate::auth::scope::INTERNAL_PLAYER);
     let config = app_config.config.load();
     let server_name = config
         .web_ui
@@ -232,9 +232,9 @@ pub(in crate::api) async fn resolve_target_recording_source(
         if let Some(mut items) = iter_raw_xtream_target_playlist(app_config, &target, cluster).await {
             while let Some(entry) = items.next().await {
                 let Ok(item) = entry else { continue };
-                if item.virtual_id == virtual_id {
+                if item.virtual_id == VirtualId::new(virtual_id) {
                     resolved = Some(ResolvedRecordingSource {
-                        virtual_id: item.virtual_id,
+                        virtual_id: item.virtual_id.get(),
                         input_name: item.input_name.to_string(),
                     });
                     break;
@@ -246,9 +246,9 @@ pub(in crate::api) async fn resolve_target_recording_source(
         if let Some(mut items) = iter_raw_m3u_target_playlist(app_config, &target, Some(cluster)).await {
             while let Some(entry) = items.next().await {
                 let Ok(item) = entry else { continue };
-                if item.virtual_id == virtual_id {
+                if item.virtual_id == VirtualId::new(virtual_id) {
                     resolved = Some(ResolvedRecordingSource {
-                        virtual_id: item.virtual_id,
+                        virtual_id: item.virtual_id.get(),
                         input_name: item.input_name.to_string(),
                     });
                     break;
@@ -282,7 +282,7 @@ pub(in crate::api) async fn resolve_target_live_recording_source_by_epg_channel(
                 let Ok(item) = entry else { continue };
                 if item.epg_channel_id.as_deref() == Some(epg_channel_id) {
                     let candidate = ResolvedRecordingSource {
-                        virtual_id: item.virtual_id,
+                        virtual_id: item.virtual_id.get(),
                         input_name: item.input_name.to_string(),
                     };
                     if resolved.replace(candidate).is_some() {
@@ -296,7 +296,7 @@ pub(in crate::api) async fn resolve_target_live_recording_source_by_epg_channel(
                 let Ok(item) = entry else { continue };
                 if item.epg_channel_id.as_deref() == Some(epg_channel_id) {
                     let candidate = ResolvedRecordingSource {
-                        virtual_id: item.virtual_id,
+                        virtual_id: item.virtual_id.get(),
                         input_name: item.input_name.to_string(),
                     };
                     if resolved.replace(candidate).is_some() {
@@ -681,7 +681,7 @@ async fn playlist_webplayer_stream(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     req_headers: axum::http::HeaderMap,
 ) -> impl IntoResponse + Send {
-    if !verify_access_token(&token, &app_state.app_config.access_token_secret) {
+    if !verify_access_token(&token, &app_state.app_config.access_token_secret, crate::auth::scope::INTERNAL_PLAYER) {
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
 
@@ -737,7 +737,7 @@ async fn playlist_recording_stream(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     req_headers: axum::http::HeaderMap,
 ) -> impl IntoResponse + Send {
-    if !verify_access_token(&token, &app_state.app_config.access_token_secret) {
+    if !verify_access_token(&token, &app_state.app_config.access_token_secret, crate::auth::scope::INTERNAL_PLAYER) {
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
     let ctxt = try_result_bad_request!(ApiStreamContext::from_str(cluster.as_str()));
@@ -771,7 +771,7 @@ async fn playlist_recording_stream(
         true,
         format!("Failed to read m3u item for stream id {virtual_id}")
     );
-    if pli.input_name != resolved.input.name || XtreamCluster::try_from(pli.item_type).ok() != Some(ctxt.cluster()) {
+    if pli.input_name != resolved.input.name || pli.item_type.cluster() != ctxt.cluster() {
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
     let user = Arc::new(create_api_proxy_user(&app_state));
@@ -1252,13 +1252,15 @@ mod tests {
                     mapping: Arc::default(),
                     favourites: None,
                     processing_order: ProcessingOrder::default(),
+                    execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
                     watch: None,
                     use_memory_cache: false,
                 })],
             },
         ));
         let app_state = test_app_state(Arc::clone(&app_config));
-        let token = crate::auth::create_access_token(&app_config.access_token_secret, 1);
+        let token =
+            crate::auth::create_access_token(&app_config.access_token_secret, 1, crate::auth::scope::INTERNAL_PLAYER);
         let fingerprint = crate::auth::Fingerprint::new(
             "test".to_string(),
             "127.0.0.1".to_string(),
@@ -1359,6 +1361,7 @@ mod tests {
                 mapping: Arc::default(),
                 favourites: None,
                 processing_order: ProcessingOrder::default(),
+                execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
                 watch: None,
                 use_memory_cache: false,
             })
@@ -1457,6 +1460,13 @@ mod tests {
             geoip,
             update_guard: crate::api::model::UpdateGuard::new(),
             metadata_manager,
+            identity_registry: Arc::new(tuliprox_repository::identity_registry::IdentityRegistry::empty(
+                std::path::PathBuf::new(),
+            )),
+            login_throttle: Arc::new(crate::auth::LoginThrottle::new()),
+            token_revocations: Arc::new(tuliprox_repository::token_revocations::TokenRevocations::empty(
+                std::path::PathBuf::new(),
+            )),
             manual_update_sender,
         })
     }
@@ -1563,6 +1573,7 @@ mod tests {
             mapping: Arc::default(),
             favourites: None,
             processing_order: ProcessingOrder::default(),
+            execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
             watch: None,
             use_memory_cache: false,
         });
@@ -1627,6 +1638,7 @@ mod tests {
             mapping: Arc::default(),
             favourites: None,
             processing_order: ProcessingOrder::default(),
+            execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
             watch: None,
             use_memory_cache: false,
         });
@@ -1677,6 +1689,7 @@ mod tests {
             mapping: Arc::default(),
             favourites: None,
             processing_order: ProcessingOrder::default(),
+            execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
             watch: None,
             use_memory_cache: false,
         });

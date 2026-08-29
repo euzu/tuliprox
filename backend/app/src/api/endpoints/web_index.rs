@@ -1,20 +1,24 @@
 use crate::{
     api::{
         api_utils::{serve_file, try_unwrap_body},
+        auth_middleware::AuthorizedClaims,
         model::AppState,
     },
-    auth::{create_jwt_admin, create_jwt_api_user, create_jwt_web_user, verify_password, verify_token, AuthBearer},
+    auth::{
+        create_jwt_admin, create_jwt_api_user, create_jwt_web_user, validate_password_version, verify_password,
+        verify_token, AuthBearer,
+    },
     model::WebAuthConfig,
 };
 use axum::{body::Body, http::Request, response::IntoResponse};
 use base64::Engine;
-use log::{debug, error};
+use log::{debug, error, warn};
 use lol_html::{element, RewriteStrSettings};
 use rand::{rngs::OsRng, RngCore, TryRngCore};
 use serde_json::json;
 use shared::{
-    model::{TokenResponse, UserCredential, TOKEN_NO_AUTH},
-    utils::{concat_path_leading_slash, CONSTANTS},
+    model::{AuthAuditEvent, EventMessage, EventSink, TokenResponse, UserCredential, TOKEN_NO_AUTH},
+    utils::{concat_path_leading_slash, sanitize_sensitive_info, CONSTANTS},
 };
 use std::{
     path::{Path, PathBuf},
@@ -29,64 +33,239 @@ fn no_web_auth_token() -> impl axum::response::IntoResponse + Send {
 
 fn api_user_can_access_web_ui(ui_enabled: bool) -> bool { ui_enabled }
 
+/// The stable subject id for a web user, allocating one on first sight.
+///
+/// `register` is get-or-create, so a user bootstrap already synced keeps the
+/// id it has and one added since gets a fresh one. This used to be
+/// `format!("web:{username}")`, which made the subject a function of the
+/// display name: renaming a user reassigned everything the old subject owned.
+async fn web_subject_id(app_state: &Arc<AppState>, username: &str) -> Option<shared::model::UserId> {
+    match app_state.identity_registry.register(username).await {
+        Ok(id) => Some(id),
+        Err(err) => {
+            error!("Cannot resolve a stable subject id for web user '{username}': {err}");
+            None
+        }
+    }
+}
+
+/// The stable subject id for a proxy API user, allocating one on first sight.
+async fn api_subject_id(app_state: &Arc<AppState>, username: &str) -> Option<shared::model::UserId> {
+    match app_state.identity_registry.register_api_user(username).await {
+        Ok(id) => Some(id),
+        Err(err) => {
+            error!("Cannot resolve a stable subject id for API user '{username}': {err}");
+            None
+        }
+    }
+}
+
+/// Publish one authentication decision.
+///
+/// Sign-ins and their failures went to `warn!` and nowhere else, so nothing
+/// that subscribes to the bus - a notification channel, a plugin, an audit
+/// sink - could see the events that matter most for spotting an intrusion.
+fn emit_auth_audit(app_state: &Arc<AppState>, event: AuthAuditEvent) {
+    app_state.event_manager.emit(EventMessage::AuthAudit(event));
+}
+
+/// A 429 carrying the wait, so a client backs off instead of hammering.
+fn too_many_attempts(retry_after: std::time::Duration) -> axum::response::Response {
+    let seconds = retry_after.as_secs().max(1);
+    axum::http::Response::builder()
+        .status(axum::http::StatusCode::TOO_MANY_REQUESTS)
+        .header(axum::http::header::RETRY_AFTER, seconds.to_string())
+        .body(axum::body::Body::empty())
+        .unwrap_or_else(|_| axum::http::StatusCode::TOO_MANY_REQUESTS.into_response())
+}
+
+/// The outcome of one sign-in branch.
+///
+/// `Rejected` means "these are not valid credentials for this branch, try the
+/// next one"; `Refused` is a decided answer the caller must return as-is,
+/// which is what keeps a `ui_enabled: false` API user from silently falling
+/// through to the generic 401.
+enum SignInAttempt {
+    Issued(String),
+    Refused(axum::response::Response),
+    Rejected,
+}
+
+/// Sign in against `web_ui.auth`.
+async fn web_user_sign_in(
+    app_state: &Arc<AppState>,
+    web_auth: &WebAuthConfig,
+    username: &str,
+    password: &str,
+) -> SignInAttempt {
+    let Some(hash) = web_auth.get_user_password(username) else {
+        return SignInAttempt::Rejected;
+    };
+    if !verify_password(hash, password.as_bytes()) {
+        return SignInAttempt::Rejected;
+    }
+
+    let pwd_version = WebAuthConfig::pwd_version_from_hash(hash);
+    let permissions = web_auth.resolve_permissions(username);
+    let user_entry = web_auth
+        .t_users
+        .as_ref()
+        .and_then(|users| users.iter().find(|user| user.username.eq_ignore_ascii_case(username)));
+    let is_admin = user_entry.is_some_and(|user| user.groups.iter().any(|group| group.eq_ignore_ascii_case("admin")));
+    let user_groups = user_entry.map(|user| user.groups.clone()).unwrap_or_default();
+    debug!(
+        "Web login success candidate: username='{username}', groups={user_groups:?}, is_admin={is_admin}, permissions={permissions}",
+    );
+
+    let token_result = if is_admin {
+        create_jwt_admin(web_auth, username, pwd_version)
+    } else {
+        let Some(subject_id) = web_subject_id(app_state, username).await else {
+            return SignInAttempt::Refused(axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response());
+        };
+        create_jwt_web_user(web_auth, username, permissions, pwd_version, subject_id)
+    };
+    token_result.map_or(SignInAttempt::Rejected, SignInAttempt::Issued)
+}
+
+/// Sign in against the proxy API-user credentials.
+async fn api_user_sign_in(
+    app_state: &Arc<AppState>,
+    web_auth: &WebAuthConfig,
+    username: &str,
+    password: &str,
+) -> SignInAttempt {
+    let Some(credentials) = app_state.app_config.get_user_credentials(username) else {
+        return SignInAttempt::Rejected;
+    };
+    if !crate::auth::constant_time_eq(credentials.password.as_bytes(), password.as_bytes()) {
+        return SignInAttempt::Rejected;
+    }
+    if !api_user_can_access_web_ui(credentials.ui_enabled) {
+        // A decided answer, not a rejection: the credentials were correct and
+        // this principal is still not allowed into the Web UI.
+        return SignInAttempt::Refused(axum::http::StatusCode::FORBIDDEN.into_response());
+    }
+    let Some(subject_id) = api_subject_id(app_state, username).await else {
+        return SignInAttempt::Refused(axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response());
+    };
+    create_jwt_api_user(web_auth, username, subject_id).map_or(SignInAttempt::Rejected, SignInAttempt::Issued)
+}
+
 async fn token(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    fingerprint: crate::auth::Fingerprint,
     axum::extract::Json(mut req): axum::extract::Json<UserCredential>,
 ) -> impl axum::response::IntoResponse + Send {
     let config = &app_state.app_config.config.load();
-    match config.web_ui.as_ref().and_then(|c| c.auth.as_ref()) {
-        None => no_web_auth_token().into_response(),
-        Some(web_auth) => {
-            if !web_auth.enabled {
-                return no_web_auth_token().into_response();
-            }
-            let username = req.username.as_str();
-            let password = req.password.as_str();
+    let Some(web_auth) = config.web_ui.as_ref().and_then(|c| c.auth.as_ref()) else {
+        return no_web_auth_token().into_response();
+    };
+    if !web_auth.enabled {
+        return no_web_auth_token().into_response();
+    }
 
-            if !(username.is_empty() || password.is_empty()) {
-                if let Some(hash) = web_auth.get_user_password(username) {
-                    if verify_password(hash, password.as_bytes()) {
-                        let pwd_version = WebAuthConfig::pwd_version_from_hash(hash);
-                        let permissions = web_auth.resolve_permissions(username);
-                        let user_entry = web_auth
-                            .t_users
-                            .as_ref()
-                            .and_then(|users| users.iter().find(|user| user.username.eq_ignore_ascii_case(username)));
-                        let is_admin = user_entry
-                            .is_some_and(|user| user.groups.iter().any(|group| group.eq_ignore_ascii_case("admin")));
-                        let user_groups = user_entry.map(|user| user.groups.clone()).unwrap_or_default();
-                        debug!(
-                            "Web login success candidate: username='{username}', groups={user_groups:?}, is_admin={is_admin}, permissions={permissions}",
-                        );
-                        let token_result = if is_admin {
-                            create_jwt_admin(web_auth, username, pwd_version)
-                        } else {
-                            create_jwt_web_user(web_auth, username, permissions, pwd_version)
-                        };
-                        if let Ok(token) = token_result {
-                            req.zeroize();
-                            return axum::Json(TokenResponse { token, username: req.username.clone() }).into_response();
-                        }
-                    }
-                }
-                if let Some(credentials) = app_state.app_config.get_user_credentials(username) {
-                    if crate::auth::constant_time_eq(credentials.password.as_bytes(), password.as_bytes()) {
-                        if !api_user_can_access_web_ui(credentials.ui_enabled) {
-                            req.zeroize();
-                            return axum::http::StatusCode::FORBIDDEN.into_response();
-                        }
-                        if let Ok(token) = create_jwt_api_user(web_auth, username) {
-                            req.zeroize();
-                            return axum::Json(TokenResponse { token, username: req.username.clone() }).into_response();
-                        }
-                    }
-                }
-            }
+    let client_ip: Arc<str> = Arc::from(fingerprint.client_ip.as_str());
+    let username = req.username.clone();
 
-            req.zeroize();
-            axum::http::StatusCode::UNAUTHORIZED.into_response()
+    // Before the argon2 verify, not after: the point is to stop a password
+    // list, and an attacker who can still force the hash on every attempt has
+    // not been slowed down.
+    if let Some(retry_after) = app_state.login_throttle.retry_after(&username, &fingerprint.client_ip) {
+        warn!(
+            "Sign-in throttled for '{}' from {}; {}s remaining",
+            sanitize_sensitive_info(&username),
+            fingerprint.client_ip,
+            retry_after.as_secs()
+        );
+        emit_auth_audit(&app_state, AuthAuditEvent::sign_in_throttled(Arc::from(username.as_str()), client_ip));
+        req.zeroize();
+        return too_many_attempts(retry_after);
+    }
+
+    if !(username.is_empty() || req.password.is_empty()) {
+        // Sequential and short-circuiting: the API branch must not run once
+        // the web branch has answered. It compares credentials and can
+        // allocate a persisted subject id, neither of which a successful web
+        // sign-in should trigger.
+        let mut attempt = web_user_sign_in(&app_state, web_auth, &username, &req.password).await;
+        if matches!(attempt, SignInAttempt::Rejected) {
+            attempt = api_user_sign_in(&app_state, web_auth, &username, &req.password).await;
+        }
+        match attempt {
+            SignInAttempt::Issued(token) => {
+                app_state.login_throttle.record_success(&username, &fingerprint.client_ip);
+                emit_auth_audit(&app_state, AuthAuditEvent::sign_in_succeeded(Arc::from(username.as_str()), client_ip));
+                req.zeroize();
+                return axum::Json(TokenResponse { token, username }).into_response();
+            }
+            SignInAttempt::Refused(response) => {
+                req.zeroize();
+                return response;
+            }
+            SignInAttempt::Rejected => {}
         }
     }
+
+    app_state.login_throttle.record_failure(&username, &fingerprint.client_ip);
+    emit_auth_audit(&app_state, AuthAuditEvent::sign_in_failed(Arc::from(username.as_str()), client_ip));
+    warn!("Sign-in rejected for '{}' from {}", sanitize_sensitive_info(&username), fingerprint.client_ip);
+    req.zeroize();
+    axum::http::StatusCode::UNAUTHORIZED.into_response()
+}
+
+/// The permission required to end somebody else's sessions.
+const REVOKE_PERMISSION: u32 = shared::model::permission::Permission::UserWrite as u32;
+
+/// Revoke every token already issued to one principal.
+///
+/// The requirement is in the signature rather than a router layer, because the
+/// `/auth` routes are mounted before any state is available to build one.
+async fn revoke_user_tokens(
+    AuthorizedClaims(actor): AuthorizedClaims<REVOKE_PERMISSION>,
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    axum::extract::Path(username): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse + Send {
+    // Both namespaces: an operator names a principal, not a namespace, and a
+    // username can exist in either.
+    let subjects: Vec<_> = [
+        app_state.identity_registry.lookup_by_username(&username).await,
+        app_state.identity_registry.lookup_api_by_username(&username).await,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    if subjects.is_empty() {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    for subject in &subjects {
+        if let Err(err) = app_state.token_revocations.revoke_subject(subject, now).await {
+            error!("Cannot persist token revocation for '{username}': {err}");
+            return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    }
+    warn!("'{}' revoked every token issued to '{username}'", actor.username);
+    axum::http::StatusCode::NO_CONTENT.into_response()
+}
+
+/// Revoke every token issued to every principal.
+///
+/// The response to a compromise. Short of rotating the signing secret this was
+/// not possible at all, and rotating the secret is not reversible or auditable.
+async fn revoke_all_tokens(
+    AuthorizedClaims(actor): AuthorizedClaims<REVOKE_PERMISSION>,
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+) -> impl axum::response::IntoResponse + Send {
+    let now = chrono::Utc::now().timestamp();
+    if let Err(err) = app_state.token_revocations.revoke_all(now).await {
+        error!("Cannot persist a global token revocation: {err}");
+        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    warn!("'{}' revoked every token issued to every principal", actor.username);
+    axum::http::StatusCode::NO_CONTENT.into_response()
 }
 
 async fn token_refresh(
@@ -101,25 +280,32 @@ async fn token_refresh(
                 return no_web_auth_token().into_response();
             }
             let secret_key = web_auth.secret.as_ref();
-            let maybe_token_data = verify_token(&token, secret_key);
+            let maybe_token_data = verify_token(&token, secret_key, &web_auth.issuer);
             if let Some(token_data) = maybe_token_data {
                 let claims = token_data.claims;
+                // A revoked token must not be exchangeable for a fresh one -
+                // that would make revocation a formality.
+                if app_state.token_revocations.is_revoked(&claims).await {
+                    return axum::http::StatusCode::UNAUTHORIZED.into_response();
+                }
                 let username = claims.username.as_str();
 
-                if claims.roles.iter().any(|role| role.eq_ignore_ascii_case(shared::model::ROLE_API_USER)) {
+                if claims.is_api_user() {
                     let Some(user) = app_state.app_config.get_user_credentials(username) else {
                         return axum::http::StatusCode::UNAUTHORIZED.into_response();
                     };
                     if !user.ui_enabled {
                         return axum::http::StatusCode::FORBIDDEN.into_response();
                     }
-                    if let Ok(token) = create_jwt_api_user(web_auth, username) {
+                    let Some(subject_id) = api_subject_id(&app_state, username).await else {
+                        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                    };
+                    if let Ok(token) = create_jwt_api_user(web_auth, username, subject_id) {
                         return axum::Json(TokenResponse { token, username: claims.username }).into_response();
                     }
                     return axum::http::StatusCode::UNAUTHORIZED.into_response();
                 }
 
-                let token_pwd_version = claims.pwd_version;
                 let Some(users) = web_auth.t_users.as_ref() else {
                     return axum::http::StatusCode::UNAUTHORIZED.into_response();
                 };
@@ -129,7 +315,9 @@ async fn token_refresh(
                 };
 
                 let current_pwd_version = WebAuthConfig::pwd_version_from_hash(&user.password_hash);
-                if token_pwd_version != 0 && token_pwd_version != current_pwd_version {
+                // This used to read `pwd_version != 0 && pwd_version != current`,
+                // so a token carrying `0` skipped the check entirely.
+                if validate_password_version(&claims, current_pwd_version).is_err() {
                     return axum::http::StatusCode::UNAUTHORIZED.into_response();
                 }
 
@@ -142,7 +330,10 @@ async fn token_refresh(
                 let new_token = if is_admin {
                     create_jwt_admin(web_auth, username, current_pwd_version)
                 } else {
-                    create_jwt_web_user(web_auth, username, resolved_permissions, current_pwd_version)
+                    let Some(subject_id) = web_subject_id(&app_state, username).await else {
+                        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                    };
+                    create_jwt_web_user(web_auth, username, resolved_permissions, current_pwd_version, subject_id)
                 };
                 if let Ok(token) = new_token {
                     return axum::Json(TokenResponse { token, username: user.username.clone() }).into_response();
@@ -328,7 +519,9 @@ pub fn index_register_without_path(web_dir_path: &Path) -> axum::Router<Arc<AppS
             "/auth",
             axum::Router::new()
                 .route("/token", axum::routing::post(token))
-                .route("/refresh", axum::routing::post(token_refresh)),
+                .route("/refresh", axum::routing::post(token_refresh))
+                .route("/revoke/{username}", axum::routing::post(revoke_user_tokens))
+                .route("/revoke", axum::routing::post(revoke_all_tokens)),
         )
         .merge(
             axum::Router::new()
@@ -393,7 +586,9 @@ pub fn index_register_with_path(web_dir_path: &Path, web_ui_path: &str) -> axum:
 
     let auth_router = axum::Router::new()
         .route("/token", axum::routing::post(token))
-        .route("/refresh", axum::routing::post(token_refresh));
+        .route("/refresh", axum::routing::post(token_refresh))
+        .route("/revoke/{username}", axum::routing::post(revoke_user_tokens))
+        .route("/revoke", axum::routing::post(revoke_all_tokens));
 
     let web_ui_path_clone = web_ui_path.to_string();
     axum::Router::new()

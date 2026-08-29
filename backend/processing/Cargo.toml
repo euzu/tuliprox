@@ -19,7 +19,6 @@ tuliprox-core = { workspace = true }
 tuliprox-iptv = { workspace = true }
 tuliprox-library = { workspace = true }
 tuliprox-media-server = { workspace = true }
-tuliprox-messaging = { workspace = true }
 tuliprox-parser = { workspace = true }
 tuliprox-repository = { workspace = true }
 tuliprox-session = { workspace = true }

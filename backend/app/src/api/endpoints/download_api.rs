@@ -11,7 +11,6 @@ use crate::{
             RecordingExecutionResult,
         },
     },
-    messaging::send_message,
     model::{AppConfig, MessageContent, VideoDownloadConfig},
     utils::{async_file_writer, request, request::create_client, IO_BUFFER_SIZE},
 };
@@ -873,6 +872,7 @@ fn rollback_last_recording_marker(fd: &mut FileDownload, kind: &shared::model::r
 fn spawn_recording_notification_after_persist(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
+    event_manager: &Arc<EventManager>,
     plan: RecordingNotificationPlan,
     persisted: bool,
 ) {
@@ -882,19 +882,28 @@ fn spawn_recording_notification_after_persist(
     let Some(message) = plan.message else {
         return;
     };
-    // A full or closed outbox hands the message back; fall through to the
+    // Also publish on the bus, so plugins and other subscribers can see
+    // recording lifecycle transitions. The notification bridge deliberately
+    // ignores this kind: operator delivery stays on the durable path below,
+    // because the bus may drop for a lagging subscriber and the marker has
+    // already been persisted.
+    if let MessageContent::RecordingLifecycle(lifecycle) = &message {
+        event_manager.send_event(EventMessage::RecordingLifecycle(lifecycle.clone()));
+    }
+    // A full or closed outbox hands the event back; fall through to the
     // direct send rather than dropping it outright.
-    let message = match crate::api::model::recording::recording_supervisor::notification_outbox() {
-        Some(outbox) => match outbox.enqueue(message) {
+    let event = tuliprox_core::model::NotificationEvent::from_content(&message);
+    let event = match crate::api::model::recording::recording_supervisor::notification_outbox() {
+        Some(outbox) => match outbox.enqueue(event) {
             None => return,
             Some(rejected) => rejected,
         },
-        None => message,
+        None => event,
     };
     let app_config = Arc::clone(app_config);
     let client = client.clone();
     tokio::spawn(async move {
-        send_message(&app_config, &client, message).await;
+        tuliprox_messaging::send_event(&app_config, &client, event).await;
     });
 }
 
@@ -1258,6 +1267,7 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                         spawn_recording_notification_after_persist(
                                             &app_config,
                                             &client,
+                                            &event_manager,
                                             notification,
                                             true,
                                         );
@@ -1439,6 +1449,7 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                         spawn_recording_notification_after_persist(
                                             &app_config,
                                             &client,
+                                            &event_manager,
                                             notification,
                                             true,
                                         );
@@ -1534,6 +1545,7 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                         spawn_recording_notification_after_persist(
                                             &app_config,
                                             &client,
+                                            &event_manager,
                                             notification,
                                             true,
                                         );
@@ -1657,6 +1669,7 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                         spawn_recording_notification_after_persist(
                                             &app_config,
                                             &client,
+                                            &event_manager,
                                             notification,
                                             true,
                                         );
@@ -2298,7 +2311,11 @@ mod tests {
             .and_then(|segments| segments.collect::<Vec<_>>().get(4).copied())
             .expect("route token");
 
-        assert!(crate::auth::verify_access_token(token, &app_config.access_token_secret));
+        assert!(crate::auth::verify_access_token(
+            token,
+            &app_config.access_token_secret,
+            crate::auth::scope::INTERNAL_PLAYER
+        ));
         assert_eq!(recording.url.as_str(), persisted_before.url);
         assert_eq!(DownloadQueue::to_persisted(&recording).url, persisted_before.url);
         assert_ne!(execution.url, recording.url);
@@ -2746,6 +2763,13 @@ mod tests {
             geoip,
             update_guard: UpdateGuard::new(),
             metadata_manager,
+            identity_registry: Arc::new(tuliprox_repository::identity_registry::IdentityRegistry::empty(
+                std::path::PathBuf::new(),
+            )),
+            login_throttle: Arc::new(crate::auth::LoginThrottle::new()),
+            token_revocations: Arc::new(tuliprox_repository::token_revocations::TokenRevocations::empty(
+                std::path::PathBuf::new(),
+            )),
             manual_update_sender,
         })
     }

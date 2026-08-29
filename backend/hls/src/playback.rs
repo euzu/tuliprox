@@ -6,7 +6,7 @@ use crate::{
     HlsPlaybackFamilyKey, ProxySessionId,
 };
 use log::warn;
-use shared::model::{PlaylistItemType, UserConnectionPermission};
+use shared::model::UserConnectionPermission;
 use std::sync::Arc;
 use tuliprox_core::model::{Fingerprint, ProxyUserCredentials};
 use tuliprox_session::{
@@ -93,7 +93,6 @@ async fn validate_hls_access_lease_admission(
         &ctx.admission_ctx(),
         &user,
         fingerprint,
-        PlaylistItemType::LiveHls,
         Some(&user_session),
         &lease.user_session_token,
         true,

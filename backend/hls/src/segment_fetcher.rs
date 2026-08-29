@@ -82,9 +82,9 @@ impl SegmentFetchPolicy {
             max_global_segment_fetches: config.max_concurrent_segment_fetches_global.max(1),
             max_session_segment_fetches: config.max_concurrent_segment_fetches_per_session.max(1),
             max_prefetch_queue_depth: config.max_segments_prefetch,
-            origin_segment_timeout_ms: config.origin_segment_timeout_ms.max(1),
+            origin_segment_timeout_ms: config.origin_segment_timeout_ms.get().max(1),
             effective_repair_postprocess_timeout_ms: if postprocess_enabled {
-                config.segment_repair.postprocess_timeout_ms.max(100)
+                config.segment_repair.postprocess_timeout_ms.get().max(100)
             } else {
                 0
             },
@@ -1723,7 +1723,7 @@ fn build_segment_origin_headers(
     build_hls_origin_resource_headers(source_headers, provider_session_headers, byte_range)
 }
 
-fn current_time_millis() -> u64 { chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default() }
+use tuliprox_core::utils::current_time_millis;
 
 #[cfg(test)]
 mod tests {

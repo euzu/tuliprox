@@ -46,14 +46,13 @@ use axum::{
 use bytes::{Bytes, BytesMut};
 use chrono::{DateTime, Utc};
 use futures::{stream, Stream, StreamExt, TryStreamExt};
-use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use log::{debug, error, info, log_enabled, trace, warn};
 use serde::Serialize;
 use shared::{
     concat_string,
     defaults::{DASH_EXT, HLS_EXT},
     model::{
-        Claims, ConfigTargetOptions, InputFetchMethod, InputType, PlaylistEntry, PlaylistItemType, ProxyType,
+        ConfigTargetOptions, InputFetchMethod, InputType, PlaylistEntry, PlaylistItemType, ProxyType,
         StalkerStreamKind, StreamChannel, StreamInfo, TargetType, UserConnectionPermission, VirtualId, XtreamCluster,
     },
     utils::{
@@ -323,7 +322,8 @@ pub(crate) use tuliprox_core::utils::request_headers::{get_headers_from_request,
 pub(crate) use tuliprox_session::{
     admission::{
         classify_playback_request, connection_priority_for_kind, resolve_admission_with_strategies,
-        resolve_playback_request_admission, EvictionReentryGuard, PlaybackRequestClass, PlaybackRequestFacts,
+        resolve_playback_request_admission, AdmissionRequest, EvictionReentryGuard, PlaybackRequestClass,
+        PlaybackRequestFacts,
     },
     stream_options::{get_stream_options, StreamOptions},
 };
@@ -506,7 +506,6 @@ async fn activate_session_before_stream_open(
             let current_session =
                 app_state.active_users.get_and_update_user_session(&user.username, session_token).await;
             classify_playback_request(PlaybackRequestFacts {
-                item_type,
                 existing_session: current_session.as_ref(),
                 prepare_only: false,
                 terminate: false,
@@ -517,7 +516,6 @@ async fn activate_session_before_stream_open(
     } else {
         let existing_session = app_state.active_users.get_and_update_user_session(&user.username, session_token).await;
         classify_playback_request(PlaybackRequestFacts {
-            item_type,
             existing_session: existing_session.as_ref(),
             prepare_only: false,
             terminate: false,
@@ -636,7 +634,7 @@ async fn activate_session_before_stream_open(
             .ensure_user_session_placeholder(crate::api::model::CreateUserSessionParams {
                 user,
                 session_token,
-                virtual_id,
+                virtual_id: virtual_id.get(),
                 provider: input.name.as_ref(),
                 stream_url,
                 addr: &fingerprint.addr,
@@ -649,18 +647,20 @@ async fn activate_session_before_stream_open(
 
     let result = resolve_admission_with_strategies(
         &app_state.admission_ctx(),
-        &user.username,
-        user.max_connections,
-        user.soft_connections,
-        &fingerprint.client_ip,
-        &fingerprint.addr,
-        true,
-        Some(session_token),
-        true,
-        if socket_bound {
-            EvictionReentryGuard::SocketPlayback { virtual_id }
-        } else {
-            EvictionReentryGuard::Session(session_token)
+        AdmissionRequest {
+            username: &user.username,
+            max_connections: user.max_connections,
+            soft_connections: user.soft_connections,
+            client_ip: &fingerprint.client_ip,
+            request_addr: &fingerprint.addr,
+            use_session_admission: true,
+            session_token: Some(session_token),
+            activate_unbound_session: true,
+            eviction_reentry_guard: if socket_bound {
+                EvictionReentryGuard::SocketPlayback { virtual_id }
+            } else {
+                EvictionReentryGuard::Session(session_token)
+            },
         },
     )
     .await;
@@ -1937,7 +1937,7 @@ pub async fn force_provider_stream_response(
         preferred_provider,
         allow_forced_provider_fallback,
         allow_provider_grace,
-        stream_channel.virtual_id,
+        VirtualId::new(stream_channel.virtual_id),
         connection_priority_for_kind(ctx.user, connection_kind),
         connection_kind,
         true,
@@ -2080,7 +2080,7 @@ pub(crate) async fn stream_response(
             user,
             session_token,
             request_class,
-            virtual_id,
+            virtual_id: VirtualId::new(virtual_id),
             item_type,
             stream_url,
             connection_permission,
@@ -2192,7 +2192,7 @@ pub(crate) async fn stream_response(
         pinned_provider,
         pinned_provider.is_none(),
         true,
-        stream_channel.virtual_id,
+        VirtualId::new(stream_channel.virtual_id),
         connection_priority_for_kind(user, connection_kind),
         connection_kind,
         false,
@@ -2235,7 +2235,7 @@ pub(crate) async fn stream_response(
                         input,
                         fingerprint,
                         session_token,
-                        virtual_id,
+                        virtual_id: VirtualId::new(virtual_id),
                         connection_permission,
                         connection_kind,
                         fallback_stream_url: stream_url,
@@ -2538,7 +2538,7 @@ async fn detected_catchup_hls_response(params: DetectedCatchupHlsResponseParams<
             content,
             hls_url: response_url,
             target_id: target.id,
-            virtual_id,
+            virtual_id: virtual_id.get(),
             input_id: input.id,
             user_token: Some(session_token),
         },
@@ -2550,7 +2550,7 @@ async fn detected_catchup_hls_response(params: DetectedCatchupHlsResponseParams<
         .create_user_session(crate::api::model::CreateUserSessionParams {
             user,
             session_token,
-            virtual_id,
+            virtual_id: virtual_id.get(),
             provider: &provider,
             stream_url: request_url,
             addr: &fingerprint.addr,
@@ -3032,7 +3032,7 @@ pub(crate) async fn local_stream_response(
                 user,
                 session_token,
                 request_class,
-                virtual_id: pli.virtual_id,
+                virtual_id: VirtualId::new(pli.virtual_id),
                 item_type: pli.item_type,
                 stream_url: &pli.url,
                 connection_permission,
@@ -3480,15 +3480,12 @@ pub fn empty_json_list_response() -> axum::response::Response {
 }
 
 pub fn get_username_from_auth_header(token: &str, app_state: &Arc<AppState>) -> Option<String> {
-    if let Some(web_auth_config) = &app_state.app_config.config.load().web_ui.as_ref().and_then(|c| c.auth.as_ref()) {
-        let secret_key: &[u8] = web_auth_config.secret.as_ref();
-        if let Ok(token_data) =
-            decode::<Claims>(token, &DecodingKey::from_secret(secret_key), &Validation::new(Algorithm::HS256))
-        {
-            return Some(token_data.claims.username);
-        }
-    }
-    None
+    let config = app_state.app_config.config.load();
+    let web_auth_config = config.web_ui.as_ref()?.auth.as_ref()?;
+    // This hand-rolled its own `decode` with a bare `Validation::new`, which
+    // checks `exp` and nothing else - no issuer.
+    crate::auth::verify_token(token, web_auth_config.secret.as_bytes(), &web_auth_config.issuer)
+        .map(|token_data| token_data.claims.username)
 }
 
 pub fn redirect(url: &str) -> impl IntoResponse {
@@ -5292,6 +5289,13 @@ mod tests {
             geoip,
             update_guard: crate::api::model::UpdateGuard::new(),
             metadata_manager,
+            identity_registry: Arc::new(tuliprox_repository::identity_registry::IdentityRegistry::empty(
+                std::path::PathBuf::new(),
+            )),
+            login_throttle: Arc::new(crate::auth::LoginThrottle::new()),
+            token_revocations: Arc::new(tuliprox_repository::token_revocations::TokenRevocations::empty(
+                std::path::PathBuf::new(),
+            )),
             manual_update_sender,
         })
     }
@@ -5399,7 +5403,6 @@ mod tests {
     #[test]
     fn classify_playback_request_marks_adaptive_playlist_request_as_prepare() {
         let request_class = classify_playback_request(PlaybackRequestFacts {
-            item_type: PlaylistItemType::LiveHls,
             existing_session: None,
             prepare_only: true,
             terminate: false,
@@ -5417,7 +5420,6 @@ mod tests {
         );
 
         let request_class = classify_playback_request(PlaybackRequestFacts {
-            item_type: PlaylistItemType::LiveHls,
             existing_session: Some(&session),
             prepare_only: false,
             terminate: false,
@@ -5432,7 +5434,6 @@ mod tests {
             create_test_session("tok-active", PlaylistItemType::LiveHls, crate::api::model::PlaybackLifecycle::Active);
 
         let request_class = classify_playback_request(PlaybackRequestFacts {
-            item_type: PlaylistItemType::LiveHls,
             existing_session: Some(&session),
             prepare_only: false,
             terminate: false,
@@ -5463,7 +5464,6 @@ mod tests {
         );
 
         let request_class = classify_playback_request(PlaybackRequestFacts {
-            item_type: PlaylistItemType::LiveHls,
             existing_session: Some(&session),
             prepare_only: false,
             terminate: false,
@@ -5495,7 +5495,6 @@ mod tests {
         session.lifecycle = crate::api::model::PlaybackLifecycle::Prepared;
 
         let request_class = classify_playback_request(PlaybackRequestFacts {
-            item_type: PlaylistItemType::LiveHls,
             existing_session: Some(&session),
             prepare_only: false,
             terminate: false,
@@ -5518,7 +5517,6 @@ mod tests {
         );
 
         let request_class = classify_playback_request(PlaybackRequestFacts {
-            item_type: PlaylistItemType::LiveHls,
             existing_session: Some(&session),
             prepare_only: false,
             terminate: false,
@@ -5541,7 +5539,6 @@ mod tests {
         session.lifecycle = crate::api::model::PlaybackLifecycle::Prepared;
 
         let request_class = classify_playback_request(PlaybackRequestFacts {
-            item_type: PlaylistItemType::LiveHls,
             existing_session: Some(&session),
             prepare_only: false,
             terminate: false,
@@ -5622,7 +5619,7 @@ mod tests {
                 user: &user,
                 session_token: "tok-follow-up",
                 request_class: None,
-                virtual_id: channel.virtual_id,
+                virtual_id: VirtualId::new(channel.virtual_id),
                 item_type: PlaylistItemType::LiveHls,
                 stream_url: channel.url.as_ref(),
                 connection_permission: UserConnectionPermission::Allowed,
@@ -5691,7 +5688,7 @@ mod tests {
                 user: &user,
                 session_token: "tok-precomputed-follow-up",
                 request_class: Some(PlaybackRequestClass::FollowUp),
-                virtual_id: channel.virtual_id,
+                virtual_id: VirtualId::new(channel.virtual_id),
                 item_type: PlaylistItemType::LiveHls,
                 stream_url: channel.url.as_ref(),
                 connection_permission: UserConnectionPermission::Allowed,
@@ -5770,7 +5767,7 @@ mod tests {
                 user: &user,
                 session_token: "tok-stale-followup",
                 request_class: Some(PlaybackRequestClass::FollowUp),
-                virtual_id: channel.virtual_id,
+                virtual_id: VirtualId::new(channel.virtual_id),
                 item_type: PlaylistItemType::LiveHls,
                 stream_url: channel.url.as_ref(),
                 connection_permission: UserConnectionPermission::Allowed,
@@ -5840,7 +5837,7 @@ mod tests {
                 user: &user,
                 session_token: "tok-pre-resolved-grace",
                 request_class: None,
-                virtual_id: channel.virtual_id,
+                virtual_id: VirtualId::new(channel.virtual_id),
                 item_type: PlaylistItemType::LiveHls,
                 stream_url: channel.url.as_ref(),
                 connection_permission: UserConnectionPermission::GracePeriod,
@@ -5896,7 +5893,7 @@ mod tests {
                 session_token: "tok-prepare",
                 // Explicitly pass Prepare class — placeholder and admission should be skipped.
                 request_class: Some(PlaybackRequestClass::Prepare),
-                virtual_id: 55222,
+                virtual_id: VirtualId::new(55222),
                 item_type: PlaylistItemType::LiveHls,
                 stream_url: "http://provider.example/live/test.ts",
                 connection_permission: UserConnectionPermission::Allowed,
@@ -5943,7 +5940,6 @@ mod tests {
             &app_state.admission_ctx(),
             &user,
             &fingerprint,
-            PlaylistItemType::LiveHls,
             None,
             "tok-prepare-only",
             false,
@@ -6009,7 +6005,6 @@ mod tests {
             &app_state.admission_ctx(),
             &user,
             &fingerprint,
-            PlaylistItemType::LiveHls,
             before.as_ref(),
             session_token,
             false,
@@ -6032,7 +6027,6 @@ mod tests {
     #[test]
     fn classify_playback_request_returns_terminate_when_flag_set() {
         let request_class = classify_playback_request(PlaybackRequestFacts {
-            item_type: PlaylistItemType::Live,
             existing_session: None,
             prepare_only: false,
             terminate: true,
@@ -6116,7 +6110,7 @@ mod tests {
                 user: &user,
                 session_token: "tok-grace-hold",
                 request_class: None,
-                virtual_id: second_channel.virtual_id,
+                virtual_id: VirtualId::new(second_channel.virtual_id),
                 item_type: PlaylistItemType::LiveHls,
                 stream_url: second_channel.url.as_ref(),
                 connection_permission: UserConnectionPermission::Allowed,
@@ -6198,7 +6192,7 @@ mod tests {
                 user: &user,
                 session_token: "tok-atomic-commit",
                 request_class: None,
-                virtual_id: channel.virtual_id,
+                virtual_id: VirtualId::new(channel.virtual_id),
                 item_type: channel.item_type,
                 stream_url: channel.url.as_ref(),
                 connection_permission: UserConnectionPermission::Allowed,
@@ -6245,6 +6239,7 @@ mod tests {
             mapping: Arc::new(ArcSwapOption::default()),
             favourites: None,
             processing_order: ProcessingOrder::default(),
+            execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
             watch: None,
             use_memory_cache: false,
         }
@@ -6286,8 +6281,8 @@ mod tests {
         });
 
         assert_eq!(
-            get_effective_admission_strategies(&app_state.admission_ctx()),
-            vec![shared::model::AdmissionStrategy::GraceHoldStream]
+            get_effective_admission_strategies(&app_state.admission_ctx()).as_ref(),
+            &[shared::model::AdmissionStrategy::GraceHoldStream][..]
         );
     }
 
@@ -6390,15 +6385,17 @@ mod tests {
         // Now the new request finds the slot exhausted and the grace strategy kicks in.
         let result = resolve_admission_with_strategies(
             &app_state.admission_ctx(),
-            &user.username,
-            user.max_connections,
-            user.soft_connections,
-            &fingerprint2.client_ip,
-            &fingerprint2.addr,
-            true,
-            Some("tok-new-request"),
-            true,
-            EvictionReentryGuard::Session("tok-new-request"),
+            AdmissionRequest {
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                client_ip: &fingerprint2.client_ip,
+                request_addr: &fingerprint2.addr,
+                use_session_admission: true,
+                session_token: Some("tok-new-request"),
+                activate_unbound_session: true,
+                eviction_reentry_guard: EvictionReentryGuard::Session("tok-new-request"),
+            },
         )
         .await;
 
@@ -6416,7 +6413,7 @@ mod tests {
         // Grace was used at index 0, so only EvictUserOldest (index 1) is evaluated.
         // Eviction frees the slot -> Allowed.
         let strategies = vec![AdmissionStrategy::GraceHoldStream, AdmissionStrategy::EvictUserOldest];
-        let grace_context = GraceResolutionContext { strategy_index: 0, strategies, kind: None };
+        let grace_context = GraceResolutionContext { strategy_index: 0, strategies: strategies.into(), kind: None };
 
         let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
             retry: true,
@@ -6483,15 +6480,17 @@ mod tests {
 
         let result = evaluate_remaining_strategies_after_grace(
             &app_state.admission_ctx(),
-            "remaining-evict",
-            1,
-            0,
-            &fingerprint2.client_ip,
-            &fingerprint2.addr,
-            true,
-            Some("tok-new"),
-            true,
-            EvictionReentryGuard::Session("tok-new"),
+            AdmissionRequest {
+                username: "remaining-evict",
+                max_connections: 1,
+                soft_connections: 0,
+                client_ip: &fingerprint2.client_ip,
+                request_addr: &fingerprint2.addr,
+                use_session_admission: true,
+                session_token: Some("tok-new"),
+                activate_unbound_session: true,
+                eviction_reentry_guard: EvictionReentryGuard::Session("tok-new"),
+            },
             &grace_context,
             Some(crate::api::model::ConnectionKind::Normal),
         )
@@ -6516,7 +6515,7 @@ mod tests {
             AdmissionStrategy::EvictUserSameIpOldest,
             AdmissionStrategy::EvictUserOldest,
         ];
-        let grace_context = GraceResolutionContext { strategy_index: 0, strategies, kind: None };
+        let grace_context = GraceResolutionContext { strategy_index: 0, strategies: strategies.into(), kind: None };
 
         let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
             retry: true,
@@ -6587,15 +6586,17 @@ mod tests {
 
         let result = evaluate_remaining_strategies_after_grace(
             &app_state.admission_ctx(),
-            "remaining-skip-no-match",
-            1,
-            0,
-            &fingerprint2.client_ip,
-            &fingerprint2.addr,
-            true,
-            Some("tok-new"),
-            true,
-            EvictionReentryGuard::Session("tok-new"),
+            AdmissionRequest {
+                username: "remaining-skip-no-match",
+                max_connections: 1,
+                soft_connections: 0,
+                client_ip: &fingerprint2.client_ip,
+                request_addr: &fingerprint2.addr,
+                use_session_admission: true,
+                session_token: Some("tok-new"),
+                activate_unbound_session: true,
+                eviction_reentry_guard: EvictionReentryGuard::Session("tok-new"),
+            },
             &grace_context,
             Some(crate::api::model::ConnectionKind::Normal),
         )
@@ -6613,7 +6614,7 @@ mod tests {
         // Strategies: [GraceHoldStream]
         // Grace was at index 0, remaining slice is empty -> exhausted.
         let strategies = vec![AdmissionStrategy::GraceHoldStream];
-        let grace_context = GraceResolutionContext { strategy_index: 0, strategies, kind: None };
+        let grace_context = GraceResolutionContext { strategy_index: 0, strategies: strategies.into(), kind: None };
 
         let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
             retry: true,
@@ -6636,15 +6637,17 @@ mod tests {
 
         let result = evaluate_remaining_strategies_after_grace(
             &app_state.admission_ctx(),
-            "no-remaining-strategies",
-            1,
-            0,
-            &fingerprint.client_ip,
-            &fingerprint.addr,
-            true,
-            Some("tok-new"),
-            true,
-            EvictionReentryGuard::Session("tok-new"),
+            AdmissionRequest {
+                username: "no-remaining-strategies",
+                max_connections: 1,
+                soft_connections: 0,
+                client_ip: &fingerprint.client_ip,
+                request_addr: &fingerprint.addr,
+                use_session_admission: true,
+                session_token: Some("tok-new"),
+                activate_unbound_session: true,
+                eviction_reentry_guard: EvictionReentryGuard::Session("tok-new"),
+            },
             &grace_context,
             None,
         )
@@ -6665,7 +6668,7 @@ mod tests {
         let strategies = vec![AdmissionStrategy::GraceHoldStream];
         let grace_context = GraceResolutionContext {
             strategy_index: 0,
-            strategies,
+            strategies: strategies.into(),
             kind: Some(crate::api::model::ConnectionKind::Soft),
         };
 
@@ -6690,15 +6693,17 @@ mod tests {
 
         let result = evaluate_remaining_strategies_after_grace(
             &app_state.admission_ctx(),
-            "soft-kind-user",
-            1,
-            0,
-            &fingerprint.client_ip,
-            &fingerprint.addr,
-            true,
-            Some("tok-soft"),
-            true,
-            EvictionReentryGuard::Session("tok-soft"),
+            AdmissionRequest {
+                username: "soft-kind-user",
+                max_connections: 1,
+                soft_connections: 0,
+                client_ip: &fingerprint.client_ip,
+                request_addr: &fingerprint.addr,
+                use_session_admission: true,
+                session_token: Some("tok-soft"),
+                activate_unbound_session: true,
+                eviction_reentry_guard: EvictionReentryGuard::Session("tok-soft"),
+            },
             &grace_context,
             Some(crate::api::model::ConnectionKind::Soft),
         )
@@ -6728,7 +6733,7 @@ mod tests {
             AdmissionStrategy::EvictUserOldest,
         ];
         let strategies_for_config = strategies.clone();
-        let grace_context = GraceResolutionContext { strategy_index: 1, strategies, kind: None };
+        let grace_context = GraceResolutionContext { strategy_index: 1, strategies: strategies.into(), kind: None };
 
         let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
             retry: true,
@@ -6795,15 +6800,17 @@ mod tests {
 
         let result = evaluate_remaining_strategies_after_grace(
             &app_state.admission_ctx(),
-            "remaining-no-retry",
-            1,
-            0,
-            &fingerprint2.client_ip,
-            &fingerprint2.addr,
-            true,
-            Some("tok-new"),
-            true,
-            EvictionReentryGuard::Session("tok-new"),
+            AdmissionRequest {
+                username: "remaining-no-retry",
+                max_connections: 1,
+                soft_connections: 0,
+                client_ip: &fingerprint2.client_ip,
+                request_addr: &fingerprint2.addr,
+                use_session_admission: true,
+                session_token: Some("tok-new"),
+                activate_unbound_session: true,
+                eviction_reentry_guard: EvictionReentryGuard::Session("tok-new"),
+            },
             &grace_context,
             Some(crate::api::model::ConnectionKind::Normal),
         )
@@ -6824,7 +6831,7 @@ mod tests {
         let strategies = vec![AdmissionStrategy::GraceHoldStream];
         let grace_context = GraceResolutionContext {
             strategy_index: 0,
-            strategies,
+            strategies: strategies.into(),
             kind: Some(crate::api::model::ConnectionKind::Normal),
         };
         let original_kind = Some(crate::api::model::ConnectionKind::Soft);
@@ -6850,15 +6857,17 @@ mod tests {
 
         let result = evaluate_remaining_strategies_after_grace(
             &app_state.admission_ctx(),
-            "kind-mismatch-empty",
-            1,
-            0,
-            &fingerprint.client_ip,
-            &fingerprint.addr,
-            true,
-            Some("tok-empty"),
-            true,
-            EvictionReentryGuard::Session("tok-empty"),
+            AdmissionRequest {
+                username: "kind-mismatch-empty",
+                max_connections: 1,
+                soft_connections: 0,
+                client_ip: &fingerprint.client_ip,
+                request_addr: &fingerprint.addr,
+                use_session_admission: true,
+                session_token: Some("tok-empty"),
+                activate_unbound_session: true,
+                eviction_reentry_guard: EvictionReentryGuard::Session("tok-empty"),
+            },
             &grace_context,
             original_kind,
         )
@@ -6883,7 +6892,7 @@ mod tests {
         let strategies = vec![AdmissionStrategy::GraceHoldStream, AdmissionStrategy::GraceInstantStream];
         let grace_context = GraceResolutionContext {
             strategy_index: 0,
-            strategies,
+            strategies: strategies.into(),
             kind: Some(crate::api::model::ConnectionKind::Normal),
         };
         let original_kind = Some(crate::api::model::ConnectionKind::Soft);
@@ -6953,15 +6962,17 @@ mod tests {
 
         let result = evaluate_remaining_strategies_after_grace(
             &app_state.admission_ctx(),
-            "kind-mismatch-grace",
-            1,
-            0,
-            &fingerprint2.client_ip,
-            &fingerprint2.addr,
-            true,
-            Some("tok-new-grace"),
-            true,
-            EvictionReentryGuard::Session("tok-new-grace"),
+            AdmissionRequest {
+                username: "kind-mismatch-grace",
+                max_connections: 1,
+                soft_connections: 0,
+                client_ip: &fingerprint2.client_ip,
+                request_addr: &fingerprint2.addr,
+                use_session_admission: true,
+                session_token: Some("tok-new-grace"),
+                activate_unbound_session: true,
+                eviction_reentry_guard: EvictionReentryGuard::Session("tok-new-grace"),
+            },
             &grace_context,
             original_kind,
         )
@@ -7082,15 +7093,17 @@ mod tests {
 
         let result = resolve_admission_with_strategies(
             &app_state.admission_ctx(),
-            "fallthrough",
-            1,
-            1,
-            "127.0.0.1",
-            &"127.0.0.1:55153".parse().unwrap_or_else(|_| unreachable!()),
-            true,
-            Some("tok-third"),
-            false,
-            EvictionReentryGuard::Session("tok-third"),
+            AdmissionRequest {
+                username: "fallthrough",
+                max_connections: 1,
+                soft_connections: 1,
+                client_ip: "127.0.0.1",
+                request_addr: &"127.0.0.1:55153".parse().unwrap_or_else(|_| unreachable!()),
+                use_session_admission: true,
+                session_token: Some("tok-third"),
+                activate_unbound_session: false,
+                eviction_reentry_guard: EvictionReentryGuard::Session("tok-third"),
+            },
         )
         .await;
         let admission = result.admission;
@@ -7145,30 +7158,34 @@ mod tests {
 
         let session_based = resolve_admission_with_strategies(
             &app_state.admission_ctx(),
-            &user.username,
-            user.max_connections,
-            user.soft_connections,
-            &fingerprint.client_ip,
-            &fingerprint.addr,
-            true,
-            Some("vod-session"),
-            false,
-            EvictionReentryGuard::Session("vod-session"),
+            AdmissionRequest {
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                client_ip: &fingerprint.client_ip,
+                request_addr: &fingerprint.addr,
+                use_session_admission: true,
+                session_token: Some("vod-session"),
+                activate_unbound_session: false,
+                eviction_reentry_guard: EvictionReentryGuard::Session("vod-session"),
+            },
         )
         .await;
         assert_eq!(session_based.admission.permission, UserConnectionPermission::Allowed);
 
         let connection_based = resolve_admission_with_strategies(
             &app_state.admission_ctx(),
-            &user.username,
-            user.max_connections,
-            user.soft_connections,
-            &fingerprint.client_ip,
-            &fingerprint.addr,
-            false,
-            Some("vod-session"),
-            false,
-            EvictionReentryGuard::Session("vod-session"),
+            AdmissionRequest {
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                client_ip: &fingerprint.client_ip,
+                request_addr: &fingerprint.addr,
+                use_session_admission: false,
+                session_token: Some("vod-session"),
+                activate_unbound_session: false,
+                eviction_reentry_guard: EvictionReentryGuard::Session("vod-session"),
+            },
         )
         .await;
         assert_eq!(connection_based.admission.permission, UserConnectionPermission::Exhausted);
@@ -7249,15 +7266,17 @@ mod tests {
 
         let result = resolve_admission_with_strategies(
             &app_state.admission_ctx(),
-            "loop-user",
-            1,
-            0,
-            &reconnect_fingerprint.client_ip,
-            &reconnect_fingerprint.addr,
-            true,
-            Some("socket-reconnect"),
-            false,
-            EvictionReentryGuard::SocketPlayback { virtual_id: 9001 },
+            AdmissionRequest {
+                username: "loop-user",
+                max_connections: 1,
+                soft_connections: 0,
+                client_ip: &reconnect_fingerprint.client_ip,
+                request_addr: &reconnect_fingerprint.addr,
+                use_session_admission: true,
+                session_token: Some("socket-reconnect"),
+                activate_unbound_session: false,
+                eviction_reentry_guard: EvictionReentryGuard::SocketPlayback { virtual_id: VirtualId::new(9001) },
+            },
         )
         .await;
         let admission = result.admission;
@@ -7378,15 +7397,17 @@ mod tests {
 
         let result = resolve_admission_with_strategies(
             &app_state.admission_ctx(),
-            "loop-user-2",
-            1,
-            0,
-            &new_fingerprint.client_ip,
-            &new_fingerprint.addr,
-            true,
-            Some("session-new"),
-            false,
-            EvictionReentryGuard::SocketPlayback { virtual_id: 9103 },
+            AdmissionRequest {
+                username: "loop-user-2",
+                max_connections: 1,
+                soft_connections: 0,
+                client_ip: &new_fingerprint.client_ip,
+                request_addr: &new_fingerprint.addr,
+                use_session_admission: true,
+                session_token: Some("session-new"),
+                activate_unbound_session: false,
+                eviction_reentry_guard: EvictionReentryGuard::SocketPlayback { virtual_id: VirtualId::new(9103) },
+            },
         )
         .await;
         let admission = result.admission;
@@ -7502,15 +7523,17 @@ mod tests {
 
         let result = resolve_admission_with_strategies(
             &app_state.admission_ctx(),
-            "loop-user-4",
-            1,
-            0,
-            &new_fingerprint.client_ip,
-            &new_fingerprint.addr,
-            true,
-            Some("session-other"),
-            false,
-            EvictionReentryGuard::Session("session-other"),
+            AdmissionRequest {
+                username: "loop-user-4",
+                max_connections: 1,
+                soft_connections: 0,
+                client_ip: &new_fingerprint.client_ip,
+                request_addr: &new_fingerprint.addr,
+                use_session_admission: true,
+                session_token: Some("session-other"),
+                activate_unbound_session: false,
+                eviction_reentry_guard: EvictionReentryGuard::Session("session-other"),
+            },
         )
         .await;
         let admission = result.admission;
@@ -7596,15 +7619,17 @@ mod tests {
 
         let result = resolve_admission_with_strategies(
             &app_state.admission_ctx(),
-            "loop-user-3",
-            1,
-            1,
-            &reconnect_fingerprint.client_ip,
-            &reconnect_fingerprint.addr,
-            true,
-            Some("socket-reconnect"),
-            false,
-            EvictionReentryGuard::SocketPlayback { virtual_id: 9201 },
+            AdmissionRequest {
+                username: "loop-user-3",
+                max_connections: 1,
+                soft_connections: 1,
+                client_ip: &reconnect_fingerprint.client_ip,
+                request_addr: &reconnect_fingerprint.addr,
+                use_session_admission: true,
+                session_token: Some("socket-reconnect"),
+                activate_unbound_session: false,
+                eviction_reentry_guard: EvictionReentryGuard::SocketPlayback { virtual_id: VirtualId::new(9201) },
+            },
         )
         .await;
         let admission = result.admission;
@@ -7644,6 +7669,7 @@ mod tests {
             mapping: Arc::new(ArcSwapOption::default()),
             favourites: None,
             processing_order: ProcessingOrder::default(),
+            execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
             watch: None,
             use_memory_cache: false,
         };
@@ -7702,6 +7728,7 @@ mod tests {
             mapping: Arc::new(ArcSwapOption::default()),
             favourites: None,
             processing_order: ProcessingOrder::default(),
+            execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
             watch: None,
             use_memory_cache: false,
         };
@@ -7893,6 +7920,7 @@ mod tests {
             mapping: Arc::new(ArcSwapOption::default()),
             favourites: None,
             processing_order: ProcessingOrder::default(),
+            execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
             watch: None,
             use_memory_cache: false,
         });
@@ -8043,6 +8071,7 @@ mod tests {
             mapping: Arc::new(ArcSwapOption::default()),
             favourites: None,
             processing_order: ProcessingOrder::default(),
+            execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
             watch: None,
             use_memory_cache: false,
         };
@@ -8090,6 +8119,7 @@ mod tests {
             mapping: Arc::new(ArcSwapOption::default()),
             favourites: None,
             processing_order: ProcessingOrder::default(),
+            execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
             watch: None,
             use_memory_cache: false,
         };
@@ -8163,6 +8193,7 @@ mod tests {
             mapping: Arc::new(ArcSwapOption::default()),
             favourites: None,
             processing_order: ProcessingOrder::default(),
+            execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
             watch: None,
             use_memory_cache: false,
         };
@@ -8239,6 +8270,7 @@ mod tests {
             mapping: Arc::new(ArcSwapOption::default()),
             favourites: None,
             processing_order: ProcessingOrder::default(),
+            execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
             watch: None,
             use_memory_cache: false,
         };
@@ -8338,28 +8370,32 @@ mod tests {
 
         let first_admission = resolve_admission_with_strategies(
             &app_state.admission_ctx(),
-            &user.username,
-            user.max_connections,
-            user.soft_connections,
-            &first_fingerprint.client_ip,
-            &first_fingerprint.addr,
-            true,
-            Some("tok-hls-first"),
-            true,
-            EvictionReentryGuard::Session("tok-hls-first"),
+            AdmissionRequest {
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                client_ip: &first_fingerprint.client_ip,
+                request_addr: &first_fingerprint.addr,
+                use_session_admission: true,
+                session_token: Some("tok-hls-first"),
+                activate_unbound_session: true,
+                eviction_reentry_guard: EvictionReentryGuard::Session("tok-hls-first"),
+            },
         )
         .await;
         let second_admission = resolve_admission_with_strategies(
             &app_state.admission_ctx(),
-            &user.username,
-            user.max_connections,
-            user.soft_connections,
-            &second_fingerprint.client_ip,
-            &second_fingerprint.addr,
-            true,
-            Some("tok-hls-second"),
-            true,
-            EvictionReentryGuard::Session("tok-hls-second"),
+            AdmissionRequest {
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                client_ip: &second_fingerprint.client_ip,
+                request_addr: &second_fingerprint.addr,
+                use_session_admission: true,
+                session_token: Some("tok-hls-second"),
+                activate_unbound_session: true,
+                eviction_reentry_guard: EvictionReentryGuard::Session("tok-hls-second"),
+            },
         )
         .await;
 
@@ -8508,15 +8544,17 @@ mod tests {
         let mut close_rx = app_state.connection_manager.get_close_connection_channel();
         let result = resolve_admission_with_strategies(
             &app_state.admission_ctx(),
-            &user.username,
-            user.max_connections,
-            user.soft_connections,
-            &ts_fingerprint.client_ip,
-            &ts_fingerprint.addr,
-            false,
-            None,
-            false,
-            EvictionReentryGuard::SocketPlayback { virtual_id: 5001 },
+            AdmissionRequest {
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                client_ip: &ts_fingerprint.client_ip,
+                request_addr: &ts_fingerprint.addr,
+                use_session_admission: false,
+                session_token: None,
+                activate_unbound_session: false,
+                eviction_reentry_guard: EvictionReentryGuard::SocketPlayback { virtual_id: VirtualId::new(5001) },
+            },
         )
         .await;
         let admission = result.admission;
@@ -8832,11 +8870,10 @@ mod tests {
             &app_state.admission_ctx(),
             &user,
             &ts_fingerprint,
-            PlaylistItemType::Live,
             None,
             &ts_token,
             false,
-            EvictionReentryGuard::SocketPlayback { virtual_id },
+            EvictionReentryGuard::SocketPlayback { virtual_id: VirtualId::new(virtual_id) },
             false,
             false,
         )
@@ -8986,7 +9023,7 @@ mod tests {
             None,
             true,
             true,
-            channel.virtual_id,
+            VirtualId::new(channel.virtual_id),
             0,
             crate::api::model::ConnectionKind::Normal,
             false,
@@ -9067,7 +9104,7 @@ mod tests {
         let app_state = create_test_app_state_for_config(Arc::new(app_cfg_raw));
 
         let pli = XtreamPlaylistItem {
-            virtual_id: 100,
+            virtual_id: VirtualId::new(100),
             provider_id: 1,
             name: "test".intern(),
             logo: "".intern(),

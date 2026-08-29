@@ -43,10 +43,10 @@ pub struct GarbageCollectionPolicy {
 impl GarbageCollectionPolicy {
     pub fn from_config(config: &HlsCacheConfig) -> Self {
         Self {
-            cache_duration_ms: config.cache_duration.saturating_mul(1_000),
-            cache_bytes_global: config.cache_bytes,
-            cache_bytes_per_session: config.cache_bytes_per_session,
-            session_idle_timeout_ms: config.session_idle_timeout.saturating_mul(1_000),
+            cache_duration_ms: config.cache_duration.as_millis().get(),
+            cache_bytes_global: config.cache_bytes.get(),
+            cache_bytes_per_session: config.cache_bytes_per_session.get(),
+            session_idle_timeout_ms: config.session_idle_timeout.as_millis().get(),
             temp_file_retention_ms: DEFAULT_TEMP_FILE_RETENTION_MS,
             failed_segment_retention_ms: DEFAULT_FAILED_SEGMENT_RETENTION_MS,
         }
@@ -2387,8 +2387,11 @@ mod tests {
 
         let (first, second) = tokio::join!(first, second);
 
-        assert!(first.expect("first task").is_ok());
-        assert!(second.expect("second task").is_ok());
+        let first = first.expect("first task");
+        let second = second.expect("second task");
+
+        assert!(first.is_ok(), "first cache write failed: {first:?}");
+        assert!(second.is_ok(), "second cache write failed: {second:?}");
         let session = session.read().await;
         assert!(!session.segments.contains_key(&1));
         assert!(!session.segments.contains_key(&2));

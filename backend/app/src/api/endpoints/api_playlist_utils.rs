@@ -199,8 +199,14 @@ pub(in crate::api::endpoints) async fn get_playlist_for_custom_provider(
                     (playlist, errors, false)
                 }
                 InputPersistence::Xtream => {
-                    let (pl, err, _) =
-                        xtream::download_xtream_playlist(&app_state.app_config, client, input, Some(&[cluster])).await;
+                    let (pl, err, _) = xtream::download_xtream_playlist(
+                        &app_state.app_config,
+                        client,
+                        &app_state.event_manager,
+                        input,
+                        Some(&[cluster]),
+                    )
+                    .await;
                     (pl, err, false)
                 }
                 InputPersistence::Library => {

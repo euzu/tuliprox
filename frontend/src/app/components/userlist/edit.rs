@@ -73,12 +73,16 @@ pub fn UserEdit() -> Html {
     {
         let plans = plans.clone();
         let services = services_ctx.clone();
-        use_effect_with((), move |()| {
-            spawn_local(async move {
-                if let Some(cfg) = services.config.get_plans_config().await {
-                    plans.set(Rc::new(cfg.plans.clone()));
-                }
-            });
+        let active_page = *userlist_ctx.active_page;
+        let selected_user = (*userlist_ctx.selected_user).clone();
+        use_effect_with((active_page, selected_user), move |(active_page, _)| {
+            if *active_page == UserlistPage::Edit {
+                spawn_local(async move {
+                    if let Some(cfg) = services.config.get_plans_config().await {
+                        plans.set(Rc::new(cfg.plans.clone()));
+                    }
+                });
+            }
             || ()
         });
     }

@@ -112,7 +112,7 @@ pub fn authorize_catalog_entry(
     }
     // Orphan entries are administrator-only.
     if entry.is_orphan_only() {
-        let admin = claims.roles.iter().any(|r| r == shared::model::ROLE_ADMIN);
+        let admin = claims.is_admin();
         if !admin {
             return Err(CatalogAccessError::Forbidden);
         }
@@ -244,7 +244,7 @@ mod tests {
             iss: "tuliprox".to_string(),
             iat: 0,
             exp: 0,
-            roles: Vec::new(),
+            roles: shared::model::RoleSet::new(),
             permissions: perms.into(),
             pwd_version: 0,
             subject_id: subject,
@@ -330,7 +330,7 @@ mod tests {
     #[test]
     fn legacy_admin_recording_visible_to_admins() {
         let mut claims = make_claims("admin", Some(UserId::builtin_admin()), Permission::RecordingRead);
-        claims.roles.push(shared::model::ROLE_ADMIN.to_string());
+        claims.roles.set(shared::model::Role::Admin);
         let entry = make_orphan_entry();
         let d = authorize_catalog_entry(&claims, &UserId::builtin_admin(), &entry);
         assert!(d.is_ok());
@@ -341,7 +341,7 @@ mod tests {
         // Even an admin without `recording.read` cannot see orphan
         // entries (the read permission is the table-stakes gate).
         let mut claims = make_claims("admin", Some(UserId::builtin_admin()), Permission::ConfigRead);
-        claims.roles.push(shared::model::ROLE_ADMIN.to_string());
+        claims.roles.set(shared::model::Role::Admin);
         let entry = make_orphan_entry();
         let d = authorize_catalog_entry(&claims, &UserId::builtin_admin(), &entry);
         assert!(matches!(d, Err(CatalogAccessError::MissingPermission)));

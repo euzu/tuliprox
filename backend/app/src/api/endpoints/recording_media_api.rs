@@ -29,7 +29,7 @@ use axum::{
     routing::get,
     RequestPartsExt,
 };
-use shared::model::{Claims, UserId, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, ROLE_ADMIN, TOKEN_NO_AUTH};
+use shared::model::{Claims, RoleSet, UserId, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, TOKEN_NO_AUTH};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -50,7 +50,7 @@ fn builtin_admin_claims() -> Claims {
         iss: "tuliprox".to_string(),
         iat: 0,
         exp: i64::MAX,
-        roles: vec![ROLE_ADMIN.to_string()],
+        roles: RoleSet::ADMIN,
         permissions: PERM_ALL,
         pwd_version: 0,
         subject_id: Some(UserId::builtin_admin()),
@@ -75,11 +75,11 @@ impl FromRequestParts<Arc<AppState>> for AuthClaims {
     ) -> Result<Self, Self::Rejection> {
         let app_state = state.clone();
         let AuthBearer(token) =
-            parts.extract::<AuthBearer>().await.map_err(|(_, msg)| (StatusCode::UNAUTHORIZED, msg).into_response())?;
+            parts.extract::<AuthBearer>().await.map_err(axum::response::IntoResponse::into_response)?;
         let config = app_state.app_config.config.load();
         match config.web_ui.as_ref().and_then(|w| w.auth.as_ref()).filter(|auth| auth.enabled) {
             Some(web_auth) => {
-                let token_data = verify_token(&token, web_auth.secret.as_bytes())
+                let token_data = verify_token(&token, web_auth.secret.as_bytes(), &web_auth.issuer)
                     .ok_or_else(|| auth_claims_rejection(AuthError::InvalidToken))?;
                 validate_token_claims(&token_data.claims).map_err(auth_claims_rejection)?;
                 Ok(Self(token_data.claims))
@@ -407,7 +407,7 @@ mod tests {
     use axum::http::Request;
     use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
     use shared::model::{
-        Permission, UserId, WebUiConfigDto, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, ROLE_ADMIN, TOKEN_NO_AUTH,
+        Permission, RoleSet, UserId, WebUiConfigDto, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, TOKEN_NO_AUTH,
     };
 
     fn config_with_web_auth(enabled: bool, secret: &str) -> Config {
@@ -443,7 +443,7 @@ mod tests {
             extract_auth_claims(&state, Some(&format!("Bearer {TOKEN_NO_AUTH}"))).await.expect("builtin claims");
 
         assert_eq!(claims.subject_id, Some(UserId::builtin_admin()));
-        assert_eq!(claims.roles, vec![ROLE_ADMIN]);
+        assert_eq!(claims.roles, RoleSet::ADMIN);
         assert_eq!(claims.permissions, PERM_ALL);
         assert_eq!(claims.permission_schema_version, CURRENT_PERMISSION_SCHEMA_VERSION);
         assert!(claims.permissions.contains(Permission::RecordingWrite));
@@ -477,6 +477,12 @@ mod tests {
         assert!(!response.headers().contains_key("X-Token-Refresh"));
     }
 
+    fn test_claims_for_issuer(issuer: &str) -> Claims {
+        let mut claims = builtin_admin_claims();
+        claims.iss = issuer.to_string();
+        claims
+    }
+
     #[tokio::test]
     async fn auth_claims_enabled_jwt_truth_table() {
         let config = config_with_web_auth(true, "secret");
@@ -488,10 +494,12 @@ mod tests {
             extract_auth_claims(&state, Some(&format!("Bearer {valid}"))).await.expect("valid claims");
         assert_eq!(claims.subject_id, Some(UserId::builtin_admin()));
 
-        let mut stale_claims = builtin_admin_claims();
+        let mut stale_claims = test_claims_for_issuer(&web_auth.issuer);
         stale_claims.permission_schema_version = 0;
-        let mut missing_subject = builtin_admin_claims();
+
+        let mut missing_subject = test_claims_for_issuer(&web_auth.issuer);
         missing_subject.subject_id = None;
+
         for claims in [stale_claims, missing_subject] {
             let token =
                 encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(b"secret")).expect("jwt");

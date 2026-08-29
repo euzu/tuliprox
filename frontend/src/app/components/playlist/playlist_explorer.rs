@@ -248,7 +248,7 @@ pub fn PlaylistExplorer() -> Html {
             event.stop_propagation();
             if let Some(target) = event.target_dyn_into::<web_sys::Element>() {
                 set_selected_channel.set(Some(ChannelSelection {
-                    virtual_id: dto.virtual_id,
+                    virtual_id: VirtualId::new(dto.virtual_id),
                     cluster: dto.xtream_cluster,
                     downloadable: dto.xtream_cluster == XtreamCluster::Video,
                     url: dto.url.to_string(),
@@ -366,8 +366,11 @@ pub fn PlaylistExplorer() -> Html {
                                         let target_id = *target_id;
                                         let services_clone = services.clone();
                                         spawn_local(async move {
-                                            let request =
-                                                PlaylistUrlResolveRequest::Webplayer { target_id, virtual_id, cluster };
+                                            let request = PlaylistUrlResolveRequest::Webplayer {
+                                                target_id,
+                                                virtual_id: virtual_id.get(),
+                                                cluster,
+                                            };
                                             if let Some(url) = services.playlist.resolve_url(request).await {
                                                 copy_to_clipboard.emit(url);
                                                 services_clone.toastr.success(
@@ -400,7 +403,7 @@ pub fn PlaylistExplorer() -> Html {
                                     let playlist_request = playlist_request.clone();
                                     spawn_local(async move {
                                         if let Some(pli) =
-                                            services.playlist.get_episode(virtual_id, &playlist_request).await
+                                            services.playlist.get_episode(virtual_id.get(), &playlist_request).await
                                         {
                                             let url = pli.url.to_string();
                                             let request = PlaylistUrlResolveRequest::Provider {
@@ -453,8 +456,10 @@ pub fn PlaylistExplorer() -> Html {
                                     }
                                 } else if selected.cluster == XtreamCluster::Series {
                                     if let Some(playlist_request) = playlist_request.as_ref() {
-                                        if let Some(pli) =
-                                            services.playlist.get_episode(selected.virtual_id, playlist_request).await
+                                        if let Some(pli) = services
+                                            .playlist
+                                            .get_episode(selected.virtual_id.get(), playlist_request)
+                                            .await
                                         {
                                             let episode_url = pli.url.to_string();
                                             let request = PlaylistUrlResolveRequest::Provider {
@@ -870,7 +875,7 @@ pub fn PlaylistExplorer() -> Html {
 
     let render_episode = |chan: &SeriesStreamDetailEpisodeProperties| {
         let channel_select = ChannelSelection {
-            virtual_id: chan.id,
+            virtual_id: VirtualId::new(chan.id),
             cluster: XtreamCluster::Series,
             downloadable: true,
             // Falls back to the episode fetch path in the menu handler when empty

@@ -5,7 +5,7 @@ use crate::{
 use indexmap::IndexMap;
 use shared::{
     error::TuliproxError,
-    model::{PlaylistGroup, PlaylistItem, StreamProperties, UUIDType, XtreamCluster, XtreamPlaylistItem},
+    model::{PlaylistGroup, PlaylistItem, StreamProperties, UUIDType, XtreamPlaylistItem},
 };
 use std::{collections::HashMap, path::Path, sync::Arc};
 use tokio::task;
@@ -140,7 +140,7 @@ pub async fn load_input_local_library_playlist(
             let mut group_cnt = 0;
             for entry in query.iter() {
                 let (_, item) = entry.map_err(|error| repository_read_error(&lib_path, error))?;
-                let cluster = XtreamCluster::try_from(item.item_type).unwrap_or(XtreamCluster::Live);
+                let cluster = item.item_type.cluster();
                 let key = (cluster, item.group.clone());
                 groups
                     .entry(key)
@@ -176,7 +176,9 @@ pub async fn load_input_local_library_playlist(
 mod tests {
     use super::*;
     use shared::{
-        model::{EpisodeStreamProperties, VideoStreamDetailProperties, VideoStreamProperties},
+        model::{
+            EpisodeStreamProperties, VideoStreamDetailProperties, VideoStreamProperties, VirtualId, XtreamCluster,
+        },
         utils::Internable,
     };
 
@@ -184,7 +186,9 @@ mod tests {
     fn bplustree_read_errors_are_generic_repository_errors() {
         let error = repository_read_error(Path::new("library.db"), std::io::Error::other("corrupt page"));
         assert!(
-            matches!(error, TuliproxError::Repository(message) if message.contains("library.db") && message.contains("corrupt page"))
+            error.kind() == shared::error::ErrorKind::Repository
+                && error.message().contains("library.db")
+                && error.message().contains("corrupt page")
         );
     }
 
@@ -197,7 +201,7 @@ mod tests {
         bitrate: u32,
     ) -> XtreamPlaylistItem {
         XtreamPlaylistItem {
-            virtual_id: 1,
+            virtual_id: VirtualId::new(1),
             provider_id: 1,
             name: "movie".intern(),
             logo: "".intern(),
@@ -232,7 +236,7 @@ mod tests {
 
     fn episode_item(url: &str, added: Option<&str>, video: Option<&str>, audio: Option<&str>) -> XtreamPlaylistItem {
         XtreamPlaylistItem {
-            virtual_id: 2,
+            virtual_id: VirtualId::new(2),
             provider_id: 2,
             name: "ep".intern(),
             logo: "".intern(),

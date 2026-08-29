@@ -29,6 +29,18 @@ pub enum ProviderAllocation {
 }
 
 impl ProviderAllocation {
+    /// The provider this allocation landed on, if it landed on one.
+    ///
+    /// Both success variants carry a provider and callers that only need
+    /// "which one" should not have to match on why it was granted.
+    #[must_use]
+    pub fn provider(&self) -> Option<&Arc<ProviderConfig>> {
+        match self {
+            Self::Exhausted => None,
+            Self::Available(config) | Self::GracePeriod(config) => Some(config),
+        }
+    }
+
     pub fn short_key(&self) -> &str {
         match self {
             ProviderAllocation::Exhausted => "exhausted",

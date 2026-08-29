@@ -68,6 +68,7 @@ cron          = "0.17.0"
 futures       = "0.3.34"
 serde-saphyr  = "0.0.26"
 sha2          = "0.11.0"
+hmac          = "0.13.0"
 thiserror     = "2.0.20"
 tokio         = { version = "1.53.1" }
 strum = "0.28.0"

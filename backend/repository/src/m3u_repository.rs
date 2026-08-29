@@ -2,18 +2,15 @@ use super::playlist_mem_cache::PlaylistStorageState;
 use crate::{
     bplustree::{BPlusTree, BPlusTreeQuery},
     m3u_playlist_iterator::M3uPlaylistM3uTextIterator,
-    open_playlist_reader,
+    playlist_backend::{ensure_storage_path, iter_raw_playlist, M3u, PlaylistBackend},
     playlist_repository::get_input_m3u_playlist_file_path,
-    storage::{
-        ensure_target_storage_subpath, get_file_path_for_db_index, get_input_storage_path, get_target_storage_path,
-    },
+    storage::{get_input_storage_path, get_target_storage_path},
     storage_const,
     xtream_repository::CategoryKey,
     LockedReceiverStream,
 };
 use indexmap::IndexMap;
 use log::{error, warn};
-use serde::{Deserialize, Serialize};
 use shared::{
     concat_string,
     error::{str_to_io_error, string_to_io_error, TuliproxError},
@@ -29,8 +26,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tokio::{fs, io::AsyncWriteExt, sync::mpsc, task};
-use tokio_stream::Stream;
+use tokio::{fs, io::AsyncWriteExt, task};
 use tuliprox_core::{
     model::{AppConfig, Config, ConfigInput, ConfigTarget, M3uTargetOutput, ProxyUserCredentials},
     utils::{async_file_writer, file_exists_async},
@@ -62,13 +58,12 @@ pub fn m3u_get_epg_file_path_for_target(target_path: &Path) -> PathBuf {
     target_path.join(storage_const::PATH_M3U).join(concat_string!("epg.", storage_const::FILE_SUFFIX_DB))
 }
 
-pub fn m3u_get_storage_path(cfg: &Config, target_name: &str) -> Option<PathBuf> {
-    get_target_storage_path(cfg, target_name)
-        .map(|target_path| target_path.join(PathBuf::from(storage_const::PATH_M3U)))
-}
+#[inline]
+pub fn m3u_get_storage_path(cfg: &Config, target_name: &str) -> Option<PathBuf> { M3u::storage_path(cfg, target_name) }
 
+#[inline]
 pub async fn ensure_m3u_storage_path(cfg: &Config, target_name: &str) -> Result<PathBuf, TuliproxError> {
-    ensure_target_storage_subpath(cfg, target_name, "m3u", m3u_get_storage_path, TuliproxError::RepositoryM3u).await
+    ensure_storage_path::<M3u>(cfg, target_name).await
 }
 
 fn provider_m3u_filename(path: &Path) -> PathBuf {
@@ -350,91 +345,35 @@ pub async fn m3u_get_item_for_stream_id(
     }
 }
 
+/// Keep items belonging to `cluster`; keep everything when `None`.
+///
+/// Returned as an opaque closure so `iter_raw_playlist` monomorphizes over it
+/// rather than taking a boxed predicate.
+fn m3u_cluster_filter(cluster: Option<XtreamCluster>) -> impl Fn(&M3uPlaylistItem) -> bool + Send + 'static {
+    move |item| cluster.is_none_or(|wanted| item.item_type.is_cluster(wanted))
+}
+
 pub async fn iter_raw_m3u_target_playlist(
     config: &AppConfig,
     target: &ConfigTarget,
     cluster: Option<XtreamCluster>,
-) -> Option<Box<dyn Stream<Item = Result<M3uPlaylistItem, TuliproxError>> + Send + Unpin>> {
+) -> Option<LockedReceiverStream<Result<M3uPlaylistItem, TuliproxError>>> {
     let target_path = get_target_storage_path(&config.config.load(), target.name.as_str())?;
     let m3u_path = m3u_get_file_path_for_db(&target_path);
 
-    iter_raw_m3u_playlist::<u32, u32>(config, &m3u_path, cluster).await
+    iter_raw_playlist::<M3u, u32, _>(config, &m3u_path, m3u_cluster_filter(cluster)).await
 }
 
 pub async fn iter_raw_m3u_input_playlist(
     app_config: &AppConfig,
     input: &ConfigInput,
     cluster: Option<XtreamCluster>,
-) -> Option<Box<dyn Stream<Item = Result<M3uPlaylistItem, TuliproxError>> + Send + Unpin>> {
+) -> Option<LockedReceiverStream<Result<M3uPlaylistItem, TuliproxError>>> {
     let cfg = app_config.config.load();
     let storage_path = get_input_storage_path(&input.name, &cfg.storage_dir).await.ok()?;
     let m3u_path = get_input_m3u_playlist_file_path(&storage_path, &input.name);
 
-    iter_raw_m3u_playlist::<u32, Arc<str>>(app_config, &m3u_path, cluster).await
-}
-
-async fn iter_raw_m3u_playlist<SortKey, ItemKey>(
-    app_config: &AppConfig,
-    m3u_path: &Path,
-    cluster: Option<XtreamCluster>,
-) -> Option<Box<dyn Stream<Item = Result<M3uPlaylistItem, TuliproxError>> + Send + Unpin>>
-where
-    ItemKey: Ord + Serialize + for<'de> Deserialize<'de> + Clone + Send + Sync + 'static,
-    SortKey: Ord + for<'de> Deserialize<'de> + Send + 'static,
-{
-    // Two read locks: iter_lock is held by LockedReceiverStream for the consumer lifetime,
-    // while bg_lock is moved into spawn_blocking to guard the on-disk reader.
-    let iter_lock = app_config.file_locks.read_lock(m3u_path).await;
-    if !file_exists_async(m3u_path).await {
-        return None;
-    }
-    let bg_lock = app_config.file_locks.read_lock(m3u_path).await;
-
-    let m3u_path = m3u_path.to_path_buf();
-    let index_path = get_file_path_for_db_index(&m3u_path);
-    let (tx, rx) = mpsc::channel::<Result<M3uPlaylistItem, TuliproxError>>(256);
-
-    let m3u_path_for_log = m3u_path.clone();
-    let err_tx = tx.clone();
-    let join_err_tx = tx.clone();
-    let handle = task::spawn_blocking(move || {
-        let _guard = bg_lock;
-        let reader = match open_playlist_reader::<ItemKey, M3uPlaylistItem, SortKey>(&m3u_path, &index_path, None) {
-            Ok(reader) => reader,
-            Err(err) => {
-                let _ = err_tx.blocking_send(Err(err));
-                return;
-            }
-        };
-
-        for entry in reader {
-            let item = match entry {
-                Ok((_, item)) => item,
-                Err(err) => {
-                    error!("Skipping unreadable M3U playlist entry: {err}");
-                    continue;
-                }
-            };
-            if cluster.is_none_or(|c| item.item_type.is_cluster(c)) && tx.blocking_send(Ok(item)).is_err() {
-                break;
-            }
-        }
-    });
-    tokio::spawn(async move {
-        if let Err(err) = handle.await {
-            error!("M3U playlist reader task failed for {}: {err}", m3u_path_for_log.display());
-            let _ = join_err_tx
-                .send(Err(TuliproxError::RepositoryM3u(format!(
-                    "M3U playlist reader task failed for {}: {err}",
-                    m3u_path_for_log.display()
-                ))))
-                .await;
-        }
-    });
-
-    let stream: Box<dyn Stream<Item = Result<M3uPlaylistItem, TuliproxError>> + Send + Unpin> =
-        Box::new(LockedReceiverStream::new(rx, iter_lock));
-    Some(stream)
+    iter_raw_playlist::<M3u, Arc<str>, _>(app_config, &m3u_path, m3u_cluster_filter(cluster)).await
 }
 
 pub async fn persist_input_m3u_playlist(
@@ -527,7 +466,7 @@ pub async fn load_input_m3u_playlist(
         let mut group_cnt = 0;
         for entry in query.iter() {
             let (_, item) = entry.map_err(|error| TuliproxError::RepositoryM3u(error.to_string()))?;
-            let cluster = XtreamCluster::try_from(item.item_type).unwrap_or(XtreamCluster::Live);
+            let cluster = item.item_type.cluster();
             let key = (cluster, item.group.clone());
             groups
                 .entry(key)

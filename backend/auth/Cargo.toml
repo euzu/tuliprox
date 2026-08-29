@@ -17,6 +17,7 @@ axum = { version = "0.8.9", features = ["macros", "default", "ws"] }
 base64.workspace = true
 blake3.workspace = true
 chrono.workspace = true
+dashmap.workspace = true
 jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }
 log.workspace = true
 rand = "0.9.5"

@@ -58,7 +58,7 @@ impl PlaylistStorageState {
                             XtreamCluster::Video => &mut xtream.vod,
                             XtreamCluster::Series => &mut xtream.series,
                         }
-                        .insert(pli.virtual_id, pli.clone());
+                        .insert(pli.virtual_id.get(), pli.clone());
                     }
                 }
             }
@@ -75,7 +75,7 @@ impl PlaylistStorageState {
                             XtreamCluster::Video => &mut xtream.vod,
                             XtreamCluster::Series => &mut xtream.series,
                         }
-                        .insert(pli.header.virtual_id, XtreamPlaylistItem::from(&pli));
+                        .insert(pli.header.virtual_id.get(), XtreamPlaylistItem::from(&pli));
                     }
                 }
             }

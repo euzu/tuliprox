@@ -85,6 +85,7 @@ pub struct ValueAccessor<'a> {
     pub pli: &'a mut PlaylistItem,
     pub virtual_items: Vec<(String, PlaylistItem)>,
     pub match_as_ascii: bool,
+    pub changed_fields: Vec<String>,
 }
 
 impl ValueAccessor<'_> {
@@ -92,6 +93,9 @@ impl ValueAccessor<'_> {
 
     pub fn set(&mut self, field: &str, value: &str) {
         if self.pli.header.set_field(field, value) {
+            if !self.changed_fields.iter().any(|changed| changed.eq_ignore_ascii_case(field)) {
+                self.changed_fields.push(field.to_string());
+            }
             trace!("Property {field} set to {value}");
         } else {
             error!("Can't set unknown field {field} set to {value}");
@@ -287,16 +291,40 @@ pub struct MapperScript {
     pub statements: Vec<Statement>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MappingDiagnostic {
+    pub statement: usize,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MappingOutcome {
+    pub changed_fields: Vec<String>,
+    pub emitted_items: usize,
+    pub diagnostics: Vec<MappingDiagnostic>,
+}
+
 impl MapperScript {
-    pub fn eval(&self, setter: &mut ValueAccessor, templates: Option<&[PatternTemplate]>) {
+    pub fn eval(&self, setter: &mut ValueAccessor, templates: Option<&[PatternTemplate]>) -> MappingOutcome {
+        let initial_change_count = setter.changed_fields.len();
+        let initial_item_count = setter.virtual_items.len();
         let ctx = &mut MapperContext::new(&self.expressions, templates);
-        self.eval_with_context(ctx, setter);
+        let diagnostics = self.eval_with_context(ctx, setter);
+        MappingOutcome {
+            changed_fields: setter.changed_fields[initial_change_count..].to_vec(),
+            emitted_items: setter.virtual_items.len().saturating_sub(initial_item_count),
+            diagnostics,
+        }
     }
 
-    fn eval_with_context(&self, ctx: &mut MapperContext, setter: &mut ValueAccessor) {
-        for stmt in &self.statements {
-            stmt.eval(ctx, setter);
-        }
+    fn eval_with_context(&self, ctx: &mut MapperContext, setter: &mut ValueAccessor) -> Vec<MappingDiagnostic> {
+        self.statements
+            .iter()
+            .enumerate()
+            .filter_map(|(statement, stmt)| {
+                stmt.eval(ctx, setter).map(|message| MappingDiagnostic { statement, message })
+            })
+            .collect()
     }
 
     pub fn get_expr_by_id(&self, id: usize) -> Option<&Expression> { self.expressions.get(id) }
@@ -310,17 +338,18 @@ impl ExprId {
 }
 
 impl Statement {
-    pub fn eval(&self, ctx: &mut MapperContext, setter: &mut ValueAccessor) {
+    pub fn eval(&self, ctx: &mut MapperContext, setter: &mut ValueAccessor) -> Option<String> {
         match self {
             Statement::Expression(expr_id) => {
                 let result = expr_id.eval(ctx, setter);
                 if let Failure(err) = &result {
                     debug!("{err}");
-                    // } else {
-                    //     trace!("Ignoring result {result:?}");
+                    Some(err.clone())
+                } else {
+                    None
                 }
             }
-            Statement::Comment(_) => {}
+            Statement::Comment(_) => None,
         }
     }
 }
@@ -1139,16 +1168,6 @@ macro_rules! extract_evaluated_arg_value {
     }};
 }
 
-macro_rules! extract_arg_value {
-    ($evaluated_arg:expr) => {{
-        match $evaluated_arg {
-            Value(value) => Some(value),
-            Named(values) => values.first().map(|(_key, val)| val),
-            _ => None,
-        }
-    }};
-}
-
 impl Expression {
     #[allow(clippy::too_many_lines)]
     pub fn eval(&self, ctx: &mut MapperContext, accessor: &mut ValueAccessor) -> EvalResult {
@@ -1397,8 +1416,16 @@ impl Expression {
                             let fmt_pattern = extract_evaluated_arg_value!(evaluated_args, 0);
 
                             if let Some(fmt_str) = fmt_pattern {
-                                let args: Vec<Option<&String>> =
-                                    evaluated_args.iter().skip(1).map(|v| extract_arg_value!(v)).collect();
+                                let args = evaluated_args
+                                    .iter()
+                                    .skip(1)
+                                    .map(|value| match value {
+                                        Value(value) => Some(value.clone()),
+                                        Number(value) => Some(format_number(*value)),
+                                        Named(values) => values.first().map(|(_, value)| value.clone()),
+                                        Undefined | AnyValue | Failure(_) => None,
+                                    })
+                                    .collect::<Vec<_>>();
 
                                 let mut formatted = String::new();
                                 let mut arg_iter = args.iter();
@@ -1711,7 +1738,8 @@ mod tests {
         .collect::<Vec<PlaylistItem>>();
 
         for pli in &mut channels {
-            let mut accessor = ValueAccessor { pli, virtual_items: vec![], match_as_ascii: false };
+            let mut accessor =
+                ValueAccessor { pli, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
             mapper.eval(&mut accessor, None);
             println!("Result: {pli:?}");
         }
@@ -1794,7 +1822,7 @@ mod tests {
     fn test_mapper_format() {
         let dsl = r#"
             @Name = pad(1000, 10, 0);
-            @Title = format("Hello {} how {}", "a", "b");
+            @Title = format("Channel {} is {}", 12, "live");
         "#;
 
         let mapper = MapperScript::parse(dsl, None).expect("Parsing failed");
@@ -1806,9 +1834,10 @@ mod tests {
             .collect::<Vec<PlaylistItem>>();
 
         for pli in &mut channels {
-            let mut accessor = ValueAccessor { pli, virtual_items: vec![], match_as_ascii: false };
+            let mut accessor =
+                ValueAccessor { pli, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
             mapper.eval(&mut accessor, None);
-            println!("Result: {pli:?}");
+            assert_eq!(accessor.pli.header.title.as_ref(), "Channel 12 is live");
         }
     }
 
@@ -1825,7 +1854,8 @@ mod tests {
         let mapper = MapperScript::parse(dsl, None).expect("mapper should parse");
         let mut channel =
             PlaylistItem { header: PlaylistItemHeader { name: "Cinéma".intern(), ..Default::default() } };
-        let mut accessor = ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: true };
+        let mut accessor =
+            ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: true, changed_fields: vec![] };
 
         mapper.eval(&mut accessor, None);
 
@@ -1867,7 +1897,8 @@ mod tests {
         "#;
         let mapper = MapperScript::parse(dsl, None)?;
         let mut channel = PlaylistItem { header: PlaylistItemHeader { name: "ABCDEF".intern(), ..Default::default() } };
-        let mut accessor = ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false };
+        let mut accessor =
+            ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
 
         mapper.eval(&mut accessor, None);
 
@@ -1887,7 +1918,8 @@ mod tests {
         "#;
         let mapper = MapperScript::parse(dsl, None)?;
         let mut channel = PlaylistItem { header: PlaylistItemHeader { name: "ABC".intern(), ..Default::default() } };
-        let mut accessor = ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false };
+        let mut accessor =
+            ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
 
         mapper.eval(&mut accessor, None);
 
@@ -1918,7 +1950,8 @@ mod tests {
                 ..Default::default()
             },
         };
-        let mut accessor = ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false };
+        let mut accessor =
+            ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
 
         mapper.eval(&mut accessor, None);
 
@@ -1953,7 +1986,8 @@ mod tests {
         ];
         let mapper = MapperScript::parse(dsl, Some(&templates)).expect("mapper should parse");
         let mut channel = PlaylistItem { header: PlaylistItemHeader::default() };
-        let mut accessor = ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false };
+        let mut accessor =
+            ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
 
         mapper.eval(&mut accessor, Some(&templates));
 
@@ -1977,7 +2011,8 @@ mod tests {
                 ..Default::default()
             },
         };
-        let mut accessor = ValueAccessor { pli: &mut video, virtual_items: vec![], match_as_ascii: false };
+        let mut accessor =
+            ValueAccessor { pli: &mut video, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
         mapper.eval(&mut accessor, None);
         assert_eq!(accessor.virtual_items.len(), 1);
         assert_eq!(&*accessor.virtual_items[0].1.header.group, "My Favs");
@@ -1990,7 +2025,12 @@ mod tests {
                 ..Default::default()
             },
         };
-        let mut accessor = ValueAccessor { pli: &mut series_info, virtual_items: vec![], match_as_ascii: false };
+        let mut accessor = ValueAccessor {
+            pli: &mut series_info,
+            virtual_items: vec![],
+            match_as_ascii: false,
+            changed_fields: vec![],
+        };
         mapper.eval(&mut accessor, None);
         assert_eq!(accessor.virtual_items.len(), 1);
 
@@ -2002,7 +2042,8 @@ mod tests {
                 ..Default::default()
             },
         };
-        let mut accessor = ValueAccessor { pli: &mut episode, virtual_items: vec![], match_as_ascii: false };
+        let mut accessor =
+            ValueAccessor { pli: &mut episode, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
         mapper.eval(&mut accessor, None);
         assert_eq!(accessor.virtual_items.len(), 0);
     }
@@ -2035,7 +2076,8 @@ mod tests {
                 ..Default::default()
             },
         };
-        let mut accessor = ValueAccessor { pli: &mut video, virtual_items: vec![], match_as_ascii: false };
+        let mut accessor =
+            ValueAccessor { pli: &mut video, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
         mapper.eval(&mut accessor, None);
         assert_eq!(accessor.virtual_items.len(), 3);
         assert_eq!(&*accessor.virtual_items[0].1.header.group, "Genre - A");
@@ -2054,7 +2096,12 @@ mod tests {
                 ..Default::default()
             },
         };
-        let mut accessor = ValueAccessor { pli: &mut series_info, virtual_items: vec![], match_as_ascii: false };
+        let mut accessor = ValueAccessor {
+            pli: &mut series_info,
+            virtual_items: vec![],
+            match_as_ascii: false,
+            changed_fields: vec![],
+        };
         mapper.eval(&mut accessor, None);
         assert_eq!(accessor.virtual_items.len(), 3);
     }
@@ -2076,11 +2123,36 @@ mod tests {
         ctx.set_var("items", Named(vec![("first".to_string(), "current".to_string())]));
         ctx.set_var("value", Value("outer".to_string()));
         let mut item = PlaylistItem { header: PlaylistItemHeader::default() };
-        let mut accessor = ValueAccessor { pli: &mut item, virtual_items: vec![], match_as_ascii: false };
+        let mut accessor =
+            ValueAccessor { pli: &mut item, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
 
         ExprId(1).eval(&mut ctx, &mut accessor);
 
         assert!(matches!(ctx.get_var("value"), Value(value) if value == "outer"));
         assert!(matches!(ctx.get_var("key"), Undefined));
+    }
+
+    #[test]
+    fn eval_reports_changes_and_statement_failures() {
+        let mapper = MapperScript::parse(
+            r#"
+                @Group = "News"
+                capture = @Name ~ "(?P<known>BBC)"
+                @Title = capture.missing
+            "#,
+            None,
+        )
+        .expect("script should parse");
+        let mut item = PlaylistItem { header: PlaylistItemHeader { name: "BBC One".intern(), ..Default::default() } };
+        let mut accessor =
+            ValueAccessor { pli: &mut item, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+
+        let outcome = mapper.eval(&mut accessor, None);
+
+        assert_eq!(outcome.changed_fields, ["Group"]);
+        assert_eq!(outcome.emitted_items, 0);
+        assert_eq!(outcome.diagnostics.len(), 1);
+        assert_eq!(outcome.diagnostics[0].statement, 2);
+        assert!(outcome.diagnostics[0].message.contains("has no field missing"));
     }
 }

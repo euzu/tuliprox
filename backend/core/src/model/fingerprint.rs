@@ -1,9 +1,11 @@
-type Rejection = (StatusCode, &'static str);
+use super::auth_rejection::AuthRejection;
 use axum::{
     extract::{ConnectInfo, FromRequestParts},
-    http::{request::Parts, StatusCode},
+    http::request::Parts,
 };
 use std::net::SocketAddr;
+
+type Rejection = AuthRejection;
 
 const MAX_HEADER_LENGTH: usize = 512;
 
@@ -49,7 +51,7 @@ impl Fingerprint {
     {
         let ConnectInfo(addr) = ConnectInfo::<SocketAddr>::from_request_parts(req, state)
             .await
-            .map_err(|_| (StatusCode::BAD_REQUEST, "IP-Addr is missing"))?;
+            .map_err(|_| AuthRejection::MissingPeerAddress)?;
 
         let mut user_agent = None;
         let mut forwarded_for = None;

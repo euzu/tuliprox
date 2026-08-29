@@ -1,8 +1,10 @@
 use crate::stalker::{
+    action::StalkerAction,
     client::StalkerApiClient,
     error::{safe_stalker_url, StalkerError, StalkerResult},
     profile::StalkerHandshake,
     recipes::recipe_spec_for,
+    transport::StalkerTransport,
 };
 use futures::StreamExt;
 use log::warn;
@@ -27,6 +29,7 @@ use tokio_util::io::{StreamReader, SyncIoBridge};
 // The persisted shape lives in `tuliprox_core::model`; re-exported here for
 // this module's own call sites.
 pub use tuliprox_core::model::StalkerProgramRecord;
+use tuliprox_core::utils::Clock;
 
 #[derive(Debug, Default, Clone, Deserialize)]
 struct RawStalkerProgram {
@@ -90,17 +93,17 @@ fn parse_stalker_timestamp(raw: &str) -> Option<i64> {
 }
 
 /// Short EPG (per channel, 2-24 hour window). Returns the parsed records on success.
-pub async fn get_short_epg(
-    client: &StalkerApiClient,
+pub async fn get_short_epg<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
     channel_id: u32,
     hours: u32,
 ) -> StalkerResult<Vec<StalkerProgramRecord>> {
     let spec = recipe_spec_for(handshake.profile.bootstrap_recipe);
-    let candidates = client.load_url_candidates().to_vec();
+    let candidates = client.ordered_load_urls();
     let mut last_err: Option<StalkerError> = None;
     for load_url in candidates {
-        let mut builder = client.http().get(&load_url.load_url).headers(client.common_headers(&load_url)).query(&[
+        let mut builder = client.get(&load_url.load_url).headers(client.common_headers(&load_url)).query(&[
             ("type", "itv"),
             ("action", "get_short_epg"),
             ("ch_id", &channel_id.to_string()),
@@ -108,7 +111,7 @@ pub async fn get_short_epg(
         ]);
         builder = client.apply_mac_query(builder);
         builder = client.apply_bearer(builder, Some(&handshake.session), spec.token_in_query);
-        match client.send_json::<Value>(builder, "get_short_epg").await {
+        match client.send_json::<Value>(builder, StalkerAction::GetShortEpg).await {
             Ok(value) => {
                 return Ok(parse_epg_records(&value));
             }
@@ -121,17 +124,17 @@ pub async fn get_short_epg(
 }
 
 /// Per-channel full EPG. The portal returns the same payload shape as the short EPG.
-pub async fn get_epg(
-    client: &StalkerApiClient,
+pub async fn get_epg<Tr: StalkerTransport, C: Clock>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
     channel_id: u32,
     period_hours: u32,
 ) -> StalkerResult<Vec<StalkerProgramRecord>> {
     let spec = recipe_spec_for(handshake.profile.bootstrap_recipe);
-    let candidates = client.load_url_candidates().to_vec();
+    let candidates = client.ordered_load_urls();
     let mut last_err: Option<StalkerError> = None;
     for load_url in candidates {
-        let mut builder = client.http().get(&load_url.load_url).headers(client.common_headers(&load_url)).query(&[
+        let mut builder = client.get(&load_url.load_url).headers(client.common_headers(&load_url)).query(&[
             ("type", "itv"),
             ("action", "get_epg_info"),
             ("ch_id", &channel_id.to_string()),
@@ -139,7 +142,7 @@ pub async fn get_epg(
         ]);
         builder = client.apply_mac_query(builder);
         builder = client.apply_bearer(builder, Some(&handshake.session), spec.token_in_query);
-        match client.send_json::<Value>(builder, "get_epg").await {
+        match client.send_json::<Value>(builder, StalkerAction::GetEpg).await {
             Ok(value) => {
                 return Ok(parse_epg_records(&value));
             }
@@ -154,8 +157,8 @@ pub async fn get_epg(
 /// Bulk-EPG stream. The portal can return hundreds of thousands of records in a single
 /// `get_epg_info?period=<h>` call, so we stream the HTTP body through a reader-backed
 /// JSON deserializer and emit one programme record at a time.
-pub async fn stream_bulk_epg<F, Fut>(
-    client: &StalkerApiClient,
+pub async fn stream_bulk_epg<Tr: StalkerTransport, C: Clock, F, Fut>(
+    client: &StalkerApiClient<Tr, C>,
     handshake: &StalkerHandshake,
     period_hours: u32,
     batch_size: usize,
@@ -166,17 +169,20 @@ where
     Fut: std::future::Future<Output = StalkerResult<()>>,
 {
     let spec = recipe_spec_for(handshake.profile.bootstrap_recipe);
-    let candidates = client.load_url_candidates().to_vec();
+    let candidates = client.ordered_load_urls();
     let mut last_err: Option<StalkerError> = None;
     for load_url in candidates {
-        let mut builder = client.http().get(&load_url.load_url).headers(client.common_headers(&load_url)).query(&[
+        let mut builder = client.get(&load_url.load_url).headers(client.common_headers(&load_url)).query(&[
             ("type", "itv"),
             ("action", "get_epg_info"),
             ("period", &period_hours.to_string()),
         ]);
         builder = client.apply_mac_query(builder);
         builder = client.apply_bearer(builder, Some(&handshake.session), spec.token_in_query);
-        let response = match client.send_with_cap(builder, "get_epg_bulk", client.body_caps().get_epg_bytes).await {
+        let response = match client
+            .send_with_cap(builder, StalkerAction::GetBulkEpg, client.cap_for_action(StalkerAction::GetBulkEpg))
+            .await
+        {
             Ok(r) => r,
             Err(err) => {
                 last_err = Some(err);
@@ -186,7 +192,7 @@ where
         if !response.status().is_success() {
             last_err = Some(StalkerError::BadStatus {
                 status: response.status().as_u16(),
-                action: "get_epg_bulk".to_string(),
+                action: StalkerAction::GetBulkEpg,
                 body_snippet: String::new(),
             });
             continue;
@@ -244,7 +250,7 @@ where
             .await
             .map_err(|err| StalkerError::BodyDecode { message: format!("get_epg_bulk parser join error: {err}") })?
             .map_err(|err| match err.kind() {
-                ErrorKind::UnexpectedEof => StalkerError::EmptyBody { action: "get_epg_bulk".to_string() },
+                ErrorKind::UnexpectedEof => StalkerError::EmptyBody { action: StalkerAction::GetBulkEpg },
                 _ => StalkerError::BodyDecode { message: format!("get_epg_bulk json decode: {err}") },
             })?;
         cancellation_guard.disarm();

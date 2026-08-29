@@ -4,13 +4,12 @@ use crate::{
     api::{
         endpoints::recording_media_api::AuthClaims,
         model::{
-            event_manager::EventMessage,
             recording_quota,
             recording_rule_service::{DeleteFuture, RuleServiceError},
             recording_service::{
                 CreateRecordingInput, EditRecordingPatch, RecordingService, RecordingSourceInput, ServiceError,
             },
-            recording_ws, AppState, FileDownload,
+            recording_ws, AppState, EventMessage, FileDownload,
         },
     },
     repository::recording_rule_repository::RecordingRuleRepository,
@@ -26,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use shared::model::{
     recording::{RecordingProvenance, RecordingVisibility},
     recording_rule::{RecordingRule, RuleBody, RuleSource, RuleVisibility},
-    FileDownloadDto, Permission, UserId, XtreamCluster, ROLE_ADMIN,
+    FileDownloadDto, Permission, UserId, XtreamCluster,
 };
 use std::sync::Arc;
 
@@ -78,7 +77,7 @@ pub async fn list_recording_tasks(
     // *seeing* another owner's private tasks, but accepting the
     // parameter and silently returning an empty list made the API read
     // as if cross-owner queries were supported. Reject it explicitly.
-    if params.owner.is_some() && !is_admin(&claims) {
+    if params.owner.is_some() && !claims.is_admin() {
         return error_response(StatusCode::FORBIDDEN, "recording_forbidden");
     }
     let (revision, mut tasks) = recording_ws::recording_snapshot(&app_state.downloads, &claims).await;
@@ -431,7 +430,7 @@ pub async fn get_recording_health(
     State(app_state): State<Arc<AppState>>,
     AuthClaims(claims): AuthClaims,
 ) -> impl IntoResponse {
-    if !is_admin(&claims) {
+    if !claims.is_admin() {
         return error_response(StatusCode::FORBIDDEN, "recording_forbidden");
     }
     let health = crate::api::model::recording::recording_supervisor::supervisor_health();
@@ -448,7 +447,11 @@ pub async fn get_recording_health(
         retention_last_tick: health.retention_last_tick(),
         retention_sweep_interval_secs: recording.and_then(|cfg| cfg.retention.as_ref().map(|r| r.sweep_interval_secs)),
         notification_last_drain: health.notification_last_drain(),
-        notification_outbox_depth: health.notification_outbox_depth(),
+        // Read from the promoted outbox: the supervisor-local counter stopped
+        // being updated when the outbox moved into `tuliprox-messaging`.
+        notification_outbox_depth: tuliprox_messaging::outbox::health()
+            .outbox_depth
+            .load(std::sync::atomic::Ordering::Relaxed),
         notification_dead_lettered: health.notification_dead_lettered(),
         queue_revision: app_state.downloads.revision.load(std::sync::atomic::Ordering::SeqCst),
     })
@@ -490,8 +493,6 @@ fn recording_rule_repo(app_state: &AppState) -> RecordingRuleRepository {
 }
 
 fn can_write_rules(claims: &shared::model::Claims) -> bool { claims.permissions.contains(Permission::RecordingWrite) }
-
-fn is_admin(claims: &shared::model::Claims) -> bool { claims.roles.iter().any(|role| role == ROLE_ADMIN) }
 
 fn quota_limits_from_config(config: Option<&crate::model::RecordingQuotaConfig>) -> recording_quota::QuotaLimits {
     let mut per_user_bytes = std::collections::HashMap::new();
@@ -581,7 +582,7 @@ pub async fn list_recording_rules(
     let Ok(rules) = recording_rule_repo(&app_state).list().await else {
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, "recording_persistence_failed");
     };
-    let admin = is_admin(&claims);
+    let admin = claims.is_admin();
     let revision = app_state.downloads.revision.load(std::sync::atomic::Ordering::SeqCst);
     Json(
         rules
@@ -627,7 +628,7 @@ pub async fn create_recording_rule(
     if let Err(err) = crate::api::model::recording_rule_service::validate_rule(&rule).and_then(|()| {
         crate::api::model::recording_rule_service::authorize_rule_action(
             can_write_rules(&claims),
-            is_admin(&claims),
+            claims.is_admin(),
             &rule.owner_id,
             &rule,
         )
@@ -755,7 +756,7 @@ fn authorize_and_apply_recording_rule_edit(
     let subject_id = claims.subject_id.as_ref().ok_or(EditRuleError::MissingSubject)?;
     crate::api::model::recording_rule_service::authorize_rule_action(
         can_write_rules(claims),
-        is_admin(claims),
+        claims.is_admin(),
         subject_id,
         rule,
     )
@@ -764,7 +765,7 @@ fn authorize_and_apply_recording_rule_edit(
     crate::api::model::recording_rule_service::validate_rule(rule).map_err(EditRuleError::Rule)?;
     crate::api::model::recording_rule_service::authorize_rule_action(
         can_write_rules(claims),
-        is_admin(claims),
+        claims.is_admin(),
         subject_id,
         rule,
     )
@@ -842,7 +843,7 @@ pub async fn delete_recording_rule(
     };
     if let Err(err) = crate::api::model::recording_rule_service::authorize_rule_action(
         can_write_rules(&claims),
-        is_admin(&claims),
+        claims.is_admin(),
         subject_id,
         &rule,
     ) {
@@ -1016,7 +1017,7 @@ mod tests {
             iss: "tuliprox".to_string(),
             iat: 0,
             exp: 0,
-            roles: admin.then(|| ROLE_ADMIN.to_string()).into_iter().collect(),
+            roles: if admin { shared::model::RoleSet::ADMIN } else { shared::model::RoleSet::new() },
             permissions: Permission::RecordingWrite.into(),
             pwd_version: 0,
             subject_id,

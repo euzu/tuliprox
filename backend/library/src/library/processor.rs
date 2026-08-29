@@ -757,7 +757,7 @@ impl LibraryProcessor {
                     url: file_path,
                     user_agent: None,
                     analyze_duration: ffprobe.analyze_duration_micros,
-                    probe_size: ffprobe.probe_size_bytes,
+                    probe_size: ffprobe.probe_size_bytes.get(),
                     timeout_secs: ffprobe.timeout.unwrap_or(60),
                 },
                 // Local file probing does not traverse the network, so no proxy config is applied.
