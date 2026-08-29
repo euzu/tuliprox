@@ -27,7 +27,7 @@ use crate::{
             StreamDetails,
         },
     },
-    config_loader::{persist_source_config, read_sources_file_from_path},
+    config_loader::{persist_source_config_preserving_templates, read_sources_file_from_path},
     model::{
         is_input_expired, ConfigInput, ConfigInputAlias, GracePeriodOptions, InputSource, PanelApiConfig,
         PanelApiQueryParam, ProxyUserCredentials,
@@ -1671,7 +1671,7 @@ async fn persist_sources_yml_with_patches(
         return Ok(false);
     }
 
-    persist_source_config(&app_state.app_config, Some(sources_path), sources).await?;
+    persist_source_config_preserving_templates(&app_state.app_config, Some(sources_path), sources).await?;
     Ok(true)
 }
 
