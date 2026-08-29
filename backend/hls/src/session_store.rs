@@ -71,6 +71,9 @@ struct HlsSessionIncarnationEntry {
 }
 
 /// Keeps one exact proxy-session incarnation indexed for a cross-store transaction.
+///
+/// The guard retains the session-index read lock. While it is alive, callers must not await a
+/// session-store operation that requires the index write lock.
 pub(crate) struct HlsCurrentProxySessionGuard<'a> {
     _indexes: RwLockReadGuard<'a, SessionIndexes>,
     session: HlsSessionHandle,
@@ -97,6 +100,9 @@ impl HlsSessionStore {
     }
 
     /// Holds the current proxy-session identity stable until the returned guard is dropped.
+    ///
+    /// The returned guard retains the session-index read lock. While it is alive, callers must not
+    /// await a session-store operation that requires the index write lock.
     pub(crate) async fn hold_current_proxy_session(
         &self,
         proxy_session_id: &ProxySessionId,
