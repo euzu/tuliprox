@@ -9,6 +9,7 @@ use super::{
         estimate_hls_peak_bandwidth_bps, HlsBandwidthPersistenceOutcome, HlsBandwidthPersistenceState,
         HlsBandwidthSample, HLS_BANDWIDTH_PERSISTENCE_RETRY_MS,
     },
+    media_reserve::HlsManifestCommitIdentity,
     origin_progress::{HlsBoundedRecoverySamples, HlsOriginPathCondition, HlsOriginProgressPhase},
     recovery_timing::HlsAcceptanceEpisodeTiming,
     resource_identity::HlsPublishedResourceHistory,
@@ -259,7 +260,9 @@ pub struct HlsSession {
     pub origin_control: HlsSessionOriginControl,
     pub render_policy: RenderPolicy,
     pub last_rendered_manifest: Option<RenderedManifest>,
-    pub published_live_origin_baseline: Option<HlsPublishedLiveOriginBaseline>,
+    manifest_commit_generation: u64,
+    last_normal_manifest_commit_identity: Option<HlsManifestCommitIdentity>,
+    pub(crate) published_live_origin_baseline: Option<HlsPublishedLiveOriginBaseline>,
     pub longest_rendered_playlist_duration_ms: u64,
     pub initial_prefetch_gap_segments: usize,
     pub segment_prefetch_queue: SegmentPrefetchQueue,
@@ -326,6 +329,8 @@ impl HlsSession {
             origin_control: HlsSessionOriginControl::default(),
             render_policy: RenderPolicy::default(),
             last_rendered_manifest: None,
+            manifest_commit_generation: 0,
+            last_normal_manifest_commit_identity: None,
             published_live_origin_baseline: None,
             longest_rendered_playlist_duration_ms: 0,
             initial_prefetch_gap_segments: 0,
@@ -363,6 +368,33 @@ impl HlsSession {
             terminal_tail_protections: HashMap::new(),
             gc_marked_for_removal: false,
         }
+    }
+
+    pub fn next_manifest_commit_identity(&self, rendered_at_ms: u64) -> Option<HlsManifestCommitIdentity> {
+        self.manifest_commit_generation
+            .checked_add(1)
+            .map(|generation| HlsManifestCommitIdentity::committed(generation, rendered_at_ms))
+    }
+
+    pub fn record_manifest_commit_identity(&mut self, identity: HlsManifestCommitIdentity) {
+        // Invariant: identities recorded here are allocated exclusively by
+        // `next_manifest_commit_identity` and only after a successful manifest commit.
+        debug_assert_eq!(identity.commit_generation(), self.manifest_commit_generation.saturating_add(1));
+        self.manifest_commit_generation = identity.commit_generation();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_manifest_commit_generation_for_test(&mut self, generation: u64) {
+        self.manifest_commit_generation = generation;
+    }
+
+    pub const fn last_normal_manifest_commit_identity(&self) -> Option<HlsManifestCommitIdentity> {
+        self.last_normal_manifest_commit_identity
+    }
+
+    pub fn record_normal_manifest_commit_identity(&mut self, identity: HlsManifestCommitIdentity) {
+        self.record_manifest_commit_identity(identity);
+        self.last_normal_manifest_commit_identity = Some(identity);
     }
 
     pub fn established_manifest_recovery_binding(&self) -> Option<HlsManifestOriginBinding> {
@@ -775,6 +807,8 @@ impl fmt::Debug for HlsSession {
             .field("origin_refresh", &self.origin_refresh)
             .field("render_policy", &self.render_policy)
             .field("last_rendered_manifest", &self.last_rendered_manifest)
+            .field("manifest_commit_generation", &self.manifest_commit_generation)
+            .field("last_normal_manifest_commit_identity", &self.last_normal_manifest_commit_identity)
             .field("published_live_origin_baseline", &self.published_live_origin_baseline)
             .field("longest_rendered_playlist_duration_ms", &self.longest_rendered_playlist_duration_ms)
             .field("initial_prefetch_gap_segments", &self.initial_prefetch_gap_segments)

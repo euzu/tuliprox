@@ -14,11 +14,15 @@ use super::{
         HlsLeasePlaybackMode, HlsTerminalAssetIdentity, HlsTerminalTailCompatibility, HlsTerminalTailGeneration,
         HlsTerminalTailPlan,
     },
-    HlsEffectiveOriginAcquirePolicy, ProxySessionId,
+    HlsEffectiveOriginAcquirePolicy, HlsPublishedTransientResourceIds, ProxySessionId, TransientManifestLeaseBinding,
 };
 use base64::{engine::general_purpose, Engine as _};
 use rand::{rngs::OsRng, RngCore, TryRngCore};
-use std::{collections::HashMap, fmt, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashMap},
+    fmt,
+    sync::Arc,
+};
 use tuliprox_session::ConnectionKind;
 
 const HLS_ACCESS_LEASE_ID_BYTES: usize = 16;
@@ -197,6 +201,8 @@ pub struct HlsAccessLease {
     pub startup_admission: HlsLeaseStartupAdmissionState,
     pub playback_cursor: HlsLeasePlaybackCursor,
     pub last_manifest_snapshot: Option<HlsLeaseManifestSnapshot>,
+    published_transient_resource_ids: HlsPublishedTransientResourceIds,
+    published_finalized_manifest_generations: BTreeSet<super::TransientManifestGeneration>,
     manifest_snapshot_generation: u64,
     pub admission_generation: u64,
     pub runtime_policy_revocation: Option<HlsRuntimePolicyRevocation>,
@@ -216,6 +222,8 @@ pub struct HlsMediaLeaseIdentity {
 
 impl HlsMediaLeaseIdentity {
     pub const fn is_live(self) -> bool { matches!(self.playback, HlsMediaLeasePlaybackIdentity::Live { .. }) }
+
+    pub const fn lease_issued_at_ms(self) -> u64 { self.issued_at_ms }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -234,6 +242,10 @@ pub struct HlsLeaseManifestPublicationGuard {
     admission_generation: u64,
 }
 
+impl HlsLeaseManifestPublicationGuard {
+    pub(crate) const fn lease_issued_at_ms(self) -> u64 { self.issued_at_ms }
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum HlsLeaseManifestPublicationRejectReason {
     UnknownLease,
@@ -244,6 +256,7 @@ pub enum HlsLeaseManifestPublicationRejectReason {
     AdmissionGenerationChanged,
     LeaseNotLive,
     SourceRegressive,
+    ManifestGenerationUnavailable,
     SnapshotGenerationExhausted,
 }
 
@@ -305,12 +318,18 @@ impl HlsAccessLease {
             startup_admission: HlsLeaseStartupAdmissionState::Pending,
             playback_cursor: HlsLeasePlaybackCursor::default(),
             last_manifest_snapshot: None,
+            published_transient_resource_ids: HlsPublishedTransientResourceIds::default(),
+            published_finalized_manifest_generations: BTreeSet::new(),
             manifest_snapshot_generation: 0,
             admission_generation: 0,
             runtime_policy_revocation: None,
             runtime_policy_denial_reason: None,
             pending_terminal_protection_release: None,
         }
+    }
+
+    pub fn published_transient_resource_ids(&self) -> &HlsPublishedTransientResourceIds {
+        &self.published_transient_resource_ids
     }
 
     pub fn with_archive_playback(mut self, epg_reference_ts: Option<i64>, archive_origin_url: Option<String>) -> Self {
@@ -709,6 +728,7 @@ pub struct HlsAccessLeaseSessionSnapshot {
     pub active_count: usize,
     pub effective_origin_policy: Option<HlsEffectiveOriginAcquirePolicy>,
     pub idle_releases: Vec<HlsAccessLeaseIdleRelease>,
+    pub(crate) finalized_transient_manifest_bindings: Vec<TransientManifestLeaseBinding>,
 }
 
 impl HlsAccessLeaseStore {
@@ -1149,12 +1169,20 @@ impl HlsAccessLeaseStore {
         self.by_lease_id.get(lease_id)?.manifest_publication_guard()
     }
 
-    pub fn commit_manifest_publication(
+    pub(crate) fn published_transient_resource_ids(
+        &self,
+        lease_id: &HlsAccessLeaseId,
+    ) -> Option<&HlsPublishedTransientResourceIds> {
+        self.by_lease_id.get(lease_id).map(HlsAccessLease::published_transient_resource_ids)
+    }
+
+    pub(crate) fn commit_manifest_publication_with_resources(
         &mut self,
         lease_id: &HlsAccessLeaseId,
         proxy_session_id: &ProxySessionId,
         expected: HlsLeaseManifestPublicationGuard,
         mut snapshot: HlsLeaseManifestSnapshot,
+        published_transient_resource_ids: HlsPublishedTransientResourceIds,
         now_ms: u64,
     ) -> HlsLeaseManifestPublicationOutcome {
         let Some(lease) = self.by_lease_id.get(lease_id) else {
@@ -1197,7 +1225,7 @@ impl HlsAccessLeaseStore {
         if lease
             .last_manifest_snapshot
             .as_ref()
-            .is_some_and(|current| snapshot.source_render_marker < current.source_render_marker)
+            .is_some_and(|current| manifest_source_is_regressive(current, &snapshot))
         {
             return HlsLeaseManifestPublicationOutcome::Rejected(
                 HlsLeaseManifestPublicationRejectReason::SourceRegressive,
@@ -1219,7 +1247,12 @@ impl HlsAccessLeaseStore {
         }
         lease.manifest_snapshot_generation = next_generation;
         snapshot.snapshot_generation = next_generation;
+        let finalized_manifest_generation = snapshot.finalized_transient_manifest_generation;
         lease.last_manifest_snapshot = Some(snapshot);
+        lease.published_transient_resource_ids = published_transient_resource_ids;
+        if let Some(manifest_generation) = finalized_manifest_generation {
+            lease.published_finalized_manifest_generations.insert(manifest_generation);
+        }
         lease.startup_admission = HlsLeaseStartupAdmissionState::Admitted;
         if self.advance_availability_evidence(proxy_session_id).is_err() {
             return HlsLeaseManifestPublicationOutcome::Rejected(
@@ -1227,6 +1260,25 @@ impl HlsAccessLeaseStore {
             );
         }
         HlsLeaseManifestPublicationOutcome::Committed { snapshot_generation: next_generation }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn commit_manifest_publication(
+        &mut self,
+        lease_id: &HlsAccessLeaseId,
+        proxy_session_id: &ProxySessionId,
+        expected: HlsLeaseManifestPublicationGuard,
+        snapshot: HlsLeaseManifestSnapshot,
+        now_ms: u64,
+    ) -> HlsLeaseManifestPublicationOutcome {
+        self.commit_manifest_publication_with_resources(
+            lease_id,
+            proxy_session_id,
+            expected,
+            snapshot,
+            HlsPublishedTransientResourceIds::default(),
+            now_ms,
+        )
     }
 
     pub fn media_identity_is_current(
@@ -1893,6 +1945,7 @@ impl HlsAccessLeaseStore {
         let mut active_count = 0;
         let mut effective_origin_policy = None;
         let mut idle_releases = Vec::new();
+        let mut finalized_transient_manifest_bindings = Vec::new();
         let lease_ids = self
             .by_lease_id
             .values()
@@ -1922,8 +1975,24 @@ impl HlsAccessLeaseStore {
                     }
                 }));
             }
+            if lease_state_allows_use(lease.state) && lease.playback_mode == HlsLeasePlaybackMode::Live {
+                finalized_transient_manifest_bindings.extend(
+                    lease.published_finalized_manifest_generations.iter().map(|manifest_generation| {
+                        TransientManifestLeaseBinding::new(
+                            lease.lease_id.clone(),
+                            lease.issued_at_ms,
+                            *manifest_generation,
+                        )
+                    }),
+                );
+            }
         }
-        HlsAccessLeaseSessionSnapshot { active_count, effective_origin_policy, idle_releases }
+        HlsAccessLeaseSessionSnapshot {
+            active_count,
+            effective_origin_policy,
+            idle_releases,
+            finalized_transient_manifest_bindings,
+        }
     }
 
     pub fn lifecycle_snapshot(
@@ -1951,6 +2020,10 @@ pub fn new_hls_access_lease_id() -> HlsAccessLeaseId {
         rand::rng().fill_bytes(&mut bytes);
     }
     HlsAccessLeaseId(general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
+
+fn manifest_source_is_regressive(current: &HlsLeaseManifestSnapshot, candidate: &HlsLeaseManifestSnapshot) -> bool {
+    candidate.source_commit_identity.commit_generation() < current.source_commit_identity.commit_generation()
 }
 
 const fn lease_state_allows_use(state: HlsAccessLeaseState) -> bool {
@@ -2020,7 +2093,10 @@ mod tests {
         super::{
             build_terminal_tail_plan,
             manifest_acceptance::HlsManifestAcceptanceGeneration,
-            media_reserve::{HlsLeaseReserveAvailabilityBasis, HlsLeaseReserveSnapshot, HlsPlaybackCompletionOutcome},
+            media_reserve::{
+                HlsLeaseReserveAvailabilityBasis, HlsLeaseReserveSnapshot, HlsManifestCommitIdentity,
+                HlsPlaybackCompletionOutcome,
+            },
             recovery_timing::{
                 HlsLeaseCutoverTiming, HlsTerminalCommitWindow, HlsTerminalMediaPreparationState, HlsTransitionMarginMs,
             },
@@ -2031,8 +2107,8 @@ mod tests {
             terminal_tail::{
                 snapshot_terminal_media_asset, HlsLeasePlaybackMode, HlsTerminalTailCompatibility, HlsTerminalTailPlan,
             },
-            HlsLeaseManifestSegment, HlsLeaseManifestSnapshot, HlsManifestDeliveryMode, HlsManifestSourceRenderMarker,
-            HlsMediaContainer, HlsTerminalAssetIdentity, HlsTerminalBaseMediaState, HlsTerminalBaseProtection,
+            HlsLeaseManifestSegment, HlsLeaseManifestSnapshot, HlsManifestDeliveryMode, HlsMediaContainer,
+            HlsTerminalAssetIdentity, HlsTerminalBaseMediaState, HlsTerminalBaseProtection,
             HlsTerminalBaseSegmentAvailability, HlsTerminalTailBuildInput, HlsTerminalTailGeneration,
         },
         new_hls_access_lease_id, HlsAccessLease, HlsAccessLeaseActivation, HlsAccessLeaseDenialMode,
@@ -2142,7 +2218,9 @@ mod tests {
     fn manifest_snapshot(source_rendered_at_ms: u64) -> HlsLeaseManifestSnapshot {
         HlsLeaseManifestSnapshot {
             delivery_mode: HlsManifestDeliveryMode::NormalCacheTimeline,
-            source_render_marker: HlsManifestSourceRenderMarker::new(source_rendered_at_ms),
+            source_commit_identity: HlsManifestCommitIdentity::new(source_rendered_at_ms),
+            uri_materialization: None,
+            finalized_transient_manifest_generation: None,
             snapshot_generation: 0,
             delivered_at_ms: 2_000,
             first_proxy_seq: 40,
@@ -2151,7 +2229,7 @@ mod tests {
                 HlsLeaseManifestSegment {
                     proxy_seq: 40,
                     duration_ms: 6_000,
-                    uri: "/live/40.ts".to_string(),
+                    uri: "/live/40.ts".to_string().into(),
                     discontinuity_before: false,
                     map_ref_ready: true,
                     encryption: None,
@@ -2159,7 +2237,7 @@ mod tests {
                 HlsLeaseManifestSegment {
                     proxy_seq: 41,
                     duration_ms: 6_000,
-                    uri: "/live/41.ts".to_string(),
+                    uri: "/live/41.ts".to_string().into(),
                     discontinuity_before: false,
                     map_ref_ready: true,
                     encryption: None,
@@ -2182,7 +2260,8 @@ mod tests {
     ) -> HlsLeaseManifestSnapshot {
         let mut snapshot = manifest_snapshot(source_rendered_at_ms);
         for segment in Arc::make_mut(&mut snapshot.visible_segments) {
-            segment.uri = format!("/hls/shared/live/{}/{}/{}.ts", proxy_session_id.0, lease_id.0, segment.proxy_seq);
+            segment.uri =
+                format!("/hls/shared/live/{}/{}/{}.ts", proxy_session_id.0, lease_id.0, segment.proxy_seq).into();
         }
         snapshot
     }
@@ -2521,7 +2600,7 @@ mod tests {
             segments.push(HlsLeaseManifestSegment {
                 proxy_seq,
                 duration_ms: 6_000,
-                uri: format!("/hls/shared/live/{}/{}/{}.ts", proxy_session_id.0, lease_id.0, proxy_seq),
+                uri: format!("/hls/shared/live/{}/{}/{}.ts", proxy_session_id.0, lease_id.0, proxy_seq).into(),
                 discontinuity_before: false,
                 map_ref_ready: true,
                 encryption: None,
@@ -3126,8 +3205,57 @@ mod tests {
             .response_snapshot(&lease_id, &proxy_session_id, 2_200)
             .and_then(|lease| lease.last_manifest_snapshot)
             .expect("newer snapshot remains current");
-        assert_eq!(current.source_render_marker, HlsManifestSourceRenderMarker::new(20));
+        assert_eq!(current.source_commit_identity, HlsManifestCommitIdentity::new(20));
         assert_eq!(current.snapshot_generation, 1);
+    }
+
+    #[test]
+    fn commit_generation_orders_cross_mode_sources_rendered_in_the_same_millisecond() {
+        let mut store = HlsAccessLeaseStore::default();
+        let lease_id = HlsAccessLeaseId("lease-a".to_string());
+        let proxy_session_id = ProxySessionId("proxy".to_string());
+        store.prepare_access_lease(lease(lease_id.clone(), &proxy_session_id.0, 1_000));
+        let older_request =
+            store.prepare_manifest_publication(&lease_id, &proxy_session_id, 2_000).expect("older request guard");
+        let newer_request =
+            store.prepare_manifest_publication(&lease_id, &proxy_session_id, 2_000).expect("newer request guard");
+        let mut newer = manifest_snapshot(20);
+        newer.delivery_mode = HlsManifestDeliveryMode::TransientPassthrough;
+        newer.source_commit_identity = HlsManifestCommitIdentity::committed(2, 20);
+        newer.finalized_transient_manifest_generation = Some(super::super::TransientManifestGeneration::for_test(2));
+        let mut older = manifest_snapshot(20);
+        older.delivery_mode = HlsManifestDeliveryMode::NormalCacheTimeline;
+        older.source_commit_identity = HlsManifestCommitIdentity::committed(1, 20);
+        older.finalized_transient_manifest_generation = None;
+
+        assert!(store
+            .commit_manifest_publication(&lease_id, &proxy_session_id, newer_request, newer, 2_100)
+            .is_committed());
+        assert_eq!(
+            store.commit_manifest_publication(&lease_id, &proxy_session_id, older_request, older, 2_200),
+            HlsLeaseManifestPublicationOutcome::Rejected(HlsLeaseManifestPublicationRejectReason::SourceRegressive)
+        );
+
+        let lease_id = HlsAccessLeaseId("lease-b".to_string());
+        store.prepare_access_lease(lease(lease_id.clone(), &proxy_session_id.0, 1_000));
+        let older_request =
+            store.prepare_manifest_publication(&lease_id, &proxy_session_id, 2_000).expect("older request guard");
+        let newer_request =
+            store.prepare_manifest_publication(&lease_id, &proxy_session_id, 2_000).expect("newer request guard");
+        let mut newer = manifest_snapshot(20);
+        newer.source_commit_identity = HlsManifestCommitIdentity::committed(4, 20);
+        let mut older = manifest_snapshot(20);
+        older.delivery_mode = HlsManifestDeliveryMode::TransientPassthrough;
+        older.source_commit_identity = HlsManifestCommitIdentity::committed(3, 20);
+        older.finalized_transient_manifest_generation = Some(super::super::TransientManifestGeneration::for_test(1));
+
+        assert!(store
+            .commit_manifest_publication(&lease_id, &proxy_session_id, newer_request, newer, 2_100)
+            .is_committed());
+        assert_eq!(
+            store.commit_manifest_publication(&lease_id, &proxy_session_id, older_request, older, 2_200),
+            HlsLeaseManifestPublicationOutcome::Rejected(HlsLeaseManifestPublicationRejectReason::SourceRegressive)
+        );
     }
 
     #[test]

@@ -70,7 +70,7 @@ use crate::{
     CacheAccessState, GarbageCollectionPolicy, HlsAccessLease, HlsAccessLeaseId, HlsAccessLeasePendingDeadline,
     HlsAccessLeaseStore, HlsAccessLeaseTiming, HlsBoundAccountAcquireErrorKind, HlsFreshManifestRequiredReason,
     HlsGarbageCollector, HlsLeaseManifestSegment, HlsLeaseManifestSnapshot, HlsManifestAcceptanceDirective,
-    HlsManifestAcceptanceExhaustionReason, HlsManifestDeliveryMode, HlsManifestSourceRenderMarker, HlsMapWorkerPool,
+    HlsManifestAcceptanceExhaustionReason, HlsManifestCommitIdentity, HlsManifestDeliveryMode, HlsMapWorkerPool,
     HlsMediaContainer, HlsOriginAccountBinding, HlsOriginIoContext, HlsPlaybackFamilyKey,
     HlsPreparedTerminalBundleState, HlsProxyManager, HlsSegmentCache, HlsSegmentRepairManager, HlsSegmentWorkerPool,
     HlsSession, HlsSessionKey, HlsSessionMode, HlsSessionStore, HlsTerminalTailCompatibility, MapCacheStatus,
@@ -137,6 +137,16 @@ fn test_manifest_origin_binding(target_url: Url) -> HlsManifestOriginBinding {
 
 fn test_session() -> Arc<RwLock<HlsSession>> {
     Arc::new(RwLock::new(HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0)))
+}
+
+fn repeated_transient_manifest(segment_count: usize) -> String {
+    let mut body = String::from(
+        "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:1\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key.bin\"\n",
+    );
+    for _ in 0..segment_count {
+        body.push_str("#EXTINF:4,\nsame.ts\n");
+    }
+    body
 }
 
 fn test_segment_repair_manager() -> Arc<HlsSegmentRepairManager> {
@@ -308,6 +318,11 @@ fn manifest_response_failure_cases() -> Vec<ManifestFetchFailureCase> {
             "retry exhausted",
             OriginManifestFetchError::RetryExhausted,
             HlsManifestFetchFailureSignal::retryable(Kind::RetryExhausted, NoResponse),
+        ),
+        (
+            "commit generation exhausted",
+            OriginManifestFetchError::CommitGenerationExhausted,
+            HlsManifestFetchFailureSignal::discarded(Kind::CommitGenerationExhausted),
         ),
         (
             "recovery unavailable after response",
@@ -1656,7 +1671,9 @@ async fn hls_availability_reevaluation_removed_lease_supersedes_old_guard() {
 fn cutover_live_manifest_snapshot() -> HlsLeaseManifestSnapshot {
     HlsLeaseManifestSnapshot {
         delivery_mode: HlsManifestDeliveryMode::NormalCacheTimeline,
-        source_render_marker: HlsManifestSourceRenderMarker::new(1_000),
+        source_commit_identity: HlsManifestCommitIdentity::new(1_000),
+        uri_materialization: None,
+        finalized_transient_manifest_generation: None,
         snapshot_generation: 0,
         delivered_at_ms: 1_000,
         first_proxy_seq: 40,
@@ -1665,7 +1682,7 @@ fn cutover_live_manifest_snapshot() -> HlsLeaseManifestSnapshot {
             HlsLeaseManifestSegment {
                 proxy_seq: 40,
                 duration_ms: 4_000,
-                uri: "/live/40.ts".to_string(),
+                uri: "/live/40.ts".into(),
                 discontinuity_before: false,
                 map_ref_ready: true,
                 encryption: None,
@@ -1673,7 +1690,7 @@ fn cutover_live_manifest_snapshot() -> HlsLeaseManifestSnapshot {
             HlsLeaseManifestSegment {
                 proxy_seq: 41,
                 duration_ms: 4_000,
-                uri: "/live/41.ts".to_string(),
+                uri: "/live/41.ts".into(),
                 discontinuity_before: false,
                 map_ref_ready: true,
                 encryption: None,
@@ -2071,6 +2088,271 @@ async fn ext_x_key_manifest_commits_transient_rewrite() {
 }
 
 #[tokio::test]
+async fn finalized_event_manifest_commits_full_transient_lifecycle() {
+    let mut origin_body =
+        "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-MEDIA-SEQUENCE:1\n".to_string();
+    for sequence in 1..=8 {
+        origin_body.push_str(&format!("#EXTINF:4.0,\n{sequence}.ts\n"));
+    }
+    origin_body.push_str("#EXT-X-ENDLIST\n");
+    let origin_body: &'static str = Box::leak(origin_body.into_boxed_str());
+    let session = refresh_session_with_origin_body(origin_body).await;
+    let session = session.read().await;
+    let body = session.transient.last_manifest_body.as_ref().expect("finalized transient body");
+
+    assert!(matches!(
+        session.mode,
+        HlsSessionMode::TransientPassthrough {
+            reason: TransientPassthroughReason::UnsupportedTag { ref tag }
+        } if tag == "#EXT-X-PLAYLIST-TYPE"
+    ));
+    let stored_body_lifecycle = tuliprox_parser::hls::origin_manifest::parse_manifest_semantics(body).lifecycle();
+    assert_eq!(session.transient.last_manifest_finalized(), stored_body_lifecycle.is_finalized());
+    assert_eq!(
+        session.transient.last_manifest_window_policy(),
+        tuliprox_parser::hls::origin_manifest::HlsManifestWindowPolicy::PreserveFullManifest
+    );
+    assert_eq!(session.transient.current_manifest_resource_ids().len(), 8);
+    assert_eq!(session.transient.last_manifest_playlist_duration_ms, Some(32_000));
+    assert_eq!(session.transient.last_manifest_valid_until_ms(), None);
+    assert!(body.contains("#EXT-X-PLAYLIST-TYPE:EVENT"));
+    assert!(body.contains("#EXT-X-ENDLIST"));
+    assert_eq!(body.matches("/r/").count(), 8);
+}
+
+#[tokio::test]
+async fn endlist_only_manifest_commits_complete_body_with_consistent_finalized_state() {
+    let mut origin_body = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:1\n".to_string();
+    for sequence in 1..=8 {
+        origin_body.push_str(&format!("#EXTINF:4.0,\n{sequence}.ts\n"));
+    }
+    origin_body.push_str("#EXT-X-ENDLIST\n");
+    let origin_body: &'static str = Box::leak(origin_body.into_boxed_str());
+    let session = refresh_session_with_origin_body(origin_body).await;
+    let session = session.read().await;
+    let body = session.transient.last_manifest_body.as_ref().expect("finalized transient body");
+
+    assert!(matches!(
+        session.mode,
+        HlsSessionMode::TransientPassthrough {
+            reason: TransientPassthroughReason::UnsupportedTag { ref tag }
+        } if tag == "#EXT-X-ENDLIST"
+    ));
+    let stored_body_lifecycle = tuliprox_parser::hls::origin_manifest::parse_manifest_semantics(body).lifecycle();
+    assert_eq!(session.transient.last_manifest_finalized(), stored_body_lifecycle.is_finalized());
+    assert_eq!(
+        session.transient.last_manifest_window_policy(),
+        tuliprox_parser::hls::origin_manifest::HlsManifestWindowPolicy::PreserveFullManifest
+    );
+    assert_eq!(session.transient.current_manifest_resource_ids().len(), 8);
+    assert_eq!(body.matches("/r/").count(), 8);
+    assert!(body.contains("#EXT-X-ENDLIST"));
+    assert!(stored_body_lifecycle.is_finalized());
+}
+
+#[test]
+fn duplicate_media_units_are_rejected_locally_before_transient_commit() {
+    let mut session = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
+    session.mode = HlsSessionMode::TransientPassthrough { reason: TransientPassthroughReason::ExtXKey };
+    let request = test_origin_refresh_request(test_session());
+    let body = repeated_transient_manifest(crate::manifest_limits::MAX_HLS_LEASE_SNAPSHOT_SEGMENTS + 1);
+
+    let result = commit_fetched_manifest(&mut session, &fetched_manifest(&body), &request, 100);
+
+    assert!(matches!(
+        result,
+        Err(HlsManifestCommitError::LocalRepresentationLimit(violation))
+            if violation.kind == crate::manifest_limits::HlsManifestLimitKind::LeaseSnapshotSegments
+    ));
+    assert!(session.transient.last_manifest_body.is_none());
+    let signal = classify_manifest_fetch_failure(&OriginManifestFetchError::LocalRepresentationLimit(
+        crate::manifest_limits::HlsManifestLimitViolation::new(
+            crate::manifest_limits::HlsManifestLimitKind::LeaseSnapshotSegments,
+            crate::manifest_limits::MAX_HLS_LEASE_SNAPSHOT_SEGMENTS + 1,
+            crate::manifest_limits::MAX_HLS_LEASE_SNAPSHOT_SEGMENTS,
+        ),
+    ));
+    assert_eq!(signal, HlsManifestFetchFailureSignal::discarded(HlsManifestFetchFailureKind::LocalRepresentationLimit));
+}
+
+#[test]
+fn transient_commit_generation_exhaustion_is_not_reported_as_manifest_limit() {
+    let mut session = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
+    session.mode = HlsSessionMode::TransientPassthrough { reason: TransientPassthroughReason::ExtXKey };
+    session.set_manifest_commit_generation_for_test(u64::MAX);
+    let request = test_origin_refresh_request(test_session());
+    let manifest_limit_rejections_before = request.segment_worker_pool.metrics().snapshot().manifest_limit_rejections;
+    let fetched = fetched_manifest(
+        "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key.bin\"\n#EXTINF:4,\nseg.ts\n",
+    );
+
+    let result = commit_fetched_manifest(&mut session, &fetched, &request, 100);
+
+    assert!(matches!(result, Err(HlsManifestCommitError::CommitGenerationExhausted)));
+    assert_eq!(
+        request.segment_worker_pool.metrics().snapshot().manifest_limit_rejections,
+        manifest_limit_rejections_before
+    );
+    assert!(session.transient.last_manifest_body.is_none());
+}
+
+#[tokio::test]
+async fn initial_local_representation_limit_does_not_enter_origin_recovery() {
+    let session = test_session();
+    session.write().await.mode = HlsSessionMode::TransientPassthrough { reason: TransientPassthroughReason::ExtXKey };
+    let request = test_origin_refresh_request(Arc::clone(&session));
+    let fetch_context = manifest_fetch_context(&request);
+    let fetched =
+        fetched_manifest(&repeated_transient_manifest(crate::manifest_limits::MAX_HLS_LEASE_SNAPSHOT_SEGMENTS + 1));
+    let recovery_binding =
+        test_manifest_origin_binding(Url::parse("http://127.0.0.1:9/recovery.m3u8").expect("test recovery URL"));
+
+    let result =
+        super::commit_initial_fetched_manifest(&request, &fetch_context, fetched, Some(recovery_binding), false).await;
+
+    assert!(matches!(
+        result,
+        Err(OriginManifestFetchError::LocalRepresentationLimit(violation))
+            if violation.kind == crate::manifest_limits::HlsManifestLimitKind::LeaseSnapshotSegments
+    ));
+}
+
+#[tokio::test]
+async fn initial_transient_manifest_without_snapshot_template_is_rejected_locally() {
+    let session = test_session();
+    session.write().await.mode = HlsSessionMode::TransientPassthrough { reason: TransientPassthroughReason::ExtXKey };
+    let request = test_origin_refresh_request(Arc::clone(&session));
+    let fetch_context = manifest_fetch_context(&request);
+    let fetched = fetched_manifest(
+        "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-MEDIA-SEQUENCE:1\n\
+         #EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key.bin\"\n#EXTINF:4,\nsegment.ts\n#EXT-X-ENDLIST\n",
+    );
+    let recovery_binding =
+        test_manifest_origin_binding(Url::parse("http://127.0.0.1:9/recovery.m3u8").expect("test recovery URL"));
+
+    let result =
+        super::commit_initial_fetched_manifest(&request, &fetch_context, fetched, Some(recovery_binding), false).await;
+
+    assert!(matches!(result, Err(OriginManifestFetchError::MalformedTransientRepresentation)));
+    assert_eq!(
+        classify_manifest_fetch_failure(&OriginManifestFetchError::MalformedTransientRepresentation),
+        HlsManifestFetchFailureSignal::discarded(HlsManifestFetchFailureKind::MalformedTransientRepresentation)
+    );
+    let session = session.read().await;
+    assert!(session.transient.last_manifest_body.is_none());
+    assert!(session.transient.last_manifest_template().is_none());
+    assert!(session.transient.last_manifest_commit_identity().is_none());
+    assert_eq!(session.transient.manifest_generation(), 0);
+    assert!(session.transient.resources.is_empty());
+    assert!(crate::manifest_commit::hls_committed_manifest_body_for_request(
+        &session,
+        crate::manifest_commit::HlsCachedManifestOptions::initial(Duration::ZERO),
+        0,
+        100,
+    )
+    .is_none());
+}
+
+#[test]
+fn rejected_transient_candidate_preserves_committed_state_and_pending_handoff() {
+    let mut session = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
+    session.mode = HlsSessionMode::TransientPassthrough { reason: TransientPassthroughReason::ExtXKey };
+    let mut request = test_origin_refresh_request(test_session());
+    request.transient_resource_ttl_ms = 1;
+    let baseline = fetched_manifest(
+        "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:1\n\
+         #EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key.bin\"\n#EXTINF:4,\nsegment.ts\n",
+    );
+    assert!(commit_fetched_manifest(&mut session, &baseline, &request, 100).is_ok());
+    session.mark_pending_handoff_discontinuity(7);
+    let baseline_body = session.transient.last_manifest_body.clone().expect("baseline manifest");
+    let baseline_generation = session.transient.manifest_generation();
+    let baseline_resources = session.transient.resources.keys().cloned().collect::<std::collections::HashSet<_>>();
+    let baseline_highwater = session.origin_seq_highwater;
+    let key_format = "x".repeat(crate::manifest_limits::MAX_HLS_ENCRYPTION_DIRECTIVE_BYTES);
+    let candidate = fetched_manifest(&format!(
+        "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:1\n\
+         #EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key.bin\",KEYFORMAT=\"{key_format}\"\n\
+         #EXTINF:4,\nsegment.ts\n"
+    ));
+
+    let result = commit_fetched_manifest(&mut session, &candidate, &request, 102);
+
+    assert!(matches!(
+        result,
+        Err(HlsManifestCommitError::LocalRepresentationLimit(violation))
+            if violation.kind
+                == crate::manifest_limits::HlsManifestLimitKind::LeaseSnapshotEncryptionDirectiveBytes
+    ));
+    assert!(Arc::ptr_eq(
+        session.transient.last_manifest_body.as_ref().expect("baseline remains current"),
+        &baseline_body
+    ));
+    assert_eq!(session.transient.manifest_generation(), baseline_generation);
+    assert_eq!(
+        session.transient.resources.keys().cloned().collect::<std::collections::HashSet<_>>(),
+        baseline_resources
+    );
+    assert_eq!(session.pending_handoff_discontinuity_sequence, Some(7));
+    assert_eq!(session.origin_seq_highwater, baseline_highwater);
+}
+
+#[test]
+fn transient_manifest_without_snapshot_template_preserves_deliverable_commit() {
+    let mut session = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
+    session.mode = HlsSessionMode::TransientPassthrough { reason: TransientPassthroughReason::ExtXKey };
+    let request = test_origin_refresh_request(test_session());
+    let baseline = fetched_manifest(
+        "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-MEDIA-SEQUENCE:1\n\
+         #EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key.bin\"\n#EXTINF:4,\nsegment.ts\n#EXT-X-ENDLIST\n",
+    );
+    assert!(commit_fetched_manifest(&mut session, &baseline, &request, 100).is_ok());
+    session.mark_pending_handoff_discontinuity(7);
+    let baseline_body = session.transient.last_manifest_body.clone().expect("baseline manifest");
+    let baseline_template = session.transient.last_manifest_template().expect("baseline template");
+    let baseline_generation = session.transient.manifest_generation();
+    let baseline_finalized_generation =
+        session.transient.current_finalized_manifest_generation().expect("baseline finalized generation");
+    let baseline_finalized_generation_count = session.transient.finalized_manifest_generation_count();
+    let baseline_commit_identity = session.transient.last_manifest_commit_identity().expect("baseline identity");
+    let baseline_resources = session.transient.resources.keys().cloned().collect::<std::collections::HashSet<_>>();
+    let baseline_manifest_resource_ids = session.transient.current_manifest_resource_ids().clone();
+    let baseline_highwater = session.origin_seq_highwater;
+    let candidate = fetched_manifest(
+        "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-MEDIA-SEQUENCE:2\n\
+         #EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"rotated-key.bin\"\n#EXTINF:4,\nreplacement.ts\n#EXT-X-ENDLIST\n",
+    );
+
+    let result = commit_fetched_manifest(&mut session, &candidate, &request, 102);
+
+    assert!(matches!(result, Err(HlsManifestCommitError::MalformedTransientRepresentation)));
+    assert!(Arc::ptr_eq(
+        session.transient.last_manifest_body.as_ref().expect("baseline remains current"),
+        &baseline_body
+    ));
+    assert!(Arc::ptr_eq(
+        &session.transient.last_manifest_template().expect("baseline template remains current"),
+        &baseline_template
+    ));
+    assert_eq!(session.transient.manifest_generation(), baseline_generation);
+    assert_eq!(session.transient.current_finalized_manifest_generation(), Some(baseline_finalized_generation));
+    assert_eq!(session.transient.finalized_manifest_generation_count(), baseline_finalized_generation_count);
+    assert_eq!(session.transient.last_manifest_commit_identity(), Some(baseline_commit_identity));
+    assert_eq!(
+        session.transient.resources.keys().cloned().collect::<std::collections::HashSet<_>>(),
+        baseline_resources
+    );
+    assert_eq!(session.transient.current_manifest_resource_ids(), &baseline_manifest_resource_ids);
+    assert_eq!(session.pending_handoff_discontinuity_sequence, Some(7));
+    assert_eq!(session.origin_seq_highwater, baseline_highwater);
+    assert!(session
+        .transient
+        .last_manifest_template()
+        .zip(session.transient.last_manifest_commit_identity())
+        .is_some());
+}
+
+#[tokio::test]
 async fn compatible_aes_128_manifest_commits_normal_timeline_with_opaque_key_resource() {
     let session = refresh_session_with_origin_body(
         "#EXTM3U\n#EXT-X-VERSION:5\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:1\n\
@@ -2105,7 +2387,7 @@ fn transient_commit_accepts_plausible_same_redirect_host_rollover_and_resets_hig
     session.mark_authorized_media_access(100);
     let previous_manifest =
         "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:757\n#EXTINF:4.0,\n/hls/shared/live/session/lease/r/old.ts\n".to_string();
-    session.transient.replace_manifest(previous_manifest.clone(), 10);
+    session.transient.replace_manifest_with_semantics(previous_manifest.clone(), 10, None);
     let request = test_origin_refresh_request(test_session());
     let fetched = fetched_manifest(
         "#EXTM3U\n#EXT-X-TARGETDURATION:12\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key.bin\"\n#EXTINF:4.0,\nseg.ts\n",
@@ -2128,7 +2410,7 @@ fn transient_commit_rejects_same_host_backward_manifest_outside_rollover_window(
     session.mark_authorized_media_access(100);
     let previous_manifest =
         "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:757\n#EXTINF:4.0,\n/hls/shared/live/session/lease/r/old.ts\n".to_string();
-    session.transient.replace_manifest(previous_manifest.clone(), 10);
+    session.transient.replace_manifest_with_semantics(previous_manifest.clone(), 10, None);
     let request = test_origin_refresh_request(test_session());
     let fetched = fetched_manifest(
         "#EXTM3U\n#EXT-X-TARGETDURATION:12\n#EXT-X-MEDIA-SEQUENCE:226\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key.bin\"\n#EXTINF:4.0,\nseg.ts\n",
@@ -2151,7 +2433,7 @@ fn transient_commit_rebases_expired_session_highwater() {
     session.mark_authorized_media_access(1_000);
     let previous_manifest =
         "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:757\n#EXTINF:4.0,\n/hls/shared/live/session/lease/r/old.ts\n".to_string();
-    session.transient.replace_manifest(previous_manifest.clone(), 10);
+    session.transient.replace_manifest_with_semantics(previous_manifest.clone(), 10, None);
     let request = test_origin_refresh_request(test_session());
     let fetched = fetched_manifest(
         "#EXTM3U\n#EXT-X-TARGETDURATION:12\n#EXT-X-MEDIA-SEQUENCE:900\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key.bin\"\n#EXTINF:4.0,\nseg.ts\n",
@@ -2170,13 +2452,14 @@ fn transient_commit_accepts_monotonic_media_sequence_and_updates_highwater() {
     session.mode = HlsSessionMode::TransientPassthrough { reason: TransientPassthroughReason::ExtXKey };
     session.origin_seq_highwater = Some(758);
     session.last_effective_manifest_host = Some("origin.example.com".to_string());
-    session.transient.replace_manifest(
+    session.transient.replace_manifest_with_semantics(
         "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:757\n#EXTINF:4.0,\n/hls/shared/live/session/lease/r/old.ts\n".to_string(),
         10,
+        None,
     );
     let request = test_origin_refresh_request(test_session());
     let fetched = fetched_manifest(
-        "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:759\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key.bin\"\n#EXTINF:4.0,\nseg759.ts\n#EXTINF:4.0,\nseg760.ts\n",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:759\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key.bin\"\n#EXTINF:4.0,\nseg759.ts\n#EXTINF:4.0,\nseg760.ts\n",
     );
 
     let result = commit_fetched_manifest(&mut session, &fetched, &request, 100);
@@ -2228,7 +2511,11 @@ fn fresh_revalidation_rebases_transient_manifest_on_the_pinned_host() {
 
 #[tokio::test]
 async fn unsupported_tag_manifest_commits_transient_rewrite() {
-    let session = refresh_session_with_origin_body("#EXTM3U\n#EXT-X-PART:DURATION=1.0,URI=\"part.m4s\"\n").await;
+    let session = refresh_session_with_origin_body(
+        "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-PART:DURATION=1.0,URI=\"part.m4s\"\n\
+         #EXTINF:4.0,\nseg.ts\n",
+    )
+    .await;
     let session = session.read().await;
 
     assert!(matches!(
@@ -2240,7 +2527,10 @@ async fn unsupported_tag_manifest_commits_transient_rewrite() {
 
 #[tokio::test]
 async fn parser_unsupported_feature_manifest_commits_transient_rewrite() {
-    let session = refresh_session_with_origin_body("#EXTM3U\n#EXT-X-BYTERANGE:10\n#EXTINF:4.0,\nseg.ts\n").await;
+    let session = refresh_session_with_origin_body(
+        "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-BYTERANGE:10\n#EXTINF:4.0,\nseg.ts\n",
+    )
+    .await;
     let session = session.read().await;
 
     assert!(matches!(
@@ -2429,7 +2719,9 @@ fn bind_refresh_request_to_app_state(mut request: OriginRefreshRequest, ctx: &cr
 fn post_refresh_live_manifest_snapshot() -> HlsLeaseManifestSnapshot {
     HlsLeaseManifestSnapshot {
         delivery_mode: HlsManifestDeliveryMode::NormalCacheTimeline,
-        source_render_marker: HlsManifestSourceRenderMarker::new(1),
+        source_commit_identity: HlsManifestCommitIdentity::new(1),
+        uri_materialization: None,
+        finalized_transient_manifest_generation: None,
         snapshot_generation: 1,
         delivered_at_ms: 1,
         first_proxy_seq: 0,
@@ -2438,7 +2730,7 @@ fn post_refresh_live_manifest_snapshot() -> HlsLeaseManifestSnapshot {
             HlsLeaseManifestSegment {
                 proxy_seq: 0,
                 duration_ms: 4_000,
-                uri: "0.ts".to_string(),
+                uri: "0.ts".into(),
                 discontinuity_before: false,
                 map_ref_ready: true,
                 encryption: None,
@@ -2446,7 +2738,7 @@ fn post_refresh_live_manifest_snapshot() -> HlsLeaseManifestSnapshot {
             HlsLeaseManifestSegment {
                 proxy_seq: 1,
                 duration_ms: 4_000,
-                uri: "1.ts".to_string(),
+                uri: "1.ts".into(),
                 discontinuity_before: false,
                 map_ref_ready: true,
                 encryption: None,
@@ -2454,7 +2746,7 @@ fn post_refresh_live_manifest_snapshot() -> HlsLeaseManifestSnapshot {
             HlsLeaseManifestSegment {
                 proxy_seq: 2,
                 duration_ms: 4_000,
-                uri: "2.ts".to_string(),
+                uri: "2.ts".into(),
                 discontinuity_before: false,
                 map_ref_ready: true,
                 encryption: None,
@@ -4546,7 +4838,7 @@ async fn commit_ready_baseline_snapshot(
             .map(|segment| HlsLeaseManifestSegment {
                 proxy_seq: segment.proxy_seq,
                 duration_ms: segment.duration_ms,
-                uri: format!("/hls/test/{:06}.ts", segment.proxy_seq),
+                uri: format!("/hls/test/{:06}.ts", segment.proxy_seq).into(),
                 discontinuity_before: segment.discontinuity_before,
                 map_ref_ready: true,
                 encryption: None,
@@ -4564,7 +4856,9 @@ async fn commit_ready_baseline_snapshot(
         visible_segments.iter().fold(0_u64, |duration_ms, segment| duration_ms.saturating_add(segment.duration_ms));
     HlsLeaseManifestSnapshot {
         delivery_mode: HlsManifestDeliveryMode::NormalCacheTimeline,
-        source_render_marker: HlsManifestSourceRenderMarker::new(now_ms),
+        source_commit_identity: HlsManifestCommitIdentity::new(now_ms),
+        uri_materialization: None,
+        finalized_transient_manifest_generation: None,
         snapshot_generation: 0,
         delivered_at_ms: now_ms,
         first_proxy_seq,

@@ -6,8 +6,9 @@
 
 use super::selection_log::format_optional_highwater;
 use crate::{
-    deterministic_conflict::HlsDeterministicTimelineConflict, resource_identity::HlsMediaResourceSemanticKey,
-    timeline::HlsResourceReplayDecision, HlsBoundAccountAcquireErrorKind,
+    deterministic_conflict::HlsDeterministicTimelineConflict, manifest_limits::HlsManifestLimitViolation,
+    resource_identity::HlsMediaResourceSemanticKey, timeline::HlsResourceReplayDecision,
+    HlsBoundAccountAcquireErrorKind,
 };
 use axum::http::StatusCode;
 use std::{fmt, fmt::Write as _};
@@ -94,6 +95,12 @@ pub enum OriginManifestFetchError {
     DecodedBodyLimitExceeded { limit: usize },
     #[error("decoded origin manifest is not valid UTF-8: valid_up_to={valid_up_to} error_len={error_len:?}")]
     InvalidUtf8 { valid_up_to: usize, error_len: Option<usize> },
+    #[error("origin manifest exceeds a local representation limit: {0}")]
+    LocalRepresentationLimit(HlsManifestLimitViolation),
+    #[error("origin manifest cannot be materialized as a transient client representation")]
+    MalformedTransientRepresentation,
+    #[error("HLS manifest commit generation exhausted")]
+    CommitGenerationExhausted,
 }
 
 impl OriginManifestFetchError {
@@ -141,6 +148,14 @@ impl OriginManifestFetchError {
             Self::InvalidUtf8 { valid_up_to, error_len } => {
                 format!("invalid_utf8 valid_up_to={valid_up_to} error_len={error_len:?}")
             }
+            Self::LocalRepresentationLimit(violation) => format!(
+                "local_representation_limit kind={} actual={} limit={}",
+                violation.kind.as_log_value(),
+                violation.actual,
+                violation.limit
+            ),
+            Self::MalformedTransientRepresentation => "malformed_transient_representation".to_string(),
+            Self::CommitGenerationExhausted => "commit_generation_exhausted".to_string(),
         }
     }
 }
@@ -157,6 +172,9 @@ fn format_resource_identity_token(resource_identity: [u8; 8]) -> String {
 pub enum HlsManifestCommitError {
     TimelineRejected { reason: HlsManifestRejectLogReason },
     RetryCurrentTarget,
+    LocalRepresentationLimit(HlsManifestLimitViolation),
+    MalformedTransientRepresentation,
+    CommitGenerationExhausted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -285,13 +303,9 @@ pub(super) fn is_hls_retryable_manifest_reject_fetch_error(err: &OriginManifestF
         | OriginManifestFetchError::DeterministicTimelineConflict(_)
         | OriginManifestFetchError::ContentCoding(_)
         | OriginManifestFetchError::DecodedBodyLimitExceeded { .. }
-        | OriginManifestFetchError::InvalidUtf8 { .. } => false,
-    }
-}
-
-pub(super) fn commit_error_to_retry_reason(err: &HlsManifestCommitError) -> HlsManifestRejectLogReason {
-    match err {
-        HlsManifestCommitError::TimelineRejected { reason } => reason.clone(),
-        HlsManifestCommitError::RetryCurrentTarget => HlsManifestRejectLogReason::PinnedHostRecoveryRejected,
+        | OriginManifestFetchError::InvalidUtf8 { .. }
+        | OriginManifestFetchError::LocalRepresentationLimit(_)
+        | OriginManifestFetchError::MalformedTransientRepresentation
+        | OriginManifestFetchError::CommitGenerationExhausted => false,
     }
 }

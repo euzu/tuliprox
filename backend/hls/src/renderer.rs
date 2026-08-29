@@ -72,6 +72,7 @@ pub enum RenderedManifestStoreOutcome {
 pub enum RenderedManifestStoreRejectReason {
     RegressiveMediaSequence { previous_first_proxy_seq: u64, candidate_first_proxy_seq: u64 },
     DuplicateMediaResource { existing_proxy_seq: u64, candidate_proxy_seq: u64 },
+    CommitGenerationExhausted,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -168,6 +169,11 @@ impl HlsSession {
                 rendered_at_ms: rendered.rendered_at_ms,
             })
         });
+        let Some(commit_identity) = self.next_manifest_commit_identity(rendered.rendered_at_ms) else {
+            return RenderedManifestStoreOutcome::Rejected(
+                RenderedManifestStoreRejectReason::CommitGenerationExhausted,
+            );
+        };
         self.longest_rendered_playlist_duration_ms =
             self.longest_rendered_playlist_duration_ms.max(rendered.playlist_duration_ms);
         for proxy_seq in &rendered.segment_proxy_seqs {
@@ -181,6 +187,7 @@ impl HlsSession {
         if self.published_live_origin_baseline.is_none() {
             self.published_live_origin_baseline = published_origin_evidence;
         }
+        self.record_normal_manifest_commit_identity(commit_identity);
         self.last_rendered_manifest = Some(rendered);
         RenderedManifestStoreOutcome::Stored
     }

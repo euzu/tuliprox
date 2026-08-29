@@ -19,6 +19,73 @@ pub enum OriginManifestTransientReason {
     ParserUnsupportedFeature { feature: String },
 }
 
+/// Declared lifecycle type of an HLS media playlist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HlsPlaylistType {
+    Event,
+    Vod,
+}
+
+/// Effective lifecycle of an HLS media playlist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HlsManifestLifecycle {
+    Rolling,
+    Finalized,
+}
+
+impl HlsManifestLifecycle {
+    pub const fn as_log_value(self) -> &'static str {
+        match self {
+            Self::Rolling => "rolling",
+            Self::Finalized => "finalized",
+        }
+    }
+
+    pub const fn is_finalized(self) -> bool { matches!(self, Self::Finalized) }
+}
+
+/// Whether Shared HLS may apply its rolling live-window transformations to a manifest.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HlsManifestWindowPolicy {
+    #[default]
+    ApplyLiveWindow,
+    PreserveFullManifest,
+}
+
+impl HlsManifestWindowPolicy {
+    pub const fn preserves_full_manifest(self) -> bool { matches!(self, Self::PreserveFullManifest) }
+}
+
+/// Lifecycle tags parsed independently from normal live-timeline support.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ParsedManifestSemantics {
+    pub playlist_type: Option<HlsPlaylistType>,
+    pub playlist_type_tag_present: bool,
+    pub end_list: bool,
+}
+
+impl ParsedManifestSemantics {
+    pub const fn lifecycle(self) -> HlsManifestLifecycle {
+        if self.end_list || matches!(self.playlist_type, Some(HlsPlaylistType::Vod)) {
+            HlsManifestLifecycle::Finalized
+        } else {
+            HlsManifestLifecycle::Rolling
+        }
+    }
+
+    /// Keeps finalized or explicitly typed playlists out of rolling window and stripping policies.
+    ///
+    /// Presence is intentionally independent from value validation: an unknown declaration must not make Shared HLS
+    /// shorten a manifest that the origin explicitly marked with `EXT-X-PLAYLIST-TYPE`.
+    pub const fn window_policy(self) -> HlsManifestWindowPolicy {
+        if self.lifecycle().is_finalized() || self.playlist_type_tag_present {
+            HlsManifestWindowPolicy::PreserveFullManifest
+        } else {
+            HlsManifestWindowPolicy::ApplyLiveWindow
+        }
+    }
+}
+
 /// Strictly supported segment encryption for the normal cache timeline.
 ///
 /// The origin URI is volatile fetch metadata and is never rendered. The opaque proxy resource fields are filled by
@@ -230,6 +297,30 @@ pub fn parse_origin_manifest_timeline(
         origin_manifest_sequence: media_sequence.unwrap_or(0),
         origin_manifest_segment_cnt: segment_count,
     })
+}
+
+/// Scans the media playlist once for the tags that define rolling versus finalized lifecycle semantics.
+pub fn parse_manifest_semantics(body: &str) -> ParsedManifestSemantics {
+    let mut semantics = ParsedManifestSemantics::default();
+    for line in body.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        match tag_name(line) {
+            "#EXT-X-PLAYLIST-TYPE" => {
+                semantics.playlist_type_tag_present = true;
+                semantics.playlist_type = line.strip_prefix("#EXT-X-PLAYLIST-TYPE:").map(str::trim).and_then(|value| {
+                    if value.eq_ignore_ascii_case("EVENT") {
+                        Some(HlsPlaylistType::Event)
+                    } else if value.eq_ignore_ascii_case("VOD") {
+                        Some(HlsPlaylistType::Vod)
+                    } else {
+                        None
+                    }
+                });
+            }
+            "#EXT-X-ENDLIST" if line == "#EXT-X-ENDLIST" => semantics.end_list = true,
+            _ => {}
+        }
+    }
+    semantics
 }
 
 pub fn parse_manifest_timing(body: &str) -> ParsedManifestTiming {
@@ -710,7 +801,8 @@ fn parser_feature(feature: &str) -> OriginManifestTransientReason {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_manifest_timing, parse_manifest_validity, parse_origin_manifest_timeline, parse_origin_media_manifest,
+        parse_manifest_semantics, parse_manifest_timing, parse_manifest_validity, parse_origin_manifest_timeline,
+        parse_origin_media_manifest, HlsManifestLifecycle, HlsManifestWindowPolicy, HlsPlaylistType,
         OriginManifestParseOutcome, OriginManifestTransientReason, ParsedByteRange, ParsedManifestValiditySource,
     };
 
@@ -825,6 +917,91 @@ mod tests {
             outcome,
             OriginManifestParseOutcome::TransientPassthrough {
                 reason: OriginManifestTransientReason::UnsupportedTag { tag: "#EXT-X-PART".to_string() }
+            }
+        );
+    }
+
+    #[test]
+    fn ordinary_live_playlist_is_rolling() {
+        let semantics = parse_manifest_semantics("#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nseg.ts\n");
+
+        assert_eq!(semantics.playlist_type, None);
+        assert!(!semantics.playlist_type_tag_present);
+        assert!(!semantics.end_list);
+        assert_eq!(semantics.lifecycle(), HlsManifestLifecycle::Rolling);
+        assert_eq!(semantics.window_policy(), HlsManifestWindowPolicy::ApplyLiveWindow);
+    }
+
+    #[test]
+    fn event_without_endlist_is_rolling() {
+        let semantics = parse_manifest_semantics("#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXTINF:4,\nseg.ts\n");
+
+        assert_eq!(semantics.playlist_type, Some(HlsPlaylistType::Event));
+        assert!(semantics.playlist_type_tag_present);
+        assert!(!semantics.end_list);
+        assert_eq!(semantics.lifecycle(), HlsManifestLifecycle::Rolling);
+        assert_eq!(semantics.window_policy(), HlsManifestWindowPolicy::PreserveFullManifest);
+    }
+
+    #[test]
+    fn event_with_endlist_is_finalized() {
+        let semantics =
+            parse_manifest_semantics("#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXTINF:4,\nseg.ts\n#EXT-X-ENDLIST\n");
+
+        assert_eq!(semantics.playlist_type, Some(HlsPlaylistType::Event));
+        assert!(semantics.playlist_type_tag_present);
+        assert!(semantics.end_list);
+        assert_eq!(semantics.lifecycle(), HlsManifestLifecycle::Finalized);
+        assert_eq!(semantics.window_policy(), HlsManifestWindowPolicy::PreserveFullManifest);
+    }
+
+    #[test]
+    fn vod_playlist_is_finalized() {
+        let semantics = parse_manifest_semantics("#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:4,\nseg.ts\n");
+
+        assert_eq!(semantics.playlist_type, Some(HlsPlaylistType::Vod));
+        assert_eq!(semantics.lifecycle(), HlsManifestLifecycle::Finalized);
+        assert_eq!(semantics.window_policy(), HlsManifestWindowPolicy::PreserveFullManifest);
+    }
+
+    #[test]
+    fn endlist_without_playlist_type_is_finalized_and_preserved() {
+        let semantics = parse_manifest_semantics("#EXTM3U\n#EXTINF:4,\nseg.ts\n#EXT-X-ENDLIST\n");
+
+        assert_eq!(semantics.playlist_type, None);
+        assert!(!semantics.playlist_type_tag_present);
+        assert!(semantics.end_list);
+        assert_eq!(semantics.lifecycle(), HlsManifestLifecycle::Finalized);
+        assert_eq!(semantics.window_policy(), HlsManifestWindowPolicy::PreserveFullManifest);
+    }
+
+    #[test]
+    fn unknown_playlist_type_does_not_finalize_without_endlist() {
+        let semantics = parse_manifest_semantics("#EXTM3U\n#EXT-X-PLAYLIST-TYPE:UNKNOWN\n#EXTINF:4,\nseg.ts\n");
+
+        assert_eq!(semantics.playlist_type, None);
+        assert!(semantics.playlist_type_tag_present);
+        assert_eq!(semantics.lifecycle(), HlsManifestLifecycle::Rolling);
+        assert_eq!(semantics.window_policy(), HlsManifestWindowPolicy::PreserveFullManifest);
+    }
+
+    #[test]
+    fn finalized_tags_do_not_enter_normal_cache_timeline() {
+        let body = "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXTINF:4,\nseg.ts\n#EXT-X-ENDLIST\n";
+
+        assert_eq!(parse_manifest_semantics(body).lifecycle(), HlsManifestLifecycle::Finalized);
+        assert_eq!(
+            parse_origin_media_manifest(body, BASE_URL),
+            OriginManifestParseOutcome::TransientPassthrough {
+                reason: OriginManifestTransientReason::UnsupportedTag { tag: "#EXT-X-PLAYLIST-TYPE".to_string() }
+            }
+        );
+
+        let endlist_only = "#EXTM3U\n#EXTINF:4,\nseg.ts\n#EXT-X-ENDLIST\n";
+        assert_eq!(
+            parse_origin_media_manifest(endlist_only, BASE_URL),
+            OriginManifestParseOutcome::TransientPassthrough {
+                reason: OriginManifestTransientReason::UnsupportedTag { tag: "#EXT-X-ENDLIST".to_string() }
             }
         );
     }
