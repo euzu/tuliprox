@@ -19,6 +19,7 @@ use shared::{
 };
 use std::{
     collections::{HashMap, HashSet},
+    future::Future,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -479,7 +480,7 @@ impl PlaylistSourceOps for EmptyPlaylistSource {
     }
     fn release_resources(&mut self, _cluster: XtreamCluster) { /* noop */
     }
-    async fn obtain_resources(&mut self) -> Result<(), TuliproxError> { Ok(()) }
+    fn obtain_resources(&mut self) -> impl Future<Output = Result<(), TuliproxError>> { std::future::ready(Ok(())) }
     fn sort_by_provider_ordinal(&mut self) { /* noop */
     }
 }
@@ -1390,7 +1391,7 @@ impl PlaylistSourceOps for MemoryPlaylistSource {
     }
     fn release_resources(&mut self, _cluster: XtreamCluster) { /* noop */
     }
-    async fn obtain_resources(&mut self) -> Result<(), TuliproxError> { Ok(()) }
+    fn obtain_resources(&mut self) -> impl Future<Output = Result<(), TuliproxError>> { std::future::ready(Ok(())) }
 
     fn sort_by_provider_ordinal(&mut self) {
         let playlist = Arc::make_mut(&mut self.playlist);

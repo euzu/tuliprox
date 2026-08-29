@@ -174,8 +174,8 @@ impl UnsupportedProvider {
 impl PlaylistProvider for UnsupportedProvider {
     fn name(&self) -> &'static str { self.name }
 
-    async fn fetch(&self, _request: &PlaylistFetchRequest<'_>) -> PlaylistFetch {
-        PlaylistFetch::failed(TuliproxError::Download(self.reason.clone()))
+    fn fetch(&self, _request: &PlaylistFetchRequest<'_>) -> impl Future<Output = PlaylistFetch> {
+        std::future::ready(PlaylistFetch::failed(TuliproxError::Download(self.reason.clone())))
     }
 }
 
@@ -187,7 +187,9 @@ pub struct BatchContainerProvider;
 impl PlaylistProvider for BatchContainerProvider {
     fn name(&self) -> &'static str { "batch" }
 
-    async fn fetch(&self, _request: &PlaylistFetchRequest<'_>) -> PlaylistFetch { PlaylistFetch::nothing_to_do() }
+    fn fetch(&self, _request: &PlaylistFetchRequest<'_>) -> impl Future<Output = PlaylistFetch> {
+        std::future::ready(PlaylistFetch::nothing_to_do())
+    }
 }
 
 #[cfg(test)]
