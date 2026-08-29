@@ -106,6 +106,11 @@
 
 ## 🌟 New Features
 
+- **Targets can require usable EPG data for live channels**: setting `options.required_epg: true` keeps only live
+  entries whose EPG ID resolves to programme data from an available EPG source. The normal target filter and mappings
+  still run first, so EPG matching operates on the already reduced playlist. VOD, series, catch-up, and local-library
+  entries are unaffected, and inputs without a successfully materialized EPG source keep their live entries.
+
 - **Ten events for the failures that used to be silent**: the registry described states nothing emitted, and several
   subsystems reported their start and their success but never their own failure. The taxonomy is now 42 events (up
   from 32) and gains two domains, `scheduled_task.*` and `notification.*`.
@@ -1190,6 +1195,11 @@
   episodes are unchanged: their properties carry no provider URL at that layer.
 
 ## ⚙️ New Settings
+
+- **source.yml (target `options`)**:
+  - Added optional `required_epg` (`bool`, default `false`) to remove unmatched live entries after EPG matching.
+    The setting is evaluated independently for each target and does not affect VOD, series, catch-up, or local-library
+    entries. If an input has no successfully materialized EPG source, its live entries are left unchanged.
 
 - **config.yml (`video.download.recording`)**:
   - Added `enabled` (`bool`, default `true`): master switch for the DVR. When `false` the REST routes answer
