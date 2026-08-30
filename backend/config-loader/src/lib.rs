@@ -696,10 +696,11 @@ pub async fn write_config_text_file(
     let filename = path.file_name().map_or(default_name.to_string(), |f| f.to_string_lossy().to_string());
 
     let revision_content = if let Some(expected) = expected_revision {
-        let current = fs::read(&path).await.map_err(|_| {
-            TuliproxError::Config(
-                "source.yml changed while an internal patch was being prepared; retrying later".to_string(),
-            )
+        let current = fs::read(&path).await.map_err(|err| {
+            TuliproxError::Config(format!(
+                "Could not re-read {} before applying an internal patch: {err}",
+                path.to_str().unwrap_or("?")
+            ))
         })?;
         if blake3::hash(&current) != expected {
             return Err(TuliproxError::Config(

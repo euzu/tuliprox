@@ -169,7 +169,7 @@ fn normalize_scalar_string(value: &str) -> &str {
 /// Case-sensitive on purpose: provider-supplied `"NULL"` or `"Null"` are real
 /// values and must be preserved verbatim.
 #[inline]
-pub fn is_nullish(value: &str) -> bool { value.is_empty() || value == "null" || value == "~" }
+pub fn is_nullish(value: &str) -> bool { value.is_empty() || value == "~" || value.eq_ignore_ascii_case("null") }
 
 //
 // Two reusable visitor types live here so that multiple public entry-points

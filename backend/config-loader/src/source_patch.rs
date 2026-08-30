@@ -2,6 +2,7 @@ use serde::Deserialize;
 use shared::{
     error::TuliproxError,
     model::{ConfigInputAliasDto, SourcesConfigDto},
+    utils::is_nullish,
 };
 use std::{collections::HashMap, fmt::Write, ops::Range};
 
@@ -551,7 +552,7 @@ fn find_null_aliases_line(text: &str, start: usize, key_indent: usize) -> Option
         let body = line[indent..].trim_start();
         if let Some(value) = body.strip_prefix("aliases:") {
             let value = value.trim();
-            if value.is_empty() || value == "null" {
+            if is_nullish(value) {
                 return Some(line_start..next_nl);
             }
             return None;
