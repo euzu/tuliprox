@@ -28,6 +28,7 @@ smallvec = "1.15.2"
 # `tempfile` and `uuid` are production dependencies here, not test-only: the v3
 # migration path stages its output through a uniquely named temporary file.
 tempfile = "3.27.0"
+thiserror.workspace = true
 uuid = { version = "1.26.0", features = ["v4"] }
 
 [dev-dependencies]

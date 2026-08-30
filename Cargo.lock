@@ -4427,6 +4427,7 @@ dependencies = [
  "rust-argon2",
  "serde_json",
  "shared",
+ "thiserror 2.0.20",
  "tuliprox-core",
  "tuliprox-repository",
  "zeroize",
@@ -4446,6 +4447,7 @@ dependencies = [
  "serde",
  "smallvec",
  "tempfile",
+ "thiserror 2.0.20",
  "uuid",
 ]
 
@@ -4535,6 +4537,7 @@ dependencies = [
  "serde_json",
  "shared",
  "tempfile",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-util",
  "tuliprox-auth",
@@ -4629,6 +4632,7 @@ dependencies = [
  "shared",
  "strsim",
  "tempfile",
+ "thiserror 2.0.20",
  "tokio",
  "tuliprox-core",
  "url",
@@ -4650,6 +4654,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shared",
+ "thiserror 2.0.20",
  "tokio",
  "url",
 ]
@@ -4796,6 +4801,7 @@ dependencies = [
  "serde_json",
  "shared",
  "tempfile",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-stream",
  "tokio-util",

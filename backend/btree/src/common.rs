@@ -225,36 +225,16 @@ pub(crate) fn require_same_parent_directory(staging: &Path, published: &Path) ->
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum BPlusTreeError {
-    Io(io::Error),
+    #[error("I/O error: {0}")]
+    Io(#[from] io::Error),
+    #[error("Data corrupted: {0}")]
     Corrupted(String),
+    #[error("Invalid structure: {0}")]
     InvalidStructure(String),
+    #[error("Key not found")]
     KeyNotFound,
-}
-
-impl std::fmt::Display for BPlusTreeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io(err) => write!(f, "I/O error: {err}"),
-            Self::Corrupted(msg) => write!(f, "Data corrupted: {msg}"),
-            Self::InvalidStructure(msg) => write!(f, "Invalid structure: {msg}"),
-            Self::KeyNotFound => write!(f, "Key not found"),
-        }
-    }
-}
-
-impl std::error::Error for BPlusTreeError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io(err) => Some(err),
-            Self::Corrupted(_) | Self::InvalidStructure(_) | Self::KeyNotFound => None,
-        }
-    }
-}
-
-impl From<io::Error> for BPlusTreeError {
-    fn from(err: io::Error) -> Self { Self::Io(err) }
 }
 
 impl BPlusTreeError {

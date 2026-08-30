@@ -31,37 +31,24 @@ pub enum RecordingVisibility {
 }
 
 /// Errors that can occur when handling a recording path.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum RecordingPathError {
+    #[error("path is empty")]
     Empty,
+    #[error("path is absolute")]
     Absolute,
+    #[error("path contains '.' or '..' or other invalid component")]
     InvalidComponent,
+    #[error("path contains a NUL byte")]
     NulByte,
+    #[error("path is not a regular file")]
     NotARegularFile,
+    #[error("path is not within the recording root")]
     NotWithinRoot,
+    #[error("path already exists")]
     AlreadyExists,
-    Io(io::Error),
-}
-
-impl std::fmt::Display for RecordingPathError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Empty => f.write_str("path is empty"),
-            Self::Absolute => f.write_str("path is absolute"),
-            Self::InvalidComponent => f.write_str("path contains '.' or '..' or other invalid component"),
-            Self::NulByte => f.write_str("path contains a NUL byte"),
-            Self::NotARegularFile => f.write_str("path is not a regular file"),
-            Self::NotWithinRoot => f.write_str("path is not within the recording root"),
-            Self::AlreadyExists => f.write_str("path already exists"),
-            Self::Io(err) => write!(f, "io error: {err}"),
-        }
-    }
-}
-
-impl std::error::Error for RecordingPathError {}
-
-impl From<io::Error> for RecordingPathError {
-    fn from(err: io::Error) -> Self { Self::Io(err) }
+    #[error("io error: {0}")]
+    Io(#[from] io::Error),
 }
 
 impl From<RecordingPathError> for io::Error {

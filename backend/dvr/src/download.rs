@@ -35,51 +35,54 @@ static DOWNLOAD_TASK_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 /// Reason a persisted entry cannot be converted back to its in-memory
 /// form during the commit step. Surfaced to the caller so a corrupt
 /// persisted file fails closed instead of silently dropping entries.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PersistedError {
     /// The persisted URL could not be parsed.
+    #[error("persisted url is invalid: {0}")]
     InvalidUrl(String),
     /// A plain download claimed a recording metadata block, or a
     /// recording was missing its metadata in a way that the legacy
     /// normalizer cannot repair.
+    #[error("persisted task {uuid} violates the kind/metadata invariant")]
     KindMetadataInvariant { uuid: String },
 }
-
-impl std::fmt::Display for PersistedError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidUrl(s) => write!(f, "persisted url is invalid: {s}"),
-            Self::KindMetadataInvariant { uuid } => {
-                write!(f, "persisted task {uuid} violates the kind/metadata invariant")
-            }
-        }
-    }
-}
-
-impl std::error::Error for PersistedError {}
 
 /// Typed error returned from the queue mutation boundary. Every
 /// `mutate` closure that fails must return a known variant; the
 /// `Other` variant is an escape hatch for dynamically-formatted
 /// messages that have no stable wire code.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum QueueMutationError {
+    #[error("recording unknown")]
     UnknownRecording,
+    #[error("recording state not editable")]
     StateNotEditable,
+    #[error("recording forbidden")]
     Forbidden,
+    #[error("recording invalid interval")]
     InvalidInterval,
+    #[error("recording invalid quota pool")]
     InvalidQuotaPool,
+    #[error("recording invalid path")]
     InvalidPath,
+    #[error("recording_padding_limit_exceeded")]
     PaddingLimitExceeded,
+    #[error("recording quota exceeded")]
     QuotaExceeded,
+    #[error("recording duplicate")]
     Duplicate,
+    #[error("recording not in terminal state")]
     NotInTerminalState,
+    #[error("disk full")]
     DiskFull,
+    #[error("mutation unexpectedly skipped")]
     MutationSkipped,
     /// Escape hatch for dynamically-formatted validation messages
     /// that have no stable wire code. Prefer the typed variants.
+    #[error("{0}")]
     Other(String),
-    Io(std::io::Error),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
 }
 
 impl QueueMutationError {
@@ -115,25 +118,6 @@ impl QueueMutationError {
     pub fn source_io(&self) -> Option<&std::io::Error> {
         match self {
             Self::Io(err) => Some(err),
-            _ => None,
-        }
-    }
-}
-
-impl std::fmt::Display for QueueMutationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Other(s) => f.write_str(s),
-            Self::Io(e) => std::fmt::Display::fmt(e, f),
-            other => f.write_str(other.message()),
-        }
-    }
-}
-
-impl std::error::Error for QueueMutationError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io(err) => Some(err as &(dyn std::error::Error + 'static)),
             _ => None,
         }
     }

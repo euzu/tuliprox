@@ -67,48 +67,29 @@ impl RecordingFilenameContext {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RecordingFilenameError {
+    #[error("recording filename template is empty")]
     Empty,
-    TooLong {
-        bytes: usize,
-    },
+    #[error("recording filename exceeds {MAX_RECORDING_STEM_BYTES} bytes (got {bytes})")]
+    TooLong { bytes: usize },
+    #[error("unknown placeholder '{0}' in recording filename template")]
     UnknownPlaceholder(String),
+    #[error("recording filename template has an unmatched '{{'")]
     UnmatchedOpenBrace,
+    #[error("recording filename template has an unmatched '}}'")]
     UnmatchedCloseBrace,
+    #[error("recording filename template must contain at least one placeholder")]
     NoPlaceholder,
     /// Template contains a literal path separator (`/` or `\`). Path
     /// separators must never reach the rendered stem — they would
     /// escape the recording directory or collide with the partial-file
     /// suffix machinery.
+    #[error("recording filename template contains path separator '{0}'")]
     PathSeparator(char),
+    #[error("recording timestamp {0} is out of range for the configured timezone")]
     TimeOutOfRange(String),
 }
-
-impl fmt::Display for RecordingFilenameError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Empty => f.write_str("recording filename template is empty"),
-            Self::TooLong { bytes } => {
-                write!(f, "recording filename exceeds {MAX_RECORDING_STEM_BYTES} bytes (got {bytes})")
-            }
-            Self::UnknownPlaceholder(name) => {
-                write!(f, "unknown placeholder '{name}' in recording filename template")
-            }
-            Self::UnmatchedOpenBrace => f.write_str("recording filename template has an unmatched '{'"),
-            Self::UnmatchedCloseBrace => f.write_str("recording filename template has an unmatched '}'"),
-            Self::NoPlaceholder => f.write_str("recording filename template must contain at least one placeholder"),
-            Self::PathSeparator(sep) => {
-                write!(f, "recording filename template contains path separator '{sep}'")
-            }
-            Self::TimeOutOfRange(what) => {
-                write!(f, "recording timestamp {what} is out of range for the configured timezone")
-            }
-        }
-    }
-}
-
-impl std::error::Error for RecordingFilenameError {}
 
 /// Validate a recording filename template. Returns `Ok(())` when the
 /// template is acceptable. Mirrors the validation in

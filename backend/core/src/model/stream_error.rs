@@ -1,17 +1,26 @@
 use std::error::Error;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum StreamError {
+    #[error("Reqwest error: {message}")]
     Reqwest { message: String, class: &'static str, status: Option<u16> },
+    #[error("IO error: {0}")]
     StdIo(String),
+    #[error("Content decoding error: {0}")]
     ContentDecoding(String),
     // ReceiverClosed,
-    ReceiverError(BroadcastStreamRecvError),
+    #[error("Receiver error {0}")]
+    ReceiverError(#[from] BroadcastStreamRecvError),
+    #[error("LockError: {0}")]
     LockError(String),
+    #[error("Stream: {0}")]
     Stream(String),
+    #[error("MalformedPacket: {0}")]
     MalformedPacket(String),
+    #[error("InvalidTimestamp: {0}")]
     InvalidTimestamp(String),
+    #[error("SyncLoss: {0}")]
     SyncLoss(String),
 }
 
@@ -96,25 +105,6 @@ impl StreamError {
         match self {
             Self::Reqwest { status, .. } => *status,
             _ => None,
-        }
-    }
-}
-
-impl std::error::Error for StreamError {}
-
-impl std::fmt::Display for StreamError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            StreamError::Reqwest { message, .. } => write!(f, "Reqwest error: {message}"),
-            StreamError::StdIo(e) => write!(f, "IO error: {e}"),
-            StreamError::ContentDecoding(e) => write!(f, "Content decoding error: {e}"),
-            // StreamError::ReceiverClosed =>  write!(f, "Receiver closed"),
-            StreamError::ReceiverError(e) => write!(f, "Receiver error {e}"),
-            StreamError::Stream(e) => write!(f, "Stream: {e}"),
-            StreamError::LockError(e) => write!(f, "LockError: {e}"),
-            StreamError::MalformedPacket(e) => write!(f, "MalformedPacket: {e}"),
-            StreamError::InvalidTimestamp(e) => write!(f, "InvalidTimestamp: {e}"),
-            StreamError::SyncLoss(e) => write!(f, "SyncLoss: {e}"),
         }
     }
 }
