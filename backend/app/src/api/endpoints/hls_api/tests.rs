@@ -181,6 +181,15 @@ fn leaked_dvr_relative_joins_against_media_playlist_and_dvr_session_root() {
         resolve_leaked_hls_relative_origin("http://cdn.example/big/aa_1/media.m3u8", "segment001.ts", None,),
         None
     );
+    assert_eq!(
+        resolve_leaked_hls_relative_origin(
+            "http://cdn.example/big/aa_1/media.m3u8",
+            "dvr-2026/07/26/15/30/../59-06000.ts",
+            None,
+        ),
+        None
+    );
+    assert_eq!(resolve_leaked_hls_relative_origin("http://cdn.example/live.m3u8", "./dvr-2026/a.ts", None), None);
 }
 
 #[test]
@@ -3541,6 +3550,17 @@ fn hls_runtime_origin_fetch_url_uses_selected_provider_account() {
     .expect("provider scheme fetch url should use selected runtime account without losing failover");
 
     assert_eq!(provider_scheme_fetch_url, "provider://demo/live/provider-user/provider-pass/12345.m3u8");
+    let origin_entry = super::LiveHlsOriginEntry::parse_with_provider_configs(
+        &provider_scheme_without_account_rewrite,
+        Some(Arc::clone(&failover_provider)),
+        Some(Arc::clone(&provider)),
+    )
+    .expect("provider origin entry");
+    let input_source = origin_entry.to_input_source();
+    assert_eq!(input_source.url, provider_scheme_without_account_rewrite);
+    assert_eq!(input_source.username.as_deref(), Some("provider-user"));
+    assert_eq!(input_source.password.as_deref(), Some("provider-pass"));
+
     let failover_context = super::hls_url_failover_provider_for_origin_context(
         &provider_scheme_input,
         "provider://demo/live/source-user/source-pass/12345.m3u8",

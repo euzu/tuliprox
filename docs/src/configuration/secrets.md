@@ -17,10 +17,10 @@ Tuliprox keeps the repository free of real credentials while making it easy to i
 | `source.yml`      | input `epg.sources[].url`                                                                                                                                                    | `CLOUDTV_1_EPG_URL`                                                              |
 | `source.yml`      | input `panel_api.api_key` (account management)                                                                                                                               | `PROVIDER_PANEL_API_KEY`                                                         |
 | `api-proxy.yml`   | output user `password` / `token` for every published user                                                                                                                    | `XTR_USER_LOCAL_PASS`, `XTR_USER_LOCAL_TOKEN`                                    |
-| `config.yml`      | `web_auth.secret` (JWT signing, 64-hex)                                                                                                                                      | `TULIPROX_WEB_SECRET`                                                            |
+| `config.yml`      | `web_ui.auth.secret` (JWT signing, 64-hex)                                                                                                                                   | `TULIPROX_WEB_SECRET`                                                            |
 | `config.yml`      | messaging webhooks/tokens: Telegram bot token, Discord URL, Pushover token/key, ntfy/Gotify tokens, Slack URL, generic REST URL + `signing_secret` + `Authorization` headers | `TULIPROX_DISCORD_WEBHOOK`, `TULIPROX_TELEGRAM_TOKEN`, `TULIPROX_SIGNING_SECRET` |
 | `config.yml`      | `metadata_update.tmdb.api_key`                                                                                                                                               | `TULIPROX_TMDB_API_KEY`                                                          |
-| `config.yml`      | `proxy_security.rewrite_secret`                                                                                                                                              | `TULIPROX_PROXY_REWRITE_SECRET`                                                  |
+| `config.yml`      | `reverse_proxy.rewrite_secret`                                                                                                                                               | `TULIPROX_PROXY_REWRITE_SECRET`                                                  |
 | `config/user.txt` | Web UI Argon2 password hashes (see below — not env-injectable)                                                                                                               | *file only*                                                                      |
 
 Anything a provider, a player, a notification bot, or a browser authenticates with is a secret and must not be in git.
@@ -94,9 +94,9 @@ hashes themselves are generated on the machine and are never committed. The `con
 repository contains sample hashes for the demo accounts `test` / `nobody` documented in `config/README.md` — replace
 them before going live.
 
-## JWT secret (`web_auth.secret`)
+## JWT secret (`web_ui.auth.secret`)
 
-If `web_auth.secret` is omitted, Tuliprox generates one in-memory and **all active logins are invalidated on every
+If `web_ui.auth.secret` is omitted, Tuliprox generates one in-memory and **all active logins are invalidated on every
 restart**. For production, pin a static 64-character hexadecimal string and keep it stable:
 
 ```bash
@@ -106,8 +106,9 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 Put the result in an environment variable and reference it from `config.yml`:
 
 ```yaml
-web_auth:
-  secret: "${env:TULIPROX_WEB_SECRET}"
+web_ui:
+  auth:
+    secret: "${env:TULIPROX_WEB_SECRET}"
 ```
 
 Rotating it invalidates all sessions — do it deliberately, not on a whim.

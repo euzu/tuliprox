@@ -81,7 +81,7 @@ pub enum QueueMutationError {
     /// that have no stable wire code. Prefer the typed variants.
     #[error("{0}")]
     Other(String),
-    #[error(transparent)]
+    #[error("queue mutation persistence failed")]
     Io(#[from] std::io::Error),
 }
 
@@ -2664,7 +2664,9 @@ mod tests {
 
         let result: Result<(), QueueMutationError> = mutate(&queue, |_candidate| Ok(())).await;
         assert!(result.is_err(), "persist failure should propagate");
-        assert!(result.unwrap_err().source_io().is_some(), "should carry io::Error");
+        let err = result.unwrap_err();
+        assert_eq!(err.to_string(), "queue mutation persistence failed");
+        assert!(std::error::Error::source(&err).is_some(), "should carry io::Error as its source");
         // State stays unchanged: the in-memory queue is intact.
         assert_eq!(queue.queue.lock().await.len(), original_len, "in-memory state must be unchanged");
         assert_eq!(queue.revision.load(Ordering::SeqCst), original_revision);

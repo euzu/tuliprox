@@ -348,6 +348,7 @@ pub(super) fn hls_url_failover_provider_for_origin_context(
 
 pub(super) struct PreparedHlsOriginRuntime {
     pub(super) fetch_url: String,
+    pub(super) runtime_provider_config: Option<Arc<RuntimeProviderConfig>>,
     // URL failover comes from source.yml provider:// resolution. Origin-account
     // binding/handles are runtime account reservations and must stay separate.
     pub(super) url_failover_provider: Option<Arc<ConfigProvider>>,
@@ -407,6 +408,7 @@ pub(super) struct HlsAccountOverlapCandidate {
     pub(super) input_name: Arc<str>,
     pub(super) account_name: Arc<str>,
     pub(super) session_owner: String,
+    pub(super) reservation_ttl_secs: u64,
     pub(super) reclaim_until_ms: u64,
     pub(super) last_media_at_ms: u64,
     pub(super) soft_overlap_eligible_at_ms: u64,
@@ -424,6 +426,28 @@ pub(super) struct HlsOriginPolicyPreemptCandidate {
     pub(super) reservation_ttl_secs: u64,
     pub(super) victim_policy: HlsEffectiveOriginAcquirePolicy,
     pub(super) last_media_at_ms: u64,
+}
+
+trait HlsOriginReservationCandidate {
+    fn account_name(&self) -> &Arc<str>;
+    fn session_owner(&self) -> &str;
+    fn reservation_ttl_secs(&self) -> u64;
+}
+
+impl HlsOriginReservationCandidate for HlsAccountOverlapCandidate {
+    fn account_name(&self) -> &Arc<str> { &self.account_name }
+
+    fn session_owner(&self) -> &str { &self.session_owner }
+
+    fn reservation_ttl_secs(&self) -> u64 { self.reservation_ttl_secs }
+}
+
+impl HlsOriginReservationCandidate for HlsOriginPolicyPreemptCandidate {
+    fn account_name(&self) -> &Arc<str> { &self.account_name }
+
+    fn session_owner(&self) -> &str { &self.session_owner }
+
+    fn reservation_ttl_secs(&self) -> u64 { self.reservation_ttl_secs }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -816,6 +840,7 @@ pub(super) async fn prepare_hls_origin_runtime_with_new_account(
             session_entry_url,
             &fetch_url,
         ),
+        runtime_provider_config: Some(provider_config),
         fetch_url,
         origin_account_binding_to_store: Some(binding),
         preacquired_origin_account_handle: Some(provider_handle),
@@ -829,9 +854,8 @@ pub(super) fn prepared_hls_origin_runtime_for_known_binding(
     session_entry_url: &str,
     binding: &HlsOriginAccountBinding,
 ) -> PreparedHlsOriginRuntime {
-    let fetch_url = app_state
-        .active_provider
-        .find_provider_config(&binding.account_name)
+    let runtime_provider_config = app_state.active_provider.find_provider_config(&binding.account_name);
+    let fetch_url = runtime_provider_config
         .as_ref()
         .and_then(|provider_config| {
             build_hls_origin_fetch_url(input, raw_request_url, session_entry_url, Some(provider_config))
@@ -839,6 +863,7 @@ pub(super) fn prepared_hls_origin_runtime_for_known_binding(
         .unwrap_or_else(|| session_entry_url.to_string());
 
     PreparedHlsOriginRuntime {
+        runtime_provider_config,
         url_failover_provider: hls_url_failover_provider_for_origin_context(
             input,
             raw_request_url,
@@ -994,10 +1019,12 @@ pub(super) async fn prepare_hls_origin_policy_preempt_runtime(
     let mut detached_victim = false;
     {
         let mut victim = candidate.session.write().await;
+        let has_no_active_origin_work = victim.activity.active_origin_work_count == 0;
         if let Some(victim_binding) = victim.origin_account_binding.as_mut() {
             if victim_binding.account_name == candidate.account_name
                 && victim_binding.session_owner == candidate.session_owner
                 && matches!(victim_binding.binding_mode, HlsOriginAccountBindingMode::Active)
+                && has_no_active_origin_work
             {
                 victim_binding.detach(HlsOriginAccountDetachedReason::PreemptedByHigherPriority, now_ms);
                 detached_victim = true;
@@ -1042,19 +1069,24 @@ pub(super) async fn prepare_hls_origin_policy_preempt_runtime(
             session_entry_url,
             &fetch_url,
         ),
+        runtime_provider_config: Some(provider_config),
         fetch_url,
         origin_account_binding_to_store: Some(binding),
         preacquired_origin_account_handle: Some(provider_handle),
     })
 }
 
-pub(super) async fn restore_hls_origin_policy_preempt_candidate_reservation(
+async fn restore_hls_origin_policy_preempt_candidate_reservation<C: HlsOriginReservationCandidate>(
     app_state: &Arc<AppState>,
-    candidate: &HlsOriginPolicyPreemptCandidate,
+    candidate: &C,
 ) {
     app_state
         .active_provider
-        .refresh_provider_reservation(&candidate.account_name, &candidate.session_owner, candidate.reservation_ttl_secs)
+        .refresh_provider_reservation(
+            candidate.account_name(),
+            candidate.session_owner(),
+            candidate.reservation_ttl_secs(),
+        )
         .await;
 }
 
@@ -1152,17 +1184,20 @@ pub(super) async fn prepare_hls_speculative_origin_runtime(
         )
         .await
     else {
+        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate).await;
         debug!("HLS account overlap denied: reason=speculative-acquire-failed");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
     let Some(provider_config) = provider_handle.allocation.get_provider_config() else {
         app_state.connection_manager.release_provider_handle(Some(provider_handle)).await;
+        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate).await;
         debug!("HLS account overlap denied: reason=missing-provider-config");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
     let Some(fetch_url) = build_hls_origin_fetch_url(input, raw_request_url, session_entry_url, Some(&provider_config))
     else {
         app_state.connection_manager.release_provider_handle(Some(provider_handle)).await;
+        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate).await;
         debug!("HLS account overlap denied: reason=invalid-origin-url");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
@@ -1196,6 +1231,7 @@ pub(super) async fn prepare_hls_speculative_origin_runtime(
             session_entry_url,
             &fetch_url,
         ),
+        runtime_provider_config: Some(provider_config),
         fetch_url,
         origin_account_binding_to_store: Some(binding),
         preacquired_origin_account_handle: Some(provider_handle),
@@ -1284,6 +1320,7 @@ pub(super) async fn find_hls_account_overlap_candidate(
             input_name: Arc::clone(&binding.input_name),
             account_name: Arc::clone(&binding.account_name),
             session_owner: binding.session_owner.clone(),
+            reservation_ttl_secs: timing.reservation_ttl_secs(),
             reclaim_until_ms,
             last_media_at_ms,
             soft_overlap_eligible_at_ms: eligible_at_ms,
@@ -1449,6 +1486,7 @@ pub(super) async fn promote_elapsed_hls_account_overlaps(app_state: &Arc<AppStat
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 pub(super) async fn rebind_hls_origin_account(
     app_state: &Arc<AppState>,
     session: &HlsSessionHandle,
@@ -1563,6 +1601,7 @@ pub(super) async fn rebind_hls_origin_account(
             session_entry_url,
             &fetch_url,
         ),
+        runtime_provider_config: Some(provider_config),
         fetch_url,
         origin_account_binding_to_store: None,
         preacquired_origin_account_handle: Some(provider_handle),

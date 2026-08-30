@@ -45,14 +45,14 @@ pub enum DeletionError {
     Forbidden,
     /// Marking the recording as `Deleting` failed.
     #[error("begin deletion failed: {0}")]
-    BeginFailed(QueueMutationError),
+    BeginFailed(#[source] QueueMutationError),
     /// File deletion failed in a way that is not safe to
     /// ignore.
     #[error("physical delete failed: {0}")]
-    DeleteFailed(std::io::Error),
+    DeleteFailed(#[source] std::io::Error),
     /// Removing the task from the queue failed.
     #[error("finalize deletion failed: {0}")]
-    FinalizeFailed(QueueMutationError),
+    FinalizeFailed(#[source] QueueMutationError),
 }
 
 /// Locate a recording task in the candidate by uuid. Returns

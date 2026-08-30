@@ -355,7 +355,7 @@ Tuliprox ships with demo placeholder configuration only — nothing in this repo
   process environment. No particular host or secret store is assumed.
 - `config/user.txt` contains sample Argon2 hashes for the demo accounts `test` / `nobody`. Replace them with
   hashes generated on your machine via `tuliprox --genpwd`.
-- Pin `web_auth.secret` (64-hex) across restarts so logins survive reboots.
+- Pin `web_ui.auth.secret` (64-hex) across restarts so logins survive reboots.
 - See [Secrets & Environment Variables](docs/src/configuration/secrets.md) for the full guide and the
   pre-publish checklist.
 

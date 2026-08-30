@@ -440,10 +440,11 @@ pub(crate) async fn finalize_prepared_target<E: EventSink + Clone + 'static, M: 
             match spill_epg_to_disk(new_epg) {
                 Ok(epg) => epg,
                 Err(err) => {
+                    let result_error = TuliproxError::new(err.kind(), err.message());
                     errors.push(err);
                     step.stop("EPG spill failed; skipping persist to preserve existing EPG");
                     log_memory_snapshot(format!("target '{}' after_persist", target.name).as_str());
-                    return (Ok(()), errors);
+                    return (Err(vec![result_error]), errors);
                 }
             }
         } else {

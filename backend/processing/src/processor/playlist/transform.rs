@@ -206,11 +206,13 @@ pub(crate) fn map_playlist_at_stage(
     stage: MappingStage,
     duplicates: Option<&mut HashSet<UUIDType>>,
 ) -> Option<Vec<PlaylistGroup>> {
-    if !has_mapping_stage(target, stage) {
+    let mapping_binding = target.mapping.load();
+    let mappings = mapping_binding.as_ref()?;
+    if mappings.for_stage(stage).is_empty() {
         return None;
     }
     let items = source.into_items().collect::<Vec<_>>();
-    let (mapped_items, _outcome) = map_items_at_stage(items, target, stage, duplicates)?;
+    let (mapped_items, _outcome) = map_items_with_mappings_at_stage(items, mappings, stage, duplicates);
     Some(group_mapped_items(mapped_items))
 }
 
@@ -219,17 +221,24 @@ pub(crate) fn has_mapping_stage(target: &ConfigTarget, stage: MappingStage) -> b
 }
 
 pub(crate) fn map_items_at_stage(
-    mut mapped_items: Vec<PlaylistItem>,
+    mapped_items: Vec<PlaylistItem>,
     target: &ConfigTarget,
     stage: MappingStage,
     duplicates: Option<&mut HashSet<UUIDType>>,
 ) -> Option<(Vec<PlaylistItem>, MappingStageOutcome)> {
     let mapping_binding = target.mapping.load();
     let mappings = mapping_binding.as_ref()?;
+    (!mappings.for_stage(stage).is_empty())
+        .then(|| map_items_with_mappings_at_stage(mapped_items, mappings, stage, duplicates))
+}
+
+fn map_items_with_mappings_at_stage(
+    mut mapped_items: Vec<PlaylistItem>,
+    mappings: &tuliprox_core::model::CompiledTargetMappings,
+    stage: MappingStage,
+    duplicates: Option<&mut HashSet<UUIDType>>,
+) -> (Vec<PlaylistItem>, MappingStageOutcome) {
     let valid_mappings = mappings.for_stage(stage);
-    if valid_mappings.is_empty() {
-        return None;
-    }
     let original_ids = if duplicates.is_some() {
         Some(mapped_items.iter().map(|item| *item.header.get_uuid()).collect::<HashSet<_>>())
     } else {
@@ -265,7 +274,7 @@ pub(crate) fn map_items_at_stage(
             original_ids.contains(&uuid) || duplicates.insert(uuid)
         });
     }
-    Some((mapped_items, stage_outcome))
+    (mapped_items, stage_outcome)
 }
 
 pub(crate) fn group_mapped_items(items: Vec<PlaylistItem>) -> Vec<PlaylistGroup> {

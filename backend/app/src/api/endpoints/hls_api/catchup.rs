@@ -72,7 +72,7 @@ pub(super) fn resolve_leaked_hls_relative_origin(
     request_query: Option<&str>,
 ) -> Option<String> {
     let rel = relative_path.trim_start_matches('/');
-    if rel.is_empty() || rel.contains("://") {
+    if rel.is_empty() || rel.contains("://") || rel.split('/').any(|segment| matches!(segment, "." | "..")) {
         return None;
     }
     // Only recover archive-style relative paths (BitTV/Flussonic DVR or date trees).

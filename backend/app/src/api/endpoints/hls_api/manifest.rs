@@ -1562,8 +1562,11 @@ pub(super) async fn try_hls_cache_canonical_manifest_response(
         prepared_origin.url_failover_provider.clone(),
         origin.session_entry_url.url_failover_provider(),
     );
-    let origin_entry =
-        LiveHlsOriginEntry::parse_with_url_failover_provider(&prepared_origin.fetch_url, url_failover_provider)?;
+    let origin_entry = LiveHlsOriginEntry::parse_with_provider_configs(
+        &prepared_origin.fetch_url,
+        url_failover_provider,
+        prepared_origin.runtime_provider_config.clone(),
+    )?;
     {
         let mut session_guard = session.write().await;
         if session_guard.is_gc_marked_for_removal() {
