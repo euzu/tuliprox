@@ -26,6 +26,7 @@
   - [api-proxy.yml (Server, Users & RBAC)](./configuration/api-proxy.md)
   - [template.yml (Macros & Regex)](./configuration/template.md)
   - [mapping.yml (Mapper DSL & Logic)](./configuration/mapping-dsl.md)
+  - [Secrets & Environment Variables](./configuration/secrets.md)
 - [Operations & Debugging (CLI & DB Dumps)](./operations-debugging.md)
 - [DVR Operator Reference](./operator/dvr.md)
 - [Examples,Recipes & Ecosystem Stacks](./examples-recipes.md)
