@@ -639,7 +639,7 @@ impl Stream for ActiveClientStream {
                 None => StreamMode::Inner,
             };
 
-            // 4. Dispatch based on current streaming phase
+            // Dispatch based on the current streaming phase.
             match mode {
                 // Grace period: hold_stream=true, waiting for grace task to resolve
                 StreamMode::GracePending => {
@@ -1507,6 +1507,7 @@ mod tests {
             shared_stream_manager,
             hls_proxy: Arc::new(crate::api::model::HlsProxyManager::new()),
             hls_provisioning: Arc::new(crate::api::model::HlsProvisioningState::new()),
+            stalker_resolve_coordinator: Arc::default(),
             active_users,
             active_provider,
             connection_manager,
@@ -1585,6 +1586,7 @@ mod tests {
             shared_stream_manager,
             hls_proxy: Arc::new(crate::api::model::HlsProxyManager::new()),
             hls_provisioning: Arc::new(crate::api::model::HlsProvisioningState::new()),
+            stalker_resolve_coordinator: Arc::default(),
             active_users,
             active_provider,
             connection_manager,

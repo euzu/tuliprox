@@ -1451,6 +1451,7 @@ mod tests {
             shared_stream_manager,
             hls_proxy: Arc::new(crate::api::model::HlsProxyManager::new()),
             hls_provisioning: Arc::new(crate::api::model::HlsProvisioningState::new()),
+            stalker_resolve_coordinator: Arc::default(),
             active_users,
             active_provider,
             connection_manager,

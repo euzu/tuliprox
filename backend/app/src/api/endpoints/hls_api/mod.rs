@@ -1,9 +1,7 @@
 #![allow(clippy::large_futures)]
 
-// Cross-import of xtream URL helpers is routed through `xtream_url` (a one-way
-// re-export module) so this endpoint file no longer depends on a sibling
-// endpoint file directly. See `xtream_url`'s module docs for the ARCH-1
-// roadmap that motivates this re-export.
+// Route shared Xtream URL helpers through the one-way `xtream_url` boundary so
+// this module does not import a sibling endpoint directly.
 use super::{
     hls_terminal_response::{
         hls_manifest_terminal_preflight, hls_response, hls_temporary_resource_unavailable_response,

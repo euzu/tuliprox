@@ -863,20 +863,19 @@ pub(crate) async fn execute_source_yml_patches(
 
     let _lock = app_config.file_locks.write_lock(sources_path).await;
 
-    // Step 2: Read original bytes
+    // Read and fingerprint the exact bytes that the transaction is based on.
     let original_bytes = tokio::fs::read(sources_path)
         .await
         .map_err(|err| TuliproxError::ConfigPanelApi(format!("source.yml patch: failed to read file: {err}")))?;
-    // Step 3: Compute revision
     let original_revision = blake3::hash(&original_bytes);
     let original_text = String::from_utf8(original_bytes)
         .map_err(|_| TuliproxError::ConfigPanelApi("source.yml patch: file is not valid UTF-8".to_string()))?;
 
-    // Step 4: Parse as SourcesConfigDto
+    // Validate the current document before applying any edits.
     let before: SourcesConfigDto = serde_saphyr::from_str(&original_text)
         .map_err(|err| TuliproxError::ConfigPanelApi(format!("source.yml patch: failed to parse source.yml: {err}")))?;
 
-    // Steps 5-9: Batch consecutive scalar commands into one clone/parse/validation pass.
+    // Batch consecutive scalar commands into one clone, parse, and validation pass.
     // Structural alias commands remain sequential because they change the byte spans used by
     // subsequent edits. The complete command list still produces one final atomic disk write.
     let mut expected = before;
@@ -896,18 +895,13 @@ pub(crate) async fn execute_source_yml_patches(
         patch_index = step_end;
     }
 
-    // Step 6: No-op check
     if !changed {
         return Ok(false);
     }
 
-    // Step 10: Verify bytes outside edit ranges came from original
-    // (implicitly guaranteed by the edit model — apply_scalar_edits only modifies declared ranges)
-
-    // Step 11: Re-read and check revision
     let backup_dir = app_config.config.load().get_backup_dir().to_string();
 
-    // Step 12-13: Write with backup and atomic replace (includes revision check)
+    // Back up and atomically replace the file if its revision is still current.
     let written = write_config_text_file(
         sources_path.to_string_lossy().as_ref(),
         &backup_dir,
@@ -918,7 +912,7 @@ pub(crate) async fn execute_source_yml_patches(
     .await?;
 
     if written {
-        // Step 14: Mark internal write revision
+        // Let the file watcher distinguish this write from an external edit.
         app_config
             .file_locks
             .mark_internal_write_revision(sources_path)

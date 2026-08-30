@@ -295,16 +295,12 @@ impl ConfigFile {
         let mut config: Config = Config::from(config_dto);
         config.prepare(paths.config_path.as_str(), paths.home_path.as_str())?;
 
-        // Compute effective runtime paths for the NEW config before apply.
-        // This ensures prepare-phase reads/validates against the same files that will be active after apply.
+        // Resolve the paths that will be active if this configuration is applied.
         let mut effective_paths = paths.as_ref().clone();
         effective_paths.mapping_file_path = Some(next_mapping_path.clone());
         effective_paths.template_file_path = Some(next_template_path.clone());
 
-        // ── PREPARE PHASE ────────────────────────────────────────────
-        // All dependent data is loaded/validated here, using the NEW config values
-        // but without touching any live state. If anything fails, we return an error
-        // and the currently-running state remains completely unchanged.
+        // Load and validate dependent data without changing live state.
         let follow_up: PreparedFollowUp = if template_changed {
             // Template path changed -> sources depend on new templates, reload everything.
             let prepared = Self::prepare_sources_reload_with_config(&config, &effective_paths).await?;
@@ -326,8 +322,7 @@ impl ConfigFile {
         let previous_sources: SourcesConfig = (*app_state.app_config.sources.load_full()).clone();
         let previous_forced_targets = app_state.forced_targets.load_full();
 
-        // ── APPLY PHASE ──────────────────────────────────────────────
-        // All preparation succeeded — safe to update live state now.
+        // Update live state only after every dependent value has been prepared.
         if let Err(err) = update_app_state_config(app_state, config).await {
             error!("Failed to apply config reload: {err}. Attempting config rollback.");
             if let Err(rollback_err) = update_app_state_config(app_state, previous_config).await {

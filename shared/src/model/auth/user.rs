@@ -28,9 +28,8 @@ pub struct Claims {
     pub permissions: PermissionSet,
     #[serde(default)]
     pub pwd_version: u32,
-    /// Stable subject identifier for the principal. `None` for
-    /// pre-Phase 2 tokens; tokens missing this field are rejected by
-    /// the validators. Built-in admin tokens carry the reserved
+    /// Stable subject identifier for the principal. Legacy tokens may omit
+    /// this field and are rejected by the validators. Built-in admin tokens carry the reserved
     /// `builtin:admin` subject; web/API tokens carry the
     /// registry-allocated `UserId`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

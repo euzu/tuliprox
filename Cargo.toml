@@ -8,7 +8,7 @@ edition = "2021"
 rust-version = "1.95.0"
 
 [workspace.lints.clippy]
-# Shared policy for every workspace crate (modularization plan, Phase 0).
+# Shared lint policy for every workspace crate.
 # Extracted crates must not silently lose the lint level that previously
 # existed only as a crate attribute on backend/app/src/main.rs.
 all      = { level = "warn", priority = -1 }

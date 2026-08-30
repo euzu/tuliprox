@@ -74,16 +74,11 @@ use std::{
 };
 use tokio::{
     io::{AsyncReadExt, AsyncSeekExt},
-    sync::{Mutex, RwLock},
+    sync::RwLock,
 };
 use tokio_util::io::ReaderStream;
 use tuliprox_hls::api::MAX_HLS_MANIFEST_BYTES;
 use url::Url;
-
-/// Per-`(input id, provider id)` single-flight guards so concurrent client requests
-/// for the same dead stalker stream trigger only one portal re-resolve at a time.
-type StalkerResolveGuards = HashMap<(u16, u32), Arc<Mutex<()>>>;
-static STALKER_RE_RESOLVE_GUARDS: LazyLock<Mutex<StalkerResolveGuards>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub(crate) fn resolve_request_url_for_logging<'a>(input: &ConfigInput, stream_url: &'a str) -> Cow<'a, str> {
     if is_media_server_playback_url(input, stream_url) {
@@ -1270,22 +1265,10 @@ async fn re_resolve_stalker_url_singleflight(
     kind: StalkerStreamKind,
     force_refresh: bool,
 ) -> Result<Option<Arc<str>>, TuliproxError> {
-    let guard_key = (input.id, provider_id);
-    let entry_lock = {
-        let mut guards = STALKER_RE_RESOLVE_GUARDS.lock().await;
-        Arc::clone(guards.entry(guard_key).or_insert_with(|| Arc::new(Mutex::new(()))))
-    };
-    let result = {
-        let _flight = entry_lock.lock().await;
-        let client = app_state.http_client.load().as_ref().clone();
-        re_resolve_stalker_url(&app_state.app_config, &client, input, provider_id, kind, force_refresh).await
-    };
-    drop(entry_lock);
-    let mut guards = STALKER_RE_RESOLVE_GUARDS.lock().await;
-    if guards.get(&guard_key).is_some_and(|lock| Arc::strong_count(lock) == 1) {
-        guards.remove(&guard_key);
-    }
-    result
+    let entry_lock = app_state.stalker_resolve_coordinator.guard_for(input.id, provider_id).await;
+    let _flight = entry_lock.lock().await;
+    let client = app_state.http_client.load().as_ref().clone();
+    re_resolve_stalker_url(&app_state.app_config, &client, input, provider_id, kind, force_refresh).await
 }
 
 pub(crate) async fn resolve_initial_stalker_playback_url(

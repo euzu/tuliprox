@@ -404,7 +404,7 @@ impl MultiProviderLineup {
     /// }
     /// ```
     async fn acquire(&self, with_grace: bool, grace_period_timeout_secs: u64) -> ProviderAllocation {
-        // Phase 1: prefer providers with available capacity (no grace allocations),
+        // Prefer providers with available capacity (no grace allocations),
         // scanning priority groups from highest -> lowest.
         for priority_group in &self.providers {
             let allocation =
@@ -418,7 +418,7 @@ impl MultiProviderLineup {
             return ProviderAllocation::Exhausted;
         }
 
-        // Phase 2: all providers are at capacity, allow grace allocations (still respecting priority order).
+        // If every provider is at capacity, allow grace allocations while respecting priority order.
         for priority_group in &self.providers {
             let allocation =
                 Self::acquire_next_provider_from_group(priority_group, true, grace_period_timeout_secs).await;
@@ -432,7 +432,7 @@ impl MultiProviderLineup {
 
     // it intended to use with redirects to cycle through provider
     async fn get_next(&self, grace_period_timeout_secs: u64) -> Option<Arc<ProviderConfig>> {
-        // Phase 1: prefer providers with available capacity (no grace allocations),
+        // Prefer providers with available capacity (no grace allocations),
         // scanning priority groups from highest -> lowest.
         for priority_group in &self.providers {
             if let Some(config) =
@@ -442,7 +442,7 @@ impl MultiProviderLineup {
             }
         }
 
-        // Phase 2: no provider is available, allow grace.
+        // If no provider is available, allow grace.
         for priority_group in &self.providers {
             if let Some(config) =
                 Self::get_next_provider_from_group(priority_group, true, grace_period_timeout_secs).await
@@ -630,7 +630,7 @@ impl ProviderLineupManager {
     }
 
     pub async fn reconcile_connections(&self, mut counts: HashMap<Arc<str>, usize>) {
-        // 1. Synchronize known providers from actual counts.
+        // Synchronize known providers from actual counts.
         // We take a snapshot of the keys and locks to avoid holding the DashMap's internal
         // shard locks while awaiting the RwLock of each provider. Holding both can lead to deadlocks.
         let snapshot: Vec<_> =
@@ -646,8 +646,8 @@ impl ProviderLineupManager {
             }
         }
 
-        // 2. Handle new providers that weren't in the registry yet (e.g. newly added/renamed).
-        // Same lock-ordering rule as Phase 1: clone the Arc<RwLock<_>> out of DashMap first,
+        // Handle providers that are not in the registry yet, such as newly added or renamed providers.
+        // Preserve the lock order above: clone the Arc<RwLock<_>> out of DashMap first,
         // then await on the provider RwLock without holding any DashMap shard lock.
         for (name, count) in counts {
             let conn_lock = self
