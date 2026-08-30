@@ -11,10 +11,9 @@ use crate::{
 };
 use shared::{
     concat_string,
-    error::TuliproxError,
     model::{ClusterFlags, PlansConfigDto, ProxyType, SortOrder, UserPlanDto, UserPlanTrialDto},
 };
-use std::{fmt::Display, rc::Rc, str::FromStr};
+use std::{rc::Rc, str::FromStr};
 use web_sys::MouseEvent;
 use yew::{platform::spawn_local, prelude::*};
 
@@ -28,31 +27,10 @@ enum PlanDialogMode {
     Edit(usize),
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, strum_macros::Display, strum_macros::EnumString)]
 enum PlanTableAction {
     Delete,
     Edit,
-}
-impl Display for PlanTableAction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                Self::Delete => "Delete",
-                Self::Edit => "Edit",
-            }
-        )
-    }
-}
-impl FromStr for PlanTableAction {
-    type Err = TuliproxError;
-    fn from_str(s: &str) -> Result<Self, TuliproxError> {
-        match s {
-            "Delete" => Ok(Self::Delete),
-            "Edit" => Ok(Self::Edit),
-            _ => Err(TuliproxError::Config(format!("Unknown Plan Action: {s}"))),
-        }
-    }
 }
 
 fn build_default_plan(existing_plans: &[UserPlanDto]) -> UserPlanDto {

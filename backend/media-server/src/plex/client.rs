@@ -1037,37 +1037,42 @@ mod tests {
         assert_eq!(libraries[0].reference.library_id.as_ref(), "2");
     }
 
-    #[test]
-    fn pms_part_url_accepts_only_same_origin_part_resources() {
+    fn assert_pms_resource_url_guards(
+        resolve: fn(&StdArc<str>, &str) -> Result<String, MediaServerError>,
+        valid_path: &str,
+        expected_valid_url: &str,
+        wrong_prefix_path: &str,
+        expected_err_kind: MediaServerErrorKind,
+    ) {
         let base = StdArc::<str>::from("http://127.0.0.1:32400/base");
-
+        assert_eq!(resolve(&base, valid_path).expect("resource key resolves"), expected_valid_url);
+        assert_eq!(resolve(&base, wrong_prefix_path).expect_err("wrong prefix must fail").kind, expected_err_kind);
         assert_eq!(
-            pms_part_url(&base, "/library/parts/part-redacted/file.mkv?download=1").expect("part key resolves"),
-            "http://127.0.0.1:32400/library/parts/part-redacted/file.mkv?download=1"
-        );
-        assert_eq!(
-            pms_part_url(&base, "/library/metadata/rating-redacted")
-                .expect_err("metadata paths are not direct part refs")
-                .kind,
-            MediaServerErrorKind::NoDirectPlayableMediaServerSource
-        );
-        assert_eq!(
-            pms_part_url(&base, "//evil.example.invalid/library/parts/part-redacted/file.mkv")
+            resolve(&base, &format!("//evil.example.invalid{valid_path}"))
                 .expect_err("network-path refs must not escape the selected PMS")
                 .kind,
-            MediaServerErrorKind::NoDirectPlayableMediaServerSource
+            expected_err_kind
         );
         assert_eq!(
-            pms_part_url(&base, "/library/parts/../../identity")
-                .expect_err("normalized paths must stay under direct part refs")
-                .kind,
-            MediaServerErrorKind::NoDirectPlayableMediaServerSource
+            resolve(&base, "/library/../identity").expect_err("normalized paths must stay under direct refs").kind,
+            expected_err_kind
         );
         assert_eq!(
-            pms_part_url(&base, "/library/parts/part-redacted/file.mkv?X-Plex-Token=should-not-leak")
-                .expect_err("part refs must not carry credentials")
+            resolve(&base, &format!("{valid_path}&X-Plex-Token=should-not-leak"))
+                .expect_err("refs must not carry credentials")
                 .kind,
-            MediaServerErrorKind::NoDirectPlayableMediaServerSource
+            expected_err_kind
+        );
+    }
+
+    #[test]
+    fn pms_part_url_accepts_only_same_origin_part_resources() {
+        assert_pms_resource_url_guards(
+            pms_part_url,
+            "/library/parts/part-redacted/file.mkv?download=1",
+            "http://127.0.0.1:32400/library/parts/part-redacted/file.mkv?download=1",
+            "/library/metadata/rating-redacted",
+            MediaServerErrorKind::NoDirectPlayableMediaServerSource,
         );
     }
 
@@ -1077,38 +1082,16 @@ mod tests {
     /// in the shared `resolve_pms_resource_url` helper.
     #[test]
     fn pms_image_url_accepts_only_same_origin_metadata_images() {
-        let base = StdArc::<str>::from("http://127.0.0.1:32400/base");
-
-        assert_eq!(
-            pms_image_url(&base, "/library/metadata/rating-redacted/thumb?width=320").expect("image path resolves"),
-            "http://127.0.0.1:32400/library/metadata/rating-redacted/thumb?width=320"
+        assert_pms_resource_url_guards(
+            pms_image_url,
+            "/library/metadata/rating-redacted/thumb?width=320",
+            "http://127.0.0.1:32400/library/metadata/rating-redacted/thumb?width=320",
+            "/library/parts/part-redacted/file.mkv",
+            MediaServerErrorKind::MediaServerItemNotFound,
         );
+        let base = StdArc::<str>::from("http://127.0.0.1:32400/base");
         assert_eq!(
             pms_image_url(&base, "").expect_err("blank paths must be rejected").kind,
-            MediaServerErrorKind::MediaServerItemNotFound
-        );
-        assert_eq!(
-            pms_image_url(&base, "/library/parts/part-redacted/file.mkv")
-                .expect_err("part paths are not metadata images")
-                .kind,
-            MediaServerErrorKind::MediaServerItemNotFound
-        );
-        assert_eq!(
-            pms_image_url(&base, "//evil.example.invalid/library/metadata/rating-redacted/thumb")
-                .expect_err("network-path refs must not escape the selected PMS")
-                .kind,
-            MediaServerErrorKind::MediaServerItemNotFound
-        );
-        assert_eq!(
-            pms_image_url(&base, "/library/metadata/../../identity")
-                .expect_err("normalized paths must stay under metadata images")
-                .kind,
-            MediaServerErrorKind::MediaServerItemNotFound
-        );
-        assert_eq!(
-            pms_image_url(&base, "/library/metadata/rating-redacted/thumb?X-Plex-Token=should-not-leak")
-                .expect_err("image refs must not carry credentials")
-                .kind,
             MediaServerErrorKind::MediaServerItemNotFound
         );
     }

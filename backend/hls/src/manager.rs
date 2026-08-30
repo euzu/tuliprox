@@ -3770,6 +3770,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::similar_names, clippy::too_many_lines)]
     async fn finalized_signed_url_generations_follow_published_lease_lifetime() {
         let manager = HlsProxyManager::new();
         let published_resource_ids = HlsPublishedTransientResourceIds::default();
@@ -3914,6 +3915,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::similar_names, clippy::too_many_lines)]
     async fn same_lease_retains_every_published_finalized_generation_until_removal() {
         let manager = HlsProxyManager::new();
         let published_resource_ids = HlsPublishedTransientResourceIds::default();

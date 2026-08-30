@@ -110,15 +110,8 @@ async fn read_snapshot(path: &Path) -> ProviderCapabilities {
     }
 }
 
-fn sanitize_component(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| match ch {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => ch,
-            _ => '_',
-        })
-        .collect()
-}
+#[inline]
+fn sanitize_component(value: &str) -> String { crate::redaction::sanitize_path_component(value, false) }
 
 #[cfg(test)]
 mod tests {

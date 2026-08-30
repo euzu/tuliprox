@@ -86,6 +86,7 @@ use shared::model::{
     ProviderUrlSelectionPolicy,
 };
 use std::{
+    fmt::Write,
     io,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -2092,7 +2093,7 @@ async fn finalized_event_manifest_commits_full_transient_lifecycle() {
     let mut origin_body =
         "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-MEDIA-SEQUENCE:1\n".to_string();
     for sequence in 1..=8 {
-        origin_body.push_str(&format!("#EXTINF:4.0,\n{sequence}.ts\n"));
+        let _ = write!(origin_body, "#EXTINF:4.0,\n{sequence}.ts\n");
     }
     origin_body.push_str("#EXT-X-ENDLIST\n");
     let origin_body: &'static str = Box::leak(origin_body.into_boxed_str());
@@ -2124,7 +2125,7 @@ async fn finalized_event_manifest_commits_full_transient_lifecycle() {
 async fn endlist_only_manifest_commits_complete_body_with_consistent_finalized_state() {
     let mut origin_body = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:1\n".to_string();
     for sequence in 1..=8 {
-        origin_body.push_str(&format!("#EXTINF:4.0,\n{sequence}.ts\n"));
+        let _ = write!(origin_body, "#EXTINF:4.0,\n{sequence}.ts\n");
     }
     origin_body.push_str("#EXT-X-ENDLIST\n");
     let origin_body: &'static str = Box::leak(origin_body.into_boxed_str());

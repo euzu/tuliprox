@@ -17,23 +17,17 @@ use crate::{
     services::{CreateRecordingTaskRequest, DialogService, RecordingService, RecordingSourceInput},
 };
 use shared::{
-    error::TuliproxError,
     model::{
         Permission, PlaylistRequest, PlaylistUrlResolveRequest, SearchRequest, SeriesStreamDetailEpisodeProperties,
         SeriesStreamProperties, UiPlaylistGroup, UiPlaylistItem, VirtualId, XtreamCluster,
     },
     utils::{format_float_localized, Internable},
 };
-use std::{cell::RefCell, collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, str::FromStr};
 use wasm_bindgen::JsCast;
 use web_sys::HtmlInputElement;
 use yew::{platform::spawn_local, prelude::*};
 
-const COPY_LINK_TULIPROX_VIRTUAL_ID: &str = "copy_link_tuliprox_virtual_id";
-const COPY_LINK_TULIPROX_WEBPLAYER_URL: &str = "copy_link_tuliprox_webplayer_url";
-const COPY_LINK_PROVIDER_URL: &str = "copy_link_provider_url";
-const DOWNLOAD_ITEM: &str = "download_item";
-const RECORD_ITEM: &str = "record_item";
 const TP_EXPLORER_SEARCH_FIELDS_KEY: &str = "tp-explorer-search-fields";
 
 #[derive(Clone)]
@@ -47,49 +41,16 @@ struct ChannelSelection {
 }
 
 #[allow(clippy::enum_variant_names)]
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, strum_macros::Display, strum_macros::EnumString)]
+#[strum(serialize_all = "snake_case")]
 enum ExplorerAction {
     CopyLinkTuliproxVirtualId,
     CopyLinkTuliproxWebPlayerUrl,
     CopyLinkProviderUrl,
+    #[strum(serialize = "download_item")]
     Download,
+    #[strum(serialize = "record_item")]
     Record,
-}
-
-impl Display for ExplorerAction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                Self::CopyLinkTuliproxVirtualId => COPY_LINK_TULIPROX_VIRTUAL_ID,
-                Self::CopyLinkTuliproxWebPlayerUrl => COPY_LINK_TULIPROX_WEBPLAYER_URL,
-                Self::CopyLinkProviderUrl => COPY_LINK_PROVIDER_URL,
-                Self::Download => DOWNLOAD_ITEM,
-                Self::Record => RECORD_ITEM,
-            }
-        )
-    }
-}
-
-impl FromStr for ExplorerAction {
-    type Err = TuliproxError;
-
-    fn from_str(s: &str) -> Result<Self, TuliproxError> {
-        if s.eq(COPY_LINK_TULIPROX_VIRTUAL_ID) {
-            Ok(Self::CopyLinkTuliproxVirtualId)
-        } else if s.eq(COPY_LINK_TULIPROX_WEBPLAYER_URL) {
-            Ok(Self::CopyLinkTuliproxWebPlayerUrl)
-        } else if s.eq(COPY_LINK_PROVIDER_URL) {
-            Ok(Self::CopyLinkProviderUrl)
-        } else if s.eq(DOWNLOAD_ITEM) {
-            Ok(Self::Download)
-        } else if s.eq(RECORD_ITEM) {
-            Ok(Self::Record)
-        } else {
-            Err(TuliproxError::Config(format!("Unknown ExplorerAction: {s}")))
-        }
-    }
 }
 
 fn build_download_filename(title: &str, url: &str) -> String {

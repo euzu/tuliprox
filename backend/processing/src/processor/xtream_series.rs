@@ -22,7 +22,7 @@ use shared::{
     },
 };
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -148,47 +148,17 @@ async fn playlist_resolve_series_info<E: EventSink + Clone + 'static, M: Metadat
 }
 
 fn sync_resolved_series_properties(provider_fpl: &mut FetchedPlaylist<'_>, processed_fpl: &mut FetchedPlaylist<'_>) {
-    let mut resolved_series_by_provider_id: HashMap<u32, SeriesStreamProperties> = HashMap::new();
-
-    for pli in processed_fpl.items() {
-        if pli.header.xtream_cluster != XtreamCluster::Series || pli.header.item_type != PlaylistItemType::SeriesInfo {
-            continue;
-        }
-
-        let Some(provider_id) = pli.get_provider_id() else {
-            continue;
-        };
-        if provider_id == 0 {
-            continue;
-        }
-
-        if let Some(StreamProperties::Series(properties)) = pli.header.additional_properties.as_ref() {
-            resolved_series_by_provider_id.entry(provider_id).or_insert_with(|| properties.as_ref().clone());
-        }
-    }
-
-    if resolved_series_by_provider_id.is_empty() {
-        return;
-    }
-
-    for source_pli in provider_fpl.items_mut() {
-        if source_pli.header.xtream_cluster != XtreamCluster::Series
-            || source_pli.header.item_type != PlaylistItemType::SeriesInfo
-        {
-            continue;
-        }
-
-        let Some(provider_id) = source_pli.get_provider_id() else {
-            continue;
-        };
-        if provider_id == 0 {
-            continue;
-        }
-
-        if let Some(resolved) = resolved_series_by_provider_id.get(&provider_id) {
-            source_pli.header.additional_properties = Some(StreamProperties::Series(Box::new(resolved.clone())));
-        }
-    }
+    crate::processor::xtream::sync_resolved_xtream_properties(
+        provider_fpl,
+        processed_fpl,
+        XtreamCluster::Series,
+        PlaylistItemType::SeriesInfo,
+        |props| match props {
+            StreamProperties::Series(s) => Some(s.as_ref()),
+            _ => None,
+        },
+        StreamProperties::Series,
+    );
 }
 
 fn queue_background_series_info<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(

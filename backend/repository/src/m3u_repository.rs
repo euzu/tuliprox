@@ -1,6 +1,7 @@
 use super::playlist_mem_cache::PlaylistStorageState;
 use crate::{
     bplustree::{BPlusTree, BPlusTreeQuery},
+    error_macros::{await_playlist_write, cant_read_result, cant_write_result},
     m3u_playlist_iterator::M3uPlaylistM3uTextIterator,
     playlist_backend::{ensure_storage_path, iter_raw_playlist, M3u, PlaylistBackend},
     playlist_repository::get_input_m3u_playlist_file_path,
@@ -31,20 +32,6 @@ use tuliprox_core::{
     model::{AppConfig, Config, ConfigInput, ConfigTarget, M3uTargetOutput, ProxyUserCredentials},
     utils::{async_file_writer, file_exists_async},
 };
-
-macro_rules! cant_write_result {
-    ($path:expr, $err:expr) => {
-        TuliproxError::RepositoryM3u(format!("failed to write m3u playlist: {} - {}", $path.display(), $err))
-    };
-}
-
-macro_rules! await_playlist_write {
-    ($expr:expr, $fmt:literal $(, $args:expr)* ) => {{
-        $expr.await.map_err(|err| {
-            TuliproxError::RepositoryM3u(format!($fmt $(, $args)*, err))
-        })?
-    }};
-}
 
 pub fn m3u_get_file_path_for_db(target_path: &Path) -> PathBuf {
     target_path.join(storage_const::PATH_M3U).join(concat_string!(
@@ -85,22 +72,38 @@ where
     F: FnMut(&M3uPlaylistItem) -> Result<String, TuliproxError>,
 {
     let file = await_playlist_write!(
+        RepositoryM3u,
         fs::File::create(m3u_filename),
         "Can't write m3u plain playlist {} - {}",
         m3u_filename.display()
     );
     // Larger buffer for sequential writes to reduce syscalls
     let mut writer = async_file_writer(file);
-    await_playlist_write!(writer.write_all(b"#EXTM3U\n"), "Failed to write header to {} - {}", m3u_filename.display());
+    await_playlist_write!(
+        RepositoryM3u,
+        writer.write_all(b"#EXTM3U\n"),
+        "Failed to write header to {} - {}",
+        m3u_filename.display()
+    );
 
     for m3u in m3u_playlist {
         let line = build_line(m3u)?;
         let bytes = line.as_bytes();
-        await_playlist_write!(writer.write_all(bytes), "Failed to write entry to {} - {}", m3u_filename.display());
-        await_playlist_write!(writer.write_all(b"\n"), "Failed to write newline to {} - {}", m3u_filename.display());
+        await_playlist_write!(
+            RepositoryM3u,
+            writer.write_all(bytes),
+            "Failed to write entry to {} - {}",
+            m3u_filename.display()
+        );
+        await_playlist_write!(
+            RepositoryM3u,
+            writer.write_all(b"\n"),
+            "Failed to write newline to {} - {}",
+            m3u_filename.display()
+        );
     }
 
-    await_playlist_write!(writer.flush(), "Failed to flush {} - {}", m3u_filename.display());
+    await_playlist_write!(RepositoryM3u, writer.flush(), "Failed to flush {} - {}", m3u_filename.display());
 
     Ok(())
 }
@@ -120,7 +123,12 @@ where
 {
     let tmp_path = temp_m3u_filename(m3u_filename);
     write_m3u_text_file(&tmp_path, m3u_playlist, build_line).await?;
-    await_playlist_write!(fs::rename(&tmp_path, m3u_filename), "Failed to replace {} - {}", m3u_filename.display());
+    await_playlist_write!(
+        RepositoryM3u,
+        fs::rename(&tmp_path, m3u_filename),
+        "Failed to replace {} - {}",
+        m3u_filename.display()
+    );
     Ok(())
 }
 
@@ -217,6 +225,7 @@ async fn persist_m3u_playlist_as_text(
 
         if let Err(rename_err) = async {
             await_playlist_write!(
+                RepositoryM3u,
                 fs::rename(&provider_tmp, &provider_filename),
                 "Failed to replace {} - {}",
                 provider_filename.display()
@@ -232,6 +241,7 @@ async fn persist_m3u_playlist_as_text(
 
         if let Err(rename_err) = async {
             await_playlist_write!(
+                RepositoryM3u,
                 fs::rename(&m3u_tmp, &m3u_filename),
                 "Failed to replace {} - {}",
                 m3u_filename.display()
@@ -286,7 +296,7 @@ pub async fn m3u_write_playlist(
             tree.insert(m3u.virtual_id, m3u);
         }
         tree.store_with_index(&m3u_path_clone, |pli| pli.source_ordinal)
-            .map_err(|err| cant_write_result!(&m3u_path_clone, err))?;
+            .map_err(|err| cant_write_result!(RepositoryM3u, "m3u", &m3u_path_clone, err))?;
         Ok(())
     })
     .await
@@ -399,7 +409,7 @@ pub async fn persist_input_m3u_playlist(
         for m3u in &playlist_items {
             tree.insert(m3u.provider_id.clone(), m3u.clone());
         }
-        tree.store(&m3u_path_clone).map_err(|err| cant_write_result!(&m3u_path_clone, err))?;
+        tree.store(&m3u_path_clone).map_err(|err| cant_write_result!(RepositoryM3u, "m3u", &m3u_path_clone, err))?;
         Ok(())
     })
     .await
@@ -485,9 +495,7 @@ pub async fn load_input_m3u_playlist(
         Ok(groups.into_values().collect())
     })
     .await
-    .map_err(|err| {
-        TuliproxError::RepositoryM3u(format!("failed to read m3u playlist: {} - {err}", m3u_path_err.display()))
-    })??;
+    .map_err(|err| cant_read_result!(RepositoryM3u, "m3u", &m3u_path_err, err))??;
 
     Ok(groups)
 }

@@ -1,7 +1,7 @@
 use crate::{
     model::{info_doc_utils::InfoDocUtils, PlaylistEntry, XtreamSeriesInfo, XtreamSeriesInfoDoc, XtreamVideoInfo},
     utils::{
-        arc_str_default_on_null, arc_str_none_default_on_null, arc_str_option_null_if_empty_serde,
+        arc_str_none_default_on_null, arc_str_null_is_none_serde, arc_str_option_null_if_empty_serde,
         arc_str_option_serde, deserialize_as_option_arc_str, deserialize_as_string_array,
         deserialize_json_as_opt_string, deserialize_number_from_string, deserialize_number_from_string_or_zero,
         serialize_json_as_opt_string, Internable, CONSTANTS,
@@ -291,7 +291,7 @@ pub struct VideoStreamProperties {
     pub custom_sid: Option<Arc<str>>,
     #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
     pub added: Arc<str>,
-    #[serde(default, deserialize_with = "arc_str_default_on_null")]
+    #[serde(default, deserialize_with = "arc_str_null_is_none_serde::deserialize")]
     pub container_extension: Arc<str>,
     #[serde(default, deserialize_with = "deserialize_number_from_string")]
     pub rating: Option<f64>,
@@ -341,7 +341,7 @@ pub struct SeriesStreamDetailEpisodeProperties {
     pub season: u32,
     #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
     pub title: Arc<str>,
-    #[serde(default, deserialize_with = "arc_str_default_on_null")]
+    #[serde(default, deserialize_with = "arc_str_null_is_none_serde::deserialize")]
     pub container_extension: Arc<str>,
     #[serde(default, with = "arc_str_option_null_if_empty_serde")]
     pub custom_sid: Option<Arc<str>>,
@@ -463,7 +463,7 @@ pub struct EpisodeStreamProperties {
     pub tmdb: Option<u32>,
     #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
     pub movie_image: Arc<str>,
-    #[serde(default, deserialize_with = "arc_str_default_on_null")]
+    #[serde(default, deserialize_with = "arc_str_null_is_none_serde::deserialize")]
     pub container_extension: Arc<str>,
     #[serde(
         default,

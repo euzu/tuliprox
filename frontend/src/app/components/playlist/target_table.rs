@@ -13,11 +13,8 @@ use crate::{
     model::DialogResult,
     services::DialogService,
 };
-use shared::{
-    error::TuliproxError,
-    model::{ConfigTargetDto, SortOrder},
-};
-use std::{fmt::Display, rc::Rc, str::FromStr};
+use shared::model::{ConfigTargetDto, SortOrder};
+use std::{rc::Rc, str::FromStr};
 use yew::{platform::spawn_local, prelude::*};
 
 const HEADERS: [&str; 12] = [
@@ -76,37 +73,59 @@ pub fn TargetTable(props: &TargetTableProps) -> Html {
         let translator = translate.clone();
         let popup_onclick = handle_popup_onclick.clone();
         Callback::<(usize, usize, Rc<ConfigTargetDto>), Html>::from(
-            move |(row, col, dto): (usize, usize, Rc<ConfigTargetDto>)| {
-                match col {
-                    0 => {
-                        let popup_onclick = popup_onclick.clone();
-                        html! {
-                            <button class="tp__icon-button"
-                                onclick={Callback::from(move |event: MouseEvent| popup_onclick.emit((dto.clone(), event)))}
-                                data-row={row.to_string()}>
-                                <AppIcon name="Popup"></AppIcon>
-                            </button>
-                        }
+            move |(row, col, dto): (usize, usize, Rc<ConfigTargetDto>)| match col {
+                0 => {
+                    let popup_onclick = popup_onclick.clone();
+                    html! {
+                        <button class="tp__icon-button"
+                            onclick={Callback::from(move |event: MouseEvent| popup_onclick.emit((dto.clone(), event)))}
+                            data-row={row.to_string()}>
+                            <AppIcon name="Popup"></AppIcon>
+                        </button>
                     }
-                    1 => html! { <Chip class={ convert_bool_to_chip_style(dto.enabled) }
-                                 label={if dto.enabled {translator.t("LABEL.ACTIVE")} else { translator.t("LABEL.DISABLED")} }
-                                  /> },
-                    2 => html! { dto.name.as_str() },
-                    3 => html! { <TargetOutput target={Rc::clone(&dto)} /> },
-                    4 => html! { <RevealContent preview={ html!{translator.t("LABEL.SETTINGS")}}><TargetOptions target={Rc::clone(&dto)} /></RevealContent> },
-                    5 => dto.sort.as_ref().map_or_else(|| html! {}, |_s| html! { <RevealContent><TargetSort target={Rc::clone(&dto)} /></RevealContent> }),
-                    6 => dto.t_filter.as_ref().map_or_else(|| html! {}, |f| html! { <RevealContent preview={Some(html!{<FilterView inline={true} filter={f.clone()} />})}><FilterView pretty={true} filter={f.clone()} /></RevealContent> }),
-                    7 => dto.rename.as_ref().map_or_else(|| html! {}, |_r| html! { <RevealContent><TargetRename target={Rc::clone(&dto)} /></RevealContent> }),
-                    8 => {
-                        let mapping_oneliner = dto.mapping.as_ref().map(|v| v.join(", ")).unwrap_or_default();
-                        html_if!(!mapping_oneliner.is_empty(),
-                            { <RevealContent preview={Some(html! { mapping_oneliner })}><PlaylistMappings mappings={dto.mapping.clone()} /></RevealContent> })
-                    },
-                    9 => html! { <PlaylistProcessing order={dto.processing_order} /> },
-                    10 => html! { <TargetWatch  target={Rc::clone(&dto)} /> },
-                    11 => html! { <ToggleSwitch value={dto.use_memory_cache} readonly={true} /> },
-                    _ => html! {""},
                 }
+                1 => html! { <Chip class={ convert_bool_to_chip_style(dto.enabled) }
+                label={if dto.enabled {translator.t("LABEL.ACTIVE")} else { translator.t("LABEL.DISABLED")} }
+                 /> },
+                2 => html! { dto.name.as_str() },
+                3 => html! { <TargetOutput target={Rc::clone(&dto)} /> },
+                4 => {
+                    html! { <RevealContent preview={ html!{translator.t("LABEL.SETTINGS")}}><TargetOptions target={Rc::clone(&dto)} /></RevealContent> }
+                }
+                5 => dto.sort.as_ref().map_or_else(
+                    || html! {},
+                    |_s| html! { <RevealContent><TargetSort target={Rc::clone(&dto)} /></RevealContent> },
+                ),
+                6 => {
+                    let filters = [
+                        (translator.t("LABEL.FILTER"), dto.filter.t_processing.as_ref()),
+                        (translator.t("LABEL.PERSIST_FILTER"), dto.filter.t_persist.as_ref()),
+                    ];
+                    let rendered = filters.into_iter().filter_map(|(label, filter)| {
+                        filter.map(|filter| {
+                            html! {
+                                <div>
+                                    <strong>{label}</strong>
+                                    <FilterView pretty={true} filter={filter.clone()} />
+                                </div>
+                            }
+                        })
+                    });
+                    html! { <RevealContent>{ for rendered }</RevealContent> }
+                }
+                7 => dto.rename.as_ref().map_or_else(
+                    || html! {},
+                    |_r| html! { <RevealContent><TargetRename target={Rc::clone(&dto)} /></RevealContent> },
+                ),
+                8 => {
+                    let mapping_oneliner = dto.mapping.as_ref().map(|v| v.join(", ")).unwrap_or_default();
+                    html_if!(!mapping_oneliner.is_empty(),
+                            { <RevealContent preview={Some(html! { mapping_oneliner })}><PlaylistMappings mappings={dto.mapping.clone()} /></RevealContent> })
+                }
+                9 => html! { <PlaylistProcessing order={dto.processing_order} /> },
+                10 => html! { <TargetWatch  target={Rc::clone(&dto)} /> },
+                11 => html! { <ToggleSwitch value={dto.use_memory_cache} readonly={true} /> },
+                _ => html! {""},
             },
         )
     };
@@ -216,36 +235,10 @@ pub fn TargetTable(props: &TargetTableProps) -> Html {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, strum_macros::Display, strum_macros::EnumString)]
+#[strum(serialize_all = "snake_case")]
 enum TargetTableAction {
     Edit,
     Refresh,
     Delete,
-}
-
-impl Display for TargetTableAction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                Self::Edit => "edit",
-                Self::Refresh => "refresh",
-                Self::Delete => "delete",
-            }
-        )
-    }
-}
-
-impl FromStr for TargetTableAction {
-    type Err = TuliproxError;
-
-    fn from_str(s: &str) -> Result<Self, TuliproxError> {
-        match s {
-            "edit" => Ok(Self::Edit),
-            "refresh" => Ok(Self::Refresh),
-            "delete" => Ok(Self::Delete),
-            _ => Err(TuliproxError::Config(format!("Unknown Target Action: {s}"))),
-        }
-    }
 }

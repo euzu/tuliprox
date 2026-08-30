@@ -979,7 +979,7 @@ mod tests {
             name: "mixed-target".to_string(),
             options: None,
             sort: None,
-            filter: Filter::default(),
+            filter: Filter::default().into(),
             output: vec![
                 TargetOutput::Xtream(XtreamTargetOutput {
                     flags: XtreamTargetFlagsSet::new(),
@@ -1011,7 +1011,7 @@ mod tests {
             name: "xtream-only".to_string(),
             options: None,
             sort: None,
-            filter: Filter::default(),
+            filter: Filter::default().into(),
             output: vec![TargetOutput::Xtream(XtreamTargetOutput {
                 flags: XtreamTargetFlagsSet::new(),
                 trakt: None,

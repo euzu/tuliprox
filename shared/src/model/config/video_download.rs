@@ -1158,46 +1158,51 @@ mod tests {
         assert!(err.to_string().contains("delete_after_days"), "error: {err}");
     }
 
+    fn check_recording_disk_rejected(disk: RecordingDiskConfigDto, expected_substr: &str) {
+        let mut recording = make_recording_config();
+        recording.disk = Some(disk);
+        let mut video = make_recording_video_config(recording);
+        let err = video.prepare().expect_err("invalid disk config should fail");
+        assert!(err.to_string().contains(expected_substr), "error: {err}");
+    }
+
     #[test]
     fn recording_disk_high_water_above_100_is_rejected() {
-        let mut recording = make_recording_config();
-        recording.disk = Some(RecordingDiskConfigDto {
-            high_water_percent: Some(101),
-            low_water_percent: None,
-            cleanup_interval_secs: Some(3600),
-            safety_bytes: Some(1024),
-        });
-        let mut video = make_recording_video_config(recording);
-        let err = video.prepare().expect_err("high > 100 should fail");
-        assert!(err.to_string().contains("high_water_percent"), "error: {err}");
+        check_recording_disk_rejected(
+            RecordingDiskConfigDto {
+                high_water_percent: Some(101),
+                low_water_percent: None,
+                cleanup_interval_secs: Some(3600),
+                safety_bytes: Some(1024),
+            },
+            "high_water_percent",
+        );
     }
 
     #[test]
     fn recording_disk_low_water_above_100_is_rejected() {
-        let mut recording = make_recording_config();
-        recording.disk = Some(RecordingDiskConfigDto {
-            high_water_percent: None,
-            low_water_percent: Some(101),
-            cleanup_interval_secs: Some(3600),
-            safety_bytes: Some(1024),
-        });
-        let mut video = make_recording_video_config(recording);
-        let err = video.prepare().expect_err("low > 100 should fail");
-        assert!(err.to_string().contains("low_water_percent"), "error: {err}");
+        check_recording_disk_rejected(
+            RecordingDiskConfigDto {
+                high_water_percent: None,
+                low_water_percent: Some(101),
+                cleanup_interval_secs: Some(3600),
+                safety_bytes: Some(1024),
+            },
+            "low_water_percent",
+        );
     }
 
     #[test]
     fn recording_disk_low_ge_high_is_rejected() {
-        let mut recording = make_recording_config();
-        recording.disk = Some(RecordingDiskConfigDto {
-            high_water_percent: Some(80),
-            low_water_percent: Some(80),
-            cleanup_interval_secs: Some(3600),
-            safety_bytes: Some(1024),
-        });
-        let mut video = make_recording_video_config(recording);
-        let err = video.prepare().expect_err("low >= high should fail");
-        assert!(err.to_string().contains("must be <"), "error: {err}");
+        check_recording_disk_rejected(
+            RecordingDiskConfigDto {
+                high_water_percent: Some(80),
+                low_water_percent: Some(80),
+                cleanup_interval_secs: Some(3600),
+                safety_bytes: Some(1024),
+            },
+            "must be <",
+        );
     }
 
     #[test]
@@ -1215,30 +1220,28 @@ mod tests {
 
     #[test]
     fn recording_disk_zero_cleanup_interval_is_rejected() {
-        let mut recording = make_recording_config();
-        recording.disk = Some(RecordingDiskConfigDto {
-            high_water_percent: None,
-            low_water_percent: None,
-            cleanup_interval_secs: Some(0),
-            safety_bytes: None,
-        });
-        let mut video = make_recording_video_config(recording);
-        let err = video.prepare().expect_err("zero cleanup_interval should fail");
-        assert!(err.to_string().contains("cleanup_interval"), "error: {err}");
+        check_recording_disk_rejected(
+            RecordingDiskConfigDto {
+                high_water_percent: None,
+                low_water_percent: None,
+                cleanup_interval_secs: Some(0),
+                safety_bytes: None,
+            },
+            "cleanup_interval",
+        );
     }
 
     #[test]
     fn recording_disk_zero_safety_bytes_is_rejected() {
-        let mut recording = make_recording_config();
-        recording.disk = Some(RecordingDiskConfigDto {
-            high_water_percent: None,
-            low_water_percent: None,
-            cleanup_interval_secs: Some(3600),
-            safety_bytes: Some(0),
-        });
-        let mut video = make_recording_video_config(recording);
-        let err = video.prepare().expect_err("zero safety_bytes should fail");
-        assert!(err.to_string().contains("safety_bytes"), "error: {err}");
+        check_recording_disk_rejected(
+            RecordingDiskConfigDto {
+                high_water_percent: None,
+                low_water_percent: None,
+                cleanup_interval_secs: Some(3600),
+                safety_bytes: Some(0),
+            },
+            "safety_bytes",
+        );
     }
 
     #[test]

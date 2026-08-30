@@ -17,12 +17,12 @@ use shared::{
     error::TuliproxError,
     foundation::ValueProvider,
     model::{
-        EventSink, MediaQuality, PlaylistEntry, PlaylistItem, PlaylistItemType, StreamProperties,
-        VideoStreamDetailProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem, XtreamVideoInfo,
+        EventSink, MediaQuality, PlaylistItem, PlaylistItemType, StreamProperties, VideoStreamDetailProperties,
+        VideoStreamProperties, XtreamCluster, XtreamPlaylistItem, XtreamVideoInfo,
     },
 };
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -96,47 +96,17 @@ pub async fn playlist_resolve_vod<E: EventSink + Clone + 'static, M: MetadataUpd
 }
 
 fn sync_resolved_vod_properties(provider_fpl: &mut FetchedPlaylist<'_>, processed_fpl: &mut FetchedPlaylist<'_>) {
-    let mut resolved_vod_by_provider_id: HashMap<u32, VideoStreamProperties> = HashMap::new();
-
-    for pli in processed_fpl.items() {
-        if pli.header.xtream_cluster != XtreamCluster::Video || pli.header.item_type != PlaylistItemType::Video {
-            continue;
-        }
-
-        let Some(provider_id) = pli.get_provider_id() else {
-            continue;
-        };
-        if provider_id == 0 {
-            continue;
-        }
-
-        if let Some(StreamProperties::Video(properties)) = pli.header.additional_properties.as_ref() {
-            resolved_vod_by_provider_id.entry(provider_id).or_insert_with(|| properties.as_ref().clone());
-        }
-    }
-
-    if resolved_vod_by_provider_id.is_empty() {
-        return;
-    }
-
-    for source_pli in provider_fpl.items_mut() {
-        if source_pli.header.xtream_cluster != XtreamCluster::Video
-            || source_pli.header.item_type != PlaylistItemType::Video
-        {
-            continue;
-        }
-
-        let Some(provider_id) = source_pli.get_provider_id() else {
-            continue;
-        };
-        if provider_id == 0 {
-            continue;
-        }
-
-        if let Some(resolved) = resolved_vod_by_provider_id.get(&provider_id) {
-            source_pli.header.additional_properties = Some(StreamProperties::Video(Box::new(resolved.clone())));
-        }
-    }
+    crate::processor::xtream::sync_resolved_xtream_properties(
+        provider_fpl,
+        processed_fpl,
+        XtreamCluster::Video,
+        PlaylistItemType::Video,
+        |props| match props {
+            StreamProperties::Video(v) => Some(v.as_ref()),
+            _ => None,
+        },
+        StreamProperties::Video,
+    );
 }
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]

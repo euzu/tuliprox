@@ -610,7 +610,7 @@ mod tests {
             name: "target".to_string(),
             options: None,
             sort: None,
-            filter: Filter::default(),
+            filter: Filter::default().into(),
             output: vec![TargetOutput::Xtream(XtreamTargetOutput {
                 flags: XtreamTargetFlagsSet::default(),
                 trakt: None,

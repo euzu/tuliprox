@@ -191,30 +191,9 @@ mod tests {
 
     fn user(name: &str) -> UserId { UserId::from(name) }
 
+    #[inline]
     fn make_meta(visibility: RecordingVisibility, owner: RecordingOwner) -> RecordingMetadata {
-        RecordingMetadata {
-            owner,
-            visibility,
-            source: None,
-            program_start: Some(1_700_000_000),
-            program_end: Some(1_700_003_600),
-            scheduled_start: Some(1_700_000_000),
-            scheduled_end: Some(1_700_003_600),
-            pre_roll_secs: 0,
-            post_roll_secs: 0,
-            channel_id: Some("ch-1".into()),
-            channel_name: Some("Channel 1".into()),
-            program_title: Some("Programme".into()),
-            epg: None,
-            provenance: shared::model::recording::RecordingProvenance::default(),
-            relative_path: Some("path/file.ts".into()),
-            partial_relative_path: None,
-            reserved_bytes: 0,
-            measured_bytes: 0,
-            completed_at: None,
-            notification_markers: vec![],
-            deleting_previous_state: None,
-        }
+        crate::recording::make_test_meta(visibility, owner, Some("path/file.ts"))
     }
 
     #[test]

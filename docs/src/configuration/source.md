@@ -1108,7 +1108,9 @@ sources:
       - my_provider
     targets:
       - name: my_target
-        filter: 'Group ~ ".*"'
+        filter:
+          processing: 'Group ~ "News"'
+          persist: 'EpgId IS NOT EMPTY'
         output:
           - type: m3u
 ```
@@ -1145,7 +1147,7 @@ sources:
         sort: { }
         options:
           ignore_logo: false
-          required_epg: false
+          clear_invalid_epg_ids: false
           epg_output:
             lowercase_ids: false
             lowercase_xmltv_display_names: false
@@ -1175,20 +1177,20 @@ sources:
 
 #### Target Parameters
 
-| Parameter          | Type   | Required | Default   | Technical Impact & Background                                                                                                                                                                                                |
-|:-------------------|:-------|:--------:|:----------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `enabled`          | Bool   |    No    | `true`    | If set to `false`, Tuliprox skips building this target during normal processing. This reduces CPU, disk, and upstream workload, but the target can still be selected explicitly via CLI target execution if matched by `-t`. |
-| `name`             | String |    No    | `default` | Logical target name. If not `default`, it must be unique. Unique names are important for selective execution (`-t <target_name>`) and for clearly separating output identities in Tuliprox's processing pipeline.            |
-| `processing_order` | Enum   |    No    | `frm`     | Defines execution order for **F**ilter, **R**ename, and **M**ap. This directly changes which intermediate state downstream steps operate on and can therefore materially alter the final playlist result.                    |
-| `filter`           | String |   Yes    |           | Global filter DSL expression for the target. This determines which entries survive into the final target after the selected processing order has been applied.                                                               |
-| `rename`           | List   |    No    |           | Regex-based transformations applied to selected fields. This is commonly used to normalize channel/group labels before sorting, mapping, or export.                                                                          |
-| `mapping`          | List   |    No    |           | References mapping IDs from `mapping.yml` for advanced transformation logic. This is where deep structural rewriting and metadata normalization can be applied.                                                              |
-| `sort`             | Object |    No    |           | Defines ordering for groups and channels after transformations. This affects the final playlist structure seen by clients and can significantly improve navigation quality in IPTV players.                                  |
-| `options`          | Object |    No    |           | Target-level behavior switches such as logo suppression, duplicate removal, and shared live-stream handling. These options influence memory usage, playlist cleanliness, and reverse-proxy behavior.                         |
-| `output`           | List   |   Yes    |           | Mandatory list of output formats. A single target can generate multiple output representations (e.g., `xtream`, `m3u`, `strm`, `hdhomerun`) from the same transformed result set.                                            |
-| `favourites`       | List   |    No    |           | Duplicates final transformed channels into dedicated favorite groups after processing is complete. This adds curated views without changing the original group structure.                                                    |
-| `watch`            | List   |    No    |           | Defines watched group patterns. If matching groups change during updates, Tuliprox emits Messaging events so operational changes become observable automatically.                                                            |
-| `use_memory_cache` | Bool   |    No    | `false`   | If enabled, the final compiled playlist is cached in RAM. This reduces disk access and improves delivery speed, especially for M3U downloads, but increases memory consumption.                                              |
+| Parameter          | Type          | Required | Default   | Technical Impact & Background                                                                                                                                                                                                |
+|:-------------------|:--------------|:--------:|:----------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `enabled`          | Bool          |    No    | `true`    | If set to `false`, Tuliprox skips building this target during normal processing. This reduces CPU, disk, and upstream workload, but the target can still be selected explicitly via CLI target execution if matched by `-t`. |
+| `name`             | String        |    No    | `default` | Logical target name. If not `default`, it must be unique. Unique names are important for selective execution (`-t <target_name>`) and for clearly separating output identities in Tuliprox's processing pipeline.            |
+| `processing_order` | Enum          |    No    | `frm`     | Defines execution order for **F**ilter, **R**ename, and **M**ap. This directly changes which intermediate state downstream steps operate on and can therefore materially alter the final playlist result.                    |
+| `filter`           | String or Map |    No    |           | Optional target filter. A string is the backward-compatible `processing` filter. A map can define optional `processing` and `persist` stages.                                                                                |
+| `rename`           | List          |    No    |           | Regex-based transformations applied to selected fields. This is commonly used to normalize channel/group labels before sorting, mapping, or export.                                                                          |
+| `mapping`          | List          |    No    |           | References mapping IDs from `mapping.yml` for advanced transformation logic. This is where deep structural rewriting and metadata normalization can be applied.                                                              |
+| `sort`             | Object        |    No    |           | Defines ordering for groups and channels after transformations. This affects the final playlist structure seen by clients and can significantly improve navigation quality in IPTV players.                                  |
+| `options`          | Object        |    No    |           | Target-level behavior switches such as logo suppression, duplicate removal, and shared live-stream handling. These options influence memory usage, playlist cleanliness, and reverse-proxy behavior.                         |
+| `output`           | List          |   Yes    |           | Mandatory list of output formats. A single target can generate multiple output representations (e.g., `xtream`, `m3u`, `strm`, `hdhomerun`) from the same transformed result set.                                            |
+| `favourites`       | List          |    No    |           | Duplicates final transformed channels into dedicated favorite groups after processing is complete. This adds curated views without changing the original group structure.                                                    |
+| `watch`            | List          |    No    |           | Defines watched group patterns. If matching groups change during updates, Tuliprox emits Messaging events so operational changes become observable automatically.                                                            |
+| `use_memory_cache` | Bool          |    No    | `false`   | If enabled, the final compiled playlist is cached in RAM. This reduces disk access and improves delivery speed, especially for M3U downloads, but increases memory consumption.                                              |
 
 ---
 
@@ -1220,8 +1222,24 @@ opt into `stage: after_epg` always run once EPG enrichment has completed, regard
 
 ### 3.2.2 `filter`
 
-The target-level `filter` is a string-based expression using Tuliprox's filter DSL.
-It defines which entries remain in the final target after the selected processing stages have been applied.
+The target-level `filter` uses Tuliprox's filter DSL and is optional. The scalar form remains backward compatible and
+runs at the `F` position of `processing_order`:
+
+```yaml
+filter: 'Group ~ "Sports.*"'
+```
+
+To filter the final transformed state, use the staged form. Both fields are optional, but at least one must be present:
+
+```yaml
+filter:
+  processing: 'Type = live'
+  persist: 'EpgId IS NOT EMPTY'
+```
+
+`processing` runs at the normal `F` position. `persist` runs after EPG matching, smart matching, all mappings, merge,
+favourites/Trakt, deduplication, sorting, channel numbering, and counters, immediately before watch evaluation and target
+persistence. Output-level filters remain plain strings and have no configurable stage.
 
 You can define complex strings or regex patterns exactly once in [template.yml](./template.md)
 and call them by wrapping the template name in exclamation marks: `!MACRO_NAME!`.
@@ -1235,11 +1253,15 @@ Tuliprox supports the following filter expression types:
 * Regular expression comparison: `([fieldname]) ~ "regexp"` <br>
   The `[fieldname]` can be `Group`, `Title`, `Name`, `Caption`, `Url`, `Genre`, `Input`, `EpgId` or `Type`.
 * String comparison (case-insensitive, no regex needed):
-  * Exact: `Group = "Sports"` / negated: `Group != "Sports"`
+  * Equal (`=`): `Group = "Sports"` matches the complete text `Sports`.
+  * Not equal (`!=`): `Group != "Sports"` matches every other group name.
   * Substring: `Title CONTAINS "HD"`
   * Prefix: `Caption STARTSWITH "DE:"`
   * Case-insensitivity is ASCII-only: ASCII letters match regardless of case, non-ASCII characters must match
     exactly. `Title CONTAINS "cinéma"` matches `Cinéma` but not `CINÉMA`.
+* Presence comparison: `EpgId IS EMPTY` matches a missing or empty field; `EpgId IS NOT EMPTY` matches a populated field.
+  This is especially useful in a `persist` filter after `clear_invalid_epg_ids` has removed unresolved EPG IDs.
+  `EpgId = EMPTY` and `EpgId != EMPTY` are accepted as aliases and normalize to the `IS` forms.
 * Set membership (case-insensitive exact match against a list): `Group IN ["Sports", "News"]`
 * Numeric comparison on the channel number: `Chno = 5`, `Chno != 5`, `Chno > 100`, `Chno >= 100`, `Chno < 200`, `Chno <= 200`
 * Numeric comparison on the detected quality tier: `Quality >= 3` <br>
@@ -1273,6 +1295,16 @@ This example keeps:
 
 * entries from groups starting with `DE`, except titles containing `Shopping`
 * all entries from groups starting with `AU`
+
+#### Understanding filters without technical background
+
+Think of a filter as a set of questions that Tuliprox asks about every channel. `Group = "Sports"` asks whether the
+complete group name is `Sports`, while `Group != "Sports"` asks whether it is anything else. `CONTAINS` searches for a
+piece of text, `STARTSWITH` checks the beginning, and `IS EMPTY` checks whether a value is missing. Join questions with
+`AND` when all of them must be true, with `OR` when one is enough, and put `NOT` before a question to reverse it.
+Parentheses make clear which questions belong together. Text values always use quotes: `Group = "EMPTY"` searches for
+the literal group name `EMPTY`, whereas `EpgId = EMPTY` without quotes is the short form of `EpgId IS EMPTY` and checks
+for a missing EPG ID. In practice, start with one simple question and add further conditions only when needed.
 
 ---
 
@@ -1439,7 +1471,7 @@ targets:
         use_output: xtream
     options:
       ignore_logo: false
-      required_epg: false
+      clear_invalid_epg_ids: false
       epg_output:
         lowercase_ids: true
         lowercase_xmltv_display_names: false
@@ -1458,7 +1490,7 @@ targets:
 | Parameter                                  | Type | Required | Default | Technical Impact & Background                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 |:-------------------------------------------|:-----|:--------:|:--------|:--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `ignore_logo`                              | Bool |    No    | `false` | Ignores `tvg-logo` and `tvg-logo-small` attributes. This reduces downstream device-side logo caching and can keep generated M3U playlists leaner for clients with limited storage or poor cache invalidation behavior.                                                                                                                                                                                                                                                                                                                                                                            |
-| `required_epg`                             | Bool |    No    | `false` | Keeps only live playlist entries whose EPG ID resolves to programme data from an available EPG source. Filtering and mappings in the regular processing stage run first, so EPG matching only processes the reduced target playlist. VOD, series, and local-library entries are unaffected. If no EPG source was successfully materialized for the input, this option leaves its live entries unchanged.                                                                                                                                                                                          |
+| `clear_invalid_epg_ids`                    | Bool |    No    | `false` | Clears an EPG ID when it does not resolve to the processed EPG data. Playlist entries are never removed. Smart matching runs first, and IDs introduced or changed by later mappings are validated again before the `persist` filter. The legacy input name `required_epg` is still accepted, but configuration is serialized with the new name.                                                                                                                                                                                                                                                   |
 | `share_live_streams.hls`                   | Bool |    No    | `false` | Enables HLS live sharing for the new HLS cache proxy path. This is a configuration switch for the HLS cache feature and is independent from MPEG-TS stream sharing.                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `share_live_streams.mpeg_ts`               | Bool |    No    | `false` | Allows Tuliprox to share MPEG-TS live stream connections in reverse proxy mode. This can reduce upstream provider connection usage when multiple clients watch the same channel, but it increases memory usage per shared channel.                                                                                                                                                                                                                                                                                                                                                                |
 | `remove_duplicates`                        | Bool |    No    | `false` | Legacy pre-transform identity deduplication. It runs independently for each input before the F/R/M pipe and removes repeated source identities before mapping can emit additional items. The field remains supported for backward compatibility.                                                                                                                                                                                                                                                                                                                                                  |

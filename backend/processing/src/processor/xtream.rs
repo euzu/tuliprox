@@ -1,10 +1,13 @@
+use crate::fetched_playlist::FetchedPlaylist;
 use log::{debug, warn};
 use parking_lot::Mutex;
 use shared::{
     error::TuliproxError,
-    model::{LiveStreamProperties, StreamProperties, XtreamCluster, XtreamPlaylistItem},
+    model::{
+        LiveStreamProperties, PlaylistEntry, PlaylistItemType, StreamProperties, XtreamCluster, XtreamPlaylistItem,
+    },
 };
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use tuliprox_core::{
     model::{AppConfig, ConfigInput, ConfigInputFlags, ProviderHandle, ProviderIdType},
     utils::{
@@ -204,6 +207,55 @@ pub async fn update_live_stream_metadata(
     }
 
     Ok(Some(properties))
+}
+
+pub(crate) fn sync_resolved_xtream_properties<T: Clone>(
+    provider_fpl: &mut FetchedPlaylist<'_>,
+    processed_fpl: &mut FetchedPlaylist<'_>,
+    cluster: XtreamCluster,
+    item_type: PlaylistItemType,
+    extract: impl Fn(&StreamProperties) -> Option<&T>,
+    wrap: impl Fn(Box<T>) -> StreamProperties,
+) {
+    let mut resolved_by_provider_id: HashMap<u32, T> = HashMap::new();
+
+    for pli in processed_fpl.items() {
+        if pli.header.xtream_cluster != cluster || pli.header.item_type != item_type {
+            continue;
+        }
+
+        let Some(provider_id) = pli.get_provider_id() else {
+            continue;
+        };
+        if provider_id == 0 {
+            continue;
+        }
+
+        if let Some(props) = pli.header.additional_properties.as_ref().and_then(&extract) {
+            resolved_by_provider_id.entry(provider_id).or_insert_with(|| props.clone());
+        }
+    }
+
+    if resolved_by_provider_id.is_empty() {
+        return;
+    }
+
+    for source_pli in provider_fpl.items_mut() {
+        if source_pli.header.xtream_cluster != cluster || source_pli.header.item_type != item_type {
+            continue;
+        }
+
+        let Some(provider_id) = source_pli.get_provider_id() else {
+            continue;
+        };
+        if provider_id == 0 {
+            continue;
+        }
+
+        if let Some(resolved) = resolved_by_provider_id.get(&provider_id) {
+            source_pli.header.additional_properties = Some(wrap(Box::new(resolved.clone())));
+        }
+    }
 }
 
 fn apply_live_probe_success(

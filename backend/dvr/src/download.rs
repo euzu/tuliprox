@@ -1174,74 +1174,70 @@ impl DownloadQueue {
         self.finished.read().await.iter().find(|download| download.matches_existing_task(candidate)).cloned()
     }
 
-    /// Pause the active download. Persists the new state through the
-    /// transactional boundary. The runtime-only control signal is published
-    /// after the commit while the mutation guard still preserves ordering.
-    pub async fn pause_active(&self, uuid: &str) -> Result<bool, QueueMutationError> {
+    async fn transition_active_matching(
+        &self,
+        uuid: &str,
+        signal: DownloadControl,
+        mutate_fn: impl FnOnce(&mut PersistedFileDownload) -> bool,
+    ) -> Result<bool, QueueMutationError> {
         let _mutation = self.mutation_guard.lock().await;
         let changed = mutate_optional_locked(self, |candidate| {
             let Some(active) = candidate.active.as_mut().filter(|active| active.uuid == uuid) else {
                 return Ok(None);
             };
-            active.paused = true;
-            active.state = DownloadState::Paused;
-            active.next_retry_at = None;
-            Ok(Some(true))
+            if mutate_fn(active) {
+                active.next_retry_at = None;
+                Ok(Some(true))
+            } else {
+                Ok(None)
+            }
         })
         .await?
         .unwrap_or(false);
         if !changed {
             return Ok(false);
         }
-        *self.control_signal.write().await = DownloadControl::Pause;
+        *self.control_signal.write().await = signal;
         self.control_notify.notify_waiters();
         Ok(true)
+    }
+
+    /// Pause the active download. Persists the new state through the
+    /// transactional boundary. The runtime-only control signal is published
+    /// after the commit while the mutation guard still preserves ordering.
+    pub async fn pause_active(&self, uuid: &str) -> Result<bool, QueueMutationError> {
+        self.transition_active_matching(uuid, DownloadControl::Pause, |active| {
+            active.paused = true;
+            active.state = DownloadState::Paused;
+            true
+        })
+        .await
     }
 
     /// Resume the active download. Persists the new state through the
     /// transactional boundary.
     pub async fn resume_active(&self, uuid: &str) -> Result<bool, QueueMutationError> {
-        let _mutation = self.mutation_guard.lock().await;
-        let changed = mutate_optional_locked(self, |candidate| {
-            let Some(active) = candidate.active.as_mut().filter(|active| active.uuid == uuid && active.paused) else {
-                return Ok(None);
-            };
-            active.paused = false;
-            active.state = DownloadState::Downloading;
-            active.next_retry_at = None;
-            Ok(Some(true))
+        self.transition_active_matching(uuid, DownloadControl::None, |active| {
+            if active.paused {
+                active.paused = false;
+                active.state = DownloadState::Downloading;
+                true
+            } else {
+                false
+            }
         })
-        .await?
-        .unwrap_or(false);
-        if !changed {
-            return Ok(false);
-        }
-        *self.control_signal.write().await = DownloadControl::None;
-        self.control_notify.notify_waiters();
-        Ok(true)
+        .await
     }
 
     /// Cancel the active download. Persists the new state through the
     /// transactional boundary.
     pub async fn cancel_active_matching(&self, uuid: &str) -> Result<bool, QueueMutationError> {
-        let _mutation = self.mutation_guard.lock().await;
-        let changed = mutate_optional_locked(self, |candidate| {
-            let Some(active) = candidate.active.as_mut().filter(|active| active.uuid == uuid) else {
-                return Ok(None);
-            };
+        self.transition_active_matching(uuid, DownloadControl::Cancel, |active| {
             active.state = DownloadState::Cancelled;
             active.error = Some("Cancelled by user".to_string());
-            active.next_retry_at = None;
-            Ok(Some(true))
+            true
         })
-        .await?
-        .unwrap_or(false);
-        if !changed {
-            return Ok(false);
-        }
-        *self.control_signal.write().await = DownloadControl::Cancel;
-        self.control_notify.notify_waiters();
-        Ok(true)
+        .await
     }
 
     pub async fn cancel_active(&self) -> Result<bool, QueueMutationError> {

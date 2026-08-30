@@ -142,7 +142,7 @@ pub async fn persist_playlist(
 
     for output in &target.output {
         let mut filtered: Option<Vec<PlaylistGroup>> =
-            output.filter().and_then(|flt| apply_filter_to_playlist(playlist, flt));
+            output.filter().map(|flt| apply_filter_to_playlist(playlist, flt));
 
         let pl: &mut [PlaylistGroup] =
             if let Some(filtered_playlist) = filtered.as_mut() { filtered_playlist.as_mut_slice() } else { playlist };

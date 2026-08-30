@@ -11,7 +11,7 @@ use crate::{
         ConfigContext,
     },
     config_field, config_field_bool, config_field_bool_empty, config_field_child, config_field_custom,
-    config_field_empty, config_field_hide, config_field_optional, edit_field_bool, edit_field_list,
+    config_field_empty, config_field_hide, config_field_optional, config_field_tags, edit_field_bool, edit_field_list,
     edit_field_number_f64, edit_field_number_u64, edit_field_text, edit_field_text_option, generate_form_reducer,
     i18n::use_translation,
 };
@@ -262,19 +262,7 @@ pub fn MessagingConfigView() -> Html {
           <Card class="tp__config-view__card">
               <h1>{translate.t("LABEL.TELEGRAM")}</h1>
               { config_field_hide!(entry, translate.t(LABEL_BOT_TOKEN), bot_token) }
-              { config_field_child!(translate.t(LABEL_CHAT_IDS), "MESSAGING_CONFIG.TELEGRAM_CHAT_IDS", {
-                  html! {
-                      <div class="tp__config-view__tags">
-                          {
-                              if entry.chat_ids.is_empty() {
-                                  html! {}
-                              } else {
-                                  html! { for t in entry.chat_ids.iter() { <Chip label={t.clone()} /> } }
-                              }
-                          }
-                      </div>
-                  }
-              })}
+              { config_field_tags!(entry, translate.t(LABEL_CHAT_IDS), chat_ids, "MESSAGING_CONFIG.TELEGRAM_CHAT_IDS") }
              { config_field_bool!(entry, translate.t(LABEL_MARKDOWN), markdown) }
              { render_templates_view(&entry.templates) }
           </Card>
@@ -295,19 +283,7 @@ pub fn MessagingConfigView() -> Html {
               <h1>{translate.t(LABEL_REST)}</h1>
               { config_field!(entry, translate.t(LABEL_URL), url) }
               { config_field_optional!(entry, translate.t(LABEL_METHOD), method) }
-              { config_field_child!(translate.t(LABEL_HEADERS), "MESSAGING_CONFIG.REST_HEADERS", {
-                  html! {
-                      <div class="tp__config-view__tags">
-                          {
-                              if entry.headers.is_empty() {
-                                  html! {}
-                              } else {
-                                  html! { for h in entry.headers.iter() { <Chip label={h.clone()} /> } }
-                              }
-                          }
-                      </div>
-                  }
-              })}
+              { config_field_tags!(entry, translate.t(LABEL_HEADERS), headers, "MESSAGING_CONFIG.REST_HEADERS") }
               { render_templates_view(&entry.templates) }
           </Card>
         },

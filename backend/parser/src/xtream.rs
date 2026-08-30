@@ -845,4 +845,17 @@ mod tests {
         assert_eq!(groups[1].channels[0].header.name.as_ref(), "unknown-1");
         assert_eq!(groups[1].channels[0].header.source_ordinal, 2);
     }
+
+    #[test]
+    fn xtream_episode_collapses_literal_null_container_extension_to_empty() {
+        let parsed: SeriesStreamDetailEpisodeProperties = serde_json::from_str(
+            r#"{"id":101,"episode_num":1,"season":1,"title":"S01E01","container_extension":"null"}"#,
+        )
+        .unwrap();
+        assert!(
+            parsed.container_extension.is_empty(),
+            "literal \"null\" must not survive as an extension, got {:?}",
+            parsed.container_extension
+        );
+    }
 }

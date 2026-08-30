@@ -8,7 +8,10 @@ use reqwest::{
     header::{HeaderMap, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, LAST_MODIFIED},
     StatusCode,
 };
-use shared::model::{InputType, PlaylistItemType};
+use shared::{
+    model::{InputType, PlaylistItemType},
+    utils::hex_digit,
+};
 use std::{fmt, sync::Arc};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,16 +220,7 @@ fn unescape_internal_url_component(value: &str) -> String {
     String::from_utf8_lossy(&decoded).into_owned()
 }
 
-fn decode_hex_byte(high: u8, low: u8) -> Option<u8> { Some(hex_value(high)? << 4 | hex_value(low)?) }
-
-fn hex_value(value: u8) -> Option<u8> {
-    match value {
-        b'0'..=b'9' => Some(value - b'0'),
-        b'a'..=b'f' => Some(value - b'a' + 10),
-        b'A'..=b'F' => Some(value - b'A' + 10),
-        _ => None,
-    }
-}
+fn decode_hex_byte(high: u8, low: u8) -> Option<u8> { Some(hex_digit(high)? << 4 | hex_digit(low)?) }
 
 #[cfg(test)]
 mod tests {

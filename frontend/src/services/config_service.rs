@@ -208,7 +208,16 @@ impl ConfigService {
                     for source in &mut app_config.sources.sources {
                         for target in &mut source.targets {
                             let prepared_templates = templates.as_deref();
-                            target.t_filter = get_filter(target.filter.as_str(), prepared_templates).ok();
+                            target.filter.t_processing = target.filter.processing.as_deref().and_then(|filter| {
+                                get_filter(filter, prepared_templates)
+                                    .map_err(|e| error!("Failed to parse target processing filter: {e}"))
+                                    .ok()
+                            });
+                            target.filter.t_persist = target.filter.persist.as_deref().and_then(|filter| {
+                                get_filter(filter, prepared_templates)
+                                    .map_err(|e| error!("Failed to parse target persist filter: {e}"))
+                                    .ok()
+                            });
                             if let Some(sort) = target.sort.as_mut() {
                                 for rule in &mut sort.rules {
                                     rule.t_filter = get_filter(&rule.filter, prepared_templates)

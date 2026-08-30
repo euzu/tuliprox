@@ -907,29 +907,37 @@ fn spawn_recording_notification_after_persist(
     });
 }
 
+fn apply_requeue_active(
+    candidate: &mut crate::api::model::PersistedDownloadQueue,
+    uuid: &str,
+    state: DownloadState,
+    error: Option<String>,
+    promote: bool,
+) -> Option<bool> {
+    let mut download = candidate.active.take()?;
+    if download.uuid != uuid {
+        candidate.active = Some(download);
+        return None;
+    }
+    download.finished = false;
+    download.paused = false;
+    download.error = error;
+    download.state = state;
+    download.next_retry_at = None;
+    candidate.queue.insert(0, download);
+    if promote {
+        candidate.active = Some(candidate.queue.remove(0));
+    }
+    Some(true)
+}
+
 async fn requeue_active_download_for_retry(
     download_queue: &DownloadQueue,
     uuid: &str,
     promote: bool,
 ) -> Result<bool, QueueMutationError> {
     Ok(mutate_optional(download_queue, |candidate| {
-        let Some(mut download) = candidate.active.take() else {
-            return Ok(None);
-        };
-        if download.uuid != uuid {
-            candidate.active = Some(download);
-            return Ok(None);
-        }
-        download.finished = false;
-        download.paused = false;
-        download.error = None;
-        download.state = DownloadState::Queued;
-        download.next_retry_at = None;
-        candidate.queue.insert(0, download);
-        if promote {
-            candidate.active = Some(candidate.queue.remove(0));
-        }
-        Ok(Some(true))
+        Ok(apply_requeue_active(candidate, uuid, DownloadState::Queued, None, promote))
     })
     .await?
     .unwrap_or(false))
@@ -943,23 +951,7 @@ async fn requeue_active_download_for_capacity_wait(
     consumed_control: Option<DownloadControl>,
 ) -> Result<bool, QueueMutationError> {
     let mutation = |candidate: &mut crate::api::model::PersistedDownloadQueue| {
-        let Some(mut download) = candidate.active.take() else {
-            return Ok(None);
-        };
-        if download.uuid != uuid {
-            candidate.active = Some(download);
-            return Ok(None);
-        }
-        download.finished = false;
-        download.paused = false;
-        download.error = Some(reason.to_string());
-        download.state = DownloadState::WaitingForCapacity;
-        download.next_retry_at = None;
-        candidate.queue.insert(0, download);
-        if promote {
-            candidate.active = Some(candidate.queue.remove(0));
-        }
-        Ok(Some(true))
+        Ok(apply_requeue_active(candidate, uuid, DownloadState::WaitingForCapacity, Some(reason.to_string()), promote))
     };
     let result = if let Some(control) = consumed_control {
         download_queue.mutate_optional_and_clear_control(control, mutation).await?

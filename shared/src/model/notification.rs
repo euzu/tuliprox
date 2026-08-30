@@ -101,8 +101,24 @@ impl<'de> serde::Deserialize<'de> for EventId {
 ///
 /// Ordered, so a channel can subscribe with `min_severity` and get
 /// everything at or above it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    strum_macros::Display,
+    strum_macros::EnumString,
+    strum_macros::IntoStaticStr,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case", ascii_case_insensitive)]
 pub enum Severity {
     /// Something finished normally. Safe to route nowhere.
     #[default]
@@ -127,15 +143,7 @@ impl Severity {
     }
 
     #[must_use]
-    pub fn from_wire(s: &str) -> Option<Self> {
-        [Self::Info, Self::Warn, Self::Error, Self::Critical]
-            .into_iter()
-            .find(|c| c.wire_name().eq_ignore_ascii_case(s))
-    }
-}
-
-impl fmt::Display for Severity {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(self.wire_name()) }
+    pub fn from_wire(s: &str) -> Option<Self> { s.parse().ok() }
 }
 
 /// One entry in the event registry.

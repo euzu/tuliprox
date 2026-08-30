@@ -186,18 +186,7 @@ impl EpgProgramme {
 
 impl EpgProgramme {
     pub fn new(start: i64, stop: i64, channel: Arc<str>) -> Self {
-        Self {
-            start,
-            stop,
-            channel,
-            title: None,
-            desc: None,
-            catchup_id: None,
-            categories: Vec::new(),
-            is_live: false,
-            is_new: false,
-            previously_shown: false,
-        }
+        Self::new_all(start, stop, channel, None, None, None)
     }
     pub fn new_all(
         start: i64,

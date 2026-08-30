@@ -4,6 +4,7 @@ use crate::{
         ensure_distinct_sidecar_lock_domains, publish_staged_database, BPlusTree, BPlusTreeError, BPlusTreeQuery,
         BPlusTreeStagingArtifacts, BPlusTreeUpdate, FlushPolicy,
     },
+    error_macros::{cant_read_result, cant_write_result},
     playlist_backend::{ensure_storage_path, iter_raw_playlist, PlaylistBackend, PlaylistKey, Xtream},
     playlist_scratch::PlaylistScratch,
     storage::{
@@ -49,12 +50,6 @@ use tuliprox_core::{
 };
 use tuliprox_parser::xtream;
 use uuid::Uuid;
-
-macro_rules! cant_write_result {
-    ($path:expr, $err:expr) => {
-        TuliproxError::RepositoryXtream(format!("failed to write xtream playlist: {} - {}", $path.display(), $err))
-    };
-}
 
 #[inline]
 pub fn get_collection_path(path: &Path, collection: &str) -> PathBuf { path.join(format!("{collection}.json")) }
@@ -135,7 +130,7 @@ where
         })
         .await
         .map_err(|e| TuliproxError::RepositoryXtream(format!("Blocking task failed: {e}")))?
-        .map_err(|err| cant_write_result!(&xtream_path, err))?;
+        .map_err(|err| cant_write_result!(RepositoryXtream, "xtream", &xtream_path, err))?;
     }
     Ok(())
 }
@@ -175,7 +170,7 @@ pub async fn write_playlist_item_update(
     })
     .await
     .map_err(|e| TuliproxError::RepositoryXtream(format!("Blocking task failed: {e}")))?
-    .map_err(|err| cant_write_result!(&xtream_path, err))?;
+    .map_err(|err| cant_write_result!(RepositoryXtream, "xtream", &xtream_path, err))?;
 
     Ok(())
 }
@@ -221,7 +216,7 @@ pub async fn write_playlist_batch_item_upsert(
     })
     .await
     .map_err(|e| TuliproxError::RepositoryXtream(format!("Blocking task failed: {e}")))?
-    .map_err(|err| cant_write_result!(&xtream_path, err))?;
+    .map_err(|err| cant_write_result!(RepositoryXtream, "xtream", &xtream_path, err))?;
 
     Ok(())
 }
@@ -1882,8 +1877,7 @@ pub async fn load_input_xtream_playlist(
 
             // Load Items
             let file_lock = app_config.file_locks.read_lock(&xtream_path).await;
-            let xtream_display = xtream_path.display().to_string();
-            let xtream_path = xtream_path.clone();
+            let xtream_path_err = xtream_path.clone();
             let items = tokio::task::spawn_blocking(move || -> Result<Vec<XtreamPlaylistItem>, TuliproxError> {
                 let _guard = file_lock;
                 let mut items = Vec::new();
@@ -1896,9 +1890,7 @@ pub async fn load_input_xtream_playlist(
                 Ok(items)
             })
             .await
-            .map_err(|err| {
-                TuliproxError::RepositoryXtream(format!("failed to read xtream playlist: {xtream_display} - {err}"))
-            })??;
+            .map_err(|err| cant_read_result!(RepositoryXtream, "xtream", &xtream_path_err, err))??;
 
             for item in items {
                 let cat_id = item.category_id;

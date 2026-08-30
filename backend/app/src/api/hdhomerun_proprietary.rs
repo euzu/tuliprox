@@ -41,32 +41,52 @@ mod packet {
 
 // --- UDP Discovery Logic ---
 
-fn write_tlv_u8(buf: &mut bytes::BytesMut, tag: u8, value: u8) {
-    buf.put_u8(tag);
-    write_tlv_length(buf, 1);
-    buf.put_u8(value);
+trait TlvValue {
+    fn write_tlv_payload(self, buf: &mut BytesMut);
 }
 
-fn write_tlv_u32(buf: &mut bytes::BytesMut, tag: u8, value: u32) {
-    buf.put_u8(tag);
-    write_tlv_length(buf, 4);
-    buf.put_u32(value);
-}
-
-fn write_tlv_str(buf: &mut bytes::BytesMut, tag: u8, value: &str) {
-    let bytes = value.as_bytes();
-    if bytes.len() > 0x7FFF {
-        // maximum length for 15-bit TLV = 32767
-        log::warn!("TLV string too long, truncating to 32767 bytes");
+impl TlvValue for u8 {
+    #[inline]
+    fn write_tlv_payload(self, buf: &mut BytesMut) {
+        write_tlv_length(buf, 1);
+        buf.put_u8(self);
     }
-    let len = std::cmp::min(bytes.len(), 0x7FFF);
+}
+
+impl TlvValue for u32 {
+    #[inline]
+    fn write_tlv_payload(self, buf: &mut BytesMut) {
+        write_tlv_length(buf, 4);
+        buf.put_u32(self);
+    }
+}
+
+impl TlvValue for &str {
+    #[inline]
+    fn write_tlv_payload(self, buf: &mut BytesMut) {
+        let bytes = self.as_bytes();
+        if bytes.len() > 0x7FFF {
+            // maximum length for 15-bit TLV = 32767
+            log::warn!("TLV string too long, truncating to 32767 bytes");
+        }
+        let len = std::cmp::min(bytes.len(), 0x7FFF);
+        write_tlv_length(buf, len);
+        buf.put_slice(&bytes[..len]);
+    }
+}
+
+impl TlvValue for &String {
+    #[inline]
+    fn write_tlv_payload(self, buf: &mut BytesMut) { self.as_str().write_tlv_payload(buf); }
+}
+
+fn write_tlv<T: TlvValue>(buf: &mut BytesMut, tag: u8, value: T) {
     buf.put_u8(tag);
-    write_tlv_length(buf, len);
-    buf.put_slice(&bytes[..len]);
+    value.write_tlv_payload(buf);
 }
 
 // helper function for variable-length TLV
-fn write_tlv_length(buf: &mut bytes::BytesMut, len: usize) {
+fn write_tlv_length(buf: &mut BytesMut, len: usize) {
     if len <= 0x7F {
         // ≤ 127 -> 1 Byte length
         buf.put_u8(u8::try_from(len).unwrap_or(0xFF));
@@ -87,11 +107,11 @@ fn build_discover_response(device: &HdHomeRunDeviceConfig, server_host: &str) ->
 
     let device_id = u32::from_str_radix(&device.device_id, 16).unwrap_or(0);
 
-    write_tlv_u32(&mut payload, packet::HDHOMERUN_TAG_DEVICE_TYPE, packet::HDHOMERUN_DEVICE_TYPE_TUNER);
-    write_tlv_u32(&mut payload, packet::HDHOMERUN_TAG_DEVICE_ID, device_id);
-    write_tlv_str(&mut payload, packet::HDHOMERUN_TAG_BASE_URL, &base_url);
-    write_tlv_u8(&mut payload, packet::HDHOMERUN_TAG_TUNER_COUNT, device.tuner_count);
-    write_tlv_str(&mut payload, packet::HDHOMERUN_TAG_LINEUP_URL, &lineup_url);
+    write_tlv(&mut payload, packet::HDHOMERUN_TAG_DEVICE_TYPE, packet::HDHOMERUN_DEVICE_TYPE_TUNER);
+    write_tlv(&mut payload, packet::HDHOMERUN_TAG_DEVICE_ID, device_id);
+    write_tlv(&mut payload, packet::HDHOMERUN_TAG_BASE_URL, &base_url);
+    write_tlv(&mut payload, packet::HDHOMERUN_TAG_TUNER_COUNT, device.tuner_count);
+    write_tlv(&mut payload, packet::HDHOMERUN_TAG_LINEUP_URL, &lineup_url);
 
     let mut response = BytesMut::new();
     response.put_u16(packet::HDHOMERUN_TYPE_DISCOVER_RSP);
@@ -315,11 +335,11 @@ async fn process_getset_request(request: &[u8], app_state: &Arc<AppState>) -> Ve
         trace!("Received GET/SET for: {name}");
 
         let name_str = name.trim_end_matches('\0');
-        write_tlv_str(&mut response_payload, packet::HDHOMERUN_TAG_GETSET_NAME, name_str);
+        write_tlv(&mut response_payload, packet::HDHOMERUN_TAG_GETSET_NAME, name_str);
 
         match name_str {
             "/sys/model" => {
-                write_tlv_str(&mut response_payload, packet::HDHOMERUN_TAG_GETSET_VALUE, "hdhomerun4_atsc");
+                write_tlv(&mut response_payload, packet::HDHOMERUN_TAG_GETSET_VALUE, "hdhomerun4_atsc");
             }
             s if s.starts_with("/tuner") && s.ends_with("/status") => {
                 let rest = &s[6..];
@@ -331,7 +351,7 @@ async fn process_getset_request(request: &[u8], app_state: &Arc<AppState>) -> Ve
                     } else {
                         "ch=none lock=none ss=0 snq=0 seq=0 bps=0 pps=0".to_string()
                     };
-                    write_tlv_str(&mut response_payload, packet::HDHOMERUN_TAG_GETSET_VALUE, &status_str);
+                    write_tlv(&mut response_payload, packet::HDHOMERUN_TAG_GETSET_VALUE, &status_str);
                 }
             }
             s if s.starts_with("/tuner") && s.ends_with("/vchannel") => {
@@ -344,15 +364,15 @@ async fn process_getset_request(request: &[u8], app_state: &Arc<AppState>) -> Ve
                     } else {
                         "none".intern()
                     };
-                    write_tlv_str(&mut response_payload, packet::HDHOMERUN_TAG_GETSET_VALUE, &vchannel);
+                    write_tlv(&mut response_payload, packet::HDHOMERUN_TAG_GETSET_VALUE, vchannel.as_ref());
                 }
             }
             s if s.starts_with("/tuner") && s.ends_with("/lockkey") => {
                 let err_msg = "ERROR: resource locked";
-                write_tlv_str(&mut response_payload, packet::HDHOMERUN_TAG_ERROR_MESSAGE, err_msg);
+                write_tlv(&mut response_payload, packet::HDHOMERUN_TAG_ERROR_MESSAGE, err_msg);
             }
             _ => {
-                write_tlv_str(&mut response_payload, packet::HDHOMERUN_TAG_GETSET_VALUE, "");
+                write_tlv(&mut response_payload, packet::HDHOMERUN_TAG_GETSET_VALUE, "");
             }
         }
     }

@@ -141,9 +141,31 @@ pub fn redact_json(value: &mut serde_json::Value) {
     }
 }
 
+/// Sanitize a string for safe use in file/directory path components.
+///
+/// If `allow_dots` is true, '.' characters are preserved (e.g. for hostnames);
+/// otherwise they are replaced with '_'.
+#[must_use]
+pub fn sanitize_path_component(value: &str, allow_dots: bool) -> String {
+    value
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => ch,
+            '.' if allow_dots => '.',
+            _ => '_',
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{is_sensitive_key, redact_json, redact_text, safe_url};
+    use super::{is_sensitive_key, redact_json, redact_text, safe_url, sanitize_path_component};
+
+    #[test]
+    fn sanitize_path_component_preserves_allowed_chars() {
+        assert_eq!(sanitize_path_component("abc-XYZ_123.host/extra", true), "abc-XYZ_123.host_extra");
+        assert_eq!(sanitize_path_component("abc-XYZ_123.host/extra", false), "abc-XYZ_123_host_extra");
+    }
 
     #[test]
     fn safe_url_drops_userinfo_query_and_fragment() {

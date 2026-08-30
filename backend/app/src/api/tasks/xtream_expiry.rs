@@ -1,6 +1,9 @@
 use crate::{
-    api::{config_file::ConfigFile, model::AppState},
-    config_loader::{persist_source_config_preserving_templates, read_sources_file_from_path},
+    api::{
+        config_file::ConfigFile,
+        model::AppState,
+        source_yml_patch::{execute_source_yml_patches, SourcesYmlPatch},
+    },
     iptv::xtream::get_xtream_stream_url_base,
     repository::{csv_patch_batch_update_exp_dates, get_csv_file_path, BatchExpDateUpdate},
     utils::request,
@@ -413,24 +416,23 @@ async fn persist_updates(app_state: &Arc<AppState>, updates: &[(&Account, i64)])
     let sources_path = app_state.app_config.paths.load().sources_file_path.clone();
     let sources_path = std::path::Path::new(&sources_path);
     if !source_updates.is_empty() {
-        let _sources_lock = app_state.app_config.file_locks.write_lock(sources_path).await;
-        let mut sources = read_sources_file_from_path(sources_path, false, false, None).await?;
-        let mut source_changed = false;
-        for (key, input_name, account_name, exp_date) in source_updates {
-            if let Some(input) = sources.inputs.iter_mut().find(|input| input.name == input_name) {
-                source_changed |=
-                    input.update_account_expiration_date(&account_name, exp_date, is_expired_at(exp_date, now))?;
-                updated_accounts.push(key);
+        let patches: Vec<SourcesYmlPatch> = source_updates
+            .iter()
+            .map(|(_, input_name, account_name, exp_date)| SourcesYmlPatch::SetFetchedExpiry {
+                input_name: Arc::clone(input_name),
+                account_name: Arc::clone(account_name),
+                exp_date: *exp_date,
+                disable: is_expired_at(*exp_date, now),
+            })
+            .collect();
+        match execute_source_yml_patches(&app_state.app_config, sources_path, &patches).await {
+            Ok(_) => {
+                updated_accounts.extend(source_updates.iter().map(|(key, _, _, _)| key.clone()));
             }
-        }
-        if source_changed {
-            persist_source_config_preserving_templates(&app_state.app_config, Some(sources_path), sources).await?;
-            app_state
-                .app_config
-                .file_locks
-                .mark_internal_write_revision(sources_path)
-                .await
-                .map_err(|err| TuliproxError::Io(format!("Failed to track internal source update: {err}")))?;
+            Err(err) => {
+                // Failed patching leaves pending updates available for retry.
+                warn!("source.yml expiry patch failed, will retry: {err}");
+            }
         }
     }
     let mut persistence_error = None;
@@ -695,6 +697,105 @@ mod tests {
         assert!(input.update_account_expiration_date("input", 30, true)?);
         assert_eq!(input.exp_date, Some(30));
         assert!(!input.enabled);
+        Ok(())
+    }
+
+    #[test]
+    fn fetched_future_expiry_updates_only_exp_date_on_root() -> Result<(), Box<dyn std::error::Error>> {
+        let mut input = ConfigInputDto {
+            name: Arc::from("input"),
+            enabled: true,
+            max_connections: 5,
+            exp_date: Some(100),
+            ..Default::default()
+        };
+
+        assert!(input.update_account_expiration_date("input", 200, false)?);
+        assert_eq!(input.exp_date, Some(200));
+        assert!(input.enabled);
+        assert_eq!(input.max_connections, 5);
+        Ok(())
+    }
+
+    #[test]
+    fn fetched_future_expiry_does_not_reenable_manually_disabled_root() -> Result<(), Box<dyn std::error::Error>> {
+        let mut input =
+            ConfigInputDto { name: Arc::from("input"), enabled: false, exp_date: Some(100), ..Default::default() };
+
+        assert!(input.update_account_expiration_date("input", 200, false)?);
+        assert_eq!(input.exp_date, Some(200));
+        assert!(!input.enabled);
+        Ok(())
+    }
+
+    #[test]
+    fn fetched_future_expiry_updates_only_exp_date_on_alias() -> Result<(), Box<dyn std::error::Error>> {
+        let mut input = ConfigInputDto {
+            name: Arc::from("input"),
+            aliases: Some(vec![ConfigInputAliasDto {
+                name: Arc::from("alias"),
+                enabled: true,
+                max_connections: 3,
+                exp_date: Some(100),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+
+        assert!(input.update_account_expiration_date("alias", 200, false)?);
+        let alias = &input.aliases.as_ref().expect("aliases")[0];
+        assert_eq!(alias.exp_date, Some(200));
+        assert!(alias.enabled);
+        assert_eq!(alias.max_connections, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn fetched_future_expiry_does_not_reenable_manually_disabled_alias() -> Result<(), Box<dyn std::error::Error>> {
+        let mut input = ConfigInputDto {
+            name: Arc::from("input"),
+            aliases: Some(vec![ConfigInputAliasDto {
+                name: Arc::from("alias"),
+                enabled: false,
+                exp_date: Some(100),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+
+        assert!(input.update_account_expiration_date("alias", 200, false)?);
+        let alias = &input.aliases.as_ref().expect("aliases")[0];
+        assert_eq!(alias.exp_date, Some(200));
+        assert!(!alias.enabled);
+        Ok(())
+    }
+
+    #[test]
+    fn fetched_expired_expiry_disables_alias() -> Result<(), Box<dyn std::error::Error>> {
+        let mut input = ConfigInputDto {
+            name: Arc::from("input"),
+            aliases: Some(vec![ConfigInputAliasDto {
+                name: Arc::from("alias"),
+                enabled: true,
+                exp_date: Some(100),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+
+        assert!(input.update_account_expiration_date("alias", 50, true)?);
+        let alias = &input.aliases.as_ref().expect("aliases")[0];
+        assert_eq!(alias.exp_date, Some(50));
+        assert!(!alias.enabled);
+        Ok(())
+    }
+
+    #[test]
+    fn unchanged_expiry_reports_no_change() -> Result<(), Box<dyn std::error::Error>> {
+        let mut input =
+            ConfigInputDto { name: Arc::from("input"), enabled: true, exp_date: Some(100), ..Default::default() };
+
+        assert!(!input.update_account_expiration_date("input", 100, false)?);
         Ok(())
     }
 

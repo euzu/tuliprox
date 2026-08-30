@@ -100,6 +100,15 @@ fn render_filter(filter: &Filter, pretty: bool, level: usize, do_indent: bool, p
                 </span>
             </>
         },
+        Filter::PresenceComparison(field, op) => html! {
+            <>
+               { indent(level, do_indent && pretty) }
+                <span class="comparison">
+                    <span class="field">{format!("{}", field)}</span>
+                    {format!(" {}", op)}
+                </span>
+            </>
+        },
         Filter::NumericComparison(field, op, value) => html! {
             <>
                { indent(level, do_indent && pretty) }

@@ -1012,13 +1012,12 @@ impl fmt::Display for ConfigInput {
 }
 
 pub fn is_input_expired(exp_date: Option<i64>) -> bool {
-    match exp_date {
-        Some(ts) => {
-            let now = Utc::now().timestamp();
-            ts <= now
-        }
-        None => false,
-    }
+    let now = Utc::now().timestamp();
+    u64::try_from(now).map_or_else(|_| exp_date.is_some(), |now| is_input_expired_at(exp_date, now))
+}
+
+pub fn is_input_expired_at(exp_date: Option<i64>, now: u64) -> bool {
+    exp_date.is_some_and(|timestamp| u64::try_from(timestamp).map_or(true, |timestamp| timestamp <= now))
 }
 
 /// Resolves a custom "provider://" URL using a pre-provided provider configuration.

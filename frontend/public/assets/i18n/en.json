@@ -379,7 +379,7 @@
       "WATCH": "List of group patterns to monitor for changes. Notifications are sent via configured messaging."
     },
     "CONFIG_TARGET_OPTIONS": {
-      "REQUIRED_EPG": "Keeps only live channels that match programme data from an available EPG source. VOD, series, and local library items are unaffected.",
+      "CLEAR_INVALID_EPG_IDS": "Clears EPG IDs that do not match the processed EPG data. Playlist entries are not removed.",
       "SHARE_LIVE_STREAMS": "Enables live stream sharing. The master toggle sets HLS and MPEG-TS together; each format can also be changed separately."
     },
     "EPG_OUTPUT_OPTIONS": {
@@ -772,6 +772,7 @@
       "USERNAME": "The user whose credentials will be embedded in the .strm URLs."
     },
     "TARGET_FORM": {
+      "PERSIST_FILTER": "Optional final filter applied after EPG processing and all mappings, immediately before persistence.",
       "FILTER": "Global filter expression applied to the target before creating explicit outputs.",
       "FORCE_REDIRECT": "Forces streams directly to the proxy or the provider instead of resolving individually.",
       "PROCESSING_ORDER": "Determines the priority or the sequence in which target channels are matched and listed."
@@ -1338,6 +1339,7 @@
     "PROBE_FILTER": "Probe Filter",
     "PROBE_STREAM": "Probe Stream",
     "PROCESSING_ORDER": "Processing order",
+    "PERSIST_FILTER": "Persist filter",
     "PROCESS_PARALLEL": "Process Parallel",
     "PROPERTIES": "Properties",
     "PROPRIETARY_DISCOVERY": "Proprietary Discovery",
@@ -1455,7 +1457,7 @@
     "REGEXP": "Regexp",
     "RELEASES": "Releases",
     "REMOVE_DUPLICATES": "Remove duplicates",
-    "REQUIRED_EPG": "Require EPG for live channels",
+    "CLEAR_INVALID_EPG_IDS": "Clear invalid EPG IDs",
     "RENAME": "Rename",
     "RENAME_SETTINGS": "Rename Settings",
     "REPEAT_PASSWORD": "Repeat Password",

@@ -4,6 +4,7 @@ mod http_layers;
 pub mod model;
 mod panel_api;
 pub mod setup_api;
+mod source_yml_patch;
 pub(crate) use panel_api::sync_panel_api_exp_dates;
 mod config_file;
 mod endpoints;

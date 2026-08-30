@@ -1,4 +1,5 @@
 use crate::{
+    error_macros::{cant_open_result, cant_query_result},
     m3u_get_epg_file_path_for_target, xtream_get_epg_file_path_for_target, xtream_get_storage_path, BPlusTree,
     BPlusTreeQuery,
 };
@@ -180,13 +181,12 @@ pub async fn epg_query_channels_by_storage_key(
     task::spawn_blocking(move || {
         let _guard = file_lock;
         let mut query = BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(&epg_path)
-            .map_err(|e| TuliproxError::RepositoryEpg(format!("failed to open epg db {}: {e}", epg_path.display())))?;
+            .map_err(|e| cant_open_result!(RepositoryEpg, "epg", &epg_path, e))?;
 
         let mut results = Vec::with_capacity(storage_keys.len());
         for storage_key in &storage_keys {
-            let channel = query.query(storage_key).map_err(|e| {
-                TuliproxError::RepositoryEpg(format!("failed to query epg db {}: {e}", epg_path.display()))
-            })?;
+            let channel =
+                query.query(storage_key).map_err(|e| cant_query_result!(RepositoryEpg, "epg", &epg_path, e))?;
             results.push((Arc::clone(storage_key), channel));
         }
         Ok(results)
@@ -201,7 +201,6 @@ mod tests {
     use crate::BPlusTree;
     use arc_swap::ArcSwapOption;
     use shared::{
-        foundation::Filter,
         model::{
             EpgCategory, EpgChannel, EpgProgramme, PlaylistItem, PlaylistItemHeader, ProcessingOrder, XtreamCluster,
         },
@@ -221,7 +220,7 @@ mod tests {
             name: "ics-target".to_string(),
             options: None,
             sort: None,
-            filter: Filter::default(),
+            filter: tuliprox_core::model::StagedFilter::default(),
             output: vec![
                 TargetOutput::M3u(M3uTargetOutput {
                     filename: None,

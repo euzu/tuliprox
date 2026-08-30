@@ -25,4 +25,4 @@ url.workspace = true
 # against; hyper is not used by the module itself.
 http-body-util = "0.1.5"
 hyper = "1.11.0"
-hyper-util = "0.1.20"
+hyper-util = { version = "0.1.20", features = ["server", "server-auto", "tokio"] }

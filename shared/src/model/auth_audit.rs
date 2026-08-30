@@ -16,8 +16,20 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// What the auth layer decided.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    strum_macros::Display,
+    strum_macros::EnumString,
+    strum_macros::IntoStaticStr,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case", ascii_case_insensitive)]
 pub enum AuthAuditOutcome {
     /// Credentials verified and a token was issued.
     SignInSucceeded,
