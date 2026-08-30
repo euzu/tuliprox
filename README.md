@@ -346,6 +346,19 @@ Generate all four formats simultaneously from the same source — one setup, eve
 - **Environment variables**: `${env:VAR}` interpolation in all config files
 - **Default User-Agent**: Configurable default user-agent for all outgoing requests
 
+### Configuration & Secrets
+
+Tuliprox ships with demo placeholder configuration only — nothing in this repository is a real credential.
+
+- Every config file supports `${env:VAR}` interpolation (`config.yml`, `source.yml`, `api-proxy.yml`,
+  `mapping.yml`, `template.yml`), so provider logins, webhooks, API keys and tokens can be injected from the
+  process environment. No particular host or secret store is assumed.
+- `config/user.txt` contains sample Argon2 hashes for the demo accounts `test` / `nobody`. Replace them with
+  hashes generated on your machine via `tuliprox --genpwd`.
+- Pin `web_auth.secret` (64-hex) across restarts so logins survive reboots.
+- See [Secrets & Environment Variables](docs/src/configuration/secrets.md) for the full guide and the
+  pre-publish checklist.
+
 ### 20. Digital Video Recorder (DVR) — Record, Manage & Keep What Matters
 
 Turn Tuliprox into your personal IPTV recorder. Record live TV directly from your existing sources, automate recurring recordings,  
