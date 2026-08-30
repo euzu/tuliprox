@@ -286,11 +286,7 @@ fn create_instance(block_type: BlockType) -> BlockInstance {
         BlockType::InputStalker => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Stalker))),
         BlockType::InputStaged => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Staged))),
         BlockType::Target => {
-            let dto = ConfigTargetDto {
-                name: String::new(),
-                filter: r#"Group ~ ".*""#.to_string(),
-                ..ConfigTargetDto::default()
-            };
+            let dto = ConfigTargetDto { name: String::new(), ..ConfigTargetDto::default() };
             BlockInstance::Target(Rc::new(dto))
         }
         BlockType::OutputM3u => BlockInstance::Output(Rc::new(TargetOutputDto::M3u(M3uTargetOutputDto::default()))),

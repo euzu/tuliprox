@@ -1,9 +1,9 @@
 use crate::{
     model::{ConfigProviderDto, ProxyUserStatus},
     utils::{
-        arc_str_option_null_if_empty_serde, arc_str_option_serde, arc_str_serde, deserialize_as_string_array,
-        deserialize_json_as_opt_string, deserialize_number_from_string, deserialize_number_from_string_or_zero,
-        serialize_json_as_opt_string,
+        arc_str_null_is_none_serde, arc_str_option_null_if_empty_serde, arc_str_option_serde, arc_str_serde,
+        deserialize_as_string_array, deserialize_json_as_opt_string, deserialize_number_from_string,
+        deserialize_number_from_string_or_zero, serialize_json_as_opt_string,
     },
 };
 use serde::{ser::SerializeMap, Deserialize, Deserializer, Serialize, Serializer};
@@ -49,7 +49,7 @@ pub struct XtreamVideoInfoMovieData {
     pub custom_sid: Option<Arc<str>>,
     #[serde(default, with = "arc_str_serde")]
     pub added: Arc<str>,
-    #[serde(default, with = "arc_str_serde")]
+    #[serde(default, with = "arc_str_null_is_none_serde")]
     pub container_extension: Arc<str>,
 }
 
@@ -230,7 +230,7 @@ pub struct XtreamSeriesInfoEpisode {
     pub episode_num: u32,
     #[serde(default, with = "arc_str_serde")]
     pub title: Arc<str>,
-    #[serde(default, with = "arc_str_serde")]
+    #[serde(default, with = "arc_str_null_is_none_serde")]
     pub container_extension: Arc<str>,
     #[serde(default)]
     pub info: Option<XtreamSeriesInfoEpisodeInfo>,

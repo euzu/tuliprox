@@ -81,7 +81,7 @@ mod tests {
 
     #[test]
     fn finalized_catchup_example_fits_representation_limits() {
-        assert!(MAX_TRANSIENT_MANIFEST_RESOURCES >= 1_643);
-        assert!(MAX_HLS_LEASE_SNAPSHOT_SEGMENTS >= 1_643);
+        const { assert!(MAX_TRANSIENT_MANIFEST_RESOURCES >= 1_643) };
+        const { assert!(MAX_HLS_LEASE_SNAPSHOT_SEGMENTS >= 1_643) };
     }
 }

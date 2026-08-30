@@ -17,11 +17,10 @@ use crate::{
 };
 use shared::{
     defaults::default_page_size,
-    error::TuliproxError,
     model::{permission::Permission, SortOrder},
     utils::{unix_ts_to_str, Substring},
 };
-use std::{cmp::Ordering, collections::HashSet, fmt::Display, rc::Rc, str::FromStr};
+use std::{cmp::Ordering, collections::HashSet, rc::Rc, str::FromStr};
 use yew::{platform::spawn_local, prelude::*};
 
 const HEADERS: [&str; 19] = [
@@ -66,45 +65,13 @@ fn get_cell_value(user: &TargetUser, col: usize) -> CellValue<'_> {
 
 fn is_col_sortable(col: usize) -> bool { matches!(col, 1 | 2 | 3 | 4 | 7 | 8 | 9 | 10 | 11 | 12 | 16 | 17) }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, strum_macros::Display, strum_macros::EnumString)]
+#[strum(serialize_all = "snake_case")]
 enum TableAction {
     Edit,
     Refresh,
     Delete,
     CopyCredentials,
-}
-
-impl Display for TableAction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                Self::Edit => "edit",
-                Self::Refresh => "refresh",
-                Self::Delete => "delete",
-                Self::CopyCredentials => "copy_credentials",
-            }
-        )
-    }
-}
-
-impl FromStr for TableAction {
-    type Err = TuliproxError;
-
-    fn from_str(s: &str) -> Result<Self, TuliproxError> {
-        if s.eq("edit") {
-            Ok(Self::Edit)
-        } else if s.eq("refresh") {
-            Ok(Self::Refresh)
-        } else if s.eq("delete") {
-            Ok(Self::Delete)
-        } else if s.eq("copy_credentials") {
-            Ok(Self::CopyCredentials)
-        } else {
-            Err(TuliproxError::Config(format!("Unknown TableAction: {s}")))
-        }
-    }
 }
 
 #[derive(Properties, PartialEq, Clone)]

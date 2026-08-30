@@ -7,7 +7,7 @@ use crate::{
     parser::xmltv::{flatten_tvguide, merge_epg_trees, EpgMergeAccumulator, TVGuide},
     playlist_watch::{process_group_watch, process_target_groups_watch},
     processor::{
-        epg::{process_playlist_epg, retain_live_items_with_processed_epg},
+        epg::{clear_invalid_live_epg_ids, process_playlist_epg, retain_epg_referenced_by_groups},
         sort::sort_playlist,
         trakt::process_trakt_categories_for_target,
         xtream_series::playlist_resolve_series,
@@ -45,9 +45,10 @@ use tokio::{
 };
 use tuliprox_core::{
     model::{
-        is_valid, AppConfig, CompiledMapping, ConfigFavourites, ConfigInput, ConfigInputFlags, ConfigInputOptions,
-        ConfigRename, ConfigTarget, Epg, MappingProgram, ProcessTargets, ProviderIdType, ResolveReason,
-        ReverseProxyDisabledHeaderConfig, TransformStage, UpdateGuard, UpdateTask,
+        is_valid, retain_filtered_playlist, AppConfig, CompiledMapping, ConfigFavourites, ConfigInput,
+        ConfigInputFlags, ConfigInputOptions, ConfigRename, ConfigTarget, Epg, FilterOutcome, MappingProgram,
+        ProcessTargets, ProviderIdType, ResolveReason, ReverseProxyDisabledHeaderConfig, TransformStage, UpdateGuard,
+        UpdateTask,
     },
     utils::{debug_if_enabled, log_memory_snapshot, trace_if_enabled, StepMeasure, StepMeasureCallback},
 };
@@ -116,13 +117,6 @@ fn stalker_checkpoint_message(input: &str) -> String {
     format!("Input '{input}': Stalker refresh checkpoint saved; active snapshot remains in service")
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct FilterOutcome {
-    pub inspected: usize,
-    pub retained: usize,
-    pub removed: usize,
-}
-
 fn retain_playlist_items(
     source: &mut PlaylistSource,
     mut keep: impl FnMut(&PlaylistItem) -> bool,
@@ -130,9 +124,7 @@ fn retain_playlist_items(
     let mut groups: IndexMap<CategoryKey, PlaylistGroup> = IndexMap::new();
     let mut outcome = FilterOutcome::default();
     for pli in source.into_items() {
-        outcome.inspected += 1;
-        if keep(&pli) {
-            outcome.retained += 1;
+        if outcome.record(keep(&pli)) {
             let group_title = pli.header.group.clone();
             let cluster = pli.header.xtream_cluster;
             let cat_id = pli.header.category_id;
@@ -148,8 +140,6 @@ fn retain_playlist_items(
                 })
                 .channels
                 .push(pli);
-        } else {
-            outcome.removed += 1;
         }
     }
 
@@ -1471,20 +1461,14 @@ impl TransformBuffer {
 
     fn apply_filter(&mut self, target: &ConfigTarget) -> FilterOutcome {
         let mut outcome = FilterOutcome::default();
-        self.items.retain(|item| {
-            outcome.inspected += 1;
-            let provider = ValueProvider { pli: item, match_as_ascii: false };
-            if target.filter(&provider) {
-                outcome.retained += 1;
-                true
-            } else {
-                outcome.removed += 1;
-                false
-            }
-        });
+        self.items.retain(|item| outcome.record(target.filter(&ValueProvider { pli: item, match_as_ascii: false })));
+        self.normalize_filter_grouping();
+        outcome
+    }
+
+    fn normalize_filter_grouping(&mut self) {
         self.grouping = GroupingPolicy::NormalizedCategory;
         self.reorder_for_grouping();
-        outcome
     }
 
     fn apply_rename(&mut self, target: &ConfigTarget) -> Option<RenameOutcome> {
@@ -1567,12 +1551,26 @@ fn execute_pipeline_on_items(
     let mut outcome = PipelineOutcome::default();
     for stage in pipe {
         match stage {
-            TransformStage::Filter => outcome.filter = Some(buffer.apply_filter(target)),
+            TransformStage::Filter => {
+                if target.filter.processing.is_some() {
+                    outcome.filter = Some(buffer.apply_filter(target));
+                } else {
+                    buffer.normalize_filter_grouping();
+                }
+            }
             TransformStage::Rename => outcome.rename = buffer.apply_rename(target),
             TransformStage::Map => outcome.mapping = buffer.apply_mapping(target, MappingStage::Processing),
         }
     }
     (buffer.into_groups(), outcome)
+}
+
+fn apply_persist_filter(target: &ConfigTarget, groups: &mut Vec<PlaylistGroup>) {
+    let Some(filter) = target.filter.persist.as_ref() else {
+        return;
+    };
+    let outcome = retain_filtered_playlist(groups, filter);
+    debug!("Target '{}' persist filter outcome: {outcome:?}", target.name);
 }
 
 pub(super) fn execute_pipeline_on_groups(
@@ -1694,9 +1692,9 @@ async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, M: Metadata
         log_memory_snapshot(
             format!("target '{}' input '{}' after_vod_resolve", target.name, provider_fpl.input.name).as_str(),
         );
-        let required_epg = target.options.as_ref().is_some_and(ConfigTargetOptions::required_epg);
+        let clear_invalid_epg_ids = target.options.as_ref().is_some_and(ConfigTargetOptions::clear_invalid_epg_ids);
         let input_epg_start = new_epg.len();
-        process_playlist_epg(&mut processed_fpl, &mut new_epg, required_epg).await;
+        process_playlist_epg(&mut processed_fpl, &mut new_epg, clear_invalid_epg_ids).await;
         log_memory_snapshot(
             format!("target '{}' input '{}' after_epg_apply", target.name, processed_fpl.input.name).as_str(),
         );
@@ -1708,9 +1706,9 @@ async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, M: Metadata
             deduplicate.then_some(&mut duplicates),
         ) {
             processed_fpl.source = MemoryPlaylistSource::new(groups).into_source();
-            if required_epg && new_epg.len() > input_epg_start {
-                retain_live_items_with_processed_epg(&mut processed_fpl, &new_epg[input_epg_start..]);
-            }
+        }
+        if clear_invalid_epg_ids && processed_fpl.epg.is_some() {
+            clear_invalid_live_epg_ids(&mut processed_fpl, &new_epg[input_epg_start..]);
         }
         if let Some(stat) = stats.get_mut(&processed_fpl.input.name) {
             stat.processed_stats.group_count = processed_fpl.get_group_count();
@@ -1778,7 +1776,7 @@ async fn finalize_prepared_target<E: EventSink + Clone + 'static, M: MetadataUpd
 ) -> (Result<(), Vec<TuliproxError>>, Vec<TuliproxError>) {
     let target = &prepared.target;
     let mut new_playlist = prepared.playlist;
-    let new_epg = prepared.epg;
+    let mut new_epg = prepared.epg;
     let mut errors = Vec::new();
     let broadcast_step = create_broadcast_callback(&ctx.events);
     let mut step = StepMeasure::new(&target.name, broadcast_step);
@@ -1835,6 +1833,9 @@ async fn finalize_prepared_target<E: EventSink + Clone + 'static, M: MetadataUpd
                 }
             }
         }
+
+        apply_persist_filter(target, &mut flat_new_playlist);
+        retain_epg_referenced_by_groups(&flat_new_playlist, &mut new_epg);
 
         if process_watch(&ctx.config, &ctx.events, target, &flat_new_playlist).await {
             step.tick("group watches");
@@ -3102,12 +3103,53 @@ mod tests {
             xtream_cluster: XtreamCluster::Live,
         }];
         let mut target = ConfigTarget::from(&ConfigTargetDto::default());
-        target.filter = get_filter(r#"name ~ "Allowed""#, None).expect("filter should parse");
+        target.filter = get_filter(r#"name ~ "Allowed""#, None).expect("filter should parse").into();
 
         let (groups, outcome) = execute_pipeline_on_groups(groups, &target, &[TransformStage::Filter]);
 
         assert!(groups.is_empty());
         assert_eq!(outcome.filter, Some(FilterOutcome { inspected: 1, retained: 0, removed: 1 }));
+    }
+
+    #[test]
+    fn missing_processing_filter_skips_filter_stage() {
+        let groups = vec![PlaylistGroup {
+            id: 1,
+            title: "Test Group".intern(),
+            channels: vec![make_test_item("Allowed", PlaylistItemType::Live)],
+            xtream_cluster: XtreamCluster::Live,
+        }];
+        let target = ConfigTarget::from(&ConfigTargetDto::default());
+
+        let (groups, outcome) = execute_pipeline_on_groups(groups, &target, &[TransformStage::Filter]);
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].channels.len(), 1);
+        assert!(outcome.filter.is_none());
+    }
+
+    #[test]
+    fn missing_processing_filter_preserves_filter_stage_group_normalization() {
+        let mut first = make_test_item("One", PlaylistItemType::Live);
+        first.header.group = "News".intern();
+        let mut second = make_test_item("Two", PlaylistItemType::Live);
+        second.header.group = "news".intern();
+        let groups = vec![
+            PlaylistGroup { id: 1, title: "News".intern(), channels: vec![first], xtream_cluster: XtreamCluster::Live },
+            PlaylistGroup {
+                id: 2,
+                title: "news".intern(),
+                channels: vec![second],
+                xtream_cluster: XtreamCluster::Live,
+            },
+        ];
+        let target = ConfigTarget::from(&ConfigTargetDto::default());
+
+        let (groups, outcome) = execute_pipeline_on_groups(groups, &target, &[TransformStage::Filter]);
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].channels.len(), 2);
+        assert!(outcome.filter.is_none());
     }
 
     #[test]
@@ -3122,7 +3164,7 @@ mod tests {
             xtream_cluster: XtreamCluster::Live,
         }];
         let mut target = ConfigTarget::from(&ConfigTargetDto::default());
-        target.filter = get_filter(r#"name ~ "Allowed""#, None).expect("filter should parse");
+        target.filter = get_filter(r#"name ~ "Allowed""#, None).expect("filter should parse").into();
         target.rename = Some(vec![ConfigRename::from(&ConfigRenameDto {
             field: ItemField::Name,
             pattern: "Allowed".to_string(),
@@ -3473,6 +3515,58 @@ mod tests {
             }
         }
 
+        #[test]
+        fn persist_filter_runs_after_after_epg_mapping() {
+            let runtime = Runtime::new().expect("runtime");
+            runtime.block_on(async {
+                let mut input = ConfigInput::from(ConfigInputDto::default());
+                input.name = "input".intern();
+                let groups = vec![PlaylistGroup {
+                    id: 1,
+                    title: "Live".intern(),
+                    channels: vec![PlaylistItem {
+                        header: PlaylistItemHeader {
+                            name: "Before".intern(),
+                            group: "Live".intern(),
+                            xtream_cluster: XtreamCluster::Live,
+                            item_type: PlaylistItemType::Live,
+                            ..Default::default()
+                        },
+                    }],
+                    xtream_cluster: XtreamCluster::Live,
+                }];
+                let mut playlist = FetchedPlaylist {
+                    input: &input,
+                    source: MemoryPlaylistSource::new(groups).into_source(),
+                    epg: None,
+                };
+                let rename = build_mapping("rename", MappingStage::AfterEpg, r#"@Name = "After""#);
+                let mut target = build_target(vec![rename], false);
+                target.filter.persist = Some(get_filter(r#"Name = "After""#, None).expect("filter parses"));
+                let mut stats = HashMap::from([(
+                    Arc::clone(&input.name),
+                    create_input_stat(1, 1, 0, input.input_type, &input.name, 0),
+                )]);
+                let mut errors = Vec::new();
+
+                let mut prepared = prepare_playlist_for_target(
+                    &processing_context(),
+                    std::slice::from_mut(&mut playlist),
+                    &target,
+                    &mut stats,
+                    &mut errors,
+                    false,
+                )
+                .await
+                .expect("target preparation");
+
+                assert!(errors.is_empty());
+                apply_persist_filter(&target, &mut prepared.playlist);
+                let item = &prepared.playlist[0].channels[0];
+                assert_eq!(item.header.name.as_ref(), "After");
+            });
+        }
+
         fn make_channel(name: &str) -> PlaylistItem {
             let mut item = PlaylistItem {
                 header: PlaylistItemHeader {
@@ -3624,7 +3718,7 @@ match {
         }
 
         #[test]
-        fn required_epg_removes_ids_invalidated_by_after_epg_mapping() {
+        fn clear_invalid_epg_ids_clears_ids_invalidated_by_after_epg_mapping() {
             let runtime = Runtime::new().expect("runtime");
             runtime.block_on(async {
                 let dir = tempdir().expect("tempdir");
@@ -3674,7 +3768,7 @@ match {
                     build_mapping("rewrite", MappingStage::AfterEpg, r#"@epg_channel_id = "missing.epg""#);
                 let add_virtual = build_mapping("virtual", MappingStage::AfterEpg, r#"add_favourite("Echo")"#);
                 let mut target = build_target(vec![rewrite_epg, add_virtual], false);
-                target.options = Some(ConfigTargetOptions { required_epg: true, ..Default::default() });
+                target.options = Some(ConfigTargetOptions { clear_invalid_epg_ids: true, ..Default::default() });
                 let mut stats = HashMap::from([(
                     Arc::clone(&input.name),
                     create_input_stat(1, 1, 0, input.input_type, &input.name, 0),
@@ -3693,9 +3787,13 @@ match {
                 .expect("target preparation");
 
                 assert!(errors.is_empty());
-                assert!(prepared.playlist.is_empty());
-                assert_eq!(stats[&input.name].processed_stats.group_count, 0);
-                assert_eq!(stats[&input.name].processed_stats.channel_count, 0);
+                assert!(!prepared.playlist.is_empty());
+                assert!(prepared
+                    .playlist
+                    .iter()
+                    .flat_map(|group| &group.channels)
+                    .all(|channel| channel.header.epg_channel_id.is_none()));
+                assert_eq!(stats[&input.name].processed_stats.channel_count, 2);
             });
         }
 

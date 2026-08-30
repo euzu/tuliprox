@@ -4454,6 +4454,7 @@ name = "tuliprox-config-loader"
 version = "3.3.95"
 dependencies = [
  "arc-swap",
+ "blake3",
  "chrono",
  "log",
  "serde",

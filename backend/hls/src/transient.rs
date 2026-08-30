@@ -2350,7 +2350,7 @@ mod tests {
         let resources = base.resources;
         let generations_within_limit = MAX_TRANSIENT_GENERATION_MEMBERSHIPS / MAX_TRANSIENT_MANIFEST_RESOURCES;
         for index in 0..generations_within_limit {
-            body.push_str(&format!("# generation-{index}\n"));
+            let _ = writeln!(body, "# generation-{index}");
             state
                 .commit_rewritten_manifest_with_semantics(
                     body.clone(),
@@ -2995,14 +2995,10 @@ mod tests {
         let proxy_session_id = ProxySessionId("proxy-session".to_string());
         let mut origin_body = String::from("#EXTM3U\n#EXT-X-TARGETDURATION:7\n#EXT-X-PLAYLIST-TYPE:EVENT\n");
         let durations_ms = (0..46)
-            .map(|index| {
-                if index < 44 {
-                    6_700
-                } else if index == 44 {
-                    6_720
-                } else {
-                    6_000
-                }
+            .map(|index| match index {
+                0..44 => 6_700,
+                44 => 6_720,
+                _ => 6_000,
             })
             .collect::<Vec<_>>();
         for (index, duration_ms) in durations_ms.iter().enumerate() {

@@ -4,12 +4,50 @@ use crate::{
     model::{
         config::target::ConfigTargetDto, ConfigInputDto, ConfigProviderDto, HdHomeRunDeviceOverview, PatternTemplate,
     },
-    utils::{arc_str_vec_serde, Internable},
+    utils::{arc_str_vec_serde, is_sanitize_sensitive_info_enabled, Internable},
 };
 use log::warn;
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 const MAX_STAGE_CHAIN_DEPTH: usize = 2;
+
+#[derive(Clone, Copy)]
+struct CredentialOwner<'a> {
+    kind: &'static str,
+    name: &'a str,
+    url: &'a str,
+}
+
+fn sensitive_url_for_log(url: &str, sanitize: bool) -> &str {
+    if sanitize {
+        "***"
+    } else {
+        url
+    }
+}
+
+fn duplicate_credentials_warning(
+    current: CredentialOwner<'_>,
+    previous: CredentialOwner<'_>,
+    sanitize: bool,
+) -> String {
+    let current_url = sensitive_url_for_log(current.url, sanitize);
+    if current.url == previous.url {
+        format!(
+            "The {} '{}' uses the same URL and credentials as the {} '{}' (URL: '{current_url}', username: '***', password: '***'). Tuliprox tracks provider connection limits separately for each input or alias, so the provider's actual connection limit may be exceeded. Reuse the existing provider account definition across multiple targets instead of defining it twice.",
+            current.kind, current.name, previous.kind, previous.name
+        )
+    } else {
+        let previous_url = sensitive_url_for_log(previous.url, sanitize);
+        format!(
+            "The {} '{}' uses the same credentials as the {} '{}', but their URLs differ (URLs: '{current_url}' and '{previous_url}', username: '***', password: '***'). Tuliprox cannot determine whether both URLs point to the same provider account. If they do, connection limits are tracked separately for each input or alias, so the provider's actual connection limit may be exceeded.",
+            current.kind, current.name, previous.kind, previous.name
+        )
+    }
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -91,23 +129,36 @@ impl SourcesConfigDto {
         let mut source_index: u16 = 0;
         let mut input_index: u16 = 0;
         let mut target_index: u16 = 1;
-        let mut input_credentials = HashSet::new();
+        let mut input_credentials = HashMap::new();
         // Prepare global inputs
         for input in &mut self.inputs {
             input_index = input.prepare(input_index, include_computed, provider_names, prepared_templates)?;
             if let (Some(username), Some(password)) = (input.username.as_ref(), input.password.as_ref()) {
-                let key = (username, password);
-                if !input_credentials.insert(key) {
-                    warn!("Duplicate credentials found for input: '{}'", input.name);
+                let key = (username.as_str(), password.as_str());
+                let current = CredentialOwner { kind: "input", name: input.name.as_ref(), url: input.url.as_str() };
+                if let Some(previous) = input_credentials.get(&key) {
+                    warn!(
+                        "{}",
+                        duplicate_credentials_warning(current, *previous, is_sanitize_sensitive_info_enabled())
+                    );
+                } else {
+                    input_credentials.insert(key, current);
                 }
             }
 
             if let Some(aliases) = &input.aliases {
                 for alias in aliases {
                     if let (Some(username), Some(password)) = (alias.username.as_ref(), alias.password.as_ref()) {
-                        let key = (username, password);
-                        if !input_credentials.insert(key) {
-                            warn!("Duplicate credentials found for input alias: '{}'", alias.name);
+                        let key = (username.as_str(), password.as_str());
+                        let current =
+                            CredentialOwner { kind: "input alias", name: alias.name.as_ref(), url: alias.url.as_str() };
+                        if let Some(previous) = input_credentials.get(&key) {
+                            warn!(
+                                "{}",
+                                duplicate_credentials_warning(current, *previous, is_sanitize_sensitive_info_enabled())
+                            );
+                        } else {
+                            input_credentials.insert(key, current);
                         }
                     }
                 }
@@ -236,6 +287,49 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_credentials_warning_identifies_same_url_account() {
+        let previous = CredentialOwner { kind: "input", name: "primary", url: "provider://example" };
+        let current = CredentialOwner { kind: "input", name: "duplicate", url: "provider://example" };
+
+        let warning = duplicate_credentials_warning(current, previous, false);
+
+        assert!(warning.contains("same URL and credentials"), "Warning: {warning}");
+        assert!(warning.contains("'duplicate'"), "Warning: {warning}");
+        assert!(warning.contains("'primary'"), "Warning: {warning}");
+        assert!(warning.contains("tracks provider connection limits separately"), "Warning: {warning}");
+        assert!(warning.contains("provider://example"), "Warning: {warning}");
+        assert!(warning.contains("username: '***', password: '***'"), "Warning: {warning}");
+    }
+
+    #[test]
+    fn duplicate_credentials_warning_explains_ambiguous_different_urls() {
+        let previous = CredentialOwner { kind: "input", name: "primary", url: "https://one.example" };
+        let current = CredentialOwner { kind: "input alias", name: "possible-duplicate", url: "https://two.example" };
+
+        let warning = duplicate_credentials_warning(current, previous, false);
+
+        assert!(warning.contains("same credentials"), "Warning: {warning}");
+        assert!(warning.contains("URLs differ"), "Warning: {warning}");
+        assert!(warning.contains("cannot determine whether both URLs point to the same provider account"));
+        assert!(warning.contains("connection limits are tracked separately"), "Warning: {warning}");
+        assert!(warning.contains("https://one.example"), "Warning: {warning}");
+        assert!(warning.contains("https://two.example"), "Warning: {warning}");
+        assert!(warning.contains("username: '***', password: '***'"), "Warning: {warning}");
+    }
+
+    #[test]
+    fn duplicate_credentials_warning_masks_urls_when_sanitizing_logs() {
+        let previous = CredentialOwner { kind: "input", name: "primary", url: "provider://one" };
+        let current = CredentialOwner { kind: "input", name: "possible-duplicate", url: "provider://two" };
+
+        let warning = duplicate_credentials_warning(current, previous, true);
+
+        assert!(warning.contains("URLs: '***' and '***'"), "Warning: {warning}");
+        assert!(warning.contains("username: '***', password: '***'"), "Warning: {warning}");
+        assert!(!warning.contains("provider://"), "Warning must not expose either URL: {warning}");
+    }
+
+    #[test]
     fn duplicate_default_target_names_are_rejected() {
         let sources = SourcesConfigDto {
             sources: vec![
@@ -295,7 +389,7 @@ mod tests {
                 inputs: vec!["input_1".intern()],
                 targets: vec![ConfigTargetDto {
                     name: "target_1".to_string(),
-                    filter: "!FILTER_NAME!".to_string(),
+                    filter: "!FILTER_NAME!".into(),
                     output: vec![TargetOutputDto::M3u(M3uTargetOutputDto::default())],
                     rename: Some(vec![ConfigRenameDto {
                         field: ItemField::Name,
@@ -425,7 +519,7 @@ mod tests {
             sources: vec![ConfigSourceDto {
                 inputs: vec!["staged".intern()],
                 targets: vec![ConfigTargetDto {
-                    filter: r#"name ~ ".*""#.to_string(),
+                    filter: r#"name ~ ".*""#.into(),
                     output: vec![TargetOutputDto::M3u(M3uTargetOutputDto::default())],
                     ..Default::default()
                 }],

@@ -61,6 +61,16 @@ impl TargetExecutionPlan {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct StagedFilter {
+    pub processing: Option<Filter>,
+    pub persist: Option<Filter>,
+}
+
+impl From<Filter> for StagedFilter {
+    fn from(processing: Filter) -> Self { Self { processing: Some(processing), ..Self::default() } }
+}
+
 #[derive(Debug)]
 pub struct CompiledTargetMappings {
     pub all: Vec<Arc<CompiledMapping>>,
@@ -316,7 +326,7 @@ pub struct ConfigTarget {
     pub name: String,
     pub options: Option<ConfigTargetOptions>,
     pub sort: Option<ConfigSort>,
-    pub filter: Filter,
+    pub filter: StagedFilter,
     pub output: Vec<TargetOutput>,
     pub rename: Option<Vec<ConfigRename>>,
     pub mapping_ids: Option<Vec<String>>,
@@ -329,7 +339,9 @@ pub struct ConfigTarget {
 }
 
 impl ConfigTarget {
-    pub fn filter(&self, provider: &ValueProvider) -> bool { self.filter.filter(provider) }
+    pub fn filter(&self, provider: &ValueProvider) -> bool {
+        self.filter.processing.as_ref().is_none_or(|filter| filter.filter(provider))
+    }
 
     pub fn get_xtream_output(&self) -> Option<&XtreamTargetOutput> {
         self.output.iter().find_map(|o| match o {
@@ -374,7 +386,7 @@ impl From<&ConfigTargetDto> for ConfigTarget {
             name: dto.name.clone(),
             options: dto.options.clone(),
             sort: dto.sort.as_ref().map(Into::into),
-            filter: dto.t_filter.clone().unwrap_or_default(),
+            filter: StagedFilter { processing: dto.filter.t_processing.clone(), persist: dto.filter.t_persist.clone() },
             output: dto.output.iter().map(Into::into).collect(),
             rename: dto.rename.as_ref().map(|l| l.iter().map(Into::into).collect()),
             mapping_ids: dto.mapping.clone(),

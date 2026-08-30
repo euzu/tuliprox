@@ -158,6 +158,19 @@ fn normalize_scalar_string(value: &str) -> &str {
     }
 }
 
+/// Returns `true` for values that should be treated as absent.
+///
+/// Covers:
+/// - empty string (`""`)
+/// - JSON/YAML null literals (`"null"`, `"~"`)
+///
+/// Generic, field-agnostic. Callers decide whether `true` maps to `""`
+/// (for non-optional `Arc<str>`) or `None` (for `Option<Arc<str>>`).
+/// Case-sensitive on purpose: provider-supplied `"NULL"` or `"Null"` are real
+/// values and must be preserved verbatim.
+#[inline]
+pub fn is_nullish(value: &str) -> bool { value.is_empty() || value == "null" || value == "~" }
+
 //
 // Two reusable visitor types live here so that multiple public entry-points
 // can share them without code duplication:
@@ -338,6 +351,142 @@ pub mod arc_str_option_null_if_empty_serde {
     pub use super::arc_str_option_serde::{deserialize, serialize_null_if_empty as serialize};
 }
 
+/// Visitor that mirrors `ArcStrVisitor` but collapses `"null"`, `""`, and `~`
+/// to an empty `Arc<str>`. Generic over the field, not specific to
+/// `container_extension`.
+struct NullishArcStrVisitor;
+
+impl<'de> Visitor<'de> for NullishArcStrVisitor {
+    type Value = Arc<str>;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a string, number, boolean, or null (literal \"null\"/\"~\"/empty mapped to empty)")
+    }
+
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+        if is_nullish(v) {
+            Ok("".intern())
+        } else {
+            Ok(normalize_scalar_string(v).intern())
+        }
+    }
+    fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
+        if is_nullish(&v) {
+            Ok("".intern())
+        } else {
+            Ok(normalize_scalar_string(&v).intern())
+        }
+    }
+    fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> { Ok(v.to_string().intern()) }
+    fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> { Ok(v.to_string().intern()) }
+    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> { Ok(v.to_string().intern()) }
+    fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> { Ok(f64_to_str(v).intern()) }
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> { Ok("".intern()) }
+    fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> { Ok("".intern()) }
+    fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> { d.deserialize_any(self) }
+}
+
+/// Visitor that mirrors `OptionArcStrVisitor` but collapses `"null"`, `""`,
+/// and `~` to `None`. Generic over the field.
+struct NullishOptionArcStrVisitor;
+
+impl<'de> Visitor<'de> for NullishOptionArcStrVisitor {
+    type Value = Option<Arc<str>>;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a string, number, boolean, null, or empty (literal \"null\"/\"~\"/empty mapped to None)")
+    }
+
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+        if is_nullish(v) {
+            Ok(None)
+        } else {
+            Ok(Some(normalize_scalar_string(v).intern()))
+        }
+    }
+    fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
+        if is_nullish(&v) {
+            Ok(None)
+        } else {
+            Ok(Some(normalize_scalar_string(&v).intern()))
+        }
+    }
+    fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> { Ok(Some(v.to_string().intern())) }
+    fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> { Ok(Some(v.to_string().intern())) }
+    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> { Ok(Some(v.to_string().intern())) }
+    fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> { Ok(Some(f64_to_str(v).intern())) }
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> { Ok(None) }
+    fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> { Ok(None) }
+    fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> { d.deserialize_any(self) }
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        while seq.next_element::<IgnoredAny>()?.is_some() {}
+        log::debug!("ignored sequence while deserializing nullish arc_str, returning None");
+        Ok(None)
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        log::debug!("ignored map while deserializing nullish arc_str, returning None");
+        Ok(None)
+    }
+}
+
+/// Generic serde for `Arc<str>` that treats JSON null, YAML null/`~`, empty
+/// string, and the literal four-character string `"null"` as empty.
+///
+/// Field-agnostic. Apply with `#[serde(with = "arc_str_null_is_none_serde")]`.
+///
+/// Use instead of `arc_str_serde` whenever the underlying value might be
+/// reported as `"null"` by a misbehaving provider.
+pub mod arc_str_null_is_none_serde {
+    // These serde helper modules deliberately re-use the parent module's imports.
+    // Clippy's expansion of this glob names private sibling modules and does not
+    // compile, so the glob is kept.
+    #[allow(clippy::wildcard_imports)]
+    use super::*;
+
+    pub fn serialize<S>(value: &Arc<str>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(value)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Arc<str>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_option(NullishArcStrVisitor)
+    }
+}
+
+/// Generic serde for `Option<Arc<str>>` that treats JSON null, YAML null/`~`,
+/// empty string, and the literal four-character string `"null"` as `None`. On
+/// serialization, `None`, empty, and the literal `"null"` all become JSON null.
+pub mod arc_str_null_is_none_option_serde {
+    // These serde helper modules deliberately re-use the parent module's imports.
+    // Clippy's expansion of this glob names private sibling modules and does not
+    // compile, so the glob is kept.
+    #[allow(clippy::wildcard_imports)]
+    use super::*;
+
+    pub fn serialize<S>(value: &Option<Arc<str>>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(s) if !super::is_nullish(s) => serializer.serialize_str(s),
+            _ => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Arc<str>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_option(NullishOptionArcStrVisitor)
+    }
+}
+
 //
 // Reuses `ArcStrVisitor` / `OptionArcStrVisitor` via `deserialize_option`:
 //   - null / ~ / empty  -> visit_none / visit_unit -> "" / None
@@ -444,5 +593,94 @@ mod tests {
         assert_eq!(parsed_inf.value.as_deref(), Some("infinity"));
         assert_eq!(parsed_neg_inf.value.as_deref(), Some("-infinity"));
         assert_eq!(parsed_nan.value.as_deref(), Some("nan"));
+    }
+
+    #[derive(Debug, serde::Deserialize, serde::Serialize)]
+    struct NullishArcStrHolder {
+        #[serde(default, with = "arc_str_null_is_none_serde")]
+        value: Arc<str>,
+    }
+
+    #[derive(Debug, serde::Deserialize, serde::Serialize)]
+    struct NullishOptArcStrHolder {
+        #[serde(default, with = "arc_str_null_is_none_option_serde")]
+        value: Option<Arc<str>>,
+    }
+
+    #[test]
+    fn null_is_none_arc_str_treats_literal_null_string_as_empty() {
+        let parsed: NullishArcStrHolder = serde_json::from_str(r#"{"value":"null"}"#).unwrap();
+        assert!(parsed.value.is_empty());
+    }
+
+    #[test]
+    fn null_is_none_arc_str_treats_yaml_null_scalar_as_empty() {
+        let parsed: NullishArcStrHolder = serde_saphyr::from_str("value: null\n").unwrap();
+        assert!(parsed.value.is_empty());
+        let parsed_tilde: NullishArcStrHolder = serde_saphyr::from_str("value: ~\n").unwrap();
+        assert!(parsed_tilde.value.is_empty());
+    }
+
+    #[test]
+    fn null_is_none_arc_str_treats_json_null_as_empty() {
+        let parsed: NullishArcStrHolder = serde_json::from_str(r#"{"value":null}"#).unwrap();
+        assert!(parsed.value.is_empty());
+    }
+
+    #[test]
+    fn null_is_none_arc_str_preserves_real_extensions() {
+        for ext in ["mkv", "mp4", "ts", "avi"] {
+            let json = format!(r#"{{"value":"{ext}"}}"#);
+            let parsed: NullishArcStrHolder = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.value.as_ref(), ext, "extension {ext} must survive");
+        }
+    }
+
+    #[test]
+    fn null_is_none_option_treats_literal_null_string_as_none() {
+        let parsed: NullishOptArcStrHolder = serde_json::from_str(r#"{"value":"null"}"#).unwrap();
+        assert_eq!(parsed.value, None);
+    }
+
+    #[test]
+    fn null_is_none_option_treats_json_null_as_none() {
+        let parsed: NullishOptArcStrHolder = serde_json::from_str(r#"{"value":null}"#).unwrap();
+        assert_eq!(parsed.value, None);
+    }
+
+    #[test]
+    fn null_is_none_option_treats_empty_string_as_none() {
+        let parsed: NullishOptArcStrHolder = serde_json::from_str(r#"{"value":""}"#).unwrap();
+        assert_eq!(parsed.value, None);
+    }
+
+    #[test]
+    fn null_is_none_option_preserves_real_extensions() {
+        for ext in ["mkv", "mp4", "ts"] {
+            let json = format!(r#"{{"value":"{ext}"}}"#);
+            let parsed: NullishOptArcStrHolder = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.value.as_deref(), Some(ext), "extension {ext} must survive");
+        }
+    }
+
+    #[test]
+    fn null_is_none_option_serializes_none_and_literal_null_as_json_null() {
+        let none_value: NullishOptArcStrHolder = NullishOptArcStrHolder { value: None };
+        assert_eq!(serde_json::to_string(&none_value).unwrap(), r#"{"value":null}"#);
+
+        let literal_null: NullishOptArcStrHolder = NullishOptArcStrHolder { value: Some("null".into()) };
+        assert_eq!(serde_json::to_string(&literal_null).unwrap(), r#"{"value":null}"#);
+
+        let empty: NullishOptArcStrHolder = NullishOptArcStrHolder { value: Some("".into()) };
+        assert_eq!(serde_json::to_string(&empty).unwrap(), r#"{"value":null}"#);
+    }
+
+    #[test]
+    fn null_is_none_arc_str_roundtrips_real_extensions_byte_for_byte() {
+        let holder = NullishArcStrHolder { value: "mkv".into() };
+        let json = serde_json::to_string(&holder).unwrap();
+        assert_eq!(json, r#"{"value":"mkv"}"#);
+        let back: NullishArcStrHolder = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.value.as_ref(), "mkv");
     }
 }

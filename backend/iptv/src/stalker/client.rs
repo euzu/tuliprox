@@ -834,15 +834,8 @@ fn rotate_stalker_debug_dumps(dump_dir: &Path) {
     }
 }
 
-fn sanitize_dump_component(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| match ch {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_' => ch,
-            _ => '_',
-        })
-        .collect()
-}
+#[inline]
+fn sanitize_dump_component(value: &str) -> String { crate::redaction::sanitize_path_component(value, true) }
 
 #[cfg(test)]
 mod transport_tests {

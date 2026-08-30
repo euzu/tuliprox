@@ -288,7 +288,7 @@ async fn save_config_sources(
         }
     }
 
-    match crate::config_loader::persist_source_config(&app_state.app_config, None, sources).await {
+    match crate::config_loader::replace_source_config_from_user_edit(&app_state.app_config, None, sources).await {
         Ok(_) => {}
         Err(err) => {
             error!("Failed to persist source.yml {err}");

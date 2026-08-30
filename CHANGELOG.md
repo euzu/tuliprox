@@ -106,10 +106,15 @@
 
 ## 🌟 New Features
 
-- **Targets can require usable EPG data for live channels**: setting `options.required_epg: true` keeps only live
-  entries whose EPG ID resolves to programme data from an available EPG source. The normal target filter and mappings
-  still run first, so EPG matching operates on the already reduced playlist. VOD, series, catch-up, and local-library
-  entries are unaffected, and inputs without a successfully materialized EPG source keep their live entries.
+- **Target filters can run during processing or immediately before persistence.** The existing scalar `filter` syntax
+  remains the `processing` stage. The staged map accepts optional `processing` and `persist` filters; `persist` sees
+  the fully finalized state after EPG processing, mappings, merge, deduplication, sorting, numbering, and counters.
+  Omitting `processing` no longer requires a match-all filter, and targets may omit `filter` entirely. Presence checks
+  use `IS EMPTY` / `IS NOT EMPTY`; `= EMPTY` / `!= EMPTY` remain accepted as compact aliases.
+
+- **Targets can clear invalid EPG IDs without removing playlist entries.** Setting
+  `options.clear_invalid_epg_ids: true` clears IDs that do not resolve to processed EPG data, including IDs changed by
+  mappings. Without the option, unmatched IDs are preserved. The old `required_epg` name remains a read-only alias.
 
 - **Ten events for the failures that used to be silent**: the registry described states nothing emitted, and several
   subsystems reported their start and their success but never their own failure. The taxonomy is now 42 events (up
@@ -1197,9 +1202,9 @@
 ## ⚙️ New Settings
 
 - **source.yml (target `options`)**:
-  - Added optional `required_epg` (`bool`, default `false`) to remove unmatched live entries after EPG matching.
-    The setting is evaluated independently for each target and does not affect VOD, series, catch-up, or local-library
-    entries. If an input has no successfully materialized EPG source, its live entries are left unchanged.
+  - Added optional `clear_invalid_epg_ids` (`bool`, default `false`) to clear unresolved live-channel EPG IDs after EPG
+    matching and final mappings without removing playlist entries. The legacy name `required_epg` is accepted while
+    reading existing configuration and is rewritten as `clear_invalid_epg_ids` when serialized.
 
 - **config.yml (`video.download.recording`)**:
   - Added `enabled` (`bool`, default `true`): master switch for the DVR. When `false` the REST routes answer

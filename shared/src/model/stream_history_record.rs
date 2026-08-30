@@ -72,8 +72,11 @@ impl Display for DisconnectReason {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum_macros::Display, strum_macros::EnumString,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum ConnectFailureReason {
     UserAccountExpired,
     UserConnectionsExhausted,
@@ -84,22 +87,6 @@ pub enum ConnectFailureReason {
     Preempted,
     SessionExpired,
     Provisioning,
-}
-
-impl Display for ConnectFailureReason {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ConnectFailureReason::UserAccountExpired => write!(f, "user_account_expired"),
-            ConnectFailureReason::UserConnectionsExhausted => write!(f, "user_connections_exhausted"),
-            ConnectFailureReason::ProviderConnectionsExhausted => write!(f, "provider_connections_exhausted"),
-            ConnectFailureReason::ProviderError => write!(f, "provider_error"),
-            ConnectFailureReason::ProviderClosed => write!(f, "provider_closed"),
-            ConnectFailureReason::ChannelUnavailable => write!(f, "channel_unavailable"),
-            ConnectFailureReason::Preempted => write!(f, "preempted"),
-            ConnectFailureReason::SessionExpired => write!(f, "session_expired"),
-            ConnectFailureReason::Provisioning => write!(f, "provisioning"),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

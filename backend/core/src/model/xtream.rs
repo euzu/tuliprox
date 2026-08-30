@@ -134,7 +134,6 @@ mod tests {
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
     use shared::{
-        foundation::Filter,
         model::{ConfigPaths, InputFetchMethod, InputType, PlaylistItemType, ProcessingOrder},
         utils::Internable,
     };
@@ -190,7 +189,7 @@ mod tests {
             name: "xtream-target".to_string(),
             options: None,
             sort: None,
-            filter: Filter::default(),
+            filter: crate::model::StagedFilter::default(),
             output: vec![TargetOutput::Xtream(xtream_output.clone())],
             rename: None,
             mapping_ids: None,

@@ -10,7 +10,7 @@ use crate::{
 };
 use shared::{
     error::TuliproxError,
-    model::{ClusterFlags, ConfigTargetDto, ConfigTargetOptions, ProcessingOrder},
+    model::{ClusterFlags, ConfigTargetDto, ConfigTargetFilterDto, ConfigTargetOptions, ProcessingOrder},
     utils::Internable,
 };
 use std::{fmt::Display, rc::Rc, str::FromStr, sync::Arc};
@@ -22,6 +22,7 @@ use yew::{
 const LABEL_ENABLED: &str = "LABEL.ENABLED";
 const LABEL_NAME: &str = "LABEL.NAME";
 const LABEL_FILTER: &str = "LABEL.FILTER";
+const LABEL_PERSIST_FILTER: &str = "LABEL.PERSIST_FILTER";
 const LABEL_MAPPING: &str = "LABEL.MAPPING";
 const LABEL_WATCH: &str = "LABEL.WATCH";
 const LABEL_ADD_MAPPING: &str = "LABEL.ADD_MAPPING";
@@ -29,7 +30,7 @@ const LABEL_ADD_WATCH: &str = "LABEL.ADD_WATCH";
 const LABEL_USE_MEMORY_CACHE: &str = "LABEL.USE_MEMORY_CACHE";
 const LABEL_PROCESSING_ORDER: &str = "LABEL.PROCESSING_ORDER";
 const LABEL_IGNORE_LOGO: &str = "LABEL.IGNORE_LOGO";
-const LABEL_REQUIRED_EPG: &str = "LABEL.REQUIRED_EPG";
+const LABEL_CLEAR_INVALID_EPG_IDS: &str = "LABEL.CLEAR_INVALID_EPG_IDS";
 const LABEL_SHARE_LIVE_STREAMS: &str = "LABEL.SHARE_LIVE_STREAMS";
 const LABEL_HLS: &str = "LABEL.HLS";
 const LABEL_MPEG_TS: &str = "LABEL.MPEG_TS";
@@ -105,7 +106,7 @@ impl HasFormData for ConfigTargetOptionsFormState {
 #[derive(Clone)]
 pub enum ConfigTargetOptionsFormAction {
     IgnoreLogo(bool),
-    RequiredEpg(bool),
+    ClearInvalidEpgIds(bool),
     ShareLiveStreamsHls(bool),
     ShareLiveStreamsMpegTs(bool),
     RemoveDuplicates(bool),
@@ -127,8 +128,8 @@ impl yew::prelude::Reducible for ConfigTargetOptionsFormState {
                 form.ignore_logo = value;
                 modified = true;
             }
-            ConfigTargetOptionsFormAction::RequiredEpg(value) => {
-                form.required_epg = value;
+            ConfigTargetOptionsFormAction::ClearInvalidEpgIds(value) => {
+                form.clear_invalid_epg_ids = value;
                 modified = true;
             }
             ConfigTargetOptionsFormAction::ShareLiveStreamsHls(value) => {
@@ -172,7 +173,7 @@ generate_form_reducer!(
         Enabled => enabled: bool,
         Name => name: String,
         ProcessingOrder => processing_order: ProcessingOrder,
-        Filter => filter: String,
+        Filter => filter: ConfigTargetFilterDto,
         Mapping => mapping: Option<Vec<String>>,
         Watch => watch: Option<Vec<String>>,
         UseMemoryCache => use_memory_cache: bool,
@@ -313,7 +314,7 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                 <Card class="tp__config-view__card">
                 <div class="tp__target-options">
                     { edit_field_bool!(target_options_state, translate.t(LABEL_IGNORE_LOGO), ignore_logo,  ConfigTargetOptionsFormAction::IgnoreLogo) }
-                    { edit_field_bool!(target_options_state, translate.t(LABEL_REQUIRED_EPG), required_epg, ConfigTargetOptionsFormAction::RequiredEpg) }
+                    { edit_field_bool!(target_options_state, translate.t(LABEL_CLEAR_INVALID_EPG_IDS), clear_invalid_epg_ids, ConfigTargetOptionsFormAction::ClearInvalidEpgIds) }
                     <div class="tp__target-options__group">
                         <div class="tp__target-options__heading">
                             <span class="tp__form-field__label">{ translate.t(LABEL_SHARE_LIVE_STREAMS) }</span>
@@ -366,7 +367,7 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                 <Card class="tp__config-view__card">
                     <div class="tp__target-options">
                         { config_field_bool!(target_options_state.form, translate.t(LABEL_IGNORE_LOGO), ignore_logo) }
-                        { config_field_bool!(target_options_state.form, translate.t(LABEL_REQUIRED_EPG), required_epg) }
+                        { config_field_bool!(target_options_state.form, translate.t(LABEL_CLEAR_INVALID_EPG_IDS), clear_invalid_epg_ids) }
                         <div class="tp__target-options__group">
                             <div class="tp__target-options__heading">
                                 <span class="tp__form-field__label">{ translate.t(LABEL_SHARE_LIVE_STREAMS) }</span>
@@ -411,6 +412,7 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
     let render_target = || {
         let target_form_state_1 = target_form_state.clone();
         let target_form_state_2 = target_form_state.clone();
+        let target_form_state_3 = target_form_state.clone();
         if props.allow_write {
             html! {
                 <Card class="tp__config-view__card">
@@ -421,8 +423,19 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                 { edit_field_text!(target_form_state, translate.t(LABEL_NAME), name, ConfigTargetFormAction::Name) }
                 { config_field_child!(translate.t(LABEL_FILTER), "TARGET_FORM.FILTER", {
                        html! {
-                            <FilterInput filter={target_form_state_2.form.filter.clone()} on_change={Callback::from(move |new_filter: Option<String>| {
-                                target_form_state_2.dispatch(ConfigTargetFormAction::Filter(new_filter.unwrap_or_default()));
+                            <FilterInput filter={target_form_state_2.form.filter.processing.clone()} on_change={Callback::from(move |new_filter: Option<String>| {
+                                let mut filter = target_form_state_2.form.filter.clone();
+                                filter.processing = new_filter.filter(|value| !value.is_empty());
+                                target_form_state_2.dispatch(ConfigTargetFormAction::Filter(filter));
+                            })} />
+                       }
+                })}
+                { config_field_child!(translate.t(LABEL_PERSIST_FILTER), "TARGET_FORM.PERSIST_FILTER", {
+                       html! {
+                            <FilterInput filter={target_form_state_3.form.filter.persist.clone()} on_change={Callback::from(move |new_filter: Option<String>| {
+                                let mut filter = target_form_state_3.form.filter.clone();
+                                filter.persist = new_filter.filter(|value| !value.is_empty());
+                                target_form_state_3.dispatch(ConfigTargetFormAction::Filter(filter));
                             })} />
                        }
                 })}
@@ -453,7 +466,14 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                         { config_field_bool!(target_form_state.form, translate.t(LABEL_USE_MEMORY_CACHE), use_memory_cache) }
                     </div>
                     { config_field!(target_form_state.form, translate.t(LABEL_NAME), name) }
-                    { config_field_custom!(translate.t(LABEL_FILTER), target_form_state.form.filter.clone()) }
+                    { config_field_custom!(
+                        translate.t(LABEL_FILTER),
+                        target_form_state.form.filter.processing.clone().unwrap_or_default()
+                    ) }
+                    { config_field_custom!(
+                        translate.t(LABEL_PERSIST_FILTER),
+                        target_form_state.form.filter.persist.clone().unwrap_or_default()
+                    ) }
                     { config_field_custom!(
                         translate.t(LABEL_PROCESSING_ORDER),
                         target_form_state.form.processing_order.to_string()
@@ -562,10 +582,10 @@ mod tests {
     }
 
     #[test]
-    fn required_epg_action_updates_target_option() {
-        let state = default_options_state().reduce(ConfigTargetOptionsFormAction::RequiredEpg(true));
+    fn clear_invalid_epg_ids_action_updates_target_option() {
+        let state = default_options_state().reduce(ConfigTargetOptionsFormAction::ClearInvalidEpgIds(true));
 
-        assert!(state.form.required_epg);
+        assert!(state.form.clear_invalid_epg_ids);
         assert!(state.modified);
     }
 

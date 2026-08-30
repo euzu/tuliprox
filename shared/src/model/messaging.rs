@@ -1,26 +1,35 @@
-use crate::{concat_string, error::TuliproxError};
-use std::{fmt, str::FromStr};
+use crate::concat_string;
 
-#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    PartialEq,
+    Eq,
+    Hash,
+    strum_macros::Display,
+    strum_macros::EnumString,
+    strum_macros::IntoStaticStr,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(ascii_case_insensitive)]
 pub enum MsgKind {
-    #[serde(rename = "info")]
     Info,
-    #[serde(rename = "stats")]
     Stats,
-    #[serde(rename = "error")]
     Error,
-    #[serde(rename = "watch")]
     Watch,
-    #[serde(rename = "disk_alert")]
+    #[strum(serialize = "DiskAlert", serialize = "disk_alert", serialize = "diskalert")]
     DiskAlert,
     /// A recording started.
-    #[serde(rename = "recording_started")]
+    #[strum(serialize = "RecordingStarted", serialize = "recording_started", serialize = "recordingstarted")]
     RecordingStarted,
     /// A recording completed.
-    #[serde(rename = "recording_completed")]
+    #[strum(serialize = "RecordingCompleted", serialize = "recording_completed", serialize = "recordingcompleted")]
     RecordingCompleted,
     /// A recording failed.
-    #[serde(rename = "recording_failed")]
+    #[strum(serialize = "RecordingFailed", serialize = "recording_failed", serialize = "recordingfailed")]
     RecordingFailed,
 }
 impl MsgKind {
@@ -28,7 +37,7 @@ impl MsgKind {
     /// annotation on the variant and is used for config keys, template
     /// filenames, and any other text format that needs a stable identifier
     /// independent of the Rust variant name.
-    pub fn wire_name(&self) -> &'static str {
+    pub const fn wire_name(&self) -> &'static str {
         match self {
             MsgKind::Info => "info",
             MsgKind::Stats => "stats",
@@ -46,50 +55,6 @@ impl MsgKind {
     /// `true` for the recording lifecycle kinds.
     pub fn is_recording_lifecycle(&self) -> bool {
         matches!(self, MsgKind::RecordingStarted | MsgKind::RecordingCompleted | MsgKind::RecordingFailed)
-    }
-}
-
-impl fmt::Display for MsgKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            MsgKind::Info => "Info",
-            MsgKind::Stats => "Stats",
-            MsgKind::Error => "Error",
-            MsgKind::Watch => "Watch",
-            MsgKind::DiskAlert => "DiskAlert",
-            MsgKind::RecordingStarted => "RecordingStarted",
-            MsgKind::RecordingCompleted => "RecordingCompleted",
-            MsgKind::RecordingFailed => "RecordingFailed",
-        };
-        write!(f, "{s}")
-    }
-}
-
-impl FromStr for MsgKind {
-    type Err = TuliproxError;
-
-    fn from_str(s: &str) -> Result<Self, TuliproxError> {
-        // Accepts both the snake_case wire name and the CamelCase variant
-        // name so values produced by `Display`/`to_string` round-trip.
-        if s.eq_ignore_ascii_case("info") {
-            Ok(Self::Info)
-        } else if s.eq_ignore_ascii_case("stats") {
-            Ok(Self::Stats)
-        } else if s.eq_ignore_ascii_case("error") {
-            Ok(Self::Error)
-        } else if s.eq_ignore_ascii_case("watch") {
-            Ok(Self::Watch)
-        } else if s.eq_ignore_ascii_case("disk_alert") || s.eq_ignore_ascii_case("diskalert") {
-            Ok(Self::DiskAlert)
-        } else if s.eq_ignore_ascii_case("recording_started") || s.eq_ignore_ascii_case("recordingstarted") {
-            Ok(Self::RecordingStarted)
-        } else if s.eq_ignore_ascii_case("recording_completed") || s.eq_ignore_ascii_case("recordingcompleted") {
-            Ok(Self::RecordingCompleted)
-        } else if s.eq_ignore_ascii_case("recording_failed") || s.eq_ignore_ascii_case("recordingfailed") {
-            Ok(Self::RecordingFailed)
-        } else {
-            Err(TuliproxError::Config(format!("Unknown MsgKind: {s}")))
-        }
     }
 }
 

@@ -23,19 +23,13 @@ use gloo_timers::callback::Interval;
 pub use helpers::get_stream_info_config;
 use shared::{
     defaults::default_kick_secs,
-    error::TuliproxError,
     model::{
         PlaylistItemType, PlaylistRequest, PlaylistUrlResolveRequest, ProtocolMessage, StreamInfo, StreamInfoConfigDto,
         UserCommand, VirtualId,
     },
 };
-use std::{collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
+use std::{collections::HashMap, rc::Rc, str::FromStr};
 use yew::{platform::spawn_local, prelude::*};
-
-const KICK: &str = "kick";
-const COPY_LINK_TULIPROX_VIRTUAL_ID: &str = "copy_link_tuliprox_virtual_id";
-const COPY_LINK_TULIPROX_WEBPLAYER_URL: &str = "copy_link_tuliprox_webplayer_url";
-const COPY_LINK_PROVIDER_URL: &str = "copy_link_provider_url";
 
 fn stream_display_key(stream: &StreamInfo) -> String {
     // Prefer a stable session identity so archive HLS segment addr/uid churn does not remount the row.
@@ -421,39 +415,11 @@ mod tests {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, strum_macros::Display, strum_macros::EnumString)]
+#[strum(serialize_all = "snake_case")]
 enum StreamDisplayAction {
     Kick,
     CopyLinkTuliproxVirtualId,
     CopyLinkTuliproxWebPlayerUrl,
     CopyLinkProviderUrl,
-}
-
-impl Display for StreamDisplayAction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                Self::Kick => KICK,
-                Self::CopyLinkTuliproxVirtualId => COPY_LINK_TULIPROX_VIRTUAL_ID,
-                Self::CopyLinkTuliproxWebPlayerUrl => COPY_LINK_TULIPROX_WEBPLAYER_URL,
-                Self::CopyLinkProviderUrl => COPY_LINK_PROVIDER_URL,
-            }
-        )
-    }
-}
-
-impl FromStr for StreamDisplayAction {
-    type Err = TuliproxError;
-
-    fn from_str(s: &str) -> Result<Self, TuliproxError> {
-        match s {
-            KICK => Ok(Self::Kick),
-            COPY_LINK_TULIPROX_VIRTUAL_ID => Ok(Self::CopyLinkTuliproxVirtualId),
-            COPY_LINK_TULIPROX_WEBPLAYER_URL => Ok(Self::CopyLinkTuliproxWebPlayerUrl),
-            COPY_LINK_PROVIDER_URL => Ok(Self::CopyLinkProviderUrl),
-            _ => Err(TuliproxError::Config(format!("Unknown Stream Action: {s}"))),
-        }
-    }
 }

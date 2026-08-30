@@ -20,10 +20,9 @@ use crate::{
 };
 use shared::{
     concat_string,
-    error::TuliproxError,
     model::{ApiProxyConfigDto, ApiProxyServerInfoDto, ConfigApiDto, SortOrder},
 };
-use std::{fmt::Display, rc::Rc, str::FromStr};
+use std::{rc::Rc, str::FromStr};
 use yew::prelude::*;
 
 const LABEL_NAME: &str = "LABEL.NAME";
@@ -43,37 +42,10 @@ const MSG_NON_UNIQUE_SERVER_NAME: &str = "MESSAGES.SAVE.API_PROXY_CONFIG.NON_UNI
 
 const SERVER_HEADERS: [&str; 8] = ["EMPTY", "NAME", "PROTOCOL", "HOST", "PORT", "TIMEZONE", "MESSAGE", "PATH"];
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, strum_macros::Display, strum_macros::EnumString)]
 enum ServerTableAction {
     Delete,
     Edit,
-}
-
-impl Display for ServerTableAction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                Self::Delete => "Delete",
-                Self::Edit => "Edit",
-            }
-        )
-    }
-}
-
-impl FromStr for ServerTableAction {
-    type Err = TuliproxError;
-
-    fn from_str(s: &str) -> Result<Self, TuliproxError> {
-        if s.eq("Delete") {
-            Ok(Self::Delete)
-        } else if s.eq("Edit") {
-            Ok(Self::Edit)
-        } else {
-            Err(TuliproxError::Config(format!("Unknown Server Action: {s}")))
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

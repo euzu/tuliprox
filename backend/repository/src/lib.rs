@@ -1,3 +1,4 @@
+mod error_macros;
 mod storage;
 mod target_id_mapping;
 // A B+Tree-backed IPv4 lookup and a CLI dumper for the repository's databases.
