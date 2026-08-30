@@ -2648,7 +2648,7 @@ async fn sync_panel_api_for_input_on_boot(
         );
     }
 
-    // Plan and execute alias refresh after the root operation (avoids over-provisioning).
+    // Refresh aliases after the root operation to avoid over-provisioning.
     let now = effective_now;
     let offset_deadline = now.saturating_add(offset_secs);
     let root_valid = root_counts_towards_pool_at(&accounts, &input.name, now);
