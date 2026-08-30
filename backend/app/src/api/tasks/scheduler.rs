@@ -419,7 +419,6 @@ mod tests {
         //    NOT: ProcessTargets { enabled: true, inputs: [], targets: [100] }
         //         (which would have been produced by the old code filtering inputs against forced_targets.inputs)
         //
-        // Full integration test requires mock AppConfig with populated sources/targets.
-        // See: docs/superpowers/plans/2026-03-24-playlist-update-silent-failures.md Task 6
+        // A full integration test requires an AppConfig populated with sources and targets.
     }
 }

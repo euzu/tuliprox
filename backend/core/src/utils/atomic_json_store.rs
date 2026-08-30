@@ -23,24 +23,16 @@ pub enum AtomicWriteStage {
 }
 
 /// Errors that wrap a caller-supplied [`std::io::Error`] with stage context.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("atomic write failed at {stage:?}: {source}")]
 pub struct AtomicWriteError {
     pub stage: AtomicWriteStage,
+    #[source]
     pub source: std::io::Error,
 }
 
 impl AtomicWriteError {
     pub fn new(stage: AtomicWriteStage, source: std::io::Error) -> Self { Self { stage, source } }
-}
-
-impl std::fmt::Display for AtomicWriteError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "atomic write failed at {:?}: {}", self.stage, self.source)
-    }
-}
-
-impl std::error::Error for AtomicWriteError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(&self.source) }
 }
 
 impl From<AtomicWriteError> for std::io::Error {

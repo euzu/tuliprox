@@ -26,43 +26,34 @@ use std::path::{Path, PathBuf};
 use tuliprox_core::utils::{no_follow_existing, safe_unlink};
 
 /// Errors that can occur during the three phases.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum DeletionError {
     /// The UUID did not match any task in the queue.
+    #[error("recording not found")]
     UnknownTask,
     /// The matched task is not a recording.
+    #[error("task is not a recording")]
     NotARecording,
     /// The matched task is not in a terminal state, so deletion cannot
     /// begin.
+    #[error("recording is not in a terminal state")]
     NotTerminal,
     /// The caller is not permitted to delete this recording. Reported
     /// from inside the mutation boundary so authorization and the state
     /// transition observe the same task.
+    #[error("recording deletion forbidden")]
     Forbidden,
     /// Marking the recording as `Deleting` failed.
-    BeginFailed(QueueMutationError),
+    #[error("begin deletion failed: {0}")]
+    BeginFailed(#[source] QueueMutationError),
     /// File deletion failed in a way that is not safe to
     /// ignore.
-    DeleteFailed(std::io::Error),
+    #[error("physical delete failed: {0}")]
+    DeleteFailed(#[source] std::io::Error),
     /// Removing the task from the queue failed.
-    FinalizeFailed(QueueMutationError),
+    #[error("finalize deletion failed: {0}")]
+    FinalizeFailed(#[source] QueueMutationError),
 }
-
-impl std::fmt::Display for DeletionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::UnknownTask => f.write_str("recording not found"),
-            Self::NotARecording => f.write_str("task is not a recording"),
-            Self::NotTerminal => f.write_str("recording is not in a terminal state"),
-            Self::Forbidden => f.write_str("recording deletion forbidden"),
-            Self::BeginFailed(err) => write!(f, "begin deletion failed: {err}"),
-            Self::DeleteFailed(err) => write!(f, "physical delete failed: {err}"),
-            Self::FinalizeFailed(err) => write!(f, "finalize deletion failed: {err}"),
-        }
-    }
-}
-
-impl std::error::Error for DeletionError {}
 
 /// Locate a recording task in the candidate by uuid. Returns
 /// `(bucket, index)` where `bucket` is one of `"queue"`, `"scheduled"`,

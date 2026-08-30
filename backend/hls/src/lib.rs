@@ -12,39 +12,9 @@
 //! HLS shared-session cache: origin fetcher, segment/map/transient/manifest stores,
 //! access-lease protocol, GC, observability, and origin-request header policy.
 //!
-//! # Subsystem map (29 flat files → 7 logical groups)
-//!
-//! The flat layout below predates the cache state machine's growth; many files
-//! span concerns (e.g. `paths.rs`/`deadline.rs`/`ids.rs` are pure infra).
-//! The natural cohesion boundaries are:
-//!
-//! | Group        | Files (current name → natural home)                                                |
-//! |--------------|------------------------------------------------------------------------------------|
-//! | `session`    | `session`, `session_store`, `lifecycle`, `ids` (session-token helpers)             |
-//! | `segment`    | `segment_fetcher`, `segment_repair`, `segment_watchdog`                            |
-//! | `map`        | `map`, `map_fetcher`                                                               |
-//! | `manifest`   | `manifest_commit`, `manifest_fetch`, `transient`, `transient_fetcher`              |
-//! | `lease`      | `lease`                                                                            |
-//! | `gc`         | `gc`                                                                               |
-//! | `infra`      | `ids` (token types), `deadline`, `paths`, `headers` (now via `proxy::header_policy`), `backpressure`, `observability`, `timeline`, `qos`, `cache`, `manager`, `refresh`, `renderer`, `response`, `prefetch`, `origin`, `playback`, `resource_fetch` |
-//!
-//! `proxy/header_policy` already exists as a cross-proxy module (see
-//! `api::model::proxy::header_policy::HopByHopHeader`); `headers.rs` is now a
-//! thin delegator. The remaining 28 files are intentionally left in place
-//! because the cost of moving them (imports, mod.rs churn, public-API re-exports)
-//! outweighs the discoverability gain at this commit. Each subsystem
-//! migration is a self-contained follow-up PR.
-//!
-//! Migration order (lowest risk first):
-//!   1. `infra` (only `proxy::header_policy` already done; rest stay flat)
-//!   2. `lease`, `gc` (each one self-contained today)
-//!   3. `map` (one fetcher, one store)
-//!   4. `manifest` + `segment` (share transient types; do together)
-//!   5. `session` last (largest blast radius; touches lifecycle, store, ids)
-//!
-//! Until the move lands, treat the table above as the canonical "where do I
-//! put this?" map. New files should land in the natural group, not the flat
-//! layout.
+//! The implementation is split by runtime responsibility: session lifecycle,
+//! segment and map fetching, manifest refresh and acceptance, leases, cache
+//! collection, playback responses, and observability.
 
 // The `test-support` surface is compiled for *other* crates' tests. From inside
 // this crate nothing calls it, so `dead_code` fires on every helper; the lint is

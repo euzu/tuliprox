@@ -66,3 +66,9 @@ backend/app/Cargo.lock
 # Scratch directory some backend tests create relative to the crate root.
 # Test output must never become tracked source.
 /backend/app/tmp/
+
+# Local secret environment files
+.env
+.env.*
+!.env.example
+

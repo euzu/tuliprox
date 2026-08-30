@@ -146,28 +146,34 @@ pub fn is_api_user(token_data: Option<TokenData<Claims>>) -> bool { has_role(tok
 /// "token-refresh-required" response lets the frontend sign out
 /// without guessing. The HTTP layer returns 401 with an
 /// `X-Token-Refresh: required` header for refresh-required cases.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum AuthError {
     /// Token signature/issuer/exp invalid, malformed, or otherwise
     /// unverifiable. The frontend should sign the user out.
+    #[error("token is invalid or expired")]
     InvalidToken,
     /// Token signature is valid but it carries an old or absent
     /// `permission_schema_version`. The frontend must refresh
     /// credentials to receive a token at the current schema.
+    #[error("token was issued for an older permission schema; refresh required")]
     StaleSchema,
     /// Token signature is valid but it lacks a `subject_id`. The
     /// identity-registry-bound principal cannot be resolved.
+    #[error("token is missing a subject_id; refresh required")]
     MissingSubject,
     /// Token signature is valid but it was minted against a password that has
     /// since changed - or it carries no password version at all. Either way
     /// the principal must authenticate again; a refresh cannot help, because
     /// the refresh endpoint applies the same check.
+    #[error("token was issued for a different password; sign in again")]
     PasswordChanged,
     /// Token signature is valid but it was issued before a revocation that
     /// covers it - the principal was signed out, or every session was.
+    #[error("token has been revoked; sign in again")]
     Revoked,
     /// Token signature is valid but the principal has the wrong
     /// role/permission for the requested endpoint.
+    #[error("principal does not have the required role")]
     Forbidden,
 }
 
@@ -176,19 +182,6 @@ impl AuthError {
     /// retrying the request. Stale-schema and missing-subject both
     /// qualify; a re-auth round-trip is required.
     pub fn is_token_refresh_required(self) -> bool { matches!(self, Self::StaleSchema | Self::MissingSubject) }
-}
-
-impl std::fmt::Display for AuthError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidToken => f.write_str("token is invalid or expired"),
-            Self::StaleSchema => f.write_str("token was issued for an older permission schema; refresh required"),
-            Self::MissingSubject => f.write_str("token is missing a subject_id; refresh required"),
-            Self::PasswordChanged => f.write_str("token was issued for a different password; sign in again"),
-            Self::Revoked => f.write_str("token has been revoked; sign in again"),
-            Self::Forbidden => f.write_str("principal does not have the required role"),
-        }
-    }
 }
 
 /// Validate a verified token's `permission_schema_version` and

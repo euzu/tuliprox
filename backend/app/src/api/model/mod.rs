@@ -2,6 +2,7 @@ mod app_state;
 mod app_state_view;
 mod hls_provisioning;
 mod proxy;
+mod stalker_resolve_coordinator;
 mod streams;
 
 #[cfg(test)]
@@ -14,8 +15,8 @@ pub(in crate::api) use self::hls_provisioning::{
     parse_hls_panel_provisioning_segment_route_name, start_hls_panel_provisioning_once,
     try_hls_panel_provisioning_manifest_response, HlsPanelProvisioningRedirectPaths, HlsProvisioningStatus,
 };
-pub(crate) use self::streams::*;
 pub use self::{app_state::*, app_state_view::*, hls_provisioning::HlsProvisioningState, proxy::*};
+pub(crate) use self::{stalker_resolve_coordinator::StalkerResolveCoordinator, streams::*};
 // Provider value types moved to `model`; re-exported so `api` keeps its names.
 pub use crate::model::provider::*;
 // Update semaphores moved to `model`; re-exported so `api` keeps its names.

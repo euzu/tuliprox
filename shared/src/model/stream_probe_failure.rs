@@ -1,10 +1,7 @@
 //! A stream probe that did not come back with metadata.
 //!
-//! `ffprobe` outcomes were written to the item store and logged at `warn`,
-//! and that was the whole audience: an operator learned that a provider had
-//! gone dark by noticing it themselves. This is the event that closes that
-//! gap, and it is the one the plugin plan wants for "alert me when a stream
-//! dies" — see `plugin-system-plan.md` §7.
+//! Failed `ffprobe` outcomes are persisted and published so notification
+//! subscribers can alert operators when a provider stream becomes unavailable.
 //!
 //! # Why there is no success variant
 //!

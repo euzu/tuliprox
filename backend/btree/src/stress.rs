@@ -57,9 +57,9 @@ fn stress_test_bplustree() {
     writeln!(log_file, "Insert benchmark runs: {insert_runs}").unwrap();
 
     // ----------------------------------------------------------------
-    // Phase 1: Batch Insert (Sequential Keys)
+    // Step 1: Batch Insert (Sequential Keys)
     // ----------------------------------------------------------------
-    writeln!(log_file, "\n[Phase 1] Batch Insert (Sequential, Multi-Run)...").unwrap();
+    writeln!(log_file, "\n[Step 1] Batch Insert (Sequential, Multi-Run)...").unwrap();
     let start_gen = Instant::now();
 
     let mut value_pool = Vec::with_capacity(value_pool_size);
@@ -104,9 +104,9 @@ fn stress_test_bplustree() {
     let query_subset_mem = &query_keys[0..query_count];
 
     // ----------------------------------------------------------------
-    // Phase 1b: Memory-Only Random Query (Before storing)
+    // Step 1b: Memory-Only Random Query (Before storing)
     // ----------------------------------------------------------------
-    writeln!(log_file, "\n[Phase 1b] Memory-Only Random Query ({query_count} items)...").unwrap();
+    writeln!(log_file, "\n[Step 1b] Memory-Only Random Query ({query_count} items)...").unwrap();
     let start = Instant::now();
     for k in query_subset_mem {
         let _ = tree.query(k);
@@ -116,9 +116,9 @@ fn stress_test_bplustree() {
     writeln!(log_file, "Throughput: {:.0} ops/sec", query_count as f64 / duration.as_secs_f64()).unwrap();
 
     // ----------------------------------------------------------------
-    // Phase 1c: Store to disk
+    // Step 1c: Store to disk
     // ----------------------------------------------------------------
-    writeln!(log_file, "\n[Phase 1c] Store to disk...").unwrap();
+    writeln!(log_file, "\n[Step 1c] Store to disk...").unwrap();
     let start = Instant::now();
     tree.store(&filepath).unwrap();
     drop(tree);
@@ -128,9 +128,9 @@ fn stress_test_bplustree() {
     writeln!(log_file, "File Size: {:.2} MB", size_phase1 as f64 / 1024.0 / 1024.0).unwrap();
 
     // ----------------------------------------------------------------
-    // Phase 2: Random Query (Disk-based)
+    // Step 2: Random Query (Disk-based)
     // ----------------------------------------------------------------
-    writeln!(log_file, "\n[Phase 2] Random Query Disk-based ({query_count} items)...").unwrap();
+    writeln!(log_file, "\n[Step 2] Random Query Disk-based ({query_count} items)...").unwrap();
     let mut query = BPlusTreeQuery::<u32, String>::try_new(&filepath).unwrap();
     let start = Instant::now();
     for k in query_subset_mem {
@@ -142,9 +142,9 @@ fn stress_test_bplustree() {
     drop(query);
 
     // ----------------------------------------------------------------
-    // Phase 3: Batch Update (In-Place Packed)
+    // Step 3: Batch Update (In-Place Packed)
     // ----------------------------------------------------------------
-    writeln!(log_file, "\n[Phase 3] Batch Update (In-Place Packed)...").unwrap();
+    writeln!(log_file, "\n[Step 3] Batch Update (In-Place Packed)...").unwrap();
     let update_count = 5000;
     let update_subset = &query_keys[0..update_count];
     let updates: Vec<(u32, String)> = update_subset.iter().map(|&k| (k, random_string(small_val_len))).collect();
@@ -159,9 +159,9 @@ fn stress_test_bplustree() {
     writeln!(log_file, "File Size: {:.2} MB", size_phase3 as f64 / 1024.0 / 1024.0).unwrap();
 
     // ----------------------------------------------------------------
-    // Phase 4: Batch Update (Promoting Packed -> Single)
+    // Step 4: Batch Update (Promoting Packed -> Single)
     // ----------------------------------------------------------------
-    writeln!(log_file, "\n[Phase 4] Batch Update (Promotion to Single)...").unwrap();
+    writeln!(log_file, "\n[Step 4] Batch Update (Promotion to Single)...").unwrap();
     let updates_prom: Vec<(u32, String)> = update_subset.iter().map(|&k| (k, random_string(large_val_len))).collect();
     let update_refs_prom: Vec<(&u32, &String)> = updates_prom.iter().map(|(k, v)| (k, v)).collect();
     let start = Instant::now();
@@ -173,9 +173,9 @@ fn stress_test_bplustree() {
     writeln!(log_file, "File Size: {:.2} MB", size_phase4 as f64 / 1024.0 / 1024.0).unwrap();
 
     // ----------------------------------------------------------------
-    // Phase 5: Batch Delete
+    // Step 5: Batch Delete
     // ----------------------------------------------------------------
-    writeln!(log_file, "\n[Phase 5] Batch Delete...").unwrap();
+    writeln!(log_file, "\n[Step 5] Batch Delete...").unwrap();
     let delete_count = 100_000usize;
     let delete_start_idx = update_count;
     let delete_end_idx = delete_start_idx + delete_count;
@@ -200,9 +200,9 @@ fn stress_test_bplustree() {
     writeln!(log_file, "File Size: {:.2} MB", size_phase5 as f64 / 1024.0 / 1024.0).unwrap();
 
     // ----------------------------------------------------------------
-    // Phase 5b: Reinsert Deleted Keys
+    // Step 5b: Reinsert Deleted Keys
     // ----------------------------------------------------------------
-    writeln!(log_file, "\n[Phase 5b] Reinsert Deleted Keys...").unwrap();
+    writeln!(log_file, "\n[Step 5b] Reinsert Deleted Keys...").unwrap();
     let reinserts: Vec<(u32, String)> = delete_subset.iter().map(|&k| (k, random_string(small_val_len))).collect();
     let reinsert_refs: Vec<(&u32, &String)> = reinserts.iter().map(|(k, v)| (k, v)).collect();
     let start = Instant::now();
@@ -215,9 +215,9 @@ fn stress_test_bplustree() {
     drop(tree_updater);
 
     // ----------------------------------------------------------------
-    // Phase 6: Compaction
+    // Step 6: Compaction
     // ----------------------------------------------------------------
-    writeln!(log_file, "\n[Phase 6] Compaction...").unwrap();
+    writeln!(log_file, "\n[Step 6] Compaction...").unwrap();
     let mut tree_updater = BPlusTreeUpdate::<u32, String>::try_new(&filepath).unwrap();
     let start = Instant::now();
     tree_updater.compact().unwrap();
@@ -234,9 +234,9 @@ fn stress_test_bplustree() {
     drop(tree_updater);
 
     // ----------------------------------------------------------------
-    // Phase 7: Full Tree Load and In-Memory Query
+    // Step 7: Full Tree Load and In-Memory Query
     // ----------------------------------------------------------------
-    writeln!(log_file, "\n[Phase 7] Full Tree Load (Memory-Only Read)...").unwrap();
+    writeln!(log_file, "\n[Step 7] Full Tree Load (Memory-Only Read)...").unwrap();
     let start = Instant::now();
     let tree_mem = BPlusTree::<u32, String>::load(&filepath).unwrap();
     let load_duration = start.elapsed();
@@ -252,9 +252,9 @@ fn stress_test_bplustree() {
     drop(tree_mem);
 
     // ----------------------------------------------------------------
-    // Phase 8: Concurrent Readers + Writers (Disk-based)
+    // Step 8: Concurrent Readers + Writers (Disk-based)
     // ----------------------------------------------------------------
-    writeln!(log_file, "\n[Phase 8] Concurrent Readers + Writers (Disk-based)...").unwrap();
+    writeln!(log_file, "\n[Step 8] Concurrent Readers + Writers (Disk-based)...").unwrap();
     let reader_threads = 8usize;
     let writer_threads = 4usize;
     let reader_ops_per_thread = 40_000u64;
@@ -397,9 +397,9 @@ fn stress_test_bplustree() {
     assert_eq!(total_reader_misses, 0, "all reader queries should resolve during concurrent load");
 
     // ----------------------------------------------------------------
-    // Phase 8b: Post-Concurrency Verification
+    // Step 8b: Post-Concurrency Verification
     // ----------------------------------------------------------------
-    writeln!(log_file, "\n[Phase 8b] Post-Concurrency Verification...").unwrap();
+    writeln!(log_file, "\n[Step 8b] Post-Concurrency Verification...").unwrap();
     let mut verify_query = BPlusTreeQuery::<u32, String>::try_new(&filepath).unwrap();
     let verification_samples = 20_000u64;
     let mut verification_misses = 0u64;
@@ -432,9 +432,9 @@ fn stress_test_bplustree() {
     drop(verify_query);
 
     // ----------------------------------------------------------------
-    // Phase 9: Iterator + query_le Traversal
+    // Step 9: Iterator + query_le Traversal
     // ----------------------------------------------------------------
-    writeln!(log_file, "\n[Phase 9] Iterator + query_le Traversal...").unwrap();
+    writeln!(log_file, "\n[Step 9] Iterator + query_le Traversal...").unwrap();
     let mut iter_query = BPlusTreeQuery::<u32, String>::try_new(&filepath).unwrap();
     let iterator_target = 100_000usize;
     let iter_start = Instant::now();
@@ -478,9 +478,9 @@ fn stress_test_bplustree() {
     drop(iter_query);
 
     // ----------------------------------------------------------------
-    // Phase 10: Final Delete + Compact Verification
+    // Step 10: Final Delete + Compact Verification
     // ----------------------------------------------------------------
-    writeln!(log_file, "\n[Phase 10] Final Delete + Compact Verification...").unwrap();
+    writeln!(log_file, "\n[Step 10] Final Delete + Compact Verification...").unwrap();
     let final_delete_count = 100_000usize;
     let final_delete_start = delete_end_idx;
     let final_delete_end = final_delete_start + final_delete_count;

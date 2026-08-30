@@ -17,6 +17,26 @@
 //! `TuliproxError` is expected to be in scope at every call site (this crate
 //! always uses it via `shared::error::TuliproxError`).
 
+#[inline]
+pub(crate) fn format_repo_playlist_err(
+    action: &str,
+    label: &str,
+    path: &dyn std::fmt::Display,
+    err: &dyn std::fmt::Display,
+) -> String {
+    format!("failed to {action} {label} playlist: {path} - {err}")
+}
+
+#[inline]
+pub(crate) fn format_repo_db_err(
+    action: &str,
+    label: &str,
+    path: &dyn std::fmt::Display,
+    err: &dyn std::fmt::Display,
+) -> String {
+    format!("failed to {action} {label} db {path}: {err}")
+}
+
 /// Wrap an `io::Error` (or any `Display` value) into the canonical
 /// "failed to write {label} playlist: {path} - {err}" message and produce the
 /// matching `TuliproxError::Repository<Variant>`.
@@ -33,7 +53,12 @@
 /// ```
 macro_rules! cant_write_result {
     ($variant:ident, $label:literal, $path:expr, $err:expr $(,)?) => {{
-        TuliproxError::$variant(format!("failed to write {} playlist: {} - {}", $label, $path.display(), $err))
+        TuliproxError::$variant($crate::error_macros::format_repo_playlist_err(
+            "write",
+            $label,
+            &($path).display(),
+            &$err,
+        ))
     }};
 }
 
@@ -61,7 +86,12 @@ macro_rules! await_playlist_write {
 /// matching `TuliproxError::Repository<Variant>`.
 macro_rules! cant_read_result {
     ($variant:ident, $label:literal, $path:expr, $err:expr $(,)?) => {{
-        TuliproxError::$variant(format!("failed to read {} playlist: {} - {}", $label, $path.display(), $err))
+        TuliproxError::$variant($crate::error_macros::format_repo_playlist_err(
+            "read",
+            $label,
+            &($path).display(),
+            &$err,
+        ))
     }};
 }
 
@@ -70,7 +100,7 @@ macro_rules! cant_read_result {
 /// matching `TuliproxError::Repository<Variant>`.
 macro_rules! cant_open_result {
     ($variant:ident, $label:literal, $path:expr, $err:expr $(,)?) => {{
-        TuliproxError::$variant(format!("failed to open {} db {}: {}", $label, $path.display(), $err))
+        TuliproxError::$variant($crate::error_macros::format_repo_db_err("open", $label, &($path).display(), &$err))
     }};
 }
 
@@ -79,7 +109,7 @@ macro_rules! cant_open_result {
 /// matching `TuliproxError::Repository<Variant>`.
 macro_rules! cant_query_result {
     ($variant:ident, $label:literal, $path:expr, $err:expr $(,)?) => {{
-        TuliproxError::$variant(format!("failed to query {} db {}: {}", $label, $path.display(), $err))
+        TuliproxError::$variant($crate::error_macros::format_repo_db_err("query", $label, &($path).display(), &$err))
     }};
 }
 

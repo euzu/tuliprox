@@ -4,7 +4,8 @@ use crate::{
         model::{
             load_target_into_memory_cache, recording_rule_scheduler::spawn_recording_rule_scheduler,
             ActiveProviderManager, ActiveUserManager, ConnectionManager, DownloadQueue, EventManager,
-            HlsProvisioningState, PlaylistStorage, PlaylistStorageState, SharedStreamManager, UpdateGuard,
+            HlsProvisioningState, PlaylistStorage, PlaylistStorageState, SharedStreamManager,
+            StalkerResolveCoordinator, UpdateGuard,
         },
         tasks::{exec_config_watch, exec_scheduler},
     },
@@ -33,10 +34,7 @@ use std::{
     sync::{atomic::AtomicI8, Arc},
     time::Duration,
 };
-use tokio::{
-    sync::{mpsc, RwLock},
-    task,
-};
+use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use tuliprox_hls::api::HlsProxyManager;
 use tuliprox_metadata::manager::MetadataUpdateManager;
@@ -362,12 +360,15 @@ pub fn create_cache(config: &Config) -> Option<Arc<RwLock<LRUResourceCache>>> {
             let cache = Arc::new(RwLock::new(res_cache));
             let cache_scanner = Arc::clone(&cache);
             tokio::spawn(async move {
-                let scan_result = {
-                    let mut cache = cache_scanner.write().await;
-                    task::block_in_place(|| cache.scan())
-                };
-                if let Err(err) = scan_result {
-                    error!("Failed to scan cache {err}");
+                let scan_result = tokio::task::spawn_blocking(move || {
+                    let mut cache = cache_scanner.blocking_write();
+                    cache.scan()
+                })
+                .await;
+                match scan_result {
+                    Ok(Err(err)) => error!("Failed to scan cache {err}"),
+                    Err(err) => error!("Failed to join cache scan task: {err}"),
+                    Ok(Ok(())) => {}
                 }
             });
             return Some(cache);
@@ -432,6 +433,7 @@ pub struct AppState {
     pub shared_stream_manager: Arc<SharedStreamManager>,
     pub hls_proxy: Arc<HlsProxyManager>,
     pub hls_provisioning: Arc<HlsProvisioningState>,
+    pub(crate) stalker_resolve_coordinator: Arc<StalkerResolveCoordinator>,
     pub active_users: Arc<ActiveUserManager>,
     pub active_provider: Arc<ActiveProviderManager>,
     pub connection_manager: Arc<ConnectionManager>,
@@ -520,6 +522,7 @@ pub(crate) fn create_test_app_state(config: Config) -> Arc<AppState> {
         shared_stream_manager,
         hls_proxy: Arc::new(HlsProxyManager::new()),
         hls_provisioning: Arc::new(HlsProvisioningState::new()),
+        stalker_resolve_coordinator: Arc::default(),
         active_users,
         active_provider,
         connection_manager,
@@ -799,13 +802,7 @@ fn schedules_changed(a: &[ScheduleConfig], b: &[ScheduleConfig]) -> bool {
 }
 
 fn hdhomerun_changed(a: &HdHomeRunConfig, b: &HdHomeRunConfig) -> bool {
-    if a.flags != b.flags {
-        return true;
-    }
-    if !small_vecs_equal_unordered(a.devices.as_ref(), b.devices.as_ref()) {
-        return true;
-    }
-    false
+    a.flags != b.flags || !small_vecs_equal_unordered(a.devices.as_ref(), b.devices.as_ref())
 }
 
 fn string_changed(a: &str, b: &str) -> bool { a != b }
@@ -825,6 +822,21 @@ fn providers_changed(a: &[Arc<ConfigProvider>], b: &[Arc<ConfigProvider>]) -> bo
     false
 }
 
+fn stream_history_tuple(cfg: Option<&crate::model::StreamHistoryConfig>) -> Option<(bool, &str, u16, usize)> {
+    cfg.map(|history| {
+        (
+            history.stream_history_enabled,
+            history.stream_history_directory.as_str(),
+            history.stream_history_retention_days,
+            history.stream_history_batch_size,
+        )
+    })
+}
+
+fn qos_tuple(cfg: Option<&crate::model::QosAggregationConfig>) -> Option<(bool, u64, u64)> {
+    cfg.map(|qos| (qos.enabled, qos.interval_secs, qos.compaction_interval_secs))
+}
+
 fn qos_aggregation_changed(old_config: &Config, new_config: &Config) -> bool {
     let old_reverse_proxy = old_config.reverse_proxy.as_ref();
     let new_reverse_proxy = new_config.reverse_proxy.as_ref();
@@ -833,20 +845,6 @@ fn qos_aggregation_changed(old_config: &Config, new_config: &Config) -> bool {
     let new_stream_history = new_reverse_proxy.and_then(|rp| rp.stream_history.as_ref());
     let old_qos = old_reverse_proxy.and_then(|rp| rp.qos_aggregation.as_ref());
     let new_qos = new_reverse_proxy.and_then(|rp| rp.qos_aggregation.as_ref());
-
-    let stream_history_tuple = |cfg: Option<&crate::model::StreamHistoryConfig>| {
-        cfg.map(|history| {
-            (
-                history.stream_history_enabled,
-                history.stream_history_directory.clone(),
-                history.stream_history_retention_days,
-                history.stream_history_batch_size,
-            )
-        })
-    };
-    let qos_tuple = |cfg: Option<&crate::model::QosAggregationConfig>| {
-        cfg.map(|qos| (qos.enabled, qos.interval_secs, qos.compaction_interval_secs))
-    };
 
     stream_history_tuple(old_stream_history) != stream_history_tuple(new_stream_history)
         || qos_tuple(old_qos) != qos_tuple(new_qos)

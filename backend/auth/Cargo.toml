@@ -23,5 +23,6 @@ log.workspace = true
 rand = "0.9.5"
 rust-argon2 = "3.0.0"
 serde_json = { workspace = true, features = ["raw_value", "preserve_order"] }
+thiserror.workspace = true
 rpassword = "7.5.4"
 zeroize.workspace = true

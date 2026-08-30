@@ -50,32 +50,12 @@ enum ProcessAction {
     Unchanged,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 enum LibraryProcessError {
+    #[error("{0}")]
     Resolve(String),
-    Io(io::Error),
-}
-
-impl fmt::Display for LibraryProcessError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Resolve(message) => f.write_str(message),
-            Self::Io(err) => write!(f, "{err}"),
-        }
-    }
-}
-
-impl std::error::Error for LibraryProcessError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Resolve(_) => None,
-            Self::Io(err) => Some(err),
-        }
-    }
-}
-
-impl From<io::Error> for LibraryProcessError {
-    fn from(value: io::Error) -> Self { Self::Io(value) }
+    #[error(transparent)]
+    Io(#[from] io::Error),
 }
 
 // VOD processor that orchestrates scanning, classification, metadata resolution, and storage

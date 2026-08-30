@@ -165,7 +165,6 @@ pub fn TargetTable(props: &TargetTableProps) -> Html {
         Callback::from(move |(name, _): (String, _)| {
             if let Ok(action) = TargetTableAction::from_str(&name) {
                 match action {
-                    TargetTableAction::Edit => {}
                     TargetTableAction::Refresh => {
                         let translate = translate.clone();
                         let services_ctx = services_ctx.clone();
@@ -220,7 +219,6 @@ pub fn TargetTable(props: &TargetTableProps) -> Html {
                   <>
                    <Table::<ConfigTargetDto> definition={definition.clone()} />
                     <PopupMenu is_open={*popup_is_open} anchor_ref={(*popup_anchor_ref).clone()} on_close={handle_popup_close}>
-                        <MenuItem icon="Edit" name={TargetTableAction::Edit.to_string()} label={translate.t("LABEL.EDIT")} onclick={&handle_menu_click}></MenuItem>
                         <MenuItem icon="Refresh" name={TargetTableAction::Refresh.to_string()} label={translate.t("LABEL.REFRESH")} onclick={&handle_menu_click} class="tp__update_action"></MenuItem>
                         <hr/>
                         <MenuItem icon="Delete" name={TargetTableAction::Delete.to_string()} label={translate.t("LABEL.DELETE")} onclick={&handle_menu_click} class="tp__delete_action"></MenuItem>
@@ -238,7 +236,6 @@ pub fn TargetTable(props: &TargetTableProps) -> Html {
 #[derive(Debug, Clone, Eq, PartialEq, strum_macros::Display, strum_macros::EnumString)]
 #[strum(serialize_all = "snake_case")]
 enum TargetTableAction {
-    Edit,
     Refresh,
     Delete,
 }

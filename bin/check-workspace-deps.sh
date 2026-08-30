@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
-# Architecture gate for the modularization plan.
+# Architecture gate for workspace dependencies.
 #
 # Cargo already rejects dependency cycles, so this script does not look for them.
-# What it enforces is the stricter rule the plan asks for: every edge between two
-# workspace packages must be listed here explicitly, with its dependency kind, so
+# It requires every edge between two workspace packages to be listed explicitly
+# with its dependency kind, so
 # that adding one - or promoting a dev-only edge to a build-time one - is a
 # deliberate, reviewed act rather than a side effect of an `use` statement.
 #
@@ -13,8 +13,7 @@
 #   * an edge listed here that no longer exists fails it too, so the list cannot
 #     rot into a record of dependencies the workspace has since dropped.
 #
-# Extend the allowlist below when a phase introduces a new package edge, in the
-# same change that introduces it.
+# Extend the allowlist in the same change that introduces a package edge.
 #
 # Usage:
 #   check-workspace-deps.sh

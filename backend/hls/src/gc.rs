@@ -1596,7 +1596,7 @@ mod tests {
         TransientResourceRef,
     };
     use std::{collections::HashSet, fmt::Write as _, sync::Arc, task::Poll, time::Duration};
-    use tokio::sync::RwLock;
+    use tokio::sync::{Barrier, RwLock};
     use tuliprox_parser::hls::origin_manifest::{
         parse_manifest_semantics, parse_origin_media_manifest, OriginManifestParseOutcome,
     };
@@ -2438,10 +2438,28 @@ mod tests {
                 session.proxy_session_id.clone(),
             )
         };
+        let first_staged = gc
+            .cache
+            .stage_temp_with_deadline(&third, &b"abcdefghij"[..], tokio::time::Instant::now() + Duration::from_mins(1))
+            .await
+            .expect("first object stages");
+        let second_staged = gc
+            .cache
+            .stage_temp_with_deadline(&fourth, &b"klmnopqrst"[..], tokio::time::Instant::now() + Duration::from_mins(1))
+            .await
+            .expect("second object stages");
+        let commit_barrier = Arc::new(Barrier::new(2));
         let first_cache = Arc::clone(&gc.cache);
-        let first = tokio::spawn(async move { first_cache.write_bytes_and_commit(&third, b"abcdefghij").await });
+        let first_barrier = Arc::clone(&commit_barrier);
+        let first = tokio::spawn(async move {
+            first_barrier.wait().await;
+            first_cache.commit_staged(&third, first_staged).await
+        });
         let second_cache = Arc::clone(&gc.cache);
-        let second = tokio::spawn(async move { second_cache.write_bytes_and_commit(&fourth, b"klmnopqrst").await });
+        let second = tokio::spawn(async move {
+            commit_barrier.wait().await;
+            second_cache.commit_staged(&fourth, second_staged).await
+        });
 
         let (first, second) = tokio::join!(first, second);
 

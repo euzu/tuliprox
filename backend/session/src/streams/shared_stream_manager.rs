@@ -681,9 +681,8 @@ pub struct SharedStreamManager {
 /// The four state handles the shared-stream paths need.
 ///
 /// These functions used to take the whole `AppState` and reach into four of its
-/// fields. Naming the server state is what the plan forbids for anything that
-/// might leave `api`, so the slice is explicit and the composition root builds
-/// it.
+/// fields. Keeping this slice explicit avoids coupling the session crate to the
+/// API server state; the composition root supplies the required handles.
 #[derive(Clone, Copy)]
 pub struct SharedStreamCtx<'a> {
     pub app_config: &'a Arc<AppConfig>,

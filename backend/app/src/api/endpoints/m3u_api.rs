@@ -60,9 +60,10 @@ async fn m3u_api(
                 })
             });
 
-            let mut builder = axum::response::Response::builder()
-                .status(axum::http::StatusCode::OK)
-                .header(axum::http::header::CONTENT_TYPE, mime::TEXT_PLAIN_UTF_8.to_string());
+            let mut builder = axum::response::Response::builder().status(axum::http::StatusCode::OK).header(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("text/plain; charset=utf-8"),
+            );
             if content_type == "m3u_plus" {
                 builder =
                     builder.header(axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\"playlist.m3u\"");

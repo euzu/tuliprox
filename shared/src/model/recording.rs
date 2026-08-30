@@ -1,8 +1,7 @@
 //! DVR recording domain types.
 //!
-//! See `docs/superpowers/specs/2026-07-23-extended-dvr-design.md` and the
-//! matching plan for the full design. This module is the source of truth for
-//! `RecordingMetadata`; persistence, runtime, and DTO layers all mirror it.
+//! This module is the source of truth for `RecordingMetadata`; persistence,
+//! runtime, and DTO layers all mirror it.
 
 use super::identity_registry::UserId;
 use std::fmt;

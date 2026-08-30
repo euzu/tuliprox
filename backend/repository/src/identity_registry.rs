@@ -389,29 +389,19 @@ impl IdentityRegistry {
     }
 }
 
-/// Errors that can occur when mutating the registry.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
+    #[error("username must not be empty")]
     EmptyUsername,
     /// The destination username already exists in the registry. The
     /// caller must remove or rename it explicitly before retrying —
     /// overwriting silently would discard the existing user's
     /// persisted recordings.
+    #[error("destination username already exists in the identity registry")]
     UsernameExists,
-    Persist(std::io::Error),
+    #[error("registry persistence failed: {0}")]
+    Persist(#[from] std::io::Error),
 }
-
-impl std::fmt::Display for RegistryError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::EmptyUsername => f.write_str("username must not be empty"),
-            Self::UsernameExists => f.write_str("destination username already exists in the identity registry"),
-            Self::Persist(err) => write!(f, "registry persistence failed: {err}"),
-        }
-    }
-}
-
-impl std::error::Error for RegistryError {}
 
 /// Canonicalize a username for the registry: trim leading/trailing
 /// whitespace. Empty inputs are returned as-is so the caller can
