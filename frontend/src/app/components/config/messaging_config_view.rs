@@ -144,6 +144,10 @@ pub fn MessagingConfigView() -> Html {
             .collect::<Vec<String>>()
     });
 
+    let notify_on_labels = use_memo((notify_on_options.clone(), translate.clone()), |(options, tr)| {
+        options.iter().map(|t| tr.t(&event_label_key(t))).collect::<Vec<String>>()
+    });
+
     let notify_on_options_text = notify_on_options.clone();
 
     {
@@ -349,7 +353,8 @@ pub fn MessagingConfigView() -> Html {
             .map(|t| {
                 let is_selected = msg_state.form.notify_on.contains(t);
                 let class = if is_selected { "tp__text-button primary" } else { "tp__text-button" };
-                html! { <Chip label={t.clone()} class={class}/> }
+                let label = translate.t(&event_label_key(t));
+                html! { <Chip {label} class={class}/> }
             })
             .collect::<Html>();
         html! {
@@ -457,10 +462,11 @@ pub fn MessagingConfigView() -> Html {
         html! {
             <>
             <div class="tp__messaging-config-view__header tp__config-view-page__header">
-                { config_field_child!(translate.t("LABEL.NOTIFY_ON"), "MESSAGING_CONFIG.NOTIFY_ON", {
+                { config_field_child!(translate.t(LABEL_NOTIFY_ON), "MESSAGING_CONFIG.NOTIFY_ON", {
                    let dispatch_handle = msg_state.clone();
                    html! { <RadioButtonGroup
-                        multi_select={true} none_allowed={true}
+                        multi_select={true} none_allowed={true} wrap={true}
+                        labels={Some(notify_on_labels.clone())}
                         on_select={Callback::from(move |selections: Rc<Vec<String>>| {
                             dispatch_handle.dispatch(MessagingConfigFormAction::NotifyOn(
                                 selections.as_ref().clone()));
@@ -525,5 +531,42 @@ pub fn MessagingConfigView() -> Html {
            <div class="tp__config-view-page__title">{translate.t(LABEL_MESSAGING_CONFIG)}</div>
             { if *config_view_ctx.edit_mode { render_edit_mode() } else { render_view_mode() } }
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{event_label_key, event_label_suffix};
+    use shared::model::notification::registry;
+
+    #[test]
+    fn event_label_suffix_formats_dotted_ids_to_upper_snake() {
+        assert_eq!(event_label_suffix("system.info"), "SYSTEM_INFO");
+        assert_eq!(event_label_suffix("recording.completed"), "RECORDING_COMPLETED");
+        assert_eq!(event_label_suffix("provider.account.status_changed"), "PROVIDER_ACCOUNT_STATUS_CHANGED");
+    }
+
+    #[test]
+    fn all_notification_event_keys_exist_in_every_locale() {
+        const LOCALES: [(&str, &str); 3] = [
+            ("en", include_str!("../../../../public/assets/i18n/en.json")),
+            ("ar", include_str!("../../../../public/assets/i18n/ar.json")),
+            ("ru", include_str!("../../../../public/assets/i18n/ru.json")),
+        ];
+
+        for (locale, json) in LOCALES {
+            let parsed = serde_json::from_str::<serde_json::Value>(json);
+            assert!(parsed.is_ok(), "{locale} locale must be valid JSON");
+            let Ok(parsed) = parsed else { continue };
+
+            for descriptor in registry::ALL {
+                let full_key = event_label_key(descriptor.id.as_str());
+                let value = full_key.split('.').try_fold(&parsed, |value, segment| value.get(segment));
+                assert!(
+                    value.and_then(serde_json::Value::as_str).is_some_and(|text| !text.trim().is_empty()),
+                    "{locale} locale is missing non-empty translation key {full_key}"
+                );
+            }
+        }
     }
 }
