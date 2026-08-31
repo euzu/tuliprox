@@ -28,11 +28,22 @@ pub const XML_PREAMBLE: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 // // DOCTYPE via events (DO NOT USE):
 // writer.write_event_async(quick_xml::events::Event::DocType(quick_xml::events::BytesText::new(r#"tv SYSTEM "xmltv.dtd""#)))
 //     .await.map_err(|e| TuliproxError::RepositoryEpg(format!("failed to write doctype: {}", e)))?;
+type EpgRenameMap = HashMap<Arc<str>, Arc<str>>;
+type EpgOrderMap = HashMap<Arc<str>, u64>;
+type EpgMaps = (EpgRenameMap, EpgOrderMap);
+
+/// Keeps the source ordinal as the primary order while traversal order makes equal or synthesized ordinals unique.
+fn epg_order_rank(source_ordinal: u32, traversal_ordinal: u32) -> u64 {
+    let ordinal = if source_ordinal > 0 { source_ordinal } else { traversal_ordinal };
+    (u64::from(ordinal) << u32::BITS) | u64::from(traversal_ordinal)
+}
+
 pub fn epg_write_file<S: std::hash::BuildHasher>(
     target_name: &str,
     epg: &Epg,
     path: &Path,
     rename_map: &HashMap<Arc<str>, Arc<str>, S>,
+    order_map: Option<&HashMap<Arc<str>, u64, S>>,
     epg_output: &EpgOutputOptions,
 ) -> Result<(), TuliproxError> {
     if epg.children.is_empty() {
@@ -57,7 +68,13 @@ pub fn epg_write_file<S: std::hash::BuildHasher>(
         tree.insert(output_id, chan);
     }
 
-    tree.store(path).map_err(|err| {
+    let result = if let Some(order) = order_map {
+        tree.store_with_index(path, |chan| order.get(&chan.id).copied().unwrap_or(u64::MAX))
+    } else {
+        tree.store(path)
+    };
+
+    result.map_err(|err| {
         TuliproxError::RepositoryEpg(format!(
             "Failed to write epg for target {}: {} - {err}",
             target_name,
@@ -69,33 +86,49 @@ pub fn epg_write_file<S: std::hash::BuildHasher>(
     Ok(())
 }
 
-fn build_epg_rename_map(
-    playlist: Option<&[PlaylistGroup]>,
-    output_case: EpgIdOutputCase,
-) -> HashMap<Arc<str>, Arc<str>> {
-    let mut rename_map = HashMap::new();
+fn build_epg_maps(playlist: Option<&[PlaylistGroup]>, output_case: EpgIdOutputCase) -> EpgMaps {
+    let estimated_len = playlist.map_or(0, |groups| groups.iter().map(|g| g.channels.len()).sum());
+    let mut rename_map = HashMap::with_capacity(estimated_len);
+    let mut order_map = HashMap::with_capacity(estimated_len);
+    let mut sequential_ordinal = 0u32;
     if let Some(pl) = playlist {
         for group in pl {
             for channel in &group.channels {
+                sequential_ordinal += 1;
+                let rank = epg_order_rank(channel.header.source_ordinal, sequential_ordinal);
                 if let Some(epg_id) = &channel.header.epg_channel_id {
                     if !epg_id.is_empty() {
                         let output_id = canonicalize_output_epg_id(epg_id, output_case);
                         match output_case {
                             // Preserve the legacy exact-key last-match behavior when the feature is disabled.
                             EpgIdOutputCase::Preserve => {
-                                rename_map.insert(output_id, Arc::clone(&channel.header.name));
+                                rename_map.insert(Arc::clone(&output_id), Arc::clone(&channel.header.name));
                             }
                             // Canonical collisions use playlist traversal order: the first entry wins.
                             EpgIdOutputCase::LowercaseAscii => {
-                                rename_map.entry(output_id).or_insert_with(|| Arc::clone(&channel.header.name));
+                                rename_map
+                                    .entry(Arc::clone(&output_id))
+                                    .or_insert_with(|| Arc::clone(&channel.header.name));
                             }
                         }
+                        order_map
+                            .entry(output_id)
+                            .and_modify(|current: &mut u64| *current = (*current).min(rank))
+                            .or_insert(rank);
                     }
                 }
             }
         }
     }
-    rename_map
+    (rename_map, order_map)
+}
+
+#[cfg(test)]
+fn build_epg_rename_map(
+    playlist: Option<&[PlaylistGroup]>,
+    output_case: EpgIdOutputCase,
+) -> HashMap<Arc<str>, Arc<str>> {
+    build_epg_maps(playlist, output_case).0
 }
 
 pub async fn epg_write_for_target(
@@ -115,7 +148,9 @@ pub async fn epg_write_for_target(
         let epg_output =
             target.options.as_ref().map_or_else(EpgOutputOptions::default, |options| options.epg_output.clone());
         let output_case = EpgIdOutputCase::from_lowercase(epg_output.lowercase_ids);
-        let rename_map = Arc::new(build_epg_rename_map(playlist, output_case));
+        let (rename_map, order_map) = build_epg_maps(playlist, output_case);
+        let rename_map = Arc::new(rename_map);
+        let order_map = Arc::new(order_map);
         let epg_data = Arc::new(epg_data.clone());
         match output {
             TargetOutput::Xtream(_) => match xtream_get_storage_path(cfg, &target.name) {
@@ -125,11 +160,12 @@ pub async fn epg_write_for_target(
                     let target_name = target.name.clone();
                     let target_name_err = target_name.clone();
                     let rename_map = Arc::clone(&rename_map);
+                    let order_map = Arc::clone(&order_map);
                     let epg_data = Arc::clone(&epg_data);
                     let epg_output = epg_output.clone();
                     let epg_path = epg_path.clone();
                     tokio::task::spawn_blocking(move || {
-                        epg_write_file(&target_name, &epg_data, &epg_path, &rename_map, &epg_output)
+                        epg_write_file(&target_name, &epg_data, &epg_path, &rename_map, Some(&order_map), &epg_output)
                     })
                     .await
                     .map_err(|err| {
@@ -149,11 +185,12 @@ pub async fn epg_write_for_target(
                 let target_name = target.name.clone();
                 let target_name_err = target_name.clone();
                 let rename_map = Arc::clone(&rename_map);
+                let order_map = Arc::clone(&order_map);
                 let epg_data = Arc::clone(&epg_data);
                 let epg_output = epg_output.clone();
                 let path = path.clone();
                 tokio::task::spawn_blocking(move || {
-                    epg_write_file(&target_name, &epg_data, &path, &rename_map, &epg_output)
+                    epg_write_file(&target_name, &epg_data, &path, &rename_map, Some(&order_map), &epg_output)
                 })
                 .await
                 .map_err(|err| {
@@ -390,7 +427,7 @@ mod tests {
         let rename_map = build_epg_rename_map(Some(&playlist), EpgIdOutputCase::LowercaseAscii);
         let options = EpgOutputOptions { lowercase_ids: true, ..EpgOutputOptions::default() };
 
-        epg_write_file("target", &mixed_case_epg(), &path, &rename_map, &options)
+        epg_write_file("target", &mixed_case_epg(), &path, &rename_map, None, &options)
             .expect("canonical EPG should be written");
 
         let mut query = BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(&path).expect("EPG DB should open");
@@ -411,7 +448,7 @@ mod tests {
         let playlist = rename_playlist(&[("example.channel", "Mapped Name")]);
         let rename_map = build_epg_rename_map(Some(&playlist), EpgIdOutputCase::Preserve);
 
-        epg_write_file("target", &mixed_case_epg(), &path, &rename_map, &EpgOutputOptions::default())
+        epg_write_file("target", &mixed_case_epg(), &path, &rename_map, None, &EpgOutputOptions::default())
             .expect("case-preserving EPG should be written");
 
         let mut query = BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(&path).expect("EPG DB should open");
@@ -431,7 +468,7 @@ mod tests {
         let playlist = rename_playlist(&[("Example.Channel", "Mapped Name")]);
         let rename_map = build_epg_rename_map(Some(&playlist), EpgIdOutputCase::Preserve);
 
-        epg_write_file("target", &mixed_case_epg(), &path, &rename_map, &EpgOutputOptions::default())
+        epg_write_file("target", &mixed_case_epg(), &path, &rename_map, None, &EpgOutputOptions::default())
             .expect("case-preserving EPG should be written");
 
         let mut query = BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(&path).expect("EPG DB should open");
@@ -467,7 +504,7 @@ mod tests {
             ],
         };
 
-        epg_write_file("target", &epg, &path, &HashMap::new(), &EpgOutputOptions::default())
+        epg_write_file("target", &epg, &path, &HashMap::new(), None, &EpgOutputOptions::default())
             .expect("case-preserving EPG should be written");
 
         let mut query = BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(&path).expect("EPG DB should open");
@@ -480,6 +517,75 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(stored_ids.iter().map(AsRef::as_ref).collect::<Vec<_>>(), vec!["Z.Channel", "a.channel"]);
+    }
+
+    #[test]
+    fn epg_write_file_resolves_ordinal_collisions_and_places_unreferenced_channels_last() {
+        use crate::{get_file_path_for_db_index, open_playlist_reader};
+
+        let tmp = TempDir::new().expect("temp dir created");
+        let path = tmp.path().join("epg.db");
+        let epg = Epg {
+            priority: 0,
+            logo_override: false,
+            attributes: None,
+            children: vec![
+                Arc::new(EpgChannel {
+                    id: "Z.Channel".intern(),
+                    title: Some("Z Channel".intern()),
+                    icon: None,
+                    programmes: vec![EpgProgramme::new(10, 20, "Z.Channel".intern())],
+                }),
+                Arc::new(EpgChannel {
+                    id: "a.channel".intern(),
+                    title: Some("A Channel".intern()),
+                    icon: None,
+                    programmes: vec![EpgProgramme::new(10, 20, "a.channel".intern())],
+                }),
+                Arc::new(EpgChannel {
+                    id: "unreferenced.channel".intern(),
+                    title: Some("Unreferenced Channel".intern()),
+                    icon: None,
+                    programmes: vec![EpgProgramme::new(10, 20, "unreferenced.channel".intern())],
+                }),
+            ],
+        };
+
+        let mut playlist = rename_playlist(&[
+            ("Z.Channel", "Z Channel"),
+            ("a.channel", "A Channel"),
+            ("a.channel", "Duplicate A Channel"),
+        ]);
+        for (channel, ordinal) in playlist[0].channels.iter_mut().zip([0, 1, 3]) {
+            channel.header.source_ordinal = ordinal;
+        }
+        let (rename_map, order_map) = build_epg_maps(Some(&playlist), EpgIdOutputCase::Preserve);
+
+        assert_eq!(order_map.get("Z.Channel"), Some(&epg_order_rank(0, 1)));
+        assert_eq!(order_map.get("a.channel"), Some(&epg_order_rank(1, 2)));
+        assert_ne!(order_map.get("Z.Channel"), order_map.get("a.channel"));
+        assert!(!order_map.contains_key("unreferenced.channel"));
+
+        epg_write_file("target", &epg, &path, &rename_map, Some(&order_map), &EpgOutputOptions::default())
+            .expect("EPG with index should be written");
+
+        let index_path = get_file_path_for_db_index(&path);
+        assert!(index_path.exists(), "epg.db.index sidecar file must exist");
+
+        let reader = open_playlist_reader::<Arc<str>, EpgChannel, u64>(&path, &index_path, None)
+            .expect("open_playlist_reader should open sorted index");
+        let stored_ids = reader
+            .collect::<std::io::Result<Vec<_>>>()
+            .expect("EPG entries should be readable in sorted order")
+            .into_iter()
+            .map(|(_, channel)| channel.id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            stored_ids.iter().map(AsRef::as_ref).collect::<Vec<_>>(),
+            vec!["Z.Channel", "a.channel", "unreferenced.channel"],
+            "Channels should follow playlist order with unreferenced EPG channels last"
+        );
     }
 
     #[test]

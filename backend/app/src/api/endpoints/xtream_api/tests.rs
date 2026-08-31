@@ -194,6 +194,7 @@ async fn xtream_short_epg_returns_imported_ics_programme_for_matching_channel_id
         &Epg { priority: 0, logo_override: false, attributes: None, children: vec![Arc::new(channel)] },
         &epg_path,
         &std::collections::HashMap::<Arc<str>, Arc<str>>::new(),
+        None,
         &shared::model::EpgOutputOptions::default(),
     )
     .expect("write target EPG");
@@ -369,6 +370,7 @@ async fn build_short_epg_app_state(
         &Epg { priority: 0, logo_override: false, attributes: None, children: vec![Arc::new(channel)] },
         &epg_path,
         &std::collections::HashMap::<Arc<str>, Arc<str>>::new(),
+        None,
         &shared::model::EpgOutputOptions::default(),
     )
     .expect("write target EPG");

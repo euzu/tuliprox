@@ -3,23 +3,24 @@ OS := $(shell uname -s)
 ARCH := $(shell uname -m)
 
 # Paths
-CARGO_BIN_DIR := $(HOME)/.cargo/bin
+CARGO_HOME ?= $(HOME)/.cargo
+CARGO_BIN_DIR ?= $(CARGO_HOME)/bin
 
 # Tool Commands
-RUSTUP := $(CARGO_BIN_DIR)/rustup
-CARGO := $(CARGO_BIN_DIR)/cargo
-CROSS := $(CARGO_BIN_DIR)/cross
-TRUNK := $(CARGO_BIN_DIR)/trunk
-WASM_BINDGEN := $(CARGO_BIN_DIR)/wasm-bindgen
-CARGO_SET_VERSION := $(CARGO_BIN_DIR)/cargo-set-version
-MDBOOK := $(CARGO_BIN_DIR)/mdbook
-NIGHTLY_TOOLCHAIN := nightly-2026-05-01
+resolve_tool = $(or $(shell command -v $(1) 2>/dev/null),$(CARGO_BIN_DIR)/$(1))
+RUSTUP ?= $(call resolve_tool,rustup)
+CARGO ?= $(call resolve_tool,cargo)
+CROSS ?= $(call resolve_tool,cross)
+TRUNK ?= $(call resolve_tool,trunk)
+WASM_BINDGEN ?= $(call resolve_tool,wasm-bindgen)
+CARGO_SET_VERSION ?= $(call resolve_tool,cargo-set-version)
+MDBOOK ?= $(call resolve_tool,mdbook)
+PINNED_NIGHTLY_TOOLCHAIN := nightly-2026-05-01
+NIGHTLY_TOOLCHAIN ?= $(shell if $(RUSTUP) toolchain list 2>/dev/null | grep -q '^$(PINNED_NIGHTLY_TOOLCHAIN)'; then echo $(PINNED_NIGHTLY_TOOLCHAIN); else echo nightly; fi)
 
 # Explicitly force stable/nightly to avoid system-wide overrides
 CARGO_STABLE     := $(CARGO) +stable
 CARGO_NIGHTLY    := $(CARGO) +$(NIGHTLY_TOOLCHAIN)
-CROSS            := cross
-TRUNK            := trunk
 
 # Colors for terminal output
 AQUA  := \033[36m
@@ -106,6 +107,22 @@ markdownlint: ## Install markdownlint-cli2 (requires npm)
 	@echo "✅ markdownlint-cli2 installed"
 
 ##@ Development:
+
+.PHONY: verify validate ci
+verify: ## Run format, clippy, markdown lint, tests, and trunk build (stops on error)
+	@$(MAKE) fmt
+	@$(MAKE) lint
+	@$(MAKE) markdown-lint
+	@$(MAKE) test
+	@$(MAKE) trunk-build
+
+validate: verify ## Alias for verify
+ci: verify ## Alias for verify
+
+.PHONY: trunk-build
+trunk-build: ## Build frontend with Trunk (WASM)
+	@echo "==> Building frontend (trunk)"
+	@cd frontend && NO_COLOR=true $(TRUNK) build
 
 .PHONY: test
 test: ## Run all workspace tests (Stable) — use detected CPU count for parallelism

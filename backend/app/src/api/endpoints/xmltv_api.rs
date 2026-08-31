@@ -14,9 +14,9 @@ use crate::{
         EPG_TAG_CATEGORY, EPG_TAG_CHANNEL, EPG_TAG_LIVE, EPG_TAG_NEW,
     },
     repository::{
-        epg_query_channels_by_storage_key, get_target_storage_path, m3u_get_epg_file_path_for_target, storage_const,
-        xtream_get_epg_file_path_for_target, xtream_get_storage_path, BPlusTreeQuery, LockedReceiverStream,
-        XML_PREAMBLE,
+        epg_query_channels_by_storage_key, get_file_path_for_db_index, get_target_storage_path,
+        m3u_get_epg_file_path_for_target, open_playlist_reader, storage_const, xtream_get_epg_file_path_for_target,
+        xtream_get_storage_path, BPlusTreeQuery, LockedReceiverStream, XML_PREAMBLE,
     },
     utils,
     utils::{
@@ -142,8 +142,9 @@ pub async fn serve_epg_web_ui(
         let join_error_tx = tx.clone();
         let handle = task::spawn_blocking(move || {
             let _guard = bg_lock;
-            let query = match BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(&epg_path) {
-                Ok(query) => query,
+            let index_path = get_file_path_for_db_index(&epg_path);
+            let reader = match open_playlist_reader::<Arc<str>, EpgChannel, u64>(&epg_path, &index_path, None) {
+                Ok(reader) => reader,
                 Err(error) => {
                     let message =
                         format!("Failed to open epg db for target {target_name} {}: {error}", epg_path.display());
@@ -152,7 +153,7 @@ pub async fn serve_epg_web_ui(
                     return;
                 }
             };
-            for entry in query.disk_iter() {
+            for entry in reader {
                 let (_, channel) = match entry {
                     Ok(entry) => entry,
                     Err(error) => {
@@ -289,8 +290,9 @@ async fn serve_epg_with_rewrites(
     let join_error_tx = channel_tx.clone();
     let spawn_handle = task::spawn_blocking(move || {
         let _guard = bg_lock;
-        let mut query = match BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(&epg_path) {
-            Ok(query) => query,
+        let index_path = get_file_path_for_db_index(&epg_path);
+        let reader = match open_playlist_reader::<Arc<str>, EpgChannel, u64>(&epg_path, &index_path, None) {
+            Ok(reader) => reader,
             Err(error) => {
                 let message = format!("Failed to open BPlusTreeQuery {}: {error}", epg_path.display());
                 error!("{message}");
@@ -299,7 +301,7 @@ async fn serve_epg_with_rewrites(
             }
         };
 
-        for entry in query.iter() {
+        for entry in reader {
             let (_, channel) = match entry {
                 Ok(entry) => entry,
                 Err(error) => {
@@ -922,7 +924,7 @@ mod tests {
     use super::{
         empty_stream_epg_entries, from_programme, get_epg_path_for_target, get_epg_path_for_target_by_type,
         group_stream_epg_items, prepare_stream_epg_request, rewrite_epg_channel_resource_url, serve_epg,
-        serve_short_epg, serve_stream_epg, stream_epg_api, stream_epg_programmes_for_channel,
+        serve_epg_web_ui, serve_short_epg, serve_stream_epg, stream_epg_api, stream_epg_programmes_for_channel,
         write_programme_classification_tags, MAX_STREAM_EPG_CHANNEL_ID_BYTES, MAX_STREAM_EPG_ITEMS,
     };
     use crate::{
@@ -1099,6 +1101,7 @@ mod tests {
             &Epg { priority: 0, logo_override: false, attributes: None, children: vec![Arc::new(channel)] },
             &epg_path,
             &HashMap::<Arc<str>, Arc<str>>::new(),
+            None,
             &EpgOutputOptions::default(),
         )
         .expect("write EPG database");
@@ -1858,5 +1861,60 @@ mod tests {
         );
         assert_eq!(filtered[0].start_timestamp, window_start + 7_260);
         assert_eq!(filtered[0].stop_timestamp, window_start + 7_800);
+    }
+
+    #[tokio::test]
+    async fn serve_epg_web_ui_preserves_sorted_index_order() {
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let epg_path = dir.path().join("epg.db");
+
+        let epg = Epg {
+            priority: 0,
+            logo_override: false,
+            attributes: None,
+            children: vec![
+                Arc::new(EpgChannel {
+                    id: "Z.Channel".intern(),
+                    title: Some("Z Channel".intern()),
+                    icon: None,
+                    programmes: vec![EpgProgramme::new(10, 20, "Z.Channel".intern())],
+                }),
+                Arc::new(EpgChannel {
+                    id: "a.channel".intern(),
+                    title: Some("A Channel".intern()),
+                    icon: None,
+                    programmes: vec![EpgProgramme::new(10, 20, "a.channel".intern())],
+                }),
+            ],
+        };
+
+        // In playlist order: "a.channel" is ordinal 1, "Z.Channel" is ordinal 2
+        let mut order_map = HashMap::new();
+        order_map.insert("a.channel".intern(), 1u64);
+        order_map.insert("Z.Channel".intern(), 2u64);
+
+        epg_write_file(
+            "test-target",
+            &epg,
+            &epg_path,
+            &HashMap::<Arc<str>, Arc<str>>::new(),
+            Some(&order_map),
+            &EpgOutputOptions::default(),
+        )
+        .expect("write EPG database with sorted index");
+
+        let config = test_config_with_storage(dir.path().to_string_lossy().as_ref());
+        let app_state = create_test_app_state(config);
+        let target = Arc::new(test_target_with_xtream_and_m3u());
+
+        let response = serve_epg_web_ui(&app_state, None, &epg_path, &target).await;
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("read web UI response body");
+        let channels: Vec<EpgChannel> = serde_json::from_slice(&body).expect("parse JSON response");
+
+        assert_eq!(
+            channels.iter().map(|c| c.id.as_ref()).collect::<Vec<_>>(),
+            vec!["a.channel", "Z.Channel"],
+            "serve_epg_web_ui must stream channels in sorted index order"
+        );
     }
 }
