@@ -1,8 +1,31 @@
 .tp__radio-button-group {
   display: flex;
-  flex-flow: row nowrap !important;
-  button {
-    margin: 0;
+  flex-flow: row nowrap;
+
+  &:not(&--wrap) {
+    button {
+      margin: 0;
+    }
+
+    button:not(:first-child) {
+      border-top-left-radius: 0;
+      border-bottom-left-radius: 0;
+      margin-left: -1px;
+    }
+
+    button:not(:last-child) {
+      border-top-right-radius: 0;
+      border-bottom-right-radius: 0;
+    }
+  }
+
+  &--wrap {
+    flex-flow: row wrap;
+    gap: var(--gap-small);
+
+    button {
+      margin: 0;
+    }
   }
 
   &__selected, &__selected:focus {
@@ -11,19 +34,4 @@
     border-color: var(--text-button-active-border-color);
     z-index: 1;
   }
-
-  button:not(:first-child) {
-    border-top-left-radius: 0;
-    border-bottom-left-radius: 0;
-  }
-
-  button:not(:last-child) {
-    border-top-right-radius: 0;
-    border-bottom-right-radius: 0;
-  }
-
-  button:not(:first-child) {
-    margin-left: -1px;
-  }
-
 }

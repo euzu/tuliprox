@@ -1,9 +1,12 @@
 use crate::{
     app::{
         components::{
-            config::HasFormData, input::Input, select::Select, selection_first_owned, selection_parse_first,
-            userlist::proxy_type_input::ProxyTypeInput, ClusterFlagsInput, ClusterFlagsInputMode, DropDownOption,
-            DropDownSelection, Tag, TextButton, UserStatus,
+            config::HasFormData,
+            input::Input,
+            select::Select,
+            selection_first_owned, selection_parse_first,
+            userlist::{page::UserlistPage, proxy_type_input::ProxyTypeInput, ProxyTypeView},
+            ClusterFlagsInput, ClusterFlagsInputMode, DropDownOption, DropDownSelection, Tag, TextButton, UserStatus,
         },
         TargetUser,
     },
@@ -25,8 +28,8 @@ use std::{net::IpAddr, rc::Rc};
 use strum::IntoEnumIterator;
 use yew::prelude::*;
 
-const DEFAULT_MAX_CONNECTIONS: u32 = 1;
 const DEFAULT_EXPIRATION_DAYS: i64 = 365;
+const DEFAULT_MAX_CONNECTIONS: u32 = 1;
 
 #[derive(Clone, PartialEq, Default)]
 struct UserFormFieldErrors {
@@ -37,6 +40,44 @@ struct UserFormFieldErrors {
 
 impl UserFormFieldErrors {
     fn has_errors(&self) -> bool { self.username.is_some() || self.password.is_some() || self.target.is_some() }
+}
+
+fn cluster_flags_label(flags: ClusterFlags, t: impl Fn(&str) -> String) -> String {
+    let mut parts = Vec::new();
+    if flags.contains(ClusterFlags::Live) {
+        parts.push(t("LABEL.LIVE_SHORT"));
+    }
+    if flags.contains(ClusterFlags::Vod) {
+        parts.push(t("LABEL.VOD_SHORT"));
+    }
+    if flags.contains(ClusterFlags::Series) {
+        parts.push(t("LABEL.SERIES_SHORT"));
+    }
+    parts.join(", ")
+}
+
+fn plan_hint_html(
+    inherited: bool,
+    inherited_key: &str,
+    override_key: &str,
+    plan_label: String,
+    t: impl Fn(&str) -> String,
+) -> Html {
+    if inherited {
+        html! {
+            <div class="tp__form-field__plan-hint tp__form-field__plan-hint--inherited">
+                <span class="tp__form-field__plan-hint-badge">{ t(inherited_key) }</span>
+                <span class="tp__form-field__plan-hint-text">{ plan_label }</span>
+            </div>
+        }
+    } else {
+        html! {
+            <div class="tp__form-field__plan-hint tp__form-field__plan-hint--override">
+                <span class="tp__form-field__plan-hint-badge">{ t(override_key) }</span>
+                <span class="tp__form-field__plan-hint-text">{ format!("({}: {plan_label})", t("LABEL.PLAN")) }</span>
+            </div>
+        }
+    }
 }
 
 fn normalize_country_entry(input: &str) -> Result<String, &'static str> {
@@ -116,10 +157,6 @@ generate_form_reducer!(
         Server => server: Option<String>,
         Status => status: Option<ProxyUserStatus>,
         OutputClusters => output_clusters: Option<ClusterFlags>,
-        MaxConnections => max_connections: u32,
-        SoftConnections => soft_connections: u16,
-        Priority => priority: i8,
-        SoftPriority => soft_priority: i8,
         ExpDate => exp_date: Option<i64>,
         UiEnabled => ui_enabled: bool,
         EpgTimeshift => epg_timeshift: Option<String>,
@@ -127,6 +164,10 @@ generate_form_reducer!(
         Comment => comment: Option<String>,
         Plan => plan: Option<String>,
         Filter => filter: Option<String>,
+        MaxConnections => max_connections: u32,
+        SoftConnections => soft_connections: u16,
+        Priority => priority: i8,
+        SoftPriority => soft_priority: i8,
     }
 );
 
@@ -137,6 +178,8 @@ pub struct ProxyUserCredentialsFormProps {
     pub server: Rc<Vec<ApiProxyServerInfoDto>>,
     #[prop_or_default]
     pub plans: Rc<Vec<UserPlanDto>>,
+    #[prop_or_default]
+    pub active_page: Option<UserlistPage>,
     pub on_save: Callback<(bool, String, ProxyUserCredentialsDto)>,
     pub on_cancel: Callback<()>,
 }
@@ -197,59 +240,82 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
         options
     });
 
+    let create_initialized = use_ref(|| std::cell::Cell::new(false));
+
     {
         let form_state = form_state.clone();
         let set_selected_target = selected_target.clone();
         let set_update = update.clone();
         let set_allowed_countries = allowed_countries.clone();
         let set_allowed_networks = allowed_networks.clone();
-        use_effect_with((props.user.clone(), props.server.clone()), move |(user, server)| {
-            if let Some(u) = user.clone() {
-                set_update.set(true);
-                set_selected_target.set(Some(u.target.clone()));
-                let creds = (*u.credentials).clone();
-                if let Some(na) = &creds.network_access {
-                    set_allowed_countries.set(na.allowed_countries.as_ref().map_or_else(Vec::new, |countries| {
-                        countries.iter().map(|country| Rc::new(Tag { label: country.clone(), class: None })).collect()
-                    }));
-                    set_allowed_networks.set(na.allowed_networks.as_ref().map_or_else(Vec::new, |networks| {
-                        networks.iter().map(|network| Rc::new(Tag { label: network.clone(), class: None })).collect()
-                    }));
-                } else {
-                    set_allowed_countries.set(Vec::new());
-                    set_allowed_networks.set(Vec::new());
-                }
-                form_state.dispatch(UserFormAction::SetAll(creds));
-            } else {
-                set_update.set(false);
-                set_selected_target.set(None);
-                set_allowed_countries.set(Vec::new());
-                set_allowed_networks.set(Vec::new());
-                let mut user = ProxyUserCredentialsDto::default();
-                if let Some(api_server) = (*server).first() {
-                    user.server = Some(api_server.name.clone());
-                }
-                user.max_connections = DEFAULT_MAX_CONNECTIONS;
-                user.proxy = ProxyType::Reverse(None);
-                user.status = Some(ProxyUserStatus::Active);
-                user.output_clusters = None;
-                user.ui_enabled = true;
-                let now = Utc::now();
-                user.created_at = Some(now.timestamp());
-                let in_one_year = now + Duration::days(DEFAULT_EXPIRATION_DAYS);
-                user.exp_date = Some(in_one_year.timestamp());
+        let create_initialized = create_initialized.clone();
+        use_effect_with(
+            (props.active_page, props.user.clone(), props.server.clone()),
+            move |(active_page, user, server)| {
+                if active_page.is_none() || *active_page == Some(UserlistPage::Edit) {
+                    if let Some(u) = user.clone() {
+                        set_update.set(true);
+                        set_selected_target.set(Some(u.target.clone()));
+                        let creds = (*u.credentials).clone();
+                        if let Some(na) = &creds.network_access {
+                            set_allowed_countries.set(na.allowed_countries.as_ref().map_or_else(
+                                Vec::new,
+                                |countries| {
+                                    countries
+                                        .iter()
+                                        .map(|country| Rc::new(Tag { label: country.clone(), class: None }))
+                                        .collect()
+                                },
+                            ));
+                            set_allowed_networks.set(na.allowed_networks.as_ref().map_or_else(Vec::new, |networks| {
+                                networks
+                                    .iter()
+                                    .map(|network| Rc::new(Tag { label: network.clone(), class: None }))
+                                    .collect()
+                            }));
+                        } else {
+                            set_allowed_countries.set(Vec::new());
+                            set_allowed_networks.set(Vec::new());
+                        }
+                        create_initialized.set(false);
+                        form_state.dispatch(UserFormAction::SetAll(creds));
+                    } else if create_initialized.get() {
+                        // Create form already initialized — only merge the default
+                        // server when the user hasn't picked one yet.
+                        if form_state.data().server.is_none() {
+                            if let Some(api_server) = (*server).first() {
+                                form_state.dispatch(UserFormAction::Server(Some(api_server.name.clone())));
+                            }
+                        }
+                    } else {
+                        create_initialized.set(true);
+                        set_update.set(false);
+                        set_selected_target.set(None);
+                        set_allowed_countries.set(Vec::new());
+                        set_allowed_networks.set(Vec::new());
+                        let mut user = ProxyUserCredentialsDto::default();
+                        if let Some(api_server) = (*server).first() {
+                            user.server = Some(api_server.name.clone());
+                        }
+                        user.max_connections = DEFAULT_MAX_CONNECTIONS;
+                        user.proxy = ProxyType::Reverse(None);
+                        user.status = Some(ProxyUserStatus::Active);
+                        user.output_clusters = None;
+                        user.ui_enabled = true;
+                        let now = Utc::now();
+                        user.created_at = Some(now.timestamp());
+                        let in_one_year = now + Duration::days(DEFAULT_EXPIRATION_DAYS);
+                        user.exp_date = Some(in_one_year.timestamp());
 
-                if user.username.is_empty() {
-                    user.username = generate_random_string(6).to_uppercase();
-                }
-                if user.password.is_empty() {
-                    user.password = generate_random_string(6).to_uppercase();
-                }
-                user.token = Some(generate_random_string(6));
+                        user.username = generate_random_string(6).to_uppercase();
+                        user.password = generate_random_string(6).to_uppercase();
+                        user.token = Some(generate_random_string(6));
 
-                form_state.dispatch(UserFormAction::SetAll(user));
-            }
-        });
+                        form_state.dispatch(UserFormAction::SetAll(user));
+                    }
+                }
+            },
+        );
     }
 
     let handle_cancel = {
@@ -353,6 +419,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
     let plan_list = props.plans.clone();
     let plan_is_update = update.clone();
     let instance_output_clusters = form_state.clone();
+    let active_plan = form_state.data().plan.as_ref().and_then(|name| props.plans.iter().find(|p| &p.name == name));
     let country_services = service_ctx.clone();
     let country_translate = translate.clone();
     let create_country_tag = Callback::from(move |value: String| match normalize_country_entry(&value) {
@@ -404,15 +471,24 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                                 options={targets.clone()}
                             />
                         </div>
-                        <ClusterFlagsInput
-                            name="output_clusters"
-                            value={form_state.data().output_clusters}
-                            mode={ClusterFlagsInputMode::NoneIsAll}
-                            short_labels={true}
-                            on_change={Callback::from(move |(_, flags): (String, Option<ClusterFlags>)| {
-                                instance_output_clusters.dispatch(UserFormAction::OutputClusters(flags));
-                            })}
-                        />
+                        <div>
+                            <ClusterFlagsInput
+                                name="output_clusters"
+                                value={form_state.data().output_clusters}
+                                mode={ClusterFlagsInputMode::NoneIsAll}
+                                short_labels={true}
+                                on_change={Callback::from(move |(_, flags): (String, Option<ClusterFlags>)| {
+                                    instance_output_clusters.dispatch(UserFormAction::OutputClusters(flags));
+                                })}
+                            />
+                            { if let Some(plan) = active_plan {
+                                if let Some(plan_clusters) = plan.output_clusters {
+                                    let label = cluster_flags_label(plan_clusters, |k| translate.t(k));
+                                    let inherited = form_state.data().output_clusters.is_none();
+                                    { plan_hint_html(inherited, "LABEL.PLAN_INHERITED", "LABEL.PLAN_OVERRIDE", label, |k| translate.t(k)) }
+                                } else { html! {} }
+                            } else { html! {} } }
+                        </div>
                     </div>
                 }
             }) }
@@ -469,11 +545,24 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
             { edit_field_text_option!(form_state,  translate.t("LABEL.TOKEN"), token, UserFormAction::Token, true) }
             { config_field_child!(translate.t("LABEL.PROXY"), "PROXY_USER_CREDENTIALS.PROXY", {
                html! {
-                     <ProxyTypeInput value={form_state.data().proxy}
-                        on_change={Callback::from(move |proxy_type: ProxyType| {
-                         instance_proxy.dispatch(UserFormAction::Proxy(proxy_type));
-                        }
-                    )}/>
+                    <div>
+                        <ProxyTypeInput value={form_state.data().proxy}
+                            on_change={Callback::from(move |proxy_type: ProxyType| {
+                                instance_proxy.dispatch(UserFormAction::Proxy(proxy_type));
+                            }
+                        )}/>
+                        { if let Some(plan) = active_plan {
+                            if let Some(plan_proxy) = plan.proxy {
+                                // "Inherited" means the user's proxy value matches the plan's
+                                // value exactly — not just that it equals ProxyType::default().
+                                // New users start with Reverse(None) which is distinct from
+                                // Redirect, so we must compare against the actual plan value.
+                                let inherited = form_state.data().proxy == plan_proxy;
+                                { plan_hint_html(inherited, "LABEL.PLAN_INHERITED", "LABEL.PLAN_OVERRIDE", plan_proxy.to_string(), |k| translate.t(k)) }
+                            } else { html! {} }
+                        } else { html! {} } }
+
+                    </div>
             }})}
             { config_field_child!(translate.t("LABEL.SERVER"), "PROXY_USER_CREDENTIALS.SERVER", {
                html! {
@@ -492,21 +581,41 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                     multi_select={false}
                     on_select={Callback::from(move |(_, selections): (String, DropDownSelection)| {
                         let plan = selection_first_owned(selections).filter(|value| !value.is_empty());
-                        // Trial plans: show the concrete trial expiry for new users right in the form.
-                        if !*plan_is_update {
-                            let trial_secs = plan
-                                .as_ref()
-                                .and_then(|name| plan_list.iter().find(|p| &p.name == name))
-                                .and_then(|p| p.trial.as_ref())
-                                .and_then(shared::model::UserPlanTrialDto::duration_secs);
-                            if let Some(trial_secs) = trial_secs {
-                                let expires = Utc::now().timestamp().saturating_add(i64::try_from(trial_secs).unwrap_or(i64::MAX));
-                                instance_plan.dispatch(UserFormAction::ExpDate(Some(expires)));
-                                instance_plan.dispatch(UserFormAction::Status(Some(ProxyUserStatus::Trial)));
-                            } else if instance_plan.data().status == Some(ProxyUserStatus::Trial) {
-                                // Selected plan has no trial (or was cleared): drop the trial-derived fields
-                                instance_plan.dispatch(UserFormAction::ExpDate(None));
-                                instance_plan.dispatch(UserFormAction::Status(None));
+                        // Snapshot state once to avoid reading stale pre-dispatch values later.
+                        let current = instance_plan.data().clone();
+                        let is_new = !*plan_is_update;
+                        if let Some(plan_name) = &plan {
+                            if let Some(p) = plan_list.iter().find(|p| &p.name == plan_name) {
+                                if is_new && current.max_connections == DEFAULT_MAX_CONNECTIONS {
+                                    instance_plan.dispatch(UserFormAction::MaxConnections(0));
+                                }
+                                // Trial window is computed only when creating a new user — never
+                                // overwrite an existing user's expiry or status automatically.
+                                if is_new {
+                                    let trial_secs = p.trial.as_ref().and_then(shared::model::UserPlanTrialDto::duration_secs);
+                                    if let Some(trial_secs) = trial_secs {
+                                        let expires = Utc::now().timestamp().saturating_add(i64::try_from(trial_secs).unwrap_or(i64::MAX));
+                                        instance_plan.dispatch(UserFormAction::ExpDate(Some(expires)));
+                                        instance_plan.dispatch(UserFormAction::Status(Some(ProxyUserStatus::Trial)));
+                                    } else if current.status == Some(ProxyUserStatus::Trial) {
+                                        // Switched from a trial-plan to a non-trial plan: restore the
+                                        // default one-year expiry and active status.
+                                        let default_exp = Utc::now().timestamp().saturating_add(DEFAULT_EXPIRATION_DAYS * 86_400);
+                                        instance_plan.dispatch(UserFormAction::ExpDate(Some(default_exp)));
+                                        instance_plan.dispatch(UserFormAction::Status(Some(ProxyUserStatus::Active)));
+                                    }
+                                }
+                            }
+                        } else {
+                            if is_new && current.max_connections == 0 {
+                                instance_plan.dispatch(UserFormAction::MaxConnections(DEFAULT_MAX_CONNECTIONS));
+                            }
+                            // Plan cleared: if status was Trial (set by previous plan selection),
+                            // restore default state.
+                            if is_new && current.status == Some(ProxyUserStatus::Trial) {
+                                let default_exp = Utc::now().timestamp().saturating_add(DEFAULT_EXPIRATION_DAYS * 86_400);
+                                instance_plan.dispatch(UserFormAction::ExpDate(Some(default_exp)));
+                                instance_plan.dispatch(UserFormAction::Status(Some(ProxyUserStatus::Active)));
                             }
                         }
                         instance_plan.dispatch(UserFormAction::Plan(plan));
@@ -514,10 +623,98 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                     options={plan_options.clone()}
                 />
             }})}
+
+            { if let Some(plan) = active_plan {
+                let max_con_label = if plan.max_connections == 0 {
+                    translate.t("LABEL.UNLIMITED")
+                } else {
+                    plan.max_connections.to_string()
+                };
+                html! {
+                    <div class="tp__proxy-user-credentials-form__plan-summary">
+                        <div class="tp__proxy-user-credentials-form__plan-summary-header">
+                            <span class="tp__proxy-user-credentials-form__plan-summary-title">{ translate.t("LABEL.PLAN_DETAILS") }</span>
+                            <span class="tp__proxy-user-credentials-form__plan-summary-name">{ &plan.name }</span>
+                        </div>
+                        <div class="tp__proxy-user-credentials-form__plan-summary-body">
+                            <div class="tp__proxy-user-credentials-form__plan-summary-chip">
+                                <span class="tp__proxy-user-credentials-form__plan-summary-chip-label">{ translate.t("LABEL.MAX_CON") }</span>
+                                <span class="tp__proxy-user-credentials-form__plan-summary-chip-val">{ max_con_label }</span>
+                            </div>
+                            { if plan.soft_connections > 0 {
+                                html! {
+                                    <div class="tp__proxy-user-credentials-form__plan-summary-chip">
+                                        <span class="tp__proxy-user-credentials-form__plan-summary-chip-label">{ translate.t("LABEL.SOFT_CON") }</span>
+                                        <span class="tp__proxy-user-credentials-form__plan-summary-chip-val">{ plan.soft_connections }</span>
+                                    </div>
+                                }
+                            } else { html! {} } }
+                            { if let Some(clusters) = plan.output_clusters {
+                                html! {
+                                    <div class="tp__proxy-user-credentials-form__plan-summary-chip">
+                                        <span class="tp__proxy-user-credentials-form__plan-summary-chip-label">{ translate.t("LABEL.CLUSTER") }</span>
+                                        <span class="tp__proxy-user-credentials-form__plan-summary-chip-val">{ cluster_flags_label(clusters, |k| translate.t(k)) }</span>
+                                    </div>
+                                }
+                            } else { html! {} } }
+                            { if let Some(proxy) = plan.proxy {
+                                html! {
+                                    <div class="tp__proxy-user-credentials-form__plan-summary-chip">
+                                        <span class="tp__proxy-user-credentials-form__plan-summary-chip-label">{ translate.t("LABEL.PROXY") }</span>
+                                        <span class="tp__proxy-user-credentials-form__plan-summary-chip-val"><ProxyTypeView value={proxy} /></span>
+                                    </div>
+                                }
+                            } else { html! {} } }
+                            { if let Some(trial) = &plan.trial {
+                                html! {
+                                    <div class="tp__proxy-user-credentials-form__plan-summary-chip">
+                                        <span class="tp__proxy-user-credentials-form__plan-summary-chip-label">{ translate.t("LABEL.TRIAL") }</span>
+                                        <span class="tp__proxy-user-credentials-form__plan-summary-chip-val">{ &trial.duration }</span>
+                                    </div>
+                                }
+                            } else { html! {} } }
+                        </div>
+                    </div>
+                }
+            } else {
+                html! {}
+            } }
             { edit_field_text_option!(form_state,  translate.t("LABEL.FILTER"), filter, UserFormAction::Filter) }
+            { if let Some(plan) = active_plan {
+                if let Some(plan_filter) = &plan.filter {
+                    html! {
+                        <div class="tp__form-field__plan-filter-notice">
+                            <div class="tp__form-field__plan-filter-notice-header">
+                                <span class="tp__form-field__plan-filter-notice-title">{ translate.t("LABEL.PLAN_FILTER_ACTIVE") }</span>
+                                <span class="tp__form-field__plan-filter-notice-sub">{ translate.t("LABEL.PLAN_FILTER_COMBINED_NOTICE") }</span>
+                            </div>
+                            <code class="tp__form-field__plan-filter-notice-code">{ plan_filter }</code>
+                        </div>
+                    }
+                } else { html! {} }
+            } else { html! {} } }
             { edit_field_date!(form_state,  translate.t("LABEL.EXP_DATE"), exp_date, UserFormAction::ExpDate) }
-            { edit_field_number!(form_state,  translate.t("LABEL.MAX_CONNECTIONS"), max_connections, UserFormAction::MaxConnections) }
-            { edit_field_number_u16!(form_state,  translate.t("LABEL.SOFT_CONNECTIONS"), soft_connections, UserFormAction::SoftConnections) }
+            <div>
+                { edit_field_number!(form_state,  translate.t("LABEL.MAX_CONNECTIONS"), max_connections, UserFormAction::MaxConnections) }
+                { if let Some(plan) = active_plan {
+                    let plan_max_str = if plan.max_connections == 0 {
+                        translate.t("LABEL.UNLIMITED")
+                    } else {
+                        plan.max_connections.to_string()
+                    };
+                    let inherited = form_state.data().max_connections == 0;
+                    { plan_hint_html(inherited, "LABEL.PLAN_INHERITED", "LABEL.PLAN_OVERRIDE", plan_max_str, |k| translate.t(k)) }
+                } else { html! {} } }
+            </div>
+            <div>
+                { edit_field_number_u16!(form_state,  translate.t("LABEL.SOFT_CONNECTIONS"), soft_connections, UserFormAction::SoftConnections) }
+                { if let Some(plan) = active_plan {
+                    if plan.soft_connections > 0 {
+                        let inherited = form_state.data().soft_connections == 0;
+                        { plan_hint_html(inherited, "LABEL.PLAN_INHERITED", "LABEL.PLAN_OVERRIDE", plan.soft_connections.to_string(), |k| translate.t(k)) }
+                    } else { html! {} }
+                } else { html! {} } }
+            </div>
             { edit_field_number_i8!(form_state, translate.t("LABEL.PRIORITY"), priority, UserFormAction::Priority) }
             { edit_field_number_i8!(form_state, translate.t("LABEL.SOFT_PRIORITY"), soft_priority, UserFormAction::SoftPriority) }
             { edit_field_text_option!(form_state,  translate.t("LABEL.EPG_TIMESHIFT"), epg_timeshift, UserFormAction::EpgTimeshift) }

@@ -161,7 +161,7 @@ pub fn UserEdit() -> Html {
         </div>
         <div class="tp__userlist-edit__body tp__list-create__body">
             <Card>
-               <ProxyUserCredentialsForm server={server.clone()} plans={(*plans).clone()} targets={targets.clone()} user={(*userlist_ctx.selected_user).clone()} on_save={handle_user_save} on_cancel={handle_cancel}/>
+               <ProxyUserCredentialsForm server={server.clone()} plans={(*plans).clone()} targets={targets.clone()} user={(*userlist_ctx.selected_user).clone()} active_page={*userlist_ctx.active_page} on_save={handle_user_save} on_cancel={handle_cancel}/>
             </Card>
         </div>
       </div>
