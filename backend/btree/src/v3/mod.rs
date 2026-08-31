@@ -17,6 +17,21 @@ pub use tree::{
 pub enum BPlusTreeMetadata {
     Empty,
     TargetIdMapping(u32),
+    /// Binds a database to the recovery history that produced it.
+    ///
+    /// The engine never interprets these fields; it only stores them so a
+    /// recovery wrapper can tell whether the database is behind, level with or
+    /// ahead of its own journal.
+    Recovery(RecoveryIdentity),
+}
+
+/// Application-neutral recovery bookkeeping carried in the database header.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RecoveryIdentity {
+    pub database_id: [u8; 16],
+    pub schema_fingerprint: [u8; 32],
+    pub schema_version: u32,
+    pub applied_revision: u64,
 }
 
 #[cfg(test)]

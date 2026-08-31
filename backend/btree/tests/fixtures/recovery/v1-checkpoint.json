@@ -1,0 +1,5 @@
+[
+  { "key": { "id": "alpha" }, "value": { "name": "Alpha" } },
+  { "key": { "id": "beta" }, "value": { "name": "Beta" } },
+  { "key": { "id": "gamma" }, "value": { "name": "Gamma" } }
+]

@@ -4462,6 +4462,7 @@ dependencies = [
 name = "tuliprox-btree"
 version = "3.3.91"
 dependencies = [
+ "blake3",
  "crc32fast",
  "fs2",
  "log",
@@ -4471,6 +4472,7 @@ dependencies = [
  "rand 0.9.5",
  "rmp-serde",
  "serde",
+ "serde_json",
  "smallvec",
  "tempfile",
  "uuid",
