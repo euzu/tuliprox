@@ -445,7 +445,7 @@ pub fn PlansView() -> Html {
                 <Card class="tp__api-config-card">
                     <div class="tp__api-config-view__section-header tp__list-list__header">
                         <div class="tp__api-config-view__section-title">{translate.t("LABEL.PLANS")}</div>
-                        <div class="tp__dialog__toolbar">
+                        <div class="tp__toolbar">
                             <TextButton class="primary" name="add_plan" icon="Add" title={translate.t("LABEL.ADD_PLAN")} onclick={handle_add_plan.clone()} />
                         </div>
                     </div>
