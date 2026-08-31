@@ -74,7 +74,7 @@ fn plan_hint_html(
         html! {
             <div class="tp__form-field__plan-hint tp__form-field__plan-hint--override">
                 <span class="tp__form-field__plan-hint-badge">{ t(override_key) }</span>
-                <span class="tp__form-field__plan-hint-text">{ format!("(Plan: {plan_label})") }</span>
+                <span class="tp__form-field__plan-hint-text">{ format!("({}: {plan_label})", t("LABEL.PLAN")) }</span>
             </div>
         }
     }
@@ -240,12 +240,15 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
         options
     });
 
+    let create_initialized = use_ref(|| std::cell::Cell::new(false));
+
     {
         let form_state = form_state.clone();
         let set_selected_target = selected_target.clone();
         let set_update = update.clone();
         let set_allowed_countries = allowed_countries.clone();
         let set_allowed_networks = allowed_networks.clone();
+        let create_initialized = create_initialized.clone();
         use_effect_with(
             (props.active_page, props.user.clone(), props.server.clone()),
             move |(active_page, user, server)| {
@@ -274,8 +277,18 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                             set_allowed_countries.set(Vec::new());
                             set_allowed_networks.set(Vec::new());
                         }
+                        create_initialized.set(false);
                         form_state.dispatch(UserFormAction::SetAll(creds));
+                    } else if create_initialized.get() {
+                        // Create form already initialized — only merge the default
+                        // server when the user hasn't picked one yet.
+                        if form_state.data().server.is_none() {
+                            if let Some(api_server) = (*server).first() {
+                                form_state.dispatch(UserFormAction::Server(Some(api_server.name.clone())));
+                            }
+                        }
                     } else {
+                        create_initialized.set(true);
                         set_update.set(false);
                         set_selected_target.set(None);
                         set_allowed_countries.set(Vec::new());
