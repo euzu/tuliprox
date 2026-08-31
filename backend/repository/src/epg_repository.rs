@@ -29,15 +29,21 @@ pub const XML_PREAMBLE: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 // writer.write_event_async(quick_xml::events::Event::DocType(quick_xml::events::BytesText::new(r#"tv SYSTEM "xmltv.dtd""#)))
 //     .await.map_err(|e| TuliproxError::RepositoryEpg(format!("failed to write doctype: {}", e)))?;
 type EpgRenameMap = HashMap<Arc<str>, Arc<str>>;
-type EpgOrderMap = HashMap<Arc<str>, u32>;
+type EpgOrderMap = HashMap<Arc<str>, u64>;
 type EpgMaps = (EpgRenameMap, EpgOrderMap);
+
+/// Keeps the source ordinal as the primary order while traversal order makes equal or synthesized ordinals unique.
+fn epg_order_rank(source_ordinal: u32, traversal_ordinal: u32) -> u64 {
+    let ordinal = if source_ordinal > 0 { source_ordinal } else { traversal_ordinal };
+    (u64::from(ordinal) << u32::BITS) | u64::from(traversal_ordinal)
+}
 
 pub fn epg_write_file<S: std::hash::BuildHasher>(
     target_name: &str,
     epg: &Epg,
     path: &Path,
     rename_map: &HashMap<Arc<str>, Arc<str>, S>,
-    order_map: Option<&HashMap<Arc<str>, u32, S>>,
+    order_map: Option<&HashMap<Arc<str>, u64, S>>,
     epg_output: &EpgOutputOptions,
 ) -> Result<(), TuliproxError> {
     if epg.children.is_empty() {
@@ -63,7 +69,7 @@ pub fn epg_write_file<S: std::hash::BuildHasher>(
     }
 
     let result = if let Some(order) = order_map {
-        tree.store_with_index(path, |chan| order.get(&chan.id).copied().unwrap_or(u32::MAX))
+        tree.store_with_index(path, |chan| order.get(&chan.id).copied().unwrap_or(u64::MAX))
     } else {
         tree.store(path)
     };
@@ -89,8 +95,7 @@ fn build_epg_maps(playlist: Option<&[PlaylistGroup]>, output_case: EpgIdOutputCa
         for group in pl {
             for channel in &group.channels {
                 sequential_ordinal += 1;
-                let ordinal =
-                    if channel.header.source_ordinal > 0 { channel.header.source_ordinal } else { sequential_ordinal };
+                let rank = epg_order_rank(channel.header.source_ordinal, sequential_ordinal);
                 if let Some(epg_id) = &channel.header.epg_channel_id {
                     if !epg_id.is_empty() {
                         let output_id = canonicalize_output_epg_id(epg_id, output_case);
@@ -108,8 +113,8 @@ fn build_epg_maps(playlist: Option<&[PlaylistGroup]>, output_case: EpgIdOutputCa
                         }
                         order_map
                             .entry(output_id)
-                            .and_modify(|current: &mut u32| *current = (*current).min(ordinal))
-                            .or_insert(ordinal);
+                            .and_modify(|current: &mut u64| *current = (*current).min(rank))
+                            .or_insert(rank);
                     }
                 }
             }
@@ -515,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn epg_write_file_writes_playlist_derived_index_with_unreferenced_channels_last() {
+    fn epg_write_file_resolves_ordinal_collisions_and_places_unreferenced_channels_last() {
         use crate::{get_file_path_for_db_index, open_playlist_reader};
 
         let tmp = TempDir::new().expect("temp dir created");
@@ -547,17 +552,18 @@ mod tests {
         };
 
         let mut playlist = rename_playlist(&[
-            ("a.channel", "Duplicate A Channel"),
             ("Z.Channel", "Z Channel"),
             ("a.channel", "A Channel"),
+            ("a.channel", "Duplicate A Channel"),
         ]);
-        for (channel, ordinal) in playlist[0].channels.iter_mut().zip([3, 2, 1]) {
+        for (channel, ordinal) in playlist[0].channels.iter_mut().zip([0, 1, 3]) {
             channel.header.source_ordinal = ordinal;
         }
         let (rename_map, order_map) = build_epg_maps(Some(&playlist), EpgIdOutputCase::Preserve);
 
-        assert_eq!(order_map.get("a.channel"), Some(&1));
-        assert_eq!(order_map.get("Z.Channel"), Some(&2));
+        assert_eq!(order_map.get("Z.Channel"), Some(&epg_order_rank(0, 1)));
+        assert_eq!(order_map.get("a.channel"), Some(&epg_order_rank(1, 2)));
+        assert_ne!(order_map.get("Z.Channel"), order_map.get("a.channel"));
         assert!(!order_map.contains_key("unreferenced.channel"));
 
         epg_write_file("target", &epg, &path, &rename_map, Some(&order_map), &EpgOutputOptions::default())
@@ -566,7 +572,7 @@ mod tests {
         let index_path = get_file_path_for_db_index(&path);
         assert!(index_path.exists(), "epg.db.index sidecar file must exist");
 
-        let reader = open_playlist_reader::<Arc<str>, EpgChannel, u32>(&path, &index_path, None)
+        let reader = open_playlist_reader::<Arc<str>, EpgChannel, u64>(&path, &index_path, None)
             .expect("open_playlist_reader should open sorted index");
         let stored_ids = reader
             .collect::<std::io::Result<Vec<_>>>()
@@ -577,7 +583,7 @@ mod tests {
 
         assert_eq!(
             stored_ids.iter().map(AsRef::as_ref).collect::<Vec<_>>(),
-            vec!["a.channel", "Z.Channel", "unreferenced.channel"],
+            vec!["Z.Channel", "a.channel", "unreferenced.channel"],
             "Channels should follow playlist order with unreferenced EPG channels last"
         );
     }

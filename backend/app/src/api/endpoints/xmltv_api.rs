@@ -143,7 +143,7 @@ pub async fn serve_epg_web_ui(
         let handle = task::spawn_blocking(move || {
             let _guard = bg_lock;
             let index_path = get_file_path_for_db_index(&epg_path);
-            let reader = match open_playlist_reader::<Arc<str>, EpgChannel, u32>(&epg_path, &index_path, None) {
+            let reader = match open_playlist_reader::<Arc<str>, EpgChannel, u64>(&epg_path, &index_path, None) {
                 Ok(reader) => reader,
                 Err(error) => {
                     let message =
@@ -291,7 +291,7 @@ async fn serve_epg_with_rewrites(
     let spawn_handle = task::spawn_blocking(move || {
         let _guard = bg_lock;
         let index_path = get_file_path_for_db_index(&epg_path);
-        let reader = match open_playlist_reader::<Arc<str>, EpgChannel, u32>(&epg_path, &index_path, None) {
+        let reader = match open_playlist_reader::<Arc<str>, EpgChannel, u64>(&epg_path, &index_path, None) {
             Ok(reader) => reader,
             Err(error) => {
                 let message = format!("Failed to open BPlusTreeQuery {}: {error}", epg_path.display());
@@ -1890,8 +1890,8 @@ mod tests {
 
         // In playlist order: "a.channel" is ordinal 1, "Z.Channel" is ordinal 2
         let mut order_map = HashMap::new();
-        order_map.insert("a.channel".intern(), 1u32);
-        order_map.insert("Z.Channel".intern(), 2u32);
+        order_map.insert("a.channel".intern(), 1u64);
+        order_map.insert("Z.Channel".intern(), 2u64);
 
         epg_write_file(
             "test-target",
