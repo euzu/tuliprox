@@ -15,6 +15,8 @@
     display: flex;
     flex-flow: column;
     flex: 1 1 auto;
+    min-width: 0;
+    max-width: 100%;
     min-height: 0;
     align-content: flex-start;
     justify-content: flex-start;
@@ -24,6 +26,9 @@
       display: flex;
       flex-flow: column;
       flex: 1 1 auto;
+      width: 100%;
+      max-width: 100%;
+      min-width: 0;
       min-height: 0;
       box-sizing: border-box;
       padding: 0 var(--padding-large);
