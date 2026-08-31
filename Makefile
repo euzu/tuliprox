@@ -107,6 +107,22 @@ markdownlint: ## Install markdownlint-cli2 (requires npm)
 
 ##@ Development:
 
+.PHONY: verify validate ci
+verify: ## Run format, clippy, markdown lint, tests, and trunk build (stops on error)
+	@$(MAKE) fmt
+	@$(MAKE) lint
+	@$(MAKE) markdown-lint
+	@$(MAKE) test
+	@$(MAKE) trunk-build
+
+validate: verify ## Alias for verify
+ci: verify ## Alias for verify
+
+.PHONY: trunk-build
+trunk-build: ## Build frontend with Trunk (WASM)
+	@echo "==> Building frontend (trunk)"
+	@cd frontend && $(TRUNK) build
+
 .PHONY: test
 test: ## Run all workspace tests (Stable) — use detected CPU count for parallelism
 	@echo "==> Running tests (stable) with $(CPU_COUNT) jobs/threads"
