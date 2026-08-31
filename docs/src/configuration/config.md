@@ -686,7 +686,9 @@ Tuliprox handles these transfers like provider-bound background streams:
   * `download.read` allows opening the downloads view and receiving transfer snapshots.
   * `download.write` allows queueing, pausing, cancelling, retrying, and removing transfers.
   * `recording.read` allows opening DVR task, quota, library, and recurring-rule views.
-  * `recording.write` allows creating, editing, cancelling, deleting, and managing DVR tasks and rules.
+  * `recording.create` allows requesting a new DVR recording.
+  * `recording.manage` allows editing, cancelling and managing DVR tasks and rules.
+  * `recording.delete` allows removing a recording from a library.
 * Persisted queue recovery is tolerant of corruption. If `downloads_state.json` cannot be deserialized,  
   Tuliprox renames it to a timestamped `*_corrupt.*.json` backup and starts with an empty transfer queue instead of
   aborting server boot.
@@ -725,7 +727,8 @@ The filename template supports these placeholders (filename only — **never** t
 
 #### 6.1.2 Authorization matrix
 
-The DVR layer runs an additional authorization pass on top of `recording.read` / `recording.write`.
+The DVR layer runs an additional authorization pass on top of `recording.read`, `recording.create`,
+`recording.manage` and `recording.delete`.
 
 | Visibility | Owner                  | Admin (`builtin:admin`) | Foreign user | Notes                                     |
 |------------|------------------------|-------------------------|--------------|-------------------------------------------|

@@ -18,7 +18,9 @@ create_bitset!(
     EpgRead,
     EpgWrite,
     RecordingRead,
-    RecordingWrite
+    RecordingCreate,
+    RecordingManage,
+    RecordingDelete
 );
 
 pub const PERM_ALL: PermissionSet = PermissionSet::ALL;
@@ -39,7 +41,9 @@ pub const PERMISSION_NAMES: &[(&str, Permission)] = &[
     ("epg.read", Permission::EpgRead),
     ("epg.write", Permission::EpgWrite),
     ("recording.read", Permission::RecordingRead),
-    ("recording.write", Permission::RecordingWrite),
+    ("recording.create", Permission::RecordingCreate),
+    ("recording.manage", Permission::RecordingManage),
+    ("recording.delete", Permission::RecordingDelete),
 ];
 
 pub fn permission_from_name(name: &str) -> Option<Permission> {
@@ -111,7 +115,9 @@ mod tests {
         assert!(PERM_ALL.contains(Permission::EpgRead));
         assert!(PERM_ALL.contains(Permission::EpgWrite));
         assert!(PERM_ALL.contains(Permission::RecordingRead));
-        assert!(PERM_ALL.contains(Permission::RecordingWrite));
+        assert!(PERM_ALL.contains(Permission::RecordingCreate));
+        assert!(PERM_ALL.contains(Permission::RecordingManage));
+        assert!(PERM_ALL.contains(Permission::RecordingDelete));
     }
 
     #[test]
@@ -136,13 +142,44 @@ mod tests {
     }
 
     #[test]
-    fn recording_bits_are_the_last_two_of_the_set() {
-        // Removing the download bits renumbered these. The schema version
-        // is bumped in lockstep (see `CURRENT_PERMISSION_SCHEMA_VERSION`)
-        // so no pre-existing token is read against this layout.
-        assert_eq!(PermissionSet::VARIANT_COUNT, 16);
-        let recording: PermissionSet = Permission::RecordingRead | Permission::RecordingWrite;
-        assert_eq!(recording.0, 0b1100_0000_0000_0000);
+    fn the_removed_recording_write_name_decodes_to_nothing() {
+        // Splitting the single write permission renumbered the bits above it.
+        // A groups file that still lists the old name must lose it rather than
+        // silently gain one of the three replacements.
+        assert_eq!(permission_from_name("recording.write"), None);
+    }
+
+    #[test]
+    fn permission_bits_are_frozen() {
+        // Reordering the enum would reinterpret every issued token. These
+        // values are the wire format; changing one requires bumping
+        // `CURRENT_PERMISSION_SCHEMA_VERSION` in lockstep.
+        let expected: &[(&str, u32)] = &[
+            ("config.read", 1 << 0),
+            ("config.write", 1 << 1),
+            ("source.read", 1 << 2),
+            ("source.write", 1 << 3),
+            ("user.read", 1 << 4),
+            ("user.write", 1 << 5),
+            ("playlist.read", 1 << 6),
+            ("playlist.write", 1 << 7),
+            ("library.read", 1 << 8),
+            ("library.write", 1 << 9),
+            ("system.read", 1 << 10),
+            ("system.write", 1 << 11),
+            ("epg.read", 1 << 12),
+            ("epg.write", 1 << 13),
+            ("recording.read", 1 << 14),
+            ("recording.create", 1 << 15),
+            ("recording.manage", 1 << 16),
+            ("recording.delete", 1 << 17),
+        ];
+        assert_eq!(PermissionSet::VARIANT_COUNT, expected.len());
+        for (name, bit) in expected {
+            let permission = permission_from_name(name).expect("permission name is missing");
+            let set: PermissionSet = permission.into();
+            assert_eq!(set.0, *bit, "bit value of {name} changed");
+        }
     }
 
     #[test]
@@ -150,7 +187,9 @@ mod tests {
         assert_eq!(permission_from_name("config.read"), Some(Permission::ConfigRead));
         assert_eq!(permission_from_name("source.write"), Some(Permission::SourceWrite));
         assert_eq!(permission_from_name("recording.read"), Some(Permission::RecordingRead));
-        assert_eq!(permission_from_name("recording.write"), Some(Permission::RecordingWrite));
+        assert_eq!(permission_from_name("recording.create"), Some(Permission::RecordingCreate));
+        assert_eq!(permission_from_name("recording.manage"), Some(Permission::RecordingManage));
+        assert_eq!(permission_from_name("recording.delete"), Some(Permission::RecordingDelete));
         assert_eq!(permission_from_name("nonexistent"), None);
         assert_eq!(permission_from_name(""), None);
     }
@@ -160,7 +199,9 @@ mod tests {
         assert_eq!(permission_to_name(Permission::ConfigRead), Some("config.read"));
         assert_eq!(permission_to_name(Permission::EpgWrite), Some("epg.write"));
         assert_eq!(permission_to_name(Permission::RecordingRead), Some("recording.read"));
-        assert_eq!(permission_to_name(Permission::RecordingWrite), Some("recording.write"));
+        assert_eq!(permission_to_name(Permission::RecordingCreate), Some("recording.create"));
+        assert_eq!(permission_to_name(Permission::RecordingManage), Some("recording.manage"));
+        assert_eq!(permission_to_name(Permission::RecordingDelete), Some("recording.delete"));
     }
 
     #[test]

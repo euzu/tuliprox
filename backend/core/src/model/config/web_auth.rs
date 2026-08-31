@@ -491,7 +491,9 @@ mod tests {
 
         assert!(permissions.contains(Permission::ConfigRead));
         assert!(!permissions.contains(Permission::RecordingRead));
-        assert!(!permissions.contains(Permission::RecordingWrite));
+        assert!(!permissions.contains(Permission::RecordingCreate));
+        assert!(!permissions.contains(Permission::RecordingManage));
+        assert!(!permissions.contains(Permission::RecordingDelete));
     }
 
     #[test]

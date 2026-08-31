@@ -107,7 +107,9 @@ fn permission_name(p: Permission) -> &'static str {
         Permission::EpgRead => "epg.read",
         Permission::EpgWrite => "epg.write",
         Permission::RecordingRead => "recording.read",
-        Permission::RecordingWrite => "recording.write",
+        Permission::RecordingCreate => "recording.create",
+        Permission::RecordingManage => "recording.manage",
+        Permission::RecordingDelete => "recording.delete",
     }
 }
 
@@ -203,14 +205,14 @@ pub fn is_system_principal(claims: &Claims) -> bool {
 fn check_create(claims: &Claims, action: RecordingAction) -> RecordingDecision {
     match action {
         RecordingAction::CreatePrivate => {
-            if !has_recording_write(claims) {
-                return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingWrite));
+            if !has(claims, Permission::RecordingCreate) {
+                return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingCreate));
             }
             RecordingDecision::Allow
         }
         RecordingAction::CreateShared => {
-            if !has_recording_write(claims) {
-                return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingWrite));
+            if !has(claims, Permission::RecordingCreate) {
+                return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingCreate));
             }
             if !is_admin(claims) {
                 return RecordingDecision::Deny(DenyReason::NotAdministrator);
@@ -227,7 +229,7 @@ fn is_visibility(meta: &RecordingMetadata, want: RecordingVisibility) -> bool { 
 
 fn has_recording_read(claims: &Claims) -> bool { claims.permissions.contains(Permission::RecordingRead) }
 
-fn has_recording_write(claims: &Claims) -> bool { claims.permissions.contains(Permission::RecordingWrite) }
+fn has(claims: &Claims, permission: Permission) -> bool { claims.permissions.contains(permission) }
 
 /// The principal decision. Pure function — does not touch the
 /// filesystem, the network, or the queue.
@@ -252,7 +254,7 @@ pub fn authorize(
     // recording on behalf of any user, including when the owner
     // cannot be resolved (e.g., a corrupted registry entry). The
     // bypass is narrow: state must be eligible, path must be valid,
-    // and the caller must carry `recording.write`.
+    // and the caller must carry `recording.delete`.
     if matches!(action, RecordingAction::SystemRetentionDelete) {
         if !recording.state.is_eligible_for_retention() {
             return RecordingDecision::Deny(DenyReason::IneligibleState);
@@ -260,8 +262,8 @@ pub fn authorize(
         if !recording.path_valid {
             return RecordingDecision::Deny(DenyReason::InvalidPath);
         }
-        if !has_recording_write(claims) {
-            return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingWrite));
+        if !has(claims, Permission::RecordingDelete) {
+            return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingDelete));
         }
         if !is_admin(claims) {
             // The system-retention path bypasses user ownership only
@@ -284,8 +286,8 @@ pub fn authorize(
             return check_create(claims, action);
         }
         RecordingAction::ManageRule => {
-            if !has_recording_write(claims) {
-                return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingWrite));
+            if !has(claims, Permission::RecordingManage) {
+                return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingManage));
             }
             if !is_admin(claims) {
                 return RecordingDecision::Deny(DenyReason::NotAdministrator);
@@ -307,12 +309,13 @@ pub fn authorize(
             check_read_action(claims, subject_id, meta)
         }
         RecordingAction::CreatePrivate | RecordingAction::CreateShared => check_create(claims, action),
-        RecordingAction::Edit | RecordingAction::Cancel | RecordingAction::Delete => {
-            check_mutate_action(claims, subject_id, meta)
+        RecordingAction::Edit | RecordingAction::Cancel => {
+            check_mutate_action(claims, subject_id, meta, Permission::RecordingManage)
         }
+        RecordingAction::Delete => check_mutate_action(claims, subject_id, meta, Permission::RecordingDelete),
         RecordingAction::ManageRule => {
-            if !has_recording_write(claims) {
-                return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingWrite));
+            if !has(claims, Permission::RecordingManage) {
+                return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingManage));
             }
             if !is_admin(claims) {
                 return RecordingDecision::Deny(DenyReason::NotAdministrator);
@@ -337,9 +340,14 @@ fn check_read_action(claims: &Claims, subject_id: &UserId, meta: &RecordingMetad
     RecordingDecision::Allow
 }
 
-fn check_mutate_action(claims: &Claims, subject_id: &UserId, meta: &RecordingMetadata) -> RecordingDecision {
-    if !has_recording_write(claims) {
-        return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingWrite));
+fn check_mutate_action(
+    claims: &Claims,
+    subject_id: &UserId,
+    meta: &RecordingMetadata,
+    required: Permission,
+) -> RecordingDecision {
+    if !has(claims, required) {
+        return RecordingDecision::Deny(DenyReason::MissingPermission(required));
     }
     if is_visibility(meta, RecordingVisibility::Private) {
         if owner_of(meta) == subject_id {
@@ -347,8 +355,7 @@ fn check_mutate_action(claims: &Claims, subject_id: &UserId, meta: &RecordingMet
         }
         return RecordingDecision::Deny(DenyReason::NotOwner);
     }
-    // Shared visibility: only admins can mutate ("shared mutation
-    // only to administrators with recording.write").
+    // Shared visibility: only administrators may mutate.
     if !is_admin(claims) {
         return RecordingDecision::Deny(DenyReason::NotAdministrator);
     }
@@ -448,9 +455,15 @@ mod tests {
     fn subject(uid: &str) -> UserId { UserId::from(uid) }
 
     fn read_perms() -> shared::model::permission::PermissionSet { Permission::RecordingRead.into() }
-    fn write_perms() -> shared::model::permission::PermissionSet { Permission::RecordingWrite.into() }
+    /// Every recording mutation permission, for tests that only care that the
+    /// caller is allowed to mutate at all.
+    fn write_perms() -> shared::model::permission::PermissionSet {
+        Permission::RecordingCreate | Permission::RecordingManage | Permission::RecordingDelete
+    }
     fn read_write_perms() -> shared::model::permission::PermissionSet {
-        Permission::RecordingRead | Permission::RecordingWrite
+        let mut perms = write_perms();
+        perms.set(Permission::RecordingRead);
+        perms
     }
     fn config_read_perms() -> shared::model::permission::PermissionSet { Permission::ConfigRead.into() }
 
@@ -529,7 +542,7 @@ mod tests {
     // --- create ---
 
     #[test]
-    fn create_private_with_recording_write_is_allowed() {
+    fn create_private_with_recording_create_is_allowed() {
         let claims = make_claims("alice", Some(subject("web:alice")), vec!["WEB"], write_perms());
         let sub = RecordingSubject::new(None, TerminalState::Active, true);
         let d = authorize(
@@ -555,7 +568,7 @@ mod tests {
     }
 
     #[test]
-    fn create_shared_with_admin_role_and_recording_write_is_allowed() {
+    fn create_shared_with_admin_role_and_recording_create_is_allowed() {
         let claims = make_claims("admin", Some(UserId::builtin_admin()), vec!["ADMIN"], read_write_perms());
         let sub = RecordingSubject::new(None, TerminalState::Active, true);
         let d = authorize(
@@ -570,7 +583,7 @@ mod tests {
     // --- edit / cancel / delete ---
 
     #[test]
-    fn edit_private_owner_with_recording_write_is_allowed() {
+    fn edit_private_owner_with_recording_manage_is_allowed() {
         let claims = make_claims("alice", Some(subject("web:alice")), vec!["WEB"], write_perms());
         let meta = owner_meta("web:alice", RecordingVisibility::Private);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Scheduled, true);
@@ -628,7 +641,7 @@ mod tests {
     // --- manage rule ---
 
     #[test]
-    fn manage_rule_requires_administrator_and_recording_write() {
+    fn manage_rule_requires_administrator_and_recording_manage() {
         let claims = make_claims("alice", Some(subject("web:alice")), vec!["WEB"], write_perms());
         let sub = RecordingSubject::new(None, TerminalState::Active, true);
         let d = authorize(
@@ -692,7 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn system_retention_delete_requires_recording_write() {
+    fn system_retention_delete_requires_recording_delete() {
         let claims = make_claims("admin", Some(UserId::builtin_admin()), vec!["ADMIN"], read_perms());
         let meta = owner_meta("web:alice", RecordingVisibility::Private);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Completed, true);
@@ -702,7 +715,7 @@ mod tests {
             RecordingAction::SystemRetentionDelete,
             &sub,
         );
-        assert!(matches!(d, RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingWrite))));
+        assert!(matches!(d, RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingDelete))));
     }
 
     #[test]
@@ -786,7 +799,9 @@ mod tests {
         // `Claims` the supervisor mints, and the agreement has to be
         // verifiable without touching the supervisor module.
         let mut perms = shared::model::permission::PermissionSet::new();
-        perms.set(Permission::RecordingWrite);
+        perms.set(Permission::RecordingCreate);
+        perms.set(Permission::RecordingManage);
+        perms.set(Permission::RecordingDelete);
         perms.set(Permission::RecordingRead);
         let claims = make_claims(SYSTEM_PRINCIPAL_USERNAME, Some(UserId::builtin_admin()), vec![ROLE_ADMIN], perms);
         assert!(is_system_principal(&claims));
@@ -798,7 +813,9 @@ mod tests {
         // match. Without this distinction a forged `username` field
         // would silently elevate the caller to a bypass path.
         let mut perms = shared::model::permission::PermissionSet::new();
-        perms.set(Permission::RecordingWrite);
+        perms.set(Permission::RecordingCreate);
+        perms.set(Permission::RecordingManage);
+        perms.set(Permission::RecordingDelete);
         perms.set(Permission::RecordingRead);
         let claims = make_claims("alice", Some(UserId::builtin_admin()), vec![ROLE_ADMIN], perms);
         assert!(!is_system_principal(&claims));
@@ -812,7 +829,9 @@ mod tests {
         // point: future policy additions must not silently break the
         // background workers.
         let mut perms = shared::model::permission::PermissionSet::new();
-        perms.set(Permission::RecordingWrite);
+        perms.set(Permission::RecordingCreate);
+        perms.set(Permission::RecordingManage);
+        perms.set(Permission::RecordingDelete);
         perms.set(Permission::RecordingRead);
         let claims = make_claims(SYSTEM_PRINCIPAL_USERNAME, Some(UserId::builtin_admin()), vec![ROLE_ADMIN], perms);
         let meta = make_meta(RecordingOwner::User(UserId::from("web:alice")), RecordingVisibility::Private);

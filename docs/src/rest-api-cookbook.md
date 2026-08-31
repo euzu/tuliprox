@@ -432,7 +432,9 @@ With Web UI authentication enabled, many endpoints require matching permissions 
 - `download.read`
 - `download.write`
 - `recording.read`
-- `recording.write`
+- `recording.create`
+- `recording.manage`
+- `recording.delete`
 
 If a request is rejected, verify the logged-in Web UI user's RBAC group assignments first.
 

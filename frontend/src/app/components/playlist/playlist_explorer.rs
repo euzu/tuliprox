@@ -109,7 +109,7 @@ pub fn PlaylistExplorer() -> Html {
         return html! { <NoContent text={translate.t("LABEL.NO_CONTENT")} /> };
     };
     let service_ctx = use_service_context();
-    let can_write_recordings = service_ctx.auth.has_permission(Permission::RecordingWrite);
+    let can_write_recordings = service_ctx.auth.has_permission(Permission::RecordingCreate);
     let is_admin_role = service_ctx.auth.is_admin();
     let recording_padding = {
         let rec = config_ctx
@@ -446,7 +446,7 @@ pub fn PlaylistExplorer() -> Html {
                                 let body = html! {
                                     <RecordingForm
                                         prefill={prefill}
-                                        has_recording_write={can_write_recordings}
+                                        has_recording_manage={can_write_recordings}
                                         is_admin_role={is_admin_role}
                                         on_submit={on_submit}
                                         on_cancel={on_cancel}

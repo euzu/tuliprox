@@ -431,7 +431,7 @@ mod tests {
         assert_eq!(claims.roles, vec![ROLE_ADMIN]);
         assert_eq!(claims.permissions, PERM_ALL);
         assert_eq!(claims.permission_schema_version, CURRENT_PERMISSION_SCHEMA_VERSION);
-        assert!(claims.permissions.contains(Permission::RecordingWrite));
+        assert!(claims.permissions.contains(Permission::RecordingManage));
 
         for authorization in [None, Some("Basic authorized"), Some("Bearer wrong")] {
             let response = extract_auth_claims(&state, authorization).await.expect_err("rejected");

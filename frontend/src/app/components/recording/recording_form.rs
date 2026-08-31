@@ -177,8 +177,10 @@ fn format_timestamp_for_filename(ts: i64) -> String {
 }
 
 /// Show the Shared visibility option only to administrators with
-/// `recording.write`. Non-admins can only record privately.
-pub fn can_pick_shared(has_recording_write: bool, is_admin_role: bool) -> bool { has_recording_write && is_admin_role }
+/// `recording.manage`. Non-admins can only record privately.
+pub fn can_pick_shared(has_recording_manage: bool, is_admin_role: bool) -> bool {
+    has_recording_manage && is_admin_role
+}
 
 pub fn target_name_for_id(
     sources: &shared::model::SourcesConfigDto,
@@ -259,16 +261,16 @@ pub fn format_interval_for_display(ts: i64) -> String {
 
 /// Convenience accessor for callers that track a `PermissionSet`.
 #[cfg(test)]
-pub fn has_recording_write(permissions: &shared::model::permission::PermissionSet) -> bool {
-    permissions.contains(Permission::RecordingWrite)
+pub fn has_recording_create(permissions: &shared::model::permission::PermissionSet) -> bool {
+    permissions.contains(Permission::RecordingCreate)
 }
 
 /// Properties for the recording form component.
 #[derive(Properties, Clone, PartialEq)]
 pub struct RecordingFormProps {
     pub prefill: RecordingFormPrefill,
-    /// `recording.write` permission.
-    pub has_recording_write: bool,
+    /// `recording.manage` permission.
+    pub has_recording_manage: bool,
     /// Whether the principal carries the built-in administrator role.
     pub is_admin_role: bool,
     /// Submit callback. Fires with a fully populated
@@ -284,7 +286,7 @@ pub fn RecordingForm(props: &RecordingFormProps) -> Html {
     let prefill = &props.prefill;
     let pre_state = use_state(|| prefill.padding.default_pre_roll_secs);
     let post_state = use_state(|| prefill.padding.default_post_roll_secs);
-    let shared_offered = can_pick_shared(props.has_recording_write, props.is_admin_role);
+    let shared_offered = can_pick_shared(props.has_recording_manage, props.is_admin_role);
     let shared_state = use_state(|| false);
     let start_state = use_state(|| prefill.program_start);
     let duration_minutes_state = use_state(|| {
@@ -864,11 +866,11 @@ mod tests {
     }
 
     #[test]
-    fn has_recording_write_respects_permission_set() {
-        let perms: shared::model::permission::PermissionSet = Permission::RecordingWrite.into();
-        assert!(has_recording_write(&perms));
+    fn has_recording_create_respects_permission_set() {
+        let perms: shared::model::permission::PermissionSet = Permission::RecordingCreate.into();
+        assert!(has_recording_create(&perms));
         let none = shared::model::permission::PermissionSet::new();
-        assert!(!has_recording_write(&none));
+        assert!(!has_recording_create(&none));
     }
 
     #[test]

@@ -346,17 +346,18 @@ behaviour they cover is asserted portably by the no-clobber tests.
 | Operation                    | Private recording                 | Shared recording                 | `LegacyAdmin`                   | Orphan       |
 |------------------------------|-----------------------------------|----------------------------------|---------------------------------|--------------|
 | Read / Playback / Download   | owner with `recording.read`       | anyone with `recording.read`     | admin only                      | admin only   |
-| Create private               | user with `recording.write`       | n/a                              | admin only                      | n/a          |
-| Create shared                | rejected (admin only)             | admin + `recording.write`        | admin only                      | n/a          |
-| Edit / Cancel / Delete       | owner + `recording.write`         | admin + `recording.write`        | admin only                      | n/a          |
-| Manage recurring rule        | owner + `recording.write`         | admin + `recording.write`        | admin only                      | n/a          |
+| Create private               | user with `recording.create`      | n/a                              | admin only                      | n/a          |
+| Create shared                | rejected (admin only)             | admin + `recording.create`       | admin only                      | n/a          |
+| Edit / Cancel                | owner + `recording.manage`        | admin + `recording.manage`       | admin only                      | n/a          |
+| Delete                       | owner + `recording.delete`        | admin + `recording.delete`       | admin only                      | n/a          |
+| Manage recurring rule        | owner + `recording.manage`        | admin + `recording.manage`       | admin only                      | n/a          |
 | `SystemRetentionDelete`      | ownership bypassed; state-gated   | ownership bypassed; state-gated  | ownership bypassed; state-gated | n/a          |
 | Orphan catalog               | n/a                               | n/a                              | n/a                             | admin only   |
 
 Administrators **do not** implicitly receive another regular user's private recording content. The
 private owner is the only non-administrator allowed to read it. Administrative access is read-only
 for diagnosis; mutations require either the `SystemRetentionDelete` action (which the retention
-worker is the only legitimate caller of) or the appropriate `recording.write` + ownership
+worker is the only legitimate caller of) or the appropriate recording permission + ownership
 combination.
 
 Orphan catalog entries (recordings whose target/input no longer matches a configured source) are
@@ -590,7 +591,7 @@ Missing messaging configuration is a no-op; the adapter logs the dispatch decisi
    existing flows to keep working.
 4. **Back up `web_user_ids.json`** after the first successful start. The bootstrap writes the
    file automatically; the operator should preserve it across restarts.
-5. **Grant `recording.read` / `recording.write`** explicitly to the user groups that need them.
+5. **Grant `recording.read`, `recording.create`, `recording.manage` and `recording.delete`** explicitly to the user groups that need them.
    The `permissions: 65535` legacy config does **not** implicitly grant the new bits.
 6. **Refresh old tokens**. The schema bump forces a token refresh; pre-bump tokens get an
    `X-Token-Refresh: required` 401. Users sign in again to receive the current claims.

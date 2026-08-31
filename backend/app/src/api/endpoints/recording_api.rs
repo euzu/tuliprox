@@ -206,7 +206,7 @@ async fn create_http_recording_task(
     {
         return error_response(StatusCode::UNPROCESSABLE_ENTITY, "recording_invalid_interval");
     }
-    if !claims.permissions.contains(Permission::RecordingWrite) {
+    if !claims.permissions.contains(Permission::RecordingManage) {
         return error_response(StatusCode::FORBIDDEN, "recording_forbidden");
     }
     let Some(owner_id) = claims.subject_id.clone() else {
@@ -647,7 +647,7 @@ fn recording_rule_repo(app_state: &AppState) -> RecordingRuleRepository {
     RecordingRuleRepository::new(&app_state.app_config.config.load().storage_dir)
 }
 
-fn can_write_rules(claims: &shared::model::Claims) -> bool { claims.permissions.contains(Permission::RecordingWrite) }
+fn can_write_rules(claims: &shared::model::Claims) -> bool { claims.permissions.contains(Permission::RecordingManage) }
 
 fn is_admin(claims: &shared::model::Claims) -> bool { claims.roles.iter().any(|role| role == ROLE_ADMIN) }
 
@@ -1071,7 +1071,7 @@ pub async fn recording_availability(
     AuthClaims(claims): AuthClaims,
 ) -> axum::response::Response {
     if !claims.permissions.contains(Permission::RecordingRead)
-        && !claims.permissions.contains(Permission::RecordingWrite)
+        && !claims.permissions.contains(Permission::RecordingCreate)
     {
         return error_response(StatusCode::FORBIDDEN, "recording_forbidden");
     }
@@ -1160,7 +1160,7 @@ mod tests {
             iat: 0,
             exp: 0,
             roles: admin.then(|| ROLE_ADMIN.to_string()).into_iter().collect(),
-            permissions: Permission::RecordingWrite.into(),
+            permissions: Permission::RecordingManage.into(),
             pwd_version: 0,
             subject_id,
             permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,

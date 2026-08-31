@@ -12,12 +12,12 @@ pub const ROLE_API_USER: &str = "API_USER";
 /// "token refresh required" response so clients re-authenticate
 /// before the new permission bits can leak through.
 ///
-/// Bumped to `2` for the `download.read/write -> recording.read/write`
-/// migration. Old tokens still decode the legacy bits (rollback compat),
-/// but a fresh token issued by the authenticator carries the new bits
-/// and the `download.*` bits have been cleared by
-/// the recording permission bits.
-pub const CURRENT_PERMISSION_SCHEMA_VERSION: u16 = 3;
+/// Bumped to `3` for the `download.read/write -> recording.read/write`
+/// migration, and to `4` when `recording.write` was split into
+/// `recording.create`, `recording.manage` and `recording.delete`. Both
+/// changes renumbered the bits above them, so tokens issued before a bump
+/// must fail closed rather than have their old bits reinterpreted.
+pub const CURRENT_PERMISSION_SCHEMA_VERSION: u16 = 4;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Claims {
@@ -177,14 +177,14 @@ mod tests {
     }
 
     #[test]
-    fn current_permission_schema_version_rejects_download_era_tokens() {
-        // `download.read`/`download.write` were removed outright, which
-        // renumbered the recording bits. Any token minted before that
-        // carries a lower schema version and must fail closed instead of
-        // having its old bits reinterpreted.
+    fn current_permission_schema_version_rejects_stale_tokens() {
+        // Removing `download.*` and then splitting `recording.write`
+        // renumbered the recording bits twice. Any token minted before those
+        // changes carries a lower schema version and must fail closed instead
+        // of having its old bits reinterpreted.
         const {
             assert!(
-                CURRENT_PERMISSION_SCHEMA_VERSION >= 3,
+                CURRENT_PERMISSION_SCHEMA_VERSION >= 4,
                 "schema must be bumped when permission bits are renumbered"
             );
         };

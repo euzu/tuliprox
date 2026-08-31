@@ -78,11 +78,13 @@ pub fn now_ts() -> i64 { chrono::Utc::now().timestamp() }
 
 /// Claims for a system-initiated action. The retention worker is not a
 /// user; it holds the administrator role so it can act on shared and
-/// legacy-owned recordings, and `RecordingWrite` so the service-level
-/// permission checks pass.
+/// legacy-owned recordings, and the recording permissions the
+/// service-level checks require.
 pub fn system_claims() -> Claims {
     let mut permissions = PermissionSet::new();
-    permissions.set(Permission::RecordingWrite);
+    permissions.set(Permission::RecordingCreate);
+    permissions.set(Permission::RecordingManage);
+    permissions.set(Permission::RecordingDelete);
     permissions.set(Permission::RecordingRead);
     let now = now_ts();
     Claims {

@@ -23,7 +23,7 @@ use yew::prelude::*;
 
 /// Permission gate: may the principal see the recurring-rule
 /// section at all? Any user with `recording.read` can list rules; creation
-/// needs `recording.write`.
+/// needs `recording.manage`.
 #[allow(dead_code)]
 pub fn can_show_rules_section(has_recording_read: bool) -> bool { has_recording_read }
 
@@ -31,21 +31,21 @@ pub fn can_show_rules_section(has_recording_read: bool) -> bool { has_recording_
 /// can create private rules; only administrators can create shared
 /// rules.
 #[allow(dead_code)]
-pub fn can_create_rule(has_recording_write: bool) -> bool { has_recording_write }
+pub fn can_create_rule(has_recording_manage: bool) -> bool { has_recording_manage }
 
 /// Permission gate: may the principal create a *shared* rule?
-/// Administrators with `recording.write` only.
+/// Administrators with `recording.manage` only.
 #[allow(dead_code)]
-pub fn can_create_shared_rule(has_recording_write: bool, is_admin_role: bool) -> bool {
-    has_recording_write && is_admin_role
+pub fn can_create_shared_rule(has_recording_manage: bool, is_admin_role: bool) -> bool {
+    has_recording_manage && is_admin_role
 }
 
 /// Permission gate: may the principal edit this rule?
-/// - Private rule: owner with `recording.write`.
-/// - Shared rule: administrator with `recording.write`.
+/// - Private rule: owner with `recording.manage`.
+/// - Shared rule: administrator with `recording.manage`.
 #[allow(dead_code)]
-pub fn can_edit_rule(has_recording_write: bool, is_admin_role: bool, is_owner: bool, is_shared: bool) -> bool {
-    if !has_recording_write {
+pub fn can_edit_rule(has_recording_manage: bool, is_admin_role: bool, is_owner: bool, is_shared: bool) -> bool {
+    if !has_recording_manage {
         return false;
     }
     if is_shared {
@@ -58,8 +58,8 @@ pub fn can_edit_rule(has_recording_write: bool, is_admin_role: bool, is_owner: b
 /// Permission gate: may the principal delete this rule?
 /// Same matrix as edit.
 #[allow(dead_code)]
-pub fn can_delete_rule(has_recording_write: bool, is_admin_role: bool, is_owner: bool, is_shared: bool) -> bool {
-    can_edit_rule(has_recording_write, is_admin_role, is_owner, is_shared)
+pub fn can_delete_rule(has_recording_manage: bool, is_admin_role: bool, is_owner: bool, is_shared: bool) -> bool {
+    can_edit_rule(has_recording_manage, is_admin_role, is_owner, is_shared)
 }
 
 /// The delete future-policy options exposed to the user. The API

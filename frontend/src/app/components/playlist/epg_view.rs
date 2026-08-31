@@ -236,7 +236,7 @@ pub fn EpgView() -> Html {
     let is_program_panning = use_state(|| false);
     let is_timeline_panning = use_state(|| false);
     let selected_epg_source = use_state(|| None::<PlaylistEpgRequest>);
-    let can_write_recordings = services.auth.has_permission(Permission::RecordingWrite);
+    let can_write_recordings = services.auth.has_permission(Permission::RecordingCreate);
     let is_admin_role = services.auth.is_admin();
     let recording_padding = {
         let rec = config_ctx
@@ -927,7 +927,7 @@ pub fn EpgView() -> Html {
                 let body = html! {
                     <RecordingForm
                         prefill={prefill}
-                        has_recording_write={can_write_recordings}
+                        has_recording_manage={can_write_recordings}
                         is_admin_role={is_admin_role}
                         on_submit={on_submit}
                         on_cancel={Callback::from(|()| {})}

@@ -336,7 +336,8 @@ fn push_reconcilable(tasks: &mut Vec<ReconcilableTask>, task: &RecordingTask) {
 
 fn scheduler_claims(owner_id: shared::model::UserId, visibility: RuleVisibility) -> Claims {
     let mut permissions = PermissionSet::new();
-    permissions.set(Permission::RecordingWrite);
+    permissions.set(Permission::RecordingCreate);
+    permissions.set(Permission::RecordingManage);
     let roles = if visibility == RuleVisibility::Shared { vec![ROLE_ADMIN.to_string()] } else { Vec::new() };
     let now = Utc::now().timestamp();
     Claims {

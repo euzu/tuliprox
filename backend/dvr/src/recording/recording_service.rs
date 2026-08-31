@@ -673,7 +673,7 @@ impl RecordingService {
         now_secs: i64,
     ) -> Result<Vec<CancelledRuleRecording>, ServiceError> {
         let _ = Self::subject_id(claims)?;
-        if !claims.permissions.contains(shared::model::Permission::RecordingWrite) {
+        if !claims.permissions.contains(shared::model::Permission::RecordingManage) {
             return Err(ServiceError::Forbidden);
         }
         let mut cancelled = Vec::new();
@@ -1568,7 +1568,7 @@ mod tests {
             iat: 0,
             exp: 0,
             roles: Vec::new(),
-            permissions: Permission::RecordingWrite.into(),
+            permissions: Permission::RecordingCreate | Permission::RecordingManage | Permission::RecordingDelete,
             pwd_version: 0,
             subject_id: Some(UserId::from("web:alice")),
             permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,
@@ -1601,7 +1601,7 @@ mod tests {
             iat: 0,
             exp: 0,
             roles: Vec::new(),
-            permissions: Permission::RecordingWrite.into(),
+            permissions: Permission::RecordingCreate | Permission::RecordingManage | Permission::RecordingDelete,
             pwd_version: 0,
             subject_id: Some(UserId::from("web:alice")),
             permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,
@@ -1644,7 +1644,7 @@ mod tests {
             iat: 0,
             exp: 0,
             roles: Vec::new(),
-            permissions: Permission::RecordingWrite.into(),
+            permissions: Permission::RecordingCreate | Permission::RecordingManage | Permission::RecordingDelete,
             pwd_version: 0,
             subject_id: Some(UserId::from("web:alice")),
             permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,
@@ -1748,7 +1748,7 @@ mod tests {
             iat: 0,
             exp: 0,
             roles: Vec::new(),
-            permissions: Permission::RecordingWrite.into(),
+            permissions: Permission::RecordingCreate | Permission::RecordingManage | Permission::RecordingDelete,
             pwd_version: 0,
             subject_id: Some(UserId::from("web:alice")),
             permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,
@@ -1781,7 +1781,7 @@ mod tests {
             iat: 0,
             exp: 0,
             roles: Vec::new(),
-            permissions: Permission::RecordingWrite.into(),
+            permissions: Permission::RecordingCreate | Permission::RecordingManage | Permission::RecordingDelete,
             pwd_version: 0,
             subject_id: Some(UserId::from("web:alice")),
             permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,
@@ -1818,7 +1818,7 @@ mod tests {
             iat: 0,
             exp: 0,
             roles: Vec::new(),
-            permissions: Permission::RecordingWrite.into(),
+            permissions: Permission::RecordingCreate | Permission::RecordingManage | Permission::RecordingDelete,
             pwd_version: 0,
             subject_id: Some(UserId::from("web:alice")),
             permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,
@@ -2067,7 +2067,7 @@ mod tests {
             iat: 0,
             exp: 0,
             roles: Vec::new(),
-            permissions: Permission::RecordingWrite.into(),
+            permissions: Permission::RecordingCreate | Permission::RecordingManage | Permission::RecordingDelete,
             pwd_version: 0,
             subject_id: Some(UserId::from("web:alice")),
             permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,

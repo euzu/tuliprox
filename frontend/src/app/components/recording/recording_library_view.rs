@@ -179,29 +179,33 @@ fn is_sortable(col: usize) -> bool { (1..=8).contains(&col) }
 /// deleted: pausing ffmpeg would lose an unrecoverable part of the
 /// broadcast, and its programme window is gone once it passed, so there is
 /// nothing to resume or retry.
-fn action_availability(can_write: bool, task: &RecordingTaskDto) -> RecordingActionAvailability {
-    if !can_write {
+fn action_availability(can_manage: bool, can_delete: bool, task: &RecordingTaskDto) -> RecordingActionAvailability {
+    if !can_manage && !can_delete {
         return RecordingActionAvailability::default();
     }
     let resumable = task.kind.is_resumable();
     RecordingActionAvailability {
-        pause: resumable
+        pause: can_manage
+            && resumable
             && matches!(
                 task.status,
                 TransferStatusDto::Running | TransferStatusDto::WaitingForCapacity | TransferStatusDto::RetryWaiting
             ),
-        resume: resumable && task.status == TransferStatusDto::Paused,
-        cancel: matches!(
-            task.status,
-            TransferStatusDto::Running
-                | TransferStatusDto::Queued
-                | TransferStatusDto::Scheduled
-                | TransferStatusDto::Paused
-                | TransferStatusDto::WaitingForCapacity
-                | TransferStatusDto::RetryWaiting
-        ),
-        remove: task.is_terminal(),
-        retry: resumable && matches!(task.status, TransferStatusDto::Failed | TransferStatusDto::Cancelled),
+        resume: can_manage && resumable && task.status == TransferStatusDto::Paused,
+        cancel: can_manage
+            && matches!(
+                task.status,
+                TransferStatusDto::Running
+                    | TransferStatusDto::Queued
+                    | TransferStatusDto::Scheduled
+                    | TransferStatusDto::Paused
+                    | TransferStatusDto::WaitingForCapacity
+                    | TransferStatusDto::RetryWaiting
+            ),
+        remove: can_delete && task.is_terminal(),
+        retry: can_manage
+            && resumable
+            && matches!(task.status, TransferStatusDto::Failed | TransferStatusDto::Cancelled),
     }
 }
 
@@ -253,7 +257,8 @@ pub fn recording_library_view() -> Html {
     let translate = use_translation();
     let services = use_service_context();
     let dialog = use_context::<DialogService>().expect("Dialog service not found");
-    let can_write = services.auth.has_permission(Permission::RecordingWrite);
+    let can_manage = services.auth.has_permission(Permission::RecordingManage);
+    let can_delete = services.auth.has_permission(Permission::RecordingDelete);
     let active_tab = use_state(|| RecordingTab::Current);
     let tasks_state = use_state(|| Rc::new(Vec::<RecordingTaskDto>::new()));
     let table_items = use_state(|| None::<Rc<Vec<Rc<RecordingTaskDto>>>>);
@@ -362,7 +367,7 @@ pub fn recording_library_view() -> Html {
         Callback::<(usize, usize, Rc<RecordingTaskDto>), Html>::from(
             move |(_row, col, dto): (usize, usize, Rc<RecordingTaskDto>)| match col {
                 0 => {
-                    let actions = action_availability(can_write, &dto);
+                    let actions = action_availability(can_manage, can_delete, &dto);
                     let retry_label = if dto.status == TransferStatusDto::Cancelled { "Resume" } else { "Retry" };
                     let retry_icon = if dto.status == TransferStatusDto::Cancelled { "Play" } else { "Refresh" };
                     let pause_id = dto.id.clone();
@@ -568,13 +573,13 @@ mod tests {
 
     #[test]
     fn live_can_only_be_stopped_and_deleted() {
-        let running = action_availability(true, &task("live", RecordingKind::Live, TransferStatusDto::Running));
+        let running = action_availability(true, true, &task("live", RecordingKind::Live, TransferStatusDto::Running));
         assert!(!running.pause, "pausing ffmpeg would lose the broadcast");
         assert!(!running.resume);
         assert!(!running.retry, "the programme window is gone");
         assert!(running.cancel);
 
-        let failed = action_availability(true, &task("live", RecordingKind::Live, TransferStatusDto::Failed));
+        let failed = action_availability(true, true, &task("live", RecordingKind::Live, TransferStatusDto::Failed));
         assert!(failed.remove);
         assert!(!failed.retry);
     }
@@ -582,17 +587,29 @@ mod tests {
     #[test]
     fn vod_and_series_can_be_paused_resumed_and_retried() {
         for kind in [RecordingKind::Vod, RecordingKind::Series] {
-            assert!(action_availability(true, &task("t", kind, TransferStatusDto::Running)).pause);
-            assert!(action_availability(true, &task("t", kind, TransferStatusDto::Paused)).resume);
-            assert!(action_availability(true, &task("t", kind, TransferStatusDto::Failed)).retry);
-            assert!(action_availability(true, &task("t", kind, TransferStatusDto::Cancelled)).retry);
+            assert!(action_availability(true, true, &task("t", kind, TransferStatusDto::Running)).pause);
+            assert!(action_availability(true, true, &task("t", kind, TransferStatusDto::Paused)).resume);
+            assert!(action_availability(true, true, &task("t", kind, TransferStatusDto::Failed)).retry);
+            assert!(action_availability(true, true, &task("t", kind, TransferStatusDto::Cancelled)).retry);
         }
     }
 
     #[test]
-    fn no_action_without_write_permission() {
-        let actions = action_availability(false, &task("t", RecordingKind::Vod, TransferStatusDto::Running));
+    fn no_action_without_a_mutation_permission() {
+        let actions = action_availability(false, false, &task("t", RecordingKind::Vod, TransferStatusDto::Running));
         assert_eq!(actions, super::RecordingActionAvailability::default());
+    }
+
+    #[test]
+    fn manage_and_delete_are_gated_separately() {
+        // `recording.delete` alone must not hand out the running-state
+        // controls, and `recording.manage` alone must not offer removal.
+        let running = task("t", RecordingKind::Vod, TransferStatusDto::Running);
+        let finished = task("t", RecordingKind::Vod, TransferStatusDto::Completed);
+        assert!(action_availability(true, false, &running).cancel);
+        assert!(!action_availability(true, false, &finished).remove);
+        assert!(!action_availability(false, true, &running).cancel);
+        assert!(action_availability(false, true, &finished).remove);
     }
 
     #[test]
