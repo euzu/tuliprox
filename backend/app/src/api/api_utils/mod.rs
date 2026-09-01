@@ -726,6 +726,10 @@ fn get_stream_alternative_url_m3u(
     input: &ConfigInput,
     alias_input: &Arc<ProviderConfig>,
 ) -> Option<String> {
+    if let Some(source_config_url) = find_input_account_by_query_signature(stream_url, input) {
+        return rewrite_account_query_fields(stream_url, source_config_url, &alias_input.url);
+    }
+
     if let Some((source_base_url, source_username, source_password)) =
         find_input_account_by_signature(stream_url, input)
     {
@@ -762,6 +766,118 @@ fn get_stream_alternative_url_m3u(
     if stream_url_has_account_signature(stream_url, &alt_input_user_info) {
         return None;
     }
+    Some(stream_url.to_string())
+}
+
+fn is_account_query_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    matches!(
+        key.as_str(),
+        "token"
+            | "access_token"
+            | "auth_token"
+            | "key"
+            | "apikey"
+            | "api_key"
+            | "accesskey"
+            | "access_key"
+            | "auth"
+            | "authorization"
+    ) || key.ends_with("_token")
+        || key.ends_with("_key")
+}
+
+fn find_input_account_by_query_signature<'a>(stream_url: &str, input: &'a ConfigInput) -> Option<&'a str> {
+    if stream_url_account_query_matches(stream_url, &input.url) {
+        return Some(&input.url);
+    }
+
+    input.aliases.as_ref().and_then(|aliases| {
+        aliases
+            .iter()
+            .find(|alias| stream_url_account_query_matches(stream_url, &alias.url))
+            .map(|alias| alias.url.as_str())
+    })
+}
+
+fn stream_url_account_query_matches(stream_url: &str, config_url: &str) -> bool {
+    let (Ok(stream_url), Ok(config_url)) = (Url::parse(stream_url), Url::parse(config_url)) else {
+        return false;
+    };
+
+    config_url.query_pairs().any(|(config_key, config_value)| {
+        is_account_query_key(&config_key)
+            && stream_url.query_pairs().any(|(stream_key, stream_value)| {
+                stream_key.eq_ignore_ascii_case(&config_key) && stream_value == config_value
+            })
+    })
+}
+
+fn rewrite_account_query_fields(stream_url: &str, source_config_url: &str, target_config_url: &str) -> Option<String> {
+    let mut stream_url = Url::parse(stream_url).ok()?;
+    let source_config_url = Url::parse(source_config_url).ok()?;
+    let target_config_url = Url::parse(target_config_url).ok()?;
+    let source_pairs: Vec<_> = source_config_url
+        .query_pairs()
+        .filter(|(key, _)| is_account_query_key(key))
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    let target_pairs: Vec<_> = target_config_url
+        .query_pairs()
+        .filter(|(key, _)| is_account_query_key(key))
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    let unambiguous_cross_key_target =
+        if source_pairs.len() == 1 && target_pairs.len() == 1 { target_pairs.first() } else { None };
+    let present_source_pairs: Vec<_> = source_pairs
+        .iter()
+        .filter(|(source_key, source_value)| {
+            stream_url.query_pairs().any(|(stream_key, stream_value)| {
+                stream_key.eq_ignore_ascii_case(source_key) && stream_value == source_value.as_str()
+            })
+        })
+        .collect();
+    let replacements: Vec<_> = present_source_pairs
+        .iter()
+        .filter_map(|(source_key, source_value)| {
+            target_pairs
+                .iter()
+                .find(|(target_key, _)| target_key.eq_ignore_ascii_case(source_key))
+                .or(unambiguous_cross_key_target)
+                .map(|(target_key, target_value)| {
+                    (source_key.clone(), source_value.clone(), target_key.clone(), target_value.clone())
+                })
+        })
+        .collect();
+
+    if replacements.len() != present_source_pairs.len() || replacements.is_empty() {
+        return None;
+    }
+
+    let mut replaced = false;
+    let stream_pairs: Vec<(String, String)> = stream_url
+        .query_pairs()
+        .map(|(key, value)| {
+            if let Some((_, _, target_key, target_value)) =
+                replacements.iter().find(|(source_key, source_value, _, _)| {
+                    key.eq_ignore_ascii_case(source_key) && value == source_value.as_str()
+                })
+            {
+                replaced = true;
+                (target_key.clone(), target_value.clone())
+            } else {
+                (key.into_owned(), value.into_owned())
+            }
+        })
+        .collect();
+
+    if !replaced {
+        return None;
+    }
+    stream_url
+        .query_pairs_mut()
+        .clear()
+        .extend_pairs(stream_pairs.iter().map(|(key, value)| (key.as_str(), value.as_str())));
     Some(stream_url.to_string())
 }
 
@@ -892,8 +1008,10 @@ fn rewrite_path_auth_fields(
 }
 
 fn stream_url_matches_provider(stream_url: &str, provider_cfg: &ProviderConfig) -> bool {
+    let account_query_matches =
+        provider_cfg.input_type.is_m3u() && stream_url_account_query_matches(stream_url, &provider_cfg.url);
     let Some(user_info) = provider_cfg.get_user_info() else {
-        return false;
+        return account_query_matches;
     };
     if stream_url_base_matches(stream_url, &user_info.base_url) {
         // Same-host fast path: both base URL and account identity must match.

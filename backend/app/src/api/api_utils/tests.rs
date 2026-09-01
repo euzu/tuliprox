@@ -427,6 +427,139 @@ fn get_stream_alternative_url_rewrites_external_cdn_url_with_valid_account_signa
 }
 
 #[test]
+fn get_stream_alternative_url_rewrites_opaque_m3u_token_for_alias_account() {
+    let input = ConfigInput {
+        name: "source".intern(),
+        url: "http://playlist.example/a.m3u?token=provider-a-token".to_string(),
+        input_type: InputType::M3u,
+        aliases: Some(vec![ConfigInputAlias {
+            id: 2,
+            name: "alias".intern(),
+            url: "http://playlist.example/b.m3u?token=provider-b-token".to_string(),
+            username: None,
+            password: None,
+            max_connections: 0,
+            priority: 0,
+            exp_date: None,
+            enabled: true,
+            stalker: None,
+        }]),
+        ..ConfigInput::default()
+    };
+    let alias = test_runtime_provider_without_credentials(
+        "http://playlist.example/b.m3u?token=provider-b-token",
+        InputType::M3u,
+    );
+
+    let rewritten =
+        get_stream_alternative_url("http://stream.example/channel/segment.ts?token=provider-a-token", &input, &alias);
+
+    assert_eq!(rewritten, Some("http://stream.example/channel/segment.ts?token=provider-b-token".to_string()));
+}
+
+#[test]
+fn get_stream_alternative_url_rewrites_single_opaque_m3u_credential_with_different_key() {
+    let input = ConfigInput {
+        name: "source".intern(),
+        url: "http://playlist.example/a.m3u?token=provider-a-token".to_string(),
+        input_type: InputType::M3u,
+        ..ConfigInput::default()
+    };
+    let alias = test_runtime_provider_without_credentials(
+        "http://playlist.example/b.m3u?api_key=provider-b-key",
+        InputType::M3u,
+    );
+
+    let rewritten = get_stream_alternative_url(
+        "http://stream.example/segment.ts?token=provider-a-token&quality=hd",
+        &input,
+        &alias,
+    );
+
+    assert_eq!(rewritten, Some("http://stream.example/segment.ts?api_key=provider-b-key&quality=hd".to_string()));
+}
+
+#[test]
+fn get_stream_alternative_url_rejects_ambiguous_cross_key_credential_mapping() {
+    let input = ConfigInput {
+        name: "source".intern(),
+        url: "http://playlist.example/a.m3u?token=provider-a-token".to_string(),
+        input_type: InputType::M3u,
+        ..ConfigInput::default()
+    };
+    let alias = test_runtime_provider_without_credentials(
+        "http://playlist.example/b.m3u?api_key=provider-b-key&auth=provider-b-auth",
+        InputType::M3u,
+    );
+
+    assert_eq!(
+        get_stream_alternative_url("http://stream.example/segment.ts?token=provider-a-token", &input, &alias),
+        None
+    );
+}
+
+#[test]
+fn get_stream_alternative_url_rejects_partial_source_credential_mapping() {
+    let input = ConfigInput {
+        name: "source".intern(),
+        url: "http://playlist.example/a.m3u?token=provider-a-token&api_key=provider-a-key".to_string(),
+        input_type: InputType::M3u,
+        ..ConfigInput::default()
+    };
+    let alias = test_runtime_provider_without_credentials(
+        "http://playlist.example/b.m3u?token=provider-b-token",
+        InputType::M3u,
+    );
+
+    assert_eq!(
+        get_stream_alternative_url(
+            "http://stream.example/segment.ts?token=provider-a-token&api_key=provider-a-key&quality=hd",
+            &input,
+            &alias,
+        ),
+        None
+    );
+}
+
+#[test]
+fn select_provider_stream_url_rewrites_opaque_m3u_token_for_allocated_alias() {
+    let input = ConfigInput {
+        name: "provider-a".intern(),
+        url: "http://playlist.example/a.m3u?token=provider-a-token".to_string(),
+        input_type: InputType::M3u,
+        aliases: Some(vec![ConfigInputAlias {
+            id: 2,
+            name: "provider-b".intern(),
+            url: "http://playlist.example/b.m3u?token=provider-b-token".to_string(),
+            username: None,
+            password: None,
+            max_connections: 0,
+            priority: 0,
+            exp_date: None,
+            enabled: true,
+            stalker: None,
+        }]),
+        ..ConfigInput::default()
+    };
+    let alias = test_runtime_provider_without_credentials(
+        "http://playlist.example/b.m3u?token=provider-b-token",
+        InputType::M3u,
+    );
+
+    let selected = select_provider_stream_url(
+        "http://stream.example/channel/segment.ts?token=provider-a-token",
+        &input,
+        &alias,
+        false,
+    );
+
+    assert_eq!(
+        selected,
+        Some(("provider".intern(), "http://stream.example/channel/segment.ts?token=provider-b-token".to_string(),))
+    );
+}
+
+#[test]
 fn get_stream_alternative_url_rewrites_timeshift_path_credentials_for_alias_account() {
     let input = ConfigInput {
         name: "source".intern(),
@@ -944,6 +1077,75 @@ async fn resolve_streaming_strategy_rewrites_stale_alias_url_to_selected_main_pr
     assert_eq!(url.as_ref(), "http://provider-1.example/live/user1/pass1/100.ts");
 
     app_state.active_provider.release_connection(&addr).await;
+}
+
+#[tokio::test]
+async fn resolve_streaming_strategy_rewrites_opaque_m3u_token_after_alias_allocation() {
+    let app_config = create_test_dual_provider_app_config();
+    let input = Arc::new(ConfigInput {
+        id: 1,
+        name: "provider-a".intern(),
+        input_type: InputType::M3u,
+        url: "http://playlist.example/a.m3u?token=provider-a-token".to_string(),
+        enabled: true,
+        max_connections: 1,
+        aliases: Some(vec![ConfigInputAlias {
+            id: 2,
+            name: "provider-b".intern(),
+            url: "http://playlist.example/b.m3u?token=provider-b-token".to_string(),
+            username: None,
+            password: None,
+            max_connections: 0,
+            priority: 1,
+            exp_date: None,
+            enabled: true,
+            stalker: None,
+        }]),
+        ..ConfigInput::default()
+    });
+    app_config.sources.store(Arc::new(SourcesConfig { inputs: vec![Arc::clone(&input)], ..SourcesConfig::default() }));
+    let app_state = create_test_app_state_for_config(Arc::new(app_config));
+    let provider_a = "provider-a".intern();
+    let busy_addr: SocketAddr = "127.0.0.1:55306".parse().unwrap_or_else(|_| unreachable!());
+    let alias_addr: SocketAddr = "127.0.0.1:55307".parse().unwrap_or_else(|_| unreachable!());
+
+    let busy = app_state
+        .active_provider
+        .acquire_exact_connection_with_grace(
+            &provider_a,
+            &busy_addr,
+            false,
+            0,
+            crate::api::model::ConnectionKind::Normal,
+        )
+        .await;
+    assert!(busy.is_some(), "setup should occupy provider A");
+
+    let strategy = resolve_streaming_strategy(
+        &app_state,
+        "http://stream.example/channel/segment.ts?token=provider-a-token",
+        &create_test_fingerprint(alias_addr),
+        &input,
+        StreamingAcquireOptions {
+            force_provider: None,
+            allow_forced_provider_fallback: false,
+            allow_provider_grace: false,
+            user_priority: 0,
+            connection_kind: crate::api::model::ConnectionKind::Normal,
+            session_owner: Some("live-session"),
+            accept_requested_stream_url: false,
+        },
+    )
+    .await;
+
+    let ProviderStreamState::Available(Some(provider), url) = strategy.provider_stream_state else {
+        panic!("request should allocate provider B")
+    };
+    assert_eq!(provider.as_ref(), "provider-b");
+    assert_eq!(url.as_ref(), "http://stream.example/channel/segment.ts?token=provider-b-token");
+
+    app_state.active_provider.release_connection(&busy_addr).await;
+    app_state.active_provider.release_connection(&alias_addr).await;
 }
 
 #[tokio::test]
