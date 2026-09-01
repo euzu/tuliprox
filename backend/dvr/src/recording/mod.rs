@@ -23,6 +23,7 @@ pub mod recording_service;
 pub mod recording_source_resolution;
 pub mod recording_supervisor;
 pub mod recording_transfer;
+pub mod recording_transition;
 pub mod recording_url;
 pub mod recording_worker;
 pub mod recording_worker_runner;
@@ -34,6 +35,6 @@ pub use self::{
     recording_notification_adapter::*, recording_observability::*, recording_occurrence::*, recording_queue::*,
     recording_quota::*, recording_reconciliation::*, recording_retention::*, recording_rule_scheduler::*,
     recording_rule_service::*, recording_security::*, recording_service::*, recording_source_resolution::*,
-    recording_supervisor::*, recording_transfer::*, recording_url::*, recording_worker::*, recording_worker_runner::*,
-    recording_ws::*,
+    recording_supervisor::*, recording_transfer::*, recording_transition::*, recording_url::*, recording_worker::*,
+    recording_worker_runner::*, recording_ws::*,
 };

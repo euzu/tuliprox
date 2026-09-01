@@ -414,7 +414,7 @@ impl RecordingService {
                         return Err(QueueMutationError::StateNotEditable);
                     }
                 };
-                if !recording_edit::state_is_editable(task.state.label()) {
+                if !recording_edit::state_is_editable(task.state) {
                     return Err(QueueMutationError::StateNotEditable);
                 }
                 let meta_snapshot = &task.recording;
@@ -1392,7 +1392,7 @@ fn is_future_rule_recording(task: &PersistedRecordingTask, rule_id: &str, now_se
     if meta.provenance.rule_id.as_deref() != Some(rule_id) {
         return false;
     }
-    recording_edit::state_is_editable(task.state.label())
+    recording_edit::state_is_editable(task.state)
 }
 
 fn validate_reserved_filename(filename: &str) -> Result<(), &'static str> {

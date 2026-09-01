@@ -11,6 +11,7 @@
 //! * [`shared::model::RecordingTaskDto`] — the owner-safe public projection,
 //!   produced only through [`RecordingTask::to_owner_view`].
 
+use crate::recording::recording_transition::{self, RecordingCommand};
 use chrono::Utc;
 use log::error;
 use serde::{Deserialize, Serialize};
@@ -980,11 +981,9 @@ impl RecordingQueue {
             let Some(active) = candidate.active.as_mut().filter(|active| active.uuid == uuid) else {
                 return Ok(None);
             };
-            if !active.kind.is_resumable() {
-                return Err(QueueMutationError::StateNotEditable);
-            }
+            active.state = recording_transition::transition(active.kind, active.state, RecordingCommand::Pause)
+                .map_err(|_| QueueMutationError::StateNotEditable)?;
             active.paused = true;
-            active.state = RecordingTaskState::Paused;
             active.next_retry_at = None;
             Ok(Some(true))
         })
@@ -1006,11 +1005,9 @@ impl RecordingQueue {
             let Some(active) = candidate.active.as_mut().filter(|active| active.uuid == uuid && active.paused) else {
                 return Ok(None);
             };
-            if !active.kind.is_resumable() {
-                return Err(QueueMutationError::StateNotEditable);
-            }
+            active.state = recording_transition::transition(active.kind, active.state, RecordingCommand::Resume)
+                .map_err(|_| QueueMutationError::StateNotEditable)?;
             active.paused = false;
-            active.state = RecordingTaskState::Running;
             active.next_retry_at = None;
             Ok(Some(true))
         })
@@ -1149,15 +1146,15 @@ impl RecordingQueue {
         Ok(mutate_optional(self, |candidate| {
             if let Some(pos) = candidate.finished.iter().position(|task| task.uuid == uuid) {
                 let mut task = candidate.finished.remove(pos);
-                if !task.kind.is_resumable() {
+                let Ok(next) = recording_transition::transition(task.kind, task.state, RecordingCommand::Retry) else {
                     candidate.finished.insert(pos, task);
                     return Ok(None);
-                }
+                };
                 task.finished = false;
                 task.size = 0;
                 task.paused = false;
                 task.error = None;
-                task.state = RecordingTaskState::Queued;
+                task.state = next;
                 task.retry_attempts = 0;
                 task.next_retry_at = None;
                 candidate.queue.push(task);
