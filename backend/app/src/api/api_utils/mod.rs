@@ -829,7 +829,15 @@ fn rewrite_account_query_fields(stream_url: &str, source_config_url: &str, targe
         .collect();
     let unambiguous_cross_key_target =
         if source_pairs.len() == 1 && target_pairs.len() == 1 { target_pairs.first() } else { None };
-    let replacements: Vec<_> = source_pairs
+    let present_source_pairs: Vec<_> = source_pairs
+        .iter()
+        .filter(|(source_key, source_value)| {
+            stream_url.query_pairs().any(|(stream_key, stream_value)| {
+                stream_key.eq_ignore_ascii_case(source_key) && stream_value == source_value.as_str()
+            })
+        })
+        .collect();
+    let replacements: Vec<_> = present_source_pairs
         .iter()
         .filter_map(|(source_key, source_value)| {
             target_pairs
@@ -842,7 +850,7 @@ fn rewrite_account_query_fields(stream_url: &str, source_config_url: &str, targe
         })
         .collect();
 
-    if replacements.is_empty() {
+    if replacements.len() != present_source_pairs.len() || replacements.is_empty() {
         return None;
     }
 

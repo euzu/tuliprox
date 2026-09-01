@@ -615,13 +615,13 @@ body {
   --tag-series-border-color: var(--theme-brand-quaternary);
 
   --toastr-success-color: var(--theme-brand-text-inverse);
-  --toastr-success-background-color: color-mix(in srgb, var(--theme-brand-positive) 40%, transparent);
+  --toastr-success-background-color: color-mix(in srgb, var(--theme-brand-positive) 10%, transparent);
   --toastr-error-color: var(--theme-brand-text-inverse);
-  --toastr-error-background-color: color-mix(in srgb, var(--theme-brand-danger-strong) 40%, transparent);
+  --toastr-error-background-color: color-mix(in srgb, var(--theme-brand-danger-strong) 10%, transparent);
   --toastr-info-color: var(--theme-brand-text-inverse);
-  --toastr-info-background-color: color-mix(in srgb, var(--theme-brand-primary-border) 40%, transparent);
+  --toastr-info-background-color: color-mix(in srgb, var(--theme-brand-primary-border) 10%, transparent);
   --toastr-warning-color: var(--theme-brand-text-inverse);
-  --toastr-warning-background-color: color-mix(in srgb, var(--theme-brand-warning-strong) 40%, transparent);
+  --toastr-warning-background-color: color-mix(in srgb, var(--theme-brand-warning-strong) 10%, transparent);
   --toastr-shadow: var(--theme-brand-toast-shadow);
 
   --spinner-color: color-mix(in srgb, var(--theme-brand-text-inverse) 40%, transparent);

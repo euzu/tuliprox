@@ -499,6 +499,29 @@ fn get_stream_alternative_url_rejects_ambiguous_cross_key_credential_mapping() {
 }
 
 #[test]
+fn get_stream_alternative_url_rejects_partial_source_credential_mapping() {
+    let input = ConfigInput {
+        name: "source".intern(),
+        url: "http://playlist.example/a.m3u?token=provider-a-token&api_key=provider-a-key".to_string(),
+        input_type: InputType::M3u,
+        ..ConfigInput::default()
+    };
+    let alias = test_runtime_provider_without_credentials(
+        "http://playlist.example/b.m3u?token=provider-b-token",
+        InputType::M3u,
+    );
+
+    assert_eq!(
+        get_stream_alternative_url(
+            "http://stream.example/segment.ts?token=provider-a-token&api_key=provider-a-key&quality=hd",
+            &input,
+            &alias,
+        ),
+        None
+    );
+}
+
+#[test]
 fn select_provider_stream_url_rewrites_opaque_m3u_token_for_allocated_alias() {
     let input = ConfigInput {
         name: "provider-a".intern(),
