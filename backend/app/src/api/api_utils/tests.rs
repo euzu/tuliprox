@@ -546,7 +546,12 @@ async fn select_provider_stream_url_rewrites_opaque_m3u_token_for_allocated_alia
         InputType::M3u,
     );
 
-    let app_config = Arc::new(create_test_dual_provider_app_config());
+    let temp = tempfile::tempdir().expect("temp dir should be created");
+    let app_config = create_test_dual_provider_app_config();
+    let mut config = (*app_config.config.load_full()).clone();
+    config.storage_dir = temp.path().to_string_lossy().into_owned();
+    app_config.config.store(Arc::new(config));
+    let app_config = Arc::new(app_config);
     let selected = select_provider_stream_url(
         "http://stream.example/channel/segment.ts?token=provider-a-token",
         &input,
