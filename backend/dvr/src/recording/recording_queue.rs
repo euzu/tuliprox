@@ -659,6 +659,7 @@ impl RecordingTask {
             epg: meta.epg.clone(),
             rule_id: meta.provenance.rule_id.clone(),
             occurrence_key: meta.provenance.occurrence_key.clone(),
+            allowed_actions: recording_transition::allowed_actions(self.kind, self.state),
         }
     }
 
@@ -1472,6 +1473,33 @@ mod tests {
         let mut persisted = RecordingQueue::to_persisted(&task(uuid, RecordingKind::Vod, state));
         persisted.media_identity = identity.to_owned();
         persisted
+    }
+
+    #[test]
+    fn the_dto_offers_exactly_what_the_transition_graph_permits() {
+        // The frontend renders its buttons straight from this set, so a
+        // mismatch here is a button that errors when pressed.
+        for kind in [RecordingKind::Live, RecordingKind::Vod, RecordingKind::Series] {
+            for state in [
+                RecordingTaskState::Scheduled,
+                RecordingTaskState::Queued,
+                RecordingTaskState::WaitingForCapacity,
+                RecordingTaskState::Running,
+                RecordingTaskState::Paused,
+                RecordingTaskState::RetryWaiting,
+                RecordingTaskState::Completed,
+                RecordingTaskState::Failed,
+                RecordingTaskState::Cancelled,
+            ] {
+                let dto = task("t", kind, state).to_view(true);
+                assert_eq!(
+                    dto.allowed_actions,
+                    recording_transition::allowed_actions(kind, state),
+                    "{kind} in {} disagrees with the graph",
+                    state.label()
+                );
+            }
+        }
     }
 
     #[test]

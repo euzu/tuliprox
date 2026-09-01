@@ -175,37 +175,19 @@ fn compare_tasks(a: &RecordingTaskDto, b: &RecordingTaskDto, col: usize) -> Orde
 
 fn is_sortable(col: usize) -> bool { (1..=8).contains(&col) }
 
-/// Which controls a task offers. A Live capture can only be stopped and
-/// deleted: pausing ffmpeg would lose an unrecoverable part of the
-/// broadcast, and its programme window is gone once it passed, so there is
-/// nothing to resume or retry.
+/// Which controls a task offers: what the server says it would accept,
+/// narrowed to what this viewer is permitted to ask for.
+///
+/// The state rules are not restated here. They used to be, and they had
+/// drifted from the backend's.
 fn action_availability(can_manage: bool, can_delete: bool, task: &RecordingTaskDto) -> RecordingActionAvailability {
-    if !can_manage && !can_delete {
-        return RecordingActionAvailability::default();
-    }
-    let resumable = task.kind.is_resumable();
+    let allowed = task.allowed_actions;
     RecordingActionAvailability {
-        pause: can_manage
-            && resumable
-            && matches!(
-                task.status,
-                TransferStatusDto::Running | TransferStatusDto::WaitingForCapacity | TransferStatusDto::RetryWaiting
-            ),
-        resume: can_manage && resumable && task.status == TransferStatusDto::Paused,
-        cancel: can_manage
-            && matches!(
-                task.status,
-                TransferStatusDto::Running
-                    | TransferStatusDto::Queued
-                    | TransferStatusDto::Scheduled
-                    | TransferStatusDto::Paused
-                    | TransferStatusDto::WaitingForCapacity
-                    | TransferStatusDto::RetryWaiting
-            ),
-        remove: can_delete && task.is_terminal(),
-        retry: can_manage
-            && resumable
-            && matches!(task.status, TransferStatusDto::Failed | TransferStatusDto::Cancelled),
+        pause: can_manage && allowed.pause,
+        resume: can_manage && allowed.resume,
+        cancel: can_manage && allowed.cancel,
+        remove: can_delete && allowed.remove,
+        retry: can_manage && allowed.retry,
     }
 }
 
@@ -481,7 +463,8 @@ mod tests {
         normalize_tab, RecordingTab,
     };
     use shared::model::{
-        RecordingKind, RecordingTaskDto, RecordingVisibility, SortOrder, TaskPriorityDto, TransferStatusDto,
+        RecordingAllowedActions, RecordingKind, RecordingTaskDto, RecordingVisibility, SortOrder, TaskPriorityDto,
+        TransferStatusDto,
     };
     use std::rc::Rc;
 
@@ -513,6 +496,22 @@ mod tests {
             epg: None,
             rule_id: None,
             occurrence_key: None,
+            allowed_actions: RecordingAllowedActions::default(),
+        }
+    }
+
+    /// A task the server would accept every command for.
+    fn task_allowing_everything(kind: RecordingKind, status: TransferStatusDto) -> RecordingTaskDto {
+        RecordingTaskDto {
+            allowed_actions: RecordingAllowedActions {
+                pause: true,
+                resume: true,
+                cancel: true,
+                retry: true,
+                edit: true,
+                remove: true,
+            },
+            ..task("t", kind, status)
         }
     }
 
@@ -572,44 +571,28 @@ mod tests {
     }
 
     #[test]
-    fn live_can_only_be_stopped_and_deleted() {
-        let running = action_availability(true, true, &task("live", RecordingKind::Live, TransferStatusDto::Running));
-        assert!(!running.pause, "pausing ffmpeg would lose the broadcast");
-        assert!(!running.resume);
-        assert!(!running.retry, "the programme window is gone");
-        assert!(running.cancel);
-
-        let failed = action_availability(true, true, &task("live", RecordingKind::Live, TransferStatusDto::Failed));
-        assert!(failed.remove);
-        assert!(!failed.retry);
-    }
-
-    #[test]
-    fn vod_and_series_can_be_paused_resumed_and_retried() {
-        for kind in [RecordingKind::Vod, RecordingKind::Series] {
-            assert!(action_availability(true, true, &task("t", kind, TransferStatusDto::Running)).pause);
-            assert!(action_availability(true, true, &task("t", kind, TransferStatusDto::Paused)).resume);
-            assert!(action_availability(true, true, &task("t", kind, TransferStatusDto::Failed)).retry);
-            assert!(action_availability(true, true, &task("t", kind, TransferStatusDto::Cancelled)).retry);
-        }
+    fn a_command_the_server_would_refuse_is_never_offered() {
+        // Which states permit which command is the backend's transition graph.
+        // The table must not second-guess it, whatever the viewer may do.
+        let refused = task("live", RecordingKind::Live, TransferStatusDto::Running);
+        assert_eq!(action_availability(true, true, &refused), super::RecordingActionAvailability::default());
     }
 
     #[test]
     fn no_action_without_a_mutation_permission() {
-        let actions = action_availability(false, false, &task("t", RecordingKind::Vod, TransferStatusDto::Running));
-        assert_eq!(actions, super::RecordingActionAvailability::default());
+        let allowed = task_allowing_everything(RecordingKind::Vod, TransferStatusDto::Running);
+        assert_eq!(action_availability(false, false, &allowed), super::RecordingActionAvailability::default());
     }
 
     #[test]
     fn manage_and_delete_are_gated_separately() {
         // `recording.delete` alone must not hand out the running-state
         // controls, and `recording.manage` alone must not offer removal.
-        let running = task("t", RecordingKind::Vod, TransferStatusDto::Running);
-        let finished = task("t", RecordingKind::Vod, TransferStatusDto::Completed);
-        assert!(action_availability(true, false, &running).cancel);
-        assert!(!action_availability(true, false, &finished).remove);
-        assert!(!action_availability(false, true, &running).cancel);
-        assert!(action_availability(false, true, &finished).remove);
+        let allowed = task_allowing_everything(RecordingKind::Vod, TransferStatusDto::Running);
+        assert!(action_availability(true, false, &allowed).cancel);
+        assert!(!action_availability(true, false, &allowed).remove);
+        assert!(!action_availability(false, true, &allowed).cancel);
+        assert!(action_availability(false, true, &allowed).remove);
     }
 
     #[test]

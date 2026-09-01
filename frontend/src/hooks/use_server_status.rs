@@ -1015,6 +1015,7 @@ mod tests {
             epg: None,
             rule_id: None,
             occurrence_key: None,
+            allowed_actions: shared::model::RecordingAllowedActions::default(),
         }
     }
 

@@ -133,23 +133,12 @@ pub fn state_is_reachable(kind: RecordingKind, state: RecordingTaskState) -> boo
     kind.is_resumable() || !matches!(state, RecordingTaskState::Paused | RecordingTaskState::RetryWaiting)
 }
 
+pub use shared::model::RecordingAllowedActions;
+
 /// Which controls a recording currently offers.
 ///
 /// Every field is derived from the same predicate the command itself uses, so
 /// a control cannot be offered for a command that would then be refused.
-// One flag per control is the point: the set maps 1:1 onto the buttons a
-// client renders, and collapsing it would hide which command was refused.
-#[allow(clippy::struct_excessive_bools)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct RecordingAllowedActions {
-    pub pause: bool,
-    pub resume: bool,
-    pub cancel: bool,
-    pub retry: bool,
-    pub edit: bool,
-    pub remove: bool,
-}
-
 pub fn allowed_actions(kind: RecordingKind, state: RecordingTaskState) -> RecordingAllowedActions {
     let allows = |command| transition(kind, state, command).is_ok();
     RecordingAllowedActions {

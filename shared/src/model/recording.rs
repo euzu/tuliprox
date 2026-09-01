@@ -43,6 +43,23 @@ impl fmt::Display for RecordingKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(self.as_str()) }
 }
 
+/// Which controls a recording currently offers.
+///
+/// Computed server-side from the transition graph and carried on the DTO so a
+/// client renders buttons for exactly the commands the server would accept.
+// One flag per control is the point: the set maps 1:1 onto the buttons a
+// client renders, and collapsing it would hide which command was refused.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RecordingAllowedActions {
+    pub pause: bool,
+    pub resume: bool,
+    pub cancel: bool,
+    pub retry: bool,
+    pub edit: bool,
+    pub remove: bool,
+}
+
 /// Owner-safe public projection of a recording task. This is the only
 /// recording shape crossing the API or WebSocket boundary. It never carries
 /// the source URL, provider/source identifiers, configured headers,
@@ -96,6 +113,10 @@ pub struct RecordingTaskDto {
     pub rule_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub occurrence_key: Option<String>,
+    /// What the server would accept for this recording right now, before the
+    /// viewer's permissions are applied.
+    #[serde(default)]
+    pub allowed_actions: RecordingAllowedActions,
 }
 
 impl RecordingTaskDto {
@@ -661,6 +682,7 @@ mod tests {
             }),
             rule_id: None,
             occurrence_key: None,
+            allowed_actions: RecordingAllowedActions::default(),
         }
     }
 
