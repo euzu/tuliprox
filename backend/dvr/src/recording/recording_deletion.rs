@@ -120,19 +120,26 @@ pub struct DeletionTarget {
     pub uuid: String,
     pub file_path: PathBuf,
     pub previous_state: DeletionPreviousState,
+    /// Another library entry still points at this file, so removing this
+    /// entry must leave the bytes alone.
+    pub still_referenced: bool,
 }
 
 impl DeletionTarget {
-    /// The single file this deletion owns. `Completed` recordings own
-    /// their final file; `Failed` / `Cancelled` ones never reached
-    /// finalization, so they own the `.partial`.
-    pub fn path_to_unlink(&self) -> PathBuf {
-        match self.previous_state {
+    /// The file this deletion may unlink, or `None` when the entry is one
+    /// of several holding it. `Completed` recordings own their final file;
+    /// `Failed` / `Cancelled` ones never reached finalization, so they own
+    /// the `.partial`.
+    pub fn path_to_unlink(&self) -> Option<PathBuf> {
+        if self.still_referenced {
+            return None;
+        }
+        Some(match self.previous_state {
             DeletionPreviousState::Completed => self.file_path.clone(),
             DeletionPreviousState::Failed | DeletionPreviousState::Cancelled => {
                 crate::recording_worker::recording_partial_path(&self.file_path)
             }
-        }
+        })
     }
 }
 
@@ -182,8 +189,12 @@ where
         // present. Measured/reserved bytes are kept as-is so quota
         // accounting survives a failed or interrupted deletion; they are
         // released when the task is removed in `finalize_deletion`.
-        let target =
-            DeletionTarget { uuid: uuid.to_string(), file_path: task.file_path.clone(), previous_state: prior };
+        let target = DeletionTarget {
+            uuid: uuid.to_string(),
+            file_path: task.file_path.clone(),
+            previous_state: prior,
+            still_referenced: crate::recording::recording_queue::media_is_still_referenced(candidate, uuid),
+        };
         let mut new_meta = meta;
         new_meta.deleting_previous_state = Some(prior);
         apply_meta(candidate, bucket, idx, new_meta);
@@ -340,7 +351,10 @@ pub async fn file_path_for_deletion(download: &RecordingTask, _recording_root: O
 /// success. Returns the path that was unlinked, or `None` if no
 /// physical file was present.
 pub async fn execute_deletion_target(target: &DeletionTarget) -> Result<Option<PathBuf>, DeletionError> {
-    unlink_owned_file(&target.path_to_unlink()).await
+    let Some(path) = target.path_to_unlink() else {
+        return Ok(None);
+    };
+    unlink_owned_file(&path).await
 }
 
 async fn unlink_owned_file(path: &Path) -> Result<Option<PathBuf>, DeletionError> {
@@ -664,6 +678,94 @@ mod tests {
         assert_eq!(after.recording.deleting_previous_state, Some(DeletionPreviousState::Completed));
         assert!(after.recording.is_deleting());
         assert!(queue.revision.load(Ordering::SeqCst) > prior, "revision must advance");
+    }
+
+    /// Seed two entries onto the same programme, so they resolve to one
+    /// media identity and one file, and delete the first.
+    async fn delete_one_of_two_entries_sharing(dir: &TempDir) -> (RecordingQueue, PathBuf, DeletionTarget) {
+        let queue = RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open recording repository");
+        let shared_file = dir.path().join("programme.ts");
+        std::fs::write(&shared_file, b"recorded bytes").expect("write file");
+        for (uuid, owner) in [("alice-entry", "web:alice"), ("bob-entry", "web:bob")] {
+            let mut task = finished_with_state(uuid, RecordingTaskState::Completed, None);
+            task.file_path.clone_from(&shared_file);
+            task.recording.owner = RecordingOwner::User(UserId::from(owner));
+            let persisted = RecordingQueue::to_persisted(&task);
+            mutate(&queue, |c| {
+                c.finished.push(persisted);
+                Ok(())
+            })
+            .await
+            .expect("seed");
+        }
+        let target = begin_deletion(&queue, "alice-entry").await.expect("begin");
+        (queue, shared_file, target)
+    }
+
+    #[tokio::test]
+    async fn deleting_one_of_two_entries_leaves_the_shared_file_alone() {
+        // Alice and Bob hold the same recording. Alice removing hers must not
+        // take Bob's copy with it.
+        let dir = TempDir::new().expect("tempdir");
+        let (queue, shared_file, target) = delete_one_of_two_entries_sharing(&dir).await;
+        assert!(target.still_referenced, "Bob still holds this file");
+        assert_eq!(target.path_to_unlink(), None);
+        let unlinked = execute_deletion_target(&target).await.expect("execute");
+        assert_eq!(unlinked, None, "nothing was unlinked");
+        assert!(shared_file.exists(), "Bob's recording must survive Alice's deletion");
+        finalize_deletion(&queue, "alice-entry").await.expect("finalize");
+        let remaining = queue.finished.read().await.clone();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].uuid, "bob-entry");
+    }
+
+    #[tokio::test]
+    async fn the_last_entry_to_be_deleted_removes_the_file() {
+        let dir = TempDir::new().expect("tempdir");
+        let (queue, shared_file, first) = delete_one_of_two_entries_sharing(&dir).await;
+        execute_deletion_target(&first).await.expect("execute");
+        finalize_deletion(&queue, "alice-entry").await.expect("finalize");
+
+        let second = begin_deletion(&queue, "bob-entry").await.expect("begin");
+        assert!(!second.still_referenced, "nobody else holds it now");
+        let unlinked = execute_deletion_target(&second).await.expect("execute");
+        assert!(unlinked.is_some());
+        assert!(!shared_file.exists(), "the bytes go once the last entry does");
+    }
+
+    #[tokio::test]
+    async fn a_concurrent_deletion_does_not_strand_the_file() {
+        // Both entries are stamped before either unlinks. If each counted the
+        // other as a holder, the file would outlive every entry pointing at it.
+        let dir = TempDir::new().expect("tempdir");
+        let (queue, shared_file, first) = delete_one_of_two_entries_sharing(&dir).await;
+        let second = begin_deletion(&queue, "bob-entry").await.expect("begin");
+        assert!(first.still_referenced);
+        assert!(!second.still_referenced, "an entry already deleting is not a holder");
+        execute_deletion_target(&first).await.expect("execute");
+        execute_deletion_target(&second).await.expect("execute");
+        assert!(!shared_file.exists(), "the file must not be left with nothing pointing at it");
+    }
+
+    #[tokio::test]
+    async fn a_sole_entry_still_removes_its_file() {
+        let dir = TempDir::new().expect("tempdir");
+        let queue = RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open recording repository");
+        let file = dir.path().join("only.ts");
+        std::fs::write(&file, b"bytes").expect("write");
+        let mut task = finished_with_state("only", RecordingTaskState::Completed, None);
+        task.file_path.clone_from(&file);
+        let persisted = RecordingQueue::to_persisted(&task);
+        mutate(&queue, |c| {
+            c.finished.push(persisted);
+            Ok(())
+        })
+        .await
+        .expect("seed");
+        let target = begin_deletion(&queue, "only").await.expect("begin");
+        assert!(!target.still_referenced);
+        execute_deletion_target(&target).await.expect("execute");
+        assert!(!file.exists());
     }
 
     #[tokio::test]

@@ -429,6 +429,30 @@ fn same_media(left: &PersistedRecordingTask, right: &PersistedRecordingTask) -> 
     !left.media_identity.is_empty() && left.media_identity == right.media_identity
 }
 
+/// Every task in the candidate, whichever partition it sits in.
+fn all_tasks(candidate: &PersistedRecordingQueue) -> impl Iterator<Item = &PersistedRecordingTask> {
+    candidate
+        .queue
+        .iter()
+        .chain(candidate.scheduled.iter())
+        .chain(candidate.active.iter())
+        .chain(candidate.finished.iter())
+}
+
+/// Whether an entry other than `uuid` still holds the same file.
+///
+/// Entries already mid-deletion are not counted. Two concurrent deletions
+/// that each saw the other as a holder would both decline to unlink and
+/// leave the file behind with nothing pointing at it.
+pub fn media_is_still_referenced(candidate: &PersistedRecordingQueue, uuid: &str) -> bool {
+    let Some(subject) = all_tasks(candidate).find(|task| task.uuid == uuid) else {
+        return false;
+    };
+    all_tasks(candidate).any(|other| {
+        other.uuid != uuid && other.recording.deleting_previous_state.is_none() && same_media(other, subject)
+    })
+}
+
 pub fn promotion_decision(candidate: &PersistedRecordingQueue, task: &PersistedRecordingTask) -> PromotionDecision {
     if candidate.active.as_ref().is_some_and(|active| same_media(active, task)) {
         return PromotionDecision::Wait;
