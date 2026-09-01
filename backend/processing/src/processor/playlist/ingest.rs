@@ -642,7 +642,7 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
         }
     }
 
-    if need_download && input.input_type == InputType::M3u {
+    if input.input_type == InputType::M3u {
         let alias_errors = download_m3u_alias_playlists(ctx, input).await;
         playlist_download_result.download_err.extend(alias_errors);
     }
