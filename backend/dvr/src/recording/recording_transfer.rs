@@ -230,6 +230,30 @@ async fn refresh_recording_progress(
     }
 }
 
+/// The validators a later resume can be checked against.
+///
+/// A weak `ETag` is discarded: it only promises semantic equivalence, so it
+/// cannot prove the bytes on the far side of an interruption are the same
+/// ones. `Last-Modified` is the fallback, and is only meaningful when no
+/// strong tag was offered.
+fn capture_resume_validators(response: &reqwest::Response) -> (Option<String>, Option<String>) {
+    let headers = response.headers();
+    let etag = headers
+        .get(reqwest::header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .and_then(crate::http_transfer::strong_etag)
+        .map(str::to_owned);
+    if etag.is_some() {
+        return (etag, None);
+    }
+    let last_modified = headers
+        .get(reqwest::header::LAST_MODIFIED)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned);
+    (None, last_modified)
+}
+
 async fn send_download_request(
     client: &reqwest::Client,
     url: &reqwest::Url,
@@ -325,10 +349,16 @@ async fn download_file(
     match response_result {
         Ok(mut response) => {
             if existing_size > 0 {
+                // The validators were captured when the first byte was written.
+                // Without them a provider that replaces the file between an
+                // interruption and the resume returns a well-formed 206 whose
+                // bytes belong to a different resource, and they are appended
+                // to the old partial.
                 let validator = ResumeValidator {
                     expected_offset: existing_size,
                     expected_total: file_download.total_size,
-                    ..ResumeValidator::default()
+                    expected_etag: file_download.recording.resume_etag.clone(),
+                    expected_last_modified: file_download.recording.resume_last_modified.clone(),
                 };
                 match validate_resume_response(&ResponseSnapshot::from_response(&response), &validator) {
                     Ok(()) => {}
@@ -383,10 +413,19 @@ async fn download_file(
             let is_resume = status == reqwest::StatusCode::PARTIAL_CONTENT;
 
             let total_size = compute_total_size(&response, existing_size);
+            let captured = capture_resume_validators(&response);
 
-            if let Some(total) = total_size {
+            if total_size.is_some() || existing_size == 0 {
                 let changed = update_active_download_for_worker(&active, worker_uuid, |download| {
-                    download.total_size = Some(total);
+                    if let Some(total) = total_size {
+                        download.total_size = Some(total);
+                    }
+                    // Only a fresh transfer may set the validators; a resume
+                    // must keep the ones its partial was written against.
+                    if existing_size == 0 {
+                        download.recording.resume_etag.clone_from(&captured.0);
+                        download.recording.resume_last_modified.clone_from(&captured.1);
+                    }
                     true
                 })
                 .await;

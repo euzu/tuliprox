@@ -440,6 +440,8 @@ mod tests {
             provenance: shared::model::recording::RecordingProvenance::default(),
             relative_path: Some("pilot.ts".to_string()),
             partial_relative_path: None,
+            resume_etag: None,
+            resume_last_modified: None,
             reserved_bytes: 0,
             measured_bytes: 0,
             completed_at: None,

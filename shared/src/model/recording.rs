@@ -311,6 +311,17 @@ pub struct RecordingMetadata {
     pub relative_path: Option<String>,
     /// Worker-owned partial path while a recording is in progress.
     pub partial_relative_path: Option<String>,
+    /// Strong `ETag` captured from the first response, so a resume can prove
+    /// the provider has not replaced the file underneath a partial download.
+    /// Weak validators are never stored: they only promise semantic
+    /// equivalence, so two matching weak tags can still be different bytes.
+    /// Internal; never projected into a DTO.
+    #[serde(default)]
+    pub resume_etag: Option<String>,
+    /// `Last-Modified` captured from the first response. Used only when no
+    /// strong `ETag` was offered.
+    #[serde(default)]
+    pub resume_last_modified: Option<String>,
     /// Conservative quota reservation. `0` once the task completes.
     pub reserved_bytes: u64,
     /// Measured partial/final size. Authoritative once the task completes.
@@ -355,6 +366,8 @@ impl RecordingMetadata {
             provenance: RecordingProvenance::default(),
             relative_path: None,
             partial_relative_path: None,
+            resume_etag: None,
+            resume_last_modified: None,
             reserved_bytes: 0,
             measured_bytes: 0,
             completed_at: None,

@@ -171,6 +171,20 @@ pub struct ResponseSnapshot {
     pub last_modified: Option<String>,
 }
 
+/// The `ETag` of a response, but only when it is a strong validator.
+///
+/// RFC 9110 forbids a weak validator in a range request precisely because it
+/// only promises semantic equivalence: two responses can share a weak tag and
+/// still differ byte for byte. Appending such a response to a partial file
+/// would corrupt it silently, so a weak tag is treated as no validator at all.
+pub fn strong_etag(etag: &str) -> Option<&str> {
+    let trimmed = etag.trim();
+    if trimmed.starts_with("W/") || trimmed.starts_with("w/") || !trimmed.starts_with('"') {
+        return None;
+    }
+    Some(trimmed)
+}
+
 impl ResponseSnapshot {
     /// Capture validator-relevant headers.
     pub fn from_response(response: &reqwest::Response) -> Self {
@@ -244,9 +258,13 @@ pub fn validate_resume_response(
     }
 
     if let Some(expected) = validator.expected_etag.as_ref() {
+        // A response that downgrades to a weak tag can no longer prove the
+        // bytes are unchanged, so it fails the comparison rather than passing
+        // it by absence.
         if let Some(got) = snapshot.etag.as_ref() {
+            let got = strong_etag(got).unwrap_or(got.as_str());
             if got != expected {
-                return Err(ResumeValidationError::ETagMismatch { expected: expected.clone(), got: got.clone() });
+                return Err(ResumeValidationError::ETagMismatch { expected: expected.clone(), got: got.to_owned() });
             }
         }
     }
@@ -279,6 +297,29 @@ mod tests {
             etag: etag.map(str::to_string),
             last_modified: last_modified.map(str::to_string),
         }
+    }
+
+    #[test]
+    fn a_weak_etag_is_not_a_usable_resume_validator() {
+        // Two responses can share a weak tag and still differ byte for byte,
+        // so appending to a partial on that evidence would corrupt the file.
+        assert_eq!(strong_etag("W/\"abc\""), None);
+        assert_eq!(strong_etag("w/\"abc\""), None);
+        assert_eq!(strong_etag("abc"), None, "an unquoted tag is not a valid entity-tag");
+        assert_eq!(strong_etag("\"abc\""), Some("\"abc\""));
+        assert_eq!(strong_etag("  \"abc\"  "), Some("\"abc\""));
+    }
+
+    #[test]
+    fn a_resume_whose_etag_weakens_is_rejected() {
+        let validator = ResumeValidator {
+            expected_offset: 100,
+            expected_etag: Some("\"strong\"".to_string()),
+            ..ResumeValidator::default()
+        };
+        let mut snap = snapshot(StatusCode::PARTIAL_CONTENT, Some("bytes 100-199/200"), None, None);
+        snap.etag = Some("W/\"strong\"".to_string());
+        assert!(matches!(validate_resume_response(&snap, &validator), Err(ResumeValidationError::ETagMismatch { .. })));
     }
 
     #[test]

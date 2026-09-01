@@ -310,6 +310,8 @@ mod tests {
             provenance: shared::model::recording::RecordingProvenance::default(),
             relative_path: None,
             partial_relative_path: None,
+            resume_etag: None,
+            resume_last_modified: None,
             reserved_bytes: reserved,
             measured_bytes: measured,
             completed_at: None,

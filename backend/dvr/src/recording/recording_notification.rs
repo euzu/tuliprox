@@ -160,6 +160,8 @@ mod tests {
             provenance: shared::model::recording::RecordingProvenance::default(),
             relative_path: Some("users/web:alice/Programme_2023-11-14_20-00.ts".into()),
             partial_relative_path: None,
+            resume_etag: None,
+            resume_last_modified: None,
             reserved_bytes: 0,
             measured_bytes: 0,
             completed_at: None,
