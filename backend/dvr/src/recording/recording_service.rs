@@ -1127,10 +1127,23 @@ enum RecordingIdentity {
         owner: RecordingOwner,
         visibility: RecordingVisibility,
     },
-    /// No programme metadata at all. Fall back to the resolved URL plus
-    /// the *scheduled* (padded) window, which — unlike `start_at` — is
-    /// stable across requests inside a currently-airing window.
-    Url { url: String, scheduled_start: Option<i64>, scheduled_end: Option<i64> },
+    /// No programme metadata at all: every VOD and series transfer, and a
+    /// Live capture whose programme window is unknown. Falls back to the
+    /// resolved URL plus the *scheduled* (padded) window, which — unlike
+    /// `start_at` — is stable across requests inside a currently-airing
+    /// window.
+    ///
+    /// Carries the quota pool for the same reason `Programme` does: until one
+    /// physical file can be shared by several users, deduplicating across
+    /// principals would mean the second user is told "duplicate" and gets
+    /// nothing.
+    Url {
+        url: String,
+        scheduled_start: Option<i64>,
+        scheduled_end: Option<i64>,
+        owner: RecordingOwner,
+        visibility: RecordingVisibility,
+    },
 }
 
 fn recording_identity(meta: &RecordingMetadata, url: &str) -> RecordingIdentity {
@@ -1156,14 +1169,13 @@ fn recording_identity(meta: &RecordingMetadata, url: &str) -> RecordingIdentity 
         url: url.to_string(),
         scheduled_start: meta.scheduled_start,
         scheduled_end: meta.scheduled_end,
+        owner: meta.owner.clone(),
+        visibility: meta.visibility,
     }
 }
 
-fn persisted_recording_identity(task: &PersistedRecordingTask) -> Option<RecordingIdentity> {
-    if task.kind != RecordingKind::Live {
-        return None;
-    }
-    Some(recording_identity(&task.recording, &task.url))
+fn persisted_recording_identity(task: &PersistedRecordingTask) -> RecordingIdentity {
+    recording_identity(&task.recording, &task.url)
 }
 
 fn candidate_has_duplicate_recording(candidate: &PersistedRecordingQueue, task: &RecordingTask) -> bool {
@@ -1175,7 +1187,7 @@ fn candidate_has_duplicate_recording(candidate: &PersistedRecordingQueue, task: 
         .iter()
         .chain(candidate.scheduled.iter())
         .chain(candidate.active.iter())
-        .filter_map(persisted_recording_identity)
+        .map(persisted_recording_identity)
         .any(|existing| existing == identity);
     if pending_match {
         return true;
@@ -1188,7 +1200,7 @@ fn candidate_has_duplicate_recording(candidate: &PersistedRecordingQueue, task: 
     if !matches!(identity, RecordingIdentity::Occurrence { .. }) {
         return false;
     }
-    candidate.finished.iter().filter_map(persisted_recording_identity).any(|existing| existing == identity)
+    candidate.finished.iter().map(persisted_recording_identity).any(|existing| existing == identity)
 }
 
 /// Where a recording lives in the candidate snapshot. The first scan
@@ -1452,6 +1464,133 @@ mod tests {
             provenance: RecordingProvenance::default(),
             epg: None,
         }
+    }
+
+    /// A VOD transfer for `owner`, resolved to `url`.
+    fn persisted_media(uuid: &str, owner: &str, visibility: RecordingVisibility, url: &str) -> PersistedRecordingTask {
+        let meta = RecordingMetadata::new_media(
+            RecordingOwner::User(UserId::from(owner)),
+            visibility,
+            RecordingSource::new("1", "1", "input-a"),
+            "Film".to_string(),
+        );
+        PersistedRecordingTask {
+            partition: crate::recording::recording_queue::RecordingPartition::default(),
+            uuid: uuid.to_string(),
+            kind: RecordingKind::Vod,
+            file_dir: std::path::PathBuf::from("/tmp"),
+            file_path: std::path::PathBuf::from(format!("/tmp/{uuid}.mp4")),
+            filename: format!("{uuid}.mp4"),
+            url: url.to_string(),
+            finished: false,
+            size: 0,
+            total_size: None,
+            paused: false,
+            error: None,
+            state: RecordingTaskState::Queued,
+            input_name: Some("input-a".to_string()),
+            priority: 0,
+            retry_attempts: 0,
+            next_retry_at: None,
+            recording: meta,
+        }
+    }
+
+    fn queued_candidate(tasks: Vec<PersistedRecordingTask>) -> PersistedRecordingQueue {
+        PersistedRecordingQueue { queue: tasks, ..PersistedRecordingQueue::default() }
+    }
+
+    #[test]
+    fn a_repeated_vod_request_is_a_duplicate() {
+        // Regression: duplicate detection only produced an identity for Live,
+        // so a user who asked for the same film twice got two downloads of it
+        // written side by side as `film.mp4` and `film_1.mp4`.
+        let existing = persisted_media("a", "web:alice", RecordingVisibility::Private, "http://p/film.mp4");
+        let repeat = RecordingQueue::from_persisted(persisted_media(
+            "b",
+            "web:alice",
+            RecordingVisibility::Private,
+            "http://p/film.mp4",
+        ))
+        .expect("valid task");
+        assert!(candidate_has_duplicate_recording(&queued_candidate(vec![existing]), &repeat));
+    }
+
+    #[test]
+    fn a_different_film_is_not_a_duplicate() {
+        let existing = persisted_media("a", "web:alice", RecordingVisibility::Private, "http://p/film.mp4");
+        let other = RecordingQueue::from_persisted(persisted_media(
+            "b",
+            "web:alice",
+            RecordingVisibility::Private,
+            "http://p/other.mp4",
+        ))
+        .expect("valid task");
+        assert!(!candidate_has_duplicate_recording(&queued_candidate(vec![existing]), &other));
+    }
+
+    #[test]
+    fn another_user_asking_for_the_same_film_is_not_refused() {
+        // Until one physical file can carry several library entries, treating
+        // this as a duplicate would tell the second user "already recording"
+        // and leave them with nothing.
+        let existing = persisted_media("a", "web:alice", RecordingVisibility::Private, "http://p/film.mp4");
+        let other_user = RecordingQueue::from_persisted(persisted_media(
+            "b",
+            "web:bob",
+            RecordingVisibility::Private,
+            "http://p/film.mp4",
+        ))
+        .expect("valid task");
+        assert!(!candidate_has_duplicate_recording(&queued_candidate(vec![existing]), &other_user));
+    }
+
+    #[test]
+    fn a_shared_copy_does_not_collide_with_a_private_one() {
+        // The two charge different quota pools, so they are two recordings.
+        let existing = persisted_media("a", "web:alice", RecordingVisibility::Private, "http://p/film.mp4");
+        let shared = RecordingQueue::from_persisted(persisted_media(
+            "b",
+            "web:alice",
+            RecordingVisibility::Shared,
+            "http://p/film.mp4",
+        ))
+        .expect("valid task");
+        assert!(!candidate_has_duplicate_recording(&queued_candidate(vec![existing]), &shared));
+    }
+
+    #[test]
+    fn a_finished_transfer_does_not_block_a_fresh_request() {
+        // After a completed or failed attempt the user may legitimately want
+        // another copy.
+        let mut finished = persisted_media("a", "web:alice", RecordingVisibility::Private, "http://p/film.mp4");
+        finished.finished = true;
+        finished.state = RecordingTaskState::Completed;
+        let candidate = PersistedRecordingQueue { finished: vec![finished], ..PersistedRecordingQueue::default() };
+        let again = RecordingQueue::from_persisted(persisted_media(
+            "b",
+            "web:alice",
+            RecordingVisibility::Private,
+            "http://p/film.mp4",
+        ))
+        .expect("valid task");
+        assert!(!candidate_has_duplicate_recording(&candidate, &again));
+    }
+
+    #[test]
+    fn a_completed_rule_occurrence_still_blocks_a_repeat() {
+        // The scheduler re-evaluates rules on every tick; without this an
+        // occurrence would be re-materialized forever.
+        let mut finished = persisted_rule_recording("a", Some("rule-1"), 100);
+        finished.recording.provenance.occurrence_key = Some("occ-1".to_string());
+        finished.finished = true;
+        finished.state = RecordingTaskState::Completed;
+        let candidate = PersistedRecordingQueue { finished: vec![finished], ..PersistedRecordingQueue::default() };
+
+        let mut repeat_persisted = persisted_rule_recording("b", Some("rule-1"), 100);
+        repeat_persisted.recording.provenance.occurrence_key = Some("occ-1".to_string());
+        let repeat = RecordingQueue::from_persisted(repeat_persisted).expect("valid task");
+        assert!(candidate_has_duplicate_recording(&candidate, &repeat));
     }
 
     fn persisted_rule_recording(uuid: &str, rule_id: Option<&str>, start_at: i64) -> PersistedRecordingTask {
