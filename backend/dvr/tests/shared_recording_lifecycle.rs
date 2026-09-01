@@ -12,7 +12,10 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use tuliprox_dvr::recording::{
     recording_deletion::{begin_deletion, execute_deletion_target, finalize_deletion},
-    recording_queue::{mutate, PersistedRecordingTask, RecordingPartition, RecordingQueue, RecordingTaskState},
+    recording_queue::{
+        mutate, PersistedRecordingTask, RecordingControl, RecordingPartition, RecordingQueue, RecordingTaskState,
+    },
+    recording_worker::recording_partial_path,
 };
 
 /// A completed entry for the same programme, owned by `user`.
@@ -194,4 +197,96 @@ async fn two_users_recording_different_programmes_never_share_a_file() {
     assert!(freed, "nothing else holds Alice's file");
     assert!(!alice_file.exists());
     assert!(bob_file.exists(), "Bob's unrelated recording is untouched");
+}
+
+/// Seed one entry per user, all on the same media, with `active_user` running.
+async fn seed_sharing(queue: &RecordingQueue, file: &Path, users: &[&str], active_user: &str) {
+    for user in users {
+        let mut entry = seeded(user, file);
+        if *user == active_user {
+            entry.state = RecordingTaskState::Running;
+            entry.finished = false;
+        }
+        let is_active = *user == active_user;
+        mutate(queue, move |candidate| {
+            if is_active {
+                candidate.active = Some(entry.clone());
+            } else {
+                candidate.queue.push(entry.clone());
+            }
+            Ok(())
+        })
+        .await
+        .expect("seed entry");
+    }
+}
+
+#[tokio::test]
+async fn cancelling_one_user_leaves_the_other_holding_the_file_across_a_restart() {
+    // Task 11: A leaves, B keeps the recording. The unit tests prove the
+    // decision in isolation; this proves the surviving links are what the
+    // repository ends up holding. The stored reference count is recomputed
+    // from those links on commit rather than decremented, so what is at risk
+    // here is which entries survive, not arithmetic.
+    let dir = TempDir::new().expect("tempdir");
+    let storage = dir.path().join("state");
+    std::fs::create_dir_all(&storage).expect("storage dir");
+    let recording = dir.path().join("programme.ts");
+    let partial = recording_partial_path(&recording);
+    std::fs::write(&partial, b"bytes in flight").expect("write partial");
+
+    {
+        let queue = open_queue(&storage).await;
+        seed_sharing(&queue, &recording, &["alice", "bob"], "alice").await;
+
+        // Alice is the running entry; cancelling her signals the worker once.
+        let was_paused = queue.cancel_requested("alice-entry").await.expect("cancel");
+        assert_eq!(was_paused, Some(false), "the active entry was cancelled");
+        assert_eq!(*queue.control_signal.read().await, RecordingControl::Cancel);
+
+        // Removing her entry must not take the bytes Bob is waiting on.
+        let target = begin_deletion(&queue, "alice-entry").await.expect("begin");
+        assert!(target.still_referenced, "Bob's entry still holds this media");
+        execute_deletion_target(&target).await.expect("execute");
+        finalize_deletion(&queue, "alice-entry").await.expect("finalize");
+        assert!(partial.exists(), "the in-flight file survives Alice leaving");
+    }
+
+    {
+        let queue = open_queue(&storage).await;
+        let (_revision, tasks) = queue.committed_snapshot().await;
+        assert_eq!(tasks.len(), 1, "only Bob's entry remains");
+        assert_eq!(tasks[0].uuid, "bob-entry");
+        assert!(partial.exists());
+    }
+}
+
+#[tokio::test]
+async fn cancelling_the_last_entry_leaves_nothing_referencing_the_file() {
+    // The counterpart to Step 1: with no other entry attached, the work is
+    // genuinely over and the staged bytes are reclaimable.
+    let dir = TempDir::new().expect("tempdir");
+    let storage = dir.path().join("state");
+    std::fs::create_dir_all(&storage).expect("storage dir");
+    let recording = dir.path().join("programme.ts");
+    let partial = recording_partial_path(&recording);
+    std::fs::write(&partial, b"abandoned bytes").expect("write partial");
+
+    {
+        let queue = open_queue(&storage).await;
+        seed_sharing(&queue, &recording, &["alice"], "alice").await;
+        queue.cancel_requested("alice-entry").await.expect("cancel");
+
+        let target = begin_deletion(&queue, "alice-entry").await.expect("begin");
+        assert!(!target.still_referenced, "nothing else holds it");
+        execute_deletion_target(&target).await.expect("execute");
+        finalize_deletion(&queue, "alice-entry").await.expect("finalize");
+        assert!(!partial.exists(), "the last entry takes its staged bytes with it");
+    }
+
+    {
+        let queue = open_queue(&storage).await;
+        let (_revision, tasks) = queue.committed_snapshot().await;
+        assert!(tasks.is_empty(), "the library is empty and still loads");
+    }
 }
