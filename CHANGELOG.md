@@ -928,6 +928,12 @@
 
 ## 🐛 Fixes
 
+- **M3U alias failover now uses the allocated provider's opaque query credentials.** When capacity allocation moved a
+  stream from the primary input to an alias, a playlist URL carrying credentials such as `token` or `api_key` could
+  retain the primary provider's value because failover only understood base URLs and username/password credentials.
+  Tuliprox now matches authentication-like query fields against the configured M3U account URL and replaces both key
+  and value with those of the selected provider while preserving unrelated query parameters. Different key names such
+  as `token` and `api_key` are mapped only for an unambiguous one-to-one pair; ambiguous mappings fail closed.
 - **Admission: a request that ended up denied anyway could leave several other streams killed behind it.** Eviction is
   destructive and is never rolled back, but the strategy loop would kick a target, find the retry still denied, and
   move straight on to the next eviction strategy. The loop now samples `user_connections` either side of the kick. A
