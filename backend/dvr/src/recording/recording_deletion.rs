@@ -937,6 +937,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn even_a_principal_allowed_to_delete_cannot_unlink_a_referenced_file() {
+        // Task 14: authorization decides whether an entry may be removed. It
+        // does not decide whether the bytes go -- that is the reference rule,
+        // and it takes no principal at all. An admin or the retention
+        // supervisor removing their entry must still leave another user's
+        // recording on disk.
+        let dir = TempDir::new().expect("tempdir");
+        let queue = RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open recording repository");
+        let shared_file = dir.path().join("programme.ts");
+        std::fs::write(&shared_file, b"recorded bytes").expect("write");
+        for (uuid, owner) in [("admin-entry", "builtin:admin"), ("bob-entry", "web:bob")] {
+            let mut task = finished_with_state(uuid, RecordingTaskState::Completed, None);
+            task.file_path.clone_from(&shared_file);
+            task.recording.owner = RecordingOwner::User(UserId::from(owner));
+            let persisted = RecordingQueue::to_persisted(&task);
+            mutate(&queue, move |candidate| {
+                candidate.finished.push(persisted.clone());
+                Ok(())
+            })
+            .await
+            .expect("seed");
+        }
+
+        // The permit says yes, as it would for an administrator.
+        let target = begin_deletion_authorized(&queue, "admin-entry", |_| true).await.expect("permitted");
+        assert!(target.still_referenced);
+        assert_eq!(target.path_to_unlink(), None, "permission does not override a live reference");
+        execute_deletion_target(&target).await.expect("execute");
+        assert!(shared_file.exists(), "Bob's recording survives an administrator removing their own entry");
+    }
+
+    #[tokio::test]
     async fn a_sole_entry_still_removes_its_file() {
         let dir = TempDir::new().expect("tempdir");
         let queue = RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open recording repository");

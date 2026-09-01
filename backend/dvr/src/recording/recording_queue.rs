@@ -43,6 +43,7 @@ fn poisoned_repository() -> std::io::Error {
 }
 
 const RECORDING_WINDOW_EXPIRED_ERR: &str = "Recording window already expired";
+const RECORDING_INTERRUPTED_ERR: &str = "Recording was interrupted by a restart and cannot be resumed";
 static RECORDING_TASK_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Reason a persisted entry cannot be converted back to its in-memory form
@@ -1101,6 +1102,19 @@ impl RecordingQueue {
             task.finished = false;
             return task;
         }
+        // A live capture cannot be picked up again: whatever was broadcast while
+        // the process was down is gone. Requeueing would restart it and write a
+        // recording silently missing everything up to now.
+        if task.kind == RecordingKind::Live
+            && matches!(task.state, RecordingTaskState::Running | RecordingTaskState::WaitingForCapacity)
+        {
+            task.paused = false;
+            task.finished = true;
+            task.state = RecordingTaskState::Failed;
+            task.error = Some(RECORDING_INTERRUPTED_ERR.to_string());
+            task.next_retry_at = None;
+            return task;
+        }
         if !task.finished {
             task.paused = false;
             task.state = RecordingTaskState::Queued;
@@ -1730,6 +1744,40 @@ mod tests {
         assert_eq!(restored_scheduled[0].kind, RecordingKind::Live);
 
         let _ = std::fs::remove_dir_all(state_file);
+    }
+
+    #[test]
+    fn an_interrupted_live_capture_fails_instead_of_restarting() {
+        // The broadcast that played while the process was down is gone. A
+        // resumed live capture would write a recording with a hole at the
+        // front and report it as complete.
+        for state in [RecordingTaskState::Running, RecordingTaskState::WaitingForCapacity] {
+            let interrupted = RecordingTask { state, ..task("live", RecordingKind::Live, state) };
+            let recovered = RecordingQueue::recover_loaded_task(interrupted);
+            assert_eq!(recovered.state, RecordingTaskState::Failed, "live in {}", state.label());
+            assert!(recovered.finished);
+            assert!(recovered.error.is_some(), "the operator is told why");
+        }
+    }
+
+    #[test]
+    fn an_interrupted_transfer_is_still_resumed() {
+        // The counterpart: a file on a server is still there after a restart,
+        // so VOD and series pick up where they left off.
+        for kind in [RecordingKind::Vod, RecordingKind::Series] {
+            let interrupted = task("film", kind, RecordingTaskState::Running);
+            let recovered = RecordingQueue::recover_loaded_task(interrupted);
+            assert_eq!(recovered.state, RecordingTaskState::Queued, "{kind} must resume");
+            assert!(!recovered.finished);
+        }
+    }
+
+    #[test]
+    fn a_future_live_recording_survives_a_restart_still_scheduled() {
+        let scheduled = task("live", RecordingKind::Live, RecordingTaskState::Scheduled);
+        let recovered = RecordingQueue::recover_loaded_task(scheduled);
+        assert_eq!(recovered.state, RecordingTaskState::Scheduled, "a window that has not opened is untouched");
+        assert!(!recovered.finished);
     }
 
     #[test]
