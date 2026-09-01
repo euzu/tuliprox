@@ -5,7 +5,7 @@ use crate::{
     m3u_playlist_iterator::M3uPlaylistM3uTextIterator,
     playlist_backend::{ensure_storage_path, iter_raw_playlist, M3u, PlaylistBackend},
     playlist_repository::get_input_m3u_playlist_file_path,
-    storage::{get_input_storage_path, get_target_storage_path},
+    storage::{build_input_storage_path, get_input_storage_path, get_target_storage_path},
     storage_const,
     xtream_repository::CategoryKey,
     LockedReceiverStream,
@@ -19,7 +19,7 @@ use shared::{
         LiveStreamProperties, M3uPlaylistItem, PlaylistGroup, PlaylistItem, PlaylistItemType, StreamProperties,
         XtreamCluster,
     },
-    utils::PROVIDER_SCHEME_PREFIX,
+    utils::{m3u_stream_url_identity, PROVIDER_SCHEME_PREFIX},
 };
 use std::{
     collections::HashMap,
@@ -393,6 +393,7 @@ pub async fn persist_input_m3u_playlist(
 ) -> Result<(), TuliproxError> {
     let file_lock = app_config.file_locks.write_lock(m3u_path).await;
     let m3u_path_clone = m3u_path.to_path_buf();
+    let stream_url_index_path = get_m3u_stream_url_index_file_path(m3u_path);
 
     let mut playlist_items: Vec<M3uPlaylistItem> =
         playlist.iter().flat_map(|pg| &pg.channels).map(M3uPlaylistItem::from).collect();
@@ -410,6 +411,28 @@ pub async fn persist_input_m3u_playlist(
             tree.insert(m3u.provider_id.clone(), m3u.clone());
         }
         tree.store(&m3u_path_clone).map_err(|err| cant_write_result!(RepositoryM3u, "m3u", &m3u_path_clone, err))?;
+
+        let mut indexed_urls: HashMap<Arc<str>, Option<Arc<str>>> = HashMap::new();
+        for item in &playlist_items {
+            let Some(identity) = m3u_stream_url_identity(&item.url) else { continue };
+            if let Some(indexed_url) = indexed_urls.get_mut(identity.as_str()) {
+                if indexed_url.as_ref().is_some_and(|url| url.as_ref() != item.url.as_ref()) {
+                    *indexed_url = None;
+                }
+            } else {
+                indexed_urls.insert(identity.into(), Some(Arc::clone(&item.url)));
+            }
+        }
+
+        let mut stream_url_index = BPlusTree::new();
+        for (identity, url) in indexed_urls {
+            if let Some(url) = url {
+                stream_url_index.insert(identity, url);
+            }
+        }
+        stream_url_index
+            .store(&stream_url_index_path)
+            .map_err(|err| cant_write_result!(RepositoryM3u, "m3u stream URL index", &stream_url_index_path, err))?;
         Ok(())
     })
     .await
@@ -418,6 +441,42 @@ pub async fn persist_input_m3u_playlist(
     })??;
 
     Ok(())
+}
+
+pub fn get_m3u_stream_url_index_file_path(m3u_path: &Path) -> PathBuf {
+    let mut path = m3u_path.to_path_buf();
+    path.set_extension("stream_urls.db");
+    path
+}
+
+pub async fn load_input_m3u_stream_url(
+    app_config: &Arc<AppConfig>,
+    input_name: &Arc<str>,
+    requested_stream_url: &str,
+) -> Result<Option<Arc<str>>, TuliproxError> {
+    let Some(identity) = m3u_stream_url_identity(requested_stream_url) else { return Ok(None) };
+    let cfg = app_config.config.load();
+    let storage_path = build_input_storage_path(input_name, &cfg.storage_dir);
+    let m3u_path = get_input_m3u_playlist_file_path(&storage_path, input_name);
+    let index_path = get_m3u_stream_url_index_file_path(&m3u_path);
+    if !file_exists_async(&index_path).await {
+        return Ok(None);
+    }
+
+    // The playlist writer publishes the playlist and its URL index while holding the
+    // playlist-path lock, so readers use the same lock as their generation boundary.
+    let file_lock = app_config.file_locks.read_lock(&m3u_path).await;
+    task::spawn_blocking(move || {
+        let _guard = file_lock;
+        let mut query = BPlusTreeQuery::<Arc<str>, Arc<str>>::try_new(&index_path).map_err(|err| {
+            TuliproxError::RepositoryM3u(format!("failed to open M3U stream URL index {}: {err}", index_path.display()))
+        })?;
+        query.query(&identity.into()).map_err(|err| {
+            TuliproxError::RepositoryM3u(format!("failed to read M3U stream URL index {}: {err}", index_path.display()))
+        })
+    })
+    .await
+    .map_err(|err| TuliproxError::RepositoryM3u(format!("failed to join M3U stream URL lookup task: {err}")))?
 }
 
 fn merge_preserved_m3u_live_metadata(m3u_path: &Path, playlist_items: &mut [M3uPlaylistItem]) -> Result<(), String> {
@@ -502,8 +561,8 @@ pub async fn load_input_m3u_playlist(
 
 #[cfg(test)]
 mod tests {
-    use super::{persist_input_m3u_playlist, replace_m3u_url_line};
-    use crate::BPlusTreeQuery;
+    use super::{load_input_m3u_stream_url, persist_input_m3u_playlist, replace_m3u_url_line};
+    use crate::{get_input_m3u_playlist_file_path, get_input_storage_path, BPlusTreeQuery};
     use arc_swap::{ArcSwap, ArcSwapOption};
     use shared::{
         model::{
@@ -623,5 +682,47 @@ mod tests {
         assert_eq!(properties.last_probed_timestamp, Some(100));
         assert_eq!(properties.last_success_timestamp, Some(90));
         assert_eq!(properties.bitrate, 2_500_000);
+    }
+
+    #[tokio::test]
+    async fn persisted_stream_url_index_resolves_account_specific_alias_token() {
+        let temp = tempfile::tempdir().expect("temp dir should be created");
+        let app_config = test_app_config();
+        let config = Config { storage_dir: temp.path().to_string_lossy().into_owned(), ..Config::default() };
+        app_config.config.store(Arc::new(config));
+
+        let alias_name = "backup-account".intern();
+        let storage_path = get_input_storage_path(&alias_name, &app_config.config.load().storage_dir)
+            .await
+            .expect("alias storage should be created");
+        let playlist_path = get_input_m3u_playlist_file_path(&storage_path, &alias_name);
+        let playlist = vec![PlaylistGroup {
+            id: 1,
+            title: "Live".intern(),
+            channels: vec![PlaylistItem {
+                header: PlaylistItemHeader {
+                    id: "channel-323".intern(),
+                    input_stream_id: "channel-323".intern(),
+                    url: "http://stream.example:4000/323/mono.m3u8?token=backup-stream-token".intern(),
+                    item_type: PlaylistItemType::Live,
+                    xtream_cluster: XtreamCluster::Live,
+                    ..PlaylistItemHeader::default()
+                },
+            }],
+            xtream_cluster: XtreamCluster::Live,
+        }];
+        persist_input_m3u_playlist(&app_config, &playlist_path, &playlist)
+            .await
+            .expect("alias playlist should persist");
+
+        let resolved = load_input_m3u_stream_url(
+            &app_config,
+            &alias_name,
+            "http://stream.example:4000/323/mono.m3u8?token=primary-stream-token",
+        )
+        .await
+        .expect("alias URL lookup should succeed");
+
+        assert_eq!(resolved.as_deref(), Some("http://stream.example:4000/323/mono.m3u8?token=backup-stream-token"));
     }
 }

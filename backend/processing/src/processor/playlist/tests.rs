@@ -9,7 +9,7 @@ use shared::{
     },
     utils::Internable,
 };
-use tuliprox_core::model::{CompiledMappingRule, CompiledTargetMappings, Config};
+use tuliprox_core::model::{CompiledMappingRule, CompiledTargetMappings, Config, ConfigInputAlias};
 
 fn serialize_without_trailing_fields<T: serde::Serialize>(value: &T, trailing_fields: &[u8]) -> Vec<u8> {
     let mut encoded = rmp_serde::to_vec(value).expect("playlist item should serialize");
@@ -894,6 +894,137 @@ mod mapping_stage {
             stalker_refresh_mode: StalkerRefreshMode::Complete,
             partial_refresh: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    #[tokio::test]
+    async fn m3u_alias_playlist_is_downloaded_and_indexed_separately() {
+        let temp = tempfile::tempdir().expect("temp dir should be created");
+        let primary_playlist_path = temp.path().join("primary.m3u");
+        let alias_playlist_path = temp.path().join("backup.m3u");
+        tokio::fs::write(
+            &primary_playlist_path,
+            "#EXTM3U\n#EXTINF:-1 tvg-id=\"323\",Channel\nhttp://stream.example:4000/323/mono.m3u8?token=primary-stream-token\n",
+        )
+        .await
+        .expect("primary fixture should be written");
+        tokio::fs::write(
+            &alias_playlist_path,
+            "#EXTM3U\n#EXTINF:-1 tvg-id=\"323\",Channel\nhttp://stream.example:4000/323/mono.m3u8?token=backup-stream-token\n",
+        )
+        .await
+        .expect("alias fixture should be written");
+
+        let ctx = processing_context();
+        let config =
+            Config { storage_dir: temp.path().join("storage").to_string_lossy().into_owned(), ..Config::default() };
+        ctx.config.config.store(Arc::new(config));
+        let input = Arc::new(ConfigInput {
+            id: 1,
+            name: "primary-account".intern(),
+            input_type: InputType::M3u,
+            url: primary_playlist_path.to_string_lossy().into_owned(),
+            enabled: true,
+            aliases: Some(vec![ConfigInputAlias {
+                id: 2,
+                name: "backup-account".intern(),
+                url: alias_playlist_path.to_string_lossy().into_owned(),
+                username: None,
+                password: None,
+                priority: 1,
+                max_connections: 1,
+                exp_date: None,
+                enabled: true,
+                stalker: None,
+            }]),
+            ..ConfigInput::default()
+        });
+
+        let (errors, mut primary_playlist, storage_error, partial) = download_input(&ctx, &input, false).await;
+
+        assert!(errors.is_empty(), "unexpected download errors: {errors:?}");
+        assert!(storage_error.is_none(), "unexpected primary storage error: {storage_error:?}");
+        assert!(!partial);
+        assert!(!primary_playlist.is_empty());
+        let alias_url = tuliprox_repository::load_input_m3u_stream_url(
+            &ctx.config,
+            &"backup-account".intern(),
+            "http://stream.example:4000/323/mono.m3u8?token=primary-stream-token",
+        )
+        .await
+        .expect("alias URL lookup should succeed");
+        assert_eq!(alias_url.as_deref(), Some("http://stream.example:4000/323/mono.m3u8?token=backup-stream-token"));
+    }
+
+    #[tokio::test]
+    async fn failed_m3u_alias_is_retried_after_primary_input_is_processed() {
+        let temp = tempfile::tempdir().expect("temp dir should be created");
+        let primary_playlist_path = temp.path().join("main.m3u");
+        let alias_playlist_path = temp.path().join("retry.m3u");
+        tokio::fs::write(
+            &primary_playlist_path,
+            "#EXTM3U\n#EXTINF:-1 tvg-id=\"323\",Channel\nhttp://stream.example:4000/323/mono.m3u8?token=main-stream-token\n",
+        )
+        .await
+        .expect("primary fixture should be written");
+
+        let ctx = processing_context();
+        let config =
+            Config { storage_dir: temp.path().join("storage").to_string_lossy().into_owned(), ..Config::default() };
+        ctx.config.config.store(Arc::new(config));
+        let input = Arc::new(ConfigInput {
+            id: 1,
+            name: "main-account".intern(),
+            input_type: InputType::M3u,
+            url: primary_playlist_path.to_string_lossy().into_owned(),
+            enabled: true,
+            aliases: Some(vec![ConfigInputAlias {
+                id: 2,
+                name: "retry-account".intern(),
+                url: alias_playlist_path.to_string_lossy().into_owned(),
+                username: None,
+                password: None,
+                priority: 1,
+                max_connections: 1,
+                exp_date: None,
+                enabled: true,
+                stalker: None,
+            }]),
+            ..ConfigInput::default()
+        });
+
+        let (first_errors, mut first_playlist, first_storage_error, first_partial) =
+            download_input(&ctx, &input, false).await;
+
+        assert!(!first_errors.is_empty(), "missing alias should report an error");
+        assert!(first_storage_error.is_none(), "primary storage should succeed: {first_storage_error:?}");
+        assert!(!first_partial);
+        assert!(!first_playlist.is_empty());
+        assert!(ctx.is_input_downloaded("main-account").await);
+        assert!(!ctx.is_input_downloaded("retry-account").await);
+
+        tokio::fs::write(
+            &alias_playlist_path,
+            "#EXTM3U\n#EXTINF:-1 tvg-id=\"323\",Channel\nhttp://stream.example:4000/323/mono.m3u8?token=retry-stream-token\n",
+        )
+        .await
+        .expect("alias fixture should be written");
+
+        let (second_errors, mut second_playlist, second_storage_error, second_partial) =
+            download_input(&ctx, &input, false).await;
+
+        assert!(second_errors.is_empty(), "unexpected retry errors: {second_errors:?}");
+        assert!(second_storage_error.is_none(), "primary storage should remain readable: {second_storage_error:?}");
+        assert!(!second_partial);
+        assert!(!second_playlist.is_empty());
+        assert!(ctx.is_input_downloaded("retry-account").await);
+        let alias_url = tuliprox_repository::load_input_m3u_stream_url(
+            &ctx.config,
+            &"retry-account".intern(),
+            "http://stream.example:4000/323/mono.m3u8?token=main-stream-token",
+        )
+        .await
+        .expect("retried alias URL lookup should succeed");
+        assert_eq!(alias_url.as_deref(), Some("http://stream.example:4000/323/mono.m3u8?token=retry-stream-token"));
     }
 
     #[test]

@@ -521,8 +521,8 @@ fn get_stream_alternative_url_rejects_partial_source_credential_mapping() {
     );
 }
 
-#[test]
-fn select_provider_stream_url_rewrites_opaque_m3u_token_for_allocated_alias() {
+#[tokio::test]
+async fn select_provider_stream_url_rewrites_opaque_m3u_token_for_allocated_alias() {
     let input = ConfigInput {
         name: "provider-a".intern(),
         url: "http://playlist.example/a.m3u?token=provider-a-token".to_string(),
@@ -546,16 +546,93 @@ fn select_provider_stream_url_rewrites_opaque_m3u_token_for_allocated_alias() {
         InputType::M3u,
     );
 
+    let temp = tempfile::tempdir().expect("temp dir should be created");
+    let app_config = create_test_dual_provider_app_config();
+    let mut config = (*app_config.config.load_full()).clone();
+    config.storage_dir = temp.path().to_string_lossy().into_owned();
+    app_config.config.store(Arc::new(config));
+    let app_config = Arc::new(app_config);
     let selected = select_provider_stream_url(
         "http://stream.example/channel/segment.ts?token=provider-a-token",
         &input,
         &alias,
         false,
-    );
+        &app_config,
+    )
+    .await;
 
     assert_eq!(
         selected,
         Some(("provider".intern(), "http://stream.example/channel/segment.ts?token=provider-b-token".to_string(),))
+    );
+}
+
+#[tokio::test]
+async fn select_provider_stream_url_uses_persisted_alias_url_for_independent_stream_token() {
+    use shared::model::{PlaylistGroup, PlaylistItem, PlaylistItemHeader};
+    use tuliprox_repository::{get_input_m3u_playlist_file_path, get_input_storage_path, persist_input_m3u_playlist};
+
+    let temp = tempfile::tempdir().expect("temp dir should be created");
+    let app_config = create_test_dual_provider_app_config();
+    let mut config = (*app_config.config.load_full()).clone();
+    config.storage_dir = temp.path().to_string_lossy().into_owned();
+    app_config.config.store(Arc::new(config));
+    let app_config = Arc::new(app_config);
+
+    let input = ConfigInput {
+        name: "primary-account".intern(),
+        url: "http://playlist.example/list.m3u?access_key=primary-playlist-key".to_string(),
+        input_type: InputType::M3u,
+        ..ConfigInput::default()
+    };
+    let alias_input = ConfigInput {
+        name: "backup-account".intern(),
+        url: "http://playlist.example/list.m3u?access_key=backup-playlist-key".to_string(),
+        input_type: InputType::M3u,
+        ..ConfigInput::default()
+    };
+    let alias = Arc::new(RuntimeProviderConfig::new(
+        &alias_input,
+        Arc::new(RwLock::new(ProviderConfigConnection::default())),
+        Arc::new(|_, _| {}),
+    ));
+
+    let storage_path = get_input_storage_path(&alias.name, &app_config.config.load().storage_dir)
+        .await
+        .expect("alias storage should be created");
+    let playlist_path = get_input_m3u_playlist_file_path(&storage_path, &alias.name);
+    let playlist = vec![PlaylistGroup {
+        id: 1,
+        title: "Live".intern(),
+        channels: vec![PlaylistItem {
+            header: PlaylistItemHeader {
+                id: "channel-323".intern(),
+                input_stream_id: "channel-323".intern(),
+                url: "http://stream.example:4000/323/mono.m3u8?token=backup-stream-token".intern(),
+                item_type: PlaylistItemType::Live,
+                xtream_cluster: XtreamCluster::Live,
+                ..PlaylistItemHeader::default()
+            },
+        }],
+        xtream_cluster: XtreamCluster::Live,
+    }];
+    persist_input_m3u_playlist(&app_config, &playlist_path, &playlist).await.expect("alias playlist should persist");
+
+    let selected = select_provider_stream_url(
+        "http://stream.example:4000/323/mono.m3u8?token=primary-stream-token",
+        &input,
+        &alias,
+        false,
+        &app_config,
+    )
+    .await;
+
+    assert_eq!(
+        selected,
+        Some((
+            "backup-account".intern(),
+            "http://stream.example:4000/323/mono.m3u8?token=backup-stream-token".to_string(),
+        ))
     );
 }
 
