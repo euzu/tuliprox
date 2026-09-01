@@ -637,6 +637,65 @@ mod tests {
         assert_eq!(recovery_action_for(&task, Some(dir.path()), false).await, RecoveryAction::RestorePrevious);
     }
 
+    /// Every combination of the four inputs the recovery decision reads.
+    ///
+    /// The rules, in the order the decision applies them:
+    ///   no deleting marker                 -> `NotDeleting`
+    ///   another entry holds the file       -> `FinishDeletion`
+    ///   the file is gone                   -> `FinishDeletion`
+    ///   the file is here, inside the root  -> `RestorePrevious`
+    ///   the file is here, outside the root -> `UnsafeRestore`
+    #[tokio::test]
+    async fn the_recovery_decision_table_is_exhaustive() {
+        for marker in [None, Some(DeletionPreviousState::Completed)] {
+            for still_referenced in [false, true] {
+                for file_present in [false, true] {
+                    for inside_root in [false, true] {
+                        let dir = TempDir::new().expect("tempdir");
+                        let elsewhere = TempDir::new().expect("tempdir");
+                        let mut task = finished_with_state("r", RecordingTaskState::Cancelled, marker);
+                        task.file_path = dir.path().join("r.ts");
+                        if file_present {
+                            std::fs::write(&task.file_path, b"bytes").expect("write");
+                        }
+                        let root = if inside_root { dir.path() } else { elsewhere.path() };
+
+                        let expected = if marker.is_none() {
+                            RecoveryAction::NotDeleting
+                        } else if still_referenced || !file_present {
+                            RecoveryAction::FinishDeletion
+                        } else if inside_root {
+                            RecoveryAction::RestorePrevious
+                        } else {
+                            RecoveryAction::UnsafeRestore
+                        };
+
+                        assert_eq!(
+                            recovery_action_for(&task, Some(root), still_referenced).await,
+                            expected,
+                            "marker={marker:?} still_referenced={still_referenced} \
+                             file_present={file_present} inside_root={inside_root}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_shared_file_outside_the_root_finishes_rather_than_flagging_the_path() {
+        // Deliberate: the unsafe-path warning exists to stop an unlink nobody
+        // can vouch for. A shared file is never unlinked here, so there is
+        // nothing to stop -- and restoring would resurrect a deleted entry.
+        // The diagnostic is traded for not undoing the user's deletion.
+        let dir = TempDir::new().expect("tempdir");
+        let elsewhere = TempDir::new().expect("tempdir");
+        let mut task = finished_with_state("r", RecordingTaskState::Cancelled, Some(DeletionPreviousState::Completed));
+        task.file_path = dir.path().join("r.ts");
+        std::fs::write(&task.file_path, b"bytes").expect("write");
+        assert_eq!(recovery_action_for(&task, Some(elsewhere.path()), true).await, RecoveryAction::FinishDeletion);
+    }
+
     #[tokio::test]
     async fn an_interrupted_deletion_of_a_shared_file_still_finishes() {
         // A correct deletion leaves a shared file alone, so a present file no

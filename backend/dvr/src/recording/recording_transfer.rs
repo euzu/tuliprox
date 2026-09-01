@@ -1785,8 +1785,105 @@ fn start_recording_scheduler(
 
 #[cfg(test)]
 mod tests {
-    use super::finalize_http_transfer;
+    use super::{finalize_http_transfer, http_transfer_path, recording_deadline_instant};
+    use crate::recording::recording_queue::{
+        PersistedRecordingTask, RecordingPartition, RecordingQueue, RecordingTask,
+    };
+    use shared::model::{
+        RecordingKind, RecordingMetadata, RecordingOwner, RecordingSource, RecordingTaskState, RecordingVisibility,
+        UserId,
+    };
+    use std::path::PathBuf;
     use tempfile::TempDir;
+
+    /// A task whose Live window runs from `program_start` for `duration_secs`.
+    fn scheduled_task(kind: RecordingKind, program_start: i64, duration_secs: i64) -> RecordingTask {
+        let meta = RecordingMetadata::new_live(
+            RecordingOwner::User(UserId::from("web:alice")),
+            RecordingVisibility::Private,
+            RecordingSource::new("t1", "v1", "in1"),
+            program_start,
+            program_start + duration_secs,
+            0,
+            0,
+        );
+        RecordingQueue::from_persisted(PersistedRecordingTask {
+            media_identity: String::new(),
+            partition: RecordingPartition::default(),
+            uuid: "task".to_string(),
+            kind,
+            file_dir: PathBuf::from("/tmp"),
+            file_path: PathBuf::from("/tmp/capture.ts"),
+            filename: "capture.ts".to_string(),
+            url: "https://example.com/stream".to_string(),
+            finished: false,
+            size: 0,
+            total_size: None,
+            paused: false,
+            error: None,
+            state: RecordingTaskState::Running,
+            input_name: None,
+            priority: 0,
+            retry_attempts: 0,
+            next_retry_at: None,
+            recording: meta,
+        })
+        .expect("valid fixture")
+    }
+
+    #[test]
+    fn a_live_window_is_measured_in_wall_clock_not_in_time_spent_recording() {
+        // A capture that was preempted or waiting for capacity does not get
+        // that time back: the broadcast ran regardless. The deadline is
+        // anchored to the programme, so an interruption cannot push a capture
+        // past the window and into the next programme.
+        let now = chrono::Utc::now().timestamp();
+        let started_ten_minutes_ago = scheduled_task(RecordingKind::Live, now - 600, 900);
+        let remaining = recording_deadline_instant(&started_ten_minutes_ago)
+            .expect("a scheduled live capture has a deadline")
+            .saturating_duration_since(tokio::time::Instant::now())
+            .as_secs();
+        // 900s window, 600s already elapsed: about 300 left, never a fresh 900.
+        assert!((295..=305).contains(&remaining), "expected roughly 300s left, got {remaining}");
+    }
+
+    #[test]
+    fn a_live_window_that_has_already_closed_stops_immediately() {
+        let now = chrono::Utc::now().timestamp();
+        let long_over = scheduled_task(RecordingKind::Live, now - 7_200, 900);
+        let deadline = recording_deadline_instant(&long_over).expect("still has a deadline");
+        assert!(deadline <= tokio::time::Instant::now(), "a closed window must not keep recording");
+    }
+
+    #[test]
+    fn only_live_captures_are_bounded_by_a_window() {
+        // A film does not stop being downloadable because a clock ran out.
+        let now = chrono::Utc::now().timestamp();
+        for kind in [RecordingKind::Vod, RecordingKind::Series] {
+            assert!(recording_deadline_instant(&scheduled_task(kind, now, 900)).is_none());
+        }
+    }
+
+    #[test]
+    fn resumable_kinds_stage_through_a_partial_and_live_writes_in_place() {
+        // The strategy split: an HTTP transfer can be interrupted and resumed,
+        // so it stages. ffmpeg owns its output file for the whole capture and
+        // has nothing to resume into.
+        let now = chrono::Utc::now().timestamp();
+        let live = scheduled_task(RecordingKind::Live, now, 900);
+        assert_eq!(http_transfer_path(&live), live.file_path, "a live capture writes straight to its file");
+
+        for kind in [RecordingKind::Vod, RecordingKind::Series] {
+            let task = scheduled_task(kind, now, 900);
+            let staged = http_transfer_path(&task);
+            assert_ne!(staged, task.file_path);
+            assert!(
+                staged.to_string_lossy().ends_with(".partial"),
+                "a resumable transfer stages beside its final file, got {}",
+                staged.display()
+            );
+        }
+    }
 
     #[tokio::test]
     async fn finalizing_publishes_the_staged_bytes_and_clears_the_partial() {
