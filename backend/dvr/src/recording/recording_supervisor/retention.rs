@@ -129,7 +129,7 @@ async fn run_policy_sweep(ctx: &RecordingCtx, now: i64) -> u64 {
     let mut deleted = 0u64;
     for candidate in &candidates {
         match delete_for_retention(&service, &claims, &candidate.uuid).await {
-            DeleteOutcome::Ok => {
+            DeleteOutcome::Ok | DeleteOutcome::Detached => {
                 deleted += 1;
                 info!(
                     target: "recording::audit",
@@ -214,9 +214,15 @@ async fn run_disk_pressure_sweep(ctx: &RecordingCtx) -> u64 {
             break;
         }
         let reclaimable = super::super::recording_worker_runner::reclaimable_bytes_for(&tasks, &candidate.uuid);
-        if matches!(delete_for_retention(&service, &claims, &candidate.uuid).await, DeleteOutcome::Ok) {
-            deleted += 1;
-            reclaimed = reclaimed.saturating_add(reclaimable);
+        match delete_for_retention(&service, &claims, &candidate.uuid).await {
+            DeleteOutcome::Ok => {
+                deleted += 1;
+                reclaimed = reclaimed.saturating_add(reclaimable);
+            }
+            // The entry is gone but another one still holds the file. Counting
+            // its bytes would end the pass against space nothing released.
+            DeleteOutcome::Detached => deleted += 1,
+            DeleteOutcome::Skipped | DeleteOutcome::Failed => {}
         }
     }
     info!(
@@ -237,7 +243,8 @@ async fn run_disk_pressure_sweep(ctx: &RecordingCtx) -> u64 {
 
 async fn delete_for_retention(service: &RecordingService, claims: &Claims, uuid: &str) -> DeleteOutcome {
     match service.system_retention_delete(claims, uuid).await {
-        Ok(()) => DeleteOutcome::Ok,
+        Ok(true) => DeleteOutcome::Ok,
+        Ok(false) => DeleteOutcome::Detached,
         // The task moved on (already deleted, no longer terminal, or not
         // safe to touch). Not an error: the next sweep re-evaluates.
         Err(ServiceError::UnknownRecording | ServiceError::InvalidState | ServiceError::Forbidden) => {

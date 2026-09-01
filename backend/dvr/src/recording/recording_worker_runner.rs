@@ -36,8 +36,9 @@ pub struct RunStats {
     /// Tasks skipped because the policy check said "skip" (e.g.
     /// already in `Deleting` state, no safe final file).
     pub skipped: u64,
-    /// Bytes reclaimed (sum of `charge_for_task` on each deleted
-    /// task at the moment of deletion).
+    /// Bytes actually freed on disk. An entry whose file another entry still
+    /// holds contributes nothing: crediting it would end a disk-pressure pass
+    /// against space that was never released.
     pub reclaimed_bytes: u64,
     /// `true` if a disk-pressure pass deleted at least one task.
     pub disk_pressure_triggered: bool,
@@ -52,6 +53,9 @@ pub struct RunStats {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeleteOutcome {
     Ok,
+    /// The entry was removed but another library entry still holds its file,
+    /// so no space was freed. Counted as deleted, reclaims nothing.
+    Detached,
     /// The task was already in `Deleting` or otherwise not safe
     /// to delete. Counted under `skipped`.
     Skipped,
@@ -98,6 +102,9 @@ pub fn run_once<V: QuotaRecordingTaskView>(
             DeleteOutcome::Ok => {
                 stats.deleted += 1;
                 stats.reclaimed_bytes = stats.reclaimed_bytes.saturating_add(reclaim);
+            }
+            DeleteOutcome::Detached => {
+                stats.deleted += 1;
             }
             DeleteOutcome::Skipped => {
                 stats.skipped += 1;
@@ -226,6 +233,9 @@ pub fn run_disk_pressure<V: QuotaRecordingTaskView>(
             DeleteOutcome::Ok => {
                 stats.deleted += 1;
                 stats.reclaimed_bytes = stats.reclaimed_bytes.saturating_add(reclaim);
+            }
+            DeleteOutcome::Detached => {
+                stats.deleted += 1;
             }
             DeleteOutcome::Skipped => {
                 stats.skipped += 1;
@@ -414,6 +424,35 @@ mod tests {
     /// a test can exercise the watermark arithmetic on its own.
     fn delete_everything() -> RetentionConfig {
         RetentionConfig { keep_last_per_channel: Some(0), delete_after_days: None }
+    }
+
+    #[test]
+    fn detaching_a_shared_file_reclaims_nothing_and_the_pass_keeps_going() {
+        // Counting a detached entry's bytes would end the pass against space
+        // that was never released, leaving the disk full and the run silent.
+        let tasks = vec![
+            completed("a", "chan", NOW - 10_000, 1_000_000),
+            completed("b", "chan", NOW - 9_000, 1_000_000),
+            completed("c", "chan", NOW - 8_000, 1_000_000),
+        ];
+        let mut delete = |uuid: &str| {
+            if uuid == "a" {
+                DeleteOutcome::Detached
+            } else {
+                DeleteOutcome::Ok
+            }
+        };
+        let stats = run_disk_pressure(
+            &tasks,
+            &DiskConfig { high_water_percent: Some(80), low_water_percent: Some(50), safety_bytes: None },
+            &delete_everything(),
+            NOW,
+            FilesystemUsage { used_percent: 90, free_bytes: 0, total_bytes: 10_000_000, is_recording_root_fs: true },
+            &mut delete,
+        );
+        // "a" was removed as an entry but freed no space.
+        assert_eq!(stats.deleted, 3, "every entry was removed");
+        assert_eq!(stats.reclaimed_bytes, 2_000_000, "only the two real unlinks count");
     }
 
     #[test]

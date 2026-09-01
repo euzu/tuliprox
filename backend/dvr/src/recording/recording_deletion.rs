@@ -431,8 +431,19 @@ pub enum RecoveryAction {
 
 /// Inspect a task that is in `Deleting` state and decide what the
 /// startup recovery should do.
-pub async fn recovery_action_for(download: &RecordingTask, recording_root: Option<&Path>) -> RecoveryAction {
+///
+/// `still_referenced` says another entry holds this file. A present file then
+/// proves nothing about whether the deletion ran, because a correct deletion
+/// deliberately leaves a shared file alone.
+pub async fn recovery_action_for(
+    download: &RecordingTask,
+    recording_root: Option<&Path>,
+    still_referenced: bool,
+) -> RecoveryAction {
     let Some(_prior) = download.recording.deleting_previous_state else { return RecoveryAction::NotDeleting };
+    if still_referenced {
+        return RecoveryAction::FinishDeletion;
+    }
     let Some(path) = file_path_for_deletion(download, recording_root).await else {
         return RecoveryAction::FinishDeletion;
     };
@@ -613,7 +624,7 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let mut task = finished_with_state("r", RecordingTaskState::Completed, Some(DeletionPreviousState::Completed));
         task.file_path = dir.path().join("missing.ts");
-        assert_eq!(recovery_action_for(&task, Some(dir.path())).await, RecoveryAction::FinishDeletion);
+        assert_eq!(recovery_action_for(&task, Some(dir.path()), false).await, RecoveryAction::FinishDeletion);
     }
 
     #[tokio::test]
@@ -623,7 +634,21 @@ mod tests {
         tokio::fs::write(&final_path, b"data").await.expect("write");
         let mut task = finished_with_state("r", RecordingTaskState::Completed, Some(DeletionPreviousState::Completed));
         task.file_path = final_path;
-        assert_eq!(recovery_action_for(&task, Some(dir.path())).await, RecoveryAction::RestorePrevious);
+        assert_eq!(recovery_action_for(&task, Some(dir.path()), false).await, RecoveryAction::RestorePrevious);
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_deletion_of_a_shared_file_still_finishes() {
+        // A correct deletion leaves a shared file alone, so a present file no
+        // longer proves the unlink never ran. Restoring here would silently
+        // undo the user's deletion on the next boot.
+        let dir = TempDir::new().expect("tempdir");
+        let mut task = finished_with_state("r", RecordingTaskState::Cancelled, Some(DeletionPreviousState::Completed));
+        task.file_path = dir.path().join("r.ts");
+        std::fs::write(&task.file_path, b"held by another entry").expect("write");
+        assert_eq!(recovery_action_for(&task, Some(dir.path()), true).await, RecoveryAction::FinishDeletion);
+        // Nobody else holds it: the file's presence does mean the unlink failed.
+        assert_eq!(recovery_action_for(&task, Some(dir.path()), false).await, RecoveryAction::RestorePrevious);
     }
 
     #[tokio::test]
@@ -634,7 +659,7 @@ mod tests {
         tokio::fs::write(&outside, b"data").await.expect("write");
         let mut task = finished_with_state("r", RecordingTaskState::Completed, Some(DeletionPreviousState::Completed));
         task.file_path = outside;
-        assert_eq!(recovery_action_for(&task, Some(dir.path())).await, RecoveryAction::UnsafeRestore);
+        assert_eq!(recovery_action_for(&task, Some(dir.path()), false).await, RecoveryAction::UnsafeRestore);
     }
 
     #[tokio::test]
@@ -642,7 +667,7 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let mut task = finished_with_state("r", RecordingTaskState::Completed, None);
         task.file_path = dir.path().join("r.ts");
-        assert_eq!(recovery_action_for(&task, Some(dir.path())).await, RecoveryAction::NotDeleting);
+        assert_eq!(recovery_action_for(&task, Some(dir.path()), false).await, RecoveryAction::NotDeleting);
     }
 
     #[test]

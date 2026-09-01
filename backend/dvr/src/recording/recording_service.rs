@@ -735,6 +735,7 @@ impl RecordingService {
             matches!(authorize(claims, &owner_id, RecordingAction::Delete, &subject), RecordingDecision::Allow)
         })
         .await
+        .map(|_| ())
     }
 
     /// The three-phase deletion, shared by the user-facing delete and the
@@ -744,7 +745,10 @@ impl RecordingService {
     /// the previous implementation looked the task up, authorized it,
     /// stamped it, then looked it up a second time and could act on a
     /// stale copy.
-    async fn run_deletion<F>(&self, uuid: &str, permit: F) -> Result<(), ServiceError>
+    /// Returns `true` when the file was actually unlinked. `false` means the
+    /// entry is gone but another library entry still holds its bytes, so the
+    /// caller must not count the space as reclaimed.
+    async fn run_deletion<F>(&self, uuid: &str, permit: F) -> Result<bool, ServiceError>
     where
         F: FnOnce(&RecordingMetadata) -> bool,
     {
@@ -763,7 +767,7 @@ impl RecordingService {
             return Err(ServiceError::IoError(err.to_string()));
         }
         finalize_deletion(&queue, uuid).await.map_err(|_| ServiceError::UnknownRecording)?;
-        Ok(())
+        Ok(!target.still_referenced)
     }
 
     /// Internal retention-delete entrypoint used by the retention
@@ -772,7 +776,7 @@ impl RecordingService {
         &self,
         claims: &shared::model::Claims,
         uuid: &str,
-    ) -> Result<(), ServiceError> {
+    ) -> Result<bool, ServiceError> {
         let owner_id = Self::subject_id(claims)?;
         self.run_deletion(uuid, |meta| {
             let subject = RecordingSubject::new(Some(meta), TerminalState::Completed, true);

@@ -31,6 +31,7 @@ use crate::{
     recording::recording_queue::{mutate, RecordingTask},
     recording_deletion::{apply_recovery_to_candidate, recovery_action_for, RecoveryAction},
     recording_reconciliation::ReconcileAction,
+    recording_service::recording_identity_key,
 };
 use log::{debug, error, info, warn};
 use shared::model::recording_rule::{RecordingRulesFile, RecordingTombstone, TombstoneKind};
@@ -53,11 +54,24 @@ pub async fn run_startup_reconciliation(ctx: &RecordingCtx) {
     }
 }
 
+/// Whether an entry other than `subject` still holds the same file.
+///
+/// Mirrors the rule the deletion path uses: entries already mid-deletion do not
+/// count, so a crash between two deletions cannot leave the file with nothing
+/// pointing at it.
+fn media_is_still_referenced(all_tasks: &[RecordingTask], subject: &RecordingTask) -> bool {
+    let key = |task: &RecordingTask| recording_identity_key(&task.recording, task.url.as_str());
+    let subject_key = key(subject);
+    all_tasks.iter().any(|other| {
+        other.uuid != subject.uuid && other.recording.deleting_previous_state.is_none() && key(other) == subject_key
+    })
+}
+
 /// Finish or undo every deletion the previous process left half-done.
 async fn recover_stuck_deletions(ctx: &RecordingCtx) -> usize {
-    let (_revision, tasks) = ctx.recordings.committed_snapshot().await;
+    let (_revision, all_tasks) = ctx.recordings.committed_snapshot().await;
     let pending: Vec<RecordingTask> =
-        tasks.into_iter().filter(|task| task.recording.deleting_previous_state.is_some()).collect();
+        all_tasks.iter().filter(|task| task.recording.deleting_previous_state.is_some()).cloned().collect();
     if pending.is_empty() {
         return 0;
     }
@@ -65,8 +79,9 @@ async fn recover_stuck_deletions(ctx: &RecordingCtx) -> usize {
         .map(|cfg| PathBuf::from(cfg.directory))
         .filter(|dir| !dir.as_os_str().is_empty());
     let mut repaired = 0;
-    for task in pending {
-        let action = recovery_action_for(&task, recording_root.as_deref()).await;
+    for task in &pending {
+        let still_referenced = media_is_still_referenced(&all_tasks, task);
+        let action = recovery_action_for(task, recording_root.as_deref(), still_referenced).await;
         match action {
             RecoveryAction::NotDeleting => continue,
             RecoveryAction::UnsafeRestore => {
