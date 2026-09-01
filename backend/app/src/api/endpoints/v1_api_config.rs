@@ -11,7 +11,10 @@ use crate::{
         read_plans_file, save_plans,
     },
     iptv::xtream::{get_xtream_stream_url_base, xtream_login},
-    model::{validate_library_paths_from_dto, ApiProxyConfig, InputSource, UserPlan},
+    model::{
+        recording_root_change, validate_library_paths_from_dto, ApiProxyConfig, InputSource, RecordingRootChange,
+        UserPlan,
+    },
     utils::request::download_text_content,
 };
 use axum::{
@@ -161,6 +164,27 @@ async fn intern_save_config_main(file_path: &str, backup_dir: &str, cfg: &Config
     None
 }
 
+/// Decide whether this config may move the recording root.
+///
+/// Counting the queue is the check: an entry only exists while a recording it
+/// points at is expected to be found.
+async fn recording_root_change_for(app_state: &Arc<AppState>, incoming: &ConfigDto) -> RecordingRootChange {
+    let current = app_state.app_config.config.load();
+    let Some(current_dir) = current.recording().map(|recording| recording.directory.clone()) else {
+        return RecordingRootChange::Allowed;
+    };
+    let incoming_dir = incoming
+        .video
+        .as_ref()
+        .and_then(|video| video.recording.as_ref())
+        .and_then(|recording| recording.directory.clone());
+    let Some(incoming_dir) = incoming_dir else {
+        return RecordingRootChange::Allowed;
+    };
+    let existing = app_state.recordings.committed_snapshot().await.1.len();
+    recording_root_change(&current_dir, &incoming_dir, existing)
+}
+
 async fn save_config_main(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     headers: HeaderMap,
@@ -191,6 +215,11 @@ async fn save_config_main(
     }
     if !cfg.is_valid() {
         (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Invalid content"}))).into_response()
+    } else if let RecordingRootChange::RefusedWithExistingRecordings { existing } =
+        recording_root_change_for(&app_state, &cfg).await
+    {
+        let refusal = RecordingRootChange::RefusedWithExistingRecordings { existing };
+        (axum::http::StatusCode::CONFLICT, axum::Json(json!({"error": refusal.to_string()}))).into_response()
     } else if let Err(err) = validate_library_paths_from_dto(&cfg) {
         (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()}))).into_response()
     } else {

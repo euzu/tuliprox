@@ -47,6 +47,42 @@ pub struct VideoConfig {
 }
 
 macros::from_impl!(VideoConfig);
+/// Why a recording-directory change was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordingRootChange {
+    Allowed,
+    /// The root moved while recordings exist under the old one.
+    RefusedWithExistingRecordings {
+        existing: usize,
+    },
+}
+
+impl std::fmt::Display for RecordingRootChange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Allowed => f.write_str("allowed"),
+            Self::RefusedWithExistingRecordings { existing } => write!(
+                f,
+                "the recording directory cannot be changed while {existing} recording(s) exist under the current \
+                 one; their stored paths resolve against the configured root and would all stop resolving"
+            ),
+        }
+    }
+}
+
+/// Whether a recording root may be replaced.
+///
+/// A recording stores its path relative to the root, and playback resolves it
+/// against whichever root is configured now. Moving the root out from under
+/// existing recordings makes every one resolve to a path holding no file: the
+/// library still lists them and every one of them 404s.
+pub fn recording_root_change(current: &str, incoming: &str, existing_recordings: usize) -> RecordingRootChange {
+    if current == incoming || existing_recordings == 0 {
+        return RecordingRootChange::Allowed;
+    }
+    RecordingRootChange::RefusedWithExistingRecordings { existing: existing_recordings }
+}
+
 impl From<&VideoConfigDto> for VideoConfig {
     fn from(dto: &VideoConfigDto) -> Self {
         Self {
@@ -300,5 +336,38 @@ impl From<&RecordingQuotaConfig> for RecordingQuotaConfigDto {
             per_user_bytes: instance.per_user_bytes.clone(),
             shared_bytes: instance.shared_bytes,
         }
+    }
+}
+
+#[cfg(test)]
+mod recording_root_tests {
+    use super::{recording_root_change, RecordingRootChange};
+
+    #[test]
+    fn moving_the_root_with_recordings_present_is_refused() {
+        // Stored paths resolve against the configured root. Moving it leaves
+        // the library listing every recording and every one of them missing.
+        assert_eq!(
+            recording_root_change("/srv/recordings", "/mnt/new", 3),
+            RecordingRootChange::RefusedWithExistingRecordings { existing: 3 }
+        );
+    }
+
+    #[test]
+    fn moving_the_root_of_an_empty_library_is_allowed() {
+        // Nothing points at the old root, so nothing breaks.
+        assert_eq!(recording_root_change("/srv/recordings", "/mnt/new", 0), RecordingRootChange::Allowed);
+    }
+
+    #[test]
+    fn leaving_the_root_alone_is_always_allowed() {
+        // Every other recording setting stays hot-reloadable.
+        assert_eq!(recording_root_change("/srv/recordings", "/srv/recordings", 12), RecordingRootChange::Allowed);
+    }
+
+    #[test]
+    fn the_refusal_says_how_many_recordings_are_in_the_way() {
+        let refusal = RecordingRootChange::RefusedWithExistingRecordings { existing: 7 };
+        assert!(refusal.to_string().contains('7'), "an operator has to know what is blocking it");
     }
 }
