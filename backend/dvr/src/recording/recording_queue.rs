@@ -416,7 +416,9 @@ pub enum PromotionDecision {
     Execute,
     /// A completed entry at this index in `finished` already holds it.
     AttachTo(usize),
-    /// Another entry is producing it right now.
+    /// Another entry is producing it right now. Unreachable while there is a
+    /// single active slot, since promotion only runs once it is empty; kept so
+    /// the rule stays correct if that ever stops being true.
     Wait,
 }
 
@@ -463,6 +465,35 @@ pub fn promotion_decision(candidate: &PersistedRecordingQueue, task: &PersistedR
         return PromotionDecision::AttachTo(index);
     }
     PromotionDecision::Execute
+}
+
+/// Move the next runnable entry into the active slot, attaching any entry whose
+/// file another entry already produced.
+///
+/// Every path that fills the active slot goes through here. Taking the head of
+/// the queue directly would re-download a file that was just completed by the
+/// entry ahead of it.
+pub fn promote_from_queue(candidate: &mut PersistedRecordingQueue) -> Option<(String, String)> {
+    let mut index = 0;
+    while index < candidate.queue.len() {
+        match promotion_decision(candidate, &candidate.queue[index]) {
+            PromotionDecision::Execute => {
+                let next = candidate.queue.remove(index);
+                let promoted = (next.uuid.clone(), next.filename.clone());
+                candidate.active = Some(next);
+                return Some(promoted);
+            }
+            PromotionDecision::AttachTo(completed) => {
+                let source = candidate.finished[completed].clone();
+                let mut attached = candidate.queue.remove(index);
+                attach_to_completed(&mut attached, &source);
+                candidate.finished.push(attached);
+                // The queue shrank; re-examine this position.
+            }
+            PromotionDecision::Wait => index += 1,
+        }
+    }
+    None
 }
 
 /// Adopt an already-produced file instead of transferring it again.
@@ -1186,9 +1217,7 @@ impl RecordingQueue {
                 cancelled.error.get_or_insert_with(|| "Cancelled by user".to_string());
                 cancelled.state = RecordingTaskState::Cancelled;
                 candidate.finished.push(cancelled);
-                if !candidate.queue.is_empty() {
-                    candidate.active = Some(candidate.queue.remove(0));
-                }
+                promote_from_queue(candidate);
             } else if let Some(active) = candidate.active.as_mut() {
                 active.state = RecordingTaskState::Cancelled;
                 active.error = Some("Cancelled by user".to_string());
@@ -1505,6 +1534,54 @@ mod tests {
         };
         let queued = identified("b", "film-99", RecordingTaskState::Queued);
         assert_eq!(promotion_decision(&candidate, &queued), PromotionDecision::Execute);
+    }
+
+    #[test]
+    fn the_entry_behind_a_finished_transfer_attaches_instead_of_downloading_again() {
+        // The live path: Alice's transfer completes and Bob is next in the
+        // queue for the same film. Taking the queue head blindly would start a
+        // second transfer over the file Alice just produced.
+        let mut candidate = PersistedRecordingQueue {
+            finished: vec![identified("alice", "film-42", RecordingTaskState::Completed)],
+            queue: vec![identified("bob", "film-42", RecordingTaskState::Queued)],
+            ..PersistedRecordingQueue::default()
+        };
+        let promoted = promote_from_queue(&mut candidate);
+        assert!(promoted.is_none(), "nothing needs to run");
+        assert!(candidate.active.is_none());
+        assert!(candidate.queue.is_empty(), "bob left the queue");
+        let bob = candidate.finished.iter().find(|task| task.uuid == "bob").expect("bob is filed");
+        assert_eq!(bob.state, RecordingTaskState::Completed);
+    }
+
+    #[test]
+    fn an_entry_for_other_media_behind_a_finished_transfer_still_runs() {
+        let mut candidate = PersistedRecordingQueue {
+            finished: vec![identified("alice", "film-42", RecordingTaskState::Completed)],
+            queue: vec![identified("bob", "film-99", RecordingTaskState::Queued)],
+            ..PersistedRecordingQueue::default()
+        };
+        let promoted = promote_from_queue(&mut candidate);
+        assert_eq!(promoted.map(|(uuid, _)| uuid), Some("bob".to_string()));
+        assert_eq!(candidate.active.as_ref().map(|task| task.uuid.as_str()), Some("bob"));
+    }
+
+    #[test]
+    fn attachable_entries_are_skipped_to_reach_one_that_must_run() {
+        let mut candidate = PersistedRecordingQueue {
+            finished: vec![identified("alice", "film-42", RecordingTaskState::Completed)],
+            queue: vec![
+                identified("bob", "film-42", RecordingTaskState::Queued),
+                identified("carol", "film-42", RecordingTaskState::Queued),
+                identified("dave", "film-99", RecordingTaskState::Queued),
+            ],
+            ..PersistedRecordingQueue::default()
+        };
+        let promoted = promote_from_queue(&mut candidate);
+        assert_eq!(promoted.map(|(uuid, _)| uuid), Some("dave".to_string()));
+        assert!(candidate.queue.is_empty(), "every entry was dispatched");
+        // Bob and Carol were filed against Alice's file without running.
+        assert_eq!(candidate.finished.len(), 3);
     }
 
     #[test]
