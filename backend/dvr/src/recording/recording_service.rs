@@ -1115,35 +1115,19 @@ pub enum RecordingIdentity {
     /// `(rule_id, occurrence_key)` are the same recording by
     /// definition, whatever their window looks like.
     Occurrence { rule_id: String, occurrence_key: String },
-    /// A concrete programme on a concrete source, per quota pool. The
-    /// pool dimension is deliberate: a shared copy and a private copy of
-    /// the same programme are two different recordings that charge two
-    /// different quotas.
-    Programme {
-        target_id: String,
-        virtual_id: String,
-        program_start: i64,
-        program_end: i64,
-        owner: RecordingOwner,
-        visibility: RecordingVisibility,
-    },
+    /// A concrete programme on a concrete source. Deliberately free of any
+    /// owner: two users asking for the same programme are asking for the same
+    /// file, and it is recorded once and linked twice.
+    Programme { target_id: String, virtual_id: String, program_start: i64, program_end: i64 },
     /// No programme metadata at all: every VOD and series transfer, and a
     /// Live capture whose programme window is unknown. Falls back to the
     /// resolved URL plus the *scheduled* (padded) window, which — unlike
     /// `start_at` — is stable across requests inside a currently-airing
     /// window.
     ///
-    /// Carries the quota pool for the same reason `Programme` does: until one
-    /// physical file can be shared by several users, deduplicating across
-    /// principals would mean the second user is told "duplicate" and gets
-    /// nothing.
-    Url {
-        url: String,
-        scheduled_start: Option<i64>,
-        scheduled_end: Option<i64>,
-        owner: RecordingOwner,
-        visibility: RecordingVisibility,
-    },
+    /// Owner-free for the same reason `Programme` is: the same URL over the
+    /// same window is the same bytes, whoever asked for them.
+    Url { url: String, scheduled_start: Option<i64>, scheduled_end: Option<i64> },
 }
 
 /// A stable, field-named key for the media a request refers to.
@@ -1170,16 +1154,12 @@ fn recording_identity(meta: &RecordingMetadata, url: &str) -> RecordingIdentity 
             virtual_id: meta.source.virtual_id.clone(),
             program_start,
             program_end,
-            owner: meta.owner.clone(),
-            visibility: meta.visibility,
         };
     }
     RecordingIdentity::Url {
         url: url.to_string(),
         scheduled_start: meta.scheduled_start,
         scheduled_end: meta.scheduled_end,
-        owner: meta.owner.clone(),
-        visibility: meta.visibility,
     }
 }
 
@@ -1190,12 +1170,16 @@ fn persisted_recording_identity(task: &PersistedRecordingTask) -> RecordingIdent
 fn candidate_has_duplicate_recording(candidate: &PersistedRecordingQueue, task: &RecordingTask) -> bool {
     let meta = &task.recording;
     let identity = recording_identity(meta, task.url.as_str());
-    // Pending and active tasks are duplicates of anything matching.
+    let pool = recording_quota::quota_pool_for_task(task);
+    // Only the *same* principal asking twice is a duplicate. A different
+    // principal asking for the same media gets their own library entry, which
+    // attaches to the one physical file rather than producing a second.
     let pending_match = candidate
         .queue
         .iter()
         .chain(candidate.scheduled.iter())
         .chain(candidate.active.iter())
+        .filter(|existing| recording_quota::quota_pool_for_task(*existing) == pool)
         .map(persisted_recording_identity)
         .any(|existing| existing == identity);
     if pending_match {
@@ -1209,7 +1193,12 @@ fn candidate_has_duplicate_recording(candidate: &PersistedRecordingQueue, task: 
     if !matches!(identity, RecordingIdentity::Occurrence { .. }) {
         return false;
     }
-    candidate.finished.iter().map(persisted_recording_identity).any(|existing| existing == identity)
+    candidate
+        .finished
+        .iter()
+        .filter(|existing| recording_quota::quota_pool_for_task(*existing) == pool)
+        .map(persisted_recording_identity)
+        .any(|existing| existing == identity)
 }
 
 /// Where a recording lives in the candidate snapshot. The first scan

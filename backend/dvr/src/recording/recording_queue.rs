@@ -405,6 +405,68 @@ fn stem_group(recording_cfg: &RecordingConfig, file_stem: &str) -> String {
     CONSTANTS.re_remove_filename_ending.replace(stem, "").into_owned()
 }
 
+/// What to do with a queued task whose media another entry may already hold.
+///
+/// Several library entries can reference one physical file. Promoting each of
+/// them would start a second transfer to the same path, so a queued entry that
+/// is not the one producing the file must attach to it or wait for it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PromotionDecision {
+    /// Nothing else holds this media; run the transfer.
+    Execute,
+    /// A completed entry at this index in `finished` already holds it.
+    AttachTo(usize),
+    /// Another entry is producing it right now.
+    Wait,
+}
+
+/// Two tasks refer to the same media when they carry the same identity.
+///
+/// An empty identity never matches, including another empty one: it means the
+/// identity could not be resolved, and guessing that two unidentified requests
+/// are the same recording would merge two different files.
+fn same_media(left: &PersistedRecordingTask, right: &PersistedRecordingTask) -> bool {
+    !left.media_identity.is_empty() && left.media_identity == right.media_identity
+}
+
+pub fn promotion_decision(candidate: &PersistedRecordingQueue, task: &PersistedRecordingTask) -> PromotionDecision {
+    if candidate.active.as_ref().is_some_and(|active| same_media(active, task)) {
+        return PromotionDecision::Wait;
+    }
+    if let Some(index) =
+        candidate.finished.iter().position(|done| done.state == RecordingTaskState::Completed && same_media(done, task))
+    {
+        return PromotionDecision::AttachTo(index);
+    }
+    PromotionDecision::Execute
+}
+
+/// Adopt an already-produced file instead of transferring it again.
+///
+/// Only the physical result is copied. The owner, visibility and quota belong
+/// to the entry and must survive: this is one user's link to a file another
+/// user's request happened to produce.
+pub fn attach_to_completed(task: &mut PersistedRecordingTask, source: &PersistedRecordingTask) {
+    task.file_dir.clone_from(&source.file_dir);
+    task.file_path.clone_from(&source.file_path);
+    task.filename.clone_from(&source.filename);
+    task.size = source.size;
+    task.total_size = source.total_size;
+    task.finished = true;
+    task.paused = false;
+    task.error = None;
+    task.state = RecordingTaskState::Completed;
+    task.next_retry_at = None;
+    task.retry_attempts = 0;
+    task.recording.relative_path.clone_from(&source.recording.relative_path);
+    task.recording.partial_relative_path = None;
+    task.recording.measured_bytes = source.recording.measured_bytes;
+    task.recording.completed_at = source.recording.completed_at;
+    // The reservation is released: the bytes are already on disk and charged
+    // to this entry as measured, not reserved.
+    task.recording.reserved_bytes = 0;
+}
+
 fn generate_recording_task_id() -> String {
     let now_nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_nanos());
     let counter = RECORDING_TASK_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -1351,6 +1413,100 @@ mod tests {
         assert!(!cancelled.finished);
         assert_eq!(cancelled.error.as_deref(), Some("Cancelled by user"));
         assert!(queue.finished.read().await.is_empty());
+    }
+
+    fn identified(uuid: &str, identity: &str, state: RecordingTaskState) -> PersistedRecordingTask {
+        let mut persisted = RecordingQueue::to_persisted(&task(uuid, RecordingKind::Vod, state));
+        persisted.media_identity = identity.to_owned();
+        persisted
+    }
+
+    #[test]
+    fn a_queued_entry_runs_when_nothing_else_holds_its_media() {
+        let candidate = PersistedRecordingQueue::default();
+        let queued = identified("a", "film-42", RecordingTaskState::Queued);
+        assert_eq!(promotion_decision(&candidate, &queued), PromotionDecision::Execute);
+    }
+
+    #[test]
+    fn a_queued_entry_waits_while_another_entry_produces_the_file() {
+        // Promoting it would start a second transfer to the same path.
+        let candidate = PersistedRecordingQueue {
+            active: Some(identified("a", "film-42", RecordingTaskState::Running)),
+            ..PersistedRecordingQueue::default()
+        };
+        let queued = identified("b", "film-42", RecordingTaskState::Queued);
+        assert_eq!(promotion_decision(&candidate, &queued), PromotionDecision::Wait);
+    }
+
+    #[test]
+    fn a_queued_entry_attaches_to_a_file_another_entry_finished() {
+        let candidate = PersistedRecordingQueue {
+            finished: vec![identified("a", "film-42", RecordingTaskState::Completed)],
+            ..PersistedRecordingQueue::default()
+        };
+        let queued = identified("b", "film-42", RecordingTaskState::Queued);
+        assert_eq!(promotion_decision(&candidate, &queued), PromotionDecision::AttachTo(0));
+    }
+
+    #[test]
+    fn a_failed_sibling_is_not_attached_to() {
+        // There is no file to adopt, so the entry has to run.
+        let candidate = PersistedRecordingQueue {
+            finished: vec![identified("a", "film-42", RecordingTaskState::Failed)],
+            ..PersistedRecordingQueue::default()
+        };
+        let queued = identified("b", "film-42", RecordingTaskState::Queued);
+        assert_eq!(promotion_decision(&candidate, &queued), PromotionDecision::Execute);
+    }
+
+    #[test]
+    fn an_unidentified_entry_never_matches_another() {
+        // An empty identity means the identity could not be resolved. Treating
+        // two of them as the same recording would merge two different files.
+        let candidate = PersistedRecordingQueue {
+            finished: vec![identified("a", "", RecordingTaskState::Completed)],
+            active: Some(identified("c", "", RecordingTaskState::Running)),
+            ..PersistedRecordingQueue::default()
+        };
+        let queued = identified("b", "", RecordingTaskState::Queued);
+        assert_eq!(promotion_decision(&candidate, &queued), PromotionDecision::Execute);
+    }
+
+    #[test]
+    fn different_media_does_not_attach() {
+        let candidate = PersistedRecordingQueue {
+            finished: vec![identified("a", "film-42", RecordingTaskState::Completed)],
+            ..PersistedRecordingQueue::default()
+        };
+        let queued = identified("b", "film-99", RecordingTaskState::Queued);
+        assert_eq!(promotion_decision(&candidate, &queued), PromotionDecision::Execute);
+    }
+
+    #[test]
+    fn attaching_adopts_the_file_but_keeps_the_entry_its_own() {
+        let mut source = identified("a", "film-42", RecordingTaskState::Completed);
+        source.file_path = PathBuf::from("/rec/film.mp4");
+        source.filename = "film.mp4".to_string();
+        source.size = 4_096;
+        source.recording.measured_bytes = 4_096;
+        source.recording.completed_at = Some(1_700_000_000);
+        source.recording.relative_path = Some("film.mp4".to_string());
+
+        let mut attached = identified("b", "film-42", RecordingTaskState::Queued);
+        attached.recording.owner = RecordingOwner::User(UserId::from("web:bob"));
+        attached.recording.reserved_bytes = 9_999;
+        attach_to_completed(&mut attached, &source);
+
+        // The bytes are shared.
+        assert_eq!(attached.file_path, source.file_path);
+        assert_eq!(attached.recording.measured_bytes, 4_096);
+        assert_eq!(attached.state, RecordingTaskState::Completed);
+        // The link is not: this is Bob's entry onto Alice's file.
+        assert_eq!(attached.uuid, "b");
+        assert_eq!(attached.recording.owner_id().0, "web:bob");
+        // Nothing is reserved any more; the bytes are already on disk.
+        assert_eq!(attached.recording.reserved_bytes, 0);
     }
 
     #[tokio::test]

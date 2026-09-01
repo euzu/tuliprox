@@ -967,10 +967,29 @@ async fn promote_next_download(
         if candidate.active.is_some() || candidate.queue.is_empty() {
             return Ok(None);
         }
-        let next = candidate.queue.remove(0);
-        let promoted = (next.uuid.clone(), next.filename.clone());
-        candidate.active = Some(next);
-        Ok(Some(promoted))
+        // Walk the queue rather than taking the head unconditionally: an entry
+        // whose file another entry already produced must attach to it, and one
+        // whose file is being produced right now has to wait its turn.
+        let mut index = 0;
+        while index < candidate.queue.len() {
+            match crate::recording::recording_queue::promotion_decision(candidate, &candidate.queue[index]) {
+                crate::recording::recording_queue::PromotionDecision::Execute => {
+                    let next = candidate.queue.remove(index);
+                    let promoted = (next.uuid.clone(), next.filename.clone());
+                    candidate.active = Some(next);
+                    return Ok(Some(promoted));
+                }
+                crate::recording::recording_queue::PromotionDecision::AttachTo(completed) => {
+                    let source = candidate.finished[completed].clone();
+                    let mut attached = candidate.queue.remove(index);
+                    crate::recording::recording_queue::attach_to_completed(&mut attached, &source);
+                    candidate.finished.push(attached);
+                    // The queue shrank; re-examine this position.
+                }
+                crate::recording::recording_queue::PromotionDecision::Wait => index += 1,
+            }
+        }
+        Ok(None)
     })
     .await
 }
