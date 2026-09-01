@@ -19,16 +19,9 @@
 
 use std::{
     io,
-    path::{Component, Path, PathBuf},
+    path::{Component, Path},
 };
 use tokio::fs;
-
-/// Visibility for a recording directory layout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RecordingVisibility {
-    Private,
-    Shared,
-}
 
 /// Errors that can occur when handling a recording path.
 #[derive(Debug)]
@@ -255,42 +248,6 @@ pub async fn clean_empty_parents(path: &Path, root: &Path) -> Result<(), Recordi
             Err(err) if err.kind() == io::ErrorKind::PermissionDenied => break,
             Err(err) => return Err(err.into()),
         }
-    }
-    Ok(())
-}
-
-/// Resolve the canonical directory layout for a recording's final path:
-/// `<recording_root>/users/<owner>/<rel>` for `Private` and
-/// `<recording_root>/shared/<rel>` for `Shared`. The relative path must
-/// already be validated.
-pub fn resolve_recording_dir(
-    recording_root: &Path,
-    visibility: RecordingVisibility,
-    owner_id: &str,
-    rel: &Path,
-) -> Result<PathBuf, RecordingPathError> {
-    validate_relative_path(rel)?;
-    validate_owner_id(owner_id)?;
-    let base = match visibility {
-        RecordingVisibility::Private => recording_root.join("users").join(owner_id),
-        RecordingVisibility::Shared => recording_root.join("shared"),
-    };
-    Ok(base.join(rel))
-}
-
-/// Validate that an `owner_id` can be safely used as a single path
-/// component. Rejects empty strings, NUL bytes, path separators, and
-/// the traversal components `.` and `..` so the resulting layout can
-/// never escape the configured recording root.
-fn validate_owner_id(owner_id: &str) -> Result<(), RecordingPathError> {
-    use std::path::Component;
-    if owner_id.is_empty() || owner_id.contains('\0') {
-        return Err(RecordingPathError::InvalidComponent);
-    }
-    let path = std::path::Path::new(owner_id);
-    let components: Vec<_> = path.components().collect();
-    if components.len() != 1 || !matches!(components.first(), Some(Component::Normal(_))) {
-        return Err(RecordingPathError::InvalidComponent);
     }
     Ok(())
 }
@@ -533,28 +490,5 @@ mod tests {
         clean_empty_parents(&nested.join("empty"), dir.path()).await.expect("clean");
         // The non-empty `a/` must remain because it still has `b/`.
         assert!(dir.path().join("a").exists(), "non-empty parent must remain");
-    }
-
-    #[test]
-    fn resolve_recording_dir_lays_out_private_and_shared() {
-        let root = Path::new("/var/recordings");
-        let private = resolve_recording_dir(root, RecordingVisibility::Private, "web:abc", Path::new("2025/pilot.ts"))
-            .expect("private");
-        assert_eq!(private, PathBuf::from("/var/recordings/users/web:abc/2025/pilot.ts"));
-        let shared =
-            resolve_recording_dir(root, RecordingVisibility::Shared, "ignored", Path::new("pilot.ts")).expect("shared");
-        assert_eq!(shared, PathBuf::from("/var/recordings/shared/pilot.ts"));
-    }
-
-    #[test]
-    fn resolve_recording_dir_rejects_traversal_in_relative() {
-        let err = resolve_recording_dir(
-            Path::new("/var/recordings"),
-            RecordingVisibility::Private,
-            "web:abc",
-            Path::new("../escape.ts"),
-        )
-        .unwrap_err();
-        assert!(matches!(err, RecordingPathError::InvalidComponent));
     }
 }

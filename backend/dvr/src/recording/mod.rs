@@ -12,6 +12,7 @@ pub mod recording_notification;
 pub mod recording_notification_adapter;
 pub mod recording_observability;
 pub mod recording_occurrence;
+pub mod recording_path;
 pub mod recording_queue;
 pub mod recording_quota;
 pub mod recording_reconciliation;
@@ -32,9 +33,9 @@ pub mod recording_ws;
 pub use self::{
     recording_catalog_access::*, recording_conflict::*, recording_ctx::*, recording_currently_airing::*,
     recording_deletion::*, recording_disk::*, recording_edit::*, recording_notification::*,
-    recording_notification_adapter::*, recording_observability::*, recording_occurrence::*, recording_queue::*,
-    recording_quota::*, recording_reconciliation::*, recording_retention::*, recording_rule_scheduler::*,
-    recording_rule_service::*, recording_security::*, recording_service::*, recording_source_resolution::*,
-    recording_supervisor::*, recording_transfer::*, recording_transition::*, recording_url::*, recording_worker::*,
-    recording_worker_runner::*, recording_ws::*,
+    recording_notification_adapter::*, recording_observability::*, recording_occurrence::*, recording_path::*,
+    recording_queue::*, recording_quota::*, recording_reconciliation::*, recording_retention::*,
+    recording_rule_scheduler::*, recording_rule_service::*, recording_security::*, recording_service::*,
+    recording_source_resolution::*, recording_supervisor::*, recording_transfer::*, recording_transition::*,
+    recording_url::*, recording_worker::*, recording_worker_runner::*, recording_ws::*,
 };

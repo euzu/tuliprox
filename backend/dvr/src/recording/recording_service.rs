@@ -2,9 +2,12 @@
 
 use super::{recording_ctx::RecordingCtx, recording_source_resolution as source_resolution};
 use crate::{
-    recording::recording_queue::{
-        mutate, PersistedRecordingQueue, PersistedRecordingTask, QueueMutationError, RecordingQueue, RecordingTask,
-        RecordingTaskState,
+    recording::{
+        recording_path,
+        recording_queue::{
+            mutate, PersistedRecordingQueue, PersistedRecordingTask, QueueMutationError, RecordingQueue, RecordingTask,
+            RecordingTaskState,
+        },
     },
     recording_deletion::{
         begin_deletion_authorized, execute_deletion_target, finalize_deletion, rollback_deletion, DeletionError,
@@ -16,7 +19,11 @@ use shared::model::{
     recording::{RecordingMetadata, RecordingOwner, RecordingProvenance, RecordingSource, RecordingVisibility},
     RecordingKind, UserId, XtreamCluster,
 };
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tuliprox_auth::{authorize, authorize_orphan, RecordingAction, RecordingDecision, RecordingSubject, TerminalState};
 use tuliprox_core::model::AppConfig;
 
@@ -1051,22 +1058,33 @@ fn reserve_recording_relative_path(
     // Borrowed set, built once. The old code walked a `Vec<String>` of
     // cloned filenames once per `_N` candidate, so reserving the
     // (N+1)-th recording of a title cost O(N^2) string comparisons.
+    // Borrowed set, built once. The old code walked a `Vec<String>` of
+    // cloned filenames once per `_N` candidate, so reserving the
+    // (N+1)-th recording of a title cost O(N^2) string comparisons.
     let existing: std::collections::HashSet<&str> = collect_existing_relative_paths(candidate).collect();
-    let mut filename = task.filename.clone();
-    if existing.contains(filename.as_str()) {
-        let (stem, ext) = split_filename(&task.filename);
+    // The reservation is over the whole root-relative path, not the bare
+    // filename: two series can legitimately hold an `e01.mkv` in different
+    // season directories.
+    let base = task.recording.relative_path.clone().unwrap_or_else(|| task.filename.clone());
+    let mut relative = PathBuf::from(&base);
+    if existing.contains(base.as_str()) {
         // Linear probe over indices; each probe is one hash lookup.
         for index in 1.. {
-            filename = if ext.is_empty() { format!("{stem}_{index}") } else { format!("{stem}_{index}.{ext}") };
-            if !existing.contains(filename.as_str()) {
+            relative = recording_path::with_collision_suffix(Path::new(&base), index);
+            if !existing.contains(relative.to_string_lossy().as_ref()) {
                 break;
             }
         }
     }
+    let filename =
+        relative.file_name().and_then(|name| name.to_str()).ok_or(QueueMutationError::InvalidPath)?.to_string();
     validate_reserved_filename(&filename).map_err(|_| QueueMutationError::InvalidPath)?;
-    task.filename.clone_from(&filename);
+    if !recording_path::is_contained_relative_path(&relative) {
+        return Err(QueueMutationError::InvalidPath);
+    }
     task.file_path = task.file_dir.join(&filename);
-    task.recording.relative_path = Some(filename);
+    task.filename = filename;
+    task.recording.relative_path = Some(relative.to_string_lossy().into_owned());
     Ok(())
 }
 
@@ -1076,13 +1094,6 @@ fn collect_existing_relative_paths(candidate: &PersistedRecordingQueue) -> impl 
 
 fn task_relative_path(task: &PersistedRecordingTask) -> &str {
     task.recording.relative_path.as_deref().unwrap_or(task.filename.as_str())
-}
-
-fn split_filename(filename: &str) -> (String, String) {
-    let path = Path::new(filename);
-    let stem = path.file_stem().and_then(std::ffi::OsStr::to_str).unwrap_or(filename);
-    let ext = path.extension().and_then(std::ffi::OsStr::to_str).unwrap_or_default();
-    (stem.to_string(), ext.to_string())
 }
 
 /// What makes two recording requests "the same thing".

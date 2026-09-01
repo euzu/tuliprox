@@ -11,7 +11,10 @@
 //! * [`shared::model::RecordingTaskDto`] — the owner-safe public projection,
 //!   produced only through [`RecordingTask::to_owner_view`].
 
-use crate::recording::recording_transition::{self, RecordingCommand};
+use crate::recording::{
+    recording_path,
+    recording_transition::{self, RecordingCommand},
+};
 use chrono::Utc;
 use log::error;
 use serde::{Deserialize, Serialize};
@@ -361,32 +364,45 @@ pub enum RecordingControl {
     Restart,
 }
 
-/// Returns the directory for the recording file.
-/// If option `organize_into_directories` is set, the root directory is determined.
-/// - For series, the episode pattern is used to determine the sub directory for the series.
-/// - For vod files, the title is used to determine the sub directory.
+/// What the organised layout groups this recording under.
 ///
-/// # Arguments
-/// * `recording_cfg` the recording configuration
-/// * `filestem` the prepared filestem to use as sub directory
-fn recording_target_directory(recording_cfg: &RecordingConfig, filestem: &str) -> PathBuf {
-    if recording_cfg.organize_into_directories {
-        let mut stem = filestem;
-        if let Some(re) = &recording_cfg.episode_pattern {
-            if let Some(captures) = re.captures(stem) {
-                if let Some(episode) = captures.name("episode") {
-                    if !episode.as_str().is_empty() {
-                        stem = &stem[..episode.start()];
-                    }
+/// Live groups by channel, VOD by title, a series by its name and season.
+/// The series name falls back to the episode pattern applied to the filename
+/// stem, which is how the layout was derived before the metadata carried it.
+fn recording_grouping(
+    kind: RecordingKind,
+    recording: &RecordingMetadata,
+    recording_cfg: &RecordingConfig,
+    file_stem: &str,
+) -> recording_path::RecordingGrouping {
+    match kind {
+        RecordingKind::Live => recording_path::RecordingGrouping::live(
+            recording.channel_name.clone().unwrap_or_else(|| stem_group(recording_cfg, file_stem)),
+        ),
+        RecordingKind::Vod => recording_path::RecordingGrouping::vod(
+            recording.program_title.clone().unwrap_or_else(|| stem_group(recording_cfg, file_stem)),
+        ),
+        RecordingKind::Series => recording_path::RecordingGrouping::series(
+            recording.program_title.clone().unwrap_or_else(|| stem_group(recording_cfg, file_stem)),
+            recording.epg.as_ref().and_then(|epg| epg.season),
+        ),
+    }
+}
+
+/// The pre-metadata grouping rule: strip the episode marker and any trailing
+/// filename decoration from the stem.
+fn stem_group(recording_cfg: &RecordingConfig, file_stem: &str) -> String {
+    let mut stem = file_stem;
+    if let Some(re) = &recording_cfg.episode_pattern {
+        if let Some(captures) = re.captures(stem) {
+            if let Some(episode) = captures.name("episode") {
+                if !episode.as_str().is_empty() {
+                    stem = &stem[..episode.start()];
                 }
             }
         }
-        let dir_name = CONSTANTS.re_remove_filename_ending.replace(stem, "");
-        let file_dir: PathBuf = [recording_cfg.directory.as_str(), dir_name.as_ref()].iter().collect();
-        file_dir
-    } else {
-        PathBuf::from(recording_cfg.directory.as_str())
     }
+    CONSTANTS.re_remove_filename_ending.replace(stem, "").into_owned()
 }
 
 fn generate_recording_task_id() -> String {
@@ -418,20 +434,32 @@ impl RecordingTask {
             filename_path.file_stem().and_then(OsStr::to_str).unwrap_or("").trim_matches(FILENAME_TRIM_PATTERNS);
         let file_ext = filename_path.extension().and_then(OsStr::to_str).unwrap_or("");
 
-        let mut filename = if file_ext.is_empty() { file_stem.to_string() } else { format!("{file_stem}.{file_ext}") };
-        let file_dir = recording_target_directory(recording_cfg, file_stem);
-        let mut file_path: PathBuf = file_dir.clone();
-        file_path.push(&filename);
-        let mut x: usize = 1;
-        while file_path.is_file() {
-            filename =
-                if file_ext.is_empty() { format!("{file_stem}_{x}") } else { format!("{file_stem}_{x}.{file_ext}") };
-            file_path.clone_from(&file_dir);
-            file_path.push(&filename);
-            x += 1;
+        let base_filename = if file_ext.is_empty() { file_stem.to_string() } else { format!("{file_stem}.{file_ext}") };
+        let root = Path::new(recording_cfg.directory.as_str());
+        let grouping = recording_grouping(kind, &recording, recording_cfg, file_stem);
+        let mut relative = recording_path::build_relative_path(
+            kind,
+            recording_cfg.organize_into_directories,
+            &grouping,
+            &base_filename,
+        )
+        .ok()?;
+        // A file already on disk under this name belongs to an earlier
+        // recording; the repository reservation resolves logical collisions,
+        // this only avoids clobbering something already written.
+        for index in 1.. {
+            if !root.join(&relative).is_file() {
+                break;
+            }
+            relative = recording_path::with_collision_suffix(&relative, index);
         }
+        let file_path = recording_path::resolve_under_root(root, &relative).ok()?;
+        let file_dir = file_path.parent().map(Path::to_path_buf)?;
+        let filename = relative.file_name().and_then(|name| name.to_str())?.to_string();
 
         file_path.to_str()?;
+        let mut recording = recording;
+        recording.relative_path = Some(relative.to_string_lossy().into_owned());
 
         Some(Self {
             uuid: generate_recording_task_id(),
