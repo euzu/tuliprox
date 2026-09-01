@@ -1770,6 +1770,7 @@
     "TASK_STATUS_COMPLETED": "Completed",
     "TASK_STATUS_FAILED": "Failed",
     "TASK_STATUS_CANCELLED": "Cancelled",
+    "TASK_STATUS_CANCELLING": "Cancelling",
     "CONFLICT_NO_KNOWN_CONFLICT": "No conflict",
     "CONFLICT_POSSIBLE_CAPACITY_WAIT": "May wait for a free slot",
     "CONFLICT_LIKELY_MISSED_WINDOW": "Likely to miss the programme",

@@ -183,7 +183,9 @@ pub fn charge_for_state(state: &RecordingTaskState, meta: &RecordingMetadata) ->
         | RecordingTaskState::WaitingForCapacity
         | RecordingTaskState::RetryWaiting
         | RecordingTaskState::Paused => meta.reserved_bytes,
-        RecordingTaskState::Running => meta.reserved_bytes.max(meta.measured_bytes),
+        // Cancelling still owns the file: the worker has not released it, so
+        // the bytes on disk are still this entry's.
+        RecordingTaskState::Running | RecordingTaskState::Cancelling => meta.reserved_bytes.max(meta.measured_bytes),
         RecordingTaskState::Completed | RecordingTaskState::Failed | RecordingTaskState::Cancelled => {
             meta.measured_bytes
         }

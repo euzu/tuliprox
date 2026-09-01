@@ -115,24 +115,14 @@ pub struct PersistedMaterialization {
     pub file_path: PathBuf,
     pub filename: String,
     pub url: String,
-    pub finished: bool,
     pub size: u64,
     pub total_size: Option<u64>,
-    pub paused: bool,
-    pub error: Option<String>,
-    pub state: RecordingTaskState,
     #[serde(default)]
     pub input_name: Option<String>,
     /// The highest priority among the attached entries; recomputed on attach
     /// and detach rather than owned by any one of them.
     #[serde(default)]
     pub priority: i8,
-    #[serde(default)]
-    pub retry_attempts: u8,
-    #[serde(default)]
-    pub next_retry_at: Option<i64>,
-    #[serde(default)]
-    pub partition: RecordingPartition,
     /// What media this file holds. Every entry attached to it agreed on this.
     #[serde(default)]
     pub media_identity: String,
@@ -157,6 +147,26 @@ pub struct PersistedLibraryEntry {
     pub quota_bytes: u64,
     #[serde(default)]
     pub priority: i8,
+    /// Where this entry is in its own lifecycle.
+    ///
+    /// Execution state is per entry, not per file: one entry can be running a
+    /// transfer while another is queued behind it or has already been
+    /// cancelled. Holding it on the shared materialization meant the last
+    /// entry committed decided what every other entry looked like.
+    #[serde(default)]
+    pub state: RecordingTaskState,
+    #[serde(default)]
+    pub partition: RecordingPartition,
+    #[serde(default)]
+    pub finished: bool,
+    #[serde(default)]
+    pub paused: bool,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub retry_attempts: u8,
+    #[serde(default)]
+    pub next_retry_at: Option<i64>,
 }
 
 /// Repository-level bookkeeping, stored under its own key.
@@ -321,17 +331,10 @@ fn split(task: &PersistedRecordingTask) -> (PersistedMaterialization, PersistedL
         file_path: task.file_path.clone(),
         filename: task.filename.clone(),
         url: task.url.clone(),
-        finished: task.finished,
         size: task.size,
         total_size: task.total_size,
-        paused: task.paused,
-        error: task.error.clone(),
-        state: task.state,
         input_name: task.input_name.clone(),
         priority: task.priority,
-        retry_attempts: task.retry_attempts,
-        next_retry_at: task.next_retry_at,
-        partition: task.partition,
         media_identity: task.media_identity.clone(),
         media: task.recording.clone(),
         reference_count: 1,
@@ -342,6 +345,13 @@ fn split(task: &PersistedRecordingTask) -> (PersistedMaterialization, PersistedL
         materialization_id,
         quota_bytes: task.recording.reserved_bytes,
         priority: task.priority,
+        state: task.state,
+        partition: task.partition,
+        finished: task.finished,
+        paused: task.paused,
+        error: task.error.clone(),
+        retry_attempts: task.retry_attempts,
+        next_retry_at: task.next_retry_at,
     };
     (materialization, entry)
 }
@@ -367,18 +377,18 @@ fn join(materialization: &PersistedMaterialization, entry: &PersistedLibraryEntr
         file_path: materialization.file_path.clone(),
         filename: materialization.filename.clone(),
         url: materialization.url.clone(),
-        finished: materialization.finished,
+        finished: entry.finished,
         size: materialization.size,
         total_size: materialization.total_size,
-        paused: materialization.paused,
-        error: materialization.error.clone(),
-        state: materialization.state,
+        paused: entry.paused,
+        error: entry.error.clone(),
+        state: entry.state,
         input_name: materialization.input_name.clone(),
         priority: entry.priority,
-        retry_attempts: materialization.retry_attempts,
-        next_retry_at: materialization.next_retry_at,
+        retry_attempts: entry.retry_attempts,
+        next_retry_at: entry.next_retry_at,
         recording: media,
-        partition: materialization.partition,
+        partition: entry.partition,
         media_identity: materialization.media_identity.clone(),
     }
 }
@@ -895,16 +905,55 @@ mod tests {
     }
 
     #[test]
+    fn two_entries_on_one_file_keep_their_own_states() -> io::Result<()> {
+        // Execution state is per entry. Alice is running the transfer; Bob is
+        // queued behind it on the same media. Holding state on the shared
+        // materialization meant whichever entry was written last decided what
+        // both of them looked like on the next load -- so Bob being queued
+        // silently rewrote Alice as queued too, or the reverse.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let (mut repository, _opened) = RecordingRepository::open(dir.path(), dir.path())?;
+
+        let mut running = task("alice");
+        running.recording.owner = RecordingOwner::User(UserId::from("web:alice"));
+        running.state = RecordingTaskState::Running;
+        running.partition = RecordingPartition::Active;
+        running.finished = false;
+        let mut queued = task("bob");
+        queued.recording.owner = RecordingOwner::User(UserId::from("web:bob"));
+        queued.state = RecordingTaskState::Queued;
+        queued.partition = RecordingPartition::Queued;
+        queued.finished = false;
+        // Same media: one file, two links.
+        running.media_identity = "programme-42".to_string();
+        queued.media_identity = "programme-42".to_string();
+
+        repository.commit(1, &[running, queued])?;
+        let stored = repository.read_records()?;
+        assert_eq!(stored.materializations.len(), 1, "one physical file");
+        assert_eq!(stored.entries.len(), 2, "two links");
+
+        let state_of = |id: &str| stored.entries.get(id).expect("entry").state;
+        assert_eq!(state_of("alice"), RecordingTaskState::Running);
+        assert_eq!(state_of("bob"), RecordingTaskState::Queued);
+        Ok(())
+    }
+
+    #[test]
     fn records_are_encoded_by_field_name() -> io::Result<()> {
         // The recovery history must not depend on field order: that is the
         // whole reason it exists beside the positional B+Tree encoding.
         let (materialization, entry) = super::split(&task("a"));
         let encoded = serde_json::to_string(&RecordingDbValue::Materialization(Box::new(materialization)))?;
-        for field in ["\"id\"", "\"kind\"", "\"state\"", "\"partition\"", "\"media\"", "\"reference_count\""] {
+        // The file's own facts.
+        for field in ["\"id\"", "\"kind\"", "\"file_path\"", "\"media\"", "\"reference_count\""] {
             assert!(encoded.contains(field), "{field} is missing from {encoded}");
         }
         let encoded = serde_json::to_string(&RecordingDbValue::LibraryEntry(Box::new(entry)))?;
-        for field in ["\"id\"", "\"principal\"", "\"materialization_id\"", "\"quota_bytes\""] {
+        // The link's own facts, including where this entry is in its lifecycle.
+        for field in
+            ["\"id\"", "\"principal\"", "\"materialization_id\"", "\"quota_bytes\"", "\"state\"", "\"partition\""]
+        {
             assert!(encoded.contains(field), "{field} is missing from {encoded}");
         }
         Ok(())

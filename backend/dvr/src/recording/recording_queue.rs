@@ -1085,6 +1085,17 @@ impl RecordingQueue {
             task.state = RecordingTaskState::Paused;
             return task;
         }
+        // The worker that was going to acknowledge the cancellation died with
+        // the process. Nothing will ever finish it, and it is not `finished`,
+        // so the requeue below would restart work the user cancelled.
+        if task.state == RecordingTaskState::Cancelling {
+            task.paused = false;
+            task.finished = true;
+            task.state = RecordingTaskState::Cancelled;
+            task.error.get_or_insert_with(|| "Cancelled by user".to_string());
+            task.next_retry_at = None;
+            return task;
+        }
         if task.state == RecordingTaskState::Scheduled {
             task.paused = false;
             task.finished = false;
@@ -1220,7 +1231,14 @@ impl RecordingQueue {
                 candidate.finished.push(cancelled);
                 promote_from_queue(candidate);
             } else if let Some(active) = candidate.active.as_mut() {
-                active.state = RecordingTaskState::Cancelled;
+                // The worker still owns the file and the provider slot; it
+                // commits `Cancelled` once it has let go.
+                active.state = recording_transition::transition(
+                    active.kind,
+                    active.state,
+                    recording_transition::RecordingCommand::Cancel,
+                )
+                .unwrap_or(RecordingTaskState::Cancelling);
                 active.error = Some("Cancelled by user".to_string());
                 active.next_retry_at = None;
             }

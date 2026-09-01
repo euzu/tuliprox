@@ -445,6 +445,10 @@ pub enum RecordingTaskState {
     RetryWaiting,
     Running,
     Paused,
+    /// Cancellation was requested; the worker still owns the file and the
+    /// provider slot. Deliberately not terminal -- treating it as terminal
+    /// lets a deletion unlink the partial the worker is still writing.
+    Cancelling,
     Completed,
     Failed,
     Cancelled,
@@ -462,6 +466,7 @@ impl RecordingTaskState {
             Self::RetryWaiting => "RetryWaiting",
             Self::Running => "Running",
             Self::Paused => "Paused",
+            Self::Cancelling => "Cancelling",
             Self::Completed => "Completed",
             Self::Failed => "Failed",
             Self::Cancelled => "Cancelled",
@@ -478,6 +483,7 @@ impl From<RecordingTaskState> for super::transfer::TransferStatusDto {
             RecordingTaskState::RetryWaiting => Self::RetryWaiting,
             RecordingTaskState::Running => Self::Running,
             RecordingTaskState::Paused => Self::Paused,
+            RecordingTaskState::Cancelling => Self::Cancelling,
             RecordingTaskState::Completed => Self::Completed,
             RecordingTaskState::Failed => Self::Failed,
             RecordingTaskState::Cancelled => Self::Cancelled,

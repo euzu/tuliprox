@@ -11,7 +11,7 @@ use shared::model::{RecordingKind, RecordingMetadata, RecordingOwner, RecordingS
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use tuliprox_dvr::recording::{
-    recording_deletion::{begin_deletion, execute_deletion_target, finalize_deletion},
+    recording_deletion::{begin_deletion, execute_deletion_target, finalize_deletion, DeletionError},
     recording_queue::{
         mutate, PersistedRecordingTask, RecordingControl, RecordingPartition, RecordingQueue, RecordingTaskState,
     },
@@ -223,11 +223,10 @@ async fn seed_sharing(queue: &RecordingQueue, file: &Path, users: &[&str], activ
 
 #[tokio::test]
 async fn cancelling_one_user_leaves_the_other_holding_the_file_across_a_restart() {
-    // Task 11: A leaves, B keeps the recording. The unit tests prove the
-    // decision in isolation; this proves the surviving links are what the
-    // repository ends up holding. The stored reference count is recomputed
-    // from those links on commit rather than decremented, so what is at risk
-    // here is which entries survive, not arithmetic.
+    // Task 11: A leaves, B keeps the recording. Cancelling the running entry
+    // does not finish it -- the worker still owns the file -- so the entry sits
+    // in `Cancelling` until something acknowledges. Here that is a restart,
+    // which is also the only acknowledgement available after a crash.
     let dir = TempDir::new().expect("tempdir");
     let storage = dir.path().join("state");
     std::fs::create_dir_all(&storage).expect("storage dir");
@@ -239,17 +238,35 @@ async fn cancelling_one_user_leaves_the_other_holding_the_file_across_a_restart(
         let queue = open_queue(&storage).await;
         seed_sharing(&queue, &recording, &["alice", "bob"], "alice").await;
 
-        // Alice is the running entry; cancelling her signals the worker once.
         let was_paused = queue.cancel_requested("alice-entry").await.expect("cancel");
         assert_eq!(was_paused, Some(false), "the active entry was cancelled");
-        assert_eq!(*queue.control_signal.read().await, RecordingControl::Cancel);
+        assert_eq!(*queue.control_signal.read().await, RecordingControl::Cancel, "the worker is signalled once");
+        let active = queue.active.read().await.clone().expect("still active");
+        assert_eq!(active.state, RecordingTaskState::Cancelling, "the worker has not let go yet");
 
-        // Removing her entry must not take the bytes Bob is waiting on.
-        let target = begin_deletion(&queue, "alice-entry").await.expect("begin");
+        // Removing it now would unlink the partial the worker is still writing.
+        assert!(
+            matches!(begin_deletion(&queue, "alice-entry").await, Err(DeletionError::NotTerminal)),
+            "a recording still being torn down cannot be deleted"
+        );
+    }
+
+    {
+        // The worker died with the process, so nothing will ever acknowledge.
+        // Recovery settles it rather than restarting cancelled work.
+        let queue = open_queue(&storage).await;
+        let all = queue.committed_snapshot().await.1;
+        for task in &all {
+            eprintln!("DBG {} state={:?} finished={}", task.uuid, task.state, task.finished);
+        }
+        let alice = all.into_iter().find(|task| task.uuid == "alice-entry").expect("alice survived the restart");
+        assert_eq!(alice.state, RecordingTaskState::Cancelled, "cancelling resolves, it does not resume");
+
+        let target = begin_deletion(&queue, "alice-entry").await.expect("now removable");
         assert!(target.still_referenced, "Bob's entry still holds this media");
         execute_deletion_target(&target).await.expect("execute");
         finalize_deletion(&queue, "alice-entry").await.expect("finalize");
-        assert!(partial.exists(), "the in-flight file survives Alice leaving");
+        assert!(partial.exists(), "the file Bob is waiting on survives Alice leaving");
     }
 
     {
@@ -263,8 +280,8 @@ async fn cancelling_one_user_leaves_the_other_holding_the_file_across_a_restart(
 
 #[tokio::test]
 async fn cancelling_the_last_entry_leaves_nothing_referencing_the_file() {
-    // The counterpart to Step 1: with no other entry attached, the work is
-    // genuinely over and the staged bytes are reclaimable.
+    // The counterpart: with no other entry attached, the work is genuinely over
+    // once the cancellation settles, and the staged bytes go with it.
     let dir = TempDir::new().expect("tempdir");
     let storage = dir.path().join("state");
     std::fs::create_dir_all(&storage).expect("storage dir");
@@ -276,7 +293,11 @@ async fn cancelling_the_last_entry_leaves_nothing_referencing_the_file() {
         let queue = open_queue(&storage).await;
         seed_sharing(&queue, &recording, &["alice"], "alice").await;
         queue.cancel_requested("alice-entry").await.expect("cancel");
+        assert!(partial.exists(), "the worker still owns the file while cancelling");
+    }
 
+    {
+        let queue = open_queue(&storage).await;
         let target = begin_deletion(&queue, "alice-entry").await.expect("begin");
         assert!(!target.still_referenced, "nothing else holds it");
         execute_deletion_target(&target).await.expect("execute");

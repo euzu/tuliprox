@@ -1649,6 +1649,7 @@
     "TASK_STATUS_COMPLETED": "Завершено",
     "TASK_STATUS_FAILED": "Ошибка",
     "TASK_STATUS_CANCELLED": "Отменено",
+    "TASK_STATUS_CANCELLING": "Отмена",
     "CONFLICT_NO_KNOWN_CONFLICT": "Конфликтов нет",
     "CONFLICT_POSSIBLE_CAPACITY_WAIT": "Возможно ожидание свободного слота",
     "CONFLICT_LIKELY_MISSED_WINDOW": "Скорее всего, программа будет пропущена",

@@ -20,6 +20,7 @@ pub fn task_status_i18n_key(status: &TransferStatusDto) -> &'static str {
         TransferStatusDto::RetryWaiting => "LABEL.TASK_STATUS_RETRY_WAITING",
         TransferStatusDto::Running => "LABEL.TASK_STATUS_RUNNING",
         TransferStatusDto::Paused => "LABEL.TASK_STATUS_PAUSED",
+        TransferStatusDto::Cancelling => "LABEL.TASK_STATUS_CANCELLING",
         TransferStatusDto::Completed => "LABEL.TASK_STATUS_COMPLETED",
         TransferStatusDto::Failed => "LABEL.TASK_STATUS_FAILED",
         TransferStatusDto::Cancelled => "LABEL.TASK_STATUS_CANCELLED",
@@ -34,6 +35,8 @@ pub fn task_status_modifier(status: &TransferStatusDto) -> &'static str {
         TransferStatusDto::Scheduled | TransferStatusDto::Queued => "tp__task-status--pending",
         TransferStatusDto::WaitingForCapacity | TransferStatusDto::RetryWaiting => "tp__task-status--waiting",
         TransferStatusDto::Running => "tp__task-status--active",
+        // Still active work, not yet gone: it is winding down.
+        TransferStatusDto::Cancelling => "tp__task-status--waiting",
         TransferStatusDto::Paused => "tp__task-status--paused",
         TransferStatusDto::Completed => "tp__task-status--done",
         TransferStatusDto::Failed => "tp__task-status--failed",

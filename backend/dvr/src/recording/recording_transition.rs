@@ -83,6 +83,14 @@ const EDITABLE: &[RecordingTaskState] = &[
     RecordingTaskState::RetryWaiting,
 ];
 
+/// The states in which a worker still owns the file and the provider slot.
+///
+/// Cancelling from one of these cannot be immediate: the worker is mid-write or
+/// parked holding a slot, and it has to let go before the recording is really
+/// over. Everything else in `CANCELLABLE` has no worker to wait for.
+const WORKER_OWNED: &[RecordingTaskState] =
+    &[RecordingTaskState::Running, RecordingTaskState::WaitingForCapacity, RecordingTaskState::RetryWaiting];
+
 /// The terminal states a failed or cancelled transfer can be restarted from.
 const RETRYABLE: &[RecordingTaskState] = &[RecordingTaskState::Failed, RecordingTaskState::Cancelled];
 
@@ -108,7 +116,14 @@ pub fn transition(
             (current == RecordingTaskState::Paused).then_some(RecordingTaskState::Running).ok_or(not_allowed)
         }
         RecordingCommand::Cancel => {
-            CANCELLABLE.contains(&current).then_some(RecordingTaskState::Cancelled).ok_or(not_allowed)
+            if !CANCELLABLE.contains(&current) {
+                return Err(not_allowed);
+            }
+            Ok(if WORKER_OWNED.contains(&current) {
+                RecordingTaskState::Cancelling
+            } else {
+                RecordingTaskState::Cancelled
+            })
         }
         RecordingCommand::Retry => {
             if !kind.is_resumable() {
@@ -160,7 +175,7 @@ mod tests {
     use shared::model::{RecordingKind, RecordingTaskState};
 
     const ALL_KINDS: [RecordingKind; 3] = [RecordingKind::Live, RecordingKind::Vod, RecordingKind::Series];
-    const ALL_STATES: [RecordingTaskState; 9] = [
+    const ALL_STATES: [RecordingTaskState; 10] = [
         RecordingTaskState::Queued,
         RecordingTaskState::Scheduled,
         RecordingTaskState::WaitingForCapacity,
@@ -169,6 +184,7 @@ mod tests {
         RecordingTaskState::Paused,
         RecordingTaskState::Completed,
         RecordingTaskState::Failed,
+        RecordingTaskState::Cancelling,
         RecordingTaskState::Cancelled,
     ];
     const ALL_COMMANDS: [RecordingCommand; 4] =
@@ -183,12 +199,14 @@ mod tests {
         (true, RecordingTaskState::Paused, RecordingCommand::Resume, RecordingTaskState::Running),
         (true, RecordingTaskState::Failed, RecordingCommand::Retry, RecordingTaskState::Queued),
         (true, RecordingTaskState::Cancelled, RecordingCommand::Retry, RecordingTaskState::Queued),
+        // No worker holds these, so cancelling is over immediately.
         (false, RecordingTaskState::Queued, RecordingCommand::Cancel, RecordingTaskState::Cancelled),
         (false, RecordingTaskState::Scheduled, RecordingCommand::Cancel, RecordingTaskState::Cancelled),
-        (false, RecordingTaskState::Running, RecordingCommand::Cancel, RecordingTaskState::Cancelled),
         (false, RecordingTaskState::Paused, RecordingCommand::Cancel, RecordingTaskState::Cancelled),
-        (false, RecordingTaskState::WaitingForCapacity, RecordingCommand::Cancel, RecordingTaskState::Cancelled),
-        (false, RecordingTaskState::RetryWaiting, RecordingCommand::Cancel, RecordingTaskState::Cancelled),
+        // A worker owns the file here and has to let go first.
+        (false, RecordingTaskState::Running, RecordingCommand::Cancel, RecordingTaskState::Cancelling),
+        (false, RecordingTaskState::WaitingForCapacity, RecordingCommand::Cancel, RecordingTaskState::Cancelling),
+        (false, RecordingTaskState::RetryWaiting, RecordingCommand::Cancel, RecordingTaskState::Cancelling),
     ];
 
     /// Looks the edge up in the table above; `None` means it must be refused.
@@ -254,7 +272,7 @@ mod tests {
     fn live_can_still_be_cancelled_while_it_runs() {
         assert_eq!(
             transition(RecordingKind::Live, RecordingTaskState::Running, RecordingCommand::Cancel),
-            Ok(RecordingTaskState::Cancelled)
+            Ok(RecordingTaskState::Cancelling)
         );
     }
 

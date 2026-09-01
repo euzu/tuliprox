@@ -1735,6 +1735,7 @@
     "TASK_STATUS_COMPLETED": "مكتمل",
     "TASK_STATUS_FAILED": "فشل",
     "TASK_STATUS_CANCELLED": "ملغى",
+    "TASK_STATUS_CANCELLING": "جارٍ الإلغاء",
     "CONFLICT_NO_KNOWN_CONFLICT": "لا يوجد تعارض",
     "CONFLICT_POSSIBLE_CAPACITY_WAIT": "قد ينتظر فتحة متاحة",
     "CONFLICT_LIKELY_MISSED_WINDOW": "من المحتمل تفويت البرنامج",

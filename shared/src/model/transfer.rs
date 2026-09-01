@@ -17,6 +17,9 @@ pub enum TransferStatusDto {
     RetryWaiting,
     Running,
     Paused,
+    /// Cancellation was requested and the worker has not finished tearing the
+    /// transfer down yet. Not terminal: bytes may still be in flight.
+    Cancelling,
     Completed,
     Failed,
     Cancelled,
