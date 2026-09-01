@@ -306,18 +306,40 @@ fn http_transfer_path(task: &RecordingTask) -> std::path::PathBuf {
     }
 }
 
-async fn finalize_http_transfer(task: &RecordingTask, transfer_path: &std::path::Path) -> std::io::Result<()> {
-    if transfer_path == task.file_path {
+/// Publish a completed transfer at its final path.
+///
+/// Idempotent: linking is the only step that is not naturally repeatable, and a
+/// crash between the link and the partial's removal used to leave a recording
+/// whose bytes are complete on disk reported as failed, permanently -- a retry
+/// re-ran the same path and failed the same way.
+async fn finalize_http_transfer(final_path: &std::path::Path, transfer_path: &std::path::Path) -> std::io::Result<()> {
+    if transfer_path == final_path {
         return Ok(());
     }
     fs::File::open(transfer_path).await?.sync_all().await?;
-    fs::hard_link(transfer_path, &task.file_path).await?;
+    match fs::hard_link(transfer_path, final_path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Path reservation gives this recording sole claim on `final_path`,
+            // so something already there is this task's own earlier link. A
+            // size mismatch means that reasoning does not hold; say so rather
+            // than publish bytes that were never checked.
+            let published = fs::metadata(final_path).await?.len();
+            let staged = fs::metadata(transfer_path).await?.len();
+            if published != staged {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!(
+                        "{} already exists with {published} bytes, but the transfer staged {staged}",
+                        final_path.display()
+                    ),
+                ));
+            }
+        }
+        Err(error) => return Err(error),
+    }
     if let Err(error) = fs::remove_file(transfer_path).await {
-        warn!(
-            "Finalized {} but could not remove partial {}: {error}",
-            task.file_path.display(),
-            transfer_path.display()
-        );
+        warn!("Finalized {} but could not remove partial {}: {error}", final_path.display(), transfer_path.display());
     }
     Ok(())
 }
@@ -364,7 +386,7 @@ async fn download_file(
                     Ok(()) => {}
                     Err(ResumeValidationError::IgnoredRange) => existing_size = 0,
                     Err(ResumeValidationError::Unsatisfiable { complete: true }) => {
-                        return match finalize_http_transfer(&file_download, &file_path).await {
+                        return match finalize_http_transfer(&file_download.file_path, &file_path).await {
                             Ok(()) => DownloadExecutionResult::Completed,
                             Err(error) => DownloadExecutionResult::Failed(format!(
                                 "Could not finalize {}: {error}",
@@ -687,7 +709,12 @@ async fn download_file(
                                                 if let Err(err) = buf_writer.shutdown().await {
                                                     return DownloadExecutionResult::Failed(err.to_string());
                                                 }
-                                                return match finalize_http_transfer(&file_download, &file_path).await {
+                                                return match finalize_http_transfer(
+                                                    &file_download.file_path,
+                                                    &file_path,
+                                                )
+                                                .await
+                                                {
                                                     Ok(()) => DownloadExecutionResult::Completed,
                                                     Err(error) => DownloadExecutionResult::Failed(format!(
                                                         "Could not finalize {}: {error}",
@@ -1754,4 +1781,68 @@ fn start_recording_scheduler(
             .await;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::finalize_http_transfer;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn finalizing_publishes_the_staged_bytes_and_clears_the_partial() {
+        let dir = TempDir::new().expect("tempdir");
+        let partial = dir.path().join("film.mp4.partial");
+        let final_path = dir.path().join("film.mp4");
+        std::fs::write(&partial, b"complete recording").expect("write");
+
+        finalize_http_transfer(&final_path, &partial).await.expect("finalize");
+
+        assert!(final_path.exists());
+        assert!(!partial.exists(), "the partial is cleared once published");
+    }
+
+    #[tokio::test]
+    async fn finalizing_twice_succeeds_instead_of_failing_a_complete_recording() {
+        // A crash between the link and the partial's removal leaves both files.
+        // The resumed transfer sees a complete file, finalizes again, and used
+        // to get AlreadyExists back -- reporting a recording whose bytes are
+        // entirely on disk as failed, on every retry.
+        let dir = TempDir::new().expect("tempdir");
+        let partial = dir.path().join("film.mp4.partial");
+        let final_path = dir.path().join("film.mp4");
+        std::fs::write(&partial, b"complete recording").expect("write");
+        std::fs::hard_link(&partial, &final_path).expect("simulate the interrupted finalize");
+
+        finalize_http_transfer(&final_path, &partial).await.expect("finalizing again must succeed");
+
+        assert!(final_path.exists());
+        assert!(!partial.exists(), "the second attempt finishes the job the first did not");
+    }
+
+    #[tokio::test]
+    async fn a_different_file_at_the_final_path_is_not_published_over() {
+        // Path reservation should make this unreachable. If it ever happens the
+        // staged bytes were never verified against what is already there, so
+        // the transfer must not claim success.
+        let dir = TempDir::new().expect("tempdir");
+        let partial = dir.path().join("film.mp4.partial");
+        let final_path = dir.path().join("film.mp4");
+        std::fs::write(&partial, b"the recording we just made").expect("write");
+        std::fs::write(&final_path, b"something else entirely, of another size").expect("write");
+
+        let error = finalize_http_transfer(&final_path, &partial).await.expect_err("must refuse");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(partial.exists(), "the staged bytes are kept for inspection");
+    }
+
+    #[tokio::test]
+    async fn a_transfer_written_straight_to_its_final_path_needs_no_finalization() {
+        let dir = TempDir::new().expect("tempdir");
+        let final_path = dir.path().join("stream.ts");
+        std::fs::write(&final_path, b"live capture").expect("write");
+
+        finalize_http_transfer(&final_path, &final_path).await.expect("finalize");
+
+        assert!(final_path.exists());
+    }
 }

@@ -525,6 +525,21 @@ mod tests {
     }
 
     #[test]
+    fn two_users_sharing_one_file_each_keep_their_own_entry() {
+        // A shared file is reachable from one entry per user, and each entry
+        // belongs to its owner's library. `keep_last_per_channel` is a
+        // per-library budget, so one user's entry must never consume the
+        // other's allowance.
+        let config = RetentionConfig { keep_last_per_channel: Some(1), delete_after_days: None };
+        let tasks = vec![
+            completed("alice-entry", RecordingOwner::User(UserId::from("web:alice")), Some("c1"), Some("Alpha"), 1_000),
+            completed("bob-entry", RecordingOwner::User(UserId::from("web:bob")), Some("c1"), Some("Alpha"), 1_000),
+        ];
+        let candidates = compute_candidates(&tasks, &config, 2_000);
+        assert_eq!(candidates.len(), 0, "each library holds one recording and is allowed one");
+    }
+
+    #[test]
     fn shared_owner_groups_only_by_channel() {
         // Two shared recordings on the same channel — count
         // retention keeps the newest 1, so 1 candidate.
