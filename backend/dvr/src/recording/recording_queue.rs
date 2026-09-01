@@ -14,11 +14,9 @@
 use chrono::Utc;
 use log::error;
 use serde::{Deserialize, Serialize};
+pub use shared::model::RecordingTaskState;
 use shared::{
-    model::{
-        Claims, QueueRevision, RecordingKind, RecordingMetadata, RecordingTaskDto, TaskPriorityDto, TransferStatusDto,
-        UserId,
-    },
+    model::{Claims, QueueRevision, RecordingKind, RecordingMetadata, RecordingTaskDto, TaskPriorityDto, UserId},
     utils::{deunicode_string, CONSTANTS, FILENAME_TRIM_PATTERNS},
 };
 use std::{
@@ -27,23 +25,20 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex as StdMutex,
     },
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::{
-    fs,
-    sync::{Mutex, Notify, RwLock},
-};
-use tuliprox_core::{
-    model::RecordingConfig,
-    utils::{file_exists_async, write_json_atomic},
-};
+use tokio::sync::{Mutex, Notify, RwLock};
+use tuliprox_core::model::RecordingConfig;
+use tuliprox_repository::recording_repository::RecordingRepository;
+pub use tuliprox_repository::recording_repository::{PersistedRecordingTask, RecordingPartition};
+
+fn poisoned_repository() -> std::io::Error {
+    std::io::Error::other("recording repository lock was poisoned by a panicking writer")
+}
 
 const RECORDING_WINDOW_EXPIRED_ERR: &str = "Recording window already expired";
-/// Schema of the canonical recording state file. There is no upgrade path:
-/// an unknown version fails the load instead of being reinterpreted.
-const RECORDING_QUEUE_SCHEMA_VERSION: u16 = 1;
 static RECORDING_TASK_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Reason a persisted entry cannot be converted back to its in-memory form
@@ -53,17 +48,12 @@ static RECORDING_TASK_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 pub enum PersistedError {
     /// The persisted URL could not be parsed.
     InvalidUrl(String),
-    /// The state file carries a schema version this build cannot read.
-    UnsupportedSchema(u16),
 }
 
 impl std::fmt::Display for PersistedError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidUrl(s) => write!(f, "persisted url is invalid: {s}"),
-            Self::UnsupportedSchema(version) => {
-                write!(f, "persisted recording queue schema version {version} is not supported")
-            }
         }
     }
 }
@@ -161,7 +151,7 @@ impl std::error::Error for QueueMutationError {
 /// The queue mutation boundary (`mutate`) holds the queue locks only while
 /// building the candidate snapshot. It does **not** hold any queue lock
 /// while running the user closure or while persisting. Persisting holds
-/// the `state_file` (filesystem only).
+/// the recording repository mutex only.
 ///
 /// Rule repository mutations are acquired strictly after the queue boundary
 /// has committed; never inside it.
@@ -171,7 +161,7 @@ impl std::error::Error for QueueMutationError {
 /// and returns either a value or a [`QueueMutationError`]. On success the
 /// candidate is persisted atomically, then swapped into the in-memory state,
 /// then the `QueueRevision` is incremented. On any failure — closure error
-/// or persist error — the in-memory state, the persisted file, and the
+/// or persist error — the in-memory state, the repository, and the
 /// revision are all unchanged.
 pub async fn mutate<F, R>(this: &RecordingQueue, op: F) -> Result<R, QueueMutationError>
 where
@@ -207,15 +197,9 @@ where
         return Ok(None);
     };
 
-    let content = this
-        .state_file
-        .as_ref()
-        .map(|_| serde_json::to_vec_pretty(&candidate))
-        .transpose()
-        .map_err(|err| QueueMutationError::from_io(std::io::Error::other(err)))?;
+    let records = candidate.to_records();
 
     let PersistedRecordingQueue {
-        schema_version: _,
         queue: candidate_queue,
         scheduled: candidate_scheduled,
         active: candidate_active,
@@ -258,14 +242,7 @@ where
     }
 
     // 5. Persist only after the complete candidate has been validated.
-    if let (Some(state_file), Some(content)) = (this.state_file.as_ref(), content) {
-        if let Some(parent) = state_file.parent() {
-            fs::create_dir_all(parent).await.map_err(QueueMutationError::from_io)?;
-        }
-        let tmp_path = state_file.with_extension(format!("json.tmp.{next_revision}"));
-        fs::write(&tmp_path, &content).await.map_err(QueueMutationError::from_io)?;
-        fs::rename(&tmp_path, state_file).await.map_err(QueueMutationError::from_io)?;
-    }
+    this.persist_records(next_revision, records).await?;
 
     // 6. Commit. Swap the validated in-memory state from the persisted
     // candidate.
@@ -322,34 +299,8 @@ pub struct RecordingTask {
     pub recording: RecordingMetadata,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PersistedRecordingTask {
-    pub uuid: String,
-    pub kind: RecordingKind,
-    pub file_dir: PathBuf,
-    pub file_path: PathBuf,
-    pub filename: String,
-    pub url: String,
-    pub finished: bool,
-    pub size: u64,
-    pub total_size: Option<u64>,
-    pub paused: bool,
-    pub error: Option<String>,
-    pub state: RecordingTaskState,
-    #[serde(default)]
-    pub input_name: Option<String>,
-    #[serde(default)]
-    pub priority: i8,
-    #[serde(default)]
-    pub retry_attempts: u8,
-    #[serde(default)]
-    pub next_retry_at: Option<i64>,
-    pub recording: RecordingMetadata,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PersistedRecordingQueue {
-    pub schema_version: u16,
     pub queue: Vec<PersistedRecordingTask>,
     pub scheduled: Vec<PersistedRecordingTask>,
     pub active: Option<PersistedRecordingTask>,
@@ -360,35 +311,44 @@ pub struct PersistedRecordingQueue {
     pub revision: QueueRevision,
 }
 
-impl Default for PersistedRecordingQueue {
-    fn default() -> Self {
-        Self {
-            schema_version: RECORDING_QUEUE_SCHEMA_VERSION,
-            queue: Vec::new(),
-            scheduled: Vec::new(),
-            active: None,
-            finished: Vec::new(),
-            revision: QueueRevision::default(),
+impl PersistedRecordingQueue {
+    /// Flatten the four partitions into the repository's record set, tagging
+    /// each task with the partition it must be restored into.
+    fn to_records(&self) -> Vec<PersistedRecordingTask> {
+        let mut records = Vec::with_capacity(
+            self.queue.len() + self.scheduled.len() + self.finished.len() + usize::from(self.active.is_some()),
+        );
+        let partitions: [(&[PersistedRecordingTask], RecordingPartition); 4] = [
+            (&self.queue, RecordingPartition::Queued),
+            (&self.scheduled, RecordingPartition::Scheduled),
+            (self.active.as_slice(), RecordingPartition::Active),
+            (&self.finished, RecordingPartition::Finished),
+        ];
+        for (tasks, partition) in partitions {
+            for task in tasks {
+                let mut task = task.clone();
+                task.partition = partition;
+                records.push(task);
+            }
         }
+        records
     }
-}
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-pub enum RecordingTaskState {
-    #[default]
-    Queued,
-    Scheduled,
-    WaitingForCapacity,
-    RetryWaiting,
-    Running,
-    Paused,
-    Completed,
-    Failed,
-    Cancelled,
-}
-
-impl RecordingTaskState {
-    pub fn is_terminal(self) -> bool { matches!(self, Self::Completed | Self::Failed | Self::Cancelled) }
+    /// Rebuild the four partitions from a repository snapshot.
+    fn from_records(records: Vec<PersistedRecordingTask>, revision: QueueRevision) -> Self {
+        let mut restored = Self { revision, ..Self::default() };
+        for task in records {
+            match task.partition {
+                RecordingPartition::Scheduled => restored.scheduled.push(task),
+                RecordingPartition::Finished => restored.finished.push(task),
+                RecordingPartition::Active if restored.active.is_none() => restored.active = Some(task),
+                // Only one task can be active; a second one is a corrupt record
+                // set, and is requeued rather than silently dropped.
+                RecordingPartition::Queued | RecordingPartition::Active => restored.queue.push(task),
+            }
+        }
+        restored
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -572,22 +532,6 @@ impl RecordingTask {
     }
 }
 
-impl From<RecordingTaskState> for TransferStatusDto {
-    fn from(value: RecordingTaskState) -> Self {
-        match value {
-            RecordingTaskState::Queued => Self::Queued,
-            RecordingTaskState::Scheduled => Self::Scheduled,
-            RecordingTaskState::WaitingForCapacity => Self::WaitingForCapacity,
-            RecordingTaskState::RetryWaiting => Self::RetryWaiting,
-            RecordingTaskState::Running => Self::Running,
-            RecordingTaskState::Paused => Self::Paused,
-            RecordingTaskState::Completed => Self::Completed,
-            RecordingTaskState::Failed => Self::Failed,
-            RecordingTaskState::Cancelled => Self::Cancelled,
-        }
-    }
-}
-
 /// Priority-aware wait queue for provider connection slots.
 /// When the provider is at capacity, tasks register here and are
 /// woken one-at-a-time in descending priority order (lowest i8 = highest priority).
@@ -714,7 +658,8 @@ pub struct RecordingQueue {
     pub control_signal: Arc<RwLock<RecordingControl>>,
     pub control_notify: Arc<Notify>,
     pub worker_running: Arc<RwLock<bool>>,
-    pub state_file: Option<PathBuf>,
+    /// The recoverable store. `None` for an in-memory queue in tests.
+    pub repository: Option<Arc<StdMutex<RecordingRepository>>>,
     /// Priority-aware waiter queue for provider connection slots.
     pub slot_waiters: Arc<RecordingSlotWaitQueue>,
     /// In-memory mirror of the persisted queue revision. Incremented
@@ -754,7 +699,6 @@ impl RecordingQueue {
         let finished = self.finished.read().await;
 
         PersistedRecordingQueue {
-            schema_version: RECORDING_QUEUE_SCHEMA_VERSION,
             queue: queue.iter().map(Self::to_persisted).collect(),
             scheduled: scheduled.iter().map(Self::to_persisted).collect(),
             active: active.as_ref().map(Self::to_persisted),
@@ -808,9 +752,18 @@ impl RecordingQueue {
             })
     }
 
-    pub fn new() -> Self { Self::new_with_state_file(None) }
+    pub fn new() -> Self { Self::new_with_repository(None) }
 
-    pub fn new_with_state_file(state_file: Option<PathBuf>) -> Self {
+    /// Opens the recoverable store and builds a queue backed by it.
+    ///
+    /// `recovery_root` may point at a different filesystem than `storage_dir`;
+    /// that is what lets the history outlive the loss of the database volume.
+    pub fn new_persistent(storage_dir: &Path, recovery_root: &Path) -> std::io::Result<Self> {
+        let (repository, _) = RecordingRepository::open(storage_dir, recovery_root)?;
+        Ok(Self::new_with_repository(Some(Arc::new(StdMutex::new(repository)))))
+    }
+
+    pub fn new_with_repository(repository: Option<Arc<StdMutex<RecordingRepository>>>) -> Self {
         Self {
             queue: Arc::from(Mutex::new(VecDeque::new())),
             scheduled: Arc::from(RwLock::new(Vec::new())),
@@ -819,7 +772,7 @@ impl RecordingQueue {
             control_signal: Arc::from(RwLock::new(RecordingControl::None)),
             control_notify: Arc::new(Notify::new()),
             worker_running: Arc::from(RwLock::new(false)),
-            state_file,
+            repository,
             slot_waiters: Arc::new(RecordingSlotWaitQueue::new()),
             revision: Arc::new(AtomicU64::new(0)),
             mutation_guard: Arc::new(Mutex::new(())),
@@ -828,6 +781,8 @@ impl RecordingQueue {
 
     pub fn to_persisted(task: &RecordingTask) -> PersistedRecordingTask {
         PersistedRecordingTask {
+            // Overwritten from the owning partition when the candidate is flattened.
+            partition: RecordingPartition::default(),
             uuid: task.uuid.clone(),
             kind: task.kind,
             file_dir: task.file_dir.clone(),
@@ -872,7 +827,9 @@ impl RecordingQueue {
     }
 
     pub async fn persist_to_disk(&self) -> std::io::Result<()> {
-        let result = self.try_persist_to_disk().await;
+        let revision = self.revision.load(Ordering::SeqCst);
+        let records = self.snapshot_current(QueueRevision(revision)).await.to_records();
+        let result = self.commit_records(revision, records).await;
         // Callers discard the result; log here so persistence failures are never silent
         if let Err(err) = &result {
             error!("Failed to persist recording queue: {err}");
@@ -880,53 +837,47 @@ impl RecordingQueue {
         result
     }
 
-    async fn try_persist_to_disk(&self) -> std::io::Result<()> {
-        let Some(state_file) = self.state_file.as_ref() else {
+    /// Commit a record set to the repository, off the async executor.
+    ///
+    /// The repository fsyncs both its journal and its B+Tree, so it must not
+    /// run on a runtime worker thread.
+    async fn commit_records(&self, revision: u64, records: Vec<PersistedRecordingTask>) -> std::io::Result<()> {
+        let Some(repository) = self.repository.clone() else {
             return Ok(());
         };
-
-        let queue = self.queue.lock().await.iter().map(Self::to_persisted).collect::<Vec<_>>();
-        let scheduled = self.scheduled.read().await.iter().map(Self::to_persisted).collect::<Vec<_>>();
-        let active = self.active.read().await.as_ref().map(Self::to_persisted);
-        let finished = self.finished.read().await.iter().map(Self::to_persisted).collect::<Vec<_>>();
-        let revision = self.revision.load(Ordering::SeqCst);
-        let payload = PersistedRecordingQueue {
-            schema_version: RECORDING_QUEUE_SCHEMA_VERSION,
-            queue,
-            scheduled,
-            active,
-            finished,
-            revision: QueueRevision(revision),
-        };
-        let content = serde_json::to_vec_pretty(&payload).map_err(std::io::Error::other)?;
-
-        if let Some(parent) = state_file.parent() {
-            fs::create_dir_all(parent).await?;
-        }
-
-        write_json_atomic(state_file, &content).await
+        tokio::task::spawn_blocking(move || {
+            let mut guard = repository.lock().map_err(|_| poisoned_repository())?;
+            guard.commit(revision, &records)
+        })
+        .await
+        .map_err(std::io::Error::other)?
     }
 
-    /// Load the canonical recording state. A missing file is a fresh
-    /// install. Malformed content or an unreadable entry is an error the
-    /// caller must propagate: the file is never renamed, reset, or backed up.
+    async fn persist_records(
+        &self,
+        revision: u64,
+        records: Vec<PersistedRecordingTask>,
+    ) -> Result<(), QueueMutationError> {
+        self.commit_records(revision, records).await.map_err(QueueMutationError::from_io)
+    }
+
+    /// Load the canonical recording state from the repository.
+    ///
+    /// An empty repository is a fresh install. A record that cannot be
+    /// converted back to its in-memory form is an error the caller must
+    /// propagate: the repository is never reset or rebuilt from memory.
     pub async fn load_from_disk(&self) -> std::io::Result<()> {
-        let Some(state_file) = self.state_file.as_ref() else {
+        let Some(repository) = self.repository.clone() else {
             return Ok(());
         };
-        if !file_exists_async(state_file).await {
-            return Ok(());
-        }
+        let snapshot = tokio::task::spawn_blocking(move || {
+            let mut guard = repository.lock().map_err(|_| poisoned_repository())?;
+            guard.load()
+        })
+        .await
+        .map_err(std::io::Error::other)??;
 
-        let content = fs::read_to_string(state_file).await?;
-        let persisted: PersistedRecordingQueue =
-            serde_json::from_str(&content).map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-        if persisted.schema_version != RECORDING_QUEUE_SCHEMA_VERSION {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                PersistedError::UnsupportedSchema(persisted.schema_version),
-            ));
-        }
+        let persisted = PersistedRecordingQueue::from_records(snapshot.tasks, QueueRevision(snapshot.queue_revision));
 
         let invalid = |err: PersistedError| std::io::Error::new(std::io::ErrorKind::InvalidData, err);
         let mut queue = VecDeque::with_capacity(persisted.queue.len());
@@ -1281,7 +1232,9 @@ mod tests {
 
     fn temp_state_file(name: &str) -> PathBuf {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).expect("time").as_nanos();
-        std::env::temp_dir().join(format!("tuliprox_{name}_{nanos}.json"))
+        let dir = std::env::temp_dir().join(format!("tuliprox_{name}_{nanos}"));
+        std::fs::create_dir_all(&dir).expect("create state dir");
+        dir
     }
 
     fn live_meta(owner: &str, start: i64, duration: u64) -> RecordingMetadata {
@@ -1374,7 +1327,7 @@ mod tests {
     #[tokio::test]
     async fn persisted_queue_round_trips_and_requeues_running_downloads() {
         let state_file = temp_state_file("download_state");
-        let queue = RecordingQueue::new_with_state_file(Some(state_file.clone()));
+        let queue = RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository");
         let queued = RecordingTask {
             size: 10,
             total_size: Some(100),
@@ -1398,7 +1351,7 @@ mod tests {
         queue.finished.write().await.push(paused.clone());
         queue.persist_to_disk().await.expect("persist state");
 
-        let restored = RecordingQueue::new_with_state_file(Some(state_file.clone()));
+        let restored = RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository");
         restored.load_from_disk().await.expect("load state");
 
         assert_eq!(restored.queue.lock().await.len(), 2);
@@ -1412,13 +1365,13 @@ mod tests {
         assert!(queued_items.iter().any(|id| id == "queued"));
         assert!(queued_items.iter().any(|id| id == "active"));
 
-        let _ = std::fs::remove_file(state_file);
+        let _ = std::fs::remove_dir_all(state_file);
     }
 
     #[tokio::test]
     async fn persisted_scheduled_recordings_round_trip_without_becoming_active() {
         let state_file = temp_state_file("record_state");
-        let queue = RecordingQueue::new_with_state_file(Some(state_file.clone()));
+        let queue = RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository");
         let future_start = Utc::now().timestamp().saturating_add(3_600);
         let scheduled = RecordingTask {
             url: reqwest::Url::parse("https://example.com/live/1").expect("valid url"),
@@ -1430,7 +1383,7 @@ mod tests {
         queue.scheduled.write().await.push(scheduled.clone());
         queue.persist_to_disk().await.expect("persist state");
 
-        let restored = RecordingQueue::new_with_state_file(Some(state_file.clone()));
+        let restored = RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository");
         restored.load_from_disk().await.expect("load state");
 
         assert!(restored.active.read().await.is_none());
@@ -1444,7 +1397,7 @@ mod tests {
         assert_eq!(restored_scheduled[0].scheduled_duration_secs(), Some(5_400));
         assert_eq!(restored_scheduled[0].kind, RecordingKind::Live);
 
-        let _ = std::fs::remove_file(state_file);
+        let _ = std::fs::remove_dir_all(state_file);
     }
 
     #[test]
@@ -1584,7 +1537,7 @@ mod tests {
     #[tokio::test]
     async fn load_from_disk_moves_expired_scheduled_recordings_to_finished() {
         let state_file = temp_state_file("expired_record_state");
-        let queue = RecordingQueue::new_with_state_file(Some(state_file.clone()));
+        let queue = RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository");
         let expired = RecordingTask {
             state: RecordingTaskState::Scheduled,
             recording: live_meta("web:alice", 100, 60),
@@ -1594,7 +1547,7 @@ mod tests {
         queue.scheduled.write().await.push(expired);
         queue.persist_to_disk().await.expect("persist state");
 
-        let restored = RecordingQueue::new_with_state_file(Some(state_file.clone()));
+        let restored = RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository");
         restored.load_from_disk().await.expect("load state");
 
         assert!(restored.scheduled.read().await.is_empty());
@@ -1604,7 +1557,7 @@ mod tests {
         assert_eq!(finished[0].state, RecordingTaskState::Failed);
         assert_eq!(finished[0].error.as_deref(), Some("Recording window already expired"));
 
-        let _ = std::fs::remove_file(state_file);
+        let _ = std::fs::remove_dir_all(state_file);
     }
 
     #[test]
@@ -1888,11 +1841,25 @@ mod tests {
         task
     }
 
+    /// Read back what the repository actually committed, rather than
+    /// trusting the in-memory mirror.
+    async fn committed(queue: &RecordingQueue) -> (u64, Vec<String>) {
+        let repository = queue.repository.clone().expect("queue is repository backed");
+        let snapshot = tokio::task::spawn_blocking(move || {
+            let mut guard = repository.lock().expect("repository lock");
+            guard.load()
+        })
+        .await
+        .expect("join")
+        .expect("load");
+        (snapshot.queue_revision, snapshot.tasks.iter().map(|task| task.uuid.clone()).collect())
+    }
+
     #[tokio::test]
     async fn mutate_persists_and_increments_revision_on_success() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let state_file = dir.path().join("downloads_state.json");
-        let queue = RecordingQueue::new_with_state_file(Some(state_file.clone()));
+        let state_dir = dir.path().to_path_buf();
+        let queue = RecordingQueue::new_persistent(&state_dir, &state_dir).expect("open recording repository");
         assert_eq!(queue.revision.load(Ordering::SeqCst), 0);
 
         // Insert one recording so a candidate is non-empty.
@@ -1902,18 +1869,18 @@ mod tests {
         let result: Result<(), QueueMutationError> = mutate(&queue, |_candidate| Ok(())).await;
         assert!(result.is_ok(), "mutate should succeed: {result:?}");
         // The first committed mutation publishes revision 1, both in
-        // memory and in the persisted candidate.
+        // memory and in the repository.
         assert_eq!(queue.revision.load(Ordering::SeqCst), 1, "counter must store the new value");
-        let content = std::fs::read(&state_file).expect("read state file");
-        let restored: PersistedRecordingQueue = serde_json::from_slice(&content).expect("parse state file");
-        assert_eq!(restored.revision, QueueRevision(1), "file carries the candidate's revision");
+        let (revision, uuids) = committed(&queue).await;
+        assert_eq!(revision, 1, "repository carries the candidate's revision");
+        assert_eq!(uuids, vec!["rec-1".to_string()]);
     }
 
     #[tokio::test]
     async fn mutate_keeps_state_when_closure_errors() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let state_file = dir.path().join("downloads_state.json");
-        let queue = RecordingQueue::new_with_state_file(Some(state_file.clone()));
+        let state_dir = dir.path().to_path_buf();
+        let queue = RecordingQueue::new_persistent(&state_dir, &state_dir).expect("open recording repository");
         let original_revision = queue.revision.load(Ordering::SeqCst);
         let original_len = queue.queue.lock().await.len();
 
@@ -1922,33 +1889,16 @@ mod tests {
         assert!(result.is_err(), "closure error should propagate");
         assert_eq!(queue.queue.lock().await.len(), original_len, "queue must stay unchanged");
         assert_eq!(queue.revision.load(Ordering::SeqCst), original_revision);
-        assert!(!state_file.exists(), "no file should be written on closure error");
+        let (revision, uuids) = committed(&queue).await;
+        assert_eq!(revision, 0, "nothing may be committed on closure error");
+        assert_eq!(uuids.len(), 0);
     }
 
     #[tokio::test]
-    async fn mutate_keeps_state_when_persist_errors() {
+    async fn mutate_invalid_candidate_keeps_existing_repository_memory_and_revision() {
         let dir = tempfile::tempdir().expect("tempdir");
-        // Point the state file at a path that already exists as a directory
-        // so the atomic write (open + write + rename) fails.
-        let state_file = dir.path().join("blocking-dir");
-        std::fs::create_dir_all(&state_file).expect("create blocking dir");
-        let queue = RecordingQueue::new_with_state_file(Some(state_file));
-        let original_len = queue.queue.lock().await.len();
-        let original_revision = queue.revision.load(Ordering::SeqCst);
-
-        let result: Result<(), QueueMutationError> = mutate(&queue, |_candidate| Ok(())).await;
-        assert!(result.is_err(), "persist failure should propagate");
-        assert!(result.unwrap_err().source_io().is_some(), "should carry io::Error");
-        // State stays unchanged: the in-memory queue is intact.
-        assert_eq!(queue.queue.lock().await.len(), original_len, "in-memory state must be unchanged");
-        assert_eq!(queue.revision.load(Ordering::SeqCst), original_revision);
-    }
-
-    #[tokio::test]
-    async fn mutate_invalid_candidate_keeps_existing_file_memory_and_revision() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let state_file = dir.path().join("downloads_state.json");
-        let queue = RecordingQueue::new_with_state_file(Some(state_file.clone()));
+        let state_dir = dir.path().to_path_buf();
+        let queue = RecordingQueue::new_persistent(&state_dir, &state_dir).expect("open recording repository");
         let initial = make_test_recording_task("rec-1", dir.path().join("a.ts"));
         let persisted = RecordingQueue::to_persisted(&initial);
         mutate(&queue, |candidate| {
@@ -1957,7 +1907,7 @@ mod tests {
         })
         .await
         .expect("initial commit");
-        let original_file = std::fs::read(&state_file).expect("read initial state");
+        let committed_before = committed(&queue).await;
 
         let result: Result<(), QueueMutationError> = mutate(&queue, |candidate| {
             if let Some(download) = candidate.queue.first_mut() {
@@ -1969,7 +1919,9 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(queue.revision.load(Ordering::SeqCst), 1);
-        assert_eq!(std::fs::read(&state_file).expect("read unchanged state"), original_file);
+        // A candidate that cannot be converted back is rejected before the
+        // repository is touched, so the committed set is byte-identical.
+        assert_eq!(committed(&queue).await, committed_before);
         assert_eq!(queue.queue.lock().await.front().map(|download| download.uuid.as_str()), Some("rec-1"));
     }
 
@@ -2032,8 +1984,10 @@ mod tests {
     #[tokio::test]
     async fn mutate_serializes_concurrent_calls() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let state_file = dir.path().join("downloads_state.json");
-        let queue = std::sync::Arc::new(RecordingQueue::new_with_state_file(Some(state_file)));
+        let state_file = dir.path().to_path_buf();
+        let queue = std::sync::Arc::new(
+            RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository"),
+        );
         let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(5));
 
         let mut handles = Vec::new();
@@ -2165,8 +2119,8 @@ mod tests {
     #[tokio::test]
     async fn mutate_swap_restores_in_memory_state_from_persisted_candidate() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let state_file = dir.path().join("downloads_state.json");
-        let queue = RecordingQueue::new_with_state_file(Some(state_file.clone()));
+        let state_file = dir.path().to_path_buf();
+        let queue = RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository");
 
         let persisted = RecordingQueue::to_persisted(&make_test_recording_task("rec-1", dir.path().join("a.ts")));
         mutate(&queue, |candidate| {
@@ -2196,62 +2150,26 @@ mod tests {
     // --- load_from_disk rejection paths ---
 
     #[tokio::test]
-    async fn load_from_disk_rejects_unknown_schema_version_and_leaves_state_unchanged() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let state_file = dir.path().join("downloads_state.json");
-        let payload = PersistedRecordingQueue {
-            schema_version: RECORDING_QUEUE_SCHEMA_VERSION + 9,
-            queue: vec![RecordingQueue::to_persisted(&task("rec-1", RecordingKind::Vod, RecordingTaskState::Queued))],
-            scheduled: Vec::new(),
-            active: None,
-            finished: Vec::new(),
-            revision: QueueRevision(7),
-        };
-        let serialized = serde_json::to_vec_pretty(&payload).expect("serialize");
-        std::fs::write(&state_file, &serialized).expect("write state file");
-
-        let queue = RecordingQueue::new_with_state_file(Some(state_file.clone()));
-        let result = queue.load_from_disk().await;
-
-        assert!(result.is_err(), "unknown schema_version must surface as an error");
-        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
-        // In-memory state stays empty: rejection happens before assignment.
-        assert!(queue.queue.lock().await.is_empty());
-        assert!(queue.scheduled.read().await.is_empty());
-        assert!(queue.finished.read().await.is_empty());
-        assert!(queue.active.read().await.is_none());
-        // Persisted file is not touched.
-        assert_eq!(std::fs::read(&state_file).expect("read unchanged file"), serialized);
-    }
-
-    #[tokio::test]
     async fn load_from_disk_rejects_invalid_url_in_persisted_entry() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let state_file = dir.path().join("downloads_state.json");
+        let state_dir = dir.path().to_path_buf();
         let mut persisted =
             RecordingQueue::to_persisted(&task("rec-1", RecordingKind::Vod, RecordingTaskState::Queued));
         persisted.url = "not a url".to_string();
-        let payload = PersistedRecordingQueue {
-            schema_version: RECORDING_QUEUE_SCHEMA_VERSION,
-            queue: vec![persisted],
-            scheduled: Vec::new(),
-            active: None,
-            finished: Vec::new(),
-            revision: QueueRevision::default(),
-        };
-        let serialized = serde_json::to_vec_pretty(&payload).expect("serialize");
-        std::fs::write(&state_file, &serialized).expect("write state file");
 
-        let queue = RecordingQueue::new_with_state_file(Some(state_file.clone()));
+        let queue = RecordingQueue::new_persistent(&state_dir, &state_dir).expect("open recording repository");
+        queue.commit_records(1, vec![persisted]).await.expect("commit unparseable record");
+
         let result = queue.load_from_disk().await;
 
         assert!(result.is_err(), "invalid url must surface as an error");
         assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+        // Rejection happens before assignment, so memory stays empty and the
+        // repository is left for an operator to inspect.
         assert!(queue.queue.lock().await.is_empty());
         assert!(queue.scheduled.read().await.is_empty());
         assert!(queue.finished.read().await.is_empty());
         assert!(queue.active.read().await.is_none());
-        assert_eq!(std::fs::read(&state_file).expect("read unchanged file"), serialized);
     }
 
     // --- Filename rendering + collision reservation ---
@@ -2353,6 +2271,7 @@ mod tests {
 
     fn persisted_recording(uuid: &str, meta: RecordingMetadata) -> PersistedRecordingTask {
         PersistedRecordingTask {
+            partition: RecordingPartition::default(),
             uuid: uuid.to_string(),
             kind: RecordingKind::Live,
             file_dir: PathBuf::from("/tmp"),
@@ -2401,8 +2320,8 @@ mod tests {
     #[tokio::test]
     async fn pause_active_routes_through_mutate() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let state_file = dir.path().join("downloads_state.json");
-        let queue = RecordingQueue::new_with_state_file(Some(state_file));
+        let state_file = dir.path().to_path_buf();
+        let queue = RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository");
         let task = make_test_transfer_task("rec-1", dir.path().join("a.ts"));
         {
             let mut active = queue.active.write().await;

@@ -274,7 +274,13 @@ async fn create_shared_data(
     forced_targets: &Arc<ProcessTargets>,
 ) -> Result<(AppState, mpsc::Receiver<ManualPlaylistUpdateRequest>), TuliproxError> {
     let config = app_config.config.load();
-    let recordings_state_file = std::path::PathBuf::from(&config.storage_dir).join("recordings_state.json");
+    // Recovery generations live under the backup directory so they survive the
+    // loss of the storage volume; the repository reports which it got.
+    let recordings = RecordingQueue::new_persistent(
+        std::path::Path::new(config.storage_dir.as_str()),
+        std::path::Path::new(config.get_backup_dir().as_ref()),
+    )
+    .map_err(|err| TuliproxError::Io(format!("failed to open the recording repository: {err}")))?;
 
     let use_geoip = config.is_geoip_enabled();
     let geoip = if use_geoip {
@@ -333,7 +339,7 @@ async fn create_shared_data(
         http_client: Arc::new(ArcSwap::from_pointee(client)),
         http_client_no_redirect: Arc::new(ArcSwap::from_pointee(client_no_redirect)),
         public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(public_client_no_redirect)),
-        recordings: Arc::new(RecordingQueue::new_with_state_file(Some(recordings_state_file))),
+        recordings: Arc::new(recordings),
         cache: Arc::new(ArcSwapOption::from(cache)),
         shared_stream_manager,
         hls_proxy,
@@ -901,32 +907,54 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    fn temp_state_file(name: &str) -> PathBuf {
+    fn temp_state_dir(name: &str) -> PathBuf {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).expect("time").as_nanos();
-        std::env::temp_dir().join(format!("tuliprox_{name}_{nanos}.json"))
+        let dir = std::env::temp_dir().join(format!("tuliprox_{name}_{nanos}"));
+        std::fs::create_dir_all(&dir).expect("create state dir");
+        dir
     }
 
     #[tokio::test]
-    async fn malformed_recording_state_fails_startup_without_touching_the_file() {
-        let state_file = temp_state_file("malformed_recording_state");
-        std::fs::write(&state_file, "{ not valid json").expect("write malformed state");
-        let recordings = RecordingQueue::new_with_state_file(Some(state_file.clone()));
+    async fn a_corrupt_recording_database_fails_startup_without_resetting_it() {
+        let dir = temp_state_dir("corrupt_recording_state");
+        {
+            let recordings = RecordingQueue::new_persistent(&dir, &dir).expect("open repository");
+            recordings.persist_to_disk().await.expect("persist");
+        }
+        let database = dir.join("recordings.db");
+        std::fs::write(&database, b"not a database").expect("corrupt the database");
 
-        let err = load_persisted_recording_state(&recordings).await.expect_err("startup must fail");
-        assert!(format!("{err}").contains("Failed to load persisted recordings"), "{err}");
-        // The operator's file is left exactly as it was: no rename, no reset.
-        assert_eq!(std::fs::read_to_string(&state_file).expect("state still there"), "{ not valid json");
-        let _ = std::fs::remove_file(&state_file);
+        // With the recovery history intact the database is rebuilt rather than
+        // discarded, and the operator never has to reconstruct the queue.
+        let recordings = RecordingQueue::new_persistent(&dir, &dir).expect("rebuild from recovery");
+        load_persisted_recording_state(&recordings).await.expect("rebuilt state loads");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_destroyed_recovery_history_fails_startup() {
+        let dir = temp_state_dir("lost_recording_recovery");
+        {
+            let recordings = RecordingQueue::new_persistent(&dir, &dir).expect("open repository");
+            recordings.persist_to_disk().await.expect("persist");
+        }
+        std::fs::remove_dir_all(dir.join("recordings_recovery")).expect("destroy recovery");
+
+        // The database is now ahead of every surviving history. Startup must
+        // refuse rather than silently adopt a queue it cannot account for.
+        assert!(RecordingQueue::new_persistent(&dir, &dir).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn missing_recording_state_is_a_fresh_install() {
-        let state_file = temp_state_file("missing_recording_state");
-        let recordings = RecordingQueue::new_with_state_file(Some(state_file));
+        let dir = temp_state_dir("missing_recording_state");
+        let recordings = RecordingQueue::new_persistent(&dir, &dir).expect("open repository");
 
         load_persisted_recording_state(&recordings).await.expect("fresh install loads");
         assert!(recordings.queue.lock().await.is_empty());
         assert!(recordings.active.read().await.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     mod ready_endpoint {

@@ -507,6 +507,7 @@ mod tests {
         );
         meta.deleting_previous_state = deleting;
         PersistedRecordingTask {
+            partition: crate::recording::recording_queue::RecordingPartition::default(),
             uuid: uuid.to_string(),
             file_dir: PathBuf::from("/tmp"),
             file_path: PathBuf::from(format!("/tmp/{uuid}.ts")),
@@ -645,8 +646,8 @@ mod tests {
     #[tokio::test]
     async fn begin_deletion_stamps_deleting_state_under_boundary() {
         let dir = TempDir::new().expect("tempdir");
-        let state_file = dir.path().join("downloads_state.json");
-        let queue = RecordingQueue::new_with_state_file(Some(state_file.clone()));
+        let state_file = dir.path().to_path_buf();
+        let queue = RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository");
         let mut task = finished_with_state("r", RecordingTaskState::Completed, None);
         task.file_path = dir.path().join("r.ts");
         let persisted = RecordingQueue::to_persisted(&task);
@@ -669,8 +670,8 @@ mod tests {
         // Authorization runs inside the same mutation boundary that stamps
         // the task, so a decline must leave the task untouched.
         let dir = TempDir::new().expect("tempdir");
-        let state_file = dir.path().join("downloads_state.json");
-        let queue = RecordingQueue::new_with_state_file(Some(state_file));
+        let state_file = dir.path().to_path_buf();
+        let queue = RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository");
         let mut task = finished_with_state("r", RecordingTaskState::Completed, None);
         task.file_path = dir.path().join("r.ts");
         let persisted = RecordingQueue::to_persisted(&task);
@@ -692,8 +693,8 @@ mod tests {
     #[tokio::test]
     async fn begin_deletion_rejects_unknown_task() {
         let dir = TempDir::new().expect("tempdir");
-        let state_file = dir.path().join("downloads_state.json");
-        let queue = RecordingQueue::new_with_state_file(Some(state_file));
+        let state_file = dir.path().to_path_buf();
+        let queue = RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository");
         let result = begin_deletion(&queue, "missing").await;
         // Reported as its own variant now, not folded into the opaque
         // `BeginFailed`, so the service layer can map it to a 404.
@@ -703,8 +704,8 @@ mod tests {
     #[tokio::test]
     async fn begin_deletion_rejects_non_terminal_state() {
         let dir = TempDir::new().expect("tempdir");
-        let state_file = dir.path().join("downloads_state.json");
-        let queue = RecordingQueue::new_with_state_file(Some(state_file));
+        let state_file = dir.path().to_path_buf();
+        let queue = RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository");
         let mut task = finished_with_state("r", RecordingTaskState::Running, None);
         task.file_path = dir.path().join("r.ts");
         let persisted = RecordingQueue::to_persisted(&task);
@@ -721,8 +722,8 @@ mod tests {
     #[tokio::test]
     async fn finalize_deletion_removes_task_under_boundary() {
         let dir = TempDir::new().expect("tempdir");
-        let state_file = dir.path().join("downloads_state.json");
-        let queue = RecordingQueue::new_with_state_file(Some(state_file));
+        let state_file = dir.path().to_path_buf();
+        let queue = RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository");
         let mut task = finished_with_state("r", RecordingTaskState::Cancelled, Some(DeletionPreviousState::Cancelled));
         task.file_path = dir.path().join("r.ts");
         let persisted = RecordingQueue::to_persisted(&task);

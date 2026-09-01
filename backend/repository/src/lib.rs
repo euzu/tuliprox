@@ -22,6 +22,7 @@ mod playlist_source;
 mod playlist_stream;
 mod provider_dns_repository;
 mod qos_snapshot_repository;
+pub mod recording_repository;
 pub mod recording_rule_repository;
 pub mod stalker_generation_repository;
 pub mod stalker_repository;
@@ -51,6 +52,9 @@ pub use playlist_source::*;
 pub use playlist_stream::*;
 pub use provider_dns_repository::*;
 pub use qos_snapshot_repository::*;
+pub use recording_repository::{
+    PersistedRecordingTask, RecordingPartition, RecordingRepository, RecordingRepositorySnapshot,
+};
 pub use stalker_repository::*;
 pub use startup_migration::*;
 pub use storage::*;

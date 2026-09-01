@@ -1456,6 +1456,7 @@ mod tests {
         meta.reserved_bytes = 123;
         meta.provenance.rule_id = rule_id.map(str::to_string);
         PersistedRecordingTask {
+            partition: crate::recording::recording_queue::RecordingPartition::default(),
             uuid: uuid.to_string(),
             file_dir: std::path::PathBuf::from("/tmp"),
             file_path: std::path::PathBuf::from(format!("/tmp/{uuid}.ts")),
@@ -1555,12 +1556,13 @@ mod tests {
     async fn edit_recording_rejects_padding_above_max_without_persisting_mutation() {
         let dir = tempfile::tempdir().expect("tempdir");
         let state_file = dir.path().join("downloads.json");
-        let downloads = Arc::new(RecordingQueue::new_with_state_file(Some(state_file.clone())));
+        let downloads =
+            Arc::new(RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository"));
         let task = RecordingQueue::from_persisted(persisted_rule_recording("recording", None, 100))
             .expect("valid recording task");
         downloads.scheduled.write().await.push(task);
         downloads.persist_to_disk().await.expect("persist initial queue");
-        let persisted_before = std::fs::read(&state_file).expect("read initial queue");
+        let persisted_before = committed_records(&downloads).await;
         let service = RecordingService::new(Arc::clone(&downloads), test_app_config());
         let claims = shared::model::Claims {
             username: "alice".to_string(),
@@ -1578,7 +1580,7 @@ mod tests {
         let result = service.edit_recording(&claims, "recording", patch).await;
 
         assert!(matches!(result, Err(ServiceError::PaddingLimitExceeded)));
-        assert_eq!(std::fs::read(&state_file).expect("read unchanged queue"), persisted_before);
+        assert_eq!(committed_records(&downloads).await, persisted_before);
         let scheduled = downloads.scheduled.read().await;
         assert_eq!(scheduled[0].recording.pre_roll_secs, 0);
     }
@@ -1587,13 +1589,14 @@ mod tests {
     async fn edit_recording_rejects_active_state_with_invalid_state_error() {
         let dir = tempfile::tempdir().expect("tempdir");
         let state_file = dir.path().join("downloads.json");
-        let downloads = Arc::new(RecordingQueue::new_with_state_file(Some(state_file.clone())));
+        let downloads =
+            Arc::new(RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository"));
         let mut task = RecordingQueue::from_persisted(persisted_rule_recording("recording", None, 100))
             .expect("valid recording task");
         task.state = RecordingTaskState::Running;
         downloads.scheduled.write().await.push(task);
         downloads.persist_to_disk().await.expect("persist initial queue");
-        let persisted_before = std::fs::read(&state_file).expect("read initial queue");
+        let persisted_before = committed_records(&downloads).await;
         let service = RecordingService::new(Arc::clone(&downloads), test_app_config());
         let claims = shared::model::Claims {
             username: "alice".to_string(),
@@ -1612,14 +1615,15 @@ mod tests {
         let result = service.edit_recording(&claims, "recording", patch).await;
 
         assert!(matches!(result, Err(ServiceError::InvalidState)));
-        assert_eq!(std::fs::read(&state_file).expect("read unchanged queue"), persisted_before);
+        assert_eq!(committed_records(&downloads).await, persisted_before);
     }
 
     #[tokio::test]
     async fn edit_recording_clears_epg_when_channel_changes_without_programme() {
         let dir = tempfile::tempdir().expect("tempdir");
         let state_file = dir.path().join("downloads.json");
-        let downloads = Arc::new(RecordingQueue::new_with_state_file(Some(state_file.clone())));
+        let downloads =
+            Arc::new(RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository"));
         let mut task = RecordingQueue::from_persisted(persisted_rule_recording("recording", None, 100))
             .expect("valid recording task");
         {
@@ -1667,7 +1671,8 @@ mod tests {
         // fail with QuotaExceeded and persist nothing.
         let dir = tempfile::tempdir().expect("tempdir");
         let state_file = dir.path().join("downloads.json");
-        let downloads = Arc::new(RecordingQueue::new_with_state_file(Some(state_file.clone())));
+        let downloads =
+            Arc::new(RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository"));
         let mut task = RecordingQueue::from_persisted(persisted_rule_recording("recording", None, 100))
             .expect("valid recording task");
         {
@@ -1676,7 +1681,7 @@ mod tests {
         }
         downloads.scheduled.write().await.push(task);
         downloads.persist_to_disk().await.expect("persist initial queue");
-        let persisted_before = std::fs::read(&state_file).expect("read initial queue");
+        let persisted_before = committed_records(&downloads).await;
         let quota = tuliprox_core::model::RecordingQuotaConfig {
             default_private_bytes: Some(1_000),
             per_user_bytes: HashMap::new(),
@@ -1758,7 +1763,7 @@ mod tests {
         let result = service.edit_recording(&claims, "recording", patch).await;
 
         assert!(matches!(result, Err(ServiceError::QuotaExceeded)));
-        assert_eq!(std::fs::read(&state_file).expect("read unchanged queue"), persisted_before);
+        assert_eq!(committed_records(&downloads).await, persisted_before);
         let scheduled = downloads.scheduled.read().await;
         assert_eq!(scheduled[0].scheduled_start(), Some(100));
     }
@@ -1767,12 +1772,13 @@ mod tests {
     async fn edit_recording_rejects_overflowing_interval_without_persisting_mutation() {
         let dir = tempfile::tempdir().expect("tempdir");
         let state_file = dir.path().join("downloads.json");
-        let downloads = Arc::new(RecordingQueue::new_with_state_file(Some(state_file.clone())));
+        let downloads =
+            Arc::new(RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository"));
         let task = RecordingQueue::from_persisted(persisted_rule_recording("recording", None, 100))
             .expect("valid recording task");
         downloads.scheduled.write().await.push(task);
         downloads.persist_to_disk().await.expect("persist initial queue");
-        let persisted_before = std::fs::read(&state_file).expect("read initial queue");
+        let persisted_before = committed_records(&downloads).await;
         let revision_before = downloads.revision.load(std::sync::atomic::Ordering::SeqCst);
         let service = RecordingService::new(Arc::clone(&downloads), test_app_config());
         let claims = shared::model::Claims {
@@ -1797,7 +1803,7 @@ mod tests {
 
         assert!(matches!(result, Err(ServiceError::InvalidInterval)));
         assert_eq!(downloads.revision.load(std::sync::atomic::Ordering::SeqCst), revision_before);
-        assert_eq!(std::fs::read(&state_file).expect("read unchanged queue"), persisted_before);
+        assert_eq!(committed_records(&downloads).await, persisted_before);
         let scheduled = downloads.scheduled.read().await;
         assert_eq!(scheduled[0].scheduled_start(), Some(100));
         assert_ne!(scheduled[0].recording.program_title.as_deref(), Some("must not persist"));
@@ -1810,7 +1816,8 @@ mod tests {
         // not wrong. Reporting `InvalidSource` here sent clients
         // hunting for a misconfiguration that does not exist.
         let dir = tempfile::tempdir().expect("tempdir");
-        let downloads = Arc::new(RecordingQueue::new_with_state_file(Some(dir.path().join("downloads.json"))));
+        let downloads =
+            Arc::new(RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open recording repository"));
         let service = RecordingService::new(Arc::clone(&downloads), test_app_config());
         let claims = shared::model::Claims {
             username: "alice".to_string(),
@@ -1827,6 +1834,20 @@ mod tests {
         let result = service.create_recording(&claims, &create_input()).await;
 
         assert!(matches!(result, Err(ServiceError::Disabled)));
+    }
+
+    /// The record set the repository actually holds, for tests that
+    /// assert a rejected mutation left persistence untouched.
+    async fn committed_records(queue: &RecordingQueue) -> Vec<PersistedRecordingTask> {
+        let repository = queue.repository.clone().expect("queue is repository backed");
+        tokio::task::spawn_blocking(move || {
+            let mut guard = repository.lock().expect("repository lock");
+            guard.load()
+        })
+        .await
+        .expect("join")
+        .expect("load")
+        .tasks
     }
 
     fn test_app_config() -> Arc<AppConfig> {
@@ -1974,7 +1995,8 @@ mod tests {
         // caller submits no `others` payload.
         let dir = tempfile::tempdir().expect("tempdir");
         let state_file = dir.path().join("downloads.json");
-        let downloads = Arc::new(RecordingQueue::new_with_state_file(Some(state_file.clone())));
+        let downloads =
+            Arc::new(RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository"));
         let mut existing = persisted_rule_recording("existing", None, 100);
         // Place a padded window that overlaps 100..200.
         existing.recording.scheduled_start = Some(100);
@@ -1991,7 +2013,8 @@ mod tests {
     async fn preview_conflict_ignores_other_target_or_input() {
         let dir = tempfile::tempdir().expect("tempdir");
         let state_file = dir.path().join("downloads.json");
-        let downloads = Arc::new(RecordingQueue::new_with_state_file(Some(state_file.clone())));
+        let downloads =
+            Arc::new(RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository"));
         let mut other_target = persisted_rule_recording("other-target", None, 100);
         other_target.recording.source = shared::model::recording::RecordingSource::new("other-target", "9", "input-a");
         let mut other_input = persisted_rule_recording("other-input", None, 100);
@@ -2059,7 +2082,7 @@ mod tests {
             encrypt_secret: [0; 16],
             media_tools: Arc::new(tuliprox_core::model::MediaToolCapabilities::default()),
         });
-        let downloads = Arc::new(RecordingQueue::new_with_state_file(None));
+        let downloads = Arc::new(RecordingQueue::new());
         let service = RecordingService::new(Arc::clone(&downloads), app_config);
         let claims = shared::model::Claims {
             username: "alice".to_string(),

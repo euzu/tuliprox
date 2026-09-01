@@ -397,6 +397,60 @@ fn extract_filename_component(relative_path: &str) -> Option<&str> {
     std::path::Path::new(trimmed).file_name().and_then(|s| s.to_str())
 }
 
+/// Execution state of a recording task as persisted.
+///
+/// Distinct from [`TransferStatusDto`](super::transfer::TransferStatusDto),
+/// which is the wire projection: this one is written to the recording
+/// repository, so renaming a variant is a storage-format change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum RecordingTaskState {
+    #[default]
+    Queued,
+    Scheduled,
+    WaitingForCapacity,
+    RetryWaiting,
+    Running,
+    Paused,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl RecordingTaskState {
+    pub fn is_terminal(self) -> bool { matches!(self, Self::Completed | Self::Failed | Self::Cancelled) }
+
+    /// Stable label used by the edit rules, logs and errors.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Queued => "Queued",
+            Self::Scheduled => "Scheduled",
+            Self::WaitingForCapacity => "WaitingForCapacity",
+            Self::RetryWaiting => "RetryWaiting",
+            Self::Running => "Running",
+            Self::Paused => "Paused",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+            Self::Cancelled => "Cancelled",
+        }
+    }
+}
+
+impl From<RecordingTaskState> for super::transfer::TransferStatusDto {
+    fn from(value: RecordingTaskState) -> Self {
+        match value {
+            RecordingTaskState::Queued => Self::Queued,
+            RecordingTaskState::Scheduled => Self::Scheduled,
+            RecordingTaskState::WaitingForCapacity => Self::WaitingForCapacity,
+            RecordingTaskState::RetryWaiting => Self::RetryWaiting,
+            RecordingTaskState::Running => Self::Running,
+            RecordingTaskState::Paused => Self::Paused,
+            RecordingTaskState::Completed => Self::Completed,
+            RecordingTaskState::Failed => Self::Failed,
+            RecordingTaskState::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
 /// Monotonic revision counter for the persisted recording queue. Increments
 /// once per committed queue mutation. Stored alongside the queue snapshot.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
