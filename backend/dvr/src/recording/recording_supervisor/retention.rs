@@ -22,7 +22,7 @@ use crate::{
     recording_service::{RecordingService, ServiceError},
     recording_worker_runner::{DeleteOutcome, DiskConfig},
 };
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use shared::model::Claims;
 use std::{
     path::PathBuf,
@@ -178,13 +178,30 @@ async fn run_disk_pressure_sweep(ctx: &RecordingCtx) -> u64 {
     let used = total_bytes.saturating_sub(free_bytes);
     let used_percent = u8::try_from(used.saturating_mul(100) / total_bytes).unwrap_or(100);
 
+    // Pressure accelerates retention; it does not widen it. Without the
+    // policy here every completed recording would be a candidate, and a
+    // recording finished a minute ago would be deleted to reclaim space the
+    // operator's own configuration says to keep.
+    let policy = config.retention.as_ref().map_or_else(
+        super::super::recording_retention::RetentionConfig::default,
+        |retention| super::super::recording_retention::RetentionConfig {
+            keep_last_per_channel: retention.keep_last_per_channel,
+            delete_after_days: retention.delete_after_days,
+        },
+    );
+    let now = chrono::Utc::now().timestamp();
     let (_revision, tasks) = ctx.recordings.committed_snapshot().await;
     // The candidate ordering and the admission conditions stay in the
     // pure runner; only the delete side effect lives here, so the loop
     // can `await` instead of blocking a worker thread.
-    let Some(candidates) =
-        super::super::recording_worker_runner::disk_pressure_candidates(&tasks, &disk_config, used_percent, true)
-    else {
+    let Some(candidates) = super::super::recording_worker_runner::disk_pressure_candidates(
+        &tasks,
+        &disk_config,
+        &policy,
+        now,
+        used_percent,
+        true,
+    ) else {
         return 0;
     };
     let low = disk_config.low_water_percent.unwrap_or(0);
@@ -207,6 +224,14 @@ async fn run_disk_pressure_sweep(ctx: &RecordingCtx) -> u64 {
         "recording_retention_delete: reason=watermark used_percent={used_percent} candidates={} deleted={deleted} reclaimed_bytes={reclaimed}",
         candidates.len()
     );
+    if !super::super::recording_worker_runner::pressure_relieved(total_bytes, free_bytes, reclaimed, low) {
+        // Everything still on disk is held by the retention policy. Only an
+        // operator can resolve this; deleting past it would be data loss.
+        warn!(
+            target: "recording::audit",
+            "recording_disk_pressure_unrelieved: used_percent={used_percent} low_water={low} deleted={deleted} reclaimed_bytes={reclaimed}"
+        );
+    }
     deleted
 }
 
