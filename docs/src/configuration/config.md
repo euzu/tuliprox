@@ -264,7 +264,7 @@ playlist_manager:playlist.read,playlist.write,source.read
 
 Available Permissions: `config.read/write`, `source.read/write`, `user.read/write`, `playlist.read/write`,
 `library.read/write`,
-`system.read/write`, `epg.read/write`, `download.read/write`. Note: Write does not imply Read. A group must explicitly
+`system.read/write`, `epg.read/write`, `recording.read/create/manage/delete`. Note: Write does not imply Read. A group must explicitly
 grant both if users need
 to view
 and edit content.
@@ -683,22 +683,35 @@ Tuliprox handles these transfers like provider-bound background streams:
   are  
   re-queued so they continue under the updated download configuration.
 * RBAC integration is explicit:
-  * `download.read` allows opening the downloads view and receiving transfer snapshots.
-  * `download.write` allows queueing, pausing, cancelling, retrying, and removing transfers.
   * `recording.read` allows opening DVR task, quota, library, and recurring-rule views.
   * `recording.create` allows requesting a new DVR recording.
   * `recording.manage` allows editing, cancelling and managing DVR tasks and rules.
   * `recording.delete` allows removing a recording from a library.
-* Persisted queue recovery is tolerant of corruption. If `downloads_state.json` cannot be deserialized,  
-  Tuliprox renames it to a timestamped `*_corrupt.*.json` backup and starts with an empty transfer queue instead of
-  aborting server boot.
+* The recording queue **fails closed**. It is not discarded on corruption: a damaged
+  `recordings.db` is rebuilt from the recovery history, and a database that is ahead of every
+  surviving history refuses to start rather than silently adopting a queue it cannot account
+  for. Losing the recovery directory while the database survives is therefore a startup error,
+  not an empty queue.
 
 ### 6.1 DVR Runtime Files
 
 The DVR runtime keeps durable state under `storage_dir`:
 
-* `downloads_state.json`: queued, scheduled, active, and finished downloads and recordings.
+* `recordings.db`: the recording queue, stored as a B+Tree.
 * `recording_rules.json`: recurring recording rules and tombstones.
+
+Recovery generations live under `backup_dir/recordings_recovery/`, deliberately away from
+`storage_dir` so they can be pointed at a different filesystem. Each generation holds a
+checkpoint and the journal that continues it; the current generation plus one verified
+predecessor are retained. Every queue mutation is appended to the journal and made durable
+*before* the B+Tree is touched, so a crash can only leave recovery ahead of the database — which
+the next start repairs by rebuilding — and never the database ahead of its own history.
+
+Records are stored as field-named JSON carrying their schema version, so a future change to the
+record shape is migrated forward on restore rather than refused.
+
+There is **no migration** from the previous `recordings_state.json`. An existing queue is not
+carried across; the repository starts empty.
 
 Live recordings use a partial-file lifecycle. The worker writes to `<filename>.partial` and renames it to the final
 path only after ffmpeg exits successfully and the final path is still free.

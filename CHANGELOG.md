@@ -4,6 +4,23 @@
 
 ## ⚠️ Breaking Changes
 
+- **The DVR recording queue is now a recoverable B+Tree, and does not migrate.** The queue moved
+  from `storage_dir/recordings_state.json` to `storage_dir/recordings.db`, with a
+  schema-versioned recovery history under `backup_dir/recordings_recovery/`. An existing
+  `recordings_state.json` is ignored: the queue starts empty on upgrade. The queue also fails
+  closed now — a database that is ahead of every surviving recovery generation refuses to start
+  rather than silently adopting a queue it cannot account for.
+
+- **`recording.write` is split into `recording.create`, `recording.manage` and
+  `recording.delete`.** The removed name decodes to nothing, so a groups file that still lists
+  it loses the permission rather than gaining one of the replacements. The permission schema
+  version is bumped, so tokens issued before the split fail closed and clients must
+  re-authenticate.
+
+- **Recording files are stored owner-independently.** The layout is `<recording-root>/<rel>`
+  with no `users/<owner-id>/` or `shared/` component. Recordings written by an earlier build are
+  not found at the new location and must be moved, or re-recorded.
+
 - **Smart EPG normalization now preserves XMLTV ID separators by default.** The default `normalize_regex` changed from
   `[^a-zA-Z0-9\-]` to `[^a-zA-Z0-9._\-]`. Existing configurations that explicitly set the former pattern keep the
   legacy separator-removal behavior; remove the override or use the new pattern to adopt the new default.

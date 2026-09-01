@@ -174,7 +174,7 @@ Typical use:
 
 - inspect filename and metadata before queueing
 - verify that the remote file is reachable
-- test `download.read` access
+- test `recording.read` access
 
 ## Example 7: Queue a file download
 
@@ -200,7 +200,7 @@ Typical use:
 
 - queue a normal background download
 - confirm that duplicate queue requests return the existing task instead of creating a second one
-- test `download.write` access
+- test `recording.manage` access
 
 ## Example 8: Trigger a playlist update
 
@@ -429,8 +429,6 @@ With Web UI authentication enabled, many endpoints require matching permissions 
 - `user.write`
 - `library.read`
 - `library.write`
-- `download.read`
-- `download.write`
 - `recording.read`
 - `recording.create`
 - `recording.manage`

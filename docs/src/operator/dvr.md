@@ -82,7 +82,8 @@ Before restarting after a configuration change:
 3. **If you are unsure, start with retention off.** Remove the `retention` block (or the
    individual keys) and set `enabled: true` with no policy. Nothing is deleted, and you can
    enable a policy deliberately once you have looked at the library.
-4. **Back up** `downloads_state.json` and the recording directory.
+4. **Back up** `recordings.db`, the recovery generations under `backup_dir`, and the
+   recording directory.
 
 There is no dry-run mode. Deletions are logged under the `recording::audit` target with a
 `recording_retention_delete` line and a reason (`Age`, `Count`, or `watermark`), so
@@ -175,35 +176,38 @@ bin/dvr_doctor.sh --token "$ADMIN_TOKEN"
 bin/dvr_doctor.sh --url https://tuliprox.example --token "$ADMIN_TOKEN" --storage-dir /opt/tuliprox/data
 ```
 
-It reports supervisor health, the effective `recording` config block, quota, and aggregate
-summaries of `downloads_state.json`, `recording_rules.json`, and the notification outbox —
-including a `stuck_deleting` count and the set of channels the outbox is still retrying. The
-summaries are deliberately aggregate: no titles, filenames, or owner ids are printed, because a
-diagnostics dump gets pasted into tickets. The health and config sections need an administrator
-token; the on-disk sections work without one.
+It reports supervisor health, the effective `recording` config block, quota, the recording
+repository and its recovery generations, and aggregate summaries of `recording_rules.json` and
+the notification outbox. The summaries are deliberately aggregate: no titles, filenames, or
+owner ids are printed, because a diagnostics dump gets pasted into tickets. The health and
+config sections need an administrator token; the on-disk sections work without one, and take
+`--backup-dir` because the recovery generations live under `backup_dir`, not `storage_dir`.
 
 ## 2. Recording directory layout and immutable IDs
 
-The recording root is the path configured in `recording.directory` (default `<download-dir>/recordings`).
-The runtime resolves the path under `<recording-root>/users/<owner-id>/<rel>` for private
-recordings and `<recording-root>/shared/<rel>` for shared recordings. The `<owner-id>` is the
-authenticated `UserId` from the JWT subject claim (UUID v4 hex with `web:` / `api:` /
-`builtin:admin` namespaces). The `<rel>` is the collision-safe relative path the queue-mutation
-boundary reserved.
+The recording root is the path configured in `recording.directory` (default
+`<download-dir>/recordings`). Every recording is stored at `<recording-root>/<rel>`, where
+`<rel>` is the collision-safe relative path reserved at the queue-mutation boundary.
 
-The directory tree:
+The layout carries **no owner or visibility component**. One physical file is shared by every
+user who requested it, so keying its directory on an owner would be wrong the moment a second
+user attaches, and would force the file to move on disk when the first detaches.
+
+With `organize_into_directories` enabled the layout groups by what the server resolved:
 
 ```text
 <recording-root>/
-  users/
-    <owner-id>/<rel>     # private
-  shared/<rel>           # shared
+  <channel>/<file>                  # live
+  <title>/<file>                    # vod
+  <series>/Season NN/<file>         # series episode
+  <file>                            # unorganized, or no grouping resolved
 ```
 
-`<owner-id>` is **immutable** for the lifetime of the recording record. The runtime never derives
-directory names from usernames, channels, programme titles, or any other mutable identifier. The
-path is canonicalized at file open time against the recording root's file descriptor; any path
-that escapes the root (via `..`, symlinks, or absolute paths) is rejected with
+Path components are sanitised to a single filesystem-safe component: separators, control
+characters and the Windows-forbidden set collapse to `_`, leading and trailing dots are
+stripped, Windows device names fall back to a placeholder, and each component is capped at 255
+bytes on a character boundary. The path is validated against the recording root at open time;
+any path that escapes the root (via `..`, symlinks, or absolute paths) is rejected with
 `recording_unsafe_path`.
 
 ## 3. Filename placeholders
@@ -368,8 +372,8 @@ id is generated per discovery.
 
 The identity registry is `web_user_ids.json` in the storage directory. The startup sequence is:
 
-1. Pre-scan `downloads_state.json` for `RecordingOwner::User(_)` entries (without the registry
-   loaded).
+1. Pre-scan the recording repository for `RecordingOwner::User(_)` entries (without the
+   registry loaded).
 2. Load the existing registry (if any).
 3. Initialize the registry **only** when no persisted real owner exists. New `UserId`s are
    generated for any username that lacks one.
@@ -585,8 +589,8 @@ Missing messaging configuration is a no-op; the adapter logs the dispatch decisi
 ## 16. Migration checklist
 
 1. **Stop or quiesce** recording activity. Cancel active recordings and let the queue drain.
-2. **Back up** the existing config, `downloads_state.json`, user / auth config, and messaging
-   config.
+2. **Back up** the existing config, `recordings.db` with its recovery generations, user /
+   auth config, and messaging config.
 3. **Deploy** the version with additive normalization. No config changes are required for the
    existing flows to keep working.
 4. **Back up `web_user_ids.json`** after the first successful start. The bootstrap writes the
@@ -613,7 +617,8 @@ Missing messaging configuration is a no-op; the adapter logs the dispatch decisi
 
 The acceptance scenarios the operator should verify before declaring the migration done:
 
-1. Old configuration and `downloads_state.json` load without data loss.
+1. Old configuration loads without data loss. The recording queue does **not** migrate: a
+   pre-existing `recordings_state.json` is ignored and the queue starts empty.
 2. Invalid recording kind / metadata combinations fail with `recording_invalid_state` or
    `recording_invalid_source`.
 3. Queue persistence failure leaves the state and revision unchanged and emits no delta.
