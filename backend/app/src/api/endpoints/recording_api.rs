@@ -24,7 +24,10 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use shared::model::{
-    recording::{RecordingMetadata, RecordingOwner, RecordingProvenance, RecordingSource, RecordingVisibility},
+    recording::{
+        CreateRecordingRequest, RecordingMetadata, RecordingOwner, RecordingProvenance, RecordingSource,
+        RecordingSourceRequest, RecordingVisibility,
+    },
     recording_rule::{RecordingRule, RuleBody, RuleSource, RuleVisibility},
     Permission, RecordingKind, RecordingTaskDto, UserId, XtreamCluster, ROLE_ADMIN,
 };
@@ -114,7 +117,7 @@ pub struct RecordingSnapshotResponse {
 pub async fn create_recording_task(
     State(app_state): State<Arc<AppState>>,
     AuthClaims(claims): AuthClaims,
-    Json(body): Json<CreateRecordingTaskBody>,
+    Json(body): Json<CreateRecordingRequest>,
 ) -> impl IntoResponse {
     let mut source = body.source.clone();
     let Some(resolved_source) = resolve_recording_source(
@@ -163,40 +166,11 @@ pub async fn create_recording_task(
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct CreateRecordingTaskBody {
-    pub source: CreateRecordingSourceBody,
-    pub program_title: String,
-    #[serde(default)]
-    pub program_start: Option<i64>,
-    #[serde(default)]
-    pub program_end: Option<i64>,
-    #[serde(default)]
-    pub pre_roll_secs: Option<u64>,
-    #[serde(default)]
-    pub post_roll_secs: Option<u64>,
-    pub visibility: RecordingVisibility,
-    #[serde(default)]
-    pub channel_id: Option<String>,
-    #[serde(default)]
-    pub channel_name: Option<String>,
-    #[serde(default)]
-    pub epg: Option<shared::model::recording::EpgEpisodeMetadata>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct CreateRecordingSourceBody {
-    pub target_id: String,
-    pub virtual_id: String,
-    pub cluster: XtreamCluster,
-    pub input_name: String,
-}
-
 async fn create_http_recording_task(
     app_state: &Arc<AppState>,
     claims: &shared::model::Claims,
-    body: CreateRecordingTaskBody,
-    source: CreateRecordingSourceBody,
+    body: CreateRecordingRequest,
+    source: RecordingSourceRequest,
     resolved: crate::api::endpoints::v1_api_playlist::ResolvedRecordingSource,
 ) -> axum::response::Response {
     if body.program_start.is_some()
@@ -1070,9 +1044,17 @@ pub async fn recording_availability(
     State(app_state): State<Arc<AppState>>,
     AuthClaims(claims): AuthClaims,
 ) -> axum::response::Response {
-    if !claims.permissions.contains(Permission::RecordingRead)
-        && !claims.permissions.contains(Permission::RecordingCreate)
-    {
+    // Any recording permission is enough to ask whether the DVR is usable;
+    // the answer carries no recording data.
+    let recording_principal = [
+        Permission::RecordingRead,
+        Permission::RecordingCreate,
+        Permission::RecordingManage,
+        Permission::RecordingDelete,
+    ]
+    .into_iter()
+    .any(|permission| claims.permissions.contains(permission));
+    if !recording_principal {
         return error_response(StatusCode::FORBIDDEN, "recording_forbidden");
     }
     if !crate::api::model::recording::recording_supervisor::recording_enabled(&app_state.app_config) {
@@ -1181,7 +1163,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recording_availability_accepts_write_only_claims() {
+    async fn recording_availability_accepts_any_recording_permission() {
         let response = recording_availability(
             State(enabled_recording_state()),
             AuthClaims(edit_claims(Some(UserId::from("web:alice")), false)),
@@ -1394,7 +1376,7 @@ mod tests {
 
     #[test]
     fn create_recording_source_rejects_numeric_target() {
-        let parsed = serde_json::from_value::<CreateRecordingSourceBody>(json!({
+        let parsed = serde_json::from_value::<RecordingSourceRequest>(json!({
             "target_id": 7,
             "virtual_id": "42",
             "cluster": "Live",
@@ -1406,7 +1388,7 @@ mod tests {
 
     #[test]
     fn create_recording_source_accepts_string_target() {
-        let parsed: CreateRecordingSourceBody = serde_json::from_value(json!({
+        let parsed: RecordingSourceRequest = serde_json::from_value(json!({
             "target_id": "default",
             "virtual_id": "42",
             "cluster": "Live",

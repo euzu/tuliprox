@@ -167,6 +167,49 @@ impl RecordingSource {
     }
 }
 
+/// Server-owned source identifiers as a client submits them.
+///
+/// This is the request half of [`RecordingSource`]: the client names the
+/// catalog item, and the server resolves the stream URL from it at execute
+/// time. A URL is never accepted from a client.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordingSourceRequest {
+    pub target_id: String,
+    pub virtual_id: String,
+    pub cluster: super::XtreamCluster,
+    pub input_name: String,
+}
+
+/// The one create-recording wire contract, shared by the REST handler and
+/// the frontend client so the two cannot drift.
+///
+/// Unknown fields are rejected: a client that sends a field this build does
+/// not understand has a different idea of what it is asking for, and
+/// silently ignoring it would record the wrong thing.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateRecordingRequest {
+    pub source: RecordingSourceRequest,
+    pub program_title: String,
+    /// Programme interval, Live only. Rejected for VOD and series.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program_start: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program_end: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_roll_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_roll_secs: Option<u64>,
+    pub visibility: RecordingVisibility,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epg: Option<EpgEpisodeMetadata>,
+}
+
 /// EPG episode metadata with tri-state airing provenance.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub struct EpgEpisodeMetadata {
@@ -386,6 +429,45 @@ mod tests {
         assert_eq!(serde_json::to_string(&RecordingKind::Vod).expect("serialize"), "\"vod\"");
         assert_eq!(serde_json::to_string(&RecordingKind::Series).expect("serialize"), "\"series\"");
         assert_eq!(serde_json::to_string(&RecordingKind::Live).expect("serialize"), "\"live\"");
+    }
+
+    fn create_request_json() -> &'static str {
+        r#"{"source":{"target_id":"t","virtual_id":"42","cluster":"Video","input_name":"in"},"program_title":"Film","visibility":"private"}"#
+    }
+
+    #[test]
+    fn create_request_round_trips_its_minimal_form() {
+        let request: CreateRecordingRequest = serde_json::from_str(create_request_json()).expect("deserialize");
+        assert_eq!(request.visibility, RecordingVisibility::Private);
+        assert_eq!(request.program_start, None);
+        assert_eq!(serde_json::to_string(&request).expect("serialize"), create_request_json());
+    }
+
+    #[test]
+    fn create_request_rejects_an_unknown_field() {
+        // A client that sends a field this build does not understand has a
+        // different idea of what it is asking for; recording the wrong thing
+        // is worse than refusing.
+        let body = r#"{"source":{"target_id":"t","virtual_id":"42","cluster":"Video","input_name":"in"},
+            "program_title":"Film","visibility":"private","url":"http://evil/stream.ts"}"#;
+        let error = serde_json::from_str::<CreateRecordingRequest>(body).expect_err("unknown field must be rejected");
+        assert!(error.to_string().contains("url"), "{error}");
+    }
+
+    #[test]
+    fn create_request_rejects_an_unknown_visibility() {
+        // The visibility was previously a free-form string built by hand in
+        // the frontend, so a typo reached the server as a valid body.
+        let body = r#"{"source":{"target_id":"t","virtual_id":"42","cluster":"Video","input_name":"in"},
+            "program_title":"Film","visibility":"pubic"}"#;
+        assert!(serde_json::from_str::<CreateRecordingRequest>(body).is_err());
+    }
+
+    #[test]
+    fn create_request_rejects_an_unknown_source_field() {
+        let body = r#"{"source":{"target_id":"t","virtual_id":"42","cluster":"Video","input_name":"in",
+            "stream_url":"http://evil/"},"program_title":"Film","visibility":"private"}"#;
+        assert!(serde_json::from_str::<CreateRecordingRequest>(body).is_err());
     }
 
     #[test]

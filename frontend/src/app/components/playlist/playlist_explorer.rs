@@ -19,8 +19,9 @@ use crate::{
 use shared::{
     error::TuliproxError,
     model::{
-        Permission, PlaylistRequest, PlaylistUrlResolveRequest, SearchRequest, SeriesStreamDetailEpisodeProperties,
-        SeriesStreamProperties, UiPlaylistGroup, UiPlaylistItem, VirtualId, XtreamCluster,
+        recording::RecordingVisibility, Permission, PlaylistRequest, PlaylistUrlResolveRequest, SearchRequest,
+        SeriesStreamDetailEpisodeProperties, SeriesStreamProperties, UiPlaylistGroup, UiPlaylistItem, VirtualId,
+        XtreamCluster,
     },
     utils::{format_float_localized, Internable},
 };
@@ -411,7 +412,7 @@ pub fn PlaylistExplorer() -> Html {
                                         program_end: None,
                                         pre_roll_secs: None,
                                         post_roll_secs: None,
-                                        visibility: "private".to_string(),
+                                        visibility: RecordingVisibility::Private,
                                         channel_id: None,
                                         channel_name: None,
                                         epg: None,

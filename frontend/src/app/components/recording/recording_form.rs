@@ -17,7 +17,7 @@ use crate::{
 use gloo_timers::future::TimeoutFuture;
 #[cfg(test)]
 use shared::model::permission::Permission;
-use shared::model::recording::EpgEpisodeMetadata;
+use shared::model::recording::{EpgEpisodeMetadata, RecordingVisibility};
 use std::rc::Rc;
 use yew::prelude::*;
 
@@ -195,15 +195,14 @@ pub fn target_name_for_id(
     })
 }
 
-/// Translate the user's form choice into the wire enum. The form only
-/// ever emits `private` or `shared`; the server's
+/// Translate the user's form choice into the wire enum. The server's
 /// `recording_shared_not_administrator` code path is the authoritative
 /// forge defense.
-pub fn visibility_to_wire(picked_shared: bool) -> &'static str {
+pub fn visibility_to_wire(picked_shared: bool) -> RecordingVisibility {
     if picked_shared {
-        "shared"
+        RecordingVisibility::Shared
     } else {
-        "private"
+        RecordingVisibility::Private
     }
 }
 
@@ -239,7 +238,7 @@ pub fn build_request(
         program_end: Some(program_end),
         pre_roll_secs: Some(pre_roll_secs),
         post_roll_secs: Some(post_roll_secs),
-        visibility: visibility_to_wire(picked_shared).to_string(),
+        visibility: visibility_to_wire(picked_shared),
         channel_id: prefill.channel_id.clone(),
         channel_name: prefill.channel_name.clone(),
         epg: prefill.epg.clone(),
@@ -381,7 +380,7 @@ pub fn RecordingForm(props: &RecordingFormProps) -> Html {
                         program_end: Some(0),
                         pre_roll_secs: Some(0),
                         post_roll_secs: Some(0),
-                        visibility: if *shared { "shared".to_string() } else { "private".to_string() },
+                        visibility: visibility_to_wire(*shared),
                         channel_id: None,
                         channel_name: None,
                         epg: None,
@@ -771,8 +770,10 @@ mod tests {
 
     #[test]
     fn visibility_to_wire_stable_strings() {
-        assert_eq!(visibility_to_wire(false), "private");
-        assert_eq!(visibility_to_wire(true), "shared");
+        assert_eq!(visibility_to_wire(false), RecordingVisibility::Private);
+        assert_eq!(visibility_to_wire(true), RecordingVisibility::Shared);
+        // The wire form is the server's enum, so a typo can no longer reach it.
+        assert_eq!(serde_json::to_string(&visibility_to_wire(true)).expect("serialize"), "\"shared\"");
     }
 
     #[test]
@@ -810,14 +811,14 @@ mod tests {
         assert_eq!(request.source.input_name, "input-1");
         assert_eq!(request.pre_roll_secs, Some(60));
         assert_eq!(request.post_roll_secs, Some(30));
-        assert_eq!(request.visibility, "private");
+        assert_eq!(request.visibility, RecordingVisibility::Private);
     }
 
     #[test]
     fn build_request_with_shared_visibility() {
         let prefill = RecordingFormPrefill::new(source(), "Title", 100, 200, bounds());
         let request = build_request(&prefill, 0, 0, true, None, None);
-        assert_eq!(request.visibility, "shared");
+        assert_eq!(request.visibility, RecordingVisibility::Shared);
     }
 
     #[test]

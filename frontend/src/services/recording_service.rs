@@ -16,45 +16,18 @@ use crate::{
     services::{get_base_href, request_delete, request_get, request_patch, request_post, Encoding},
 };
 use serde::{Deserialize, Serialize};
+/// The create-recording request and its source identifiers are defined once,
+/// in `shared`, so the client and the REST handler cannot drift apart.
+pub use shared::model::recording::{
+    CreateRecordingRequest as CreateRecordingTaskRequest, RecordingSourceRequest as RecordingSourceInput,
+};
 use shared::{
     model::{
         recording_rule::{RuleBody, RuleVisibility},
-        RecordingTaskDto, XtreamCluster,
+        RecordingTaskDto,
     },
     utils::concat_path_leading_slash,
 };
-
-/// Source identifiers (server-resolved) for creating a recording.
-/// These come from the configured target/input combination, never a
-/// free-form URL.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct RecordingSourceInput {
-    pub target_id: String,
-    pub virtual_id: String,
-    pub cluster: XtreamCluster,
-    pub input_name: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct CreateRecordingTaskRequest {
-    pub source: RecordingSourceInput,
-    pub program_title: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub program_start: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub program_end: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pre_roll_secs: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub post_roll_secs: Option<u64>,
-    pub visibility: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub channel_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub channel_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub epg: Option<shared::model::recording::EpgEpisodeMetadata>,
-}
 
 #[derive(Clone, Debug, Serialize)]
 pub struct EditRecordingTaskRequest {
@@ -614,7 +587,7 @@ mod tests {
             source: RecordingSourceInput {
                 target_id: "default".to_string(),
                 virtual_id: "42".to_string(),
-                cluster: XtreamCluster::Live,
+                cluster: shared::model::XtreamCluster::Live,
                 input_name: "input-a".to_string(),
             },
             program_title: "News".to_string(),
@@ -622,7 +595,7 @@ mod tests {
             program_end: Some(200),
             pre_roll_secs: Some(0),
             post_roll_secs: Some(0),
-            visibility: "private".to_string(),
+            visibility: shared::model::recording::RecordingVisibility::Private,
             channel_id: None,
             channel_name: None,
             epg: None,
