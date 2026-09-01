@@ -218,6 +218,12 @@ pub async fn begin_deletion(queue: &RecordingQueue, uuid: &str) -> Result<Deleti
 }
 
 fn prior_terminal_state_runtime(download: &PersistedRecordingTask) -> Option<DeletionPreviousState> {
+    // A stamped task's live `state` is the deleting marker, not its terminal
+    // state; deriving from it would call a Completed recording Cancelled and
+    // unlink the partial instead of the file.
+    if download.recording.deleting_previous_state.is_some() {
+        return None;
+    }
     match download.state {
         RecordingTaskState::Completed => Some(DeletionPreviousState::Completed),
         RecordingTaskState::Failed => Some(DeletionPreviousState::Failed),
@@ -829,6 +835,105 @@ mod tests {
         execute_deletion_target(&first).await.expect("execute");
         execute_deletion_target(&second).await.expect("execute");
         assert!(!shared_file.exists(), "the file must not be left with nothing pointing at it");
+    }
+
+    #[tokio::test]
+    async fn one_user_leaving_does_not_stop_or_delete_the_others_recording() {
+        // A cancelled and removed their entry; B is mid-transfer on the same
+        // media. A cancelled entry owns the `.partial`, so deleting A unlinks
+        // exactly the file B is writing into -- the transfer would keep
+        // streaming into an unlinked inode and B would end with nothing.
+        let dir = TempDir::new().expect("tempdir");
+        let queue = RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open recording repository");
+        let final_path = dir.path().join("film.mp4");
+        let partial = crate::recording_worker::recording_partial_path(&final_path);
+        std::fs::write(&partial, b"bytes B is still writing").expect("write partial");
+
+        let mut leaving = finished_with_state("alice-entry", RecordingTaskState::Cancelled, None);
+        leaving.file_path.clone_from(&final_path);
+        let mut recording = finished_with_state("bob-entry", RecordingTaskState::Running, None);
+        recording.file_path.clone_from(&final_path);
+        recording.recording.owner = RecordingOwner::User(UserId::from("web:bob"));
+        let (leaving, recording) = (RecordingQueue::to_persisted(&leaving), RecordingQueue::to_persisted(&recording));
+        assert_eq!(leaving.media_identity, recording.media_identity, "fixture must share one media");
+        mutate(&queue, move |candidate| {
+            candidate.finished.push(leaving.clone());
+            candidate.active = Some(recording.clone());
+            Ok(())
+        })
+        .await
+        .expect("seed");
+
+        let target = begin_deletion(&queue, "alice-entry").await.expect("begin");
+        assert!(target.still_referenced, "B is recording this media right now");
+        execute_deletion_target(&target).await.expect("execute");
+        finalize_deletion(&queue, "alice-entry").await.expect("finalize");
+
+        assert!(partial.exists(), "B's in-flight transfer must keep its file");
+        let still_recording = queue.active.read().await.clone().expect("B is still active");
+        assert_eq!(still_recording.uuid, "bob-entry");
+        assert_eq!(still_recording.state, RecordingTaskState::Running, "A leaving must not stop B");
+    }
+
+    #[tokio::test]
+    async fn the_partial_is_removed_when_the_last_entry_cancels_out() {
+        // The counterpart: with nobody else holding it, a cancelled entry does
+        // own its partial and must not leak it.
+        let dir = TempDir::new().expect("tempdir");
+        let queue = RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open recording repository");
+        let final_path = dir.path().join("film.mp4");
+        let partial = crate::recording_worker::recording_partial_path(&final_path);
+        std::fs::write(&partial, b"abandoned bytes").expect("write partial");
+
+        let mut only = finished_with_state("only", RecordingTaskState::Cancelled, None);
+        only.file_path.clone_from(&final_path);
+        let only = RecordingQueue::to_persisted(&only);
+        mutate(&queue, move |candidate| {
+            candidate.finished.push(only.clone());
+            Ok(())
+        })
+        .await
+        .expect("seed");
+
+        let target = begin_deletion(&queue, "only").await.expect("begin");
+        assert!(!target.still_referenced);
+        execute_deletion_target(&target).await.expect("execute");
+        assert!(!partial.exists(), "an abandoned partial must not be left behind");
+    }
+
+    #[tokio::test]
+    async fn a_second_deletion_of_the_same_entry_is_refused_not_misread() {
+        // Retention and a user delete can reach the same recording. The stamp
+        // overwrites `state` with the deleting marker, so a second pass reading
+        // it would call a Completed recording Cancelled -- and a Cancelled
+        // recording owns the `.partial`, so it would unlink the wrong path and
+        // leave the real file behind while removing the entry that named it.
+        let dir = TempDir::new().expect("tempdir");
+        let queue = RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open recording repository");
+        let final_path = dir.path().join("film.mp4");
+        std::fs::write(&final_path, b"the recording").expect("write");
+        let mut task = finished_with_state("r", RecordingTaskState::Completed, None);
+        task.file_path.clone_from(&final_path);
+        let persisted = RecordingQueue::to_persisted(&task);
+        mutate(&queue, move |candidate| {
+            candidate.finished.push(persisted.clone());
+            Ok(())
+        })
+        .await
+        .expect("seed");
+
+        let first = begin_deletion(&queue, "r").await.expect("first deletion begins");
+        assert_eq!(first.previous_state, DeletionPreviousState::Completed);
+        assert_eq!(first.path_to_unlink(), Some(final_path.clone()), "the first owns the final file");
+
+        let second = begin_deletion(&queue, "r").await;
+        assert!(
+            matches!(second, Err(DeletionError::NotTerminal)),
+            "a deletion already in flight must be skipped, not restamped"
+        );
+
+        execute_deletion_target(&first).await.expect("execute");
+        assert!(!final_path.exists(), "the recording the first deletion claimed is the one removed");
     }
 
     #[tokio::test]
