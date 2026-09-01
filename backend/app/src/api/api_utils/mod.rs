@@ -30,6 +30,7 @@ use crate::{
         parser::hls::{rewrite_hls, RewriteHlsProps},
         processor::re_resolve_stalker_url,
     },
+    repository::load_input_m3u_stream_url,
     utils::{
         async_file_reader, async_file_writer, create_new_file_for_write, debug_if_enabled, get_file_extension, request,
         request::{content_type_from_ext, parse_range, send_with_retry_and_provider},
@@ -57,8 +58,8 @@ use shared::{
     },
     utils::{
         bin_serialize, current_time_secs, extract_extension_from_url, get_credentials_from_url, human_readable_kbps,
-        is_sanitize_sensitive_info_enabled, replace_url_extension, sanitize_sensitive_info, trim_slash, Internable,
-        CONTENT_TYPE_CBOR, CONTENT_TYPE_JSON,
+        is_account_query_key, is_sanitize_sensitive_info_enabled, replace_url_extension, sanitize_sensitive_info,
+        trim_slash, Internable, CONTENT_TYPE_CBOR, CONTENT_TYPE_JSON,
     },
 };
 use smallvec::SmallVec;
@@ -769,24 +770,6 @@ fn get_stream_alternative_url_m3u(
     Some(stream_url.to_string())
 }
 
-fn is_account_query_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
-    matches!(
-        key.as_str(),
-        "token"
-            | "access_token"
-            | "auth_token"
-            | "key"
-            | "apikey"
-            | "api_key"
-            | "accesskey"
-            | "access_key"
-            | "auth"
-            | "authorization"
-    ) || key.ends_with("_token")
-        || key.ends_with("_key")
-}
-
 fn find_input_account_by_query_signature<'a>(stream_url: &str, input: &'a ConfigInput) -> Option<&'a str> {
     if stream_url_account_query_matches(stream_url, &input.url) {
         return Some(&input.url);
@@ -1101,15 +1084,33 @@ fn stream_url_has_account_signature(stream_url: &str, user_info: &crate::model::
     false
 }
 
-fn select_provider_stream_url(
+async fn select_provider_stream_url(
     stream_url: &str,
     input: &ConfigInput,
     provider_cfg: &Arc<ProviderConfig>,
     accept_requested_stream_url: bool,
+    app_config: &Arc<AppConfig>,
 ) -> Option<(Arc<str>, String)> {
     if accept_requested_stream_url {
         return Some((provider_cfg.name.clone(), stream_url.to_string()));
     }
+
+    if provider_cfg.input_type.is_m3u() {
+        match load_input_m3u_stream_url(app_config, &provider_cfg.name, stream_url).await {
+            Ok(Some(provider_stream_url)) => {
+                return Some((provider_cfg.name.clone(), provider_stream_url.to_string()));
+            }
+            Ok(None) => {}
+            Err(err) => {
+                debug_if_enabled!(
+                    "Failed to resolve M3U stream URL for provider {}: {}",
+                    sanitize_sensitive_info(&provider_cfg.name),
+                    sanitize_sensitive_info(&err.to_string())
+                );
+            }
+        }
+    }
+
     if stream_url_matches_provider(stream_url, provider_cfg) {
         Some((provider_cfg.name.clone(), stream_url.to_string()))
     } else {
@@ -1261,8 +1262,14 @@ async fn resolve_streaming_strategy(
             ProviderAllocation::Available(ref provider_cfg) | ProviderAllocation::GracePeriod(ref provider_cfg) => {
                 // Keep the URL only when it already targets the selected provider account. Hot reload can leave old
                 // alias URLs in persisted playlists until the next processing run.
-                if let Some((selected_provider_name, url)) =
-                    select_provider_stream_url(stream_url, input, provider_cfg, accept_requested_stream_url)
+                if let Some((selected_provider_name, url)) = select_provider_stream_url(
+                    stream_url,
+                    input,
+                    provider_cfg,
+                    accept_requested_stream_url,
+                    &app_state.app_config,
+                )
+                .await
                 {
                     debug_if_enabled!(
                         "provider session: input={} provider_cfg={} user={} allocation={} stream_url={}",

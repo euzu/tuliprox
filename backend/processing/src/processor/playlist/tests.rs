@@ -9,7 +9,7 @@ use shared::{
     },
     utils::Internable,
 };
-use tuliprox_core::model::{CompiledMappingRule, CompiledTargetMappings, Config};
+use tuliprox_core::model::{CompiledMappingRule, CompiledTargetMappings, Config, ConfigInputAlias};
 
 fn serialize_without_trailing_fields<T: serde::Serialize>(value: &T, trailing_fields: &[u8]) -> Vec<u8> {
     let mut encoded = rmp_serde::to_vec(value).expect("playlist item should serialize");
@@ -894,6 +894,65 @@ mod mapping_stage {
             stalker_refresh_mode: StalkerRefreshMode::Complete,
             partial_refresh: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    #[tokio::test]
+    async fn m3u_alias_playlist_is_downloaded_and_indexed_separately() {
+        let temp = tempfile::tempdir().expect("temp dir should be created");
+        let primary_playlist_path = temp.path().join("primary.m3u");
+        let alias_playlist_path = temp.path().join("backup.m3u");
+        tokio::fs::write(
+            &primary_playlist_path,
+            "#EXTM3U\n#EXTINF:-1 tvg-id=\"323\",Channel\nhttp://stream.example:4000/323/mono.m3u8?token=primary-stream-token\n",
+        )
+        .await
+        .expect("primary fixture should be written");
+        tokio::fs::write(
+            &alias_playlist_path,
+            "#EXTM3U\n#EXTINF:-1 tvg-id=\"323\",Channel\nhttp://stream.example:4000/323/mono.m3u8?token=backup-stream-token\n",
+        )
+        .await
+        .expect("alias fixture should be written");
+
+        let ctx = processing_context();
+        let config =
+            Config { storage_dir: temp.path().join("storage").to_string_lossy().into_owned(), ..Config::default() };
+        ctx.config.config.store(Arc::new(config));
+        let input = Arc::new(ConfigInput {
+            id: 1,
+            name: "primary-account".intern(),
+            input_type: InputType::M3u,
+            url: primary_playlist_path.to_string_lossy().into_owned(),
+            enabled: true,
+            aliases: Some(vec![ConfigInputAlias {
+                id: 2,
+                name: "backup-account".intern(),
+                url: alias_playlist_path.to_string_lossy().into_owned(),
+                username: None,
+                password: None,
+                priority: 1,
+                max_connections: 1,
+                exp_date: None,
+                enabled: true,
+                stalker: None,
+            }]),
+            ..ConfigInput::default()
+        });
+
+        let (errors, mut primary_playlist, storage_error, partial) = download_input(&ctx, &input, false).await;
+
+        assert!(errors.is_empty(), "unexpected download errors: {errors:?}");
+        assert!(storage_error.is_none(), "unexpected primary storage error: {storage_error:?}");
+        assert!(!partial);
+        assert!(!primary_playlist.is_empty());
+        let alias_url = tuliprox_repository::load_input_m3u_stream_url(
+            &ctx.config,
+            &"backup-account".intern(),
+            "http://stream.example:4000/323/mono.m3u8?token=primary-stream-token",
+        )
+        .await
+        .expect("alias URL lookup should succeed");
+        assert_eq!(alias_url.as_deref(), Some("http://stream.example:4000/323/mono.m3u8?token=backup-stream-token"));
     }
 
     #[test]
