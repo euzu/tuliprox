@@ -13,7 +13,10 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use shared::model::{RecordingKind, RecordingMetadata, RecordingTaskState};
+use shared::model::{
+    recording::{RecordingOwner, RecordingVisibility},
+    RecordingKind, RecordingMetadata, RecordingTaskState, UserId,
+};
 use std::{
     collections::BTreeMap,
     io,
@@ -25,9 +28,9 @@ use tuliprox_btree::{
 };
 
 /// Name of the operational database inside the storage directory.
-const DATABASE_FILE: &str = "recordings.db";
+const DATABASE_FILE: &str = "recordings_library.db";
 /// Directory holding recovery generations, relative to the recovery root.
-const RECOVERY_DIR: &str = "recordings_recovery";
+const RECOVERY_DIR: &str = "recordings_library_recovery";
 
 /// Which of the queue's four partitions a task currently belongs to.
 ///
@@ -75,6 +78,80 @@ pub struct PersistedRecordingTask {
     pub partition: RecordingPartition,
 }
 
+/// Who a library entry belongs to.
+///
+/// This is the entry's own dimension, not the file's: the same physical
+/// recording can be reachable from several principals at once.
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(tag = "principal", rename_all = "snake_case")]
+pub enum LibraryPrincipal {
+    User { id: String },
+    Shared,
+}
+
+impl LibraryPrincipal {
+    /// Stable key for indexing and for the reference invariant.
+    pub fn key(&self) -> String {
+        match self {
+            Self::User { id } => format!("user:{id}"),
+            Self::Shared => "shared".to_owned(),
+        }
+    }
+}
+
+/// One physical recording: the file on disk and the work that produces it.
+///
+/// Carries no owner and no visibility. Those belong to the library entries
+/// that reference it, because one file can be reachable from several.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PersistedMaterialization {
+    pub id: String,
+    pub kind: RecordingKind,
+    pub file_dir: PathBuf,
+    pub file_path: PathBuf,
+    pub filename: String,
+    pub url: String,
+    pub finished: bool,
+    pub size: u64,
+    pub total_size: Option<u64>,
+    pub paused: bool,
+    pub error: Option<String>,
+    pub state: RecordingTaskState,
+    #[serde(default)]
+    pub input_name: Option<String>,
+    /// The highest priority among the attached entries; recomputed on attach
+    /// and detach rather than owned by any one of them.
+    #[serde(default)]
+    pub priority: i8,
+    #[serde(default)]
+    pub retry_attempts: u8,
+    #[serde(default)]
+    pub next_retry_at: Option<i64>,
+    #[serde(default)]
+    pub partition: RecordingPartition,
+    /// Media identity and file state. The owner and visibility fields of this
+    /// metadata are not authoritative here; the library entry owns them.
+    pub media: RecordingMetadata,
+    /// How many library entries reference this file. A physical delete is only
+    /// legal at zero.
+    #[serde(default)]
+    pub reference_count: u32,
+}
+
+/// One user's link to a physical recording.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PersistedLibraryEntry {
+    pub id: String,
+    pub principal: LibraryPrincipal,
+    pub materialization_id: String,
+    /// Bytes charged to this principal's quota pool. Every attached entry is
+    /// charged the whole logical size; the physical file is charged once.
+    #[serde(default)]
+    pub quota_bytes: u64,
+    #[serde(default)]
+    pub priority: i8,
+}
+
 /// Repository-level bookkeeping, stored under its own key.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RecordingDbMetadata {
@@ -87,10 +164,13 @@ pub struct RecordingDbMetadata {
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(tag = "key", rename_all = "snake_case")]
 pub enum RecordingDbKey {
-    /// Sorts first, so a scan reaches the bookkeeping record before any task.
+    /// Sorts first, so a scan reaches the bookkeeping record before any record.
     Metadata,
-    Task {
-        uuid: String,
+    Materialization {
+        id: String,
+    },
+    LibraryEntry {
+        id: String,
     },
 }
 
@@ -99,7 +179,8 @@ pub enum RecordingDbKey {
 #[serde(tag = "value", rename_all = "snake_case")]
 pub enum RecordingDbValue {
     Metadata(RecordingDbMetadata),
-    Task(Box<PersistedRecordingTask>),
+    Materialization(Box<PersistedMaterialization>),
+    LibraryEntry(Box<PersistedLibraryEntry>),
 }
 
 fn invalid(message: impl Into<String>) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, message.into()) }
@@ -109,20 +190,27 @@ fn invalid(message: impl Into<String>) -> io::Error { io::Error::new(io::ErrorKi
 fn check_pairing(key: &RecordingDbKey, value: &RecordingDbValue) -> io::Result<()> {
     match (key, value) {
         (RecordingDbKey::Metadata, RecordingDbValue::Metadata(_))
-        | (RecordingDbKey::Task { .. }, RecordingDbValue::Task(_)) => Ok(()),
+        | (RecordingDbKey::Materialization { .. }, RecordingDbValue::Materialization(_))
+        | (RecordingDbKey::LibraryEntry { .. }, RecordingDbValue::LibraryEntry(_)) => Ok(()),
         _ => Err(invalid("recording record key and value describe different record kinds")),
     }
 }
 
-/// Version 1 of the recording recovery schema.
+/// Version 1 of the split recording recovery schema.
 ///
 /// Every field is encoded by name. When the record shape changes, raise
 /// `CURRENT_VERSION` and add the step to `migrate_one`; existing histories
 /// are then migrated forward on restore rather than rejected.
+///
+/// The name is distinct from the pre-split `recording` schema on purpose. That
+/// shape stored one task per recording with the owner embedded, which cannot
+/// be expressed as a one-to-one value migration into a materialization plus a
+/// library entry. The queue does not migrate, so the old database and history
+/// are left in place for inspection and a fresh pair is created beside them.
 pub struct RecordingRecoverySchema;
 
 impl RecoverySchema<RecordingDbKey, RecordingDbValue> for RecordingRecoverySchema {
-    const NAME: &'static str = "recording";
+    const NAME: &'static str = "recording_library";
     const CURRENT_VERSION: u32 = 1;
 
     fn encode_key(&self, key: &RecordingDbKey) -> io::Result<Value> {
@@ -147,6 +235,136 @@ impl RecoverySchema<RecordingDbKey, RecordingDbValue> for RecordingRecoverySchem
 
     fn decode_current(&self, value: Value) -> io::Result<RecordingDbValue> {
         serde_json::from_value(value).map_err(|error| invalid(error.to_string()))
+    }
+}
+
+/// The stored records, indexed for joining and for the reference invariant.
+#[derive(Debug, Default)]
+struct StoredRecords {
+    queue_revision: u64,
+    materializations: BTreeMap<String, PersistedMaterialization>,
+    entries: BTreeMap<String, PersistedLibraryEntry>,
+}
+
+impl StoredRecords {
+    fn attached_counts(&self) -> BTreeMap<&str, u32> {
+        let mut counts: BTreeMap<&str, u32> = BTreeMap::new();
+        for entry in self.entries.values() {
+            *counts.entry(entry.materialization_id.as_str()).or_default() += 1;
+        }
+        counts
+    }
+
+    fn recount_references(&mut self) {
+        let counts: BTreeMap<String, u32> =
+            self.attached_counts().into_iter().map(|(id, count)| (id.to_owned(), count)).collect();
+        for (id, materialization) in &mut self.materializations {
+            materialization.reference_count = counts.get(id).copied().unwrap_or(0);
+        }
+    }
+
+    /// A file whose count disagrees with the links pointing at it would either
+    /// be deleted while still reachable, or kept forever after its last
+    /// reference went away. Neither is recoverable by guessing, so a
+    /// disagreement fails the read.
+    fn check_reference_invariant(&self) -> io::Result<()> {
+        let counts = self.attached_counts();
+        for (id, materialization) in &self.materializations {
+            let attached = counts.get(id.as_str()).copied().unwrap_or(0);
+            if attached != materialization.reference_count {
+                return Err(invalid(format!(
+                    "materialization reference count is {} but {attached} library entries reference it",
+                    materialization.reference_count
+                )));
+            }
+        }
+        for entry in self.entries.values() {
+            if !self.materializations.contains_key(&entry.materialization_id) {
+                return Err(invalid("library entry references a materialization that does not exist"));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The materialization id a task's file is stored under.
+///
+/// Distinct from the entry id from the start: an entry id is what a user
+/// addresses, and once one file can serve several users the two stop being in
+/// step.
+fn materialization_id_for(task_uuid: &str) -> String { format!("mat-{task_uuid}") }
+
+/// Split a task into the file it produces and the link that owns it.
+fn split(task: &PersistedRecordingTask) -> (PersistedMaterialization, PersistedLibraryEntry) {
+    let materialization_id = materialization_id_for(&task.uuid);
+    let principal = match task.recording.visibility {
+        RecordingVisibility::Shared => LibraryPrincipal::Shared,
+        RecordingVisibility::Private => LibraryPrincipal::User { id: task.recording.owner_id().0.clone() },
+    };
+    let materialization = PersistedMaterialization {
+        id: materialization_id.clone(),
+        kind: task.kind,
+        file_dir: task.file_dir.clone(),
+        file_path: task.file_path.clone(),
+        filename: task.filename.clone(),
+        url: task.url.clone(),
+        finished: task.finished,
+        size: task.size,
+        total_size: task.total_size,
+        paused: task.paused,
+        error: task.error.clone(),
+        state: task.state,
+        input_name: task.input_name.clone(),
+        priority: task.priority,
+        retry_attempts: task.retry_attempts,
+        next_retry_at: task.next_retry_at,
+        partition: task.partition,
+        media: task.recording.clone(),
+        reference_count: 1,
+    };
+    let entry = PersistedLibraryEntry {
+        id: task.uuid.clone(),
+        principal,
+        materialization_id,
+        quota_bytes: task.recording.reserved_bytes,
+        priority: task.priority,
+    };
+    (materialization, entry)
+}
+
+/// Rejoin a file and one of its links into the task view the DVR works in.
+///
+/// The link is authoritative for owner and visibility; the file is
+/// authoritative for everything physical.
+fn join(materialization: &PersistedMaterialization, entry: &PersistedLibraryEntry) -> PersistedRecordingTask {
+    let mut media = materialization.media.clone();
+    match &entry.principal {
+        LibraryPrincipal::Shared => media.visibility = RecordingVisibility::Shared,
+        LibraryPrincipal::User { id } => {
+            media.visibility = RecordingVisibility::Private;
+            media.owner = RecordingOwner::User(UserId::from(id.as_str()));
+        }
+    }
+    media.reserved_bytes = entry.quota_bytes;
+    PersistedRecordingTask {
+        uuid: entry.id.clone(),
+        kind: materialization.kind,
+        file_dir: materialization.file_dir.clone(),
+        file_path: materialization.file_path.clone(),
+        filename: materialization.filename.clone(),
+        url: materialization.url.clone(),
+        finished: materialization.finished,
+        size: materialization.size,
+        total_size: materialization.total_size,
+        paused: materialization.paused,
+        error: materialization.error.clone(),
+        state: materialization.state,
+        input_name: materialization.input_name.clone(),
+        priority: entry.priority,
+        retry_attempts: materialization.retry_attempts,
+        next_retry_at: materialization.next_retry_at,
+        recording: media,
+        partition: materialization.partition,
     }
 }
 
@@ -179,57 +397,98 @@ impl RecordingRepository {
         Ok((Self { journal }, report))
     }
 
-    /// Reads every committed task, plus the queue revision.
+    /// Reads every committed library entry joined to the file it references,
+    /// plus the queue revision.
+    ///
+    /// The caller still works in whole tasks. Splitting them is the
+    /// repository's job precisely so the reference count has one owner.
     pub fn load(&mut self) -> io::Result<RecordingRepositorySnapshot> {
-        let mut snapshot = RecordingRepositorySnapshot::default();
-        for (key, value) in self.journal.entries()? {
-            check_pairing(&key, &value)?;
-            match value {
-                RecordingDbValue::Metadata(metadata) => snapshot.queue_revision = metadata.queue_revision,
-                RecordingDbValue::Task(task) => {
-                    let RecordingDbKey::Task { uuid } = &key else {
-                        return Err(invalid("task value stored under a non-task key"));
-                    };
-                    if *uuid != task.uuid {
-                        return Err(invalid("recording task is filed under a different uuid than it carries"));
-                    }
-                    snapshot.tasks.push(*task);
-                }
-            }
+        let stored = self.read_records()?;
+        let mut snapshot = RecordingRepositorySnapshot { queue_revision: stored.queue_revision, tasks: Vec::new() };
+        for entry in stored.entries.values() {
+            let materialization = stored
+                .materializations
+                .get(&entry.materialization_id)
+                .ok_or_else(|| invalid("library entry references a materialization that does not exist"))?;
+            snapshot.tasks.push(join(materialization, entry));
         }
+        snapshot.tasks.sort_by(|left, right| left.uuid.cmp(&right.uuid));
         Ok(snapshot)
     }
 
-    /// Replaces the committed task set in one atomic batch.
+    /// Every stored record, indexed for joining and for invariant checks.
+    fn read_records(&mut self) -> io::Result<StoredRecords> {
+        let mut stored = StoredRecords::default();
+        for (key, value) in self.journal.entries()? {
+            check_pairing(&key, &value)?;
+            match (key, value) {
+                (_, RecordingDbValue::Metadata(metadata)) => stored.queue_revision = metadata.queue_revision,
+                (RecordingDbKey::Materialization { id }, RecordingDbValue::Materialization(materialization)) => {
+                    if id != materialization.id {
+                        return Err(invalid("materialization is filed under a different id than it carries"));
+                    }
+                    let _ = stored.materializations.insert(id, *materialization);
+                }
+                (RecordingDbKey::LibraryEntry { id }, RecordingDbValue::LibraryEntry(entry)) => {
+                    if id != entry.id {
+                        return Err(invalid("library entry is filed under a different id than it carries"));
+                    }
+                    let _ = stored.entries.insert(id, *entry);
+                }
+                _ => return Err(invalid("recording record key and value describe different record kinds")),
+            }
+        }
+        stored.check_reference_invariant()?;
+        Ok(stored)
+    }
+
+    /// Replaces the committed set in one atomic batch.
     ///
     /// The queue mutates by rebuilding a whole candidate set, so the
     /// repository diffs that against what is stored and commits the
     /// difference. Committing the diff rather than the whole set keeps the
     /// recovery journal proportional to what actually changed.
     pub fn commit(&mut self, queue_revision: u64, tasks: &[PersistedRecordingTask]) -> io::Result<()> {
-        let mut incoming = BTreeMap::new();
+        let mut incoming = StoredRecords::default();
         for task in tasks {
-            if incoming.insert(task.uuid.clone(), task).is_some() {
+            let (materialization, entry) = split(task);
+            if incoming.entries.insert(entry.id.clone(), entry).is_some() {
                 return Err(invalid("recording batch contains two tasks with the same uuid"));
             }
+            // One entry per task for now, so a repeat is the same collision.
+            let _ = incoming.materializations.insert(materialization.id.clone(), materialization);
         }
+        incoming.recount_references();
+        incoming.check_reference_invariant()?;
 
-        let existing = self.load()?;
+        let existing = self.read_records()?;
         let mut operations = Vec::new();
-        for stored in &existing.tasks {
-            if !incoming.contains_key(&stored.uuid) {
-                operations.push(RecoveryOperation::Delete(RecordingDbKey::Task { uuid: stored.uuid.clone() }));
+        for id in existing.entries.keys() {
+            if !incoming.entries.contains_key(id) {
+                operations.push(RecoveryOperation::Delete(RecordingDbKey::LibraryEntry { id: id.clone() }));
             }
         }
-        let stored_by_uuid: BTreeMap<&str, &PersistedRecordingTask> =
-            existing.tasks.iter().map(|task| (task.uuid.as_str(), task)).collect();
-        for (uuid, task) in incoming {
-            if stored_by_uuid.get(uuid.as_str()).is_some_and(|stored| *stored == task) {
+        for id in existing.materializations.keys() {
+            if !incoming.materializations.contains_key(id) {
+                operations.push(RecoveryOperation::Delete(RecordingDbKey::Materialization { id: id.clone() }));
+            }
+        }
+        for (id, materialization) in &incoming.materializations {
+            if existing.materializations.get(id) == Some(materialization) {
                 continue;
             }
             operations.push(RecoveryOperation::Upsert(
-                RecordingDbKey::Task { uuid },
-                RecordingDbValue::Task(Box::new(task.clone())),
+                RecordingDbKey::Materialization { id: id.clone() },
+                RecordingDbValue::Materialization(Box::new(materialization.clone())),
+            ));
+        }
+        for (id, entry) in &incoming.entries {
+            if existing.entries.get(id) == Some(entry) {
+                continue;
+            }
+            operations.push(RecoveryOperation::Upsert(
+                RecordingDbKey::LibraryEntry { id: id.clone() },
+                RecordingDbValue::LibraryEntry(Box::new(entry.clone())),
             ));
         }
         if existing.queue_revision != queue_revision || operations.is_empty() {
@@ -259,11 +518,11 @@ impl RecordingRepository {
 #[cfg(test)]
 mod tests {
     use super::{
-        PersistedRecordingTask, RecordingDbKey, RecordingDbMetadata, RecordingDbValue, RecordingPartition,
-        RecordingRepository,
+        LibraryPrincipal, PersistedRecordingTask, RecordingDbKey, RecordingDbValue, RecordingPartition,
+        RecordingRepository, RecordingVisibility,
     };
     use shared::model::{
-        recording::{RecordingOwner, RecordingSource, RecordingVisibility},
+        recording::{RecordingOwner, RecordingSource},
         RecordingKind, RecordingMetadata, RecordingTaskState, UserId,
     };
     use std::{io, path::PathBuf};
@@ -422,22 +681,104 @@ mod tests {
         repository.commit(1, &[task("a"), task("b")])?;
         let report = repository.verify()?;
         assert_eq!(report.database_revision, report.recovery_revision);
-        // Two tasks plus the metadata record.
-        assert_eq!(report.live_records, 3);
+        // Each task is now a file plus a link, so two tasks are four records
+        // plus the metadata one.
+        assert_eq!(report.live_records, 5);
         Ok(())
     }
 
     #[test]
+    fn a_task_round_trips_through_the_split() {
+        // The DVR still works in whole tasks; splitting and rejoining them is
+        // the repository's job, so the join must be lossless.
+        let mut original = task("a");
+        original.recording.reserved_bytes = 4_096;
+        original.priority = -3;
+        let (materialization, entry) = super::split(&original);
+        assert_eq!(super::join(&materialization, &entry), original);
+    }
+
+    #[test]
+    fn the_file_carries_no_owner_and_the_link_does() {
+        let mut private = task("a");
+        private.recording.visibility = RecordingVisibility::Private;
+        let (_, entry) = super::split(&private);
+        assert_eq!(entry.principal, LibraryPrincipal::User { id: "web:alice".to_owned() });
+
+        let mut shared = task("b");
+        shared.recording.visibility = RecordingVisibility::Shared;
+        let (_, shared_entry) = super::split(&shared);
+        assert_eq!(shared_entry.principal, LibraryPrincipal::Shared);
+    }
+
+    #[test]
+    fn an_entry_id_and_a_materialization_id_are_different_namespaces() {
+        // Once one file serves several users the two stop being in step, so
+        // they must not be interchangeable even while the mapping is 1:1.
+        let (materialization, entry) = super::split(&task("a"));
+        assert_eq!(entry.id, "a");
+        assert_ne!(materialization.id, entry.id);
+        assert_eq!(entry.materialization_id, materialization.id);
+    }
+
+    #[test]
+    fn a_committed_file_records_its_reference_count() -> io::Result<()> {
+        let fixture = Fixture::new()?;
+        let mut repository = fixture.open()?;
+        repository.commit(1, &[task("a"), task("b")])?;
+        let stored = repository.read_records()?;
+        assert_eq!(stored.materializations.len(), 2);
+        assert_eq!(stored.entries.len(), 2);
+        for materialization in stored.materializations.values() {
+            assert_eq!(materialization.reference_count, 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_reference_count_that_disagrees_with_the_links_fails_the_read() {
+        // A file deleted while still reachable, or kept forever after its last
+        // reference went away, cannot be resolved by guessing.
+        let (mut materialization, entry) = super::split(&task("a"));
+        materialization.reference_count = 3;
+        let mut stored = super::StoredRecords::default();
+        let _ = stored.materializations.insert(materialization.id.clone(), materialization);
+        let _ = stored.entries.insert(entry.id.clone(), entry);
+        assert!(stored.check_reference_invariant().is_err());
+
+        stored.recount_references();
+        assert!(stored.check_reference_invariant().is_ok());
+    }
+
+    #[test]
+    fn a_link_to_a_missing_file_fails_the_read() {
+        let (_, entry) = super::split(&task("a"));
+        let mut stored = super::StoredRecords::default();
+        let _ = stored.entries.insert(entry.id.clone(), entry);
+        assert!(stored.check_reference_invariant().is_err());
+    }
+
+    #[test]
     fn a_mismatched_key_and_value_is_rejected() {
-        assert!(super::check_pairing(&RecordingDbKey::Metadata, &RecordingDbValue::Task(Box::new(task("a")))).is_err());
+        let (materialization, entry) = super::split(&task("a"));
         assert!(super::check_pairing(
-            &RecordingDbKey::Task { uuid: "a".to_owned() },
-            &RecordingDbValue::Metadata(RecordingDbMetadata::default()),
+            &RecordingDbKey::Metadata,
+            &RecordingDbValue::Materialization(Box::new(materialization.clone())),
         )
         .is_err());
         assert!(super::check_pairing(
-            &RecordingDbKey::Task { uuid: "a".to_owned() },
-            &RecordingDbValue::Task(Box::new(task("a"))),
+            &RecordingDbKey::Materialization { id: materialization.id.clone() },
+            &RecordingDbValue::LibraryEntry(Box::new(entry.clone())),
+        )
+        .is_err());
+        assert!(super::check_pairing(
+            &RecordingDbKey::Materialization { id: materialization.id.clone() },
+            &RecordingDbValue::Materialization(Box::new(materialization)),
+        )
+        .is_ok());
+        assert!(super::check_pairing(
+            &RecordingDbKey::LibraryEntry { id: entry.id.clone() },
+            &RecordingDbValue::LibraryEntry(Box::new(entry)),
         )
         .is_ok());
     }
@@ -446,8 +787,13 @@ mod tests {
     fn records_are_encoded_by_field_name() -> io::Result<()> {
         // The recovery history must not depend on field order: that is the
         // whole reason it exists beside the positional B+Tree encoding.
-        let encoded = serde_json::to_string(&RecordingDbValue::Task(Box::new(task("a"))))?;
-        for field in ["\"uuid\"", "\"kind\"", "\"state\"", "\"partition\"", "\"recording\""] {
+        let (materialization, entry) = super::split(&task("a"));
+        let encoded = serde_json::to_string(&RecordingDbValue::Materialization(Box::new(materialization)))?;
+        for field in ["\"id\"", "\"kind\"", "\"state\"", "\"partition\"", "\"media\"", "\"reference_count\""] {
+            assert!(encoded.contains(field), "{field} is missing from {encoded}");
+        }
+        let encoded = serde_json::to_string(&RecordingDbValue::LibraryEntry(Box::new(entry)))?;
+        for field in ["\"id\"", "\"principal\"", "\"materialization_id\"", "\"quota_bytes\""] {
             assert!(encoded.contains(field), "{field} is missing from {encoded}");
         }
         Ok(())

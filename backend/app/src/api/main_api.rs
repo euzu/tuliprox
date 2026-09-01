@@ -921,7 +921,12 @@ mod tests {
             let recordings = RecordingQueue::new_persistent(&dir, &dir).expect("open repository");
             recordings.persist_to_disk().await.expect("persist");
         }
-        let database = dir.join("recordings.db");
+        let database = std::fs::read_dir(&dir)
+            .expect("read state dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "db"))
+            .expect("recording database exists");
         std::fs::write(&database, b"not a database").expect("corrupt the database");
 
         // With the recovery history intact the database is rebuilt rather than
@@ -938,7 +943,16 @@ mod tests {
             let recordings = RecordingQueue::new_persistent(&dir, &dir).expect("open repository");
             recordings.persist_to_disk().await.expect("persist");
         }
-        std::fs::remove_dir_all(dir.join("recordings_recovery")).expect("destroy recovery");
+        // Find the recovery directory rather than naming it: the repository
+        // owns that name, and hardcoding it here would silently stop testing
+        // the fail-closed path the moment it changed.
+        let recovery = std::fs::read_dir(&dir)
+            .expect("read state dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.is_dir() && path.join("CURRENT").exists())
+            .expect("recovery directory exists");
+        std::fs::remove_dir_all(&recovery).expect("destroy recovery");
 
         // The database is now ahead of every surviving history. Startup must
         // refuse rather than silently adopt a queue it cannot account for.
