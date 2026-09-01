@@ -1174,10 +1174,7 @@ pub async fn ensure_recording_worker_running(
                         // If the provider is at capacity, wait in the priority queue until signalled.
                         // Never proceeds without a slot when input_name is set — account bans otherwise.
                         let provider_acquire_result = {
-                            let (input_name, priority) = {
-                                let active = dq.active.read().await;
-                                active.as_ref().map_or((None, 0i8), |dl| (dl.input_name.clone(), dl.priority))
-                            };
+                            let (input_name, priority) = dq.active_scheduling_priority().await.unwrap_or((None, 0i8));
                             if let Some(input_name) = input_name {
                                 loop {
                                     let capacities = active_provider.provider_capacities_for_input(&input_name).await;

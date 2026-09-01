@@ -280,6 +280,27 @@ impl StoredRecords {
         }
     }
 
+    /// The strongest priority any attached entry asked for.
+    ///
+    /// Priority is per entry but scheduling is per file: one transfer serves
+    /// every entry pointing at it. Taking any single entry's value lets a
+    /// background request hold back somebody else's foreground one for the
+    /// same media. Lower is stronger.
+    fn recompute_effective_priorities(&mut self) {
+        let mut strongest: BTreeMap<&str, i8> = BTreeMap::new();
+        for entry in self.entries.values() {
+            let slot = strongest.entry(entry.materialization_id.as_str()).or_insert(i8::MAX);
+            *slot = (*slot).min(entry.priority);
+        }
+        let strongest: BTreeMap<String, i8> =
+            strongest.into_iter().map(|(id, priority)| (id.to_owned(), priority)).collect();
+        for (id, materialization) in &mut self.materializations {
+            if let Some(priority) = strongest.get(id) {
+                materialization.priority = *priority;
+            }
+        }
+    }
+
     /// A file whose count disagrees with the links pointing at it would either
     /// be deleted while still reachable, or kept forever after its last
     /// reference went away. Neither is recoverable by guessing, so a
@@ -464,6 +485,10 @@ impl RecordingRepository {
             }
         }
         stored.check_reference_invariant()?;
+        // Derived from the links, so a stale stored value is recomputed rather
+        // than rejected. A wrong reference count risks deleting a file someone
+        // still holds; a wrong priority only schedules badly.
+        stored.recompute_effective_priorities();
         Ok(stored)
     }
 
@@ -485,6 +510,7 @@ impl RecordingRepository {
             let _ = incoming.materializations.entry(materialization.id.clone()).or_insert(materialization);
         }
         incoming.recount_references();
+        incoming.recompute_effective_priorities();
         incoming.check_reference_invariant()?;
 
         let existing = self.read_records()?;
@@ -937,6 +963,69 @@ mod tests {
         assert_eq!(state_of("alice"), RecordingTaskState::Running);
         assert_eq!(state_of("bob"), RecordingTaskState::Queued);
         Ok(())
+    }
+
+    /// Two entries on one file, at the given priorities. Lower is stronger.
+    fn shared_media_at(priorities: [(&str, i8); 2]) -> Vec<PersistedRecordingTask> {
+        priorities
+            .into_iter()
+            .map(|(user, priority)| {
+                let mut task = task(user);
+                task.recording.owner = RecordingOwner::User(UserId::from(format!("web:{user}").as_str()));
+                task.priority = priority;
+                task.media_identity = "programme-42".to_string();
+                task
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_file_runs_at_the_strongest_priority_any_entry_asked_for() -> io::Result<()> {
+        // One transfer serves both entries. If it took the background value,
+        // Bob's foreground request would wait behind Alice's background one for
+        // bytes they both want.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let (mut repository, _opened) = RecordingRepository::open(dir.path(), dir.path())?;
+        repository.commit(1, &shared_media_at([("alice", 5), ("bob", -3)]))?;
+
+        let stored = repository.read_records()?;
+        let file = stored.materializations.values().next().expect("one file");
+        assert_eq!(file.priority, -3, "the file runs at the strongest priority attached to it");
+        Ok(())
+    }
+
+    #[test]
+    fn losing_the_strongest_entry_relaxes_the_file() -> io::Result<()> {
+        // The plan's case: remove the former maximum and the file must fall
+        // back to what is still attached, not keep a priority nobody holds.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let (mut repository, _opened) = RecordingRepository::open(dir.path(), dir.path())?;
+        let tasks = shared_media_at([("alice", 5), ("bob", -3)]);
+        repository.commit(1, &tasks)?;
+
+        let alice_only: Vec<_> = tasks.into_iter().filter(|task| task.uuid == "alice").collect();
+        repository.commit(2, &alice_only)?;
+
+        let stored = repository.read_records()?;
+        let file = stored.materializations.values().next().expect("one file");
+        assert_eq!(file.priority, 5, "with Bob gone the file is background work again");
+        Ok(())
+    }
+
+    #[test]
+    fn a_stale_stored_priority_is_recomputed_rather_than_trusted() {
+        // Unlike the reference count, a wrong priority cannot lose data, so it
+        // is corrected from the links instead of failing the read.
+        let mut stored = super::StoredRecords::default();
+        let (mut materialization, mut entry) = super::split(&task("a"));
+        entry.priority = -4;
+        materialization.priority = 99;
+        let _ = stored.materializations.insert(materialization.id.clone(), materialization);
+        let _ = stored.entries.insert(entry.id.clone(), entry);
+
+        stored.recompute_effective_priorities();
+
+        assert_eq!(stored.materializations.values().next().expect("a file").priority, -4);
     }
 
     #[test]

@@ -855,6 +855,36 @@ impl RecordingQueue {
         }
     }
 
+    /// The provider input and the priority the active transfer should run at.
+    ///
+    /// One transfer serves every entry pointing at its file, so it runs at the
+    /// strongest priority any of them asked for. Taking the active entry's own
+    /// value lets a background request hold back somebody else's foreground one
+    /// for the same media. Lower is stronger.
+    ///
+    /// Takes the mutation guard first, like `committed_snapshot`, so the two
+    /// cannot interleave their inner locks.
+    pub async fn active_scheduling_priority(&self) -> Option<(Option<Arc<str>>, i8)> {
+        let _mutation = self.mutation_guard.lock().await;
+        let active = self.active.read().await;
+        let active = active.as_ref()?;
+        let media = crate::recording::recording_service::recording_identity_key(&active.recording, active.url.as_str());
+        let queue = self.queue.lock().await;
+        let scheduled = self.scheduled.read().await;
+        let finished = self.finished.read().await;
+        let strongest = queue
+            .iter()
+            .chain(scheduled.iter())
+            .chain(finished.iter())
+            .filter(|task| {
+                task.uuid != active.uuid
+                    && crate::recording::recording_service::recording_identity_key(&task.recording, task.url.as_str())
+                        == media
+            })
+            .fold(active.priority, |strongest, task| strongest.min(task.priority));
+        Some((active.input_name.clone(), strongest))
+    }
+
     pub async fn committed_snapshot(&self) -> (QueueRevision, Vec<RecordingTask>) {
         let _mutation = self.mutation_guard.lock().await;
         let revision = QueueRevision(self.revision.load(Ordering::SeqCst));
@@ -1532,6 +1562,56 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_transfer_runs_at_the_strongest_priority_anyone_attached_asked_for() {
+        // Alice's background request is producing the file; Bob wants the same
+        // media urgently. One transfer serves both, so it must not sit in the
+        // background queue while Bob waits for bytes already being fetched.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let queue = RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open recording repository");
+        let mut background = task("alice", RecordingKind::Vod, RecordingTaskState::Running);
+        background.priority = 5;
+        let mut foreground = task("bob", RecordingKind::Vod, RecordingTaskState::Queued);
+        foreground.priority = -3;
+        // Same media: a VOD identity keys on the url, so both entries name one.
+        foreground.url = background.url.clone();
+        let (background, foreground) =
+            (RecordingQueue::to_persisted(&background), RecordingQueue::to_persisted(&foreground));
+        assert_eq!(background.media_identity, foreground.media_identity, "fixture must share one media");
+        mutate(&queue, move |candidate| {
+            candidate.active = Some(background.clone());
+            candidate.queue.push(foreground.clone());
+            Ok(())
+        })
+        .await
+        .expect("seed");
+
+        let (_input, priority) = queue.active_scheduling_priority().await.expect("an active transfer");
+        assert_eq!(priority, -3, "the transfer inherits Bob's urgency");
+    }
+
+    #[tokio::test]
+    async fn an_unrelated_urgent_recording_does_not_lift_this_one() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let queue = RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open recording repository");
+        let mut background = task("alice", RecordingKind::Vod, RecordingTaskState::Running);
+        background.priority = 5;
+        let mut other = task("bob", RecordingKind::Vod, RecordingTaskState::Queued);
+        other.priority = -3;
+        let (background, other) = (RecordingQueue::to_persisted(&background), RecordingQueue::to_persisted(&other));
+        assert_ne!(background.media_identity, other.media_identity, "fixture must be different media");
+        mutate(&queue, move |candidate| {
+            candidate.active = Some(background.clone());
+            candidate.queue.push(other.clone());
+            Ok(())
+        })
+        .await
+        .expect("seed");
+
+        let (_input, priority) = queue.active_scheduling_priority().await.expect("an active transfer");
+        assert_eq!(priority, 5, "priority is shared only with entries on the same file");
     }
 
     #[test]
