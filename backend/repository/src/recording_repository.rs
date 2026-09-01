@@ -76,6 +76,10 @@ pub struct PersistedRecordingTask {
     pub recording: RecordingMetadata,
     #[serde(default)]
     pub partition: RecordingPartition,
+    /// What media this task refers to. Two tasks with the same identity are the
+    /// same recording and share one physical file.
+    #[serde(default)]
+    pub media_identity: String,
 }
 
 /// Who a library entry belongs to.
@@ -129,6 +133,9 @@ pub struct PersistedMaterialization {
     pub next_retry_at: Option<i64>,
     #[serde(default)]
     pub partition: RecordingPartition,
+    /// What media this file holds. Every entry attached to it agreed on this.
+    #[serde(default)]
+    pub media_identity: String,
     /// Media identity and file state. The owner and visibility fields of this
     /// metadata are not authoritative here; the library entry owns them.
     pub media: RecordingMetadata,
@@ -289,14 +296,20 @@ impl StoredRecords {
 
 /// The materialization id a task's file is stored under.
 ///
-/// Distinct from the entry id from the start: an entry id is what a user
-/// addresses, and once one file can serve several users the two stop being in
-/// step.
-fn materialization_id_for(task_uuid: &str) -> String { format!("mat-{task_uuid}") }
+/// Derived from the media identity, so two requests for the same thing land on
+/// one file. Distinct from the entry id, which is what a user addresses.
+/// Falls back to the task's own uuid when no identity was supplied, which
+/// keeps such a task on a file of its own rather than colliding with others.
+fn materialization_id_for(task: &PersistedRecordingTask) -> String {
+    if task.media_identity.is_empty() {
+        return format!("mat-uuid:{}", task.uuid);
+    }
+    format!("mat-{}", task.media_identity)
+}
 
 /// Split a task into the file it produces and the link that owns it.
 fn split(task: &PersistedRecordingTask) -> (PersistedMaterialization, PersistedLibraryEntry) {
-    let materialization_id = materialization_id_for(&task.uuid);
+    let materialization_id = materialization_id_for(task);
     let principal = match task.recording.visibility {
         RecordingVisibility::Shared => LibraryPrincipal::Shared,
         RecordingVisibility::Private => LibraryPrincipal::User { id: task.recording.owner_id().0.clone() },
@@ -319,6 +332,7 @@ fn split(task: &PersistedRecordingTask) -> (PersistedMaterialization, PersistedL
         retry_attempts: task.retry_attempts,
         next_retry_at: task.next_retry_at,
         partition: task.partition,
+        media_identity: task.media_identity.clone(),
         media: task.recording.clone(),
         reference_count: 1,
     };
@@ -365,6 +379,7 @@ fn join(materialization: &PersistedMaterialization, entry: &PersistedLibraryEntr
         next_retry_at: materialization.next_retry_at,
         recording: media,
         partition: materialization.partition,
+        media_identity: materialization.media_identity.clone(),
     }
 }
 
@@ -455,8 +470,9 @@ impl RecordingRepository {
             if incoming.entries.insert(entry.id.clone(), entry).is_some() {
                 return Err(invalid("recording batch contains two tasks with the same uuid"));
             }
-            // One entry per task for now, so a repeat is the same collision.
-            let _ = incoming.materializations.insert(materialization.id.clone(), materialization);
+            // Two requests for the same media converge on one file; the first
+            // one to arrive defines its physical state.
+            let _ = incoming.materializations.entry(materialization.id.clone()).or_insert(materialization);
         }
         incoming.recount_references();
         incoming.check_reference_invariant()?;
@@ -540,6 +556,7 @@ mod tests {
 
     fn task(uuid: &str) -> PersistedRecordingTask {
         PersistedRecordingTask {
+            media_identity: String::new(),
             uuid: uuid.to_owned(),
             kind: RecordingKind::Vod,
             file_dir: PathBuf::from("/rec"),
@@ -756,6 +773,100 @@ mod tests {
         let mut stored = super::StoredRecords::default();
         let _ = stored.entries.insert(entry.id.clone(), entry);
         assert!(stored.check_reference_invariant().is_err());
+    }
+
+    /// The same media, requested by a different principal.
+    fn task_for(uuid: &str, owner: &str, identity: &str) -> PersistedRecordingTask {
+        let mut built = task(uuid);
+        built.media_identity = identity.to_owned();
+        built.recording.owner = RecordingOwner::User(UserId::from(owner));
+        built
+    }
+
+    #[test]
+    fn two_principals_asking_for_the_same_media_share_one_file() -> io::Result<()> {
+        let fixture = Fixture::new()?;
+        let mut repository = fixture.open()?;
+        repository.commit(
+            1,
+            &[task_for("alice-entry", "web:alice", "film-42"), task_for("bob-entry", "web:bob", "film-42")],
+        )?;
+
+        let stored = repository.read_records()?;
+        assert_eq!(stored.materializations.len(), 1, "one physical file");
+        assert_eq!(stored.entries.len(), 2, "one link each");
+        let materialization = stored.materializations.values().next().expect("a file");
+        assert_eq!(materialization.reference_count, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn each_principal_still_sees_their_own_entry() -> io::Result<()> {
+        let fixture = Fixture::new()?;
+        let mut repository = fixture.open()?;
+        repository.commit(
+            1,
+            &[task_for("alice-entry", "web:alice", "film-42"), task_for("bob-entry", "web:bob", "film-42")],
+        )?;
+
+        let tasks = repository.load()?.tasks;
+        assert_eq!(tasks.len(), 2, "a shared file is still two library entries");
+        let owners: Vec<String> = tasks.iter().map(|task| task.recording.owner_id().0.clone()).collect();
+        assert_eq!(owners, vec!["web:alice".to_owned(), "web:bob".to_owned()]);
+        // Both point at the same bytes.
+        assert_eq!(tasks[0].file_path, tasks[1].file_path);
+        Ok(())
+    }
+
+    #[test]
+    fn different_media_never_share_a_file() -> io::Result<()> {
+        let fixture = Fixture::new()?;
+        let mut repository = fixture.open()?;
+        repository.commit(1, &[task_for("a", "web:alice", "film-42"), task_for("b", "web:alice", "film-99")])?;
+        assert_eq!(repository.read_records()?.materializations.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn detaching_one_principal_leaves_the_file_for_the_other() -> io::Result<()> {
+        let fixture = Fixture::new()?;
+        let mut repository = fixture.open()?;
+        repository.commit(
+            1,
+            &[task_for("alice-entry", "web:alice", "film-42"), task_for("bob-entry", "web:bob", "film-42")],
+        )?;
+        // Alice removes hers; Bob's link and the file must both survive.
+        repository.commit(2, &[task_for("bob-entry", "web:bob", "film-42")])?;
+
+        let stored = repository.read_records()?;
+        assert_eq!(stored.entries.len(), 1);
+        assert_eq!(stored.materializations.len(), 1, "the file outlives the first reference");
+        assert_eq!(stored.materializations.values().next().expect("a file").reference_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn the_last_detach_removes_the_file() -> io::Result<()> {
+        let fixture = Fixture::new()?;
+        let mut repository = fixture.open()?;
+        repository.commit(1, &[task_for("alice-entry", "web:alice", "film-42")])?;
+        repository.commit(2, &[])?;
+
+        let stored = repository.read_records()?;
+        assert_eq!(stored.entries.len(), 0);
+        assert_eq!(stored.materializations.len(), 0, "nothing references it, so it is gone");
+        Ok(())
+    }
+
+    #[test]
+    fn a_task_without_an_identity_keeps_a_file_to_itself() -> io::Result<()> {
+        // Falling back to the uuid is what stops two unidentified tasks from
+        // silently colliding on one file.
+        let fixture = Fixture::new()?;
+        let mut repository = fixture.open()?;
+        repository.commit(1, &[task("a"), task("b")])?;
+        assert_eq!(repository.read_records()?.materializations.len(), 2);
+        Ok(())
     }
 
     #[test]

@@ -1109,8 +1109,8 @@ fn task_relative_path(task: &PersistedRecordingTask) -> &str {
 ///   booked over and over.
 ///
 /// The identity is now derived from what the user actually asked for.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum RecordingIdentity {
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub enum RecordingIdentity {
     /// Materialization of one rule occurrence. Two tasks with the same
     /// `(rule_id, occurrence_key)` are the same recording by
     /// definition, whatever their window looks like.
@@ -1144,6 +1144,15 @@ enum RecordingIdentity {
         owner: RecordingOwner,
         visibility: RecordingVisibility,
     },
+}
+
+/// A stable, field-named key for the media a request refers to.
+///
+/// Two tasks with the same key are the same recording, so they share one
+/// physical file. The key is persisted, so it has to be stable across builds:
+/// that is why it is serialised rather than formatted with `Debug`.
+pub fn recording_identity_key(meta: &RecordingMetadata, url: &str) -> String {
+    serde_json::to_string(&recording_identity(meta, url)).unwrap_or_else(|_| format!("url:{url}"))
 }
 
 fn recording_identity(meta: &RecordingMetadata, url: &str) -> RecordingIdentity {
@@ -1475,6 +1484,7 @@ mod tests {
             "Film".to_string(),
         );
         PersistedRecordingTask {
+            media_identity: String::new(),
             partition: crate::recording::recording_queue::RecordingPartition::default(),
             uuid: uuid.to_string(),
             kind: RecordingKind::Vod,
@@ -1606,6 +1616,7 @@ mod tests {
         meta.reserved_bytes = 123;
         meta.provenance.rule_id = rule_id.map(str::to_string);
         PersistedRecordingTask {
+            media_identity: String::new(),
             partition: crate::recording::recording_queue::RecordingPartition::default(),
             uuid: uuid.to_string(),
             file_dir: std::path::PathBuf::from("/tmp"),

@@ -507,6 +507,7 @@ mod tests {
         );
         meta.deleting_previous_state = deleting;
         PersistedRecordingTask {
+            media_identity: String::new(),
             partition: crate::recording::recording_queue::RecordingPartition::default(),
             uuid: uuid.to_string(),
             file_dir: PathBuf::from("/tmp"),

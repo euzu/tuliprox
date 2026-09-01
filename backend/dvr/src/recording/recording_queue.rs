@@ -810,6 +810,10 @@ impl RecordingQueue {
 
     pub fn to_persisted(task: &RecordingTask) -> PersistedRecordingTask {
         PersistedRecordingTask {
+            media_identity: crate::recording::recording_service::recording_identity_key(
+                &task.recording,
+                task.url.as_str(),
+            ),
             // Overwritten from the owning partition when the candidate is flattened.
             partition: RecordingPartition::default(),
             uuid: task.uuid.clone(),
@@ -2296,6 +2300,7 @@ mod tests {
 
     fn persisted_recording(uuid: &str, meta: RecordingMetadata) -> PersistedRecordingTask {
         PersistedRecordingTask {
+            media_identity: String::new(),
             partition: RecordingPartition::default(),
             uuid: uuid.to_string(),
             kind: RecordingKind::Live,
