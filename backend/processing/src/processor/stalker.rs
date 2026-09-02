@@ -13,7 +13,7 @@
 use super::stalker_refresh::{
     advance_stalker_refresh, StalkerClusterSelection, StalkerRefreshMode, StalkerRefreshOutcome,
 };
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use lru::LruCache;
 use parking_lot::Mutex;
 use shared::{
@@ -297,6 +297,27 @@ pub async fn download_stalker_playlist(
             Ok(items) => {
                 counts[cluster as usize] = items.len();
                 let cluster_groups = groups_for_cluster(items, cluster, &input.name);
+                let group_titles = cluster_groups.iter().map(|g| g.title.to_string()).collect::<Vec<String>>();
+                let xc = match cluster {
+                    StalkerCluster::Live => shared::model::XtreamCluster::Live,
+                    StalkerCluster::Vod => shared::model::XtreamCluster::Video,
+                    StalkerCluster::Series => shared::model::XtreamCluster::Series,
+                };
+                if let Err(publish_err) = tuliprox_repository::publish_raw_group_catalog(
+                    &storage_path,
+                    &input.name,
+                    xc,
+                    group_titles,
+                    &app_config.file_locks,
+                )
+                .await
+                {
+                    error!(
+                        "Failed to publish raw group catalog for stalker input '{}' cluster {xc:?}: {publish_err}",
+                        input.name
+                    );
+                    errors.push(publish_err);
+                }
                 groups.extend(cluster_groups);
             }
             Err(err) => errors.push(err),

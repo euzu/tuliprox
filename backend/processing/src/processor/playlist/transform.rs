@@ -478,6 +478,7 @@ pub(crate) fn execute_pipe<'a>(
     fpl: &mut FetchedPlaylist<'a>,
     duplicates: &mut HashSet<UUIDType>,
     consume_source: bool,
+    bouquet_filter: Option<&tuliprox_core::model::TargetBouquetFilter>,
 ) -> Result<(FetchedPlaylist<'a>, PipelineOutcome), TuliproxError> {
     let source = if consume_source {
         if fpl.is_memory() {
@@ -489,6 +490,7 @@ pub(crate) fn execute_pipe<'a>(
         fpl.clone_source()?
     };
 
+    let deduplicate_memory = source.is_memory() && target.execution_plan.pre_transform_identity_dedup;
     let mut new_fpl = FetchedPlaylist { input: fpl.input, source, epg: fpl.epg.clone() };
     // In-memory items are frozen here at the target-processing boundary. Read-only disk sources
     // capture the same identity when their persisted M3U/Xtream items are converted to PlaylistItem.
@@ -497,7 +499,42 @@ pub(crate) fn execute_pipe<'a>(
             item.header.freeze_input_stream_id();
         }
     }
-    if target.execution_plan.pre_transform_identity_dedup {
+
+    // Bouquet prefilter runs BEFORE the shared identity dedup so that items the
+    // target refuses never occupy a slot in the `duplicates` UUID set that
+    // downstream targets rely on.
+    if let Some(filter) = bouquet_filter {
+        let (filtered_items, total, kept) = {
+            let mut total = 0usize;
+            let mut kept = 0usize;
+            let items: Vec<PlaylistItem> = new_fpl
+                .source
+                .into_items()
+                .filter(|item| {
+                    total += 1;
+                    let allowed = filter.allows(item.header.xtream_cluster, &item.header.group);
+                    if allowed {
+                        kept += 1;
+                    }
+                    allowed
+                })
+                .collect();
+            (items, total, kept)
+        };
+        if total > 0 && total > kept {
+            debug!(
+                "Target '{}' bouquet prefilter for input '{}': rejected {} / {} items",
+                target.name,
+                fpl.input.name,
+                total - kept,
+                total
+            );
+        }
+        new_fpl.source =
+            MemoryPlaylistSource::new(group_items(filtered_items, GroupingPolicy::ExactCategory)).into_source();
+    }
+
+    if deduplicate_memory {
         new_fpl.deduplicate(duplicates);
     }
 

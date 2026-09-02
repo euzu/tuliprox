@@ -12,7 +12,6 @@ use axum::{
     Json, Router,
 };
 use log::{info, warn};
-use rand::Rng;
 use serde::Deserialize;
 use serde_json::json;
 use shared::{
@@ -58,43 +57,8 @@ struct PermissionInfo {
     reserved: bool,
 }
 
-fn create_temp_path(file_path: &FsPath) -> PathBuf {
-    let file_name =
-        file_path.file_name().and_then(|value| value.to_str()).filter(|value| !value.is_empty()).unwrap_or("rbac");
-    let temp_name = format!(".{file_name}.tmp-{}-{}", std::process::id(), rand::rng().random::<u64>());
-    match file_path.parent() {
-        Some(parent) => parent.join(temp_name),
-        None => PathBuf::from(temp_name),
-    }
-}
-
-async fn replace_file_atomic(source: &FsPath, target: &FsPath) -> std::io::Result<()> {
-    match tokio::fs::rename(source, target).await {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            #[cfg(windows)]
-            {
-                if target.exists() {
-                    tokio::fs::remove_file(target).await?;
-                    return tokio::fs::rename(source, target).await;
-                }
-            }
-            Err(err)
-        }
-    }
-}
-
 async fn write_text_file_atomic(path: &FsPath, content: &str) -> Result<(), std::io::Error> {
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    let temp_path = create_temp_path(path);
-    tokio::fs::write(&temp_path, content).await?;
-    if let Err(err) = replace_file_atomic(&temp_path, path).await {
-        let _ = tokio::fs::remove_file(&temp_path).await;
-        return Err(err);
-    }
-    Ok(())
+    utils::write_text_file_atomic(path, content).await
 }
 
 fn serialize_users_file(users: &[WebUiUser]) -> String {

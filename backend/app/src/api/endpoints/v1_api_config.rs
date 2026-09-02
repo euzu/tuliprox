@@ -36,6 +36,66 @@ use std::{collections::HashMap, path::Path, sync::Arc};
 
 fn file_revision_from_bytes(bytes: &[u8]) -> String { blake3::hash(bytes).to_hex().to_string() }
 
+/// Target-bouquet file updates derived from a sources configuration change.
+struct BouquetMutationBatch {
+    renames: Vec<(String, String)>,
+    deletions: Vec<String>,
+}
+
+/// Collects every bouquet rename and deletion required by the new configuration.
+fn build_bouquet_mutation_batch(app_state: &Arc<AppState>, sources: &SourcesConfigDto) -> BouquetMutationBatch {
+    let old_sources = app_state.app_config.sources.load();
+    let mut old_targets_by_id = std::collections::HashMap::new();
+    let mut old_target_names = std::collections::HashSet::new();
+    for source in &old_sources.sources {
+        for target in &source.targets {
+            old_targets_by_id.insert(target.id, target.name.clone());
+            old_target_names.insert(target.name.clone());
+        }
+    }
+
+    let mut renames: Vec<(String, String)> = Vec::new();
+    let mut new_target_names = std::collections::HashSet::new();
+    for source_dto in &sources.sources {
+        for target_dto in &source_dto.targets {
+            new_target_names.insert(target_dto.name.clone());
+            if let Some(old_name) = old_targets_by_id.get(&target_dto.id) {
+                if old_name != &target_dto.name {
+                    renames.push((old_name.clone(), target_dto.name.clone()));
+                }
+            }
+        }
+    }
+
+    let deletions: Vec<String> = old_target_names.difference(&new_target_names).cloned().collect();
+
+    BouquetMutationBatch { renames, deletions }
+}
+
+/// Applies bouquet mutations under their shared lock and reports persistence failures.
+async fn apply_bouquet_mutation_batch(
+    app_state: &Arc<AppState>,
+    batch: &BouquetMutationBatch,
+) -> Result<(), Box<axum::response::Response>> {
+    if let Err(err) =
+        tuliprox_repository::apply_target_bouquet_mutations(&app_state.app_config, &batch.renames, &batch.deletions)
+            .await
+    {
+        error!("Failed to apply target bouquet lifecycle mutations: {err}");
+        return Err(Box::new(
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(json!({
+                    "error": format!("Source.yml saved but updating target bouquets failed: {err}")
+                })),
+            )
+                .into_response(),
+        ));
+    }
+
+    Ok(())
+}
+
 async fn read_file_revision(path: &str) -> Result<String, std::io::Error> {
     match tokio::fs::read(path).await {
         Ok(bytes) => Ok(file_revision_from_bytes(&bytes)),
@@ -288,6 +348,9 @@ async fn save_config_sources(
         }
     }
 
+    // Derive lifecycle changes from the currently loaded configuration before it is replaced.
+    let bouquet_mutations = build_bouquet_mutation_batch(&app_state, &sources);
+
     match crate::config_loader::replace_source_config_from_user_edit(&app_state.app_config, None, sources).await {
         Ok(_) => {}
         Err(err) => {
@@ -295,6 +358,11 @@ async fn save_config_sources(
             return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()})))
                 .into_response();
         }
+    }
+
+    // The mutation lock prevents concurrent bouquet writes from observing a partial rename.
+    if let Err(response) = apply_bouquet_mutation_batch(&app_state, &bouquet_mutations).await {
+        return *response;
     }
 
     // Reload from disk so runtime always uses fully prepared sources/mappings/templates.

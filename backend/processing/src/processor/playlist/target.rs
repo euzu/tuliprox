@@ -258,6 +258,14 @@ pub(crate) async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, 
     debug!("Executing processing pipes");
     let broadcast_step = create_broadcast_callback(&ctx.events);
 
+    let bouquet_file =
+        tuliprox_repository::load_target_bouquet(&ctx.config, &target.name).await.map_err(|err| vec![err])?;
+    let bouquet_filter = bouquet_file.and_then(|f| tuliprox_core::model::TargetBouquetFilter::from_dto(f.groups));
+    if let Some(ref filter) = bouquet_filter {
+        let (live, vod, series) = filter.cluster_counts();
+        debug!("Loaded target bouquet for '{}': live={:?}, vod={:?}, series={:?}", target.name, live, vod, series);
+    }
+
     let pipe = get_processing_pipe(target);
     let mut step = StepMeasure::new(&target.name, broadcast_step);
     for provider_fpl in playlists.iter_mut() {
@@ -266,7 +274,7 @@ pub(crate) async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, 
         );
         step.broadcast("Executing transformations on '{}' playlist", &target.name);
         let (mut processed_fpl, input_outcome) =
-            execute_pipe(target, &pipe, provider_fpl, &mut duplicates, consume_input_source)
+            execute_pipe(target, &pipe, provider_fpl, &mut duplicates, consume_input_source, bouquet_filter.as_ref())
                 .map_err(|err| vec![err])?;
         debug!("Target '{}' input '{}' pipeline outcome: {input_outcome:?}", target.name, provider_fpl.input.name);
         aggregate_outcome.merge(input_outcome);

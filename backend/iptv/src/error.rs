@@ -101,6 +101,7 @@ impl ProviderErrorKind {
             | ErrorKind::ConfigVideoDownload
             | ErrorKind::ConfigTarget
             | ErrorKind::ConfigWebUi
+            | ErrorKind::TargetBouquet
             | ErrorKind::UrlParse
             | ErrorKind::FilterParse
             | ErrorKind::RegexCompile => Self::Config,

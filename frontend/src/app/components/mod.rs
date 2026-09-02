@@ -2,6 +2,7 @@ mod accordion;
 mod accordion_panel;
 mod api_user;
 mod authentication;
+pub mod bouquet_editor;
 mod breadcrumbs;
 mod button_utils;
 mod card;

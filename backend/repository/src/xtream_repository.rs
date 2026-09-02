@@ -32,7 +32,7 @@ use shared::{
     utils::{arc_str_serde, get_u32_from_serde_value, Internable},
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ffi::OsString,
     fs::File,
     io::{self, Error, ErrorKind},
@@ -1088,9 +1088,13 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
         tree.set_flush_policy(FlushPolicy::Batch);
 
         let mut buffer = Vec::with_capacity(BATCH_SIZE);
+        let mut seen_groups: HashSet<String> = HashSet::new();
 
         // This loop exits when all 'tx' clones are dropped (signaling end of stream)
         while let Some(item) = rx.blocking_recv() {
+            if !seen_groups.contains(item.group.as_ref()) {
+                seen_groups.insert(item.group.to_string());
+            }
             buffer.push(item);
             if buffer.len() >= BATCH_SIZE {
                 let batch: Vec<(&u32, &XtreamPlaylistItem)> = buffer.iter().map(|i| (&i.provider_id, i)).collect();
@@ -1146,7 +1150,7 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
                 staging_path.display()
             ))
         })?;
-        Ok::<(), TuliproxError>(())
+        Ok::<Vec<String>, TuliproxError>(seen_groups.into_iter().collect())
     });
 
     // 3. Robust Joining of both tasks
@@ -1157,7 +1161,7 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
 
     // Handle internal errors from the tasks
     let parsed_categories = parse_res?;
-    consumer_res?;
+    let raw_groups = consumer_res?;
 
     save_xtream_categories_to_file(refresh_lease.clone(), &parsed_categories).await?;
 
@@ -1209,6 +1213,16 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
         TuliproxError::RepositoryXtream(format!("Compaction task failed to join during {cluster} refresh: {error}"))
     })??;
 
+    if let Err(invalidate_err) =
+        crate::invalidate_raw_group_catalog(&storage_path, cluster, &app_config.file_locks).await
+    {
+        log::error!(
+            "Failed to invalidate stale raw group catalog for input '{}' cluster {cluster}: {invalidate_err}",
+            input.name
+        );
+        return Err(invalidate_err);
+    }
+
     let database_publish_lease = refresh_lease.clone();
     let database_publish_lock = Arc::clone(&publish_lock);
     tokio::task::spawn_blocking(move || {
@@ -1246,6 +1260,13 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
             "Xtream database for {cluster} was published, but the category publish task failed to join: {error}"
         ))
     })??;
+
+    if let Err(publish_err) =
+        crate::publish_raw_group_catalog(&storage_path, &input.name, cluster, raw_groups, &app_config.file_locks).await
+    {
+        log::error!("Failed to publish raw group catalog for input '{}' cluster {cluster}: {publish_err}", input.name);
+        return Err(publish_err);
+    }
 
     let cleanup_lease = refresh_lease.clone();
     let cleanup_lock = Arc::clone(&publish_lock);

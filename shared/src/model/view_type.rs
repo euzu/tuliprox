@@ -20,6 +20,7 @@ const STREAM_HISTORY: &str = "stream_history";
 const RECORDING_LIBRARY: &str = "recording_library";
 const RECORDING_RULES: &str = "recording_rules";
 const RECORDING_RULE_FORM: &str = "recording_rule_form";
+const TARGET_BOUQUETS: &str = "target_bouquets";
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default, EnumIter)]
 pub enum ViewType {
@@ -41,6 +42,7 @@ pub enum ViewType {
     RecordingLibrary,
     RecordingRules,
     RecordingRuleForm,
+    TargetBouquets,
 }
 
 impl ViewType {
@@ -64,6 +66,7 @@ impl ViewType {
             ViewType::RecordingLibrary => RECORDING_LIBRARY,
             ViewType::RecordingRules => RECORDING_RULES,
             ViewType::RecordingRuleForm => RECORDING_RULE_FORM,
+            ViewType::TargetBouquets => TARGET_BOUQUETS,
         }
     }
 }
@@ -90,6 +93,7 @@ impl FromStr for ViewType {
             RECORDING_LIBRARY => Ok(ViewType::RecordingLibrary),
             RECORDING_RULES => Ok(ViewType::RecordingRules),
             RECORDING_RULE_FORM => Ok(ViewType::RecordingRuleForm),
+            TARGET_BOUQUETS => Ok(ViewType::TargetBouquets),
             _ => Err(TuliproxError::Config(format!("Unknown view type: {s}"))),
         }
     }

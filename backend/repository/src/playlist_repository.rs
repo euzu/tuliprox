@@ -8,7 +8,7 @@ use crate::{
     M3uDiskPlaylistSource, MediaServerDiskPlaylistSource, MemoryPlaylistSource, PlaylistSource,
     StalkerDiskPlaylistSource, TargetIdMapping, VirtualIdRecord, XtreamDiskPlaylistSource, FILE_SUFFIX_DB,
 };
-use log::{debug, warn};
+use log::{debug, error, warn};
 use shared::{
     error::TuliproxError,
     model::{
@@ -629,6 +629,78 @@ pub async fn load_m3u_target_storage(
     }
 }
 
+async fn invalidate_all_cluster_catalogs(app_config: &AppConfig, storage_path: &Path, input_name: &str) {
+    for cluster in [XtreamCluster::Live, XtreamCluster::Video, XtreamCluster::Series] {
+        if let Err(invalidate_err) =
+            crate::invalidate_raw_group_catalog(storage_path, cluster, &app_config.file_locks).await
+        {
+            warn!(
+                "Failed to invalidate raw group catalog for input '{input_name}' cluster {cluster:?} before persist: {invalidate_err}"
+            );
+        }
+    }
+}
+
+/// Publishes one cluster's raw group catalog and converts a failure into the
+/// `(playlist, Some(err))` shape the caller expects.
+macro_rules! publish_cluster_catalog {
+    (
+        $storage_path:expr,
+        $input_name:expr,
+        $cluster:expr,
+        $groups:expr,
+        $app_config:expr,
+        $persisted_playlist:expr
+    ) => {
+        if let Err(publish_err) =
+            crate::publish_raw_group_catalog($storage_path, $input_name, $cluster, $groups, &$app_config.file_locks)
+                .await
+        {
+            error!(
+                "Failed to publish raw group catalog for input '{}' cluster {:?}: {publish_err}",
+                $input_name, $cluster
+            );
+            return ($persisted_playlist, Some(publish_err));
+        }
+    };
+}
+
+async fn publish_all_cluster_catalogs(
+    app_config: &AppConfig,
+    storage_path: &Path,
+    input_name: &str,
+    live_groups: Vec<String>,
+    vod_groups: Vec<String>,
+    series_groups: Vec<String>,
+    persisted_playlist: Vec<PlaylistGroup>,
+) -> (Vec<PlaylistGroup>, Option<TuliproxError>) {
+    publish_cluster_catalog!(
+        storage_path,
+        input_name,
+        XtreamCluster::Live,
+        live_groups,
+        app_config,
+        persisted_playlist
+    );
+    publish_cluster_catalog!(
+        storage_path,
+        input_name,
+        XtreamCluster::Video,
+        vod_groups,
+        app_config,
+        persisted_playlist
+    );
+    publish_cluster_catalog!(
+        storage_path,
+        input_name,
+        XtreamCluster::Series,
+        series_groups,
+        app_config,
+        persisted_playlist
+    );
+    (persisted_playlist, None)
+}
+
 pub async fn persist_input_playlist(
     app_config: &Arc<AppConfig>,
     input: &ConfigInput,
@@ -653,7 +725,25 @@ pub async fn persist_input_playlist(
         }
     };
 
-    match input.get_download_input_type().persistence() {
+    let mut live_groups = Vec::new();
+    let mut vod_groups = Vec::new();
+    let mut series_groups = Vec::new();
+    for group in &playlist {
+        match group.xtream_cluster {
+            XtreamCluster::Live => live_groups.push(group.title.to_string()),
+            XtreamCluster::Video => vod_groups.push(group.title.to_string()),
+            XtreamCluster::Series => series_groups.push(group.title.to_string()),
+        }
+    }
+
+    // The Xtream path invalidates internally inside `persist_input_xtream_playlist`; for
+    // every other input type, drop the stale catalogs up front so a partial persist failure
+    // cannot leave them advertising groups that no longer exist in the new on-disk data.
+    if !matches!(input.get_download_input_type().persistence(), InputPersistence::Xtream) {
+        invalidate_all_cluster_catalogs(app_config, &storage_path, &input.name).await;
+    }
+
+    let (persisted_playlist, err) = match input.get_download_input_type().persistence() {
         InputPersistence::Xtream => persist_input_xtream_playlist(app_config, &storage_path, playlist).await,
 
         InputPersistence::M3u => {
@@ -691,7 +781,22 @@ pub async fn persist_input_playlist(
             // already in sync; nothing to do here.
             (playlist, None)
         }
+    };
+
+    if err.is_none() {
+        return publish_all_cluster_catalogs(
+            app_config,
+            &storage_path,
+            &input.name,
+            live_groups,
+            vod_groups,
+            series_groups,
+            persisted_playlist,
+        )
+        .await;
     }
+
+    (persisted_playlist, err)
 }
 
 pub async fn load_input_playlist(

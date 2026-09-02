@@ -1,0 +1,471 @@
+use crate::api::{
+    api_utils::stream_json_or_bin_response_stream, auth_middleware::permission_layer,
+    endpoints::extract_accept_header::ExtractAcceptHeader, model::AppState,
+};
+use axum::{
+    extract::{Path as AxumPath, State},
+    http::{header, HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
+    routing::{delete, get, put},
+    Json, Router,
+};
+use shared::model::{
+    permission::Permission, PlaylistClusterBouquetDto, TargetBouquetStreamEventDto, TargetBouquetTargetDto,
+    XtreamCluster,
+};
+use std::{path::Path, sync::Arc};
+use tuliprox_core::model::{ConfigInput, ConfigInputFlags, ConfigTarget, SourcesConfig};
+
+pub fn target_bouquet_api_register_with_permissions(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
+    let read_routes = Router::new()
+        .route("/target-bouquets", get(list_target_bouquets))
+        .route("/target-bouquets/{target_id}/groups", get(get_target_bouquet_groups))
+        .layer(permission_layer!(app_state, Permission::PlaylistRead));
+
+    let write_routes = Router::new()
+        .route("/target-bouquets/{target_id}", put(save_target_bouquet_handler))
+        .route("/target-bouquets/{target_id}", delete(delete_target_bouquet_handler))
+        .layer(permission_layer!(app_state, Permission::PlaylistWrite));
+
+    Router::new().merge(read_routes).merge(write_routes)
+}
+
+pub fn target_bouquet_api_register_unprotected() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/target-bouquets", get(list_target_bouquets))
+        .route("/target-bouquets/{target_id}/groups", get(get_target_bouquet_groups))
+        .route("/target-bouquets/{target_id}", put(save_target_bouquet_handler))
+        .route("/target-bouquets/{target_id}", delete(delete_target_bouquet_handler))
+}
+
+async fn send_stream_event(
+    tx: &tokio::sync::mpsc::Sender<TargetBouquetStreamEventDto>,
+    event: TargetBouquetStreamEventDto,
+) -> bool {
+    tx.send(event).await.is_ok()
+}
+
+fn resolve_target_with_inputs(
+    sources: &SourcesConfig,
+    target_id: u16,
+) -> Option<(Arc<ConfigTarget>, Vec<Arc<ConfigInput>>)> {
+    sources.sources.iter().find_map(|source| {
+        let target = source.targets.iter().find(|target| target.id == target_id)?;
+        let inputs = source
+            .inputs
+            .iter()
+            .filter_map(|input_name| sources.inputs.iter().find(|input| input.name == *input_name).cloned())
+            .collect();
+        Some((Arc::clone(target), inputs))
+    })
+}
+
+async fn collect_target_summaries(state: &AppState) -> Vec<TargetBouquetTargetDto> {
+    let sources = state.app_config.sources.load();
+    let config_path = state.app_config.paths.load().config_path.clone();
+    let mut target_dtos = Vec::new();
+
+    for source in &sources.sources {
+        for target in &source.targets {
+            let has_bouquet = tuliprox_repository::target_bouquet_exists(Path::new(&config_path), &target.name).await;
+            let (live_count, vod_count, series_count) = if has_bouquet {
+                if let Ok(Some(bouquet)) =
+                    tuliprox_repository::load_target_bouquet(&state.app_config, &target.name).await
+                {
+                    (
+                        bouquet.groups.live.as_ref().map(Vec::len),
+                        bouquet.groups.vod.as_ref().map(Vec::len),
+                        bouquet.groups.series.as_ref().map(Vec::len),
+                    )
+                } else {
+                    (None, None, None)
+                }
+            } else {
+                (None, None, None)
+            };
+
+            target_dtos.push(TargetBouquetTargetDto {
+                id: target.id,
+                name: target.name.clone(),
+                inputs: source.inputs.iter().map(ToString::to_string).collect(),
+                restricted: has_bouquet,
+                live_count,
+                vod_count,
+                series_count,
+            });
+        }
+    }
+    target_dtos
+}
+
+async fn stream_input_clusters(
+    tx: &tokio::sync::mpsc::Sender<TargetBouquetStreamEventDto>,
+    state: &AppState,
+    input: &ConfigInput,
+    storage_dir: &str,
+) -> bool {
+    if !send_stream_event(tx, TargetBouquetStreamEventDto::InputStarted { input: input.name.to_string() }).await {
+        return false;
+    }
+
+    let input_storage = tuliprox_repository::build_input_storage_path(&input.name, storage_dir);
+    let clusters = [
+        (XtreamCluster::Live, !input.has_flag(ConfigInputFlags::SkipLive)),
+        (XtreamCluster::Video, !input.has_flag(ConfigInputFlags::SkipVod)),
+        (XtreamCluster::Series, !input.has_flag(ConfigInputFlags::SkipSeries)),
+    ];
+
+    let mut group_count = 0;
+    for (cluster, enabled) in clusters {
+        if !enabled {
+            continue;
+        }
+        match tuliprox_repository::load_raw_group_catalog(
+            &input_storage,
+            &input.name,
+            cluster,
+            &state.app_config.file_locks,
+        )
+        .await
+        {
+            Ok(Some(cat)) => {
+                if cat.groups.is_empty() {
+                    let event = TargetBouquetStreamEventDto::InputChunk {
+                        input: input.name.to_string(),
+                        cluster,
+                        groups: Vec::new(),
+                        is_last_for_cluster: true,
+                    };
+                    if !send_stream_event(tx, event).await {
+                        return false;
+                    }
+                } else {
+                    let chunk_size = 500;
+                    let total_chunks = cat.groups.len().div_ceil(chunk_size);
+                    for (idx, chunk) in cat.groups.chunks(chunk_size).enumerate() {
+                        group_count += chunk.len();
+                        let event = TargetBouquetStreamEventDto::InputChunk {
+                            input: input.name.to_string(),
+                            cluster,
+                            groups: chunk.to_vec(),
+                            is_last_for_cluster: idx + 1 == total_chunks,
+                        };
+                        if !send_stream_event(tx, event).await {
+                            return false;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                }
+            }
+            Ok(None) => {
+                let event = TargetBouquetStreamEventDto::InputWarning {
+                    input: input.name.to_string(),
+                    message: format!(
+                        "Raw group catalog for input '{}' ({cluster:?}) is not available. Please trigger a playlist update.",
+                        input.name
+                    ),
+                };
+                if !send_stream_event(tx, event).await {
+                    return false;
+                }
+            }
+            Err(err) => {
+                let event = TargetBouquetStreamEventDto::InputWarning {
+                    input: input.name.to_string(),
+                    message: format!(
+                        "Failed to load raw group catalog for input '{}' ({cluster:?}): {err}",
+                        input.name
+                    ),
+                };
+                if !send_stream_event(tx, event).await {
+                    return false;
+                }
+            }
+        }
+    }
+    send_stream_event(
+        tx,
+        TargetBouquetStreamEventDto::InputFinished { input: input.name.to_string(), groups: group_count },
+    )
+    .await
+}
+
+async fn list_target_bouquets(State(app_state): State<Arc<AppState>>) -> Json<Vec<TargetBouquetTargetDto>> {
+    Json(collect_target_summaries(&app_state).await)
+}
+
+async fn get_target_bouquet_groups(
+    State(app_state): State<Arc<AppState>>,
+    AxumPath(target_id): AxumPath<u16>,
+    ExtractAcceptHeader(accept): ExtractAcceptHeader,
+) -> Response {
+    let sources = app_state.app_config.sources.load();
+    let Some((target, inputs)) = resolve_target_with_inputs(&sources, target_id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("Target id '{target_id}' not found") })),
+        )
+            .into_response();
+    };
+    drop(sources);
+
+    let selection = match tuliprox_repository::load_target_bouquet(&app_state.app_config, &target.name).await {
+        Ok(bouquet) => bouquet.map(|value| value.groups),
+        Err(err) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": err.to_string() })))
+                .into_response();
+        }
+    };
+
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    let state = Arc::clone(&app_state);
+    tokio::spawn(async move {
+        if !send_stream_event(&tx, TargetBouquetStreamEventDto::Selection { groups: selection }).await {
+            return;
+        }
+        let storage_dir = state.app_config.config.load().storage_dir.clone();
+        for input in inputs {
+            if !stream_input_clusters(&tx, &state, &input, &storage_dir).await {
+                return;
+            }
+        }
+        let _ = send_stream_event(&tx, TargetBouquetStreamEventDto::Complete).await;
+    });
+
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    let mut response = stream_json_or_bin_response_stream(accept.as_deref(), stream);
+    response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+async fn save_target_bouquet_handler(
+    State(app_state): State<Arc<AppState>>,
+    AxumPath(target_id): AxumPath<u16>,
+    Json(bouquet): Json<PlaylistClusterBouquetDto>,
+) -> Response {
+    let sources = app_state.app_config.sources.load();
+    let Some(target) = sources.get_target_by_id(target_id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("Target id '{target_id}' not found") })),
+        )
+            .into_response();
+    };
+
+    match tuliprox_repository::save_target_bouquet(&app_state.app_config, &target.name, bouquet).await {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response(),
+        Err(err) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": err.to_string() }))).into_response()
+        }
+    }
+}
+
+async fn delete_target_bouquet_handler(
+    State(app_state): State<Arc<AppState>>,
+    AxumPath(target_id): AxumPath<u16>,
+) -> Response {
+    let sources = app_state.app_config.sources.load();
+    let Some(target) = sources.get_target_by_id(target_id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("Target id '{target_id}' not found") })),
+        )
+            .into_response();
+    };
+
+    match tuliprox_repository::delete_target_bouquet(&app_state.app_config, &target.name).await {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response(),
+        Err(err) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": err.to_string() }))).into_response()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::model::create_test_app_state;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use http_body_util::BodyExt;
+    use shared::model::{ConfigInputDto, ConfigSourceDto, ConfigTargetDto, SourcesConfigDto};
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use tower::ServiceExt;
+    use tuliprox_core::model::{Config, SourcesConfig};
+
+    fn test_config_with_sources(temp_dir: &TempDir) -> (Config, SourcesConfig) {
+        let mut config = Config::default();
+        config.storage_dir = temp_dir.path().to_string_lossy().to_string();
+
+        let sources_dto = SourcesConfigDto {
+            inputs: vec![
+                ConfigInputDto {
+                    name: "provider1".to_string().into(),
+                    url: "http://localhost:8080/playlist.m3u".to_string(),
+                    ..Default::default()
+                },
+                ConfigInputDto {
+                    name: "unconnected".to_string().into(),
+                    url: "http://localhost:8080/unconnected.m3u".to_string(),
+                    ..Default::default()
+                },
+            ],
+            sources: vec![ConfigSourceDto {
+                inputs: vec!["provider1".to_string().into()],
+                targets: vec![ConfigTargetDto { name: "living_room".to_string(), ..Default::default() }],
+            }],
+            ..Default::default()
+        };
+        let sources_config = SourcesConfig::try_from(&sources_dto).unwrap();
+        (config, sources_config)
+    }
+
+    fn setup_test_app_state(temp_dir: &TempDir) -> Arc<AppState> {
+        let (config, sources) = test_config_with_sources(temp_dir);
+        let app_state = create_test_app_state(config);
+        app_state.app_config.sources.store(Arc::new(sources));
+        app_state.app_config.paths.store(Arc::new(shared::model::ConfigPaths {
+            home_path: String::new(),
+            config_path: temp_dir.path().to_string_lossy().to_string(),
+            storage_path: temp_dir.path().to_string_lossy().to_string(),
+            config_file_path: String::new(),
+            sources_file_path: String::new(),
+            mapping_file_path: None,
+            mapping_files_used: None,
+            template_file_path: None,
+            template_files_used: None,
+            api_proxy_file_path: String::new(),
+            custom_stream_response_path: None,
+        }));
+        app_state
+    }
+
+    #[tokio::test]
+    async fn target_bouquets_crud_lifecycle() {
+        let temp_dir = TempDir::new().unwrap();
+        let app_state = setup_test_app_state(&temp_dir);
+
+        let router = target_bouquet_api_register_unprotected().with_state(Arc::clone(&app_state));
+
+        // An unconfigured target starts without a restricted selection.
+        let req = Request::builder().method("GET").uri("/target-bouquets/0/groups").body(Body::empty()).unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let events: Vec<TargetBouquetStreamEventDto> = serde_json::from_slice(&body).unwrap();
+        assert!(matches!(events.first(), Some(TargetBouquetStreamEventDto::Selection { groups: None })));
+
+        // Persist a restricted selection.
+        let bouquet_dto = PlaylistClusterBouquetDto { live: Some(vec!["News".to_string()]), vod: None, series: None };
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/target-bouquets/0")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&bouquet_dto).unwrap()))
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Subsequent reads expose the persisted selection.
+        let req = Request::builder().method("GET").uri("/target-bouquets/0/groups").body(Body::empty()).unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let events: Vec<TargetBouquetStreamEventDto> = serde_json::from_slice(&body).unwrap();
+        assert!(matches!(
+            events.first(),
+            Some(TargetBouquetStreamEventDto::Selection { groups: Some(groups) })
+                if groups.live == Some(vec!["News".to_string()])
+        ));
+
+        // Reset the selection.
+        let req = Request::builder().method("DELETE").uri("/target-bouquets/0").body(Body::empty()).unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Reset restores the unrestricted state.
+        let req = Request::builder().method("GET").uri("/target-bouquets/0/groups").body(Body::empty()).unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let events: Vec<TargetBouquetStreamEventDto> = serde_json::from_slice(&body).unwrap();
+        assert!(matches!(events.first(), Some(TargetBouquetStreamEventDto::Selection { groups: None })));
+    }
+
+    #[tokio::test]
+    async fn target_bouquet_group_stream_contains_only_target_inputs() {
+        let temp_dir = TempDir::new().unwrap();
+        let app_state = setup_test_app_state(&temp_dir);
+
+        // Publish catalog for provider1 Live
+        let input_storage =
+            tuliprox_repository::build_input_storage_path("provider1", temp_dir.path().to_str().unwrap());
+        tokio::fs::create_dir_all(&input_storage).await.unwrap();
+        tuliprox_repository::publish_raw_group_catalog(
+            &input_storage,
+            "provider1",
+            XtreamCluster::Live,
+            vec!["Sports".to_string(), "News".to_string()],
+            &app_state.app_config.file_locks,
+        )
+        .await
+        .unwrap();
+        let unconnected_storage =
+            tuliprox_repository::build_input_storage_path("unconnected", temp_dir.path().to_str().unwrap());
+        tokio::fs::create_dir_all(&unconnected_storage).await.unwrap();
+        tuliprox_repository::publish_raw_group_catalog(
+            &unconnected_storage,
+            "unconnected",
+            XtreamCluster::Live,
+            vec!["Must not leak".to_string()],
+            &app_state.app_config.file_locks,
+        )
+        .await
+        .unwrap();
+
+        let router = target_bouquet_api_register_unprotected().with_state(Arc::clone(&app_state));
+
+        let req = Request::builder().method("GET").uri("/target-bouquets").body(Body::empty()).unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let targets: Vec<TargetBouquetTargetDto> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].name, "living_room");
+
+        let req = Request::builder().method("GET").uri("/target-bouquets/0/groups").body(Body::empty()).unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers().get(axum::http::header::CONTENT_TYPE).unwrap(), shared::utils::CONTENT_TYPE_JSON);
+        assert_eq!(resp.headers().get(axum::http::header::CACHE_CONTROL).unwrap(), "no-store");
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let events: Vec<TargetBouquetStreamEventDto> = serde_json::from_slice(&body).unwrap();
+        assert!(!events.iter().any(|event| match event {
+            TargetBouquetStreamEventDto::InputStarted { input }
+            | TargetBouquetStreamEventDto::InputFinished { input, .. }
+            | TargetBouquetStreamEventDto::InputWarning { input, .. }
+            | TargetBouquetStreamEventDto::Group { input, .. }
+            | TargetBouquetStreamEventDto::InputChunk { input, .. } => input == "unconnected",
+            _ => false,
+        }));
+        assert!(matches!(events.first(), Some(TargetBouquetStreamEventDto::Selection { groups: None })));
+        let chunk = events
+            .iter()
+            .find(|event| matches!(event, TargetBouquetStreamEventDto::InputChunk { .. }))
+            .expect("live input chunk");
+        match chunk {
+            TargetBouquetStreamEventDto::InputChunk { input, cluster, groups, is_last_for_cluster } => {
+                assert_eq!(input, "provider1");
+                assert_eq!(*cluster, XtreamCluster::Live);
+                assert_eq!(groups, &vec!["News".to_string(), "Sports".to_string()]);
+                assert!(is_last_for_cluster);
+            }
+            _ => panic!("Expected InputChunk event"),
+        }
+        assert!(matches!(events.last(), Some(TargetBouquetStreamEventDto::Complete)));
+    }
+}

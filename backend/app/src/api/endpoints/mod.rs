@@ -13,6 +13,7 @@ mod rbac_api;
 pub(in crate::api) mod recording_api;
 pub(in crate::api) mod recording_media_api;
 mod stream_history_api;
+pub(in crate::api) mod target_bouquet_api;
 mod user_api;
 mod user_visibility;
 pub(in crate::api) mod v1_api;
