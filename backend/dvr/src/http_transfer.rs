@@ -225,6 +225,19 @@ pub fn validate_resume_response(
         }
     }
 
+    // The partial cannot be a prefix of something smaller than itself.
+    // Resuming from its length would append to a file that is already not this
+    // resource, and finish it as complete. Equality is the legitimate case
+    // where the partial is the whole thing; the server answers 416 for it.
+    if let Some(expected_total) = validator.expected_total {
+        if validator.expected_offset > expected_total {
+            return Err(ResumeValidationError::TotalMismatch {
+                expected: expected_total,
+                got: validator.expected_offset,
+            });
+        }
+    }
+
     match snapshot.status {
         StatusCode::PARTIAL_CONTENT => {
             let content_range = snapshot.content_range.as_deref().unwrap_or("");
@@ -487,5 +500,46 @@ mod tests {
         // field landed have no recorded total.
         let snap = snapshot(StatusCode::PARTIAL_CONTENT, Some("bytes 100-199/9999"), None, None);
         assert_eq!(validate_resume_response(&snap, &validator), Ok(()));
+    }
+    #[test]
+    fn last_modified_is_accepted_when_no_strong_etag_was_offered() {
+        // The fallback validator: weaker than an ETag, but it is what some
+        // providers give, and without it every interruption restarts at zero.
+        let response = snapshot(
+            StatusCode::PARTIAL_CONTENT,
+            Some("bytes 100-199/200"),
+            None,
+            Some("Wed, 21 Oct 2015 07:28:00 GMT"),
+        );
+        let validator = ResumeValidator {
+            expected_offset: 100,
+            expected_total: Some(200),
+            expected_etag: None,
+            expected_last_modified: Some("Wed, 21 Oct 2015 07:28:00 GMT".to_string()),
+        };
+        assert!(validate_resume_response(&response, &validator).is_ok());
+    }
+
+    #[test]
+    fn a_resume_with_no_validator_at_all_is_still_checked_on_offsets() {
+        // Nothing proves the bytes are the same resource, so the only thing
+        // left to verify is that the server resumed where we asked.
+        let response = snapshot(StatusCode::PARTIAL_CONTENT, Some("bytes 100-199/200"), None, None);
+        let validator =
+            ResumeValidator { expected_offset: 100, expected_total: Some(200), ..ResumeValidator::default() };
+        assert!(validate_resume_response(&response, &validator).is_ok());
+
+        let wrong_place = snapshot(StatusCode::PARTIAL_CONTENT, Some("bytes 50-199/200"), None, None);
+        assert!(validate_resume_response(&wrong_place, &validator).is_err(), "a different offset is still a mismatch");
+    }
+
+    #[test]
+    fn a_partial_longer_than_the_total_is_refused() {
+        // The local file cannot be a prefix of a smaller resource, so resuming
+        // from its length would append to something that is not the same file.
+        let response = snapshot(StatusCode::PARTIAL_CONTENT, Some("bytes 300-399/200"), None, None);
+        let validator =
+            ResumeValidator { expected_offset: 300, expected_total: Some(200), ..ResumeValidator::default() };
+        assert!(validate_resume_response(&response, &validator).is_err());
     }
 }

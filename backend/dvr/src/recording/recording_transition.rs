@@ -291,6 +291,22 @@ mod tests {
     }
 
     #[test]
+    fn live_has_no_state_to_retry_from_and_no_state_to_wait_in() {
+        // The worker used to put a live capture into RetryWaiting after a
+        // transient failure, which is a state the graph says it cannot reach --
+        // and retrying records a later part of the programme as if it were the
+        // whole thing.
+        assert!(!state_is_reachable(RecordingKind::Live, RecordingTaskState::RetryWaiting));
+        for state in ALL_STATES {
+            assert!(
+                transition(RecordingKind::Live, state, RecordingCommand::Retry).is_err(),
+                "live must never be retryable, not even from {}",
+                state.label()
+            );
+        }
+    }
+
+    #[test]
     fn only_upcoming_states_are_editable() {
         for state in ALL_STATES {
             let editable = matches!(

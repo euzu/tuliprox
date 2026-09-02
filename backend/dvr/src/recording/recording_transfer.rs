@@ -72,6 +72,8 @@ enum ProviderAcquireResult {
     Paused,
     Cancelled,
     Preempted,
+    /// A live capture waited for capacity until its broadcast window closed.
+    WindowClosed,
 }
 
 fn recording_execution_download(app_config: &AppConfig, task: &RecordingTask) -> Result<RecordingTask, String> {
@@ -296,6 +298,27 @@ async fn send_download_request(
                 response = &mut send => return response.map_err(|error| classify_download_open_error(url, &error)),
             }
         }
+    }
+}
+
+/// Wait for a provider slot, giving up when a live window closes.
+///
+/// Waiting past `scheduled_end` cannot produce the recording that was asked
+/// for: the programme has finished. Only live work has a deadline; a transfer
+/// waits as long as it takes.
+async fn wait_for_provider_slot(
+    download_queue: &RecordingQueue,
+    input_name: &Arc<str>,
+    priority: i8,
+    control_signal: &RwLock<RecordingControl>,
+    control_notify: &Notify,
+    deadline: Option<Instant>,
+) -> Option<RecordingWaitOutcome> {
+    let waiting =
+        download_queue.slot_waiters.wait(Some(Arc::clone(input_name)), priority, control_signal, control_notify);
+    match deadline {
+        Some(deadline) => time::timeout_at(deadline, waiting).await.ok(),
+        None => Some(waiting.await),
     }
 }
 
@@ -1014,6 +1037,36 @@ async fn write_completion_sidecar(download_queue: &RecordingQueue, uuid: &str, m
     }
 }
 
+const LIVE_CAPACITY_WINDOW_CLOSED: &str = "No provider capacity became available before the recording window closed";
+
+/// Commit a terminal failure for the active task and move on.
+async fn fail_active_download(
+    download_queue: &RecordingQueue,
+    uuid: &str,
+    reason: &str,
+) -> Result<bool, QueueMutationError> {
+    Ok(mutate_optional(download_queue, |candidate| {
+        let Some(mut failed) = candidate.active.take() else {
+            return Ok(None);
+        };
+        if failed.uuid != uuid {
+            candidate.active = Some(failed);
+            return Ok(None);
+        }
+        failed.finished = true;
+        failed.paused = false;
+        failed.next_retry_at = None;
+        failed.state = RecordingTaskState::Failed;
+        failed.error = Some(reason.to_string());
+        failed.recording.reserved_bytes = 0;
+        candidate.finished.push(failed);
+        crate::recording::recording_queue::promote_from_queue(candidate);
+        Ok(Some(true))
+    })
+    .await?
+    .unwrap_or(false))
+}
+
 async fn promote_next_download(
     download_queue: &RecordingQueue,
 ) -> Result<Option<(String, String)>, QueueMutationError> {
@@ -1089,13 +1142,22 @@ async fn prepare_active_retry(
         let Some(active) = candidate.active.as_mut().filter(|active| active.uuid == uuid) else {
             return Ok(None);
         };
+        // A live broadcast cannot be retried: whatever played during the
+        // backoff is gone, so a second attempt records a different part of the
+        // programme and calls it the same recording. `RetryWaiting` is not a
+        // state a live capture can legally be in either.
+        let retryable_kind = active.kind.is_resumable();
         active.retry_attempts = active.retry_attempts.saturating_add(1);
         let attempts = active.retry_attempts;
-        if attempts > download_cfg.retry_max_attempts {
+        if !retryable_kind || attempts > download_cfg.retry_max_attempts {
             let Some(mut failed) = candidate.active.take() else {
                 return Ok(None);
             };
-            let error = format!("Retry limit reached after {} attempts", download_cfg.retry_max_attempts);
+            let error = if retryable_kind {
+                format!("Retry limit reached after {} attempts", download_cfg.retry_max_attempts)
+            } else {
+                "Live recording failed and cannot be retried; its broadcast window has moved on".to_string()
+            };
             failed.finished = true;
             failed.paused = false;
             failed.next_retry_at = None;
@@ -1205,6 +1267,8 @@ pub async fn ensure_recording_worker_running(
                         // Never proceeds without a slot when input_name is set — account bans otherwise.
                         let provider_acquire_result = {
                             let (input_name, priority) = dq.active_scheduling_priority().await.unwrap_or((None, 0i8));
+                            // Only live work has one; a transfer waits as long as it takes.
+                            let window_deadline = dq.active.read().await.as_ref().and_then(recording_deadline_instant);
                             if let Some(input_name) = input_name {
                                 loop {
                                     let capacities = active_provider.provider_capacities_for_input(&input_name).await;
@@ -1224,20 +1288,25 @@ pub async fn ensure_recording_worker_running(
                                             error!("Download worker commit failed: {err}");
                                             break 'worker;
                                         }
-                                        match dq
-                                            .slot_waiters
-                                            .wait(
-                                                Some(Arc::clone(&input_name)),
-                                                priority,
-                                                control_signal.as_ref(),
-                                                control_notify.as_ref(),
-                                            )
-                                            .await
+                                        match wait_for_provider_slot(
+                                            &dq,
+                                            &input_name,
+                                            priority,
+                                            control_signal.as_ref(),
+                                            control_notify.as_ref(),
+                                            window_deadline,
+                                        )
+                                        .await
                                         {
-                                            RecordingWaitOutcome::Signalled => {}
-                                            RecordingWaitOutcome::Paused => break ProviderAcquireResult::Paused,
-                                            RecordingWaitOutcome::Cancelled => break ProviderAcquireResult::Cancelled,
-                                            RecordingWaitOutcome::Restarted => break ProviderAcquireResult::Preempted,
+                                            None => break ProviderAcquireResult::WindowClosed,
+                                            Some(RecordingWaitOutcome::Signalled) => {}
+                                            Some(RecordingWaitOutcome::Paused) => break ProviderAcquireResult::Paused,
+                                            Some(RecordingWaitOutcome::Cancelled) => {
+                                                break ProviderAcquireResult::Cancelled
+                                            }
+                                            Some(RecordingWaitOutcome::Restarted) => {
+                                                break ProviderAcquireResult::Preempted
+                                            }
                                         }
                                         continue;
                                     }
@@ -1271,20 +1340,25 @@ pub async fn ensure_recording_worker_running(
                                         break 'worker;
                                     }
                                     // Wait for highest-priority signal — no sleep, no polling.
-                                    match dq
-                                        .slot_waiters
-                                        .wait(
-                                            Some(Arc::clone(&input_name)),
-                                            priority,
-                                            control_signal.as_ref(),
-                                            control_notify.as_ref(),
-                                        )
-                                        .await
+                                    match wait_for_provider_slot(
+                                        &dq,
+                                        &input_name,
+                                        priority,
+                                        control_signal.as_ref(),
+                                        control_notify.as_ref(),
+                                        window_deadline,
+                                    )
+                                    .await
                                     {
-                                        RecordingWaitOutcome::Signalled => {}
-                                        RecordingWaitOutcome::Paused => break ProviderAcquireResult::Paused,
-                                        RecordingWaitOutcome::Cancelled => break ProviderAcquireResult::Cancelled,
-                                        RecordingWaitOutcome::Restarted => break ProviderAcquireResult::Preempted,
+                                        None => break ProviderAcquireResult::WindowClosed,
+                                        Some(RecordingWaitOutcome::Signalled) => {}
+                                        Some(RecordingWaitOutcome::Paused) => break ProviderAcquireResult::Paused,
+                                        Some(RecordingWaitOutcome::Cancelled) => {
+                                            break ProviderAcquireResult::Cancelled
+                                        }
+                                        Some(RecordingWaitOutcome::Restarted) => {
+                                            break ProviderAcquireResult::Preempted
+                                        }
                                     }
                                 }
                             } else {
@@ -1316,6 +1390,19 @@ pub async fn ensure_recording_worker_running(
                                     }
                                 }
                                 handle
+                            }
+                            ProviderAcquireResult::WindowClosed => {
+                                // No slot was ever acquired, so there is nothing
+                                // to release and nothing was written.
+                                if let Err(err) = broadcast_required_worker_mutation(
+                                    &event_manager,
+                                    fail_active_download(&dq, &worker_uuid, LIVE_CAPACITY_WINDOW_CLOSED).await,
+                                    "live capacity window closed",
+                                ) {
+                                    error!("Download worker commit failed: {err}");
+                                    break 'worker;
+                                }
+                                continue;
                             }
                             ProviderAcquireResult::Paused => {
                                 break;
