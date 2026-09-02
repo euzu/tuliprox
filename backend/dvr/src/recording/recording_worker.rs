@@ -172,7 +172,15 @@ pub fn recording_start_missed_window(download: &RecordingTask, now_ts: i64) -> b
         .is_some_and(|(start_at, duration_secs)| super::recording_math::window_elapsed(start_at, duration_secs, now_ts))
 }
 
-async fn run_recording_with_binary(
+/// The encoder the Live worker spawns, resolved from `PATH`.
+///
+/// This is threaded through the worker as a value rather than baked in
+/// as a constant so a test can point the worker at a script and observe
+/// what it actually spawned, and how often. Every production caller
+/// passes this and nothing else.
+pub const FFMPEG_BINARY: &str = "ffmpeg";
+
+pub async fn run_recording_with_binary(
     ffmpeg_binary: &Path,
     download: &RecordingTask,
     control_signal: &RwLock<RecordingControl>,
@@ -251,24 +259,6 @@ async fn run_recording_with_binary(
             }
         }
     }
-}
-
-pub async fn run_recording(
-    download: &RecordingTask,
-    control_signal: &RwLock<RecordingControl>,
-    control_notify: &Notify,
-    cancel_token: Option<&CancellationToken>,
-    container_format: RecordingContainerFormat,
-) -> RecordingExecutionResult {
-    run_recording_with_binary(
-        Path::new("ffmpeg"),
-        download,
-        control_signal,
-        control_notify,
-        cancel_token,
-        container_format,
-    )
-    .await
 }
 
 /// Compute the partial-file path the worker uses for safe no-clobber

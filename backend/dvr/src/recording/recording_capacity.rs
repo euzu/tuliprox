@@ -53,18 +53,27 @@ pub mod stub {
     /// Counts what the worker asked for, and hands out slots on request.
     pub struct StubCapacity {
         capacities: Mutex<Vec<ProviderCapacity>>,
-        /// `None` means "no slot free", which is what makes a worker wait.
-        grants: Mutex<Vec<Option<ProviderHandle>>>,
         notify: Arc<Notify>,
         pub acquires: AtomicUsize,
         pub releases: AtomicUsize,
+    }
+
+    /// The recording worker reads nothing off a handle but its
+    /// `cancel_token`, so the allocation carried here is a placeholder and
+    /// not a claim that some real provider slot is backing it.
+    fn granted_handle() -> ProviderHandle {
+        ProviderHandle::new(
+            std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+            1,
+            tuliprox_core::model::ProviderAllocation::Exhausted,
+            Some(tokio_util::sync::CancellationToken::new()),
+        )
     }
 
     impl StubCapacity {
         fn with_capacity(in_use: usize, limit: usize) -> Arc<Self> {
             Arc::new(Self {
                 capacities: Mutex::new(vec![(Arc::from("provider"), in_use, limit)]),
-                grants: Mutex::new(Vec::new()),
                 notify: Arc::new(Notify::new()),
                 acquires: AtomicUsize::new(0),
                 releases: AtomicUsize::new(0),
@@ -76,6 +85,13 @@ pub mod stub {
 
         /// A provider that is full, so every request has to wait.
         pub fn full() -> Arc<Self> { Self::with_capacity(4, 4) }
+
+        /// Whether the reported capacities leave anything to hand out. Kept
+        /// consistent with what `capacities_for_input` says, so the stub
+        /// cannot advertise headroom and then refuse to grant it.
+        fn has_room(&self) -> bool {
+            self.capacities.lock().expect("capacities").iter().any(|(_, in_use, limit)| *limit == 0 || in_use < limit)
+        }
 
         pub fn acquire_count(&self) -> usize { self.acquires.load(Ordering::SeqCst) }
 
@@ -90,7 +106,7 @@ pub mod stub {
         fn acquire<'a>(&'a self, _input_name: &'a Arc<str>, _priority: i8) -> BoxFuture<'a, Option<ProviderHandle>> {
             Box::pin(async move {
                 self.acquires.fetch_add(1, Ordering::SeqCst);
-                self.grants.lock().expect("grants").pop().flatten()
+                self.has_room().then(granted_handle)
             })
         }
 
@@ -120,6 +136,18 @@ mod tests {
         assert_eq!(reported, vec![(Arc::from("provider"), 4, 4)], "no headroom");
         assert!(capacity.acquire(&input, 0).await.is_none(), "and nothing to hand out");
         assert_eq!(capacity.acquire_count(), 1, "the attempt is observable, which is the point");
+    }
+
+    #[tokio::test]
+    async fn a_provider_with_room_grants_what_it_advertises() {
+        // The stub must not report headroom and then refuse to hand a slot
+        // out: a worker that believes the first and hits the second waits
+        // forever, and the test that set it up looks like a product bug.
+        let capacity = StubCapacity::with_room();
+        let input: Arc<str> = Arc::from("provider");
+
+        assert_eq!(capacity.capacities_for_input(&input).await, vec![(Arc::from("provider"), 0, 4)], "headroom");
+        assert!(capacity.acquire(&input, 0).await.is_some(), "so a slot is actually granted");
     }
 
     #[tokio::test]

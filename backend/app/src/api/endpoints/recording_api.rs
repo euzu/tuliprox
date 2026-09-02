@@ -255,6 +255,7 @@ async fn create_http_recording_task(
             &app_state.recordings,
             &app_state.event_manager,
             &app_state.recording_capacity,
+            std::path::Path::new(tuliprox_dvr::recording::recording_worker::FFMPEG_BINARY),
         )
         .await
         .is_err()

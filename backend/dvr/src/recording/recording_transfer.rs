@@ -22,7 +22,7 @@ use crate::{
         },
         recording_sidecar,
         recording_url::build_stable_recording_url,
-        recording_worker::{recording_partial_path, run_recording, RecordingExecutionResult},
+        recording_worker::{recording_partial_path, run_recording_with_binary, RecordingExecutionResult},
     },
 };
 use futures::stream::TryStreamExt;
@@ -32,7 +32,7 @@ use shared::{
     model::{RecordingKind, RecordingMetadata},
     utils::bytes_to_megabytes,
 };
-use std::{collections::HashMap, ops::Deref, pin::Pin, sync::Arc};
+use std::{collections::HashMap, ops::Deref, path::Path, pin::Pin, sync::Arc};
 use tokio::{
     fs,
     io::{AsyncWrite, AsyncWriteExt},
@@ -1206,6 +1206,7 @@ pub async fn ensure_recording_worker_running(
     download_queue: &Arc<RecordingQueue>,
     event_manager: &Arc<EventManager>,
     capacity: &Arc<dyn RecordingCapacityPort>,
+    recording_binary: &Path,
 ) -> Result<(), String> {
     let mut worker_running = download_queue.worker_running.write().await;
     if *worker_running {
@@ -1242,6 +1243,7 @@ pub async fn ensure_recording_worker_running(
         let event_manager = Arc::clone(event_manager);
         let capacity = Arc::clone(capacity);
         let download_cfg = download_cfg.clone();
+        let recording_binary = recording_binary.to_path_buf();
         let app_config = Arc::new(cfg.clone());
 
         if let Ok(client) = create_client(cfg).default_headers(headers).build() {
@@ -1470,7 +1472,8 @@ pub async fn ensure_recording_worker_running(
                                             shared::model::RecordingContainerFormat::default,
                                             |recording| recording.container_format,
                                         );
-                                    let mut recording_future = Box::pin(run_recording(
+                                    let mut recording_future = Box::pin(run_recording_with_binary(
+                                        &recording_binary,
                                         &execution_download,
                                         &control_signal,
                                         &control_notify,
@@ -1816,6 +1819,7 @@ pub async fn resume_recording_worker_if_needed(
         &ctx.recordings,
         &ctx.event_manager,
         &ctx.recording_capacity,
+        Path::new(crate::recording::recording_worker::FFMPEG_BINARY),
     )
     .await
 }
@@ -1890,6 +1894,7 @@ fn start_recording_scheduler(
                 &scheduler_recordings,
                 &event_manager,
                 &capacity,
+                Path::new(crate::recording::recording_worker::FFMPEG_BINARY),
             )
             .await;
         }
@@ -1913,7 +1918,11 @@ mod tests {
         RecordingKind, RecordingMetadata, RecordingOwner, RecordingSource, RecordingTaskState, RecordingVisibility,
         UserId,
     };
-    use std::{path::PathBuf, sync::Arc, time::Duration};
+    use std::{
+        path::{Path, PathBuf},
+        sync::Arc,
+        time::Duration,
+    };
     use tempfile::TempDir;
     use tokio::sync::{Notify, RwLock};
     use tuliprox_core::model::RecordingConfig;
@@ -2162,6 +2171,54 @@ mod tests {
         }
     }
 
+    /// `bare_app_config`, plus the one server entry a recording needs to
+    /// resolve its own execution URL. Without it the worker fails before it
+    /// ever reaches the encoder.
+    fn app_config_with_server() -> tuliprox_core::model::AppConfig {
+        let app_config = bare_app_config();
+        app_config.api_proxy.store(Some(Arc::new(tuliprox_core::model::ApiProxyConfig {
+            server: vec![tuliprox_core::model::ApiProxyServerInfo {
+                name: "default".to_string(),
+                protocol: "http".to_string(),
+                host: "127.0.0.1".to_string(),
+                port: Some("8901".to_string()),
+                timezone: "UTC".to_string(),
+                message: String::new(),
+                path: None,
+            }],
+            ..tuliprox_core::model::ApiProxyConfig::default()
+        })));
+        app_config
+    }
+
+    /// An executable standing in for ffmpeg that appends a line to `log`
+    /// every time it is run, then writes its output argument and exits
+    /// cleanly. The log is what lets a test say "once" rather than "at
+    /// least once".
+    fn counting_ffmpeg(dir: &Path, log: &Path) -> PathBuf {
+        let script_path = dir.join("fake-ffmpeg");
+        std::fs::write(
+            &script_path,
+            format!(
+                "#!/bin/sh\necho run >> \"{}\"\nfor arg in \"$@\"; do output=\"$arg\"; done\nprintf 'recorded' > \"$output\"\nexit 0\n",
+                log.display()
+            ),
+        )
+        .expect("write fake ffmpeg");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script_path).expect("metadata").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms).expect("chmod");
+        }
+        script_path
+    }
+
+    fn spawn_count(log: &Path) -> usize {
+        std::fs::read_to_string(log).map_or(0, |text| text.lines().filter(|line| !line.is_empty()).count())
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_live_capture_that_never_gets_capacity_fails_at_its_window_without_recording() {
         // The whole path, driven against a provider that is permanently full:
@@ -2196,6 +2253,7 @@ mod tests {
             &queue,
             &Arc::new(EventManager::new()),
             &capacity,
+            Path::new(crate::recording::recording_worker::FFMPEG_BINARY),
         )
         .await
         .expect("worker started");
@@ -2217,5 +2275,90 @@ mod tests {
             "it asked for a slot once and then waited, rather than spinning on the provider"
         );
         assert_eq!(stub.release_count(), 0, "and it never held one to give back");
+    }
+
+    #[tokio::test]
+    async fn a_live_capture_asks_for_capacity_once_runs_the_encoder_once_and_completes_once() {
+        // The other half of the window contract. A real clock here on
+        // purpose: the worker spawns an actual child process, and pausing
+        // time would let unrelated timers fire between the spawn and the
+        // exit while the process itself still ran in wall-clock.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let recordings_dir = dir.path().join("recordings");
+        std::fs::create_dir_all(&recordings_dir).expect("create recording dir");
+        let log = dir.path().join("spawns.log");
+        let script = counting_ffmpeg(dir.path(), &log);
+
+        let queue = Arc::new(RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open repository"));
+        let now = chrono::Utc::now().timestamp();
+        let mut capture = scheduled_task(RecordingKind::Live, now, 1_800);
+        capture.uuid = "live".to_string();
+        capture.state = RecordingTaskState::Queued;
+        capture.input_name = Some(Arc::from("provider"));
+        // The execution URL is derived from the source, so the virtual id has
+        // to be a real one rather than the placeholder the other fixtures use.
+        capture.recording.source.virtual_id = "42".to_string();
+        capture.file_dir.clone_from(&recordings_dir);
+        capture.file_path = recordings_dir.join("capture.ts");
+        let persisted = RecordingQueue::to_persisted(&capture);
+        crate::recording::recording_queue::mutate(&queue, move |candidate| {
+            candidate.queue.push(persisted.clone());
+            Ok(())
+        })
+        .await
+        .expect("seed");
+
+        let stub = StubCapacity::with_room();
+        let capacity: Arc<dyn RecordingCapacityPort> = Arc::clone(&stub) as Arc<dyn RecordingCapacityPort>;
+        ensure_recording_worker_running(
+            &app_config_with_server(),
+            &RecordingConfig::from(&shared::model::RecordingConfigDto {
+                enabled: true,
+                ..shared::model::RecordingConfigDto::default()
+            }),
+            &queue,
+            &Arc::new(EventManager::new()),
+            &capacity,
+            &script,
+        )
+        .await
+        .expect("worker started");
+
+        let settled = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(done) = queue.finished.read().await.first().cloned() {
+                    break done;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        // A bare timeout here says nothing about why. Where the capture got
+        // stuck is the whole diagnosis, so report it.
+        let Ok(settled) = settled else {
+            panic!(
+                "never settled: active={:?} queued={} spawns={} acquires={}",
+                queue.active.read().await.as_ref().map(|active| (
+                    active.uuid.clone(),
+                    active.state,
+                    active.error.clone()
+                )),
+                queue.queue.lock().await.len(),
+                spawn_count(&log),
+                stub.acquire_count(),
+            );
+        };
+
+        assert_eq!(settled.state, RecordingTaskState::Completed, "{:?}", settled.error);
+        assert_eq!(spawn_count(&log), 1, "the encoder ran once, not once per retry or per promotion pass");
+        assert_eq!(stub.acquire_count(), 1, "and one slot was asked for");
+        assert_eq!(stub.release_count(), 1, "and given back exactly once");
+        assert_eq!(queue.finished.read().await.len(), 1, "the recording was committed once");
+        assert_eq!(
+            tokio::fs::read(&capture.file_path).await.expect("the recording is where playback will look"),
+            b"recorded"
+        );
+        assert!(!crate::recording_partial_path(&capture.file_path).exists(), "and nothing was left staged");
+        assert_eq!(settled.recording.reserved_bytes, 0, "and it is not still holding disk");
     }
 }
