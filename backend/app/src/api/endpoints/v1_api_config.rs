@@ -55,19 +55,27 @@ fn build_bouquet_mutation_batch(app_state: &Arc<AppState>, sources: &SourcesConf
     }
 
     let mut renames: Vec<(String, String)> = Vec::new();
+    let mut renamed_old_names = std::collections::HashSet::new();
     let mut new_target_names = std::collections::HashSet::new();
     for source_dto in &sources.sources {
         for target_dto in &source_dto.targets {
             new_target_names.insert(target_dto.name.clone());
-            if let Some(old_name) = old_targets_by_id.get(&target_dto.id) {
-                if old_name != &target_dto.name {
-                    renames.push((old_name.clone(), target_dto.name.clone()));
+            if target_dto.id != 0 {
+                if let Some(old_name) = old_targets_by_id.get(&target_dto.id) {
+                    if old_name != &target_dto.name {
+                        renames.push((old_name.clone(), target_dto.name.clone()));
+                        renamed_old_names.insert(old_name.clone());
+                    }
                 }
             }
         }
     }
 
-    let deletions: Vec<String> = old_target_names.difference(&new_target_names).cloned().collect();
+    let deletions: Vec<String> = old_target_names
+        .difference(&new_target_names)
+        .filter(|name| !renamed_old_names.contains(*name))
+        .cloned()
+        .collect();
 
     BouquetMutationBatch { renames, deletions }
 }
@@ -77,9 +85,12 @@ async fn apply_bouquet_mutation_batch(
     app_state: &Arc<AppState>,
     batch: &BouquetMutationBatch,
 ) -> Result<(), Box<axum::response::Response>> {
-    if let Err(err) =
-        tuliprox_repository::apply_target_bouquet_mutations(&app_state.app_config, &batch.renames, &batch.deletions)
-            .await
+    if let Err(err) = tuliprox_repository::apply_target_bouquet_mutations_locked(
+        &app_state.app_config,
+        &batch.renames,
+        &batch.deletions,
+    )
+    .await
     {
         error!("Failed to apply target bouquet lifecycle mutations: {err}");
         return Err(Box::new(
@@ -309,11 +320,13 @@ async fn save_config_sources(
     headers: HeaderMap,
     axum::extract::Json(sources): axum::extract::Json<SourcesConfigDto>,
 ) -> impl axum::response::IntoResponse + Send {
-    let sources_file_path = {
+    let (sources_file_path, config_path) = {
         let paths = app_state.app_config.paths.load();
-        paths.sources_file_path.clone()
+        (paths.sources_file_path.clone(), paths.config_path.clone())
     };
-    let _lock = app_state.app_config.file_locks.write_lock(Path::new(&sources_file_path)).await;
+    let _source_lock = app_state.app_config.file_locks.write_lock(Path::new(&sources_file_path)).await;
+    let _bouquet_mutation_lock =
+        app_state.app_config.file_locks.write_lock_str(tuliprox_repository::TARGET_BOUQUET_MUTATION_LOCK).await;
 
     let current_revision = match read_file_revision(&sources_file_path).await {
         Ok(revision) => revision,
@@ -350,6 +363,18 @@ async fn save_config_sources(
 
     // Derive lifecycle changes from the currently loaded configuration before it is replaced.
     let bouquet_mutations = build_bouquet_mutation_batch(&app_state, &sources);
+
+    // Pre-validate bouquet mutations before writing source.yml to prevent partial failure.
+    if let Err(err) = tuliprox_repository::validate_target_bouquet_mutations(
+        Path::new(&config_path),
+        &bouquet_mutations.renames,
+        &bouquet_mutations.deletions,
+    )
+    .await
+    {
+        error!("Target bouquet mutation preflight failed: {err}");
+        return (axum::http::StatusCode::CONFLICT, axum::Json(json!({"error": err.to_string()}))).into_response();
+    }
 
     match crate::config_loader::replace_source_config_from_user_edit(&app_state.app_config, None, sources).await {
         Ok(_) => {}
@@ -1041,5 +1066,83 @@ mod tests {
             input_source.provider.as_ref().and_then(|provider| provider.urls.first()).map(std::convert::AsRef::as_ref),
             Some("http://request.example")
         );
+    }
+
+    #[tokio::test]
+    async fn save_config_sources_does_not_deadlock_on_mutation_lock() {
+        use crate::api::model::create_test_app_state;
+        use std::time::Duration;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().to_string_lossy().to_string();
+        let sources_file = temp_dir.path().join("source.yml");
+        let input_dto = shared::model::ConfigInputDto {
+            name: "input1".into(),
+            url: "http://example.com/playlist.m3u".to_string(),
+            ..Default::default()
+        };
+        let initial_sources = SourcesConfigDto {
+            inputs: vec![input_dto.clone()],
+            sources: vec![shared::model::ConfigSourceDto {
+                inputs: vec!["input1".into()],
+                targets: vec![shared::model::ConfigTargetDto {
+                    id: 1,
+                    name: "target_1".to_string(),
+                    output: vec![shared::model::TargetOutputDto::M3u(shared::model::M3uTargetOutputDto::default())],
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+        let yaml = serde_saphyr::to_string(&initial_sources).unwrap();
+        tokio::fs::write(&sources_file, &yaml).await.unwrap();
+
+        let test_config = crate::model::Config {
+            backup_dir: Some(temp_dir.path().join("backup").to_string_lossy().to_string()),
+            ..crate::model::Config::default()
+        };
+        let app_state = create_test_app_state(test_config);
+        app_state.app_config.paths.store(Arc::new(shared::model::ConfigPaths {
+            home_path: config_path.clone(),
+            config_path: config_path.clone(),
+            storage_path: config_path.clone(),
+            config_file_path: String::new(),
+            sources_file_path: sources_file.to_string_lossy().to_string(),
+            mapping_file_path: None,
+            mapping_files_used: None,
+            template_file_path: None,
+            template_files_used: None,
+            api_proxy_file_path: String::new(),
+            custom_stream_response_path: None,
+        }));
+        super::ConfigFile::load_sources(&app_state).await.unwrap();
+
+        let updated_sources = SourcesConfigDto {
+            inputs: vec![input_dto],
+            sources: vec![shared::model::ConfigSourceDto {
+                inputs: vec!["input1".into()],
+                targets: vec![shared::model::ConfigTargetDto {
+                    id: 1,
+                    name: "target_renamed".to_string(),
+                    output: vec![shared::model::TargetOutputDto::M3u(shared::model::M3uTargetOutputDto::default())],
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+
+        let rev = super::read_file_revision(sources_file.to_str().unwrap()).await.unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_IF_MATCH, HeaderValue::from_str(&rev).unwrap());
+
+        let save_future =
+            super::save_config_sources(axum::extract::State(app_state), headers, axum::Json(updated_sources));
+        let response = tokio::time::timeout(Duration::from_secs(5), save_future)
+            .await
+            .expect("save_config_sources must not deadlock");
+
+        use axum::response::IntoResponse;
+        assert_eq!(response.into_response().status(), StatusCode::OK);
     }
 }

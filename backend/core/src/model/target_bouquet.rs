@@ -10,7 +10,8 @@ pub struct TargetBouquetFilter {
 }
 
 impl TargetBouquetFilter {
-    pub fn from_dto(groups: PlaylistClusterBouquetDto) -> Option<Self> {
+    pub fn from_dto(mut groups: PlaylistClusterBouquetDto) -> Option<Self> {
+        groups.canonicalize_for_target();
         if groups.is_target_unrestricted() {
             return None;
         }
@@ -84,5 +85,20 @@ mod tests {
         let filter_empty =
             TargetBouquetFilter::from_dto(PlaylistClusterBouquetDto { live: Some(vec![]), vod: None, series: None });
         assert!(filter_empty.is_none());
+    }
+
+    #[test]
+    fn uncanonicalized_empty_cluster_is_canonicalized_to_none() {
+        let filter = TargetBouquetFilter::from_dto(PlaylistClusterBouquetDto {
+            live: Some(vec!["News".to_string()]),
+            vod: Some(vec![]),
+            series: None,
+        })
+        .expect("filter should be Some");
+
+        assert!(filter.allows(XtreamCluster::Live, "News"));
+        assert!(!filter.allows(XtreamCluster::Live, "Sports"));
+        // vod was Some(vec![]), but canonicalization converts it to None, so all VOD is allowed
+        assert!(filter.allows(XtreamCluster::Video, "Any Movie"));
     }
 }

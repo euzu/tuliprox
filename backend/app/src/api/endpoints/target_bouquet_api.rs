@@ -68,30 +68,11 @@ async fn collect_target_summaries(state: &AppState) -> Vec<TargetBouquetTargetDt
     for source in &sources.sources {
         for target in &source.targets {
             let has_bouquet = tuliprox_repository::target_bouquet_exists(Path::new(&config_path), &target.name).await;
-            let (live_count, vod_count, series_count) = if has_bouquet {
-                if let Ok(Some(bouquet)) =
-                    tuliprox_repository::load_target_bouquet(&state.app_config, &target.name).await
-                {
-                    (
-                        bouquet.groups.live.as_ref().map(Vec::len),
-                        bouquet.groups.vod.as_ref().map(Vec::len),
-                        bouquet.groups.series.as_ref().map(Vec::len),
-                    )
-                } else {
-                    (None, None, None)
-                }
-            } else {
-                (None, None, None)
-            };
-
             target_dtos.push(TargetBouquetTargetDto {
                 id: target.id,
                 name: target.name.clone(),
                 inputs: source.inputs.iter().map(ToString::to_string).collect(),
                 restricted: has_bouquet,
-                live_count,
-                vod_count,
-                series_count,
             });
         }
     }
@@ -116,6 +97,7 @@ async fn stream_input_clusters(
     ];
 
     let mut group_count = 0;
+    let mut missing_clusters = Vec::new();
     for (cluster, enabled) in clusters {
         if !enabled {
             continue;
@@ -141,14 +123,19 @@ async fn stream_input_clusters(
                     }
                 } else {
                     let chunk_size = 500;
-                    let total_chunks = cat.groups.len().div_ceil(chunk_size);
-                    for (idx, chunk) in cat.groups.chunks(chunk_size).enumerate() {
+                    let total_groups = cat.groups.len();
+                    let mut groups_iter = cat.groups.into_iter();
+                    let mut sent = 0;
+                    while sent < total_groups {
+                        let take_count = chunk_size.min(total_groups - sent);
+                        let chunk: Vec<String> = groups_iter.by_ref().take(take_count).collect();
+                        sent += chunk.len();
                         group_count += chunk.len();
                         let event = TargetBouquetStreamEventDto::InputChunk {
                             input: input.name.to_string(),
                             cluster,
-                            groups: chunk.to_vec(),
-                            is_last_for_cluster: idx + 1 == total_chunks,
+                            groups: chunk,
+                            is_last_for_cluster: sent == total_groups,
                         };
                         if !send_stream_event(tx, event).await {
                             return false;
@@ -158,23 +145,15 @@ async fn stream_input_clusters(
                 }
             }
             Ok(None) => {
-                let event = TargetBouquetStreamEventDto::InputWarning {
-                    input: input.name.to_string(),
-                    message: format!(
-                        "Raw group catalog for input '{}' ({cluster:?}) is not available. Please trigger a playlist update.",
-                        input.name
-                    ),
-                };
-                if !send_stream_event(tx, event).await {
-                    return false;
-                }
+                missing_clusters.push(cluster);
             }
             Err(err) => {
                 let event = TargetBouquetStreamEventDto::InputWarning {
                     input: input.name.to_string(),
                     message: format!(
-                        "Failed to load raw group catalog for input '{}' ({cluster:?}): {err}",
-                        input.name
+                        "Failed to load raw group catalog for input '{}' ({}): {err}",
+                        input.name,
+                        cluster.as_ref(),
                     ),
                 };
                 if !send_stream_event(tx, event).await {
@@ -183,6 +162,21 @@ async fn stream_input_clusters(
             }
         }
     }
+
+    if !missing_clusters.is_empty() {
+        let cluster_labels = missing_clusters.iter().map(std::convert::AsRef::as_ref).collect::<Vec<_>>().join(", ");
+        let event = TargetBouquetStreamEventDto::InputWarning {
+            input: input.name.to_string(),
+            message: format!(
+                "Raw group catalog for input '{}' ({cluster_labels}) is not available. Please trigger a playlist update.",
+                input.name
+            ),
+        };
+        if !send_stream_event(tx, event).await {
+            return false;
+        }
+    }
+
     send_stream_event(
         tx,
         TargetBouquetStreamEventDto::InputFinished { input: input.name.to_string(), groups: group_count },
@@ -448,7 +442,6 @@ mod tests {
             TargetBouquetStreamEventDto::InputStarted { input }
             | TargetBouquetStreamEventDto::InputFinished { input, .. }
             | TargetBouquetStreamEventDto::InputWarning { input, .. }
-            | TargetBouquetStreamEventDto::Group { input, .. }
             | TargetBouquetStreamEventDto::InputChunk { input, .. } => input == "unconnected",
             _ => false,
         }));
@@ -465,6 +458,20 @@ mod tests {
                 assert!(is_last_for_cluster);
             }
             _ => panic!("Expected InputChunk event"),
+        }
+        let warning = events
+            .iter()
+            .find(|event| matches!(event, TargetBouquetStreamEventDto::InputWarning { .. }))
+            .expect("grouped vod/series warning");
+        match warning {
+            TargetBouquetStreamEventDto::InputWarning { input, message } => {
+                assert_eq!(input, "provider1");
+                assert_eq!(
+                    message,
+                    "Raw group catalog for input 'provider1' (video, series) is not available. Please trigger a playlist update."
+                );
+            }
+            _ => panic!("Expected InputWarning event"),
         }
         assert!(matches!(events.last(), Some(TargetBouquetStreamEventDto::Complete)));
     }

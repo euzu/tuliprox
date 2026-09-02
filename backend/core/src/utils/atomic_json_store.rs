@@ -169,7 +169,7 @@ pub async fn write_json_atomic_with_ops<O: AtomicWriteOps>(
     content: &[u8],
     ops: &O,
 ) -> Result<(), AtomicWriteError> {
-    let tmp = tmp_path_for(final_path);
+    let tmp = create_unique_temp_path(final_path);
     let result = async {
         ops.write_temp(&tmp, content).await?;
         ops.sync_file(&tmp).await?;

@@ -710,6 +710,16 @@ pub async fn persist_input_playlist(
         warn!("Skipping empty playlist for input {}", input.name);
         return (playlist, None);
     }
+    if input.get_download_input_type().persistence() == InputPersistence::Stalker {
+        // The Stalker processor (`processor::stalker::download_stalker_playlist`)
+        // is the single writer of the per-cluster B+Tree and raw group catalogs.
+        // Re-encoding the `PlaylistItem` runtime projection back into `StalkerPlaylistItem`
+        // would destroy the canonical `cmd`/`playback_descriptor`/capability
+        // flags the processor just persisted — including the field the
+        // runtime 4xx-re-resolve hook relies on. The disk layout is
+        // already in sync; nothing to do here.
+        return (playlist, None);
+    }
     playlist.iter_mut().for_each(PlaylistGroup::on_load);
     let cfg = app_config.config.load();
     let storage_path = match get_input_storage_path(&input.name, &cfg.storage_dir).await {
@@ -736,12 +746,9 @@ pub async fn persist_input_playlist(
         }
     }
 
-    // The Xtream path invalidates internally inside `persist_input_xtream_playlist`; for
-    // every other input type, drop the stale catalogs up front so a partial persist failure
-    // cannot leave them advertising groups that no longer exist in the new on-disk data.
-    if !matches!(input.get_download_input_type().persistence(), InputPersistence::Xtream) {
-        invalidate_all_cluster_catalogs(app_config, &storage_path, &input.name).await;
-    }
+    // Drop stale catalogs up front so a partial persist failure cannot leave
+    // them advertising groups that no longer exist in the new on-disk data.
+    invalidate_all_cluster_catalogs(app_config, &storage_path, &input.name).await;
 
     let (persisted_playlist, err) = match input.get_download_input_type().persistence() {
         InputPersistence::Xtream => persist_input_xtream_playlist(app_config, &storage_path, playlist).await,
@@ -771,16 +778,7 @@ pub async fn persist_input_playlist(
             }
             (playlist, None)
         }
-        InputPersistence::Stalker => {
-            // The Stalker processor (`processor::stalker::download_stalker_playlist`)
-            // is the single writer of the per-cluster B+Tree. Re-encoding the
-            // `PlaylistItem` runtime projection back into `StalkerPlaylistItem`
-            // would destroy the canonical `cmd`/`playback_descriptor`/capability
-            // flags the processor just persisted — including the field the
-            // runtime 4xx-re-resolve hook relies on. The disk layout is
-            // already in sync; nothing to do here.
-            (playlist, None)
-        }
+        InputPersistence::Stalker => unreachable!("handled above"),
     };
 
     if err.is_none() {

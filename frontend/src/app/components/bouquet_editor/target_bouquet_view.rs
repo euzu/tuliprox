@@ -189,10 +189,6 @@ pub fn TargetBouquetView() -> Html {
                                     .insert(input.clone());
                             }
                         }
-                        TargetBouquetStreamEventDto::Group { input, cluster, name } => {
-                            loaded_groups.entry(cluster).or_default().insert(name.clone());
-                            loaded_origins.entry(cluster).or_default().entry(name).or_default().insert(input);
-                        }
                         TargetBouquetStreamEventDto::InputWarning { message, .. } => loaded_warnings.push(message),
                         _ => {}
                     })

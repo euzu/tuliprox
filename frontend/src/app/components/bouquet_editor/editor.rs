@@ -24,7 +24,7 @@ fn normalize(s: &str) -> String {
 
 fn sort_opt_vec(v: &mut Option<Vec<String>>) {
     if let Some(ref mut inner) = v {
-        inner.sort_by_key(|a| normalize(a));
+        inner.sort_by_cached_key(|a| normalize(a));
     }
 }
 

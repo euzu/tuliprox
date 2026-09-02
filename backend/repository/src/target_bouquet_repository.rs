@@ -7,7 +7,10 @@ use std::{
     collections::HashSet,
     path::{Path, PathBuf},
 };
-use tuliprox_core::{model::AppConfig, utils::write_text_file_atomic};
+use tuliprox_core::{
+    model::AppConfig,
+    utils::{create_unique_temp_path, write_text_file_atomic},
+};
 
 pub const TARGET_BOUQUET_MUTATION_LOCK: &str = "target_bouquet:mutation";
 const MAX_PREFIX_BYTES: usize = 64;
@@ -215,24 +218,7 @@ async fn rename_target_bouquet_locked(
         )));
     }
 
-    let content = tokio::fs::read_to_string(&old_path).await.map_err(|err| {
-        TuliproxError::TargetBouquet(format!("Failed to read source bouquet file {}: {err}", old_path.display()))
-    })?;
-
-    let mut dto: TargetBouquetFileDto = serde_saphyr::from_str(&content).map_err(|err| {
-        TuliproxError::TargetBouquet(format!("Failed to parse source bouquet file {}: {err}", old_path.display()))
-    })?;
-
-    dto.target = new_target_name.to_string();
-    dto.canonicalize();
-
-    let yaml = serde_saphyr::to_string(&dto)
-        .map_err(|err| TuliproxError::TargetBouquet(format!("Failed to serialize renamed bouquet: {err}")))?;
-
-    write_text_file_atomic(&new_path, &yaml).await.map_err(|err| {
-        TuliproxError::TargetBouquet(format!("Failed to write renamed bouquet to {}: {err}", new_path.display()))
-    })?;
-
+    rewrite_bouquet_with_target(&old_path, &new_path, new_target_name).await?;
     let _ = tokio::fs::remove_file(&old_path).await;
     debug!(
         "Renamed target bouquet from '{}' ({}) to '{}' ({})",
@@ -244,19 +230,166 @@ async fn rename_target_bouquet_locked(
     Ok(())
 }
 
-/// Applies source-editor renames and deletions while holding the logical mutation lock exactly once.
+async fn rewrite_bouquet_with_target(src: &Path, dest: &Path, new_target: &str) -> Result<(), TuliproxError> {
+    let content = tokio::fs::read_to_string(src).await.map_err(|err| {
+        TuliproxError::TargetBouquet(format!("Failed to read source bouquet file {}: {err}", src.display()))
+    })?;
+
+    let mut dto: TargetBouquetFileDto = serde_saphyr::from_str(&content).map_err(|err| {
+        TuliproxError::TargetBouquet(format!("Failed to parse source bouquet file {}: {err}", src.display()))
+    })?;
+
+    dto.target = new_target.to_string();
+    dto.canonicalize();
+
+    let yaml = serde_saphyr::to_string(&dto)
+        .map_err(|err| TuliproxError::TargetBouquet(format!("Failed to serialize renamed bouquet: {err}")))?;
+
+    write_text_file_atomic(dest, &yaml).await.map_err(|err| {
+        TuliproxError::TargetBouquet(format!("Failed to write renamed bouquet to {}: {err}", dest.display()))
+    })
+}
+
+/// Pre-validates that target bouquet rename mutations will not collide with existing destinations.
+pub async fn validate_target_bouquet_mutations(
+    config_path: &Path,
+    renames: &[(String, String)],
+    deletions: &[String],
+) -> Result<(), TuliproxError> {
+    let mut seen_destinations = HashSet::with_capacity(renames.len());
+    for (_, new_name) in renames {
+        if !seen_destinations.insert(new_name.as_str()) {
+            return Err(TuliproxError::TargetBouquet(format!("Duplicate rename destination '{new_name}'")));
+        }
+    }
+
+    let deleted_names: HashSet<&str> = deletions.iter().map(String::as_str).collect();
+    let renamed_old_names: HashSet<&str> = renames.iter().map(|(old, _)| old.as_str()).collect();
+
+    for (old_name, new_name) in renames {
+        if old_name == new_name {
+            continue;
+        }
+        let old_path = target_bouquet_path(config_path, old_name);
+        let new_path = target_bouquet_path(config_path, new_name);
+
+        if !tokio::fs::try_exists(&old_path).await.unwrap_or(false) {
+            continue;
+        }
+
+        if tokio::fs::try_exists(&new_path).await.unwrap_or(false)
+            && !deleted_names.contains(new_name.as_str())
+            && !renamed_old_names.contains(new_name.as_str())
+        {
+            return Err(TuliproxError::TargetBouquet(format!(
+                "Cannot rename target bouquet from '{old_name}' to '{new_name}': destination file {} already exists",
+                new_path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Applies source-editor renames and deletions while acquiring the logical mutation lock.
 pub async fn apply_target_bouquet_mutations(
     app_config: &AppConfig,
     renames: &[(String, String)],
     deletions: &[String],
 ) -> Result<(), TuliproxError> {
     let _mutation_lock = app_config.file_locks.write_lock_str(TARGET_BOUQUET_MUTATION_LOCK).await;
-    for (old_name, new_name) in renames {
-        rename_target_bouquet_locked(app_config, old_name, new_name).await?;
-    }
+    apply_target_bouquet_mutations_locked(app_config, renames, deletions).await
+}
+
+/// Applies source-editor renames and deletions.
+/// Caller MUST already hold `TARGET_BOUQUET_MUTATION_LOCK`.
+/// Supports chained renames (A -> B, B -> C) and swaps (A <-> B) without destination collision via staging.
+/// Staged files are safely rolled back to their original paths if an error occurs.
+pub async fn apply_target_bouquet_mutations_locked(
+    app_config: &AppConfig,
+    renames: &[(String, String)],
+    deletions: &[String],
+) -> Result<(), TuliproxError> {
+    // Apply deletions first so that renames to a deleted target's name do not collide.
     for target_name in deletions {
         delete_target_bouquet_locked(app_config, target_name).await?;
     }
+
+    let paths = app_config.paths.load();
+    let config_path = Path::new(&paths.config_path);
+
+    // Pre-validate that all existing source bouquet files can be read and parsed before staging.
+    for (old_name, _) in renames {
+        let old_path = target_bouquet_path(config_path, old_name);
+        if tokio::fs::try_exists(&old_path).await.unwrap_or(false) {
+            let content = tokio::fs::read_to_string(&old_path).await.map_err(|err| {
+                TuliproxError::TargetBouquet(format!(
+                    "Failed to read source bouquet file {}: {err}",
+                    old_path.display()
+                ))
+            })?;
+            let _: TargetBouquetFileDto = serde_saphyr::from_str(&content).map_err(|err| {
+                TuliproxError::TargetBouquet(format!(
+                    "Failed to parse source bouquet file {}: {err}",
+                    old_path.display()
+                ))
+            })?;
+        }
+    }
+
+    // Stage all existing source files to unique temporary paths to avoid collisions in chained renames or swaps.
+    // We record (tmp_path, old_path, new_name) to allow full rollback on failure.
+    let mut staged = Vec::new();
+    for (old_name, new_name) in renames {
+        if old_name == new_name {
+            continue;
+        }
+        let old_path = target_bouquet_path(config_path, old_name);
+        let _lock = app_config.file_locks.write_lock(&old_path).await;
+        if tokio::fs::try_exists(&old_path).await.unwrap_or(false) {
+            let tmp_path = create_unique_temp_path(&old_path);
+            if let Err(err) = tokio::fs::rename(&old_path, &tmp_path).await {
+                // Roll back any files already staged so far
+                for (staged_tmp, staged_old, _) in staged {
+                    let _ = tokio::fs::rename(&staged_tmp, &staged_old).await;
+                }
+                return Err(TuliproxError::TargetBouquet(format!(
+                    "Failed to stage bouquet file {} to {}: {err}",
+                    old_path.display(),
+                    tmp_path.display()
+                )));
+            }
+            staged.push((tmp_path, old_path, new_name.clone()));
+        }
+    }
+
+    // Write all staged files to their final destinations.
+    // If any write fails, roll back all remaining staged files, the current failed entry,
+    // and all already finalized entries.
+    let mut finalized = Vec::new();
+    let mut pending = staged.into_iter();
+    while let Some((tmp_path, old_path, new_name)) = pending.next() {
+        let new_path = target_bouquet_path(config_path, &new_name);
+        let _lock = app_config.file_locks.write_lock(&new_path).await;
+
+        if let Err(err) = rewrite_bouquet_with_target(&tmp_path, &new_path, &new_name).await {
+            // Restore current failed entry
+            let _ = tokio::fs::rename(&tmp_path, &old_path).await;
+            // Restore remaining staged entries
+            for (remaining_tmp, remaining_old, _) in pending {
+                let _ = tokio::fs::rename(&remaining_tmp, &remaining_old).await;
+            }
+            // Restore already finalized entries
+            for (finalized_new, finalized_old) in finalized {
+                let _ = tokio::fs::rename(&finalized_new, &finalized_old).await;
+            }
+            return Err(err);
+        }
+
+        finalized.push((new_path.clone(), old_path));
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        debug!("Finalized renamed target bouquet to '{}' ({})", new_name, new_path.display());
+    }
+
     Ok(())
 }
 
@@ -290,6 +423,7 @@ pub async fn list_target_bouquet_files(config_path: &Path) -> Result<Vec<PathBuf
 pub struct TargetBouquetAuditReport {
     pub orphan_files: Vec<PathBuf>,
     pub corrupt_files: Vec<(PathBuf, String)>,
+    pub leftover_temp_files: Vec<PathBuf>,
 }
 
 /// Audits target bouquet files on disk against current active target names.
@@ -299,6 +433,22 @@ pub async fn audit_target_bouquets<S: std::hash::BuildHasher>(
 ) -> Result<TargetBouquetAuditReport, TuliproxError> {
     let files = list_target_bouquet_files(config_path).await?;
     let mut report = TargetBouquetAuditReport::default();
+
+    // Clean up and report any orphaned temporary staging files in the bouquets directory
+    let dir = target_bouquet_dir(config_path);
+    if let Ok(mut dir_reader) = tokio::fs::read_dir(&dir).await {
+        while let Ok(Some(entry)) = dir_reader.next_entry().await {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name.starts_with('.') && name.contains(".tmp-") {
+                        let _ = tokio::fs::remove_file(&path).await;
+                        report.leftover_temp_files.push(path);
+                    }
+                }
+            }
+        }
+    }
 
     for file in files {
         let content = match tokio::fs::read_to_string(&file).await {
@@ -488,5 +638,134 @@ mod tests {
 
         assert!(target_bouquet_exists(temp_dir.path(), "renamed").await);
         assert!(!target_bouquet_exists(temp_dir.path(), "delete_me").await);
+    }
+
+    #[tokio::test]
+    async fn mutation_validation_detects_destination_collisions() {
+        let temp_dir = TempDir::new().unwrap();
+        let app_config = test_app_config(temp_dir.path().to_str().unwrap());
+        let bouquet = PlaylistClusterBouquetDto { live: Some(vec!["Kids".to_string()]), vod: None, series: None };
+
+        save_target_bouquet(&app_config, "target_a", bouquet.clone()).await.unwrap();
+        save_target_bouquet(&app_config, "target_b", bouquet).await.unwrap();
+
+        // target_a -> target_b should collide because target_b exists and is not deleted
+        let result = validate_target_bouquet_mutations(
+            temp_dir.path(),
+            &[("target_a".to_string(), "target_b".to_string())],
+            &[],
+        )
+        .await;
+        assert!(result.is_err());
+
+        // target_a -> target_b is allowed if target_b is in deletions
+        let result_with_deletion = validate_target_bouquet_mutations(
+            temp_dir.path(),
+            &[("target_a".to_string(), "target_b".to_string())],
+            &["target_b".to_string()],
+        )
+        .await;
+        assert!(result_with_deletion.is_ok());
+
+        // Applying deletion before rename succeeds
+        apply_target_bouquet_mutations(
+            &app_config,
+            &[("target_a".to_string(), "target_b".to_string())],
+            &["target_b".to_string()],
+        )
+        .await
+        .unwrap();
+
+        assert!(!target_bouquet_exists(temp_dir.path(), "target_a").await);
+        assert!(target_bouquet_exists(temp_dir.path(), "target_b").await);
+    }
+
+    #[tokio::test]
+    async fn mutation_application_handles_chained_renames_and_swaps() {
+        let temp_dir = TempDir::new().unwrap();
+        let app_config = test_app_config(temp_dir.path().to_str().unwrap());
+
+        // Test chained rename: 1 -> 2, 2 -> 3
+        let bouquet1 = PlaylistClusterBouquetDto { live: Some(vec!["News".to_string()]), vod: None, series: None };
+        let bouquet2 = PlaylistClusterBouquetDto { live: Some(vec!["Sports".to_string()]), vod: None, series: None };
+        save_target_bouquet(&app_config, "target_1", bouquet1).await.unwrap();
+        save_target_bouquet(&app_config, "target_2", bouquet2).await.unwrap();
+
+        let chained_renames =
+            vec![("target_1".to_string(), "target_2".to_string()), ("target_2".to_string(), "target_3".to_string())];
+        validate_target_bouquet_mutations(temp_dir.path(), &chained_renames, &[]).await.unwrap();
+        apply_target_bouquet_mutations(&app_config, &chained_renames, &[]).await.unwrap();
+
+        assert!(!target_bouquet_exists(temp_dir.path(), "target_1").await);
+        let b2 = load_target_bouquet(&app_config, "target_2").await.unwrap().unwrap();
+        assert_eq!(b2.groups.live, Some(vec!["News".to_string()]));
+        let b3 = load_target_bouquet(&app_config, "target_3").await.unwrap().unwrap();
+        assert_eq!(b3.groups.live, Some(vec!["Sports".to_string()]));
+
+        // Test swap: 2 <-> 3
+        let swap_renames =
+            vec![("target_2".to_string(), "target_3".to_string()), ("target_3".to_string(), "target_2".to_string())];
+        validate_target_bouquet_mutations(temp_dir.path(), &swap_renames, &[]).await.unwrap();
+        apply_target_bouquet_mutations(&app_config, &swap_renames, &[]).await.unwrap();
+
+        let swapped_b2 = load_target_bouquet(&app_config, "target_2").await.unwrap().unwrap();
+        assert_eq!(swapped_b2.groups.live, Some(vec!["Sports".to_string()]));
+        let swapped_b3 = load_target_bouquet(&app_config, "target_3").await.unwrap().unwrap();
+        assert_eq!(swapped_b3.groups.live, Some(vec!["News".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn mutation_validation_rejects_duplicate_destinations() {
+        let temp_dir = TempDir::new().unwrap();
+        let renames =
+            vec![("target_a".to_string(), "target_c".to_string()), ("target_b".to_string(), "target_c".to_string())];
+        let err = validate_target_bouquet_mutations(temp_dir.path(), &renames, &[]).await.unwrap_err();
+        assert!(err.to_string().contains("Duplicate rename destination 'target_c'"));
+    }
+
+    #[tokio::test]
+    async fn mutation_application_rolls_back_on_corrupt_yaml() {
+        let temp_dir = TempDir::new().unwrap();
+        let app_config = test_app_config(temp_dir.path().to_str().unwrap());
+
+        // Create target_ok with valid bouquet
+        let bouquet = PlaylistClusterBouquetDto { live: Some(vec!["News".to_string()]), vod: None, series: None };
+        save_target_bouquet(&app_config, "target_ok", bouquet).await.unwrap();
+
+        // Create target_corrupt with corrupt content directly on disk
+        let corrupt_path = target_bouquet_path(temp_dir.path(), "target_corrupt");
+        tokio::fs::create_dir_all(corrupt_path.parent().unwrap()).await.unwrap();
+        tokio::fs::write(&corrupt_path, "not: [valid: {yaml").await.unwrap();
+
+        let renames = vec![
+            ("target_ok".to_string(), "target_ok_renamed".to_string()),
+            ("target_corrupt".to_string(), "target_corrupt_renamed".to_string()),
+        ];
+
+        // Validation passes since destinations do not exist on disk
+        validate_target_bouquet_mutations(temp_dir.path(), &renames, &[]).await.unwrap();
+
+        // Application must fail due to corrupt YAML and roll back target_ok
+        let result = apply_target_bouquet_mutations(&app_config, &renames, &[]).await;
+        assert!(result.is_err());
+
+        // target_ok must have been restored or remain intact
+        assert!(target_bouquet_exists(temp_dir.path(), "target_ok").await);
+        // target_corrupt must have been restored
+        assert!(tokio::fs::try_exists(&corrupt_path).await.unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn audit_sweeps_leftover_temporary_staging_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let bouquet_dir = target_bouquet_dir(temp_dir.path());
+        tokio::fs::create_dir_all(&bouquet_dir).await.unwrap();
+
+        let leftover_tmp = bouquet_dir.join(".some_target.yml.tmp-123-456");
+        tokio::fs::write(&leftover_tmp, "stale temp content").await.unwrap();
+
+        let report = audit_target_bouquets(temp_dir.path(), &HashSet::new()).await.unwrap();
+        assert_eq!(report.leftover_temp_files, vec![leftover_tmp.clone()]);
+        assert!(!tokio::fs::try_exists(&leftover_tmp).await.unwrap_or(false));
     }
 }

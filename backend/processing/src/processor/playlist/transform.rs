@@ -1,5 +1,6 @@
 #![allow(clippy::wildcard_imports)]
 use super::*;
+use shared::model::PlaylistEntry;
 
 pub(crate) fn retain_playlist_items(
     source: &mut PlaylistSource,
@@ -480,7 +481,7 @@ pub(crate) fn execute_pipe<'a>(
     consume_source: bool,
     bouquet_filter: Option<&tuliprox_core::model::TargetBouquetFilter>,
 ) -> Result<(FetchedPlaylist<'a>, PipelineOutcome), TuliproxError> {
-    let source = if consume_source {
+    let mut source = if consume_source {
         if fpl.is_memory() {
             MemoryPlaylistSource::new(fpl.source.take_groups()).into_source()
         } else {
@@ -490,57 +491,58 @@ pub(crate) fn execute_pipe<'a>(
         fpl.clone_source()?
     };
 
-    let deduplicate_memory = source.is_memory() && target.execution_plan.pre_transform_identity_dedup;
-    let mut new_fpl = FetchedPlaylist { input: fpl.input, source, epg: fpl.epg.clone() };
-    // In-memory items are frozen here at the target-processing boundary. Read-only disk sources
-    // capture the same identity when their persisted M3U/Xtream items are converted to PlaylistItem.
-    if new_fpl.is_memory() {
-        for item in new_fpl.items_mut() {
+    let is_memory = source.is_memory();
+    let pre_transform_dedup_enabled = target.execution_plan.pre_transform_identity_dedup;
+    if !is_memory && pre_transform_dedup_enabled {
+        warn!(
+            "Target '{}' input '{}': pre_transform_identity_dedup has no effect for disk-based playlist sources",
+            target.name, fpl.input.name
+        );
+    }
+    // Memory sources dedup here; disk sources cannot, because persisted B+Tree
+    // leaves are read-only at the pipeline boundary. Cross-input dedup for disk
+    // sources runs later in `deduplicate_playlist` during target finalization.
+    let deduplicate_memory = is_memory && pre_transform_dedup_enabled;
+    let mut items = Vec::new();
+    let mut rejected = 0usize;
+    let mut duplicates_removed = 0usize;
+    let mut total_items = 0usize;
+
+    for mut item in source.into_items() {
+        total_items += 1;
+        if is_memory {
             item.header.freeze_input_stream_id();
         }
-    }
-
-    // Bouquet prefilter runs BEFORE the shared identity dedup so that items the
-    // target refuses never occupy a slot in the `duplicates` UUID set that
-    // downstream targets rely on.
-    if let Some(filter) = bouquet_filter {
-        let (filtered_items, total, kept) = {
-            let mut total = 0usize;
-            let mut kept = 0usize;
-            let items: Vec<PlaylistItem> = new_fpl
-                .source
-                .into_items()
-                .filter(|item| {
-                    total += 1;
-                    let allowed = filter.allows(item.header.xtream_cluster, &item.header.group);
-                    if allowed {
-                        kept += 1;
-                    }
-                    allowed
-                })
-                .collect();
-            (items, total, kept)
-        };
-        if total > 0 && total > kept {
-            debug!(
-                "Target '{}' bouquet prefilter for input '{}': rejected {} / {} items",
-                target.name,
-                fpl.input.name,
-                total - kept,
-                total
-            );
+        if bouquet_filter.is_some_and(|filter| !filter.allows(item.header.xtream_cluster, &item.header.group)) {
+            rejected += 1;
+            continue;
         }
-        new_fpl.source =
-            MemoryPlaylistSource::new(group_items(filtered_items, GroupingPolicy::ExactCategory)).into_source();
+        if deduplicate_memory && !duplicates.insert(item.get_uuid()) {
+            duplicates_removed += 1;
+            continue;
+        }
+        items.push(item);
     }
 
-    if deduplicate_memory {
-        new_fpl.deduplicate(duplicates);
+    if rejected > 0 {
+        debug!(
+            "Target '{}' bouquet prefilter for input '{}': rejected {}/{} items",
+            target.name, fpl.input.name, rejected, total_items
+        );
+    }
+    if duplicates_removed > 0 {
+        debug!(
+            "Target '{}' input '{}': pre-transform dedup removed {} duplicate items",
+            target.name, fpl.input.name, duplicates_removed
+        );
     }
 
-    let items = new_fpl.source.into_items().collect();
     let (groups, outcome) = execute_pipeline_on_items(items, target, pipe);
-    new_fpl.source = MemoryPlaylistSource::new(groups).into_source();
+    let new_fpl = FetchedPlaylist {
+        input: fpl.input,
+        source: MemoryPlaylistSource::new(groups).into_source(),
+        epg: fpl.epg.clone(),
+    };
     Ok((new_fpl, outcome))
 }
 

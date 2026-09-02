@@ -26,14 +26,11 @@ impl TargetBouquetFileDto {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TargetBouquetStreamEventDto {
-    Targets { targets: Vec<TargetBouquetTargetDto> },
     Selection { groups: Option<PlaylistClusterBouquetDto> },
     InputStarted { input: String },
-    Group { input: String, cluster: XtreamCluster, name: String },
     InputChunk { input: String, cluster: XtreamCluster, groups: Vec<String>, is_last_for_cluster: bool },
     InputFinished { input: String, groups: usize },
     InputWarning { input: String, message: String },
-    Done,
     Complete,
 }
 
@@ -43,9 +40,6 @@ pub struct TargetBouquetTargetDto {
     pub name: String,
     pub inputs: Vec<String>,
     pub restricted: bool,
-    pub live_count: Option<usize>,
-    pub vod_count: Option<usize>,
-    pub series_count: Option<usize>,
 }
 
 #[cfg(test)]
