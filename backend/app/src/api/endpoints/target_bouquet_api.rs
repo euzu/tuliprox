@@ -10,10 +10,9 @@ use axum::{
     Json, Router,
 };
 use shared::model::{
-    permission::Permission, PlaylistClusterBouquetDto, TargetBouquetStreamEventDto, TargetBouquetTargetDto,
-    XtreamCluster,
+    permission::Permission, TargetBouquetDto, TargetBouquetStreamEventDto, TargetBouquetTargetDto, XtreamCluster,
 };
-use std::{path::Path, sync::Arc};
+use std::{collections::HashSet, path::Path, sync::Arc};
 use tuliprox_core::model::{ConfigInput, ConfigInputFlags, ConfigTarget, SourcesConfig};
 
 pub fn target_bouquet_api_register_with_permissions(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
@@ -63,11 +62,17 @@ fn resolve_target_with_inputs(
 async fn collect_target_summaries(state: &AppState) -> Vec<TargetBouquetTargetDto> {
     let sources = state.app_config.sources.load();
     let config_path = state.app_config.paths.load().config_path.clone();
+    let bouquet_files: HashSet<_> = tuliprox_repository::list_target_bouquet_files(Path::new(&config_path))
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
     let mut target_dtos = Vec::new();
 
     for source in &sources.sources {
         for target in &source.targets {
-            let has_bouquet = tuliprox_repository::target_bouquet_exists(Path::new(&config_path), &target.name).await;
+            let has_bouquet = bouquet_files
+                .contains(&tuliprox_repository::target_bouquet_path(Path::new(&config_path), &target.name));
             target_dtos.push(TargetBouquetTargetDto {
                 id: target.id,
                 name: target.name.clone(),
@@ -203,19 +208,30 @@ async fn get_target_bouquet_groups(
     };
     drop(sources);
 
-    let selection = match tuliprox_repository::load_target_bouquet(&app_state.app_config, &target.name).await {
-        Ok(bouquet) => bouquet.map(|value| value.groups),
-        Err(err) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": err.to_string() })))
-                .into_response();
-        }
-    };
+    let (selection, selection_warning) =
+        match tuliprox_repository::load_target_bouquet(&app_state.app_config, &target.name).await {
+            Ok(bouquet) => (bouquet.map(|value| value.bouquet), None),
+            Err(err) => (
+                None,
+                Some(format!(
+                    "Stored target bouquet for '{}' could not be loaded: {err}. Reset or save it to replace the invalid configuration.",
+                    target.name
+                )),
+            ),
+        };
+    let target_name = target.name.clone();
 
     let (tx, rx) = tokio::sync::mpsc::channel(64);
     let state = Arc::clone(&app_state);
     tokio::spawn(async move {
-        if !send_stream_event(&tx, TargetBouquetStreamEventDto::Selection { groups: selection }).await {
+        if !send_stream_event(&tx, TargetBouquetStreamEventDto::Selection { bouquet: selection }).await {
             return;
+        }
+        if let Some(message) = selection_warning {
+            let warning = TargetBouquetStreamEventDto::InputWarning { input: target_name, message };
+            if !send_stream_event(&tx, warning).await {
+                return;
+            }
         }
         let storage_dir = state.app_config.config.load().storage_dir.clone();
         for input in inputs {
@@ -235,7 +251,7 @@ async fn get_target_bouquet_groups(
 async fn save_target_bouquet_handler(
     State(app_state): State<Arc<AppState>>,
     AxumPath(target_id): AxumPath<u16>,
-    Json(bouquet): Json<PlaylistClusterBouquetDto>,
+    Json(bouquet): Json<TargetBouquetDto>,
 ) -> Response {
     let sources = app_state.app_config.sources.load();
     let Some(target) = sources.get_target_by_id(target_id) else {
@@ -284,7 +300,10 @@ mod tests {
         http::{Request, StatusCode},
     };
     use http_body_util::BodyExt;
-    use shared::model::{ConfigInputDto, ConfigSourceDto, ConfigTargetDto, SourcesConfigDto};
+    use shared::model::{
+        ConfigInputDto, ConfigSourceDto, ConfigTargetDto, PlaylistClusterBouquetDto, SourcesConfigDto,
+        TargetBouquetMode,
+    };
     use std::sync::Arc;
     use tempfile::TempDir;
     use tower::ServiceExt;
@@ -350,10 +369,13 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let events: Vec<TargetBouquetStreamEventDto> = serde_json::from_slice(&body).unwrap();
-        assert!(matches!(events.first(), Some(TargetBouquetStreamEventDto::Selection { groups: None })));
+        assert!(matches!(events.first(), Some(TargetBouquetStreamEventDto::Selection { bouquet: None })));
 
         // Persist a restricted selection.
-        let bouquet_dto = PlaylistClusterBouquetDto { live: Some(vec!["News".to_string()]), vod: None, series: None };
+        let bouquet_dto = TargetBouquetDto::new(
+            TargetBouquetMode::Blacklist,
+            PlaylistClusterBouquetDto { live: Some(vec!["News".to_string()]), vod: None, series: None },
+        );
         let req = Request::builder()
             .method("PUT")
             .uri("/target-bouquets/0")
@@ -371,8 +393,9 @@ mod tests {
         let events: Vec<TargetBouquetStreamEventDto> = serde_json::from_slice(&body).unwrap();
         assert!(matches!(
             events.first(),
-            Some(TargetBouquetStreamEventDto::Selection { groups: Some(groups) })
-                if groups.live == Some(vec!["News".to_string()])
+            Some(TargetBouquetStreamEventDto::Selection { bouquet: Some(bouquet) })
+                if bouquet.mode == TargetBouquetMode::Blacklist
+                    && bouquet.groups.live == Some(vec!["News".to_string()])
         ));
 
         // Reset the selection.
@@ -386,7 +409,34 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let events: Vec<TargetBouquetStreamEventDto> = serde_json::from_slice(&body).unwrap();
-        assert!(matches!(events.first(), Some(TargetBouquetStreamEventDto::Selection { groups: None })));
+        assert!(matches!(events.first(), Some(TargetBouquetStreamEventDto::Selection { bouquet: None })));
+    }
+
+    #[tokio::test]
+    async fn invalid_saved_bouquet_keeps_the_editor_available_for_recovery() {
+        let temp_dir = TempDir::new().unwrap();
+        let app_state = setup_test_app_state(&temp_dir);
+        let bouquet_path = tuliprox_repository::target_bouquet_path(temp_dir.path(), "living_room");
+        tokio::fs::create_dir_all(bouquet_path.parent().unwrap()).await.unwrap();
+        tokio::fs::write(bouquet_path, "version: 1\ntarget: living_room\ngroups:\n  live:\n    - News\n")
+            .await
+            .unwrap();
+
+        let router = target_bouquet_api_register_unprotected().with_state(app_state);
+        let request = Request::builder().method("GET").uri("/target-bouquets/0/groups").body(Body::empty()).unwrap();
+        let response = router.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let events: Vec<TargetBouquetStreamEventDto> = serde_json::from_slice(&body).unwrap();
+        assert!(matches!(events.first(), Some(TargetBouquetStreamEventDto::Selection { bouquet: None })));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            TargetBouquetStreamEventDto::InputWarning { input, message }
+                if input == "living_room"
+                    && message.contains("could not be loaded")
+                    && message.contains("Reset or save")
+        )));
     }
 
     #[tokio::test]
@@ -445,7 +495,7 @@ mod tests {
             | TargetBouquetStreamEventDto::InputChunk { input, .. } => input == "unconnected",
             _ => false,
         }));
-        assert!(matches!(events.first(), Some(TargetBouquetStreamEventDto::Selection { groups: None })));
+        assert!(matches!(events.first(), Some(TargetBouquetStreamEventDto::Selection { bouquet: None })));
         let chunk = events
             .iter()
             .find(|event| matches!(event, TargetBouquetStreamEventDto::InputChunk { .. }))

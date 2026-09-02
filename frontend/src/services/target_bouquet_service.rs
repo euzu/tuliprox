@@ -5,7 +5,7 @@ use crate::{
 use gloo_net::http::Request;
 use js_sys::{Reflect, Uint8Array};
 use shared::{
-    model::{PlaylistClusterBouquetDto, TargetBouquetStreamEventDto, TargetBouquetTargetDto},
+    model::{TargetBouquetDto, TargetBouquetStreamEventDto, TargetBouquetTargetDto},
     utils::concat_path_leading_slash,
 };
 use wasm_bindgen::JsValue;
@@ -208,7 +208,7 @@ impl TargetBouquetService {
         decoder.finish(&mut on_event)
     }
 
-    pub async fn save_target_bouquet(target_id: u16, bouquet: &PlaylistClusterBouquetDto) -> Result<(), Error> {
+    pub async fn save_target_bouquet(target_id: u16, bouquet: &TargetBouquetDto) -> Result<(), Error> {
         let url = Self::target_url(target_id, None);
         let _ = request_put::<_, serde_json::Value>(&url, bouquet, Some(Encoding::Json), Some(Encoding::Json)).await?;
         Ok(())

@@ -87,6 +87,15 @@
     font-size: var(--font-size-s);
   }
 
+  &__mode {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--gap-small);
+    color: var(--text-color);
+    font-size: var(--font-size-s);
+  }
+
   &__origins {
     margin-left: auto;
     padding-left: var(--gap-small);

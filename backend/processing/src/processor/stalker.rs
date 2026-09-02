@@ -13,7 +13,7 @@
 use super::stalker_refresh::{
     advance_stalker_refresh, StalkerClusterSelection, StalkerRefreshMode, StalkerRefreshOutcome,
 };
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use lru::LruCache;
 use parking_lot::Mutex;
 use shared::{
@@ -42,6 +42,10 @@ pub enum StalkerCluster {
     Live,
     Vod,
     Series,
+}
+
+fn raw_group_catalog_storage_path(stalker_storage_path: &std::path::Path) -> &std::path::Path {
+    stalker_storage_path.parent().unwrap_or(stalker_storage_path)
 }
 
 const DEFAULT_STALKER_CLUSTERS: [StalkerCluster; 3] =
@@ -168,6 +172,7 @@ pub async fn download_stalker_playlist(
             );
         }
     };
+    let catalog_storage_path = raw_group_catalog_storage_path(&storage_path);
 
     let outcome = if let Some(_refresh_permit) = try_acquire_stalker_refresh(&input.name).await {
         let handshake = match api_client.handshake().await {
@@ -304,7 +309,7 @@ pub async fn download_stalker_playlist(
                     StalkerCluster::Series => shared::model::XtreamCluster::Series,
                 };
                 if let Err(publish_err) = tuliprox_repository::publish_raw_group_catalog(
-                    &storage_path,
+                    catalog_storage_path,
                     &input.name,
                     xc,
                     group_titles,
@@ -312,11 +317,10 @@ pub async fn download_stalker_playlist(
                 )
                 .await
                 {
-                    error!(
+                    warn!(
                         "Failed to publish raw group catalog for stalker input '{}' cluster {xc:?}: {publish_err}",
                         input.name
                     );
-                    errors.push(publish_err);
                 }
                 groups.extend(cluster_groups);
             }
@@ -498,6 +502,12 @@ mod tests {
     use super::*;
 
     fn runtime_cfg() -> StalkerInputConfig { StalkerInputConfig::default() }
+
+    #[test]
+    fn raw_group_catalog_is_published_at_the_input_storage_root() {
+        let stalker_path = std::path::Path::new("/storage/input_portal/stalker");
+        assert_eq!(raw_group_catalog_storage_path(stalker_path), std::path::Path::new("/storage/input_portal"));
+    }
 
     #[test]
     fn runtime_client_cache_key_changes_with_endpoint_preference() {

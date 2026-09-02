@@ -1264,8 +1264,10 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
     if let Err(publish_err) =
         crate::publish_raw_group_catalog(&storage_path, &input.name, cluster, raw_groups, &app_config.file_locks).await
     {
-        log::error!("Failed to publish raw group catalog for input '{}' cluster {cluster}: {publish_err}", input.name);
-        return Err(publish_err);
+        log::warn!(
+            "Xtream data for input '{}' cluster {cluster} was published, but its raw group catalog could not be published: {publish_err}",
+            input.name
+        );
     }
 
     let cleanup_lease = refresh_lease.clone();

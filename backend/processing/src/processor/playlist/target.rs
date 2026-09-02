@@ -260,7 +260,8 @@ pub(crate) async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, 
 
     let bouquet_file =
         tuliprox_repository::load_target_bouquet(&ctx.config, &target.name).await.map_err(|err| vec![err])?;
-    let bouquet_filter = bouquet_file.and_then(|f| tuliprox_core::model::TargetBouquetFilter::from_dto(f.groups));
+    let bouquet_filter =
+        bouquet_file.and_then(|file| tuliprox_core::model::TargetBouquetFilter::from_dto(file.bouquet));
     if let Some(ref filter) = bouquet_filter {
         let (live, vod, series) = filter.cluster_counts();
         debug!("Loaded target bouquet for '{}': live={:?}, vod={:?}, series={:?}", target.name, live, vod, series);

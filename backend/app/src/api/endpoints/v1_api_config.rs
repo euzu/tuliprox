@@ -80,31 +80,64 @@ fn build_bouquet_mutation_batch(app_state: &Arc<AppState>, sources: &SourcesConf
     BouquetMutationBatch { renames, deletions }
 }
 
-/// Applies bouquet mutations under their shared lock and reports persistence failures.
+/// Applies bouquet mutations under their shared lock.
 async fn apply_bouquet_mutation_batch(
     app_state: &Arc<AppState>,
     batch: &BouquetMutationBatch,
-) -> Result<(), Box<axum::response::Response>> {
-    if let Err(err) = tuliprox_repository::apply_target_bouquet_mutations_locked(
-        &app_state.app_config,
-        &batch.renames,
-        &batch.deletions,
-    )
-    .await
-    {
-        error!("Failed to apply target bouquet lifecycle mutations: {err}");
-        return Err(Box::new(
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(json!({
-                    "error": format!("Source.yml saved but updating target bouquets failed: {err}")
-                })),
-            )
-                .into_response(),
-        ));
-    }
+) -> Result<(), TuliproxError> {
+    tuliprox_repository::apply_target_bouquet_mutations_locked(&app_state.app_config, &batch.renames, &batch.deletions)
+        .await
+}
 
-    Ok(())
+async fn restore_sources_file(path: &Path, content: Option<&[u8]>) -> Result<(), std::io::Error> {
+    if let Some(content) = content {
+        return tuliprox_core::utils::write_file_atomic(path, content).await;
+    }
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+async fn roll_back_sources_after_bouquet_failure(
+    app_state: &Arc<AppState>,
+    sources_file_path: &Path,
+    original_sources_file: Option<&[u8]>,
+    mutation_err: &TuliproxError,
+) -> axum::response::Response {
+    error!("Failed to apply target bouquet lifecycle mutations: {mutation_err}");
+    if let Err(rollback_err) = restore_sources_file(sources_file_path, original_sources_file).await {
+        error!("Failed to roll back source.yml after target bouquet mutation failure: {rollback_err}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(json!({
+                "error": format!(
+                    "Updating target bouquets failed: {mutation_err}; rolling back source.yml also failed: {rollback_err}"
+                )
+            })),
+        )
+            .into_response();
+    }
+    if let Err(reload_err) = ConfigFile::load_sources(app_state).await {
+        error!("source.yml was rolled back, but reloading the previous runtime configuration failed: {reload_err}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(json!({
+                "error": format!(
+                    "Updating target bouquets failed: {mutation_err}; source.yml was restored but runtime reload failed: {reload_err}"
+                )
+            })),
+        )
+            .into_response();
+    }
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        axum::Json(json!({
+            "error": format!("Updating target bouquets failed and source.yml was rolled back: {mutation_err}")
+        })),
+    )
+        .into_response()
 }
 
 async fn read_file_revision(path: &str) -> Result<String, std::io::Error> {
@@ -340,6 +373,14 @@ async fn save_config_sources(
     {
         return response;
     }
+    let original_sources_file = match tokio::fs::read(&sources_file_path).await {
+        Ok(content) => Some(content),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => {
+            error!("Failed to snapshot source.yml '{sources_file_path}' before save: {err}");
+            return internal_server_error!();
+        }
+    };
 
     let templates_to_persist =
         match crate::config_loader::validate_source_config_for_persist(&app_state.app_config, &sources).await {
@@ -386,8 +427,14 @@ async fn save_config_sources(
     }
 
     // The mutation lock prevents concurrent bouquet writes from observing a partial rename.
-    if let Err(response) = apply_bouquet_mutation_batch(&app_state, &bouquet_mutations).await {
-        return *response;
+    if let Err(mutation_err) = apply_bouquet_mutation_batch(&app_state, &bouquet_mutations).await {
+        return roll_back_sources_after_bouquet_failure(
+            &app_state,
+            Path::new(&sources_file_path),
+            original_sources_file.as_deref(),
+            &mutation_err,
+        )
+        .await;
     }
 
     // Reload from disk so runtime always uses fully prepared sources/mappings/templates.
@@ -1136,13 +1183,44 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(HEADER_IF_MATCH, HeaderValue::from_str(&rev).unwrap());
 
-        let save_future =
-            super::save_config_sources(axum::extract::State(app_state), headers, axum::Json(updated_sources));
+        let save_future = super::save_config_sources(
+            axum::extract::State(Arc::clone(&app_state)),
+            headers,
+            axum::Json(updated_sources.clone()),
+        );
         let response = tokio::time::timeout(Duration::from_secs(5), save_future)
             .await
             .expect("save_config_sources must not deadlock");
 
         use axum::response::IntoResponse;
         assert_eq!(response.into_response().status(), StatusCode::OK);
+
+        let committed_sources = tokio::fs::read(&sources_file).await.unwrap();
+        let corrupt_bouquet = tuliprox_repository::target_bouquet_path(temp_dir.path(), "target_renamed");
+        tokio::fs::create_dir_all(corrupt_bouquet.parent().unwrap()).await.unwrap();
+        tokio::fs::write(&corrupt_bouquet, "not: [valid yaml").await.unwrap();
+
+        let mut failed_sources = updated_sources;
+        failed_sources
+            .sources
+            .first_mut()
+            .and_then(|source| source.targets.first_mut())
+            .expect("test target should exist")
+            .name = "target_failed".to_string();
+        let rev = super::read_file_revision(sources_file.to_str().unwrap()).await.unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_IF_MATCH, HeaderValue::from_str(&rev).unwrap());
+
+        let response = super::save_config_sources(
+            axum::extract::State(Arc::clone(&app_state)),
+            headers,
+            axum::Json(failed_sources),
+        )
+        .await;
+
+        assert_eq!(response.into_response().status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(tokio::fs::read(&sources_file).await.unwrap(), committed_sources);
+        let runtime_sources = app_state.app_config.sources.load();
+        assert_eq!(runtime_sources.sources[0].targets[0].name, "target_renamed");
     }
 }

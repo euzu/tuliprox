@@ -8,7 +8,7 @@ use crate::{
     M3uDiskPlaylistSource, MediaServerDiskPlaylistSource, MemoryPlaylistSource, PlaylistSource,
     StalkerDiskPlaylistSource, TargetIdMapping, VirtualIdRecord, XtreamDiskPlaylistSource, FILE_SUFFIX_DB,
 };
-use log::{debug, error, warn};
+use log::{debug, warn};
 use shared::{
     error::TuliproxError,
     model::{
@@ -641,30 +641,6 @@ async fn invalidate_all_cluster_catalogs(app_config: &AppConfig, storage_path: &
     }
 }
 
-/// Publishes one cluster's raw group catalog and converts a failure into the
-/// `(playlist, Some(err))` shape the caller expects.
-macro_rules! publish_cluster_catalog {
-    (
-        $storage_path:expr,
-        $input_name:expr,
-        $cluster:expr,
-        $groups:expr,
-        $app_config:expr,
-        $persisted_playlist:expr
-    ) => {
-        if let Err(publish_err) =
-            crate::publish_raw_group_catalog($storage_path, $input_name, $cluster, $groups, &$app_config.file_locks)
-                .await
-        {
-            error!(
-                "Failed to publish raw group catalog for input '{}' cluster {:?}: {publish_err}",
-                $input_name, $cluster
-            );
-            return ($persisted_playlist, Some(publish_err));
-        }
-    };
-}
-
 async fn publish_all_cluster_catalogs(
     app_config: &AppConfig,
     storage_path: &Path,
@@ -674,30 +650,17 @@ async fn publish_all_cluster_catalogs(
     series_groups: Vec<String>,
     persisted_playlist: Vec<PlaylistGroup>,
 ) -> (Vec<PlaylistGroup>, Option<TuliproxError>) {
-    publish_cluster_catalog!(
-        storage_path,
-        input_name,
-        XtreamCluster::Live,
-        live_groups,
-        app_config,
-        persisted_playlist
-    );
-    publish_cluster_catalog!(
-        storage_path,
-        input_name,
-        XtreamCluster::Video,
-        vod_groups,
-        app_config,
-        persisted_playlist
-    );
-    publish_cluster_catalog!(
-        storage_path,
-        input_name,
-        XtreamCluster::Series,
-        series_groups,
-        app_config,
-        persisted_playlist
-    );
+    for (cluster, groups) in
+        [(XtreamCluster::Live, live_groups), (XtreamCluster::Video, vod_groups), (XtreamCluster::Series, series_groups)]
+    {
+        if let Err(publish_err) =
+            crate::publish_raw_group_catalog(storage_path, input_name, cluster, groups, &app_config.file_locks).await
+        {
+            warn!(
+                "Playlist data for input '{input_name}' was persisted, but publishing its raw group catalog for cluster {cluster:?} failed: {publish_err}"
+            );
+        }
+    }
     (persisted_playlist, None)
 }
 

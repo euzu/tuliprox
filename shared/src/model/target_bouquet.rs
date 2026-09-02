@@ -1,32 +1,60 @@
 use crate::model::{PlaylistClusterBouquetDto, XtreamCluster};
 
-pub const TARGET_BOUQUET_VERSION: u8 = 1;
+pub const TARGET_BOUQUET_VERSION: u8 = 2;
+
+#[derive(Debug, Default, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetBouquetMode {
+    #[default]
+    Whitelist,
+    Blacklist,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct TargetBouquetDto {
+    pub mode: TargetBouquetMode,
+    pub groups: PlaylistClusterBouquetDto,
+}
+
+impl TargetBouquetDto {
+    pub fn new(mode: TargetBouquetMode, mut groups: PlaylistClusterBouquetDto) -> Self {
+        groups.canonicalize_for_target();
+        Self { mode, groups }
+    }
+
+    pub fn whitelist(groups: PlaylistClusterBouquetDto) -> Self { Self::new(TargetBouquetMode::Whitelist, groups) }
+
+    #[inline]
+    pub fn is_unrestricted(&self) -> bool { self.groups.is_target_unrestricted() }
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct TargetBouquetFileDto {
     pub version: u8,
     pub target: String,
-    pub groups: PlaylistClusterBouquetDto,
+    #[serde(flatten)]
+    pub bouquet: TargetBouquetDto,
 }
 
 impl TargetBouquetFileDto {
-    pub fn new(target: impl Into<String>, groups: PlaylistClusterBouquetDto) -> Self {
-        let mut file = Self { version: TARGET_BOUQUET_VERSION, target: target.into(), groups };
+    pub fn new(target: impl Into<String>, bouquet: TargetBouquetDto) -> Self {
+        let mut file = Self { version: TARGET_BOUQUET_VERSION, target: target.into(), bouquet };
         file.canonicalize();
         file
     }
 
     #[inline]
-    pub fn is_unrestricted(&self) -> bool { self.groups.is_target_unrestricted() }
+    pub fn is_unrestricted(&self) -> bool { self.bouquet.is_unrestricted() }
 
-    pub fn canonicalize(&mut self) { self.groups.canonicalize_for_target(); }
+    pub fn canonicalize(&mut self) { self.bouquet.groups.canonicalize_for_target(); }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TargetBouquetStreamEventDto {
-    Selection { groups: Option<PlaylistClusterBouquetDto> },
+    Selection { bouquet: Option<TargetBouquetDto> },
     InputStarted { input: String },
     InputChunk { input: String, cluster: XtreamCluster, groups: Vec<String>, is_last_for_cluster: bool },
     InputFinished { input: String, groups: usize },
@@ -50,11 +78,14 @@ mod tests {
     fn round_trip_yaml_and_json() {
         let file = TargetBouquetFileDto::new(
             "family",
-            PlaylistClusterBouquetDto {
-                live: Some(vec!["News".to_string(), "Kids".to_string()]),
-                vod: Some(vec!["Movies".to_string()]),
-                series: None,
-            },
+            TargetBouquetDto::new(
+                TargetBouquetMode::Blacklist,
+                PlaylistClusterBouquetDto {
+                    live: Some(vec!["News".to_string(), "Kids".to_string()]),
+                    vod: Some(vec!["Movies".to_string()]),
+                    series: None,
+                },
+            ),
         );
 
         let json = serde_json::to_string(&file).expect("serialize json");
@@ -68,7 +99,14 @@ mod tests {
 
     #[test]
     fn rejects_unknown_fields() {
-        let yaml = "version: 1\ntarget: family\nextra_field: oops\ngroups:\n  live:\n    - Kids\n";
+        let yaml = "version: 2\ntarget: family\nmode: whitelist\nextra_field: oops\ngroups:\n  live:\n    - Kids\n";
+        let result: Result<TargetBouquetFileDto, _> = serde_saphyr::from_str(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_legacy_files_without_an_explicit_mode() {
+        let yaml = "version: 1\ntarget: family\ngroups:\n  live:\n    - Kids\n";
         let result: Result<TargetBouquetFileDto, _> = serde_saphyr::from_str(yaml);
         assert!(result.is_err());
     }
@@ -90,7 +128,7 @@ mod tests {
         dto.canonicalize_for_target();
         let live = dto.live.as_ref().expect("live should be Some");
         assert_eq!(live, &vec!["", " Zebra", "News", "news"]);
-        assert!(dto.vod.is_none());
+        assert_eq!(dto.vod, Some(Vec::new()));
         assert!(dto.series.is_none());
         assert!(!dto.is_target_unrestricted());
     }
@@ -98,27 +136,35 @@ mod tests {
     #[test]
     fn uncategorized_empty_string_is_restricted() {
         let mut file = TargetBouquetFileDto {
-            version: 1,
+            version: TARGET_BOUQUET_VERSION,
             target: "test".to_string(),
-            groups: PlaylistClusterBouquetDto { live: Some(vec![String::new()]), vod: None, series: None },
+            bouquet: TargetBouquetDto::whitelist(PlaylistClusterBouquetDto {
+                live: Some(vec![String::new()]),
+                vod: None,
+                series: None,
+            }),
         };
         file.canonicalize();
         assert!(!file.is_unrestricted());
-        assert_eq!(file.groups.live, Some(vec![String::new()]));
+        assert_eq!(file.bouquet.groups.live, Some(vec![String::new()]));
     }
 
     #[test]
     fn all_empty_is_unrestricted() {
         let mut file = TargetBouquetFileDto {
-            version: 1,
+            version: TARGET_BOUQUET_VERSION,
             target: "test".to_string(),
-            groups: PlaylistClusterBouquetDto { live: Some(vec![]), vod: Some(vec![]), series: None },
+            bouquet: TargetBouquetDto::new(
+                TargetBouquetMode::Blacklist,
+                PlaylistClusterBouquetDto { live: Some(vec![]), vod: Some(vec![]), series: None },
+            ),
         };
         file.canonicalize();
         assert!(file.is_unrestricted());
-        assert_eq!(file.groups.live, None);
-        assert_eq!(file.groups.vod, None);
-        assert_eq!(file.groups.series, None);
+        assert_eq!(file.bouquet.mode, TargetBouquetMode::Blacklist);
+        assert_eq!(file.bouquet.groups.live, None);
+        assert_eq!(file.bouquet.groups.vod, None);
+        assert_eq!(file.bouquet.groups.series, None);
     }
 
     #[test]

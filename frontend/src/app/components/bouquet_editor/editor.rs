@@ -5,7 +5,10 @@ use crate::{
 };
 use shared::{
     error::TuliproxError,
-    model::{ClusterFlags, PlaylistClusterBouquetDto, PlaylistClusterCategoriesDto, SearchRequest, XtreamCluster},
+    model::{
+        ClusterFlags, PlaylistClusterBouquetDto, PlaylistClusterCategoriesDto, SearchRequest, TargetBouquetMode,
+        XtreamCluster,
+    },
 };
 use std::{
     cell::RefCell,
@@ -44,14 +47,16 @@ fn resolve_category_element(target: Option<web_sys::EventTarget>) -> Option<web_
 }
 
 macro_rules! create_selection {
-    ($bouquet:expr, $categories:expr, $selections:expr, $field: ident) => {
+    ($bouquet:expr, $categories:expr, $selections:expr, $select_unrestricted:expr, $field: ident) => {
         if let Some(selects) = $bouquet.$field.as_ref() {
             for b in selects {
                 $selections.$field.insert(b.clone(), true);
             }
-        } else if let Some(cats) = $categories.$field.as_ref() {
-            for c in cats {
-                $selections.$field.insert(c.clone(), true);
+        } else if $select_unrestricted {
+            if let Some(cats) = $categories.$field.as_ref() {
+                for c in cats {
+                    $selections.$field.insert(c.clone(), true);
+                }
             }
         }
     };
@@ -107,12 +112,32 @@ pub struct BouquetSelection {
 pub type BouquetOrigins = HashMap<XtreamCluster, HashMap<String, Vec<String>>>;
 
 impl BouquetSelection {
-    pub fn to_target_dto(&self, categories: &PlaylistClusterCategoriesDto) -> PlaylistClusterBouquetDto {
+    pub fn to_target_dto(
+        &self,
+        categories: &PlaylistClusterCategoriesDto,
+        mode: TargetBouquetMode,
+    ) -> PlaylistClusterBouquetDto {
+        let selection = |map, available| match mode {
+            TargetBouquetMode::Whitelist => selected_categories_or_none(map, available),
+            TargetBouquetMode::Blacklist => selected_categories_for_blacklist(map, available),
+        };
         PlaylistClusterBouquetDto {
-            live: selected_categories_or_none(&self.live, categories.live.as_deref()),
-            vod: selected_categories_or_none(&self.vod, categories.vod.as_deref()),
-            series: selected_categories_or_none(&self.series, categories.series.as_deref()),
+            live: selection(&self.live, categories.live.as_deref()),
+            vod: selection(&self.vod, categories.vod.as_deref()),
+            series: selection(&self.series, categories.series.as_deref()),
         }
+    }
+}
+
+fn selected_categories_for_blacklist(map: &HashMap<String, bool>, available: Option<&[String]>) -> Option<Vec<String>> {
+    let mut selected: Vec<String> =
+        map.iter().filter(|(_, is_selected)| **is_selected).map(|(category, _)| category.clone()).collect();
+    selected.sort_unstable();
+    selected.dedup();
+    if selected.is_empty() && available.is_none() {
+        None
+    } else {
+        Some(selected)
     }
 }
 
@@ -123,7 +148,7 @@ fn selected_categories_or_none(map: &HashMap<String, bool>, available: Option<&[
     selected.dedup();
 
     if selected.is_empty() {
-        return None;
+        return available.map(|_| Vec::new());
     }
 
     let available_set: std::collections::HashSet<&str> =
@@ -143,6 +168,10 @@ pub struct BouquetEditorProps {
     pub categories: Option<PlaylistClusterCategoriesDto>,
     pub bouquet: Option<PlaylistClusterBouquetDto>,
     pub on_change: Callback<Rc<RefCell<BouquetSelection>>>,
+    #[prop_or_default]
+    pub on_initialize: Callback<Rc<RefCell<BouquetSelection>>>,
+    #[prop_or(true)]
+    pub select_all_when_unrestricted: bool,
     #[prop_or_default]
     pub cluster_flags: Option<ClusterFlags>,
     #[prop_or_default]
@@ -193,40 +222,46 @@ pub fn BouquetEditor(props: &BouquetEditorProps) -> Html {
         let playlist_categories = playlist_categories.clone();
         let in_cats = props.categories.clone();
         let in_bouquet = props.bouquet.clone();
+        let select_all_when_unrestricted = props.select_all_when_unrestricted;
+        let on_initialize = props.on_initialize.clone();
         let force_update = force_update.clone();
-        use_effect_with((in_cats, in_bouquet), move |(maybe_categories, maybe_bouquet)| {
-            let mut selections = BouquetSelection::default();
-            if let Some(categories) = maybe_categories.as_ref() {
-                if let Some(bouquet) = maybe_bouquet.as_ref() {
-                    create_selection!(bouquet, categories, selections, live);
-                    create_selection!(bouquet, categories, selections, vod);
-                    create_selection!(bouquet, categories, selections, series);
-                } else {
-                    if let Some(cats) = categories.live.as_ref() {
-                        for c in cats {
-                            selections.live.insert(c.clone(), true);
+        use_effect_with(
+            (in_cats, in_bouquet, select_all_when_unrestricted),
+            move |(maybe_categories, maybe_bouquet, select_all_when_unrestricted)| {
+                let mut selections = BouquetSelection::default();
+                if let Some(categories) = maybe_categories.as_ref() {
+                    if let Some(bouquet) = maybe_bouquet.as_ref() {
+                        create_selection!(bouquet, categories, selections, *select_all_when_unrestricted, live);
+                        create_selection!(bouquet, categories, selections, *select_all_when_unrestricted, vod);
+                        create_selection!(bouquet, categories, selections, *select_all_when_unrestricted, series);
+                    } else if *select_all_when_unrestricted {
+                        if let Some(cats) = categories.live.as_ref() {
+                            for c in cats {
+                                selections.live.insert(c.clone(), true);
+                            }
+                        }
+                        if let Some(cats) = categories.vod.as_ref() {
+                            for c in cats {
+                                selections.vod.insert(c.clone(), true);
+                            }
+                        }
+                        if let Some(cats) = categories.series.as_ref() {
+                            for c in cats {
+                                selections.series.insert(c.clone(), true);
+                            }
                         }
                     }
-                    if let Some(cats) = categories.vod.as_ref() {
-                        for c in cats {
-                            selections.vod.insert(c.clone(), true);
-                        }
-                    }
-                    if let Some(cats) = categories.series.as_ref() {
-                        for c in cats {
-                            selections.series.insert(c.clone(), true);
-                        }
-                    }
+                    *bouquet_selection.borrow_mut() = selections.clone();
+                    on_initialize.emit(Rc::new(RefCell::new(selections)));
+                    let mut new_categories = categories.clone();
+                    sort_opt_vec(&mut new_categories.live);
+                    sort_opt_vec(&mut new_categories.vod);
+                    sort_opt_vec(&mut new_categories.series);
+                    playlist_categories.set(new_categories);
+                    force_update.set(*force_update + 1);
                 }
-                *bouquet_selection.borrow_mut() = selections;
-                let mut new_categories = categories.clone();
-                sort_opt_vec(&mut new_categories.live);
-                sort_opt_vec(&mut new_categories.vod);
-                sort_opt_vec(&mut new_categories.series);
-                playlist_categories.set(new_categories);
-                force_update.set(*force_update + 1);
-            }
-        });
+            },
+        );
     }
 
     let handle_category_click = {
@@ -526,7 +561,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(selection.to_target_dto(&categories).live, None);
+        assert_eq!(selection.to_target_dto(&categories, TargetBouquetMode::Whitelist).live, None);
     }
 
     #[test]
@@ -538,8 +573,45 @@ mod tests {
         };
 
         assert_eq!(
-            selection.to_target_dto(&categories).live,
+            selection.to_target_dto(&categories, TargetBouquetMode::Whitelist).live,
             Some(vec!["News".to_string(), "Temporarily Missing".to_string()])
+        );
+    }
+
+    #[test]
+    fn target_dto_preserves_an_empty_cluster_when_categories_are_available() {
+        let categories = PlaylistClusterCategoriesDto {
+            live: Some(vec!["News".to_string()]),
+            vod: Some(vec!["Movies".to_string()]),
+            series: None,
+        };
+        let selection = BouquetSelection {
+            live: HashMap::from([("News".to_string(), true)]),
+            vod: HashMap::from([("Movies".to_string(), false)]),
+            ..Default::default()
+        };
+
+        let dto = selection.to_target_dto(&categories, TargetBouquetMode::Whitelist);
+        assert_eq!(dto.live, None);
+        assert_eq!(dto.vod, Some(Vec::new()));
+        assert_eq!(dto.series, None);
+    }
+
+    #[test]
+    fn blacklist_keeps_all_selected_groups_as_explicit_exclusions() {
+        let categories = PlaylistClusterCategoriesDto {
+            live: Some(vec!["News".to_string(), "Sports".to_string()]),
+            vod: None,
+            series: None,
+        };
+        let selection = BouquetSelection {
+            live: HashMap::from([("News".to_string(), true), ("Sports".to_string(), true)]),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            selection.to_target_dto(&categories, TargetBouquetMode::Blacklist).live,
+            Some(vec!["News".to_string(), "Sports".to_string()])
         );
     }
 }

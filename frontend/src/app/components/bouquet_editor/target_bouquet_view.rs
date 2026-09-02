@@ -1,15 +1,15 @@
 use crate::{
     app::components::{
         bouquet_editor::{BouquetEditor, BouquetOrigins, BouquetSelection},
-        IconButton, LoadingIndicator, RadioButtonGroup, TextButton,
+        LoadingIndicator, RadioButtonGroup, TextButton,
     },
     hooks::use_service_context,
     i18n::use_translation,
     services::TargetBouquetService,
 };
 use shared::model::{
-    permission::Permission, PlaylistClusterBouquetDto, PlaylistClusterCategoriesDto, TargetBouquetStreamEventDto,
-    TargetBouquetTargetDto, XtreamCluster,
+    permission::Permission, PlaylistClusterBouquetDto, PlaylistClusterCategoriesDto, TargetBouquetDto,
+    TargetBouquetMode, TargetBouquetStreamEventDto, TargetBouquetTargetDto, XtreamCluster,
 };
 use std::{
     cell::RefCell,
@@ -92,8 +92,10 @@ pub fn TargetBouquetView() -> Html {
     let categories = use_state(PlaylistClusterCategoriesDto::default);
     let origins = use_state(BouquetOrigins::default);
     let warnings = use_state(Vec::<String>::new);
-    let active_bouquet = use_state(|| Option::<PlaylistClusterBouquetDto>::None);
+    let active_bouquet = use_state(|| Option::<TargetBouquetDto>::None);
+    let bouquet_mode = use_state(TargetBouquetMode::default);
     let pending_selection = use_mut_ref(BouquetSelection::default);
+    let selection_has_changed = use_state(|| false);
     let has_unsaved_changes = use_state(|| false);
     let reload_nonce = use_state(|| 0_u64);
     let request_generation = use_mut_ref(|| 0_u64);
@@ -136,7 +138,9 @@ pub fn TargetBouquetView() -> Html {
         let origins = origins.clone();
         let warnings = warnings.clone();
         let active_bouquet = active_bouquet.clone();
+        let bouquet_mode = bouquet_mode.clone();
         let pending_selection = pending_selection.clone();
+        let selection_has_changed = selection_has_changed.clone();
         let has_unsaved_changes = has_unsaved_changes.clone();
         let request_generation = request_generation.clone();
         let services = services.clone();
@@ -158,6 +162,7 @@ pub fn TargetBouquetView() -> Html {
                 categories.set(PlaylistClusterCategoriesDto::default());
                 origins.set(BouquetOrigins::default());
                 active_bouquet.set(None);
+                bouquet_mode.set(TargetBouquetMode::default());
                 is_loading_groups.set(false);
                 return cleanup;
             };
@@ -166,6 +171,7 @@ pub fn TargetBouquetView() -> Html {
             origins.set(BouquetOrigins::default());
             warnings.set(Vec::new());
             active_bouquet.set(None);
+            bouquet_mode.set(TargetBouquetMode::default());
             has_unsaved_changes.set(false);
 
             spawn_local(async move {
@@ -177,7 +183,7 @@ pub fn TargetBouquetView() -> Html {
                 let abort_signal = abort_controller.map(|controller| controller.signal());
                 let result =
                     TargetBouquetService::fetch_target_bouquet_stream(target_id, abort_signal, |event| match event {
-                        TargetBouquetStreamEventDto::Selection { groups } => selection = groups,
+                        TargetBouquetStreamEventDto::Selection { bouquet } => selection = bouquet,
                         TargetBouquetStreamEventDto::InputChunk { input, cluster, groups, .. } => {
                             for group in groups {
                                 loaded_groups.entry(cluster).or_default().insert(group.clone());
@@ -202,8 +208,11 @@ pub fn TargetBouquetView() -> Html {
                         categories.set(finish_catalog(loaded_groups));
                         origins.set(finish_origins(loaded_origins));
                         warnings.set(loaded_warnings);
+                        bouquet_mode
+                            .set(selection.as_ref().map_or_else(TargetBouquetMode::default, |value| value.mode));
                         active_bouquet.set(selection);
                         *pending_selection.borrow_mut() = BouquetSelection::default();
+                        selection_has_changed.set(false);
                     }
                     Err(err) => {
                         let message = format!("Failed to load target bouquet: {err}");
@@ -220,24 +229,67 @@ pub fn TargetBouquetView() -> Html {
 
     let on_selection_change = {
         let pending_selection = pending_selection.clone();
+        let selection_has_changed = selection_has_changed.clone();
         let has_unsaved_changes = has_unsaved_changes.clone();
         Callback::from(move |sel: Rc<RefCell<BouquetSelection>>| {
             *pending_selection.borrow_mut() = sel.borrow().clone();
+            selection_has_changed.set(true);
             has_unsaved_changes.set(true);
+        })
+    };
+
+    let on_selection_initialize = {
+        let pending_selection = pending_selection.clone();
+        Callback::from(move |selection: Rc<RefCell<BouquetSelection>>| {
+            *pending_selection.borrow_mut() = selection.borrow().clone();
+        })
+    };
+
+    let on_mode_change = {
+        let bouquet_mode = bouquet_mode.clone();
+        let active_bouquet = active_bouquet.clone();
+        let pending_selection = pending_selection.clone();
+        let selection_has_changed = selection_has_changed.clone();
+        let categories = categories.clone();
+        let has_unsaved_changes = has_unsaved_changes.clone();
+        Callback::from(move |selections: Rc<Vec<String>>| {
+            let mode = match selections.first().map(String::as_str) {
+                Some("blacklist") => TargetBouquetMode::Blacklist,
+                _ => TargetBouquetMode::Whitelist,
+            };
+            if mode != *bouquet_mode {
+                if *selection_has_changed {
+                    let groups = pending_selection.borrow().to_target_dto(&categories, mode);
+                    active_bouquet.set(Some(TargetBouquetDto::new(mode, groups)));
+                    selection_has_changed.set(false);
+                }
+                bouquet_mode.set(mode);
+                has_unsaved_changes.set(true);
+            }
         })
     };
 
     let handle_save = {
         let selected_target = selected_target.clone();
         let pending_selection = pending_selection.clone();
+        let selection_has_changed = selection_has_changed.clone();
         let categories = categories.clone();
+        let active_bouquet = active_bouquet.clone();
+        let bouquet_mode = bouquet_mode.clone();
         let reload_nonce = reload_nonce.clone();
         let services = services.clone();
         let translate = translate.clone();
 
         Callback::from(move |_: String| {
             if let Some(target_id) = *selected_target {
-                let bouquet = pending_selection.borrow().to_target_dto(&categories);
+                let groups = if *selection_has_changed {
+                    pending_selection.borrow().to_target_dto(&categories, *bouquet_mode)
+                } else {
+                    active_bouquet
+                        .as_ref()
+                        .map_or_else(PlaylistClusterBouquetDto::default, |value| value.groups.clone())
+                };
+                let bouquet = TargetBouquetDto::new(*bouquet_mode, groups);
                 let services_state = services.clone();
                 let translate_state = translate.clone();
                 let reload_nonce_state = reload_nonce.clone();
@@ -286,7 +338,7 @@ pub fn TargetBouquetView() -> Html {
 
     let handle_refresh = {
         let reload_nonce = reload_nonce.clone();
-        Callback::from(move |(_, _): (String, MouseEvent)| reload_nonce.set(reload_nonce.wrapping_add(1)))
+        Callback::from(move |_: String| reload_nonce.set(reload_nonce.wrapping_add(1)))
     };
 
     let current_target_dto = targets.iter().find(|target| Some(target.id) == *selected_target).cloned();
@@ -295,7 +347,11 @@ pub fn TargetBouquetView() -> Html {
         targets.iter().map(|t| if t.restricted { format!("{} ★", t.name) } else { t.name.clone() }).collect();
 
     let selected_target_vec = Rc::new(selected_target.map(|id| vec![id.to_string()]).unwrap_or_default());
-    let unavailable = unavailable_groups(active_bouquet.as_ref(), &categories);
+    let unavailable = unavailable_groups(active_bouquet.as_ref().map(|value| &value.groups), &categories);
+    let selected_mode = Rc::new(vec![match *bouquet_mode {
+        TargetBouquetMode::Whitelist => "whitelist".to_string(),
+        TargetBouquetMode::Blacklist => "blacklist".to_string(),
+    }]);
 
     html! {
         <div class="tp__target-bouquet-view">
@@ -304,9 +360,10 @@ pub fn TargetBouquetView() -> Html {
                     <h2>{ translate.t("LABEL.TARGET_BOUQUETS") }</h2>
                 </div>
                 <div class="tp__target-bouquet-view__actions">
-                    <IconButton
-                        hint={translate.t("LABEL.REFRESH")}
+                    <TextButton
                         name="Refresh"
+                        hint={translate.t("LABEL.REFRESH")}
+                        title={translate.t("LABEL.REFRESH")}
                         icon="Refresh"
                         onclick={handle_refresh}
                     />
@@ -373,6 +430,17 @@ pub fn TargetBouquetView() -> Html {
                         <p class="tp__target-bouquet-view__notice">
                             { "Changes are applied by the next playlist update." }
                         </p>
+                        <div class="tp__target-bouquet-view__mode">
+                            <strong>{ "Selection mode" }</strong>
+                            <RadioButtonGroup
+                                multi_select={false}
+                                none_allowed={false}
+                                on_select={on_mode_change}
+                                options={Rc::new(vec!["whitelist".to_string(), "blacklist".to_string()])}
+                                labels={Rc::new(vec!["Whitelist (include selected)".to_string(), "Blacklist (exclude selected)".to_string()])}
+                                selected={selected_mode}
+                            />
+                        </div>
                         { if unavailable.is_empty() { html! {} } else { html! {
                             <div class="tp__target-bouquet-view__unavailable">
                                 <strong>{ "Configured groups currently unavailable:" }</strong>
@@ -383,9 +451,11 @@ pub fn TargetBouquetView() -> Html {
                         } } }
                         <BouquetEditor
                             categories={Some((*categories).clone())}
-                            bouquet={(*active_bouquet).clone()}
+                            bouquet={active_bouquet.as_ref().map(|value| value.groups.clone())}
+                            select_all_when_unrestricted={*bouquet_mode == TargetBouquetMode::Whitelist}
                             origins={Some(Rc::new((*origins).clone()))}
                             on_change={on_selection_change}
+                            on_initialize={on_selection_initialize}
                         />
                     </div>
                 }

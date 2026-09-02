@@ -199,7 +199,9 @@ fn execute_pipe_applies_target_bouquet_prefilter() {
 
     let bouquet_dto =
         shared::model::PlaylistClusterBouquetDto { live: Some(vec!["Kids".to_string()]), vod: None, series: None };
-    let filter = tuliprox_core::model::TargetBouquetFilter::from_dto(bouquet_dto).unwrap();
+    let filter =
+        tuliprox_core::model::TargetBouquetFilter::from_dto(shared::model::TargetBouquetDto::whitelist(bouquet_dto))
+            .unwrap();
 
     let (mut processed, _outcome) = execute_pipe(&target, &vec![], &mut fetched, &mut duplicates, false, Some(&filter))
         .expect("target processing should succeed");
@@ -257,7 +259,9 @@ fn execute_pipe_prefilter_does_not_suppress_allowed_duplicate() {
 
     let bouquet_dto =
         shared::model::PlaylistClusterBouquetDto { live: Some(vec!["Kids".to_string()]), vod: None, series: None };
-    let filter = tuliprox_core::model::TargetBouquetFilter::from_dto(bouquet_dto).unwrap();
+    let filter =
+        tuliprox_core::model::TargetBouquetFilter::from_dto(shared::model::TargetBouquetDto::whitelist(bouquet_dto))
+            .unwrap();
 
     let (mut processed, _outcome) = execute_pipe(&target, &vec![], &mut fetched, &mut duplicates, false, Some(&filter))
         .expect("target processing should succeed");
