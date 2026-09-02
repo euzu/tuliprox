@@ -1898,10 +1898,16 @@ fn start_recording_scheduler(
 
 #[cfg(test)]
 mod tests {
-    use super::{finalize_http_transfer, http_transfer_path, recording_deadline_instant, wait_for_provider_slot};
-    use crate::recording::recording_queue::{
-        PersistedRecordingTask, RecordingControl, RecordingPartition, RecordingQueue, RecordingTask,
-        RecordingWaitOutcome,
+    use super::{
+        ensure_recording_worker_running, finalize_http_transfer, http_transfer_path, recording_deadline_instant,
+        wait_for_provider_slot, LIVE_CAPACITY_WINDOW_CLOSED,
+    };
+    use crate::recording::{
+        recording_capacity::{stub::StubCapacity, RecordingCapacityPort},
+        recording_queue::{
+            PersistedRecordingTask, RecordingControl, RecordingPartition, RecordingQueue, RecordingTask,
+            RecordingWaitOutcome,
+        },
     };
     use shared::model::{
         RecordingKind, RecordingMetadata, RecordingOwner, RecordingSource, RecordingTaskState, RecordingVisibility,
@@ -1910,6 +1916,8 @@ mod tests {
     use std::{path::PathBuf, sync::Arc, time::Duration};
     use tempfile::TempDir;
     use tokio::sync::{Notify, RwLock};
+    use tuliprox_core::model::RecordingConfig;
+    use tuliprox_session::EventManager;
 
     /// A task whose Live window runs from `program_start` for `duration_secs`.
     fn scheduled_task(kind: RecordingKind, program_start: i64, duration_secs: i64) -> RecordingTask {
@@ -2126,5 +2134,88 @@ mod tests {
 
         assert!(matches!(outcome, Some(RecordingWaitOutcome::Cancelled)), "the cancel is answered, not the deadline");
         assert!(tokio::time::Instant::now() < window_ends, "and long before the window closes");
+    }
+    fn bare_app_config() -> tuliprox_core::model::AppConfig {
+        tuliprox_core::model::AppConfig {
+            config: Arc::new(arc_swap::ArcSwap::from_pointee(tuliprox_core::model::Config::default())),
+            sources: Arc::new(arc_swap::ArcSwap::from_pointee(tuliprox_core::model::SourcesConfig::default())),
+            hdhomerun: Arc::new(arc_swap::ArcSwapOption::default()),
+            api_proxy: Arc::new(arc_swap::ArcSwapOption::default()),
+            file_locks: Arc::new(tuliprox_core::utils::FileLockManager::default()),
+            paths: Arc::new(arc_swap::ArcSwap::from_pointee(shared::model::ConfigPaths {
+                home_path: String::new(),
+                config_path: String::new(),
+                storage_path: String::new(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
+                mapping_file_path: None,
+                mapping_files_used: None,
+                template_file_path: None,
+                template_files_used: None,
+                api_proxy_file_path: String::new(),
+                custom_stream_response_path: None,
+            })),
+            custom_stream_response: Arc::new(arc_swap::ArcSwapOption::default()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            media_tools: Arc::new(tuliprox_core::model::MediaToolCapabilities::new()),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_live_capture_that_never_gets_capacity_fails_at_its_window_without_recording() {
+        // The whole path, driven against a provider that is permanently full:
+        // the worker asks for a slot, is refused, waits, and gives up when the
+        // programme it was going to record has finished. Until the capacity
+        // port existed this could only be produced by a real provider actually
+        // being busy for the length of a broadcast.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let queue = Arc::new(RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open repository"));
+        let now = chrono::Utc::now().timestamp();
+        let mut capture = scheduled_task(RecordingKind::Live, now, 1_800);
+        capture.uuid = "live".to_string();
+        capture.state = RecordingTaskState::Queued;
+        capture.input_name = Some(Arc::from("provider"));
+        let capture = RecordingQueue::to_persisted(&capture);
+        crate::recording::recording_queue::mutate(&queue, move |candidate| {
+            candidate.queue.push(capture.clone());
+            Ok(())
+        })
+        .await
+        .expect("seed");
+
+        let stub = StubCapacity::full();
+        let capacity: Arc<dyn RecordingCapacityPort> = Arc::clone(&stub) as Arc<dyn RecordingCapacityPort>;
+        let app_config = bare_app_config();
+        ensure_recording_worker_running(
+            &app_config,
+            &RecordingConfig::from(&shared::model::RecordingConfigDto {
+                enabled: true,
+                ..shared::model::RecordingConfigDto::default()
+            }),
+            &queue,
+            &Arc::new(EventManager::new()),
+            &capacity,
+        )
+        .await
+        .expect("worker started");
+
+        // Sleeping rather than spinning: with a paused clock the runtime only
+        // advances time when nothing is runnable, so a busy wait would stop the
+        // window from ever closing.
+        tokio::time::sleep(Duration::from_mins(31)).await;
+
+        let finished = queue.finished.read().await;
+        let settled = finished.first().expect("the capture reached a terminal state");
+        assert_eq!(settled.state, RecordingTaskState::Failed, "no capacity ever came");
+        assert_eq!(settled.error.as_deref(), Some(LIVE_CAPACITY_WINDOW_CLOSED), "and it says why");
+        assert_eq!(settled.size, 0, "nothing was ever recorded");
+        assert_eq!(settled.recording.reserved_bytes, 0, "and it is not still holding disk");
+        assert_eq!(
+            stub.acquire_count(),
+            1,
+            "it asked for a slot once and then waited, rather than spinning on the provider"
+        );
+        assert_eq!(stub.release_count(), 0, "and it never held one to give back");
     }
 }
