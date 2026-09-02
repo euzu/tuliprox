@@ -1504,6 +1504,41 @@ mod tests {
     }
 
     #[test]
+    fn a_live_window_must_have_time_left_in_it() {
+        // A window whose padded end is not after its padded start cannot
+        // produce a recording, and admitting one means a scheduled capture that
+        // can only ever fail.
+        let now = 1_700_000_000;
+        // Zero-length and inverted programmes.
+        assert!(matches!(
+            effective_recording_window(now + 100, now + 100, 0, 0, now),
+            Err(ServiceError::InvalidInterval)
+        ));
+        assert!(matches!(
+            effective_recording_window(now + 200, now + 100, 0, 0, now),
+            Err(ServiceError::InvalidInterval)
+        ));
+        // A programme that finished before it was asked for.
+        assert!(matches!(
+            effective_recording_window(now - 7_200, now - 3_600, 0, 0, now),
+            Err(ServiceError::InvalidInterval)
+        ));
+    }
+
+    #[test]
+    fn a_live_window_already_underway_records_only_what_is_left() {
+        // Joining late is legal; it just cannot rewind. The padded bounds stay
+        // as planned so the stop time is still the programme's.
+        let now = 1_700_000_000;
+        let window = effective_recording_window(now - 600, now + 600, 60, 120, now).expect("still running");
+
+        assert_eq!(window.scheduled_start, now - 660, "the padded start is history, not moved to now");
+        assert_eq!(window.scheduled_end, now + 720);
+        assert_eq!(window.execution_start, now, "but recording starts now");
+        assert_eq!(window.remaining_duration_secs, 720, "and runs to the padded end");
+    }
+
+    #[test]
     fn a_repeated_vod_request_is_a_duplicate() {
         // Regression: duplicate detection only produced an identity for Live,
         // so a user who asked for the same film twice got two downloads of it

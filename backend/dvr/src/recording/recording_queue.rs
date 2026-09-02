@@ -1831,6 +1831,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(state_file);
     }
 
+    #[tokio::test]
+    async fn a_live_window_that_has_not_opened_acquires_nothing() {
+        // Promotion is what puts a capture in front of the provider. A window
+        // that starts in an hour must not reach it, or the DVR holds a slot for
+        // an hour of nothing and records the wrong programme.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let queue = RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open recording repository");
+        let now = 1_700_000_000;
+        let mut upcoming = task("live", RecordingKind::Live, RecordingTaskState::Scheduled);
+        upcoming.recording.scheduled_start = Some(now + 3_600);
+        upcoming.recording.scheduled_end = Some(now + 7_200);
+        let upcoming = RecordingQueue::to_persisted(&upcoming);
+        mutate(&queue, move |candidate| {
+            candidate.scheduled.push(upcoming.clone());
+            Ok(())
+        })
+        .await
+        .expect("seed");
+
+        assert_eq!(queue.promote_due_scheduled(now).await, 0, "an hour early is not due");
+        assert!(queue.queue.lock().await.is_empty(), "and nothing is queued for a provider");
+
+        // At the padded start it becomes work.
+        assert_eq!(queue.promote_due_scheduled(now + 3_600).await, 1, "due at its padded start");
+        assert_eq!(queue.queue.lock().await.len(), 1);
+    }
+
     #[test]
     fn an_interrupted_live_capture_fails_instead_of_restarting() {
         // The broadcast that played while the process was down is gone. A

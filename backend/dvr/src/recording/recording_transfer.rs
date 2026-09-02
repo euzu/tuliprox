@@ -1905,16 +1905,18 @@ fn start_recording_scheduler(
 
 #[cfg(test)]
 mod tests {
-    use super::{finalize_http_transfer, http_transfer_path, recording_deadline_instant};
+    use super::{finalize_http_transfer, http_transfer_path, recording_deadline_instant, wait_for_provider_slot};
     use crate::recording::recording_queue::{
-        PersistedRecordingTask, RecordingPartition, RecordingQueue, RecordingTask,
+        PersistedRecordingTask, RecordingControl, RecordingPartition, RecordingQueue, RecordingTask,
+        RecordingWaitOutcome,
     };
     use shared::model::{
         RecordingKind, RecordingMetadata, RecordingOwner, RecordingSource, RecordingTaskState, RecordingVisibility,
         UserId,
     };
-    use std::path::PathBuf;
+    use std::{path::PathBuf, sync::Arc, time::Duration};
     use tempfile::TempDir;
+    use tokio::sync::{Notify, RwLock};
 
     /// A task whose Live window runs from `program_start` for `duration_secs`.
     fn scheduled_task(kind: RecordingKind, program_start: i64, duration_secs: i64) -> RecordingTask {
@@ -2061,5 +2063,75 @@ mod tests {
         finalize_http_transfer(&final_path, &final_path).await.expect("finalize");
 
         assert!(final_path.exists());
+    }
+    /// A queue with nothing in it; the wait queue is what these exercise.
+    fn slot_queue(dir: &TempDir) -> RecordingQueue {
+        RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open recording repository")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_live_capture_stops_waiting_for_capacity_when_its_window_closes() {
+        // Waiting past the padded end cannot produce the recording that was
+        // asked for -- the programme has finished. Before this the wait had no
+        // bound at all, so a live capture with no free slot sat in the queue
+        // through its own broadcast and out the other side.
+        let dir = TempDir::new().expect("tempdir");
+        let queue = slot_queue(&dir);
+        let control = RwLock::new(RecordingControl::None);
+        let notify = Notify::new();
+        let window_ends = tokio::time::Instant::now() + Duration::from_mins(30);
+
+        let outcome =
+            wait_for_provider_slot(&queue, &Arc::from("provider"), 0, &control, &notify, Some(window_ends)).await;
+
+        assert!(outcome.is_none(), "the wait ends when the programme does");
+        assert!(tokio::time::Instant::now() >= window_ends, "and only then");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_transfer_waits_for_a_slot_however_long_it_takes() {
+        // The counterpart, and the reason the bound is not applied to
+        // everything: a file on a server is still there in an hour.
+        let dir = TempDir::new().expect("tempdir");
+        let queue = slot_queue(&dir);
+        let control = RwLock::new(RecordingControl::None);
+        let notify = Notify::new();
+
+        let waiters = Arc::clone(&queue.slot_waiters);
+        let freed = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_mins(60)).await;
+            let queued = waiters.snapshots().await;
+            let waiter = queued.first().expect("someone is waiting an hour later");
+            waiters.signal_waiter(waiter.id).await
+        });
+
+        let outcome = wait_for_provider_slot(&queue, &Arc::from("provider"), 0, &control, &notify, None).await;
+
+        assert!(freed.await.expect("signaller"), "the waiter was still there to signal");
+        assert!(matches!(outcome, Some(RecordingWaitOutcome::Signalled)), "it took the slot when one appeared");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_capacity_wait_still_answers_a_cancellation_before_its_deadline() {
+        // The deadline must not swallow the control signals: a user cancelling
+        // a live capture that is waiting for capacity should not have to wait
+        // out the programme.
+        let dir = TempDir::new().expect("tempdir");
+        let queue = slot_queue(&dir);
+        let control = RwLock::new(RecordingControl::None);
+        let notify = Notify::new();
+        let window_ends = tokio::time::Instant::now() + Duration::from_mins(30);
+
+        let provider: Arc<str> = Arc::from("provider");
+        let waiting = wait_for_provider_slot(&queue, &provider, 0, &control, &notify, Some(window_ends));
+        let cancelling = async {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            *control.write().await = RecordingControl::Cancel;
+            notify.notify_waiters();
+        };
+        let (outcome, ()) = tokio::join!(waiting, cancelling);
+
+        assert!(matches!(outcome, Some(RecordingWaitOutcome::Cancelled)), "the cancel is answered, not the deadline");
+        assert!(tokio::time::Instant::now() < window_ends, "and long before the window closes");
     }
 }
