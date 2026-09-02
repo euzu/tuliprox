@@ -5,7 +5,10 @@
 //! first with a stable task-id tie-break.
 
 use super::recording_quota::QuotaRecordingTaskView;
-use shared::model::{recording::RecordingOwner, UserId};
+use shared::model::{
+    recording::{RecordingMetadata, RecordingVisibility},
+    UserId,
+};
 use std::collections::HashMap;
 
 /// Retention configuration derived from `RecordingRetentionConfig`.
@@ -113,9 +116,16 @@ pub fn normalize_channel_name(name: &str) -> String {
 }
 
 impl RetentionOwner {
-    pub fn from_recording_owner(owner: &RecordingOwner) -> Self {
-        let RecordingOwner::User(uid) = owner;
-        Self::Private(uid.clone())
+    /// Which retention budget a recording is charged to.
+    ///
+    /// Visibility decides it, exactly as it does for quota. Reading the owner
+    /// instead put every shared recording in its creator's personal budget, so
+    /// `Shared` was a variant nothing could produce.
+    pub fn from_metadata(meta: &RecordingMetadata) -> Self {
+        match meta.visibility {
+            RecordingVisibility::Shared => Self::Shared,
+            RecordingVisibility::Private => Self::Private(meta.owner_id().clone()),
+        }
     }
 }
 
@@ -153,7 +163,7 @@ fn group_for<V: QuotaRecordingTaskView>(task: &V) -> Option<(RetentionGroupKey, 
     }
     let completed_at = meta.completed_at?;
     let channel = ChannelKey::from_metadata(meta.channel_id.as_deref(), meta.channel_name.as_deref());
-    let owner = RetentionOwner::from_recording_owner(&meta.owner);
+    let owner = RetentionOwner::from_metadata(meta);
     Some((RetentionGroupKey { owner, channel }, completed_at))
 }
 
@@ -537,6 +547,28 @@ mod tests {
         ];
         let candidates = compute_candidates(&tasks, &config, 2_000);
         assert_eq!(candidates.len(), 0, "each library holds one recording and is allowed one");
+    }
+
+    #[test]
+    fn private_retention_never_reaches_the_shared_library() {
+        // Step 1: a user's own budget must not evict the shared copy, and the
+        // shared budget must not evict anyone's private one. They are separate
+        // pools that happen to name the same channel.
+        let config = RetentionConfig { keep_last_per_channel: Some(1), delete_after_days: None };
+        let tasks = vec![
+            completed("alice-old", RecordingOwner::User(UserId::from("web:alice")), Some("c1"), Some("Alpha"), 1_000),
+            completed("alice-new", RecordingOwner::User(UserId::from("web:alice")), Some("c1"), Some("Alpha"), 2_000),
+            shared_completed("shared-old", Some("c1"), Some("Alpha"), 1_000),
+            shared_completed("shared-new", Some("c1"), Some("Alpha"), 2_000),
+        ];
+
+        let candidates = compute_candidates(&tasks, &config, 3_000);
+        let evicted: Vec<&str> = candidates.iter().map(|candidate| candidate.uuid.as_str()).collect();
+
+        // One over budget in each pool, and each pool gives up its own oldest.
+        assert!(evicted.contains(&"alice-old"), "alice keeps her newest and gives up her oldest");
+        assert!(evicted.contains(&"shared-old"), "the shared library does the same, separately");
+        assert_eq!(evicted.len(), 2, "neither pool spends the other's budget");
     }
 
     #[test]

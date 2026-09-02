@@ -19,6 +19,7 @@ use crate::{
             mutate_optional, PersistedRecordingTask, QueueMutationError, RecordingControl, RecordingQueue,
             RecordingTask, RecordingTaskState, RecordingWaitOutcome,
         },
+        recording_sidecar,
         recording_url::build_stable_recording_url,
         recording_worker::{recording_partial_path, run_recording, RecordingExecutionResult},
     },
@@ -987,6 +988,32 @@ async fn requeue_active_download_for_capacity_wait(
     Ok(result.unwrap_or(false))
 }
 
+/// Write the sidecar for the recording that just finished.
+///
+/// Best effort by design: the recording is on disk and committed either way,
+/// and refusing to complete a transfer because a descriptive file could not be
+/// written would trade a real recording for a diagnostic.
+async fn write_completion_sidecar(download_queue: &RecordingQueue, uuid: &str, measured_bytes: u64) {
+    let Some(task) = download_queue.active.read().await.as_ref().filter(|task| task.uuid == uuid).cloned() else {
+        return;
+    };
+    let Some(relative_path) = task.recording.relative_path.clone() else {
+        return;
+    };
+    let persisted = RecordingQueue::to_persisted(&task);
+    let sidecar = recording_sidecar::RecordingSidecar {
+        materialization_id: tuliprox_repository::recording_repository::materialization_id_for(&persisted),
+        media_identity: persisted.media_identity,
+        kind: task.kind,
+        relative_path,
+        size_bytes: measured_bytes,
+        completed_at: chrono::Utc::now().timestamp(),
+    };
+    if let Err(error) = recording_sidecar::write_sidecar(&task.file_path, &sidecar).await {
+        warn!("Could not write the sidecar for {}: {error}", task.file_path.display());
+    }
+}
+
 async fn promote_next_download(
     download_queue: &RecordingQueue,
 ) -> Result<Option<(String, String)>, QueueMutationError> {
@@ -1418,6 +1445,11 @@ pub async fn ensure_recording_worker_running(
                                         None => 0,
                                     }
                                 };
+                                // Beside the file, before the repository is told
+                                // it is complete: an operator finding an orphan
+                                // needs the record even if the commit is what
+                                // failed.
+                                write_completion_sidecar(&dq, &worker_uuid, measured_bytes).await;
                                 let committed = finish_active_and_promote(&dq, &worker_uuid, |fd| {
                                     fd.finished = true;
                                     fd.paused = false;

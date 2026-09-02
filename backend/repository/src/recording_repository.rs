@@ -331,7 +331,7 @@ impl StoredRecords {
 /// one file. Distinct from the entry id, which is what a user addresses.
 /// Falls back to the task's own uuid when no identity was supplied, which
 /// keeps such a task on a file of its own rather than colliding with others.
-fn materialization_id_for(task: &PersistedRecordingTask) -> String {
+pub fn materialization_id_for(task: &PersistedRecordingTask) -> String {
     if task.media_identity.is_empty() {
         return format!("mat-uuid:{}", task.uuid);
     }

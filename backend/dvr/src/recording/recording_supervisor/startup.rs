@@ -47,6 +47,7 @@ pub async fn run_startup_reconciliation(ctx: &RecordingCtx) {
     }
     let stuck = recover_stuck_deletions(ctx).await;
     let drift = reconcile_rule_drift(ctx).await;
+    report_orphan_recordings(ctx).await;
     SupervisorHealth::stamp(&supervisor_health().reconciliation_last_run, now_ts());
     if stuck > 0 || drift > 0 {
         info!("DVR startup reconciliation: repaired {stuck} interrupted deletion(s), {drift} rule drift item(s)");
@@ -65,6 +66,40 @@ fn media_is_still_referenced(all_tasks: &[RecordingTask], subject: &RecordingTas
     all_tasks.iter().any(|other| {
         other.uuid != subject.uuid && other.recording.deleting_previous_state.is_none() && key(other) == subject_key
     })
+}
+
+/// Tell the operator about recordings on disk the repository does not know.
+///
+/// Reporting only. A sidecar describes a file; it is not evidence that anyone
+/// was ever entitled to play it, so rediscovering one must never put it back in
+/// somebody's library. Access comes from the repository or not at all.
+async fn report_orphan_recordings(ctx: &RecordingCtx) {
+    let Some(root) = recording_config(&ctx.app_config)
+        .map(|cfg| PathBuf::from(cfg.directory))
+        .filter(|dir| !dir.as_os_str().is_empty())
+    else {
+        return;
+    };
+    let (_revision, tasks) = ctx.recordings.committed_snapshot().await;
+    let known: Vec<String> = tasks
+        .iter()
+        .map(|task| {
+            let persisted = crate::recording::recording_queue::RecordingQueue::to_persisted(task);
+            tuliprox_repository::recording_repository::materialization_id_for(&persisted)
+        })
+        .collect();
+    match crate::recording::recording_sidecar::scan_orphans(&root, &known).await {
+        Ok(orphans) if orphans.is_empty() => {}
+        Ok(orphans) => {
+            // Count only: the paths belong to whoever recorded them.
+            warn!(
+                target: "recording::audit",
+                "recording_orphan_files: {} recording(s) on disk are not in the library and are not playable through it",
+                orphans.len()
+            );
+        }
+        Err(error) => warn!("Could not scan the recording directory for orphans: {error}"),
+    }
 }
 
 /// Finish or undo every deletion the previous process left half-done.

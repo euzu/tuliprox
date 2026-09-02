@@ -21,6 +21,7 @@ pub mod recording_rule_scheduler;
 pub mod recording_rule_service;
 pub mod recording_security;
 pub mod recording_service;
+pub mod recording_sidecar;
 pub mod recording_source_resolution;
 pub mod recording_supervisor;
 pub mod recording_transfer;
