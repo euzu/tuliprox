@@ -920,6 +920,7 @@ impl RecordingQueue {
         task.paused = false;
         task.state = RecordingTaskState::Failed;
         task.error = Some(RECORDING_WINDOW_EXPIRED_ERR.to_string());
+        task.recording.reserved_bytes = 0;
         task
     }
 
@@ -1125,6 +1126,7 @@ impl RecordingQueue {
             task.state = RecordingTaskState::Cancelled;
             task.error.get_or_insert_with(|| "Cancelled by user".to_string());
             task.next_retry_at = None;
+            task.recording.reserved_bytes = 0;
             return task;
         }
         if task.state == RecordingTaskState::Scheduled {
@@ -1143,6 +1145,7 @@ impl RecordingQueue {
             task.state = RecordingTaskState::Failed;
             task.error = Some(RECORDING_INTERRUPTED_ERR.to_string());
             task.next_retry_at = None;
+            task.recording.reserved_bytes = 0;
             return task;
         }
         if !task.finished {
@@ -1272,6 +1275,7 @@ impl RecordingQueue {
                 cancelled.next_retry_at = None;
                 cancelled.error.get_or_insert_with(|| "Cancelled by user".to_string());
                 cancelled.state = RecordingTaskState::Cancelled;
+                cancelled.recording.reserved_bytes = 0;
                 candidate.finished.push(cancelled);
                 promote_from_queue(candidate);
             } else if let Some(active) = candidate.active.as_mut() {
@@ -1391,6 +1395,7 @@ impl RecordingQueue {
                     missed.paused = false;
                     missed.state = RecordingTaskState::Failed;
                     missed.error = Some(RECORDING_WINDOW_EXPIRED_ERR.to_string());
+                    missed.recording.reserved_bytes = 0;
                     missed_recordings.push(missed);
                     return false;
                 }

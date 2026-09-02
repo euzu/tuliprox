@@ -19,7 +19,7 @@
 use crate::recording::recording_queue::{PersistedRecordingTask, RecordingTask, RecordingTaskState};
 use serde::{Deserialize, Serialize};
 use shared::model::{recording::RecordingMetadata, UserId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Pool a task belongs to. Private is keyed by the immutable
 /// `UserId`; shared is the single shared pool.
@@ -154,18 +154,33 @@ pub trait QuotaRecordingTaskView {
     /// not expose one; callers (e.g. retention) require a
     /// non-empty uuid to be useful.
     fn uuid(&self) -> &str;
+    /// Which file this entry points at. Several entries share one.
+    ///
+    /// Defaults to a key of its own, so a view that does not know about sharing
+    /// is counted separately rather than silently merged with another file.
+    fn media_key(&self) -> String { format!("uuid:{}", self.uuid()) }
 }
 
 impl QuotaRecordingTaskView for RecordingTask {
     fn state(&self) -> &RecordingTaskState { &self.state }
     fn recording(&self) -> &RecordingMetadata { &self.recording }
     fn uuid(&self) -> &str { &self.uuid }
+    fn media_key(&self) -> String {
+        crate::recording::recording_service::recording_identity_key(&self.recording, self.url.as_str())
+    }
 }
 
 impl QuotaRecordingTaskView for PersistedRecordingTask {
     fn state(&self) -> &RecordingTaskState { &self.state }
     fn recording(&self) -> &RecordingMetadata { &self.recording }
     fn uuid(&self) -> &str { &self.uuid }
+    fn media_key(&self) -> String {
+        if self.media_identity.is_empty() {
+            // An unresolved identity is nobody else's file.
+            return format!("uuid:{}", self.uuid);
+        }
+        self.media_identity.clone()
+    }
 }
 
 /// `charge_for_task` is the public surface that walks a real
@@ -240,6 +255,27 @@ where
     total
 }
 
+/// Bytes on disk, counting each file once however many entries hold it.
+///
+/// The quota pools are logical: every attached entry is charged the whole size,
+/// because that is what that user is keeping. Disk is not -- one file occupies
+/// its bytes once, so summing the pools would refuse admission against space
+/// that was never taken.
+pub fn physical_bytes<'a, V, I>(tasks: I) -> u64
+where
+    V: QuotaRecordingTaskView + 'a,
+    I: IntoIterator<Item = &'a V>,
+{
+    let mut counted: HashSet<String> = HashSet::new();
+    let mut total = 0u64;
+    for task in tasks {
+        if counted.insert(task.media_key()) {
+            total = total.saturating_add(charge_for_task(task));
+        }
+    }
+    total
+}
+
 /// Build the regular-user DTO. `subject_id` is the user asking.
 /// Other users' private totals are never included.
 pub fn regular_user_dto<V: QuotaRecordingTaskView>(
@@ -278,10 +314,12 @@ pub fn split_measured_reserved_for_user_from_tasks<V: QuotaRecordingTaskView>(
             continue;
         }
         let charge = charge_for_task(task);
-        // The reservation is the part of the charge that comes
-        // from `reserved_bytes`; the measured part is everything
-        // over that, capped at the total charge.
-        let r = meta.reserved_bytes;
+        // The reservation is the part of the charge that comes from
+        // `reserved_bytes`; the measured part is everything over that, capped
+        // at the total charge. A terminal recording reserves nothing whatever
+        // the stored field says -- its charge is what it actually wrote, and
+        // reporting the old reservation would show space nobody is holding.
+        let r = if task.state().is_terminal() { 0 } else { meta.reserved_bytes.min(charge) };
         let m = charge.saturating_sub(r);
         reserved = reserved.saturating_add(r);
         measured = measured.saturating_add(m);
@@ -499,5 +537,55 @@ mod tests {
         let json = serde_json::to_value(&dto).unwrap();
         let s = serde_json::to_string(&json).unwrap();
         assert!(!s.contains("9999"), "DTO must not leak other users' totals: {s}");
+    }
+    /// A view whose media key is stated explicitly, so sharing can be tested.
+    struct SharedView {
+        uuid: String,
+        media: String,
+        state: RecordingTaskState,
+        recording: RecordingMetadata,
+    }
+
+    impl QuotaRecordingTaskView for SharedView {
+        fn state(&self) -> &RecordingTaskState { &self.state }
+        fn recording(&self) -> &RecordingMetadata { &self.recording }
+        fn uuid(&self) -> &str { &self.uuid }
+        fn media_key(&self) -> String { self.media.clone() }
+    }
+
+    fn holder(uuid: &str, media: &str, measured: u64) -> SharedView {
+        let mut recording = make_meta(RecordingOwner::User(UserId::from("web:alice")), 0, measured);
+        recording.measured_bytes = measured;
+        SharedView { uuid: uuid.to_string(), media: media.to_string(), state: RecordingTaskState::Completed, recording }
+    }
+
+    #[test]
+    fn disk_counts_a_shared_file_once_however_many_hold_it() {
+        // Both users are charged the whole film in their own quota, because
+        // that is what each is keeping. The disk holds it once, and admitting
+        // against the sum would refuse space that was never taken.
+        let holders = vec![holder("alice", "film-42", 1_000), holder("bob", "film-42", 1_000)];
+        assert_eq!(physical_bytes(&holders), 1_000, "one file, one lot of bytes");
+        assert_eq!(compute_totals(&holders).private.values().sum::<u64>(), 2_000, "but two logical charges");
+    }
+
+    #[test]
+    fn disk_counts_different_files_separately() {
+        let holders = vec![holder("alice", "film-42", 1_000), holder("bob", "film-99", 1_000)];
+        assert_eq!(physical_bytes(&holders), 2_000);
+    }
+
+    #[test]
+    fn a_terminal_recording_reports_no_reservation() {
+        // A failed transfer used to keep whatever it had reserved, so the user
+        // was shown space held by a recording that no longer exists.
+        let subject = UserId::from("web:alice");
+        let mut failed = task(RecordingOwner::User(subject.clone()), RecordingTaskState::Failed, 5_000, 0);
+        failed.recording.reserved_bytes = 5_000;
+
+        let (measured, reserved) = split_measured_reserved_for_user_from_tasks(&subject, &[failed]);
+
+        assert_eq!(reserved, 0, "a failed recording is holding nothing");
+        assert_eq!(measured, 0, "and it wrote nothing");
     }
 }

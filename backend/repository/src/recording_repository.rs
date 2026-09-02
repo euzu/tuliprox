@@ -18,7 +18,7 @@ use shared::model::{
     RecordingKind, RecordingMetadata, RecordingTaskState, UserId,
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io,
     path::{Path, PathBuf},
 };
@@ -319,6 +319,17 @@ impl StoredRecords {
         for entry in self.entries.values() {
             if !self.materializations.contains_key(&entry.materialization_id) {
                 return Err(invalid("library entry references a materialization that does not exist"));
+            }
+        }
+        // The shared library is one library. A second shared link to the same
+        // recording would be a duplicate of itself, and it would charge the
+        // shared quota twice for one file.
+        let mut shared_files: BTreeSet<&str> = BTreeSet::new();
+        for entry in self.entries.values() {
+            if matches!(entry.principal, LibraryPrincipal::Shared)
+                && !shared_files.insert(entry.materialization_id.as_str())
+            {
+                return Err(invalid("two shared library entries reference one recording"));
             }
         }
         Ok(())
@@ -1026,6 +1037,41 @@ mod tests {
         stored.recompute_effective_priorities();
 
         assert_eq!(stored.materializations.values().next().expect("a file").priority, -4);
+    }
+
+    #[test]
+    fn one_file_cannot_be_in_the_shared_library_twice() {
+        // The shared library is one library, so a second shared link to the same
+        // recording is a duplicate of itself -- and it would charge the shared
+        // quota twice for bytes that exist once.
+        let mut stored = super::StoredRecords::default();
+        let (materialization, mut first) = super::split(&task("a"));
+        first.principal = LibraryPrincipal::Shared;
+        let mut second = first.clone();
+        second.id = "b".to_string();
+        let _ = stored.materializations.insert(materialization.id.clone(), materialization);
+        let _ = stored.entries.insert(first.id.clone(), first);
+        let _ = stored.entries.insert(second.id.clone(), second);
+        stored.recount_references();
+
+        assert!(stored.check_reference_invariant().is_err(), "a second shared link must be refused");
+    }
+
+    #[test]
+    fn one_shared_entry_alongside_private_ones_is_fine() {
+        // Sharing is one shared link plus any number of personal ones.
+        let mut stored = super::StoredRecords::default();
+        let (materialization, mut shared) = super::split(&task("a"));
+        shared.principal = LibraryPrincipal::Shared;
+        let mut private = shared.clone();
+        private.id = "b".to_string();
+        private.principal = LibraryPrincipal::User { id: "web:alice".to_string() };
+        let _ = stored.materializations.insert(materialization.id.clone(), materialization);
+        let _ = stored.entries.insert(shared.id.clone(), shared);
+        let _ = stored.entries.insert(private.id.clone(), private);
+        stored.recount_references();
+
+        assert!(stored.check_reference_invariant().is_ok());
     }
 
     #[test]

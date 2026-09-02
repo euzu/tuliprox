@@ -311,3 +311,42 @@ async fn cancelling_the_last_entry_leaves_nothing_referencing_the_file() {
         assert!(tasks.is_empty(), "the library is empty and still loads");
     }
 }
+
+#[tokio::test]
+async fn a_cancelled_recording_stops_holding_the_space_it_reserved() {
+    // A reservation is a claim on disk for bytes still to be written. Once the
+    // recording is over, nothing more will be written, so keeping the claim
+    // charges the user for space no recording occupies -- and the worker paths
+    // used to keep it while only the user-initiated cancel released it.
+    let dir = TempDir::new().expect("tempdir");
+    let storage = dir.path().join("state");
+    std::fs::create_dir_all(&storage).expect("storage dir");
+    let recording = dir.path().join("programme.ts");
+
+    let queue = open_queue(&storage).await;
+    let mut running = seeded("alice", &recording);
+    running.state = RecordingTaskState::Running;
+    running.finished = false;
+    running.recording.reserved_bytes = 5_000;
+    mutate(&queue, move |candidate| {
+        candidate.active = Some(running.clone());
+        Ok(())
+    })
+    .await
+    .expect("seed");
+
+    queue.cancel_requested("alice-entry").await.expect("cancel");
+
+    // The worker settles it; a restart stands in for that here.
+    drop(queue);
+    let queue = open_queue(&storage).await;
+    let settled = queue
+        .committed_snapshot()
+        .await
+        .1
+        .into_iter()
+        .find(|task| task.uuid == "alice-entry")
+        .expect("the entry survived");
+    assert_eq!(settled.state, RecordingTaskState::Cancelled);
+    assert_eq!(settled.recording.reserved_bytes, 0, "a finished recording reserves nothing");
+}

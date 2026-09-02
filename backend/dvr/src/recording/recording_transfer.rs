@@ -1065,6 +1065,8 @@ async fn cancel_active_and_promote(download_queue: &RecordingQueue, uuid: &str) 
             active.next_retry_at = None;
             active.error.get_or_insert_with(|| "Cancelled by user".to_string());
             active.state = RecordingTaskState::Cancelled;
+            // Nothing more will be written, so the space stops being spoken for.
+            active.recording.reserved_bytes = 0;
             candidate.finished.push(active);
             crate::recording::recording_queue::promote_from_queue(candidate);
             Ok(Some(true))
@@ -1099,6 +1101,7 @@ async fn prepare_active_retry(
             failed.next_retry_at = None;
             failed.state = RecordingTaskState::Failed;
             failed.error = Some(error.clone());
+            failed.recording.reserved_bytes = 0;
             let notification =
                 mark_recording_metadata_notification(&mut failed.recording, LifecycleEvent::Failed, Some(error));
             candidate.finished.push(failed);
@@ -1657,6 +1660,7 @@ pub async fn ensure_recording_worker_running(
                                     fd.next_retry_at = None;
                                     fd.error = Some(err.clone());
                                     fd.state = RecordingTaskState::Failed;
+                                    fd.recording.reserved_bytes = 0;
                                     mark_recording_metadata_notification(
                                         &mut fd.recording,
                                         LifecycleEvent::Failed,
