@@ -12,6 +12,7 @@ use crate::{
         validate_resume_response, ResponseSnapshot, ResumeValidationError, ResumeValidator,
     },
     recording::{
+        recording_capacity::RecordingCapacityPort,
         recording_ctx::RecordingCtx,
         recording_notification::LifecycleEvent,
         recording_notification_adapter::{build_marker, decide, message_for, DispatchDecision},
@@ -44,7 +45,7 @@ use tuliprox_core::{
     utils::{async_file_writer, request, request::create_client, IO_BUFFER_SIZE},
 };
 use tuliprox_messaging::send_message;
-use tuliprox_session::{ActiveProviderManager, ConnectionManager, EventManager, EventMessage};
+use tuliprox_session::{EventManager, EventMessage};
 
 const DOWNLOAD_PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const DOWNLOAD_PROGRESS_LOG_BYTES: u64 = 16 * 1024 * 1024;
@@ -1204,8 +1205,7 @@ pub async fn ensure_recording_worker_running(
     download_cfg: &RecordingConfig,
     download_queue: &Arc<RecordingQueue>,
     event_manager: &Arc<EventManager>,
-    active_provider: &Arc<ActiveProviderManager>,
-    connection_manager: &Arc<ConnectionManager>,
+    capacity: &Arc<dyn RecordingCapacityPort>,
 ) -> Result<(), String> {
     let mut worker_running = download_queue.worker_running.write().await;
     if *worker_running {
@@ -1240,8 +1240,7 @@ pub async fn ensure_recording_worker_running(
         let control_signal = Arc::clone(&dq.control_signal);
         let control_notify = Arc::clone(&dq.control_notify);
         let event_manager = Arc::clone(event_manager);
-        let active_provider = Arc::clone(active_provider);
-        let connection_manager = Arc::clone(connection_manager);
+        let capacity = Arc::clone(capacity);
         let download_cfg = download_cfg.clone();
         let app_config = Arc::new(cfg.clone());
 
@@ -1271,7 +1270,7 @@ pub async fn ensure_recording_worker_running(
                             let window_deadline = dq.active.read().await.as_ref().and_then(recording_deadline_instant);
                             if let Some(input_name) = input_name {
                                 loop {
-                                    let capacities = active_provider.provider_capacities_for_input(&input_name).await;
+                                    let capacities = capacity.capacities_for_input(&input_name).await;
                                     if background_download_should_wait(priority, &capacities, &download_cfg) {
                                         if let Err(err) = broadcast_worker_mutation(
                                             &event_manager,
@@ -1310,9 +1309,7 @@ pub async fn ensure_recording_worker_running(
                                         }
                                         continue;
                                     }
-                                    if let Some(handle) =
-                                        active_provider.acquire_connection_for_download(&input_name, priority).await
-                                    {
+                                    if let Some(handle) = capacity.acquire(&input_name, priority).await {
                                         break ProviderAcquireResult::Acquired(Some(handle));
                                     }
                                     if *control_signal.read().await == RecordingControl::Cancel {
@@ -1379,12 +1376,12 @@ pub async fn ensure_recording_worker_running(
                                         publish_recording_change(&event_manager);
                                     }
                                     Ok(None) => {
-                                        connection_manager.release_provider_handle(handle).await;
+                                        capacity.release(handle).await;
                                         error!("Download worker active task changed after provider acquire");
                                         break 'worker;
                                     }
                                     Err(err) => {
-                                        connection_manager.release_provider_handle(handle).await;
+                                        capacity.release(handle).await;
                                         error!("Download worker commit failed after provider acquire: {err}");
                                         break 'worker;
                                     }
@@ -1440,7 +1437,7 @@ pub async fn ensure_recording_worker_running(
                         let execution_result = {
                             let Some(download) = active_download_snapshot_for_worker(&dq.active, &worker_uuid).await
                             else {
-                                connection_manager.release_provider_handle(provider_handle).await;
+                                capacity.release(provider_handle).await;
                                 break 'worker;
                             };
                             match download.kind {
@@ -1525,7 +1522,7 @@ pub async fn ensure_recording_worker_running(
 
                         match execution_result {
                             DownloadExecutionResult::Completed => {
-                                connection_manager.release_provider_handle(provider_handle).await;
+                                capacity.release(provider_handle).await;
                                 let measured_bytes = {
                                     let active = dq.active.read().await;
                                     match active.as_ref() {
@@ -1577,7 +1574,7 @@ pub async fn ensure_recording_worker_running(
                                 }
                             }
                             DownloadExecutionResult::Paused => {
-                                connection_manager.release_provider_handle(provider_handle).await;
+                                capacity.release(provider_handle).await;
                                 if let Err(err) = broadcast_required_worker_mutation(
                                     &event_manager,
                                     set_active_download_state(
@@ -1596,7 +1593,7 @@ pub async fn ensure_recording_worker_running(
                                 break;
                             }
                             DownloadExecutionResult::Cancelled => {
-                                connection_manager.release_provider_handle(provider_handle).await;
+                                capacity.release(provider_handle).await;
                                 if let Err(err) = broadcast_required_worker_mutation(
                                     &event_manager,
                                     cancel_active_and_promote(&dq, &worker_uuid).await,
@@ -1607,7 +1604,7 @@ pub async fn ensure_recording_worker_running(
                                 }
                             }
                             DownloadExecutionResult::Preempted => {
-                                connection_manager.release_provider_handle(provider_handle).await;
+                                capacity.release(provider_handle).await;
                                 let control = *control_signal.read().await;
                                 match control {
                                     RecordingControl::Restart => warn!(
@@ -1636,7 +1633,7 @@ pub async fn ensure_recording_worker_running(
                                 }
                             }
                             DownloadExecutionResult::Retryable(_err) => {
-                                connection_manager.release_provider_handle(provider_handle).await;
+                                capacity.release(provider_handle).await;
                                 warn!("Retrying active download after transient failure");
                                 let retry_commit = prepare_active_retry(&dq, &worker_uuid, &download_cfg).await;
                                 let retry_delay_secs = match retry_commit {
@@ -1739,7 +1736,7 @@ pub async fn ensure_recording_worker_running(
                                 }
                             }
                             DownloadExecutionResult::Failed(err) => {
-                                connection_manager.release_provider_handle(provider_handle).await;
+                                capacity.release(provider_handle).await;
                                 warn!("Download failed permanently: {err}");
                                 let committed = finish_active_and_promote(&dq, &worker_uuid, |fd| {
                                     fd.finished = true;
@@ -1800,8 +1797,7 @@ pub fn spawn_recording_services(ctx: &RecordingCtx, cancel_token: &CancellationT
         recording_cfg,
         &ctx.recordings,
         Arc::clone(&ctx.event_manager),
-        Arc::clone(&ctx.active_provider),
-        Arc::clone(&ctx.connection_manager),
+        Arc::clone(&ctx.recording_capacity),
         cancel_token.clone(),
     );
 }
@@ -1819,8 +1815,7 @@ pub async fn resume_recording_worker_if_needed(
         recording_cfg,
         &ctx.recordings,
         &ctx.event_manager,
-        &ctx.active_provider,
-        &ctx.connection_manager,
+        &ctx.recording_capacity,
     )
     .await
 }
@@ -1830,13 +1825,12 @@ fn start_recording_scheduler(
     recording_cfg: RecordingConfig,
     recordings: &Arc<RecordingQueue>,
     event_manager: Arc<EventManager>,
-    active_provider: Arc<ActiveProviderManager>,
-    connection_manager: Arc<ConnectionManager>,
+    capacity: Arc<dyn RecordingCapacityPort>,
     cancel_token: CancellationToken,
 ) {
-    let capacity_notify = connection_manager.capacity_notified();
+    let capacity_notify = capacity.capacity_changed();
     let slot_waiters = Arc::clone(&recordings.slot_waiters);
-    let bridge_active_provider = Arc::clone(&active_provider);
+    let bridge_capacity = Arc::clone(&capacity);
     let bridge_recording_cfg = recording_cfg.clone();
     let bridge_cancel_token = cancel_token.clone();
     tokio::spawn(async move {
@@ -1857,7 +1851,7 @@ fn start_recording_scheduler(
                 let capacities = if let Some(capacities) = capacities_by_input.get(input_name) {
                     capacities.clone()
                 } else {
-                    let capacities = bridge_active_provider.provider_capacities_for_input(input_name).await;
+                    let capacities = bridge_capacity.capacities_for_input(input_name).await;
                     capacities_by_input.insert(Arc::clone(input_name), capacities.clone());
                     capacities
                 };
@@ -1895,8 +1889,7 @@ fn start_recording_scheduler(
                 &recording_cfg,
                 &scheduler_recordings,
                 &event_manager,
-                &active_provider,
-                &connection_manager,
+                &capacity,
             )
             .await;
         }

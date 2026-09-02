@@ -345,6 +345,10 @@ async fn create_shared_data(
         hls_proxy,
         hls_provisioning: Arc::new(HlsProvisioningState::new()),
         active_users,
+        recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
+            Arc::clone(&active_provider),
+            Arc::clone(&connection_manager),
+        ),
         active_provider,
         connection_manager,
         event_manager,
@@ -1067,6 +1071,10 @@ mod tests {
             let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
             let (manual_update_sender, _) = mpsc::channel::<ManualPlaylistUpdateRequest>(1);
             Arc::new(AppState {
+                recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
+                    Arc::clone(&active_provider),
+                    Arc::clone(&connection_manager),
+                ),
                 forced_targets: Arc::new(ArcSwap::from_pointee(ProcessTargets {
                     enabled: false,
                     inputs: Vec::new(),

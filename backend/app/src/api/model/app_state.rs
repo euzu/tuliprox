@@ -434,6 +434,9 @@ pub struct AppState {
     pub active_users: Arc<ActiveUserManager>,
     pub active_provider: Arc<ActiveProviderManager>,
     pub connection_manager: Arc<ConnectionManager>,
+    /// Provider capacity as the DVR sees it; the adapter that keeps provider
+    /// details out of the recording engine.
+    pub recording_capacity: Arc<dyn tuliprox_dvr::recording::recording_capacity::RecordingCapacityPort>,
     pub event_manager: Arc<EventManager>,
     pub cancel_tokens: Arc<ArcSwap<CancelTokens>>,
     pub playlists: Arc<PlaylistStorageState>,
@@ -504,6 +507,10 @@ pub(crate) fn create_test_app_state(config: Config) -> Arc<AppState> {
         hls_proxy: Arc::new(HlsProxyManager::new()),
         hls_provisioning: Arc::new(HlsProvisioningState::new()),
         active_users,
+        recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
+            Arc::clone(&active_provider),
+            Arc::clone(&connection_manager),
+        ),
         active_provider,
         connection_manager,
         event_manager,

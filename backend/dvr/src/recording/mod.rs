@@ -1,3 +1,4 @@
+pub mod recording_capacity;
 pub mod recording_catalog_access;
 pub mod recording_conflict;
 pub mod recording_ctx;

@@ -1489,6 +1489,10 @@ mod tests {
         let (manual_update_sender, _) = mpsc::channel::<crate::api::model::ManualPlaylistUpdateRequest>(1);
 
         Arc::new(AppState {
+            recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
+                Arc::clone(&active_provider),
+                Arc::clone(&connection_manager),
+            ),
             forced_targets: Arc::new(ArcSwap::from_pointee(ProcessTargets {
                 enabled: false,
                 inputs: Vec::new(),
@@ -1560,6 +1564,10 @@ mod tests {
         let (manual_update_sender, _) = mpsc::channel::<crate::api::model::ManualPlaylistUpdateRequest>(1);
 
         Arc::new(AppState {
+            recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
+                Arc::clone(&active_provider),
+                Arc::clone(&connection_manager),
+            ),
             forced_targets: Arc::new(ArcSwap::from_pointee(ProcessTargets {
                 enabled: false,
                 inputs: Vec::new(),

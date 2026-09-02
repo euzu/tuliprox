@@ -254,8 +254,7 @@ async fn create_http_recording_task(
             recording_config,
             &app_state.recordings,
             &app_state.event_manager,
-            &app_state.active_provider,
-            &app_state.connection_manager,
+            &app_state.recording_capacity,
         )
         .await
         .is_err()

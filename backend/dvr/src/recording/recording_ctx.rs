@@ -5,12 +5,12 @@
 //! four directly keeps the DVR independent of the shape of the server's root
 //! state, which is what lets it live outside `api`.
 
-use crate::recording::recording_queue::RecordingQueue;
+use crate::recording::{recording_capacity::RecordingCapacityPort, recording_queue::RecordingQueue};
 use arc_swap::ArcSwap;
 use reqwest::Client;
 use std::sync::Arc;
 use tuliprox_core::model::AppConfig;
-use tuliprox_session::{ActiveProviderManager, ConnectionManager, EventManager};
+use tuliprox_session::EventManager;
 
 /// Everything the DVR reads from the running server.
 #[derive(Clone)]
@@ -23,11 +23,10 @@ pub struct RecordingCtx {
     pub event_manager: Arc<EventManager>,
     /// Shared HTTP client, swapped when the proxy configuration changes.
     pub http_client: Arc<ArcSwap<Client>>,
-    /// Provider capacity, used to acquire a connection slot before a
-    /// recording starts and to release it when the task ends.
-    pub active_provider: Arc<ActiveProviderManager>,
-    /// Connection registry; its capacity signal wakes waiting recordings.
-    pub connection_manager: Arc<ConnectionManager>,
+    /// Provider capacity: acquiring a connection slot before a recording
+    /// starts, releasing it when the task ends, and the signal that wakes
+    /// waiters when one is freed.
+    pub recording_capacity: Arc<dyn RecordingCapacityPort>,
 }
 
 impl RecordingCtx {
