@@ -1951,6 +1951,5 @@ watch:
 
 > **Note:** `watch` is especially useful for monitoring premium groups, VOD collections,
 > or unstable provider segments where additions and removals should generate operational alerts.
-
 > **Processing order:** watch evaluation runs only after `persist_playlist` succeeds. If persistence fails, watch
 > evaluation is skipped and no watch events are emitted for that target on that update.
