@@ -18,8 +18,8 @@ use crate::{
             create_playback_session_fingerprint, create_session_fingerprint, force_provider_stream_response,
             get_headers_from_request, get_hls_session_ttl_secs, get_stream_alternative_url,
             is_hls_stream_share_enabled, is_seekable_media_request, local_stream_response,
-            record_connect_failed_attempt, resolve_playback_request_admission, try_option_bad_request, try_unwrap_body,
-            ConnectFailedAttempt, EvictionReentryGuard, HeaderFilter,
+            record_connect_failed_attempt, resolve_playback_request_admission, select_provider_stream_url,
+            try_option_bad_request, try_unwrap_body, ConnectFailedAttempt, EvictionReentryGuard, HeaderFilter,
         },
         model::{
             hls_cache::initial_strip::{

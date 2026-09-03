@@ -1084,7 +1084,7 @@ fn stream_url_has_account_signature(stream_url: &str, user_info: &crate::model::
     false
 }
 
-async fn select_provider_stream_url(
+pub(crate) async fn select_provider_stream_url(
     stream_url: &str,
     input: &ConfigInput,
     provider_cfg: &Arc<ProviderConfig>,
@@ -1098,9 +1098,21 @@ async fn select_provider_stream_url(
     if provider_cfg.input_type.is_m3u() {
         match load_input_m3u_stream_url(app_config, &provider_cfg.name, stream_url).await {
             Ok(Some(provider_stream_url)) => {
+                debug_if_enabled!(
+                    "M3U alias URL lookup: provider={} requested_url={} index_match=true resolved_url={}",
+                    sanitize_sensitive_info(&provider_cfg.name),
+                    sanitize_sensitive_info(resolve_request_url_for_logging(input, stream_url).as_ref()),
+                    sanitize_sensitive_info(resolve_request_url_for_logging(input, &provider_stream_url).as_ref())
+                );
                 return Some((provider_cfg.name.clone(), provider_stream_url.to_string()));
             }
-            Ok(None) => {}
+            Ok(None) => {
+                debug_if_enabled!(
+                    "M3U alias URL lookup: provider={} requested_url={} index_match=false",
+                    sanitize_sensitive_info(&provider_cfg.name),
+                    sanitize_sensitive_info(resolve_request_url_for_logging(input, stream_url).as_ref())
+                );
+            }
             Err(err) => {
                 debug_if_enabled!(
                     "Failed to resolve M3U stream URL for provider {}: {}",

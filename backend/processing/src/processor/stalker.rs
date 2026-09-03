@@ -44,6 +44,10 @@ pub enum StalkerCluster {
     Series,
 }
 
+fn raw_group_catalog_storage_path(stalker_storage_path: &std::path::Path) -> &std::path::Path {
+    stalker_storage_path.parent().unwrap_or(stalker_storage_path)
+}
+
 const DEFAULT_STALKER_CLUSTERS: [StalkerCluster; 3] =
     [StalkerCluster::Live, StalkerCluster::Vod, StalkerCluster::Series];
 
@@ -168,6 +172,7 @@ pub async fn download_stalker_playlist(
             );
         }
     };
+    let catalog_storage_path = raw_group_catalog_storage_path(&storage_path);
 
     let outcome = if let Some(_refresh_permit) = try_acquire_stalker_refresh(&input.name).await {
         let handshake = match api_client.handshake().await {
@@ -297,6 +302,22 @@ pub async fn download_stalker_playlist(
             Ok(items) => {
                 counts[cluster as usize] = items.len();
                 let cluster_groups = groups_for_cluster(items, cluster, &input.name);
+                let group_titles = cluster_groups.iter().map(|g| g.title.to_string()).collect::<Vec<String>>();
+                let xc = xtream_cluster(cluster);
+                if let Err(publish_err) = tuliprox_repository::publish_raw_group_catalog(
+                    catalog_storage_path,
+                    &input.name,
+                    xc,
+                    group_titles,
+                    &app_config.file_locks,
+                )
+                .await
+                {
+                    warn!(
+                        "Failed to publish raw group catalog for stalker input '{}' cluster {xc:?}: {publish_err}",
+                        input.name
+                    );
+                }
                 groups.extend(cluster_groups);
             }
             Err(err) => errors.push(err),
@@ -339,12 +360,7 @@ fn groups_for_cluster(
     cluster: StalkerCluster,
     input_name: &str,
 ) -> Vec<PlaylistGroup> {
-    use shared::model::XtreamCluster;
-    let xtream_cluster = match cluster {
-        StalkerCluster::Live => XtreamCluster::Live,
-        StalkerCluster::Vod => XtreamCluster::Video,
-        StalkerCluster::Series => XtreamCluster::Series,
-    };
+    let xtream_cluster = xtream_cluster(cluster);
     let mut groups_map: indexmap::IndexMap<u32, PlaylistGroup> = indexmap::IndexMap::new();
     for item in items {
         let category_id = item.category_id;
@@ -358,6 +374,14 @@ fn groups_for_cluster(
         group.channels.push(pli);
     }
     groups_map.into_values().collect()
+}
+
+const fn xtream_cluster(cluster: StalkerCluster) -> shared::model::XtreamCluster {
+    match cluster {
+        StalkerCluster::Live => shared::model::XtreamCluster::Live,
+        StalkerCluster::Vod => shared::model::XtreamCluster::Video,
+        StalkerCluster::Series => shared::model::XtreamCluster::Series,
+    }
 }
 
 /// Map a Stalker failure onto the workspace error type, keeping its classification.
@@ -477,6 +501,12 @@ mod tests {
     use super::*;
 
     fn runtime_cfg() -> StalkerInputConfig { StalkerInputConfig::default() }
+
+    #[test]
+    fn raw_group_catalog_is_published_at_the_input_storage_root() {
+        let stalker_path = std::path::Path::new("/storage/input_portal/stalker");
+        assert_eq!(raw_group_catalog_storage_path(stalker_path), std::path::Path::new("/storage/input_portal"));
+    }
 
     #[test]
     fn runtime_client_cache_key_changes_with_endpoint_preference() {

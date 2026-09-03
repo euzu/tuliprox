@@ -22,6 +22,7 @@ That makes it usable both for IPTV players and for media-server-oriented workflo
 ## Playlist processing
 
 - filter channels and groups
+- manage target-specific group bouquets in whitelist or blacklist mode from the Source Editor
 - rename or normalize entries
 - apply mappings and templates
 - sort and regroup outputs
@@ -51,6 +52,7 @@ That makes it usable both for IPTV players and for media-server-oriented workflo
 Tuliprox also includes:
 
 - scheduled playlist refreshes
+- retain the last usable input and target playlists when an update unexpectedly produces no items
 - hot config reload support
 - provider failover and DNS-aware connection rotation
 - integrated download and recording manager with provider-aware fairness, retries, and RBAC

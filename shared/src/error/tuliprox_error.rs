@@ -108,6 +108,7 @@ error_kinds! {
     ConfigStreamHistory => "config stream history error",
     ConfigVideoDownload => "config video download error",
     ConfigTarget => "config target error",
+    TargetBouquet => "target bouquet error",
     ConfigWebUi => "config web UI error",
     RepositoryEpg => "repository EPG error",
     RepositoryXtream => "repository XTream error",

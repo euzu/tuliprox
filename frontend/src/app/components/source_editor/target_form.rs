@@ -1,22 +1,27 @@
 use crate::{
     app::components::{
-        build_options, config::HasFormData, select::Select, selection_parse_first, BlockId, BlockInstance, Card,
-        ClusterFlagsInput, ClusterFlagsInputMode, DropDownSelection, EditMode, FilterInput, IconButton, Panel,
+        build_options, config::HasFormData, select::Select, selection_parse_first, AppIcon, BlockId, BlockInstance,
+        Card, ClusterFlagsInput, ClusterFlagsInputMode, DropDownSelection, EditMode, FilterInput, IconButton, Panel,
         SourceEditorContext, TextButton, ToggleSwitch,
     },
     config_field, config_field_bool, config_field_child, config_field_custom, edit_field_bool, edit_field_list_option,
     edit_field_text, generate_form_reducer,
+    hooks::use_service_context,
     i18n::use_translation,
+    services::TargetBouquetService,
 };
 use shared::{
     error::TuliproxError,
-    model::{ClusterFlags, ConfigTargetDto, ConfigTargetFilterDto, ConfigTargetOptions, ProcessingOrder},
+    model::{
+        permission::Permission, ClusterFlags, ConfigTargetDto, ConfigTargetFilterDto, ConfigTargetOptions,
+        ProcessingOrder, TargetBouquetMode, TargetBouquetStatusDto,
+    },
     utils::Internable,
 };
 use std::{fmt::Display, rc::Rc, str::FromStr, sync::Arc};
 use yew::{
-    component, html, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback, Html, Properties,
-    UseReducerHandle,
+    component, html, platform::spawn_local, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback,
+    Html, MouseEvent, Properties, UseReducerHandle,
 };
 
 const LABEL_ENABLED: &str = "LABEL.ENABLED";
@@ -41,6 +46,14 @@ const LABEL_LOWERCASE_EPG_IDS: &str = "LABEL.LOWERCASE_EPG_IDS";
 const LABEL_LOWERCASE_XMLTV_DISPLAY_NAMES: &str = "LABEL.LOWERCASE_XMLTV_DISPLAY_NAMES";
 const LABEL_MAIN: &str = "LABEL.MAIN_CONFIG";
 const LABEL_OPTIONS: &str = "LABEL.OPTIONS";
+const LABEL_BOUQUETS: &str = "LABEL.BOUQUETS";
+
+#[derive(Clone, PartialEq)]
+enum BouquetStatus {
+    Loading,
+    Ready(Option<TargetBouquetStatusDto>),
+    Unavailable,
+}
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum TargetFormPage {
@@ -191,6 +204,7 @@ pub struct ConfigTargetViewProps {
 #[component]
 pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
     let translate = use_translation();
+    let services = use_service_context();
     let source_editor_ctx = use_context::<SourceEditorContext>().expect("SourceEditorContext not found");
 
     let target_form_state: UseReducerHandle<ConfigTargetFormState> =
@@ -199,6 +213,41 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
         use_reducer(|| ConfigTargetOptionsFormState { form: ConfigTargetOptions::default(), modified: false });
 
     let view_visible = use_state(|| TargetFormPage::Main);
+    let bouquet_status = use_state(|| BouquetStatus::Loading);
+    let bouquet_target_name = props.target.as_ref().map_or_else(String::new, |target| target.name.clone());
+    let can_read_bouquets = services.auth.has_permission(Permission::PlaylistRead);
+
+    {
+        let bouquet_status = bouquet_status.clone();
+        let target_name = bouquet_target_name.clone();
+        let reload = source_editor_ctx.bouquet_revision;
+        let request_generation = use_state(|| 0_u64);
+        use_effect_with((target_name, reload, can_read_bouquets), move |(target_name, _, can_read)| {
+            if !can_read || target_name.is_empty() {
+                bouquet_status.set(BouquetStatus::Ready(None));
+                return;
+            }
+            bouquet_status.set(BouquetStatus::Loading);
+            let target_name = target_name.clone();
+            let my_generation = {
+                let next = *request_generation + 1;
+                request_generation.set(next);
+                next
+            };
+            let request_generation = request_generation.clone();
+            spawn_local(async move {
+                let result = TargetBouquetService::fetch_target_status(&target_name).await;
+                if *request_generation != my_generation {
+                    return;
+                }
+                match result {
+                    Ok(target) => bouquet_status.set(BouquetStatus::Ready(Some(target))),
+                    Err(crate::error::Error::NotFound) => bouquet_status.set(BouquetStatus::Ready(None)),
+                    Err(_) => bouquet_status.set(BouquetStatus::Unavailable),
+                }
+            });
+        });
+    }
 
     let handle_menu_click = {
         let active_menu = view_visible.clone();
@@ -409,6 +458,55 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
         }
     };
 
+    let render_bouquet_input = || {
+        if !can_read_bouquets {
+            return html! {};
+        }
+        let status = match &*bouquet_status {
+            BouquetStatus::Loading => translate.t("LABEL.LOADING"),
+            BouquetStatus::Unavailable => translate.t("MESSAGES.TARGET_BOUQUET.STATUS_UNAVAILABLE"),
+            BouquetStatus::Ready(Some(summary)) => match summary.mode {
+                Some(TargetBouquetMode::Whitelist) => translate
+                    .t("MESSAGES.TARGET_BOUQUET.STATUS_WHITELIST")
+                    .replace("{count}", &summary.group_count.to_string()),
+                Some(TargetBouquetMode::Blacklist) => translate
+                    .t("MESSAGES.TARGET_BOUQUET.STATUS_BLACKLIST")
+                    .replace("{count}", &summary.group_count.to_string()),
+                None => translate.t("MESSAGES.TARGET_BOUQUET.NO_FILTER"),
+            },
+            BouquetStatus::Ready(None) => translate.t("MESSAGES.TARGET_BOUQUET.SAVE_TARGET_FIRST"),
+        };
+        let can_open = matches!(&*bouquet_status, BouquetStatus::Ready(Some(_)));
+        let on_open = {
+            let open_target_bouquet = source_editor_ctx.open_target_bouquet.clone();
+            let target_name = bouquet_target_name.clone();
+            Callback::from(move |event: MouseEvent| {
+                event.prevent_default();
+                event.stop_propagation();
+                if can_open {
+                    open_target_bouquet.emit(target_name.clone());
+                }
+            })
+        };
+        html! {
+            { config_field_child!(translate.t(LABEL_BOUQUETS), "TARGET_FORM.BOUQUETS", {
+                html! {
+                    <button
+                        type="button"
+                        class="tp__filter-input tp__target-bouquet-input tp__input"
+                        disabled={!can_open}
+                        onclick={on_open}
+                    >
+                        <span class="tp__input-wrapper">
+                            <span class="tp__filter-input__preview">{ status }</span>
+                            <AppIcon name="Edit" />
+                        </span>
+                    </button>
+                }
+            }) }
+        }
+    };
+
     let render_target = || {
         let target_form_state_1 = target_form_state.clone();
         let target_form_state_2 = target_form_state.clone();
@@ -430,6 +528,7 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                             })} />
                        }
                 })}
+                { render_bouquet_input() }
                 { config_field_child!(translate.t(LABEL_PERSIST_FILTER), "TARGET_FORM.PERSIST_FILTER", {
                        html! {
                             <FilterInput filter={target_form_state_3.form.filter.persist.clone()} on_change={Callback::from(move |new_filter: Option<String>| {
@@ -474,6 +573,7 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                         translate.t(LABEL_PERSIST_FILTER),
                         target_form_state.form.filter.persist.clone().unwrap_or_default()
                     ) }
+                    { render_bouquet_input() }
                     { config_field_custom!(
                         translate.t(LABEL_PROCESSING_ORDER),
                         target_form_state.form.processing_order.to_string()
@@ -540,17 +640,17 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
     };
 
     html! {
-    <div class="tp__source-editor-form tp__config-view-page">
+        <div class="tp__source-editor-form tp__config-view-page">
          <div class="tp__source-editor-form_toolbar tp__form-page__toolbar">
          <TextButton class="secondary" name="cancel_input"
-            icon="Cancel"
-            title={ translate.t("LABEL.CANCEL")}
-            onclick={handle_cancel}></TextButton>
+                icon="Cancel"
+                title={ translate.t("LABEL.CANCEL")}
+                onclick={handle_cancel}></TextButton>
          if props.allow_write {
              <TextButton class="primary" name="apply_input"
-                icon="Accept"
-                title={ translate.t("LABEL.OK")}
-                onclick={handle_apply_target}></TextButton>
+                    icon="Accept"
+                    title={ translate.t("LABEL.OK")}
+                    onclick={handle_apply_target}></TextButton>
          }
       </div>
         <div class="tp__source-editor-form__content">

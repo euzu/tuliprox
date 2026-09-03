@@ -602,13 +602,13 @@ pub fn Home() -> Html {
                                           </ErrorBoundary>
                                        </Panel>
                                        })}
-                                       { html_if!(can_read_sources, {
-                                       <Panel class="tp__full-width tp__full-height" value={ViewType::SourceEditor.intern()} active={view_page.clone()}>
-                                          <ErrorBoundary name={translate.t("LABEL.SOURCE_EDITOR")}>
-                                            <SourceEditor/>
-                                          </ErrorBoundary>
-                                       </Panel>
-                                       })}
+                                        { html_if!(can_read_sources, {
+                                        <Panel class="tp__full-width tp__full-height" value={ViewType::SourceEditor.intern()} active={view_page.clone()}>
+                                           <ErrorBoundary name={translate.t("LABEL.SOURCE_EDITOR")}>
+                                             <SourceEditor/>
+                                           </ErrorBoundary>
+                                        </Panel>
+                                        })}
                                        { html_if!(can_write_playlist, {
                                        <Panel class="tp__full-width" value={ViewType::PlaylistUpdate.intern()} active={view_page.clone()}>
                                          <ErrorBoundary name={translate.t("LABEL.UPDATE")}>

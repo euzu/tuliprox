@@ -43,7 +43,7 @@ strum_macros.workspace = true
 
 [dependencies.web-sys]
 version = "0.3.104"
-features = ["Document", "Element", "Node", "Window", "HtmlCollection", "HtmlImageElement", "HtmlInputElement", "DomRect", "HtmlDialogElement", "CssStyleDeclaration", "Event", "BeforeUnloadEvent", "MutationObserver", "MutationObserverInit", "WebGlRenderingContext", "WebGlProgram", "WebGlShader", "WebGlBuffer", "WebGlUniformLocation", "HtmlCanvasElement", "HtmlSelectElement", "DomTokenList", "Selection"]
+features = ["AbortController", "AbortSignal", "ReadableStream", "ReadableStreamDefaultReader", "Document", "Element", "Node", "Window", "HtmlCollection", "HtmlImageElement", "HtmlInputElement", "DomRect", "HtmlDialogElement", "CssStyleDeclaration", "Event", "BeforeUnloadEvent", "MutationObserver", "MutationObserverInit", "WebGlRenderingContext", "WebGlProgram", "WebGlShader", "WebGlBuffer", "WebGlUniformLocation", "HtmlCanvasElement", "HtmlSelectElement", "DomTokenList", "Selection"]
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.77"

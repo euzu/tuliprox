@@ -665,7 +665,9 @@ pub(super) async fn try_reserve_hls_entry_origin_account_for_redirect(
         app_state.connection_manager.release_provider_handle(Some(provider_handle)).await;
         return None;
     };
-    let Some(stream_url) = get_stream_alternative_url(request_url, input, &provider_config) else {
+    let Some((_provider_name, stream_url)) =
+        select_provider_stream_url(request_url, input, &provider_config, false, &app_state.app_config).await
+    else {
         app_state.connection_manager.release_provider_handle(Some(provider_handle)).await;
         return None;
     };

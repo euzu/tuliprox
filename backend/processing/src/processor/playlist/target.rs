@@ -258,6 +258,15 @@ pub(crate) async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, 
     debug!("Executing processing pipes");
     let broadcast_step = create_broadcast_callback(&ctx.events);
 
+    let bouquet_file =
+        tuliprox_repository::load_target_bouquet(&ctx.config, &target.name).await.map_err(|err| vec![err])?;
+    let bouquet_filter =
+        bouquet_file.and_then(|file| tuliprox_core::model::TargetBouquetFilter::from_dto(file.bouquet));
+    if let Some(ref filter) = bouquet_filter {
+        let (live, vod, series) = filter.cluster_counts();
+        debug!("Loaded target bouquet for '{}': live={:?}, vod={:?}, series={:?}", target.name, live, vod, series);
+    }
+
     let pipe = get_processing_pipe(target);
     let mut step = StepMeasure::new(&target.name, broadcast_step);
     for provider_fpl in playlists.iter_mut() {
@@ -266,7 +275,7 @@ pub(crate) async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, 
         );
         step.broadcast("Executing transformations on '{}' playlist", &target.name);
         let (mut processed_fpl, input_outcome) =
-            execute_pipe(target, &pipe, provider_fpl, &mut duplicates, consume_input_source)
+            execute_pipe(target, &pipe, provider_fpl, &mut duplicates, consume_input_source, bouquet_filter.as_ref())
                 .map_err(|err| vec![err])?;
         debug!("Target '{}' input '{}' pipeline outcome: {input_outcome:?}", target.name, provider_fpl.input.name);
         aggregate_outcome.merge(input_outcome);
@@ -423,10 +432,6 @@ pub(crate) async fn finalize_prepared_target<E: EventSink + Clone + 'static, M: 
         apply_persist_filter(target, &mut flat_new_playlist);
         retain_epg_referenced_by_groups(&flat_new_playlist, &mut new_epg);
 
-        if process_watch(&ctx.config, &ctx.events, target, &flat_new_playlist).await {
-            step.tick("group watches");
-            log_memory_snapshot(format!("target '{}' after_group_watches", target.name).as_str());
-        }
         let merged_epg = if ctx.config.config.load().disk_based_processing {
             // Per-source drain to disk, then multi-way merge. Errors are pushed
             // to `errors` rather than `?` because the function returns
@@ -458,6 +463,10 @@ pub(crate) async fn finalize_prepared_target<E: EventSink + Clone + 'static, M: 
             ctx.playlist_state.as_ref(),
         )
         .await;
+        if result.is_ok() && process_watch(&ctx.config, &ctx.events, target, &flat_new_playlist).await {
+            step.tick("group watches");
+            log_memory_snapshot(format!("target '{}' after_group_watches", target.name).as_str());
+        }
         step.stop("Persisting playlists");
         log_memory_snapshot(format!("target '{}' after_persist", target.name).as_str());
         (result, errors)

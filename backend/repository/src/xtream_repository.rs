@@ -32,7 +32,7 @@ use shared::{
     utils::{arc_str_serde, get_u32_from_serde_value, Internable},
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ffi::OsString,
     fs::File,
     io::{self, Error, ErrorKind},
@@ -41,11 +41,12 @@ use std::{
 };
 use tuliprox_core::{
     model::{
-        AppConfig, Config, ConfigInput, ConfigTarget, PlaylistXtreamCategory, ProxyUserCredentials, XtreamCategory,
+        AppConfig, Config, ConfigInput, ConfigInputFlags, ConfigTarget, PlaylistXtreamCategory, ProxyUserCredentials,
+        XtreamCategory,
     },
     utils::{
         file_exists_async, file_reader, json_write_documents_to_file, parent_or_dot, remove_file_if_exists,
-        request::DynReader, require_same_parent_directory, FileReadGuard,
+        request::DynReader, require_same_parent_directory, FileReadGuard, FileWriteGuard,
     },
 };
 use tuliprox_parser::xtream;
@@ -1025,14 +1026,24 @@ fn preserve_details_with_injected_operation_failure(
     })
 }
 
+struct StagedXtreamClusterRefresh {
+    refresh_lease: XtreamRefreshLease,
+    publish_lock: Arc<FileWriteGuard>,
+    storage_path: PathBuf,
+    input_name: Arc<str>,
+    cluster: XtreamCluster,
+    raw_groups: Vec<String>,
+    item_count: usize,
+}
+
 #[allow(clippy::too_many_lines)]
-pub async fn persist_input_xtream_playlist_cluster_to_disk(
+async fn stage_input_xtream_playlist_cluster_to_disk(
     app_config: &Arc<AppConfig>,
     input: &ConfigInput,
     cluster: XtreamCluster,
     categories: DynReader,
     streams: DynReader,
-) -> Result<(), TuliproxError> {
+) -> Result<StagedXtreamClusterRefresh, TuliproxError> {
     let cfg = app_config.config.load();
     let storage_path = ensure_input_storage_path(&cfg, &input.name).await?;
     drop(cfg);
@@ -1088,9 +1099,15 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
         tree.set_flush_policy(FlushPolicy::Batch);
 
         let mut buffer = Vec::with_capacity(BATCH_SIZE);
+        let mut seen_groups: HashSet<String> = HashSet::new();
+        let mut item_count = 0_usize;
 
         // This loop exits when all 'tx' clones are dropped (signaling end of stream)
         while let Some(item) = rx.blocking_recv() {
+            item_count = item_count.saturating_add(1);
+            if !seen_groups.contains(item.group.as_ref()) {
+                seen_groups.insert(item.group.to_string());
+            }
             buffer.push(item);
             if buffer.len() >= BATCH_SIZE {
                 let batch: Vec<(&u32, &XtreamPlaylistItem)> = buffer.iter().map(|i| (&i.provider_id, i)).collect();
@@ -1146,7 +1163,7 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
                 staging_path.display()
             ))
         })?;
-        Ok::<(), TuliproxError>(())
+        Ok::<(Vec<String>, usize), TuliproxError>((seen_groups.into_iter().collect(), item_count))
     });
 
     // 3. Robust Joining of both tasks
@@ -1157,7 +1174,7 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
 
     // Handle internal errors from the tasks
     let parsed_categories = parse_res?;
-    consumer_res?;
+    let (raw_groups, item_count) = consumer_res?;
 
     save_xtream_categories_to_file(refresh_lease.clone(), &parsed_categories).await?;
 
@@ -1209,6 +1226,31 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
         TuliproxError::RepositoryXtream(format!("Compaction task failed to join during {cluster} refresh: {error}"))
     })??;
 
+    Ok(StagedXtreamClusterRefresh {
+        refresh_lease,
+        publish_lock,
+        storage_path,
+        input_name: Arc::clone(&input.name),
+        cluster,
+        raw_groups,
+        item_count,
+    })
+}
+
+async fn publish_staged_xtream_cluster(
+    app_config: &AppConfig,
+    staged: StagedXtreamClusterRefresh,
+) -> Result<(), TuliproxError> {
+    let StagedXtreamClusterRefresh {
+        refresh_lease,
+        publish_lock,
+        storage_path,
+        input_name,
+        cluster,
+        raw_groups,
+        item_count: _,
+    } = staged;
+
     let database_publish_lease = refresh_lease.clone();
     let database_publish_lock = Arc::clone(&publish_lock);
     tokio::task::spawn_blocking(move || {
@@ -1247,6 +1289,14 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
         ))
     })??;
 
+    if let Err(publish_err) =
+        crate::publish_raw_group_catalog(&storage_path, &input_name, cluster, raw_groups, &app_config.file_locks).await
+    {
+        log::warn!(
+            "Xtream data for input '{input_name}' cluster {cluster} was published, but its raw group catalog could not be published: {publish_err}"
+        );
+    }
+
     let cleanup_lease = refresh_lease.clone();
     let cleanup_lock = Arc::clone(&publish_lock);
     tokio::task::spawn_blocking(move || {
@@ -1271,6 +1321,92 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
         refresh_lease.paths().generation
     );
     Ok(())
+}
+
+fn input_cluster_enabled(input: &ConfigInput, cluster: XtreamCluster) -> bool {
+    match cluster {
+        XtreamCluster::Live => !input.has_flag(ConfigInputFlags::SkipLive),
+        XtreamCluster::Video => !input.has_flag(ConfigInputFlags::SkipVod),
+        XtreamCluster::Series => !input.has_flag(ConfigInputFlags::SkipSeries),
+    }
+}
+
+async fn published_xtream_cluster_has_items(
+    app_config: &AppConfig,
+    storage_path: &Path,
+    cluster: XtreamCluster,
+) -> Result<bool, TuliproxError> {
+    let path = xtream_get_file_path(storage_path, cluster);
+    let lock = app_config.file_locks.read_lock(&path).await;
+    tokio::task::spawn_blocking(move || {
+        let _guard = lock;
+        match BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&path) {
+            Ok(mut query) => query.iter().next().transpose().map(|entry| entry.is_some()).map_err(|error| {
+                TuliproxError::RepositoryXtream(format!(
+                    "Failed to inspect published Xtream cluster {cluster} at {}: {error}",
+                    path.display()
+                ))
+            }),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(TuliproxError::RepositoryXtream(format!(
+                "Failed to open published Xtream cluster {cluster} at {}: {error}",
+                path.display()
+            ))),
+        }
+    })
+    .await
+    .map_err(|error| TuliproxError::Task(format!("Failed to join Xtream cluster inspection: {error}")))?
+}
+
+pub async fn persist_input_xtream_playlist_clusters_to_disk(
+    app_config: &Arc<AppConfig>,
+    input: &ConfigInput,
+    cluster_readers: Vec<(XtreamCluster, DynReader, DynReader)>,
+) -> Result<(), TuliproxError> {
+    let mut staged = Vec::with_capacity(cluster_readers.len());
+    for (cluster, categories, streams) in cluster_readers {
+        staged
+            .push(stage_input_xtream_playlist_cluster_to_disk(app_config, input, cluster, categories, streams).await?);
+    }
+
+    let staged_clusters: HashSet<XtreamCluster> = staged.iter().map(|refresh| refresh.cluster).collect();
+    let mut has_items = staged.iter().any(|refresh| refresh.item_count > 0);
+    if !has_items {
+        let cfg = app_config.config.load();
+        let storage_path = ensure_input_storage_path(&cfg, &input.name).await?;
+        drop(cfg);
+        for cluster in XTREAM_CLUSTER {
+            if input_cluster_enabled(input, cluster)
+                && !staged_clusters.contains(&cluster)
+                && published_xtream_cluster_has_items(app_config, &storage_path, cluster).await?
+            {
+                has_items = true;
+                break;
+            }
+        }
+    }
+
+    if !has_items {
+        return Err(TuliproxError::RepositoryPlaylist(format!(
+            "Refusing to publish empty disk-based Xtream playlist for input '{}'; existing data was retained",
+            input.name
+        )));
+    }
+
+    for refresh in staged {
+        publish_staged_xtream_cluster(app_config, refresh).await?;
+    }
+    Ok(())
+}
+
+pub async fn persist_input_xtream_playlist_cluster_to_disk(
+    app_config: &Arc<AppConfig>,
+    input: &ConfigInput,
+    cluster: XtreamCluster,
+    categories: DynReader,
+    streams: DynReader,
+) -> Result<(), TuliproxError> {
+    persist_input_xtream_playlist_clusters_to_disk(app_config, input, vec![(cluster, categories, streams)]).await
 }
 
 fn publish_staged_file_same_directory(staging: &Path, published: &Path) -> io::Result<()> {
@@ -1990,6 +2126,89 @@ mod tests {
             writer.shutdown().await.expect("fixture writer should shut down");
         });
         Box::pin(reader)
+    }
+
+    #[tokio::test]
+    async fn empty_disk_refresh_retains_published_playlist_and_catalog() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let app_config = test_app_config(directory.path());
+        let input = ConfigInput { name: "empty-guard".intern(), input_type: InputType::Xtream, ..Default::default() };
+
+        persist_input_xtream_playlist_cluster_to_disk(
+            &app_config,
+            &input,
+            XtreamCluster::Live,
+            json_reader(r#"[{"category_id":"1","category_name":"News"}]"#),
+            json_reader(r#"[{"name":"Channel","stream_id":7,"category_id":"1","added":"0"}]"#),
+        )
+        .await?;
+
+        let storage = build_input_storage_path(&input.name, directory.path().to_string_lossy().as_ref());
+        let database = super::xtream_get_file_path(&storage, XtreamCluster::Live);
+        let catalog = crate::raw_group_catalog_path(&storage, XtreamCluster::Live);
+        let database_before = tokio::fs::read(&database).await?;
+        let catalog_before = tokio::fs::read(&catalog).await?;
+
+        let result = persist_input_xtream_playlist_cluster_to_disk(
+            &app_config,
+            &input,
+            XtreamCluster::Live,
+            json_reader("[]"),
+            json_reader("[]"),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(tokio::fs::read(database).await?, database_before);
+        assert_eq!(tokio::fs::read(catalog).await?, catalog_before);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn empty_cluster_is_published_when_another_cluster_still_has_items() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let app_config = test_app_config(directory.path());
+        let input = ConfigInput { name: "empty-cluster".intern(), input_type: InputType::Xtream, ..Default::default() };
+
+        for (cluster, category, stream) in [
+            (
+                XtreamCluster::Live,
+                r#"[{"category_id":"1","category_name":"News"}]"#,
+                r#"[{"name":"Channel","stream_id":7,"category_id":"1","added":"0"}]"#,
+            ),
+            (
+                XtreamCluster::Video,
+                r#"[{"category_id":"2","category_name":"Movies"}]"#,
+                r#"[{"name":"Movie","stream_id":8,"category_id":"2","added":"0"}]"#,
+            ),
+        ] {
+            persist_input_xtream_playlist_cluster_to_disk(
+                &app_config,
+                &input,
+                cluster,
+                json_reader(category),
+                json_reader(stream),
+            )
+            .await?;
+        }
+
+        persist_input_xtream_playlist_cluster_to_disk(
+            &app_config,
+            &input,
+            XtreamCluster::Live,
+            json_reader("[]"),
+            json_reader("[]"),
+        )
+        .await?;
+
+        let storage = build_input_storage_path(&input.name, directory.path().to_string_lossy().as_ref());
+        let playlist =
+            super::load_input_xtream_playlist(&app_config, &storage, &[XtreamCluster::Live, XtreamCluster::Video])
+                .await?;
+        assert!(playlist.iter().all(|group| group.xtream_cluster != XtreamCluster::Live));
+        assert!(playlist.iter().any(|group| group.xtream_cluster == XtreamCluster::Video));
+        Ok(())
     }
 
     fn wait_for_child(mut child: Child, timeout: Duration) -> io::Result<ExitStatus> {

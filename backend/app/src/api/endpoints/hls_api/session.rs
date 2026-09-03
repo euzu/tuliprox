@@ -1,5 +1,7 @@
 #![allow(clippy::wildcard_imports)]
+
 use super::*;
+use tuliprox_core::model::AppConfig;
 
 #[derive(Clone, Debug)]
 pub(super) enum HlsOriginEntryUrl {
@@ -216,6 +218,35 @@ pub(super) fn build_hls_origin_fetch_url(
     } else {
         None
     }
+}
+
+pub(super) async fn resolve_hls_origin_fetch_url(
+    app_config: &Arc<AppConfig>,
+    input: &ConfigInput,
+    raw_request_url: &str,
+    session_entry_url: &str,
+    provider_config: Option<&Arc<RuntimeProviderConfig>>,
+) -> Option<String> {
+    if [session_entry_url, raw_request_url]
+        .into_iter()
+        .any(|url| hls_url_failover_provider_for_origin_url(input, url).is_some())
+    {
+        return build_hls_origin_fetch_url(input, raw_request_url, session_entry_url, provider_config);
+    }
+
+    if let Some(provider_config) = provider_config {
+        for candidate in [raw_request_url, session_entry_url] {
+            if let Some((_provider_name, url)) =
+                select_provider_stream_url(candidate, input, provider_config, false, app_config).await
+            {
+                if is_supported_hls_origin_url(input, &url) {
+                    return Some(url);
+                }
+            }
+        }
+    }
+
+    build_hls_origin_fetch_url(input, raw_request_url, session_entry_url, provider_config)
 }
 
 pub(super) fn rewrite_hls_provider_scheme_origin_account(
@@ -632,7 +663,8 @@ pub(super) async fn prepare_hls_origin_runtime(
                         raw_request_url,
                         session_entry_url,
                         &binding,
-                    ));
+                    )
+                    .await);
                 }
             }
         }
@@ -801,7 +833,14 @@ pub(super) async fn prepare_hls_origin_runtime_with_new_account(
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
 
-    let Some(fetch_url) = build_hls_origin_fetch_url(input, raw_request_url, session_entry_url, Some(&provider_config))
+    let Some(fetch_url) = resolve_hls_origin_fetch_url(
+        &app_state.app_config,
+        input,
+        raw_request_url,
+        session_entry_url,
+        Some(&provider_config),
+    )
+    .await
     else {
         app_state.connection_manager.release_provider_handle(Some(provider_handle)).await;
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
@@ -847,7 +886,7 @@ pub(super) async fn prepare_hls_origin_runtime_with_new_account(
     })
 }
 
-pub(super) fn prepared_hls_origin_runtime_for_known_binding(
+pub(super) async fn prepared_hls_origin_runtime_for_known_binding(
     app_state: &Arc<AppState>,
     input: &ConfigInput,
     raw_request_url: &str,
@@ -855,12 +894,15 @@ pub(super) fn prepared_hls_origin_runtime_for_known_binding(
     binding: &HlsOriginAccountBinding,
 ) -> PreparedHlsOriginRuntime {
     let runtime_provider_config = app_state.active_provider.find_provider_config(&binding.account_name);
-    let fetch_url = runtime_provider_config
-        .as_ref()
-        .and_then(|provider_config| {
-            build_hls_origin_fetch_url(input, raw_request_url, session_entry_url, Some(provider_config))
-        })
-        .unwrap_or_else(|| session_entry_url.to_string());
+    let fetch_url = resolve_hls_origin_fetch_url(
+        &app_state.app_config,
+        input,
+        raw_request_url,
+        session_entry_url,
+        runtime_provider_config.as_ref(),
+    )
+    .await
+    .unwrap_or_else(|| session_entry_url.to_string());
 
     PreparedHlsOriginRuntime {
         runtime_provider_config,
@@ -997,7 +1039,14 @@ pub(super) async fn prepare_hls_origin_policy_preempt_runtime(
         debug!("HLS origin policy preemption denied: reason=missing-provider-config");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
-    let Some(fetch_url) = build_hls_origin_fetch_url(input, raw_request_url, session_entry_url, Some(&provider_config))
+    let Some(fetch_url) = resolve_hls_origin_fetch_url(
+        &app_state.app_config,
+        input,
+        raw_request_url,
+        session_entry_url,
+        Some(&provider_config),
+    )
+    .await
     else {
         app_state.connection_manager.release_provider_handle(Some(provider_handle)).await;
         restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate).await;
@@ -1194,7 +1243,14 @@ pub(super) async fn prepare_hls_speculative_origin_runtime(
         debug!("HLS account overlap denied: reason=missing-provider-config");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
-    let Some(fetch_url) = build_hls_origin_fetch_url(input, raw_request_url, session_entry_url, Some(&provider_config))
+    let Some(fetch_url) = resolve_hls_origin_fetch_url(
+        &app_state.app_config,
+        input,
+        raw_request_url,
+        session_entry_url,
+        Some(&provider_config),
+    )
+    .await
     else {
         app_state.connection_manager.release_provider_handle(Some(provider_handle)).await;
         restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate).await;
@@ -1563,7 +1619,14 @@ pub(super) async fn rebind_hls_origin_account(
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
 
-    let Some(fetch_url) = build_hls_origin_fetch_url(input, raw_request_url, session_entry_url, Some(&provider_config))
+    let Some(fetch_url) = resolve_hls_origin_fetch_url(
+        &app_state.app_config,
+        input,
+        raw_request_url,
+        session_entry_url,
+        Some(&provider_config),
+    )
+    .await
     else {
         app_state.connection_manager.release_provider_handle(Some(provider_handle)).await;
         mark_hls_origin_rebind_failed(session, stale_binding, now_ms, "invalid_origin_url").await;

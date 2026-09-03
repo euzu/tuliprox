@@ -57,6 +57,7 @@ mod stream_probe_failure;
 mod stream_properties;
 mod strm_export_style;
 pub mod system_info;
+mod target_bouquet;
 mod target_type;
 mod transfer;
 mod ui_playlist_item;
@@ -79,8 +80,8 @@ pub use self::{
     regex_cache::*, scheduled_task_failure::*, search_fields::*, search_request::*, server_lifecycle::*, short_epg::*,
     stalker::*, stalker_item::*, stats::*, status_check::*, stream_history::*, stream_history_record::*,
     stream_info::*, stream_meter::*, stream_probe_failure::*, stream_properties::*, strm_export_style::*,
-    system_info::*, target_type::*, transfer::*, ui_playlist_item::*, user_command::*, user_lifecycle::*, uuidtype::*,
-    watch_health::*, web_socket::*, xtream::*,
+    system_info::*, target_bouquet::*, target_type::*, transfer::*, ui_playlist_item::*, user_command::*,
+    user_lifecycle::*, uuidtype::*, watch_health::*, web_socket::*, xtream::*,
 };
 pub use ids::*;
 pub use prepare::*;

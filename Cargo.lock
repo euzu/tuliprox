@@ -4486,6 +4486,7 @@ dependencies = [
  "chrono-tz",
  "ctr",
  "env_logger",
+ "fastrand",
  "flate2",
  "futures",
  "http-body-util",
@@ -4518,6 +4519,7 @@ dependencies = [
  "tuliprox-media-server",
  "tuliprox-mpegts",
  "url",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 
@@ -4784,6 +4786,7 @@ version = "3.3.102"
 dependencies = [
  "arc-swap",
  "base64 0.23.1",
+ "blake3",
  "bytes",
  "chrono",
  "crc32fast",
@@ -4798,6 +4801,7 @@ dependencies = [
  "paste",
  "rmp-serde",
  "serde",
+ "serde-saphyr",
  "serde_json",
  "shared",
  "tempfile",

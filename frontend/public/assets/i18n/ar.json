@@ -768,6 +768,7 @@
       "USERNAME": "المستخدم الذي سيتم تضمين بياناته في عناوين URL لـ .strm."
     },
     "TARGET_FORM": {
+      "BOUQUETS": "يفتح محرر باقات هذا الهدف. تحتفظ القائمة البيضاء بالمجموعات المحددة فقط، بينما تستبعد القائمة السوداء المجموعات المحددة. تسري التغييرات مع تحديث قائمة التشغيل التالي.",
       "PERSIST_FILTER": "مرشح نهائي اختياري يُطبّق بعد معالجة EPG وجميع التعيينات، مباشرة قبل الحفظ.",
       "FILTER": "تعبير تصفية عام مطبق على الهدف قبل إنشاء مخرجات صريحة.",
       "FORCE_REDIRECT": "يُجبر البث مباشرة على الوكيل أو المزود بدلاً من الحل بشكل فردي.",
@@ -892,6 +893,8 @@
     "WEB_ROOT": "Web-Root: يحتوي على ملفات واجهة الويب. عادة ما يتم وضعها في نفس الدليل تحت ./web"
   },
   "LABEL": {
+    "BACK": "رجوع",
+    "BOUQUETS": "الباقات",
     "ALL_TARGETS": "جميع الأهداف",
     "ACCEPT_INSECURE_SSL_CERTIFICATES": "قبول شهادات SSL غير الآمنة",
     "ACTIVE": "نشط",
@@ -1140,6 +1143,9 @@
     "INCLUDE_TYPE_IN_URL": "تضمين النوع في URL",
     "INFINITE": "لا نهائي",
     "INPUTS": "الإدخالات",
+    "SELECTION_MODE": "وضع التحديد",
+    "WHITELIST_INCLUDE_SELECTED": "القائمة البيضاء (تضمين المحدد)",
+    "BLACKLIST_EXCLUDE_SELECTED": "القائمة السوداء (استبعاد المحدد)",
     "INTERVAL_SECS": "فاصل الثواني",
     "INPUT_TYPE": "نوع الإدخال",
     "IP_CHECK": "فحص IP",
@@ -1436,6 +1442,7 @@
     "RESOURCE_REWRITE_DISABLE": "تعطيل إعادة كتابة المورد",
     "RESOURCE_REWRITE_DISABLED": "إعادة كتابة المورد معطلة",
     "RESERVE_SLOTS_FOR_USERS": "حجز فتحات للمستخدمين",
+    "RESET": "إعادة تعيين",
     "REST": "REST",
     "RETRY": "إعادة المحاولة",
     "REVERSE": "عكسي",
@@ -1506,6 +1513,7 @@
     "SOURCE": "مصدر",
     "SOURCES": "المصادر",
     "SOURCE_EDITOR": "المصادر",
+    "TARGET_BOUQUETS": "باقات الهدف",
     "SOURCE_PICKER": "منتقي المصدر",
     "SPECIFIC_TEMPLATES": "قوالب محددة",
     "SSDP_DISCOVERY": "اكتشاف SSDP",
@@ -1951,6 +1959,21 @@
       "SUCCESS_FINISH": "تم تحديث قائمة التشغيل بنجاح!",
       "URL_MANDATORY": "URL مطلوب!",
       "USERNAME_PASSWORD_MANDATORY": "اسم المستخدم وكلمة المرور مطلوبان!"
+    },
+    "RESET": {
+      "BOUQUET": {
+        "SUCCESS": "تمت إعادة تعيين الباقة بنجاح"
+      }
+    },
+    "TARGET_BOUQUET": {
+      "CHANGES_APPLY_ON_UPDATE": "يتم تطبيق التغييرات عند تحديث قائمة التشغيل التالي.",
+      "NO_FILTER": "لا يوجد مرشح باقات",
+      "NO_TARGETS": "لم يتم تكوين أي أهداف.",
+      "SAVE_TARGET_FIRST": "احفظ الهدف قبل تكوين الباقات",
+      "STATUS_BLACKLIST": "قائمة سوداء · {count} مجموعات",
+      "STATUS_UNAVAILABLE": "حالة الباقة غير متاحة",
+      "STATUS_WHITELIST": "قائمة بيضاء · {count} مجموعات",
+      "UNAVAILABLE_GROUPS": "المجموعات المكوّنة غير المتاحة حاليًا:"
     },
     "SAVE": {
       "API_PROXY_CONFIG": {

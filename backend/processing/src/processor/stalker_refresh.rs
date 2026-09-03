@@ -19,8 +19,8 @@ use tuliprox_iptv::stalker::{
 };
 use tuliprox_repository::{
     stalker_generation_repository::{
-        cleanup_obsolete_generations, clear_checkpoint, generation_data_path, load_checkpoint, publish_selection,
-        save_checkpoint, StalkerCheckpoint, StalkerGenerationData, StalkerRefreshPhase,
+        cleanup_obsolete_generations, clear_checkpoint, generation_data_path, load_active_manifest, load_checkpoint,
+        publish_selection, save_checkpoint, StalkerCheckpoint, StalkerGenerationData, StalkerRefreshPhase,
     },
     stalker_repository::{
         load_stalker_items_after, prepare_stalker_episode_series_at, promote_stalker_file, remove_stalker_file,
@@ -181,6 +181,42 @@ async fn load_or_start_checkpoint(
     state.phase = first_phase(selection);
     save_checkpoint(storage_path, &state).await?;
     Ok(state)
+}
+
+async fn finish_completed_refresh_checked(
+    app_config: &Arc<AppConfig>,
+    storage_path: &Path,
+    identity_fingerprint: u64,
+    checkpoint: &StalkerCheckpoint,
+) -> Result<(), TuliproxError> {
+    if checkpoint.processed == 0 {
+        let active = load_active_manifest(storage_path, identity_fingerprint).await?;
+        let mut retained_has_items = false;
+        if checkpoint.selection_mask & 0b0001 == 0 {
+            if let Some(files) = active.live.as_ref() {
+                retained_has_items = !load_stalker_items_after(app_config, &files.data, None, 1).await?.is_empty();
+            }
+        }
+        if !retained_has_items && checkpoint.selection_mask & 0b0010 == 0 {
+            if let Some(files) = active.vod.as_ref() {
+                retained_has_items = !load_stalker_items_after(app_config, &files.data, None, 1).await?.is_empty();
+            }
+        }
+        if !retained_has_items && checkpoint.selection_mask & 0b0100 == 0 {
+            if let Some(files) = active.series.as_ref() {
+                retained_has_items = !load_stalker_items_after(app_config, &files.roots, None, 1).await?.is_empty()
+                    || !load_stalker_items_after(app_config, &files.episodes, None, 1).await?.is_empty();
+            }
+        }
+        if !retained_has_items {
+            clear_checkpoint(storage_path).await?;
+            cleanup_obsolete_generations(storage_path, &active).await?;
+            return Err(TuliproxError::RepositoryPlaylist(
+                "Refusing to publish an empty Stalker playlist; existing data was retained".to_string(),
+            ));
+        }
+    }
+    finish_completed_refresh(storage_path, identity_fingerprint, checkpoint).await
 }
 
 async fn finish_completed_refresh(
@@ -532,7 +568,7 @@ pub async fn advance_stalker_refresh(
                 checkpoint.retry_count = 0;
             }
             StalkerRefreshPhase::Complete => {
-                finish_completed_refresh(storage_path, identity_fingerprint, &checkpoint).await?;
+                finish_completed_refresh_checked(app_config, storage_path, identity_fingerprint, &checkpoint).await?;
                 return Ok(StalkerRefreshOutcome::Complete);
             }
             StalkerRefreshPhase::Terminal => {
@@ -547,6 +583,42 @@ pub async fn advance_stalker_refresh(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arc_swap::{ArcSwap, ArcSwapOption};
+    use shared::model::ConfigPaths;
+    use tuliprox_core::{
+        model::{ApiProxyConfig, Config, CustomStreamResponse, HdHomeRunConfig, MediaToolCapabilities, SourcesConfig},
+        utils::FileLockManager,
+    };
+
+    fn test_app_config(storage_dir: &Path) -> Arc<AppConfig> {
+        Arc::new(AppConfig {
+            config: Arc::new(ArcSwap::from_pointee(Config {
+                storage_dir: storage_dir.to_string_lossy().into_owned(),
+                ..Config::default()
+            })),
+            sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
+            hdhomerun: Arc::new(ArcSwapOption::<HdHomeRunConfig>::default()),
+            api_proxy: Arc::new(ArcSwapOption::<ApiProxyConfig>::default()),
+            file_locks: Arc::new(FileLockManager::default()),
+            paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
+                home_path: String::new(),
+                config_path: String::new(),
+                storage_path: storage_dir.to_string_lossy().into_owned(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
+                mapping_file_path: None,
+                mapping_files_used: None,
+                template_file_path: None,
+                template_files_used: None,
+                api_proxy_file_path: String::new(),
+                custom_stream_response_path: None,
+            })),
+            custom_stream_response: Arc::new(ArcSwapOption::<CustomStreamResponse>::default()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            media_tools: Arc::new(MediaToolCapabilities::new()),
+        })
+    }
 
     #[tokio::test]
     async fn terminal_checkpoint_is_cleared_after_restart() -> Result<(), Box<dyn std::error::Error>> {
@@ -575,6 +647,30 @@ mod tests {
 
         assert_eq!(resumed.generation, 23);
         assert_eq!(resumed.phase, StalkerRefreshPhase::Complete);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn empty_complete_refresh_keeps_the_active_manifest() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let app_config = test_app_config(temp.path());
+        let mut active = tuliprox_repository::stalker_generation_repository::StalkerActiveManifest::empty(17);
+        active.live = Some(tuliprox_repository::stalker_generation_repository::ClusterFiles {
+            generation: 11,
+            data: temp.path().join("old-live.db"),
+        });
+        tuliprox_repository::stalker_generation_repository::save_active_manifest(temp.path(), &active).await?;
+
+        let selection = StalkerClusterSelection { live: true, vod: false, series: false, epg: false };
+        let mut checkpoint = StalkerCheckpoint::new(17, 23, selection.mask(), 123);
+        checkpoint.phase = StalkerRefreshPhase::Complete;
+        save_checkpoint(temp.path(), &checkpoint).await?;
+
+        let result = finish_completed_refresh_checked(&app_config, temp.path(), 17, &checkpoint).await;
+
+        assert!(result.is_err());
+        assert_eq!(load_active_manifest(temp.path(), 17).await?, active);
+        assert!(load_checkpoint(temp.path(), 17).await?.is_none());
         Ok(())
     }
 

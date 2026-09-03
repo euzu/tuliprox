@@ -7989,6 +7989,106 @@ async fn hls_entry_origin_reservation_sets_owner_reservation_before_redirect() {
 }
 
 #[tokio::test]
+async fn hls_entry_origin_reservation_uses_persisted_alias_manifest_url() {
+    use shared::model::PlaylistGroup;
+    use tuliprox_repository::{get_input_m3u_playlist_file_path, get_input_storage_path, persist_input_m3u_playlist};
+
+    let temp = tempfile::tempdir().expect("temp dir should be created");
+    let input = ConfigInput {
+        id: 1,
+        name: Arc::from("primary-account"),
+        input_type: InputType::M3u,
+        url: "http://playlist.example/list.m3u?access_key=primary-playlist-key".to_string(),
+        enabled: true,
+        max_connections: 1,
+        aliases: Some(vec![crate::model::ConfigInputAlias {
+            id: 2,
+            name: Arc::from("alias-account"),
+            url: "http://playlist.example/list.m3u?access_key=alias-playlist-key".to_string(),
+            username: None,
+            password: None,
+            max_connections: 0,
+            priority: 0,
+            exp_date: None,
+            enabled: true,
+            stalker: None,
+        }]),
+        ..ConfigInput::default()
+    };
+    let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+    let mut config = (*app_state.app_config.config.load_full()).clone();
+    config.storage_dir = temp.path().to_string_lossy().into_owned();
+    app_state.app_config.config.store(Arc::new(config));
+
+    let alias_name = "alias-account".intern();
+    let storage_path = get_input_storage_path(&alias_name, &app_state.app_config.config.load().storage_dir)
+        .await
+        .expect("alias storage should be created");
+    let playlist_path = get_input_m3u_playlist_file_path(&storage_path, &alias_name);
+    let alias_playlist = vec![PlaylistGroup {
+        id: 1,
+        title: "Live".intern(),
+        channels: vec![PlaylistItem {
+            header: PlaylistItemHeader {
+                id: "news24hd".intern(),
+                input_stream_id: "news24hd".intern(),
+                url: "http://stream.example:4000/news24hd/mono.m3u8?token=alias-stream-token".intern(),
+                item_type: PlaylistItemType::Live,
+                xtream_cluster: XtreamCluster::Live,
+                ..PlaylistItemHeader::default()
+            },
+        }],
+        xtream_cluster: XtreamCluster::Live,
+    }];
+    persist_input_m3u_playlist(&app_state.app_config, &playlist_path, &alias_playlist)
+        .await
+        .expect("alias playlist should persist");
+
+    let primary_handle = app_state
+        .active_provider
+        .acquire_exact_connection_with_grace_for_session(
+            &input.name,
+            &test_fingerprint().addr,
+            false,
+            0,
+            ConnectionKind::Normal,
+            Some("primary-session"),
+        )
+        .await
+        .expect("primary account should be allocated");
+
+    let reservation = super::try_reserve_hls_entry_origin_account_for_redirect(
+        &app_state,
+        &test_fingerprint(),
+        &{
+            let mut creds = ProxyUserCredentials::default();
+            creds.username = "hls-user".to_string();
+            creds
+        },
+        &input,
+        12345,
+        "http://stream.example:4000/news24hd/mono.m3u8?token=primary-stream-token",
+        "alias-session-token",
+        "alias-session-owner",
+        super::hls_origin_account_reservation_ttl_secs_fallback(),
+        UserConnectionPermission::Allowed,
+        ConnectionKind::Normal,
+        false,
+    )
+    .await
+    .expect("alias provider reservation should succeed");
+
+    assert_eq!(
+        reservation.selected_provider_config.as_ref().map(|provider| provider.name.as_ref()),
+        Some("alias-account")
+    );
+    assert_eq!(reservation.request_url, "http://stream.example:4000/news24hd/mono.m3u8?token=alias-stream-token");
+
+    app_state.connection_manager.release_provider_handle(reservation.provider_handle).await;
+    app_state.connection_manager.release_provider_handle(Some(primary_handle)).await;
+}
+
+#[tokio::test]
 async fn hls_virtual_entry_reservation_uses_input_stream_id_for_shared_session_owner() {
     let input = single_hls_provider_input("origin-id-reservation-input");
     let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);

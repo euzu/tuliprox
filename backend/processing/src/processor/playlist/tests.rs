@@ -160,13 +160,118 @@ fn execute_pipe_freezes_input_stream_id_without_rename_or_mapper() {
     let mut duplicates = HashSet::new();
     let target = ConfigTarget::from(&ConfigTargetDto::default());
 
-    let (mut processed, _outcome) =
-        execute_pipe(&target, &vec![], &mut fetched, &mut duplicates, false).expect("target processing should succeed");
+    let (mut processed, _outcome) = execute_pipe(&target, &vec![], &mut fetched, &mut duplicates, false, None)
+        .expect("target processing should succeed");
     let mut groups = processed.source.take_groups();
 
     assert_eq!(groups[0].channels[0].header.input_stream_id.as_ref(), "origin-alpha");
     assert!(groups[0].channels[0].header.set_field("id", "late-target-id"));
     assert_eq!(groups[0].channels[0].header.input_stream_id.as_ref(), "origin-alpha");
+}
+
+#[test]
+fn execute_pipe_applies_target_bouquet_prefilter() {
+    let input = ConfigInput::default();
+    let item1 = PlaylistItem {
+        header: PlaylistItemHeader {
+            id: "ch-1".intern(),
+            group: "Kids".intern(),
+            xtream_cluster: XtreamCluster::Live,
+            ..Default::default()
+        },
+    };
+    let item2 = PlaylistItem {
+        header: PlaylistItemHeader {
+            id: "ch-2".intern(),
+            group: "Adults".intern(),
+            xtream_cluster: XtreamCluster::Live,
+            ..Default::default()
+        },
+    };
+    let source = MemoryPlaylistSource::new(vec![
+        PlaylistGroup { id: 1, title: "Kids".intern(), channels: vec![item1], xtream_cluster: XtreamCluster::Live },
+        PlaylistGroup { id: 2, title: "Adults".intern(), channels: vec![item2], xtream_cluster: XtreamCluster::Live },
+    ])
+    .into_source();
+    let mut fetched = FetchedPlaylist { input: &input, source, epg: None };
+    let mut duplicates = HashSet::new();
+    let target = ConfigTarget::from(&ConfigTargetDto::default());
+
+    let bouquet_dto =
+        shared::model::PlaylistClusterBouquetDto { live: Some(vec!["Kids".to_string()]), vod: None, series: None };
+    let filter =
+        tuliprox_core::model::TargetBouquetFilter::from_dto(shared::model::TargetBouquetDto::whitelist(bouquet_dto))
+            .unwrap();
+
+    let (mut processed, _outcome) = execute_pipe(&target, &vec![], &mut fetched, &mut duplicates, false, Some(&filter))
+        .expect("target processing should succeed");
+    let groups = processed.source.take_groups();
+
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].title.as_ref(), "Kids");
+    assert_eq!(groups[0].channels.len(), 1);
+    assert_eq!(groups[0].channels[0].header.id.as_ref(), "ch-1");
+}
+
+#[test]
+fn execute_pipe_prefilter_does_not_suppress_allowed_duplicate() {
+    let input = ConfigInput::default();
+    // Two items with the same URL (same UUID): one in disallowed group, one in allowed group.
+    let item_disallowed = PlaylistItem {
+        header: PlaylistItemHeader {
+            id: "ch-1".intern(),
+            url: "http://provider.example/stream.ts".intern(),
+            group: "Adults".intern(),
+            xtream_cluster: XtreamCluster::Live,
+            ..Default::default()
+        },
+    };
+    let item_allowed = PlaylistItem {
+        header: PlaylistItemHeader {
+            id: "ch-2".intern(),
+            url: "http://provider.example/stream.ts".intern(),
+            group: "Kids".intern(),
+            xtream_cluster: XtreamCluster::Live,
+            ..Default::default()
+        },
+    };
+    let source = MemoryPlaylistSource::new(vec![
+        PlaylistGroup {
+            id: 1,
+            title: "Adults".intern(),
+            channels: vec![item_disallowed],
+            xtream_cluster: XtreamCluster::Live,
+        },
+        PlaylistGroup {
+            id: 2,
+            title: "Kids".intern(),
+            channels: vec![item_allowed],
+            xtream_cluster: XtreamCluster::Live,
+        },
+    ])
+    .into_source();
+    let mut fetched = FetchedPlaylist { input: &input, source, epg: None };
+    let mut duplicates = HashSet::new();
+    let target = ConfigTarget::from(&ConfigTargetDto {
+        options: Some(ConfigTargetOptions { remove_duplicates: true, ..Default::default() }),
+        ..Default::default()
+    });
+
+    let bouquet_dto =
+        shared::model::PlaylistClusterBouquetDto { live: Some(vec!["Kids".to_string()]), vod: None, series: None };
+    let filter =
+        tuliprox_core::model::TargetBouquetFilter::from_dto(shared::model::TargetBouquetDto::whitelist(bouquet_dto))
+            .unwrap();
+
+    let (mut processed, _outcome) = execute_pipe(&target, &vec![], &mut fetched, &mut duplicates, false, Some(&filter))
+        .expect("target processing should succeed");
+    let groups = processed.source.take_groups();
+
+    // The allowed item must be retained because the rejected item did not consume the duplicate UUID slot.
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].title.as_ref(), "Kids");
+    assert_eq!(groups[0].channels.len(), 1);
+    assert_eq!(groups[0].channels[0].header.id.as_ref(), "ch-2");
 }
 
 #[test]
@@ -1330,7 +1435,7 @@ match {
             FetchedPlaylist { input: &input, source: memory_source(vec![channel.clone(), channel]), epg: None };
         let mut duplicates = HashSet::new();
         let (mut processed, _outcome) =
-            execute_pipe(&target, &get_processing_pipe(&target), &mut fetched, &mut duplicates, false)
+            execute_pipe(&target, &get_processing_pipe(&target), &mut fetched, &mut duplicates, false, None)
                 .expect("processing pipe must run");
         assert_eq!(processed.get_channel_count(), 1, "processing pipe must remove the duplicate");
 

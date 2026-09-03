@@ -24,7 +24,7 @@ use tuliprox_core::{
 use tuliprox_parser::{xtream, xtream::parse_xtream_series_info};
 use tuliprox_repository::{
     get_input_storage_path, get_target_id_mapping, get_target_storage_path, persist_input_vod_info,
-    persist_input_xtream_playlist_cluster_to_disk, persists_input_series_info,
+    persist_input_xtream_playlist_clusters_to_disk, persists_input_series_info,
     rewrite_provider_series_info_episode_virtual_id, write_playlist_batch_item_upsert, write_playlist_item_update,
     PlaylistStorageState, ProviderEpisodeKey, VirtualIdRecord,
 };
@@ -541,6 +541,7 @@ async fn download_xtream_from_source<E: EventSink>(
     let use_disk_based_processing = cfg.disk_based_processing && source_input_type.is_xtream();
 
     let mut errors = vec![];
+    let mut disk_cluster_readers = Vec::new();
     for (xtream_cluster, category, stream) in &ACTIONS {
         if !clusters.contains(xtream_cluster) {
             continue;
@@ -564,18 +565,7 @@ async fn download_xtream_from_source<E: EventSink>(
         ) {
             (Ok(category_content), Ok(stream_content)) => {
                 if use_disk_based_processing {
-                    if let Err(err) = persist_input_xtream_playlist_cluster_to_disk(
-                        app_config,
-                        input,
-                        *xtream_cluster,
-                        category_content,
-                        stream_content,
-                    )
-                    .await
-                    {
-                        error!("persist_input_xtream_playlist_cluster_to_disk failed: {err}");
-                        errors.push(err);
-                    }
+                    disk_cluster_readers.push((*xtream_cluster, category_content, stream_content));
                 } else {
                     match xtream::parse_xtream(input, *xtream_cluster, category_content, stream_content).await {
                         Ok(sub_playlist_parsed) => {
@@ -597,6 +587,14 @@ async fn download_xtream_from_source<E: EventSink>(
                 errors.extend([err1, err2]);
             }
             (_, Err(err)) | (Err(err), _) => errors.push(err),
+        }
+    }
+
+    if use_disk_based_processing && errors.is_empty() && !disk_cluster_readers.is_empty() {
+        if let Err(err) = persist_input_xtream_playlist_clusters_to_disk(app_config, input, disk_cluster_readers).await
+        {
+            error!("persist_input_xtream_playlist_clusters_to_disk failed: {err}");
+            errors.push(err);
         }
     }
 

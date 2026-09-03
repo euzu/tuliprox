@@ -33,6 +33,8 @@ struct LocalEpisodeKey {
     virtual_id: u32,
 }
 
+fn playlist_has_items(playlist: &[PlaylistGroup]) -> bool { playlist.iter().any(|group| !group.channels.is_empty()) }
+
 pub struct ProviderEpisodeKey {
     pub provider_id: u32,
     pub virtual_id: u32,
@@ -65,6 +67,12 @@ pub async fn persist_playlist(
     target: &ConfigTarget,
     playlist_state: Option<&Arc<PlaylistStorageState>>,
 ) -> Result<(), Vec<TuliproxError>> {
+    if !playlist_has_items(playlist) {
+        return Err(vec![TuliproxError::RepositoryPlaylist(format!(
+            "Refusing to persist empty playlist for target '{}'; existing data was retained",
+            target.name
+        ))]);
+    }
     let mut errors = vec![];
     let config = &app_config.config.load();
     let target_path = match ensure_target_storage_path(config, &target.name).await {
@@ -629,13 +637,71 @@ pub async fn load_m3u_target_storage(
     }
 }
 
+async fn publish_all_cluster_catalogs(
+    app_config: &AppConfig,
+    storage_path: &Path,
+    input_name: &str,
+    persisted_playlist: Vec<PlaylistGroup>,
+) -> (Vec<PlaylistGroup>, Option<TuliproxError>) {
+    let mut live_groups = Vec::new();
+    let mut vod_groups = Vec::new();
+    let mut series_groups = Vec::new();
+    for group in &persisted_playlist {
+        match group.xtream_cluster {
+            XtreamCluster::Live => live_groups.push(group.title.to_string()),
+            XtreamCluster::Video => vod_groups.push(group.title.to_string()),
+            XtreamCluster::Series => series_groups.push(group.title.to_string()),
+        }
+    }
+    for (cluster, groups) in
+        [(XtreamCluster::Live, live_groups), (XtreamCluster::Video, vod_groups), (XtreamCluster::Series, series_groups)]
+    {
+        if let Err(publish_err) =
+            crate::publish_raw_group_catalog(storage_path, input_name, cluster, groups, &app_config.file_locks).await
+        {
+            warn!(
+                "Playlist data for input '{input_name}' was persisted, but publishing its raw group catalog for cluster {cluster:?} failed: {publish_err}"
+            );
+        }
+    }
+    (persisted_playlist, None)
+}
+
 pub async fn persist_input_playlist(
     app_config: &Arc<AppConfig>,
     input: &ConfigInput,
     mut playlist: Vec<PlaylistGroup>,
 ) -> (Vec<PlaylistGroup>, Option<TuliproxError>) {
-    if playlist.is_empty() {
-        warn!("Skipping empty playlist for input {}", input.name);
+    if !playlist_has_items(&playlist) {
+        let empty_error = TuliproxError::RepositoryPlaylist(format!(
+            "Refusing to persist empty playlist for input '{}'; existing data was retained",
+            input.name
+        ));
+        warn!("{empty_error}");
+        return match load_input_playlist(app_config, input, None).await {
+            Ok(mut previous) => {
+                if previous.is_empty() {
+                    (playlist, Some(empty_error))
+                } else {
+                    (previous.take_groups(), Some(empty_error))
+                }
+            }
+            Err(load_err) => (
+                playlist,
+                Some(TuliproxError::RepositoryPlaylist(format!(
+                    "{empty_error}; failed to load the retained input playlist: {load_err}"
+                ))),
+            ),
+        };
+    }
+    if input.get_download_input_type().persistence() == InputPersistence::Stalker {
+        // The Stalker processor (`processor::stalker::download_stalker_playlist`)
+        // is the single writer of the per-cluster B+Tree and raw group catalogs.
+        // Re-encoding the `PlaylistItem` runtime projection back into `StalkerPlaylistItem`
+        // would destroy the canonical `cmd`/`playback_descriptor`/capability
+        // flags the processor just persisted — including the field the
+        // runtime 4xx-re-resolve hook relies on. The disk layout is
+        // already in sync; nothing to do here.
         return (playlist, None);
     }
     playlist.iter_mut().for_each(PlaylistGroup::on_load);
@@ -653,7 +719,7 @@ pub async fn persist_input_playlist(
         }
     };
 
-    match input.get_download_input_type().persistence() {
+    let (persisted_playlist, err) = match input.get_download_input_type().persistence() {
         InputPersistence::Xtream => persist_input_xtream_playlist(app_config, &storage_path, playlist).await,
 
         InputPersistence::M3u => {
@@ -681,17 +747,14 @@ pub async fn persist_input_playlist(
             }
             (playlist, None)
         }
-        InputPersistence::Stalker => {
-            // The Stalker processor (`processor::stalker::download_stalker_playlist`)
-            // is the single writer of the per-cluster B+Tree. Re-encoding the
-            // `PlaylistItem` runtime projection back into `StalkerPlaylistItem`
-            // would destroy the canonical `cmd`/`playback_descriptor`/capability
-            // flags the processor just persisted — including the field the
-            // runtime 4xx-re-resolve hook relies on. The disk layout is
-            // already in sync; nothing to do here.
-            (playlist, None)
-        }
+        InputPersistence::Stalker => unreachable!("handled above"),
+    };
+
+    if err.is_none() {
+        return publish_all_cluster_catalogs(app_config, &storage_path, &input.name, persisted_playlist).await;
     }
+
+    (persisted_playlist, err)
 }
 
 pub async fn load_input_playlist(
@@ -871,7 +934,7 @@ mod tests {
     use super::{
         assign_local_series_info_episode_key, assign_media_server_series_info_episode,
         get_input_media_server_playlist_file_path, materialize_media_server_series_info_episodes,
-        normalize_target_playlist_epg_ids, rewrite_local_series_info_episode_virtual_id,
+        normalize_target_playlist_epg_ids, playlist_has_items, rewrite_local_series_info_episode_virtual_id,
         rewrite_series_episode_parent_virtual_ids, rewrite_series_info_episode_virtual_id, skipped_clusters,
         LocalEpisodeKey, ProviderEpisodeKey,
     };
@@ -886,6 +949,17 @@ mod tests {
         utils::Internable,
     };
     use std::{collections::HashMap, sync::Arc};
+
+    #[test]
+    fn playlist_without_channels_is_empty_for_persistence() {
+        assert!(!playlist_has_items(&[]));
+        assert!(!playlist_has_items(&[PlaylistGroup {
+            id: 1,
+            title: "empty".intern(),
+            channels: Vec::new(),
+            xtream_cluster: XtreamCluster::Live,
+        }]));
+    }
     use tempfile::tempdir;
 
     #[test]
