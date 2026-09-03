@@ -642,6 +642,11 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
         }
     }
 
+    if input.input_type == InputType::M3u {
+        let alias_errors = download_m3u_alias_playlists(ctx, input).await;
+        playlist_download_result.download_err.extend(alias_errors);
+    }
+
     if mark_as_processed && !playlist_download_result.partial && error.is_none() && !playlist.is_empty() {
         // Mark after persist/load so other workers only see this input as ready when data is usable.
         ctx.mark_input_downloaded(input.name.clone()).await;
@@ -651,6 +656,45 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
     drop(input_lock);
 
     (playlist_download_result.download_err, playlist, error, playlist_download_result.partial)
+}
+
+async fn download_m3u_alias_playlists<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
+    input: &ConfigInput,
+) -> Vec<TuliproxError> {
+    let Some(aliases) = input.get_enabled_aliases() else { return vec![] };
+    let mut errors = Vec::new();
+
+    for alias in aliases {
+        if ctx.is_input_downloaded(&alias.name).await {
+            continue;
+        }
+
+        let mut alias_input = input.as_input(alias);
+        // A user-provided raw-playlist persist path belongs to the primary input. Alias
+        // snapshots use their own internal storage so accounts never overwrite each other.
+        alias_input.persist = None;
+        alias_input.epg = None;
+        let alias_input = Arc::new(alias_input);
+
+        let (mut alias_errors, mut alias_playlist, storage_error, partial) =
+            Box::pin(download_input(ctx, &alias_input, false)).await;
+        let alias_had_errors = !alias_errors.is_empty() || storage_error.is_some();
+        errors.append(&mut alias_errors);
+        if let Some(storage_error) = storage_error {
+            errors.push(storage_error);
+        }
+        if partial {
+            errors.push(TuliproxError::RepositoryPlaylist(format!(
+                "M3U alias '{}' returned a partial playlist",
+                alias.name
+            )));
+        } else if alias_playlist.is_empty() && !alias_had_errors {
+            errors.push(TuliproxError::RepositoryPlaylist(format!("M3U alias '{}' playlist is empty", alias.name)));
+        }
+    }
+
+    errors
 }
 
 pub(crate) fn create_broadcast_callback<E: EventSink + Clone + 'static>(events: &E) -> StepMeasureCallback {

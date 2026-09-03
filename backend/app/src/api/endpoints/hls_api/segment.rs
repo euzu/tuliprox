@@ -2375,7 +2375,9 @@ pub(in crate::api) async fn handle_hls_stream_request(
             Some(ProviderAllocation::Exhausted) => (url, None, provider_handle, None),
             Some(ProviderAllocation::Available(cfg) | ProviderAllocation::GracePeriod(cfg)) => {
                 let selected_provider_config = Arc::clone(cfg);
-                let Some(stream_url) = get_stream_alternative_url(&url, input, cfg) else {
+                let Some((_provider_name, stream_url)) =
+                    select_provider_stream_url(&url, input, cfg, false, &app_state.app_config).await
+                else {
                     app_state.connection_manager.release_provider_handle(provider_handle).await;
                     return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
                 };
