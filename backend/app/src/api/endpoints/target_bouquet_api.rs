@@ -197,7 +197,7 @@ async fn get_target_bouquet_status(
     State(app_state): State<Arc<AppState>>,
     Query(query): Query<TargetBouquetQuery>,
 ) -> Response {
-    match target_summary(&app_state, &query.target).await {
+    let mut response = match target_summary(&app_state, &query.target).await {
         Ok(Some(target)) => Json(target).into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
@@ -207,7 +207,9 @@ async fn get_target_bouquet_status(
         Err(err) => {
             (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": err.to_string() }))).into_response()
         }
-    }
+    };
+    response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 async fn get_target_bouquet_groups(

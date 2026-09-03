@@ -1329,7 +1329,8 @@ raw catalog therefore shows no available groups until a playlist update has comp
 saved bouquet are normal states, not configuration errors.
 
 Bouquet files are associated with the unique target name rather than the transient numeric target ID used by the Web
-UI. Renaming or deleting a target through the Source Editor moves or removes its bouquet together with the target.
+UI. Renaming a target through the Source Editor removes the bouquet stored under the old name; no bouquet is created or
+moved under the new target name. Deleting a target removes its bouquet together with the target.
 
 > **Update safety:** Tuliprox treats a completely empty input or target playlist as a failed refresh and retains the
 > previously published data. This protects stable virtual IDs when a provider temporarily returns no data or a download
@@ -1950,3 +1951,6 @@ watch:
 
 > **Note:** `watch` is especially useful for monitoring premium groups, VOD collections,
 > or unstable provider segments where additions and removals should generate operational alerts.
+
+> **Processing order:** watch evaluation runs only after `persist_playlist` succeeds. If persistence fails, watch
+> evaluation is skipped and no watch events are emitted for that target on that update.

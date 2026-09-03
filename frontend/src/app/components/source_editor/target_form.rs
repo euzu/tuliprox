@@ -221,6 +221,7 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
         let bouquet_status = bouquet_status.clone();
         let target_name = bouquet_target_name.clone();
         let reload = source_editor_ctx.bouquet_revision;
+        let request_generation = use_state(|| 0_u64);
         use_effect_with((target_name, reload, can_read_bouquets), move |(target_name, _, can_read)| {
             if !can_read || target_name.is_empty() {
                 bouquet_status.set(BouquetStatus::Ready(None));
@@ -228,8 +229,18 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
             }
             bouquet_status.set(BouquetStatus::Loading);
             let target_name = target_name.clone();
+            let my_generation = {
+                let next = *request_generation + 1;
+                request_generation.set(next);
+                next
+            };
+            let request_generation = request_generation.clone();
             spawn_local(async move {
-                match TargetBouquetService::fetch_target_status(&target_name).await {
+                let result = TargetBouquetService::fetch_target_status(&target_name).await;
+                if *request_generation != my_generation {
+                    return;
+                }
+                match result {
                     Ok(target) => bouquet_status.set(BouquetStatus::Ready(Some(target))),
                     Err(crate::error::Error::NotFound) => bouquet_status.set(BouquetStatus::Ready(None)),
                     Err(_) => bouquet_status.set(BouquetStatus::Unavailable),
