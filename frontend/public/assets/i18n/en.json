@@ -508,6 +508,7 @@
       },
       "STAGED_CLUSTERS": "Clusters this staged input overrides on the connected provider input.",
       "STAGED_PERSIST": "Optional file path used to persist or reuse the downloaded staged playlist.",
+      "UPDATE_QUALITY": "Minimum accepted cluster update quality in percent. A value of 0 disables the quality check.",
       "URL": "Source URL for this input.",
       "SERIES_SOURCE": "Source selector for the Series cluster when staged input is enabled (`default`, `staged`, `input`, `skip`).",
       "VOD_SOURCE": "Source selector for the VOD cluster when staged input is enabled (`default`, `staged`, `input`, `skip`)."
@@ -1707,6 +1708,7 @@
     "UI_ENABLED": "Ui",
     "UNDERSCORE_WHITESPACE": "Underscore whitespace",
     "UPDATE": "Update",
+    "UPDATE_QUALITY": "Update quality",
     "UPDATE_GEOIP_DB": "Update Geo-IP db",
     "UPDATE_LOCAL_LIBRARY": "Update Local Library",
     "UPDATE_ON_BOOT": "Update on boot",

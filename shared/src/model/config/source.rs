@@ -287,6 +287,62 @@ mod tests {
     }
 
     #[test]
+    fn legacy_source_yaml_without_update_quality_round_trips_with_disabled_defaults() {
+        let yaml = r"
+inputs:
+  - name: legacy-provider
+    type: xtream
+    url: https://provider.example
+    username: user
+    password: password
+    options:
+      skip_vod: true
+sources: []
+";
+
+        let parsed: SourcesConfigDto = serde_saphyr::from_str(yaml).expect("legacy source config should parse");
+        let options = parsed.inputs[0].options.as_ref().expect("legacy options should be present");
+        assert!(options.update_quality.is_disabled());
+
+        let serialized = serde_saphyr::to_string(&parsed).expect("legacy source config should serialize");
+        assert!(!serialized.contains("update_quality"));
+        let reparsed: SourcesConfigDto =
+            serde_saphyr::from_str(&serialized).expect("serialized legacy source config should parse");
+        assert_eq!(reparsed, parsed);
+    }
+
+    #[test]
+    fn source_yaml_round_trip_preserves_all_update_quality_thresholds() {
+        let yaml = r"
+inputs:
+  - name: guarded-provider
+    type: stalker
+    url: https://provider.example
+    username: user
+    password: password
+    options:
+      update_quality:
+        live: 90
+        vod: 95
+        series: 100
+sources: []
+";
+
+        let parsed: SourcesConfigDto = serde_saphyr::from_str(yaml).expect("guarded source config should parse");
+        let quality = parsed.inputs[0]
+            .options
+            .as_ref()
+            .map(|options| options.update_quality)
+            .expect("update quality should be present");
+        assert_eq!((quality.live, quality.vod, quality.series), (90, 95, 100));
+
+        let serialized = serde_saphyr::to_string(&parsed).expect("guarded source config should serialize");
+        let reparsed: SourcesConfigDto =
+            serde_saphyr::from_str(&serialized).expect("serialized guarded source config should parse");
+        assert_eq!(reparsed, parsed);
+    }
+
+    #[test]
     fn duplicate_credentials_warning_identifies_same_url_account() {
         let previous = CredentialOwner { kind: "input", name: "primary", url: "provider://example" };
         let current = CredentialOwner { kind: "input", name: "duplicate", url: "provider://example" };

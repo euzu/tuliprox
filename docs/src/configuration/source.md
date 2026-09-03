@@ -245,6 +245,7 @@ specific provider.
 | Parameter                                  | Type     | Default | Technical Impact & Background                                                                                                                                                                                                          |
 |:-------------------------------------------|:---------|:--------|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `skip_live` / `skip_vod` / `skip_series`   | Bool     | `false` | Immediately ignores entire categories during Xtream or Stalker ingestion. Saves massive amounts of RAM and runtime if you only want specific clusters from a provider.                                                                 |
+| `update_quality.live` / `.vod` / `.series` | Int      | `0`     | Rejects an independently downloaded Xtream or Stalker cluster when its item count differs too much from the last accepted cluster. Values are percentages from `0` through `100`; `0` disables the guard.                              |
 | `xtream_live_stream_without_extension`     | Bool     | `false` | Strips `.ts` from generated stream URLs.                                                                                                                                                                                               |
 | `xtream_live_stream_use_prefix`            | Bool     | `true`  | Injects the `/live/` prefix into URLs.                                                                                                                                                                                                 |
 | `disable_hls_streaming`                    | Bool     | `false` | Rewrites live `.m3u8` requests to `.ts` and bypasses Tuliprox HLS handling.                                                                                                                                                            |
@@ -263,6 +264,40 @@ specific provider.
 
 > **Note:** For `resolve_vod` and `resolve_series`, data is cached per input and only new or changed entries are
 > updated.
+
+#### Update quality guard
+
+`update_quality` protects independently refreshable Live, VOD, and Series clusters from unexpectedly small or large
+provider responses. It is available for Xtream, expanded Xtream batch inputs, staged Xtream inputs, Stalker, and
+expanded Stalker batch inputs. M3U remains outside this feature because an M3U download is one snapshot rather than
+three independently publishable upstream clusters.
+
+```yaml
+inputs:
+  - name: guarded-provider
+    type: xtream
+    url: https://provider.example
+    username: user
+    password: password
+    options:
+      update_quality:
+        live: 90
+        vod: 90
+        series: 100
+```
+
+Each value is a minimum percentage of similarity between the previous and candidate item counts:
+
+* `0` disables the additional check and preserves the behavior of existing configurations.
+* `90` accepts counts from 90% through 110% of the previous count, including both boundaries.
+* `100` accepts only an identical item count.
+
+With no previous cluster, the first non-empty candidate is accepted as the baseline; an empty candidate is not. A
+rejected Xtream cluster retains its active cluster database and associated categories. A rejected Stalker cluster keeps
+its previous active manifest entry and generation. Accepted clusters from the same update continue to publication, so
+target processing receives newly accepted clusters together with retained clusters. The input remains usable and the
+overall update is reported as partial. For Xtream, only the rejected cluster is marked for retry in the input cache;
+Stalker continues to use its existing requested selection and refresh lifecycle.
 
 #### Minimal Xtream MPEG-TS Example
 

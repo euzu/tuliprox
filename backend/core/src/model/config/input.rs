@@ -1,5 +1,5 @@
 use crate::{
-    model::{macros, ConfigProvider, EpgConfig, PanelApiConfig},
+    model::{macros, ConfigInputUpdateQuality, ConfigProvider, EpgConfig, PanelApiConfig},
     utils::get_csv_file_path,
 };
 use chrono::Utc;
@@ -57,6 +57,7 @@ create_bitset!(
 #[derive(Debug, Clone)]
 pub struct ConfigInputOptions {
     pub flags: ConfigInputFlagsSet,
+    pub update_quality: ConfigInputUpdateQuality,
     pub resolve_delay: u16,
     pub probe_delay: u16,
     pub probe_live_interval_hours: u32,
@@ -101,6 +102,7 @@ impl From<&ConfigInputOptionsDto> for ConfigInputOptions {
 
         Self {
             flags,
+            update_quality: ConfigInputUpdateQuality::from(&dto.update_quality),
             resolve_delay: dto.resolve_delay,
             probe_delay: dto.probe_delay,
             probe_live_interval_hours: dto.probe_live_interval_hours,
@@ -1077,7 +1079,8 @@ mod tests {
     use super::*;
     use crate::model::ConfigProvider;
     use shared::model::{
-        ConfigProviderDto, MediaServerInputConfigDto, MediaServerLibrarySelector, ProviderUrlSelectionPolicy,
+        ConfigInputUpdateQualityDto, ConfigProviderDto, MediaServerInputConfigDto, MediaServerLibrarySelector,
+        ProviderUrlSelectionPolicy, XtreamCluster,
     };
     use std::{borrow::Cow, sync::Arc};
 
@@ -1090,11 +1093,92 @@ mod tests {
 
     #[test]
     fn input_options_conversion_sets_disable_hls_streaming_flag() {
-        let dto = ConfigInputOptionsDto { disable_hls_streaming: true, ..ConfigInputOptionsDto::default() };
+        let dto = ConfigInputOptionsDto {
+            disable_hls_streaming: true,
+            update_quality: ConfigInputUpdateQualityDto { live: 95, vod: 90, series: 85 },
+            ..ConfigInputOptionsDto::default()
+        };
 
         let options = ConfigInputOptions::from(&dto);
 
         assert!(options.has_flag(ConfigInputFlags::DisableHlsStreaming));
+        assert_eq!(options.update_quality.threshold(XtreamCluster::Live), 95);
+        assert_eq!(options.update_quality.threshold(XtreamCluster::Video), 90);
+        assert_eq!(options.update_quality.threshold(XtreamCluster::Series), 85);
+    }
+
+    fn quality_options_dto() -> ConfigInputOptionsDto {
+        ConfigInputOptionsDto {
+            update_quality: ConfigInputUpdateQualityDto { live: 95, vod: 90, series: 85 },
+            ..ConfigInputOptionsDto::default()
+        }
+    }
+
+    fn assert_update_quality_is_preserved(input: &ConfigInput) {
+        let options = input.options.as_ref().expect("runtime input options");
+        assert_eq!(options.update_quality.threshold(XtreamCluster::Live), 95);
+        assert_eq!(options.update_quality.threshold(XtreamCluster::Video), 90);
+        assert_eq!(options.update_quality.threshold(XtreamCluster::Series), 85);
+    }
+
+    #[test]
+    fn alias_conversion_inherits_update_quality() {
+        let dto = ConfigInputDto {
+            input_type: InputType::Xtream,
+            options: Some(quality_options_dto()),
+            aliases: Some(vec![ConfigInputAliasDto {
+                name: "alias".into(),
+                url: "https://alias.example.invalid".to_string(),
+                ..ConfigInputAliasDto::default()
+            }]),
+            ..ConfigInputDto::default()
+        };
+        let input = ConfigInput::from(&dto);
+        let alias = input.aliases.as_ref().and_then(|aliases| aliases.first()).expect("runtime alias");
+
+        let alias_input = input.as_input(alias);
+
+        assert_update_quality_is_preserved(&alias_input);
+    }
+
+    #[test]
+    fn batch_conversion_preserves_update_quality_when_promoting_alias() {
+        let mut input = ConfigInput::from(&ConfigInputDto {
+            input_type: InputType::XtreamBatch,
+            url: "batch:///tmp/aliases.csv".to_string(),
+            enabled: true,
+            options: Some(quality_options_dto()),
+            aliases: Some(vec![ConfigInputAliasDto {
+                name: "alias".into(),
+                url: "https://alias.example.invalid".to_string(),
+                username: Some("user".to_string()),
+                password: Some("password".to_string()),
+                enabled: true,
+                ..ConfigInputAliasDto::default()
+            }]),
+            ..ConfigInputDto::default()
+        });
+
+        let _ = input.prepare_batch();
+
+        assert_eq!(input.input_type, InputType::Xtream);
+        assert_update_quality_is_preserved(&input);
+    }
+
+    #[test]
+    fn staged_xtream_conversion_preserves_update_quality() {
+        let mut input = ConfigInput::from(&ConfigInputDto {
+            input_type: InputType::Staged,
+            staged_type: StagedInputType::Xtream,
+            options: Some(quality_options_dto()),
+            staged: Some(ConfigInputStagedDto { for_input: Some("provider".into()), clusters: ClusterFlags::all() }),
+            ..ConfigInputDto::default()
+        });
+
+        input.resolve_staged_download_type();
+
+        assert_eq!(input.input_type, InputType::Xtream);
+        assert_update_quality_is_preserved(&input);
     }
 
     #[test]

@@ -14,7 +14,8 @@ use crate::{
             },
             dto_field_id,
             number_input::NumberInput,
-            Card, Chip, DropDownOption, DropDownSelection, IconButton, RadioButtonGroup, Select, TextButton,
+            Card, Chip, DropDownOption, DropDownSelection, IconButton, RadioButtonGroup, RangeSlider, Select,
+            TextButton,
         },
         context::ConfigContext,
     },
@@ -37,7 +38,6 @@ use shared::{
 };
 use std::{rc::Rc, str::FromStr};
 use strum::IntoEnumIterator;
-use web_sys::HtmlInputElement;
 use yew::prelude::*;
 
 const LABEL_CACHE: &str = "LABEL.CACHE";
@@ -1050,56 +1050,27 @@ pub fn ReverseProxyConfigView() -> Html {
                 hls_cache_state.dispatch(HlsCacheConfigFormAction::SegmentRepair(segment_repair));
             })
         };
-        let render_slider_control = |name: String, value: u8, max_value: u8, on_change: Callback<u8>| -> Html {
-            let value_string = value.to_string();
-            let max_string = max_value.to_string();
-            let fill = if max_value == 0 { 0 } else { (u16::from(value) * 100) / u16::from(max_value) };
-            let slider_style = format!("--tp-hls-repair-slider-fill: {fill}%;");
-            let oninput = Callback::from(move |event: InputEvent| {
-                let input: HtmlInputElement = event.target_unchecked_into();
-                if let Ok(value) = input.value().parse::<u8>() {
-                    on_change.emit(value.min(max_value));
-                }
-            });
-            html! {
-                <div class="tp__hls-repair-slider">
-                    <input
-                        class="tp__hls-repair-slider__range"
-                        type="range"
-                        name={name}
-                        min="0"
-                        max={max_string}
-                        value={value_string.clone()}
-                        style={slider_style}
-                        oninput={oninput}
-                    />
-                    <span class="tp__form-field__value tp__hls-repair-slider__value">{value_string}</span>
-                </div>
-            }
-        };
-        let render_slider =
-            |label: String, info_key: &'static str, name: String, value: u8, max_value: u8, on_change: Callback<u8>| {
-                let control = render_slider_control(name, value, max_value, on_change);
-                config_field_child!(label, info_key, {
-                    html! {
-                        { control }
-                    }
-                })
-            };
         let size_increase_editor =
             if let Some(size_increase_percent) = hls_segment_repair_size_increase_percent(&segment_repair) {
                 let hls_cache_state = hls_cache_state.clone();
-                render_slider(
+                let on_change = Callback::from(move |value| {
+                    let mut segment_repair = hls_cache_state.form.segment_repair.clone();
+                    set_hls_segment_repair_size_increase_percent(&mut segment_repair, value);
+                    hls_cache_state.dispatch(HlsCacheConfigFormAction::SegmentRepair(segment_repair));
+                });
+                config_field_child!(
                     hls_segment_repair_size_increase_label(&translate, segment_repair.max_level),
                     "HLS_CACHE_CONFIG.SEGMENT_REPAIR_SIZE_INCREASE",
-                    "hls_segment_repair_size_increase".to_string(),
-                    size_increase_percent,
-                    100,
-                    Callback::from(move |value| {
-                        let mut segment_repair = hls_cache_state.form.segment_repair.clone();
-                        set_hls_segment_repair_size_increase_percent(&mut segment_repair, value);
-                        hls_cache_state.dispatch(HlsCacheConfigFormAction::SegmentRepair(segment_repair));
-                    }),
+                    {
+                        html! {
+                            <RangeSlider
+                                name="hls_segment_repair_size_increase"
+                                value={size_increase_percent}
+                                max={100}
+                                {on_change}
+                            />
+                        }
+                    }
                 )
             } else {
                 config_field_child!(
@@ -1623,6 +1594,38 @@ mod tests {
             let parsed =
                 GeoIpUnavailablePolicy::from_str(policy.as_ref()).expect("failed to parse GeoIpUnavailablePolicy");
             assert_eq!(parsed, policy);
+        }
+    }
+
+    #[test]
+    fn range_slider_value_updates_only_the_active_segment_repair_mode() {
+        for (mode, expected) in [
+            (HlsSegmentRepairMode::Off, (11, 22, 33)),
+            (HlsSegmentRepairMode::Low, (100, 22, 33)),
+            (HlsSegmentRepairMode::Medium, (11, 100, 33)),
+            (HlsSegmentRepairMode::High, (11, 22, 100)),
+        ] {
+            let mut segment_repair = HlsSegmentRepairConfigDto {
+                max_level: mode,
+                size_increase: shared::model::HlsSegmentRepairSizeIncreaseConfigDto {
+                    low_percent: 11,
+                    medium_percent: 22,
+                    high_percent: 33,
+                },
+                ..HlsSegmentRepairConfigDto::default()
+            };
+
+            set_hls_segment_repair_size_increase_percent(&mut segment_repair, 100);
+
+            assert_eq!(
+                (
+                    segment_repair.size_increase.low_percent,
+                    segment_repair.size_increase.medium_percent,
+                    segment_repair.size_increase.high_percent,
+                ),
+                expected,
+                "mode: {mode:?}"
+            );
         }
     }
 }

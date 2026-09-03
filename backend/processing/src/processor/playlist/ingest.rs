@@ -1,5 +1,8 @@
 #![allow(clippy::wildcard_imports)]
-use super::*;
+use super::{
+    fetch_outcome::{apply_playlist_fetch_outcome, CacheStatusScope},
+    *,
+};
 
 // Inputs disabled in the config are always disabled.
 // Command-line targets can only restrict enabled inputs, never enable them.
@@ -28,6 +31,7 @@ pub(crate) async fn with_sequential_group<T>(
 pub(crate) struct PlaylistDownloadResult {
     pub downloaded_playlist: Vec<PlaylistGroup>,
     pub download_err: Vec<TuliproxError>,
+    pub quality_rejections: Vec<ClusterUpdateRejection>,
     pub was_cached: bool,
     pub persisted: bool,
     pub partial: bool,
@@ -40,12 +44,27 @@ impl PlaylistDownloadResult {
         was_cached: bool,
         persisted: bool,
     ) -> Self {
-        Self { downloaded_playlist, download_err, was_cached, persisted, partial: false }
+        Self {
+            downloaded_playlist,
+            download_err,
+            quality_rejections: Vec::new(),
+            was_cached,
+            persisted,
+            partial: false,
+        }
     }
+}
 
-    pub(crate) fn with_partial(mut self, partial: bool) -> Self {
-        self.partial = partial;
-        self
+impl From<PlaylistFetch> for PlaylistDownloadResult {
+    fn from(fetch: PlaylistFetch) -> Self {
+        Self {
+            downloaded_playlist: fetch.groups,
+            download_err: fetch.errors,
+            quality_rejections: fetch.quality_rejections,
+            was_cached: false,
+            persisted: fetch.persisted,
+            partial: fetch.partial,
+        }
     }
 }
 
@@ -214,45 +233,45 @@ pub(crate) async fn playlist_download_from_input<E: EventSink>(
         }));
     }
 
-    let PlaylistFetch { groups: playlist, errors, persisted, partial } = fetch;
-
-    // Update Status
-    let save_status;
-    if partial {
-        input_cache::update_cluster_status(&mut status, "default", ClusterState::Failed);
-        save_status = true;
-    } else if errors.is_empty() {
-        if use_per_cluster_cache {
-            for cluster in &xtream_clusters_to_download {
-                input_cache::update_cluster_status(&mut status, cluster.as_ref(), ClusterState::Ok);
-            }
-            save_status = !xtream_clusters_to_download.is_empty();
-        } else {
-            input_cache::update_cluster_status(&mut status, "default", ClusterState::Ok);
-            save_status = true;
-        }
-    } else if use_per_cluster_cache {
-        for cluster in &xtream_clusters_to_download {
-            input_cache::update_cluster_status(&mut status, cluster.as_ref(), ClusterState::Failed);
-        }
-        save_status = !xtream_clusters_to_download.is_empty();
+    let cache_scope = if use_per_cluster_cache {
+        CacheStatusScope::RequestedClusters(&xtream_clusters_to_download)
     } else {
-        input_cache::update_cluster_status(&mut status, "default", ClusterState::Failed);
-        save_status = true;
-    }
+        CacheStatusScope::Default
+    };
+    let save_status = apply_playlist_fetch_outcome(events, input, &mut status, cache_scope, &fetch);
 
     if save_status {
         input_cache::save_input_status(&storage_path, &status);
     }
 
-    PlaylistDownloadResult::new(playlist, errors, false, persisted).with_partial(partial)
+    PlaylistDownloadResult::from(fetch)
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InputJobState {
     Ready,
     Pending,
     Failed,
+}
+
+pub(crate) struct InputDownloadResult {
+    pub(crate) errors: Vec<TuliproxError>,
+    pub(crate) source: PlaylistSource,
+    pub(crate) storage_error: Option<TuliproxError>,
+    pub(crate) partial: bool,
+    pub(crate) quality_rejections: Vec<ClusterUpdateRejection>,
+}
+
+impl InputDownloadResult {
+    pub(crate) fn job_state(&mut self) -> InputJobState {
+        if self.partial {
+            InputJobState::Pending
+        } else if self.storage_error.is_some() || self.source.is_empty() {
+            InputJobState::Failed
+        } else {
+            InputJobState::Ready
+        }
+    }
 }
 
 pub(crate) struct InputJobResult {
@@ -290,35 +309,32 @@ pub(crate) async fn process_input_job_inner<E: EventSink + Clone + 'static, M: M
     let broadcast_step = create_broadcast_callback(&ctx.events);
     broadcast_step("Playlist download", &format!("Downloading input '{}'", input.name));
 
-    let (mut errors, mut source, storage_error, partial) = download_input(ctx, input, false).await;
-    let storage_failed = storage_error.is_some();
-    if let Some(err) = storage_error {
+    let mut download = download_input(ctx, input, false).await;
+    let state = download.job_state();
+    let storage_failed = download.storage_error.is_some();
+    if !download.quality_rejections.is_empty() {
+        ctx.had_quality_rejections.store(true, std::sync::atomic::Ordering::Release);
+    }
+    if let Some(err) = download.storage_error.take() {
         broadcast_step("Playlist download", &format!("Failed to persist/load input '{}' playlist", input.name));
         error!("Failed to persist input playlist {}", input.name);
-        errors.push(err);
+        download.errors.push(err);
     }
-    let epg = if input_type == InputType::Library || partial || storage_failed {
+    let epg = if input_type == InputType::Library || download.partial || storage_failed {
         None
     } else {
-        download_input_epg(ctx, input, &mut errors).await
+        download_input_epg(ctx, input, &mut download.errors).await
     };
-    let group_count = source.get_group_count();
-    let channel_count = source.get_channel_count();
-    let state = if partial {
-        InputJobState::Pending
-    } else if storage_failed || source.is_empty() {
-        if source.is_empty() {
-            broadcast_step("Playlist download", &format!("Input '{}' playlist is empty", input.name));
-            errors.push(TuliproxError::RepositoryPlaylist(format!("Source is empty {}", input.name)));
-        }
-        InputJobState::Failed
-    } else {
-        InputJobState::Ready
-    };
+    let group_count = download.source.get_group_count();
+    let channel_count = download.source.get_channel_count();
+    if state == InputJobState::Failed && download.source.is_empty() {
+        broadcast_step("Playlist download", &format!("Input '{}' playlist is empty", input.name));
+        download.errors.push(TuliproxError::RepositoryPlaylist(format!("Source is empty {}", input.name)));
+    }
     let stat = create_input_stat(
         group_count,
         channel_count,
-        errors.len(),
+        download.errors.len(),
         input_type,
         &input.name,
         start_time.elapsed().as_secs(),
@@ -328,10 +344,10 @@ pub(crate) async fn process_input_job_inner<E: EventSink + Clone + 'static, M: M
         index,
         input_name: input.name.clone(),
         state,
-        source: (state == InputJobState::Ready).then_some(source),
+        source: (state == InputJobState::Ready).then_some(download.source),
         epg,
         stat,
-        errors,
+        errors: download.errors,
     }
 }
 
@@ -516,9 +532,15 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
     ctx: &PlaylistProcessingContext<E, M>,
     input: &Arc<ConfigInput>,
     allow_staged_input: bool,
-) -> (Vec<TuliproxError>, PlaylistSource, Option<TuliproxError>, bool) {
+) -> InputDownloadResult {
     if input.staged.is_some() && !allow_staged_input {
-        return (vec![], MemoryPlaylistSource::default().into_source(), None, false);
+        return InputDownloadResult {
+            errors: Vec::new(),
+            source: MemoryPlaylistSource::default().into_source(),
+            storage_error: None,
+            partial: false,
+            quality_rejections: Vec::new(),
+        };
     }
 
     let staged_overlay = if input.staged.is_none() {
@@ -604,10 +626,16 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
         }));
     }
     let apply_staged_overlay = should_apply_staged_overlay(&playlist_download_result);
+    let reuse_persisted_after_quality_rejection = !playlist_download_result.quality_rejections.is_empty()
+        && playlist_download_result.downloaded_playlist.is_empty()
+        && !playlist_download_result.persisted;
 
     let (mut playlist, mut error) = if let Some(preloaded) = preloaded_playlist {
         preloaded
-    } else if playlist_download_result.was_cached || playlist_download_result.persisted {
+    } else if playlist_download_result.was_cached
+        || playlist_download_result.persisted
+        || reuse_persisted_after_quality_rejection
+    {
         match load_input_playlist(&ctx.config, input, None).await {
             Ok(pl_source) => (pl_source, None),
             Err(e) => (MemoryPlaylistSource::default().into_source(), Some(e)),
@@ -622,15 +650,15 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
 
     if let Some(staged_input) = staged_overlay.filter(|_| apply_staged_overlay) {
         let clusters = staged_input.staged.as_ref().map_or_else(ClusterFlags::all, |staged| staged.clusters);
-        let (mut staged_download_err, mut staged_playlist, staged_error, staged_partial) =
-            Box::pin(download_input(ctx, &staged_input, true)).await;
-        playlist_download_result.partial |= staged_partial;
-        playlist_download_result.download_err.append(&mut staged_download_err);
-        if let Some(staged_error) = staged_error {
+        let mut staged_result = Box::pin(download_input(ctx, &staged_input, true)).await;
+        playlist_download_result.partial |= staged_result.partial;
+        playlist_download_result.download_err.append(&mut staged_result.errors);
+        playlist_download_result.quality_rejections.append(&mut staged_result.quality_rejections);
+        if let Some(staged_error) = staged_result.storage_error {
             playlist_download_result.download_err.push(staged_error);
         } else {
             let provider_groups = playlist.take_groups();
-            let staged_groups = staged_playlist.take_groups();
+            let staged_groups = staged_result.source.take_groups();
             let merged_groups = apply_staged_overlay_groups(&input.name, clusters, provider_groups, staged_groups);
             let (merged_playlist, persist_error) = persist_input_playlist(&ctx.config, input, merged_groups).await;
             playlist = MemoryPlaylistSource::new(merged_playlist).into_source();
@@ -655,7 +683,13 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
     // Explicitly release per-input lock after load/persist/mark steps are completed.
     drop(input_lock);
 
-    (playlist_download_result.download_err, playlist, error, playlist_download_result.partial)
+    InputDownloadResult {
+        errors: playlist_download_result.download_err,
+        source: playlist,
+        storage_error: error,
+        partial: playlist_download_result.partial,
+        quality_rejections: playlist_download_result.quality_rejections,
+    }
 }
 
 async fn download_m3u_alias_playlists<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
@@ -677,19 +711,18 @@ async fn download_m3u_alias_playlists<E: EventSink + Clone + 'static, M: Metadat
         alias_input.epg = None;
         let alias_input = Arc::new(alias_input);
 
-        let (mut alias_errors, mut alias_playlist, storage_error, partial) =
-            Box::pin(download_input(ctx, &alias_input, false)).await;
-        let alias_had_errors = !alias_errors.is_empty() || storage_error.is_some();
-        errors.append(&mut alias_errors);
-        if let Some(storage_error) = storage_error {
+        let mut alias_result = Box::pin(download_input(ctx, &alias_input, false)).await;
+        let alias_had_errors = !alias_result.errors.is_empty() || alias_result.storage_error.is_some();
+        errors.append(&mut alias_result.errors);
+        if let Some(storage_error) = alias_result.storage_error {
             errors.push(storage_error);
         }
-        if partial {
+        if alias_result.partial {
             errors.push(TuliproxError::RepositoryPlaylist(format!(
                 "M3U alias '{}' returned a partial playlist",
                 alias.name
             )));
-        } else if alias_playlist.is_empty() && !alias_had_errors {
+        } else if alias_result.source.is_empty() && !alias_had_errors {
             errors.push(TuliproxError::RepositoryPlaylist(format!("M3U alias '{}' playlist is empty", alias.name)));
         }
     }
@@ -751,7 +784,10 @@ pub struct PlaylistProcessingContext<E: EventSink, M: MetadataUpdateSink = NoopM
     pub metadata_manager: Option<Arc<M>>,
     pub pre_processed_inputs: Option<Arc<HashSet<Arc<str>>>>,
     pub stalker_refresh_mode: StalkerRefreshMode,
+    /// Resumable Stalker work that must remain `Pending` at input level.
     pub partial_refresh: Arc<std::sync::atomic::AtomicBool>,
+    /// Completed, nonfatal quality decisions that make only the overall run partial.
+    pub had_quality_rejections: Arc<std::sync::atomic::AtomicBool>,
 }
 
 // Written out rather than derived: `#[derive(Clone)]` would demand `M: Clone`,
@@ -772,6 +808,7 @@ impl<E: EventSink + Clone, M: MetadataUpdateSink> Clone for PlaylistProcessingCo
             pre_processed_inputs: self.pre_processed_inputs.clone(),
             stalker_refresh_mode: self.stalker_refresh_mode,
             partial_refresh: Arc::clone(&self.partial_refresh),
+            had_quality_rejections: Arc::clone(&self.had_quality_rejections),
         }
     }
 }

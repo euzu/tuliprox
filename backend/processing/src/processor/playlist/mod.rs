@@ -2,7 +2,6 @@ use super::providers::{LibraryProvider, PlexProvider, StalkerProvider, XmltvEpgP
 use crate::{
     fetched_playlist::FetchedPlaylist,
     input_cache,
-    input_cache::ClusterState,
     metadata_sink::{MetadataUpdateSink, NoopMetadataSink},
     parser::xmltv::{flatten_tvguide, merge_epg_trees, EpgMergeAccumulator, TVGuide},
     playlist_watch::{process_group_watch, process_target_groups_watch},
@@ -27,8 +26,8 @@ use shared::{
     model::{
         ClusterFlags, ConfigTargetOptions, CounterModifier, EventMessage, EventSink, FieldGet, FieldSet, InputStats,
         InputType, MappingStage, PipelineStats, PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistStats,
-        PlaylistUpdateProgressEvent, PlaylistUpdateSummary, ProviderFetchFailure, SourceStats, StreamProperties,
-        TargetStats, UUIDType, WatchDisabled, WatchDisabledReason, WatchUnmatched, XtreamCluster,
+        PlaylistUpdateProgressEvent, PlaylistUpdateState, PlaylistUpdateSummary, ProviderFetchFailure, SourceStats,
+        StreamProperties, TargetStats, UUIDType, WatchDisabled, WatchDisabledReason, WatchUnmatched, XtreamCluster,
     },
     utils::{create_alias_uuid, interner_gc, sanitize_sensitive_info, Internable},
 };
@@ -45,10 +44,10 @@ use tokio::{
 };
 use tuliprox_core::{
     model::{
-        is_valid, retain_filtered_playlist, AppConfig, CompiledMapping, ConfigFavourites, ConfigInput,
-        ConfigInputFlags, ConfigInputOptions, ConfigRename, ConfigTarget, Epg, FilterOutcome, MappingProgram,
-        ProcessTargets, ProviderIdType, ResolveReason, ReverseProxyDisabledHeaderConfig, TransformStage, UpdateGuard,
-        UpdateTask,
+        is_valid, retain_filtered_playlist, AppConfig, ClusterUpdateRejection, CompiledMapping, ConfigFavourites,
+        ConfigInput, ConfigInputFlags, ConfigInputOptions, ConfigRename, ConfigTarget, Epg, FilterOutcome,
+        MappingProgram, ProcessTargets, ProviderIdType, ResolveReason, ReverseProxyDisabledHeaderConfig,
+        TransformStage, UpdateGuard, UpdateTask,
     },
     utils::{debug_if_enabled, log_memory_snapshot, trace_if_enabled, StepMeasure, StepMeasureCallback},
 };
@@ -70,6 +69,7 @@ use tuliprox_session::ActiveProviderManager;
 const PLAYLIST_UPDATE_MAX_DURATION_SECS: u64 = 3600;
 const MAX_CONCURRENT_TARGET_FINALIZERS: usize = 2;
 
+mod fetch_outcome;
 mod ingest;
 mod target;
 mod transform;
@@ -324,6 +324,7 @@ pub async fn exec_processing<E: EventSink + Clone + 'static, B: UpdateBootstrap,
             StalkerRefreshMode::Complete
         },
         partial_refresh: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        had_quality_rejections: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
 
     let start_time = Instant::now();
@@ -373,13 +374,12 @@ pub async fn exec_processing<E: EventSink + Clone + 'static, B: UpdateBootstrap,
     // refresh notified twice. Subscribers now get one event with everything,
     // and the bridge renders the single message from it.
     let error = get_errors_notify_message!(errors, 255);
-    let outcome = if error.is_some() {
-        shared::model::PlaylistUpdateState::Failure
-    } else if ctx.partial_refresh.load(std::sync::atomic::Ordering::Acquire) {
-        shared::model::PlaylistUpdateState::Partial
-    } else {
-        shared::model::PlaylistUpdateState::Success
-    };
+    let outcome = PlaylistRunSignals {
+        has_error: error.is_some(),
+        has_pending_stalker_refresh: ctx.partial_refresh.load(std::sync::atomic::Ordering::Acquire),
+        has_quality_rejections: ctx.had_quality_rejections.load(std::sync::atomic::Ordering::Acquire),
+    }
+    .state();
     events.emit(EventMessage::PlaylistUpdate(PlaylistUpdateSummary { state: outcome, stats, error }));
 
     let elapsed = start_time.elapsed().as_secs();
@@ -395,6 +395,25 @@ pub async fn exec_processing<E: EventSink + Clone + 'static, B: UpdateBootstrap,
     //trim_allocator_after_update();
 
     info!("{update_finished_message}");
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct PlaylistRunSignals {
+    pub(crate) has_error: bool,
+    pub(crate) has_pending_stalker_refresh: bool,
+    pub(crate) has_quality_rejections: bool,
+}
+
+impl PlaylistRunSignals {
+    pub(crate) const fn state(self) -> PlaylistUpdateState {
+        if self.has_error {
+            PlaylistUpdateState::Failure
+        } else if self.has_pending_stalker_refresh || self.has_quality_rejections {
+            PlaylistUpdateState::Partial
+        } else {
+            PlaylistUpdateState::Success
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 use super::stalker::StalkerCluster;
 use shared::{
     error::TuliproxError,
-    model::{stalker::StalkerStreamKind, stalker_item::StalkerPlaylistItem},
+    model::{stalker::StalkerStreamKind, stalker_item::StalkerPlaylistItem, XtreamCluster},
 };
 use std::{
     collections::HashMap,
@@ -9,7 +9,10 @@ use std::{
     sync::Arc,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
-use tuliprox_core::model::{AppConfig, ConfigInput, ConfigInputFlags};
+use tuliprox_core::model::{
+    evaluate_update_quality, AppConfig, ClusterUpdateRejection, ConfigInput, ConfigInputFlags,
+    ConfigInputUpdateQuality, UpdateQualityDecision,
+};
 use tuliprox_iptv::stalker::{
     catalog::{StalkerCategory, StalkerRawItem},
     client::StalkerApiClient,
@@ -23,13 +26,18 @@ use tuliprox_repository::{
         publish_selection, save_checkpoint, StalkerCheckpoint, StalkerGenerationData, StalkerRefreshPhase,
     },
     stalker_repository::{
-        load_stalker_items_after, prepare_stalker_episode_series_at, promote_stalker_file, remove_stalker_file,
-        snapshot_stalker_epg_at, snapshot_stalker_items_at, upsert_stalker_epg_at, upsert_stalker_items_at,
+        count_stalker_items_at, load_stalker_items_after, prepare_stalker_episode_series_at, promote_stalker_file,
+        remove_stalker_file, snapshot_stalker_epg_at, snapshot_stalker_items_at, upsert_stalker_epg_at,
+        upsert_stalker_items_at,
     },
 };
 
 const MAX_RETRIES: u8 = 3;
 const SKIPPED_SAMPLE_LIMIT: usize = 32;
+const LIVE_SELECTION: u8 = 0b0001;
+const VOD_SELECTION: u8 = 0b0010;
+const SERIES_SELECTION: u8 = 0b0100;
+const EPG_SELECTION: u8 = 0b1000;
 
 pub enum StalkerRefreshLimit {
     Deadline(Instant),
@@ -118,6 +126,22 @@ impl StalkerClusterSelection {
     }
 }
 
+/// Requested clusters and the publication policy applied once their generation is complete.
+#[derive(Clone, Copy)]
+pub struct StalkerRefreshPlan {
+    selection: StalkerClusterSelection,
+    update_quality: ConfigInputUpdateQuality,
+}
+
+impl StalkerRefreshPlan {
+    pub fn requested(input: &ConfigInput, requested: &[StalkerCluster]) -> Self {
+        let selection = StalkerClusterSelection::requested(input, requested);
+        let update_quality =
+            input.options.as_ref().map_or_else(ConfigInputUpdateQuality::default, |options| options.update_quality);
+        Self { selection, update_quality }
+    }
+}
+
 fn first_phase(selection: StalkerClusterSelection) -> StalkerRefreshPhase {
     if selection.live {
         StalkerRefreshPhase::LiveBulk
@@ -154,7 +178,7 @@ fn next_phase_after_series(selection: StalkerClusterSelection) -> StalkerRefresh
 
 #[derive(Debug)]
 pub enum StalkerRefreshOutcome {
-    Complete,
+    Complete { quality_rejections: Vec<ClusterUpdateRejection> },
     Yielded { phase: StalkerRefreshPhase, processed: u64, skipped: u64, error: Option<TuliproxError> },
     Terminal(TuliproxError),
 }
@@ -183,26 +207,55 @@ async fn load_or_start_checkpoint(
     Ok(state)
 }
 
-async fn finish_completed_refresh_checked(
+async fn evaluate_completed_refresh_publication(
     app_config: &Arc<AppConfig>,
     storage_path: &Path,
     identity_fingerprint: u64,
     checkpoint: &StalkerCheckpoint,
+    update_quality: ConfigInputUpdateQuality,
+) -> Result<StalkerGenerationPublication, TuliproxError> {
+    let needs_quality_evaluation = selection_needs_quality_evaluation(checkpoint.selection_mask, update_quality);
+    if needs_quality_evaluation {
+        let active_manifest = load_active_manifest(storage_path, identity_fingerprint).await?;
+        evaluate_generation_publication(
+            app_config,
+            storage_path,
+            checkpoint.generation,
+            checkpoint.selection_mask,
+            update_quality,
+            &active_manifest,
+        )
+        .await
+    } else {
+        Ok(StalkerGenerationPublication {
+            accepted_selection_mask: checkpoint.selection_mask,
+            quality_rejections: Vec::new(),
+        })
+    }
+}
+
+async fn ensure_completed_refresh_has_usable_playlist(
+    app_config: &Arc<AppConfig>,
+    storage_path: &Path,
+    identity_fingerprint: u64,
+    checkpoint: &StalkerCheckpoint,
+    accepted_selection_mask: u8,
 ) -> Result<(), TuliproxError> {
-    if checkpoint.processed == 0 {
+    let accepted_media_selection = accepted_selection_mask & (LIVE_SELECTION | VOD_SELECTION | SERIES_SELECTION);
+    if checkpoint.processed == 0 && accepted_media_selection != 0 {
         let active = load_active_manifest(storage_path, identity_fingerprint).await?;
         let mut retained_has_items = false;
-        if checkpoint.selection_mask & 0b0001 == 0 {
+        if accepted_selection_mask & LIVE_SELECTION == 0 {
             if let Some(files) = active.live.as_ref() {
                 retained_has_items = !load_stalker_items_after(app_config, &files.data, None, 1).await?.is_empty();
             }
         }
-        if !retained_has_items && checkpoint.selection_mask & 0b0010 == 0 {
+        if !retained_has_items && accepted_selection_mask & VOD_SELECTION == 0 {
             if let Some(files) = active.vod.as_ref() {
                 retained_has_items = !load_stalker_items_after(app_config, &files.data, None, 1).await?.is_empty();
             }
         }
-        if !retained_has_items && checkpoint.selection_mask & 0b0100 == 0 {
+        if !retained_has_items && accepted_selection_mask & SERIES_SELECTION == 0 {
             if let Some(files) = active.series.as_ref() {
                 retained_has_items = !load_stalker_items_after(app_config, &files.roots, None, 1).await?.is_empty()
                     || !load_stalker_items_after(app_config, &files.episodes, None, 1).await?.is_empty();
@@ -216,18 +269,215 @@ async fn finish_completed_refresh_checked(
             ));
         }
     }
-    finish_completed_refresh(storage_path, identity_fingerprint, checkpoint).await
+    Ok(())
 }
 
-async fn finish_completed_refresh(
+async fn publish_completed_refresh(
     storage_path: &Path,
     identity_fingerprint: u64,
     checkpoint: &StalkerCheckpoint,
-) -> Result<(), TuliproxError> {
-    let manifest =
-        publish_selection(storage_path, identity_fingerprint, checkpoint.generation, checkpoint.selection_mask).await?;
+    publication: StalkerGenerationPublication,
+) -> Result<Vec<ClusterUpdateRejection>, TuliproxError> {
+    let manifest = publish_selection(
+        storage_path,
+        identity_fingerprint,
+        checkpoint.generation,
+        publication.accepted_selection_mask,
+    )
+    .await?;
     clear_checkpoint(storage_path).await?;
-    cleanup_obsolete_generations(storage_path, &manifest).await
+    cleanup_obsolete_generations(storage_path, &manifest).await?;
+    Ok(publication.quality_rejections)
+}
+
+#[cfg(test)]
+async fn finish_completed_refresh(
+    app_config: &Arc<AppConfig>,
+    storage_path: &Path,
+    identity_fingerprint: u64,
+    checkpoint: &StalkerCheckpoint,
+    update_quality: ConfigInputUpdateQuality,
+) -> Result<Vec<ClusterUpdateRejection>, TuliproxError> {
+    let publication = evaluate_completed_refresh_publication(
+        app_config,
+        storage_path,
+        identity_fingerprint,
+        checkpoint,
+        update_quality,
+    )
+    .await?;
+    publish_completed_refresh(storage_path, identity_fingerprint, checkpoint, publication).await
+}
+
+async fn finish_completed_refresh_checked(
+    app_config: &Arc<AppConfig>,
+    storage_path: &Path,
+    identity_fingerprint: u64,
+    checkpoint: &StalkerCheckpoint,
+    update_quality: ConfigInputUpdateQuality,
+) -> Result<Vec<ClusterUpdateRejection>, TuliproxError> {
+    let publication = evaluate_completed_refresh_publication(
+        app_config,
+        storage_path,
+        identity_fingerprint,
+        checkpoint,
+        update_quality,
+    )
+    .await?;
+    ensure_completed_refresh_has_usable_playlist(
+        app_config,
+        storage_path,
+        identity_fingerprint,
+        checkpoint,
+        publication.accepted_selection_mask,
+    )
+    .await?;
+    publish_completed_refresh(storage_path, identity_fingerprint, checkpoint, publication).await
+}
+
+struct StalkerGenerationPublication {
+    accepted_selection_mask: u8,
+    quality_rejections: Vec<ClusterUpdateRejection>,
+}
+
+fn selection_needs_quality_evaluation(requested_selection_mask: u8, update_quality: ConfigInputUpdateQuality) -> bool {
+    [StalkerCluster::Live, StalkerCluster::Vod, StalkerCluster::Series].into_iter().any(|cluster| {
+        requested_selection_mask & selection_bit(cluster) != 0
+            && update_quality.threshold(quality_cluster(cluster)) != 0
+    })
+}
+
+const fn selection_bit(cluster: StalkerCluster) -> u8 {
+    match cluster {
+        StalkerCluster::Live => LIVE_SELECTION,
+        StalkerCluster::Vod => VOD_SELECTION,
+        StalkerCluster::Series => SERIES_SELECTION,
+    }
+}
+
+const fn quality_cluster(cluster: StalkerCluster) -> XtreamCluster {
+    match cluster {
+        StalkerCluster::Live => XtreamCluster::Live,
+        StalkerCluster::Vod => XtreamCluster::Video,
+        StalkerCluster::Series => XtreamCluster::Series,
+    }
+}
+
+async fn count_stalker_cluster_files(
+    app_config: &Arc<AppConfig>,
+    primary: &Path,
+    secondary: Option<&Path>,
+) -> Result<usize, TuliproxError> {
+    let primary_count = count_stalker_items_at(app_config, primary).await?.unwrap_or_default();
+    let secondary_count = match secondary {
+        Some(path) => count_stalker_items_at(app_config, path).await?.unwrap_or_default(),
+        None => 0,
+    };
+    primary_count.checked_add(secondary_count).ok_or_else(|| {
+        TuliproxError::RepositoryStalker("Stalker cluster item count exceeds platform capacity".to_string())
+    })
+}
+
+async fn count_candidate_cluster(
+    app_config: &Arc<AppConfig>,
+    storage_path: &Path,
+    generation: u64,
+    cluster: StalkerCluster,
+) -> Result<usize, TuliproxError> {
+    let primary_data = match cluster {
+        StalkerCluster::Live => StalkerGenerationData::Live,
+        StalkerCluster::Vod => StalkerGenerationData::Vod,
+        StalkerCluster::Series => StalkerGenerationData::SeriesRoots,
+    };
+    let primary = generation_data_path(storage_path, generation, primary_data);
+    let secondary = (cluster == StalkerCluster::Series)
+        .then(|| generation_data_path(storage_path, generation, StalkerGenerationData::SeriesEpisodes));
+    count_stalker_cluster_files(app_config, &primary, secondary.as_deref()).await
+}
+
+async fn count_active_cluster(
+    app_config: &Arc<AppConfig>,
+    manifest: &tuliprox_repository::stalker_generation_repository::StalkerActiveManifest,
+    cluster: StalkerCluster,
+) -> Result<Option<usize>, TuliproxError> {
+    match cluster {
+        StalkerCluster::Live => match manifest.live.as_ref() {
+            Some(files) => count_stalker_cluster_files(app_config, &files.data, None).await.map(Some),
+            None => Ok(None),
+        },
+        StalkerCluster::Vod => match manifest.vod.as_ref() {
+            Some(files) => count_stalker_cluster_files(app_config, &files.data, None).await.map(Some),
+            None => Ok(None),
+        },
+        StalkerCluster::Series => match manifest.series.as_ref() {
+            Some(files) => count_stalker_cluster_files(app_config, &files.roots, Some(&files.episodes)).await.map(Some),
+            None => Ok(None),
+        },
+    }
+}
+
+fn rejection_from_decision(
+    cluster: XtreamCluster,
+    current_count: Option<usize>,
+    candidate_count: usize,
+    threshold: u8,
+    decision: UpdateQualityDecision,
+) -> Option<ClusterUpdateRejection> {
+    match decision {
+        UpdateQualityDecision::Rejected { current, candidate, threshold, quality } => Some(ClusterUpdateRejection {
+            cluster,
+            current_count: current,
+            candidate_count: candidate,
+            threshold,
+            quality,
+        }),
+        UpdateQualityDecision::RejectedWithoutBaseline => Some(ClusterUpdateRejection {
+            cluster,
+            current_count: current_count.unwrap_or_default(),
+            candidate_count,
+            threshold: threshold.min(100),
+            quality: 0,
+        }),
+        UpdateQualityDecision::Disabled
+        | UpdateQualityDecision::BootstrapAccepted { .. }
+        | UpdateQualityDecision::Accepted { .. } => None,
+    }
+}
+
+async fn evaluate_generation_publication(
+    app_config: &Arc<AppConfig>,
+    storage_path: &Path,
+    generation: u64,
+    requested_selection_mask: u8,
+    update_quality: ConfigInputUpdateQuality,
+    active_manifest: &tuliprox_repository::stalker_generation_repository::StalkerActiveManifest,
+) -> Result<StalkerGenerationPublication, TuliproxError> {
+    let mut accepted_selection_mask = requested_selection_mask;
+    let mut quality_rejections = Vec::new();
+    for cluster in [StalkerCluster::Live, StalkerCluster::Vod, StalkerCluster::Series] {
+        let selection_bit = selection_bit(cluster);
+        if requested_selection_mask & selection_bit == 0 {
+            continue;
+        }
+        let report_cluster = quality_cluster(cluster);
+        let threshold = update_quality.threshold(report_cluster);
+        if threshold == 0 {
+            continue;
+        }
+        let candidate_count = count_candidate_cluster(app_config, storage_path, generation, cluster).await?;
+        let current_count = count_active_cluster(app_config, active_manifest, cluster).await?;
+        let decision = evaluate_update_quality(current_count, candidate_count, threshold);
+        if let Some(rejection) =
+            rejection_from_decision(report_cluster, current_count, candidate_count, threshold, decision)
+        {
+            accepted_selection_mask &= !selection_bit;
+            if cluster == StalkerCluster::Live {
+                accepted_selection_mask &= !EPG_SELECTION;
+            }
+            quality_rejections.push(rejection);
+        }
+    }
+    Ok(StalkerGenerationPublication { accepted_selection_mask, quality_rejections })
 }
 
 fn category_map(categories: Vec<StalkerCategory>) -> HashMap<u32, StalkerCategory> {
@@ -317,11 +567,12 @@ pub async fn advance_stalker_refresh(
     app_config: &Arc<AppConfig>,
     api_client: &StalkerApiClient,
     handshake: &StalkerHandshake,
-    selection: StalkerClusterSelection,
+    refresh_plan: StalkerRefreshPlan,
     storage_path: &Path,
     identity_fingerprint: u64,
     mut budget: StalkerRefreshBudget,
 ) -> Result<StalkerRefreshOutcome, TuliproxError> {
+    let StalkerRefreshPlan { selection, update_quality } = refresh_plan;
     let mut checkpoint = load_or_start_checkpoint(storage_path, identity_fingerprint, selection).await?;
     if checkpoint.phase == StalkerRefreshPhase::Terminal {
         return finish_terminal_refresh(storage_path).await;
@@ -568,8 +819,15 @@ pub async fn advance_stalker_refresh(
                 checkpoint.retry_count = 0;
             }
             StalkerRefreshPhase::Complete => {
-                finish_completed_refresh_checked(app_config, storage_path, identity_fingerprint, &checkpoint).await?;
-                return Ok(StalkerRefreshOutcome::Complete);
+                let quality_rejections = finish_completed_refresh_checked(
+                    app_config,
+                    storage_path,
+                    identity_fingerprint,
+                    &checkpoint,
+                    update_quality,
+                )
+                .await?;
+                return Ok(StalkerRefreshOutcome::Complete { quality_rejections });
             }
             StalkerRefreshPhase::Terminal => {
                 return finish_terminal_refresh(storage_path).await;
@@ -584,10 +842,16 @@ pub async fn advance_stalker_refresh(
 mod tests {
     use super::*;
     use arc_swap::{ArcSwap, ArcSwapOption};
-    use shared::model::ConfigPaths;
+    use shared::{
+        model::{ConfigInputUpdateQualityDto, ConfigPaths},
+        utils::Internable,
+    };
     use tuliprox_core::{
         model::{ApiProxyConfig, Config, CustomStreamResponse, HdHomeRunConfig, MediaToolCapabilities, SourcesConfig},
         utils::FileLockManager,
+    };
+    use tuliprox_repository::stalker_generation_repository::{
+        load_active_manifest, save_active_manifest, ClusterFiles, SeriesFiles, StalkerActiveManifest,
     };
 
     fn test_app_config(storage_dir: &Path) -> Arc<AppConfig> {
@@ -618,6 +882,78 @@ mod tests {
             encrypt_secret: [0; 16],
             media_tools: Arc::new(MediaToolCapabilities::new()),
         })
+    }
+
+    fn update_quality(live: u8, vod: u8, series: u8) -> ConfigInputUpdateQuality {
+        ConfigInputUpdateQuality::from(&ConfigInputUpdateQualityDto { live, vod, series })
+    }
+
+    fn stalker_items(count: usize, kind: StalkerStreamKind, series_roots: bool) -> Vec<StalkerPlaylistItem> {
+        (0..count)
+            .map(|index| StalkerPlaylistItem {
+                stream_id: u32::try_from(index + 1).unwrap_or(u32::MAX),
+                name: format!("item-{index}").intern(),
+                stream_kind: kind,
+                is_series: series_roots,
+                ..StalkerPlaylistItem::default()
+            })
+            .collect()
+    }
+
+    async fn write_generation_cluster(
+        app_config: &Arc<AppConfig>,
+        storage_path: &Path,
+        generation: u64,
+        cluster: StalkerCluster,
+        primary_count: usize,
+        episode_count: usize,
+    ) -> Result<(), TuliproxError> {
+        let (primary_data, kind, series_roots) = match cluster {
+            StalkerCluster::Live => (StalkerGenerationData::Live, StalkerStreamKind::Live, false),
+            StalkerCluster::Vod => (StalkerGenerationData::Vod, StalkerStreamKind::Movie, false),
+            StalkerCluster::Series => (StalkerGenerationData::SeriesRoots, StalkerStreamKind::Episode, true),
+        };
+        let primary_path = generation_data_path(storage_path, generation, primary_data);
+        let primary_items = stalker_items(primary_count, kind, series_roots);
+        if primary_items.is_empty() {
+            upsert_stalker_items_at(app_config, &primary_path, &primary_items).await?;
+        } else {
+            snapshot_stalker_items_at(app_config, primary_path, &primary_items).await?;
+        }
+        if cluster == StalkerCluster::Series {
+            let episode_path = generation_data_path(storage_path, generation, StalkerGenerationData::SeriesEpisodes);
+            snapshot_stalker_items_at(
+                app_config,
+                episode_path,
+                &stalker_items(episode_count, StalkerStreamKind::Episode, false),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    fn complete_manifest(storage_path: &Path, identity_fingerprint: u64, generation: u64) -> StalkerActiveManifest {
+        StalkerActiveManifest {
+            schema: StalkerActiveManifest::empty(identity_fingerprint).schema,
+            identity_fingerprint,
+            live: Some(ClusterFiles {
+                generation,
+                data: generation_data_path(storage_path, generation, StalkerGenerationData::Live),
+            }),
+            vod: Some(ClusterFiles {
+                generation,
+                data: generation_data_path(storage_path, generation, StalkerGenerationData::Vod),
+            }),
+            series: Some(SeriesFiles {
+                generation,
+                roots: generation_data_path(storage_path, generation, StalkerGenerationData::SeriesRoots),
+                episodes: generation_data_path(storage_path, generation, StalkerGenerationData::SeriesEpisodes),
+            }),
+            epg: Some(ClusterFiles {
+                generation,
+                data: generation_data_path(storage_path, generation, StalkerGenerationData::Epg),
+            }),
+        }
     }
 
     #[tokio::test]
@@ -666,7 +1002,14 @@ mod tests {
         checkpoint.phase = StalkerRefreshPhase::Complete;
         save_checkpoint(temp.path(), &checkpoint).await?;
 
-        let result = finish_completed_refresh_checked(&app_config, temp.path(), 17, &checkpoint).await;
+        let result = finish_completed_refresh_checked(
+            &app_config,
+            temp.path(),
+            17,
+            &checkpoint,
+            ConfigInputUpdateQuality::default(),
+        )
+        .await;
 
         assert!(result.is_err());
         assert_eq!(load_active_manifest(temp.path(), 17).await?, active);
@@ -677,19 +1020,178 @@ mod tests {
     #[tokio::test]
     async fn complete_publication_is_idempotent_after_restart() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
+        let app_config = test_app_config(temp.path());
         let mut checkpoint = StalkerCheckpoint::new(17, 23, 0b0011, 123);
         checkpoint.phase = StalkerRefreshPhase::Complete;
         save_checkpoint(temp.path(), &checkpoint).await?;
 
-        finish_completed_refresh(temp.path(), 17, &checkpoint).await?;
+        finish_completed_refresh(&app_config, temp.path(), 17, &checkpoint, ConfigInputUpdateQuality::default())
+            .await?;
         save_checkpoint(temp.path(), &checkpoint).await?;
-        finish_completed_refresh(temp.path(), 17, &checkpoint).await?;
+        finish_completed_refresh(&app_config, temp.path(), 17, &checkpoint, ConfigInputUpdateQuality::default())
+            .await?;
 
-        let manifest =
-            tuliprox_repository::stalker_generation_repository::load_active_manifest(temp.path(), 17).await?;
+        let manifest = load_active_manifest(temp.path(), 17).await?;
         assert_eq!(manifest.live.as_ref().map(|files| files.generation), Some(23));
         assert_eq!(manifest.vod.as_ref().map(|files| files.generation), Some(23));
         assert!(load_checkpoint(temp.path(), 17).await?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mixed_quality_publication_replaces_only_accepted_manifest_entries(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let app_config = test_app_config(temp.path());
+        let identity = 17;
+        let active_generation = 41;
+        let candidate_generation = 42;
+        write_generation_cluster(&app_config, temp.path(), active_generation, StalkerCluster::Live, 100, 0).await?;
+        write_generation_cluster(&app_config, temp.path(), active_generation, StalkerCluster::Vod, 100, 0).await?;
+        write_generation_cluster(&app_config, temp.path(), active_generation, StalkerCluster::Series, 40, 60).await?;
+        let active = complete_manifest(temp.path(), identity, active_generation);
+        save_active_manifest(temp.path(), &active).await?;
+        write_generation_cluster(&app_config, temp.path(), candidate_generation, StalkerCluster::Live, 90, 0).await?;
+        write_generation_cluster(&app_config, temp.path(), candidate_generation, StalkerCluster::Vod, 89, 0).await?;
+        write_generation_cluster(&app_config, temp.path(), candidate_generation, StalkerCluster::Series, 45, 65)
+            .await?;
+        let checkpoint = StalkerCheckpoint::new(identity, candidate_generation, 0b1111, 123);
+
+        let rejections =
+            finish_completed_refresh(&app_config, temp.path(), identity, &checkpoint, update_quality(90, 90, 90))
+                .await?;
+
+        assert_eq!(
+            rejections,
+            vec![ClusterUpdateRejection {
+                cluster: XtreamCluster::Video,
+                current_count: 100,
+                candidate_count: 89,
+                threshold: 90,
+                quality: 89,
+            }]
+        );
+        let published = load_active_manifest(temp.path(), identity).await?;
+        assert_eq!(published.live.as_ref().map(|files| files.generation), Some(candidate_generation));
+        assert_eq!(published.vod, active.vod);
+        assert_eq!(published.series.as_ref().map(|files| files.generation), Some(candidate_generation));
+        assert_eq!(published.epg.as_ref().map(|files| files.generation), Some(candidate_generation));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejected_live_generation_keeps_active_live_and_epg() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let app_config = test_app_config(temp.path());
+        let identity = 23;
+        let active_generation = 7;
+        let candidate_generation = 8;
+        write_generation_cluster(&app_config, temp.path(), active_generation, StalkerCluster::Live, 100, 0).await?;
+        let mut active = StalkerActiveManifest::empty(identity);
+        active.live = Some(ClusterFiles {
+            generation: active_generation,
+            data: generation_data_path(temp.path(), active_generation, StalkerGenerationData::Live),
+        });
+        active.epg = Some(ClusterFiles {
+            generation: active_generation,
+            data: generation_data_path(temp.path(), active_generation, StalkerGenerationData::Epg),
+        });
+        save_active_manifest(temp.path(), &active).await?;
+        write_generation_cluster(&app_config, temp.path(), candidate_generation, StalkerCluster::Live, 89, 0).await?;
+        let checkpoint = StalkerCheckpoint::new(identity, candidate_generation, LIVE_SELECTION | EPG_SELECTION, 123);
+
+        let rejections =
+            finish_completed_refresh(&app_config, temp.path(), identity, &checkpoint, update_quality(90, 0, 0)).await?;
+
+        assert_eq!(rejections.len(), 1);
+        assert_eq!(rejections[0].cluster, XtreamCluster::Live);
+        let published = load_active_manifest(temp.path(), identity).await?;
+        assert_eq!(published.live, active.live);
+        assert_eq!(published.epg, active.epg);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn nonempty_bootstrap_generation_is_published() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let app_config = test_app_config(temp.path());
+        let identity = 29;
+        let generation = 3;
+        write_generation_cluster(&app_config, temp.path(), generation, StalkerCluster::Series, 2, 3).await?;
+        let checkpoint = StalkerCheckpoint::new(identity, generation, SERIES_SELECTION, 123);
+
+        let rejections =
+            finish_completed_refresh(&app_config, temp.path(), identity, &checkpoint, update_quality(0, 0, 100))
+                .await?;
+
+        assert!(rejections.is_empty());
+        let published = load_active_manifest(temp.path(), identity).await?;
+        assert_eq!(published.series.as_ref().map(|files| files.generation), Some(generation));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn empty_bootstrap_generation_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let app_config = test_app_config(temp.path());
+        let identity = 30;
+        let generation = 4;
+        write_generation_cluster(&app_config, temp.path(), generation, StalkerCluster::Live, 0, 0).await?;
+        let checkpoint = StalkerCheckpoint::new(identity, generation, LIVE_SELECTION | EPG_SELECTION, 123);
+
+        let rejections =
+            finish_completed_refresh(&app_config, temp.path(), identity, &checkpoint, update_quality(90, 0, 0)).await?;
+
+        assert_eq!(
+            rejections,
+            vec![ClusterUpdateRejection {
+                cluster: XtreamCluster::Live,
+                current_count: 0,
+                candidate_count: 0,
+                threshold: 90,
+                quality: 0,
+            }]
+        );
+        let published = load_active_manifest(temp.path(), identity).await?;
+        assert!(published.live.is_none());
+        assert!(published.epg.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejected_series_counts_roots_and_episodes_without_blocking_accepted_live_generation(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let app_config = test_app_config(temp.path());
+        let identity = 31;
+        let active_generation = 11;
+        let candidate_generation = 12;
+        write_generation_cluster(&app_config, temp.path(), active_generation, StalkerCluster::Live, 10, 0).await?;
+        write_generation_cluster(&app_config, temp.path(), active_generation, StalkerCluster::Series, 2, 8).await?;
+        let mut active = complete_manifest(temp.path(), identity, active_generation);
+        active.vod = None;
+        save_active_manifest(temp.path(), &active).await?;
+        write_generation_cluster(&app_config, temp.path(), candidate_generation, StalkerCluster::Live, 10, 0).await?;
+        write_generation_cluster(&app_config, temp.path(), candidate_generation, StalkerCluster::Series, 2, 7).await?;
+        let checkpoint = StalkerCheckpoint::new(identity, candidate_generation, LIVE_SELECTION | SERIES_SELECTION, 123);
+
+        assert_eq!(count_active_cluster(&app_config, &active, StalkerCluster::Series).await?, Some(10));
+        assert_eq!(
+            count_candidate_cluster(&app_config, temp.path(), candidate_generation, StalkerCluster::Series).await?,
+            9
+        );
+
+        let rejections =
+            finish_completed_refresh(&app_config, temp.path(), identity, &checkpoint, update_quality(100, 0, 100))
+                .await?;
+
+        assert_eq!(rejections.len(), 1);
+        assert_eq!(rejections[0].cluster, XtreamCluster::Series);
+        assert_eq!(rejections[0].current_count, 10);
+        assert_eq!(rejections[0].candidate_count, 9);
+        let published = load_active_manifest(temp.path(), identity).await?;
+        assert_eq!(published.live.as_ref().map(|files| files.generation), Some(candidate_generation));
+        assert_eq!(published.series, active.series);
         Ok(())
     }
 

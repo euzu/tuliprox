@@ -145,7 +145,7 @@ pub(in crate::api::endpoints) async fn get_playlist_for_input(
             // TODO refactor
             let stalker_cluster = stalker_cluster(cluster);
             let client = app_state.http_client.load();
-            let (groups, errors, _, partial) = download_stalker_playlist(
+            let fetch = download_stalker_playlist(
                 &app_state.app_config,
                 client.as_ref(),
                 input,
@@ -154,14 +154,14 @@ pub(in crate::api::endpoints) async fn get_playlist_for_input(
                 true,
             )
             .await;
-            if groups.is_empty() {
-                if partial {
+            if fetch.groups.is_empty() {
+                if fetch.partial {
                     return stalker_refresh_pending_response(accept);
                 }
-                if errors.is_empty() {
+                if fetch.errors.is_empty() {
                     return json_or_bin_response(accept, &Vec::<UiPlaylistItem>::new()).into_response();
                 }
-                let error_strings: Vec<String> = errors.iter().map(ToString::to_string).collect();
+                let error_strings: Vec<String> = fetch.errors.iter().map(ToString::to_string).collect();
                 return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": error_strings.join(", ")})))
                     .into_response();
             }
@@ -169,7 +169,8 @@ pub(in crate::api::endpoints) async fn get_playlist_for_input(
             let web_ui_path = config.web_ui.as_ref().and_then(|web_ui| web_ui.path.as_ref()).map_or("", String::as_str);
             let resource_url = concat_path_leading_slash(web_ui_path, "api/v1/playlist/resource");
             let encrypt_secret = app_state.get_encrypt_secret();
-            let channels: Vec<UiPlaylistItem> = groups
+            let channels: Vec<UiPlaylistItem> = fetch
+                .groups
                 .iter()
                 .flat_map(|group| group.channels.iter())
                 .map(UiPlaylistItem::from)
@@ -199,7 +200,7 @@ pub(in crate::api::endpoints) async fn get_playlist_for_custom_provider(
                     (playlist, errors, false)
                 }
                 InputPersistence::Xtream => {
-                    let (pl, err, _) = xtream::download_xtream_playlist(
+                    let fetch = xtream::download_xtream_playlist_direct(
                         &app_state.app_config,
                         client,
                         &app_state.event_manager,
@@ -207,7 +208,7 @@ pub(in crate::api::endpoints) async fn get_playlist_for_custom_provider(
                         Some(&[cluster]),
                     )
                     .await;
-                    (pl, err, false)
+                    (fetch.groups, fetch.errors, fetch.partial)
                 }
                 InputPersistence::Library => {
                     return (
@@ -225,11 +226,9 @@ pub(in crate::api::endpoints) async fn get_playlist_for_custom_provider(
                 }
                 InputPersistence::Stalker => {
                     let stalker_cluster = stalker_cluster(cluster);
-                    // The Stalker processor mirrors the M3U/Xtream path: it returns
-                    // `PlaylistGroup`s for the requested cluster only. The third
-                    // tuple element (`use_disk_based_processing`) is irrelevant for
-                    // a live preview — we always surface the in-memory items here.
-                    let (groups, errs, _, partial) = download_stalker_playlist(
+                    // A live preview materializes the requested active cluster; provider-side
+                    // persistence remains an implementation detail of the named fetch result.
+                    let fetch = download_stalker_playlist(
                         &app_state.app_config,
                         client,
                         input,
@@ -238,7 +237,7 @@ pub(in crate::api::endpoints) async fn get_playlist_for_custom_provider(
                         true,
                     )
                     .await;
-                    (groups, errs, partial)
+                    (fetch.groups, fetch.errors, fetch.partial)
                 }
             };
             if result.is_empty() {

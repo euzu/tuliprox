@@ -41,7 +41,7 @@ impl PlaylistProvider for StalkerProvider {
     fn name(&self) -> &'static str { "stalker" }
 
     async fn fetch(&self, request: &PlaylistFetchRequest<'_>) -> PlaylistFetch {
-        let (groups, errors, persisted, partial) = download_stalker_playlist(
+        download_stalker_playlist(
             request.app_config,
             request.client,
             request.input,
@@ -49,8 +49,7 @@ impl PlaylistProvider for StalkerProvider {
             self.refresh_mode,
             self.materialize_active,
         )
-        .await;
-        PlaylistFetch::groups(groups).with_errors(errors).persisted(persisted).partial(partial)
+        .await
     }
 }
 
