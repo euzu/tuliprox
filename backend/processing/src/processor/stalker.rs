@@ -303,11 +303,7 @@ pub async fn download_stalker_playlist(
                 counts[cluster as usize] = items.len();
                 let cluster_groups = groups_for_cluster(items, cluster, &input.name);
                 let group_titles = cluster_groups.iter().map(|g| g.title.to_string()).collect::<Vec<String>>();
-                let xc = match cluster {
-                    StalkerCluster::Live => shared::model::XtreamCluster::Live,
-                    StalkerCluster::Vod => shared::model::XtreamCluster::Video,
-                    StalkerCluster::Series => shared::model::XtreamCluster::Series,
-                };
+                let xc = xtream_cluster(cluster);
                 if let Err(publish_err) = tuliprox_repository::publish_raw_group_catalog(
                     catalog_storage_path,
                     &input.name,
@@ -364,12 +360,7 @@ fn groups_for_cluster(
     cluster: StalkerCluster,
     input_name: &str,
 ) -> Vec<PlaylistGroup> {
-    use shared::model::XtreamCluster;
-    let xtream_cluster = match cluster {
-        StalkerCluster::Live => XtreamCluster::Live,
-        StalkerCluster::Vod => XtreamCluster::Video,
-        StalkerCluster::Series => XtreamCluster::Series,
-    };
+    let xtream_cluster = xtream_cluster(cluster);
     let mut groups_map: indexmap::IndexMap<u32, PlaylistGroup> = indexmap::IndexMap::new();
     for item in items {
         let category_id = item.category_id;
@@ -383,6 +374,14 @@ fn groups_for_cluster(
         group.channels.push(pli);
     }
     groups_map.into_values().collect()
+}
+
+const fn xtream_cluster(cluster: StalkerCluster) -> shared::model::XtreamCluster {
+    match cluster {
+        StalkerCluster::Live => shared::model::XtreamCluster::Live,
+        StalkerCluster::Vod => shared::model::XtreamCluster::Video,
+        StalkerCluster::Series => shared::model::XtreamCluster::Series,
+    }
 }
 
 /// Map a Stalker failure onto the workspace error type, keeping its classification.

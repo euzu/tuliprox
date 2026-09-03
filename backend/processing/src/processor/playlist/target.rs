@@ -432,10 +432,6 @@ pub(crate) async fn finalize_prepared_target<E: EventSink + Clone + 'static, M: 
         apply_persist_filter(target, &mut flat_new_playlist);
         retain_epg_referenced_by_groups(&flat_new_playlist, &mut new_epg);
 
-        if process_watch(&ctx.config, &ctx.events, target, &flat_new_playlist).await {
-            step.tick("group watches");
-            log_memory_snapshot(format!("target '{}' after_group_watches", target.name).as_str());
-        }
         let merged_epg = if ctx.config.config.load().disk_based_processing {
             // Per-source drain to disk, then multi-way merge. Errors are pushed
             // to `errors` rather than `?` because the function returns
@@ -467,6 +463,10 @@ pub(crate) async fn finalize_prepared_target<E: EventSink + Clone + 'static, M: 
             ctx.playlist_state.as_ref(),
         )
         .await;
+        if result.is_ok() && process_watch(&ctx.config, &ctx.events, target, &flat_new_playlist).await {
+            step.tick("group watches");
+            log_memory_snapshot(format!("target '{}' after_group_watches", target.name).as_str());
+        }
         step.stop("Persisting playlists");
         log_memory_snapshot(format!("target '{}' after_persist", target.name).as_str());
         (result, errors)

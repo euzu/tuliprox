@@ -3,27 +3,30 @@ use crate::api::{
     endpoints::extract_accept_header::ExtractAcceptHeader, model::AppState,
 };
 use axum::{
-    extract::{Path as AxumPath, State},
+    extract::{Query, State},
     http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, put},
     Json, Router,
 };
-use shared::model::{
-    permission::Permission, TargetBouquetDto, TargetBouquetStreamEventDto, TargetBouquetTargetDto, XtreamCluster,
+use shared::{
+    error::TuliproxError,
+    model::{
+        permission::Permission, TargetBouquetDto, TargetBouquetStatusDto, TargetBouquetStreamEventDto, XtreamCluster,
+    },
 };
-use std::{collections::HashSet, path::Path, sync::Arc};
+use std::sync::Arc;
 use tuliprox_core::model::{ConfigInput, ConfigInputFlags, ConfigTarget, SourcesConfig};
 
 pub fn target_bouquet_api_register_with_permissions(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
     let read_routes = Router::new()
-        .route("/target-bouquets", get(list_target_bouquets))
-        .route("/target-bouquets/{target_id}/groups", get(get_target_bouquet_groups))
+        .route("/target-bouquets/status", get(get_target_bouquet_status))
+        .route("/target-bouquets/groups", get(get_target_bouquet_groups))
         .layer(permission_layer!(app_state, Permission::PlaylistRead));
 
     let write_routes = Router::new()
-        .route("/target-bouquets/{target_id}", put(save_target_bouquet_handler))
-        .route("/target-bouquets/{target_id}", delete(delete_target_bouquet_handler))
+        .route("/target-bouquets/selection", put(save_target_bouquet_handler))
+        .route("/target-bouquets/selection", delete(delete_target_bouquet_handler))
         .layer(permission_layer!(app_state, Permission::PlaylistWrite));
 
     Router::new().merge(read_routes).merge(write_routes)
@@ -31,10 +34,15 @@ pub fn target_bouquet_api_register_with_permissions(app_state: &Arc<AppState>) -
 
 pub fn target_bouquet_api_register_unprotected() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/target-bouquets", get(list_target_bouquets))
-        .route("/target-bouquets/{target_id}/groups", get(get_target_bouquet_groups))
-        .route("/target-bouquets/{target_id}", put(save_target_bouquet_handler))
-        .route("/target-bouquets/{target_id}", delete(delete_target_bouquet_handler))
+        .route("/target-bouquets/status", get(get_target_bouquet_status))
+        .route("/target-bouquets/groups", get(get_target_bouquet_groups))
+        .route("/target-bouquets/selection", put(save_target_bouquet_handler))
+        .route("/target-bouquets/selection", delete(delete_target_bouquet_handler))
+}
+
+#[derive(serde::Deserialize)]
+struct TargetBouquetQuery {
+    target: String,
 }
 
 async fn send_stream_event(
@@ -46,10 +54,10 @@ async fn send_stream_event(
 
 fn resolve_target_with_inputs(
     sources: &SourcesConfig,
-    target_id: u16,
+    target_name: &str,
 ) -> Option<(Arc<ConfigTarget>, Vec<Arc<ConfigInput>>)> {
     sources.sources.iter().find_map(|source| {
-        let target = source.targets.iter().find(|target| target.id == target_id)?;
+        let target = source.targets.iter().find(|target| target.name == target_name)?;
         let inputs = source
             .inputs
             .iter()
@@ -59,29 +67,25 @@ fn resolve_target_with_inputs(
     })
 }
 
-async fn collect_target_summaries(state: &AppState) -> Vec<TargetBouquetTargetDto> {
+async fn target_summary(state: &AppState, target_name: &str) -> Result<Option<TargetBouquetStatusDto>, TuliproxError> {
     let sources = state.app_config.sources.load();
-    let config_path = state.app_config.paths.load().config_path.clone();
-    let bouquet_files: HashSet<_> = tuliprox_repository::list_target_bouquet_files(Path::new(&config_path))
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
-    let mut target_dtos = Vec::new();
-
-    for source in &sources.sources {
-        for target in &source.targets {
-            let has_bouquet = bouquet_files
-                .contains(&tuliprox_repository::target_bouquet_path(Path::new(&config_path), &target.name));
-            target_dtos.push(TargetBouquetTargetDto {
-                id: target.id,
-                name: target.name.clone(),
-                inputs: source.inputs.iter().map(ToString::to_string).collect(),
-                restricted: has_bouquet,
-            });
-        }
-    }
-    target_dtos
+    let target =
+        sources.sources.iter().flat_map(|source| &source.targets).find(|target| target.name == target_name).cloned();
+    drop(sources);
+    let Some(target) = target else { return Ok(None) };
+    let bouquet = tuliprox_repository::load_target_bouquet(&state.app_config, &target.name).await?;
+    let active_bouquet = bouquet.as_ref().filter(|value| !value.is_unrestricted());
+    Ok(Some(TargetBouquetStatusDto {
+        name: target.name.clone(),
+        mode: active_bouquet.map(|value| value.bouquet.mode),
+        group_count: active_bouquet.map_or(0, |value| {
+            [&value.bouquet.groups.live, &value.bouquet.groups.vod, &value.bouquet.groups.series]
+                .into_iter()
+                .flatten()
+                .map(Vec::len)
+                .sum()
+        }),
+    }))
 }
 
 async fn stream_input_clusters(
@@ -189,20 +193,33 @@ async fn stream_input_clusters(
     .await
 }
 
-async fn list_target_bouquets(State(app_state): State<Arc<AppState>>) -> Json<Vec<TargetBouquetTargetDto>> {
-    Json(collect_target_summaries(&app_state).await)
+async fn get_target_bouquet_status(
+    State(app_state): State<Arc<AppState>>,
+    Query(query): Query<TargetBouquetQuery>,
+) -> Response {
+    match target_summary(&app_state, &query.target).await {
+        Ok(Some(target)) => Json(target).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("Target '{}' not found", query.target) })),
+        )
+            .into_response(),
+        Err(err) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": err.to_string() }))).into_response()
+        }
+    }
 }
 
 async fn get_target_bouquet_groups(
     State(app_state): State<Arc<AppState>>,
-    AxumPath(target_id): AxumPath<u16>,
+    Query(query): Query<TargetBouquetQuery>,
     ExtractAcceptHeader(accept): ExtractAcceptHeader,
 ) -> Response {
     let sources = app_state.app_config.sources.load();
-    let Some((target, inputs)) = resolve_target_with_inputs(&sources, target_id) else {
+    let Some((target, inputs)) = resolve_target_with_inputs(&sources, &query.target) else {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": format!("Target id '{target_id}' not found") })),
+            Json(serde_json::json!({ "error": format!("Target '{}' not found", query.target) })),
         )
             .into_response();
     };
@@ -250,14 +267,16 @@ async fn get_target_bouquet_groups(
 
 async fn save_target_bouquet_handler(
     State(app_state): State<Arc<AppState>>,
-    AxumPath(target_id): AxumPath<u16>,
+    Query(query): Query<TargetBouquetQuery>,
     Json(bouquet): Json<TargetBouquetDto>,
 ) -> Response {
     let sources = app_state.app_config.sources.load();
-    let Some(target) = sources.get_target_by_id(target_id) else {
+    let Some(target) =
+        sources.sources.iter().flat_map(|source| &source.targets).find(|target| target.name == query.target)
+    else {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": format!("Target id '{target_id}' not found") })),
+            Json(serde_json::json!({ "error": format!("Target '{}' not found", query.target) })),
         )
             .into_response();
     };
@@ -272,13 +291,15 @@ async fn save_target_bouquet_handler(
 
 async fn delete_target_bouquet_handler(
     State(app_state): State<Arc<AppState>>,
-    AxumPath(target_id): AxumPath<u16>,
+    Query(query): Query<TargetBouquetQuery>,
 ) -> Response {
     let sources = app_state.app_config.sources.load();
-    let Some(target) = sources.get_target_by_id(target_id) else {
+    let Some(target) =
+        sources.sources.iter().flat_map(|source| &source.targets).find(|target| target.name == query.target)
+    else {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": format!("Target id '{target_id}' not found") })),
+            Json(serde_json::json!({ "error": format!("Target '{}' not found", query.target) })),
         )
             .into_response();
     };
@@ -364,7 +385,11 @@ mod tests {
         let router = target_bouquet_api_register_unprotected().with_state(Arc::clone(&app_state));
 
         // An unconfigured target starts without a restricted selection.
-        let req = Request::builder().method("GET").uri("/target-bouquets/0/groups").body(Body::empty()).unwrap();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/target-bouquets/groups?target=living_room")
+            .body(Body::empty())
+            .unwrap();
         let resp = router.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
@@ -378,15 +403,32 @@ mod tests {
         );
         let req = Request::builder()
             .method("PUT")
-            .uri("/target-bouquets/0")
+            .uri("/target-bouquets/selection?target=living_room")
             .header(axum::http::header::CONTENT_TYPE, "application/json")
             .body(Body::from(serde_json::to_vec(&bouquet_dto).unwrap()))
             .unwrap();
         let resp = router.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
+        // The lightweight target summary exposes the mode and selected group count for the target editor.
+        let req = Request::builder()
+            .method("GET")
+            .uri("/target-bouquets/status?target=living_room")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let target: TargetBouquetStatusDto = serde_json::from_slice(&body).unwrap();
+        assert_eq!(target.mode, Some(TargetBouquetMode::Blacklist));
+        assert_eq!(target.group_count, 1);
+
         // Subsequent reads expose the persisted selection.
-        let req = Request::builder().method("GET").uri("/target-bouquets/0/groups").body(Body::empty()).unwrap();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/target-bouquets/groups?target=living_room")
+            .body(Body::empty())
+            .unwrap();
         let resp = router.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
@@ -399,12 +441,20 @@ mod tests {
         ));
 
         // Reset the selection.
-        let req = Request::builder().method("DELETE").uri("/target-bouquets/0").body(Body::empty()).unwrap();
+        let req = Request::builder()
+            .method("DELETE")
+            .uri("/target-bouquets/selection?target=living_room")
+            .body(Body::empty())
+            .unwrap();
         let resp = router.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
         // Reset restores the unrestricted state.
-        let req = Request::builder().method("GET").uri("/target-bouquets/0/groups").body(Body::empty()).unwrap();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/target-bouquets/groups?target=living_room")
+            .body(Body::empty())
+            .unwrap();
         let resp = router.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
@@ -423,7 +473,11 @@ mod tests {
             .unwrap();
 
         let router = target_bouquet_api_register_unprotected().with_state(app_state);
-        let request = Request::builder().method("GET").uri("/target-bouquets/0/groups").body(Body::empty()).unwrap();
+        let request = Request::builder()
+            .method("GET")
+            .uri("/target-bouquets/groups?target=living_room")
+            .body(Body::empty())
+            .unwrap();
         let response = router.oneshot(request).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
@@ -472,15 +526,24 @@ mod tests {
 
         let router = target_bouquet_api_register_unprotected().with_state(Arc::clone(&app_state));
 
-        let req = Request::builder().method("GET").uri("/target-bouquets").body(Body::empty()).unwrap();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/target-bouquets/status?target=living_room")
+            .body(Body::empty())
+            .unwrap();
         let resp = router.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
-        let targets: Vec<TargetBouquetTargetDto> = serde_json::from_slice(&body).unwrap();
-        assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0].name, "living_room");
+        let target: TargetBouquetStatusDto = serde_json::from_slice(&body).unwrap();
+        assert_eq!(target.name, "living_room");
+        assert_eq!(target.mode, None);
+        assert_eq!(target.group_count, 0);
 
-        let req = Request::builder().method("GET").uri("/target-bouquets/0/groups").body(Body::empty()).unwrap();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/target-bouquets/groups?target=living_room")
+            .body(Body::empty())
+            .unwrap();
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(resp.headers().get(axum::http::header::CONTENT_TYPE).unwrap(), shared::utils::CONTENT_TYPE_JSON);

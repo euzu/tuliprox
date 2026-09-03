@@ -66,10 +66,6 @@ pub async fn load_target_bouquet(
 
     let _lock = app_config.file_locks.read_lock(&file_path).await;
 
-    if !tokio::fs::try_exists(&file_path).await.unwrap_or(false) {
-        return Ok(None);
-    }
-
     let content = match tokio::fs::read_to_string(&file_path).await {
         Ok(c) => c,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -194,11 +190,20 @@ async fn rename_target_bouquet_locked(
         (app_config.file_locks.write_lock(&new_path).await, app_config.file_locks.write_lock(&old_path).await)
     };
 
-    if !tokio::fs::try_exists(&old_path).await.unwrap_or(false) {
-        return Ok(());
+    match tokio::fs::try_exists(&old_path).await {
+        Ok(true) => {}
+        Ok(false) => return Ok(()),
+        Err(err) => {
+            return Err(TuliproxError::TargetBouquet(format!(
+                "Failed to inspect source bouquet {}: {err}",
+                old_path.display()
+            )));
+        }
     }
 
-    if tokio::fs::try_exists(&new_path).await.unwrap_or(false) {
+    if tokio::fs::try_exists(&new_path).await.map_err(|err| {
+        TuliproxError::TargetBouquet(format!("Failed to inspect destination bouquet {}: {err}", new_path.display()))
+    })? {
         return Err(TuliproxError::TargetBouquet(format!(
             "Cannot rename bouquet: destination file {} already exists",
             new_path.display()
@@ -206,7 +211,13 @@ async fn rename_target_bouquet_locked(
     }
 
     rewrite_bouquet_with_target(&old_path, &new_path, new_target_name).await?;
-    let _ = tokio::fs::remove_file(&old_path).await;
+    tokio::fs::remove_file(&old_path).await.map_err(|err| {
+        TuliproxError::TargetBouquet(format!(
+            "Renamed bouquet was written to {}, but removing source file {} failed: {err}",
+            new_path.display(),
+            old_path.display()
+        ))
+    })?;
     debug!(
         "Renamed target bouquet from '{}' ({}) to '{}' ({})",
         old_target_name,
@@ -264,12 +275,18 @@ pub async fn validate_target_bouquet_mutations(
         let old_path = target_bouquet_path(config_path, old_name);
         let new_path = target_bouquet_path(config_path, new_name);
 
-        if !tokio::fs::try_exists(&old_path).await.unwrap_or(false) {
-            continue;
+        if !tokio::fs::try_exists(&old_path).await.map_err(|err| {
+            TuliproxError::TargetBouquet(format!("Failed to inspect source bouquet {}: {err}", old_path.display()))
+        })? {
+            return Err(TuliproxError::TargetBouquet(format!(
+                "Cannot rename target bouquet from '{old_name}' to '{new_name}': source file {} does not exist",
+                old_path.display()
+            )));
         }
 
-        if tokio::fs::try_exists(&new_path).await.unwrap_or(false)
-            && !deleted_names.contains(new_name.as_str())
+        if tokio::fs::try_exists(&new_path).await.map_err(|err| {
+            TuliproxError::TargetBouquet(format!("Failed to inspect destination bouquet {}: {err}", new_path.display()))
+        })? && !deleted_names.contains(new_name.as_str())
             && !renamed_old_names.contains(new_name.as_str())
         {
             return Err(TuliproxError::TargetBouquet(format!(
@@ -433,22 +450,29 @@ pub async fn apply_target_bouquet_mutations_locked(
 /// Lists all bouquet files in `config/bouquets/`.
 pub async fn list_target_bouquet_files(config_path: &Path) -> Result<Vec<PathBuf>, TuliproxError> {
     let dir = target_bouquet_dir(config_path);
-    if !tokio::fs::try_exists(&dir).await.unwrap_or(false) {
-        return Ok(Vec::new());
-    }
-
     let mut entries = Vec::new();
-    let mut dir_reader = tokio::fs::read_dir(&dir).await.map_err(|err| {
-        TuliproxError::TargetBouquet(format!("Failed to read bouquets directory {}: {err}", dir.display()))
-    })?;
+    let mut dir_reader = match tokio::fs::read_dir(&dir).await {
+        Ok(reader) => reader,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(entries),
+        Err(err) => {
+            return Err(TuliproxError::TargetBouquet(format!(
+                "Failed to read bouquets directory {}: {err}",
+                dir.display()
+            )));
+        }
+    };
 
     while let Some(entry) = dir_reader
         .next_entry()
         .await
         .map_err(|err| TuliproxError::TargetBouquet(format!("Failed to read bouquet directory entry: {err}")))?
     {
+        let file_type = entry
+            .file_type()
+            .await
+            .map_err(|err| TuliproxError::TargetBouquet(format!("Failed to inspect bouquet directory entry: {err}")))?;
         let path = entry.path();
-        if path.is_file() && path.extension().is_some_and(|ext| ext == "yml" || ext == "yaml") {
+        if file_type.is_file() && path.extension().is_some_and(|ext| ext == "yml" || ext == "yaml") {
             entries.push(path);
         }
     }
@@ -476,7 +500,7 @@ pub async fn audit_target_bouquets<S: std::hash::BuildHasher>(
     if let Ok(mut dir_reader) = tokio::fs::read_dir(&dir).await {
         while let Ok(Some(entry)) = dir_reader.next_entry().await {
             let path = entry.path();
-            if path.is_file() {
+            if entry.file_type().await.is_ok_and(|file_type| file_type.is_file()) {
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                     if name.starts_with('.') && name.contains(".tmp-") {
                         let _ = tokio::fs::remove_file(&path).await;
@@ -765,6 +789,24 @@ mod tests {
             vec![("target_a".to_string(), "target_c".to_string()), ("target_b".to_string(), "target_c".to_string())];
         let err = validate_target_bouquet_mutations(temp_dir.path(), &renames, &[]).await.unwrap_err();
         assert!(err.to_string().contains("Duplicate rename destination 'target_c'"));
+    }
+
+    #[tokio::test]
+    async fn mutation_with_missing_source_preserves_existing_destination() {
+        let temp_dir = TempDir::new().unwrap();
+        let app_config = test_app_config(temp_dir.path().to_str().unwrap());
+        let bouquet = PlaylistClusterBouquetDto { live: Some(vec!["News".to_string()]), vod: None, series: None };
+        save_target_bouquet(&app_config, "target_b", whitelist(bouquet)).await.unwrap();
+
+        let renames = [("missing".to_string(), "target_b".to_string())];
+        let result = apply_target_bouquet_mutations(&app_config, &renames, &[]).await;
+
+        assert!(result.is_err());
+        assert!(target_bouquet_exists(temp_dir.path(), "target_b").await);
+        assert_eq!(
+            load_target_bouquet(&app_config, "target_b").await.unwrap().unwrap().bouquet.groups.live,
+            Some(vec!["News".to_string()])
+        );
     }
 
     #[tokio::test]

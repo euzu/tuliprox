@@ -63,11 +63,10 @@ pub enum TargetBouquetStreamEventDto {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-pub struct TargetBouquetTargetDto {
-    pub id: u16,
+pub struct TargetBouquetStatusDto {
     pub name: String,
-    pub inputs: Vec<String>,
-    pub restricted: bool,
+    pub mode: Option<TargetBouquetMode>,
+    pub group_count: usize,
 }
 
 #[cfg(test)]

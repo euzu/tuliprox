@@ -410,27 +410,27 @@ pub fn BouquetEditor(props: &BouquetEditorProps) -> Html {
                 filter_ok && search_ok
             };
 
-            let visible_cats: Vec<String> = c.iter().filter(|cat| is_visible(cat)).cloned().collect();
+            let visible_cats: Rc<Vec<String>> = Rc::new(c.iter().filter(|cat| is_visible(cat)).cloned().collect());
 
             let total = c.len();
             let selected_count = c.iter().filter(|cat| *selections.get(*cat).unwrap_or(&false)).count();
             let visible_count = visible_cats.len();
 
             let select_all = {
-                let cats = visible_cats.clone();
+                let cats = Rc::clone(&visible_cats);
                 let handler = handler.clone();
                 Callback::from(move |(_, event): (String, MouseEvent)| {
                     event.stop_propagation();
-                    handler.emit((cluster_clone, cats.clone(), true));
+                    handler.emit((cluster_clone, cats.as_ref().clone(), true));
                 })
             };
 
             let deselect_all = {
-                let cats = visible_cats;
+                let cats = Rc::clone(&visible_cats);
                 let handler = handler.clone();
                 Callback::from(move |(_, event): (String, MouseEvent)| {
                     event.stop_propagation();
-                    handler.emit((cluster_clone, cats.clone(), false));
+                    handler.emit((cluster_clone, cats.as_ref().clone(), false));
                 })
             };
 
@@ -491,7 +491,7 @@ pub fn BouquetEditor(props: &BouquetEditorProps) -> Html {
                        collapse_state.set(collapse_map);
                   })}>
                     <div class="tp__api-user-target-playlist__categories">
-                        { for c.iter().filter(|cat| is_visible(cat)).map(|cat| {
+                        { for visible_cats.iter().map(|cat| {
                             let selected = *selections.get(cat).unwrap_or(&false);
                             let origins = props
                                 .origins

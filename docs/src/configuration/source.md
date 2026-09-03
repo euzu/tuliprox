@@ -1306,6 +1306,35 @@ Parentheses make clear which questions belong together. Text values always use q
 the literal group name `EMPTY`, whereas `EpgId = EMPTY` without quotes is the short form of `EpgId IS EMPTY` and checks
 for a missing EPG ID. In practice, start with one simple question and add further conditions only when needed.
 
+#### Target bouquet filter in the Web UI
+
+The Source Editor provides an additional **Bouquets** row below a target's regular filter settings. The row shows
+whether the target currently has no bouquet filter or summarizes the active mode and group count. Its action button
+opens the bouquet editor as a full-size stacked view; use the back button to return to the unchanged target form.
+The target shown in the title is informational because the editor always belongs to the target from which it was
+opened.
+
+The bouquet is an additional, target-specific group filter and supports two modes:
+
+* **Whitelist** keeps only the selected groups.
+* **Blacklist** removes the selected groups and keeps the others.
+
+Live, VOD, and Series selections are independent. One cluster may intentionally have an empty selection while groups
+remain selected in another cluster. If no group is selected in any cluster, the bouquet is unrestricted and the target
+keeps all groups; a completely empty selection never means "publish an empty playlist". Saving or resetting the
+bouquet takes effect during the next playlist update.
+
+The available groups are read from the raw catalogs produced by playlist processing. A new installation or deleted
+raw catalog therefore shows no available groups until a playlist update has completed. Missing catalogs and a missing
+saved bouquet are normal states, not configuration errors.
+
+Bouquet files are associated with the unique target name rather than the transient numeric target ID used by the Web
+UI. Renaming or deleting a target through the Source Editor moves or removes its bouquet together with the target.
+
+> **Update safety:** Tuliprox treats a completely empty input or target playlist as a failed refresh and retains the
+> previously published data. This protects stable virtual IDs when a provider temporarily returns no data or a download
+> fails. Consequently, an intentionally empty playlist is not persisted through a normal update.
+
 ---
 
 ### 3.2.3 `rename`

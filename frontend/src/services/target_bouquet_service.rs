@@ -3,9 +3,9 @@ use crate::{
     services::{get_base_href, get_token, request_delete, request_get, request_put, Encoding},
 };
 use gloo_net::http::Request;
-use js_sys::{Reflect, Uint8Array};
+use js_sys::{encode_uri_component, Reflect, Uint8Array};
 use shared::{
-    model::{TargetBouquetDto, TargetBouquetStreamEventDto, TargetBouquetTargetDto},
+    model::{TargetBouquetDto, TargetBouquetStatusDto, TargetBouquetStreamEventDto},
     utils::concat_path_leading_slash,
 };
 use wasm_bindgen::JsValue;
@@ -149,30 +149,29 @@ impl TargetBouquetService {
 
     fn collection_url() -> String { Self::collection_url_from_base(&get_base_href()) }
 
-    fn target_url(target_id: u16, suffix: Option<&str>) -> String {
+    fn target_url(target_name: &str, endpoint: &str) -> String {
         let collection = Self::collection_url();
-        suffix.map_or_else(
-            || concat_path_leading_slash(&collection, &target_id.to_string()),
-            |suffix| concat_path_leading_slash(&collection, &format!("{target_id}/{suffix}")),
-        )
+        let endpoint_url = concat_path_leading_slash(&collection, endpoint);
+        let encoded_name: String = encode_uri_component(target_name).into();
+        format!("{endpoint_url}?target={encoded_name}")
     }
 
-    pub async fn list_targets() -> Result<Vec<TargetBouquetTargetDto>, Error> {
-        request_get::<Vec<TargetBouquetTargetDto>>(&Self::collection_url(), None, Some(Encoding::Json))
+    pub async fn fetch_target_status(target_name: &str) -> Result<TargetBouquetStatusDto, Error> {
+        request_get::<TargetBouquetStatusDto>(&Self::target_url(target_name, "status"), None, Some(Encoding::Json))
             .await?
             .ok_or(Error::NotFound)
     }
 
     /// Loads the selected target's bounded event stream and dispatches decoded events in wire order.
     pub async fn fetch_target_bouquet_stream<F>(
-        target_id: u16,
+        target_name: &str,
         abort_signal: Option<web_sys::AbortSignal>,
         mut on_event: F,
     ) -> Result<(), Error>
     where
         F: FnMut(TargetBouquetStreamEventDto),
     {
-        let url = Self::target_url(target_id, Some("groups"));
+        let url = Self::target_url(target_name, "groups");
         let mut request = Request::get(&url).header("Accept", "application/json").abort_signal(abort_signal.as_ref());
         if let Some(token) = get_token() {
             request = request.header("Authorization", format!("Bearer {token}").as_str());
@@ -208,14 +207,14 @@ impl TargetBouquetService {
         decoder.finish(&mut on_event)
     }
 
-    pub async fn save_target_bouquet(target_id: u16, bouquet: &TargetBouquetDto) -> Result<(), Error> {
-        let url = Self::target_url(target_id, None);
+    pub async fn save_target_bouquet(target_name: &str, bouquet: &TargetBouquetDto) -> Result<(), Error> {
+        let url = Self::target_url(target_name, "selection");
         let _ = request_put::<_, serde_json::Value>(&url, bouquet, Some(Encoding::Json), Some(Encoding::Json)).await?;
         Ok(())
     }
 
-    pub async fn delete_target_bouquet(target_id: u16) -> Result<(), Error> {
-        let url = Self::target_url(target_id, None);
+    pub async fn delete_target_bouquet(target_name: &str) -> Result<(), Error> {
+        let url = Self::target_url(target_name, "selection");
         let _ = request_delete::<serde_json::Value>(&url, None, None).await?;
         Ok(())
     }

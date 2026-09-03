@@ -1,9 +1,10 @@
 use crate::{
     app::{
         components::{
-            can_connect, source_editor::layout::layout, Block, BlockId, BlockInstance, BlockType, BlockView,
-            Connection, EditMode, InputRow, PortStatus, SourceEditorContext, SourceEditorForm, SourceEditorSidebar,
-            TextButton, BLOCK_HEADER_HEIGHT, BLOCK_HEIGHT, BLOCK_PORT_HEIGHT, BLOCK_WIDTH,
+            bouquet_editor::TargetBouquetView, can_connect, source_editor::layout::layout, Block, BlockId,
+            BlockInstance, BlockType, BlockView, Connection, EditMode, InputRow, PortStatus, SourceEditorContext,
+            SourceEditorForm, SourceEditorSidebar, TextButton, BLOCK_HEADER_HEIGHT, BLOCK_HEIGHT, BLOCK_PORT_HEIGHT,
+            BLOCK_WIDTH,
         },
         ConfigContext, PlaylistContext,
     },
@@ -2223,6 +2224,22 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
     };
 
     let edit_mode = use_state(|| EditMode::Inactive);
+    let target_bouquet = use_state(|| Option::<String>::None);
+    let bouquet_revision = use_state(|| 0_u64);
+
+    let open_target_bouquet = {
+        let target_bouquet = target_bouquet.clone();
+        Callback::from(move |target_name: String| target_bouquet.set(Some(target_name)))
+    };
+
+    let close_target_bouquet = {
+        let target_bouquet = target_bouquet.clone();
+        let bouquet_revision = bouquet_revision.clone();
+        Callback::from(move |()| {
+            target_bouquet.set(None);
+            bouquet_revision.set(bouquet_revision.wrapping_add(1));
+        })
+    };
 
     let handle_block_edit = {
         let edit_mode_set = edit_mode.clone();
@@ -2238,6 +2255,8 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
 
     let editor_context = SourceEditorContext {
         on_form_change: form_changed,
+        open_target_bouquet,
+        bouquet_revision: *bouquet_revision,
         edit_mode: edit_mode.clone(),
         allow_write: can_write_sources,
     };
@@ -2434,6 +2453,11 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
             </div>
             <SourceEditorForm />
           </div>
+          if let Some(target_name) = target_bouquet.as_ref() {
+              <div class="tp__source-editor__stack-layer">
+                  <TargetBouquetView target_name={target_name.clone()} on_back={close_target_bouquet} />
+              </div>
+          }
         </div>
         </ContextProvider<SourceEditorContext>>
     }

@@ -131,8 +131,19 @@ pub async fn write_file_atomic_with_ops<O: AtomicWriteOps>(
     content: &[u8],
     ops: &O,
 ) -> Result<(), AtomicWriteError> {
-    if let Some(parent) = final_path.parent() {
-        fs::create_dir_all(parent).await.map_err(|e| AtomicWriteError::new(AtomicWriteStage::WriteTemp, e))?;
+    write_file_atomic_with_parent_mode(final_path, content, ops, true).await
+}
+
+async fn write_file_atomic_with_parent_mode<O: AtomicWriteOps>(
+    final_path: &Path,
+    content: &[u8],
+    ops: &O,
+    create_parent: bool,
+) -> Result<(), AtomicWriteError> {
+    if create_parent {
+        if let Some(parent) = final_path.parent() {
+            fs::create_dir_all(parent).await.map_err(|e| AtomicWriteError::new(AtomicWriteStage::WriteTemp, e))?;
+        }
     }
     let tmp = create_unique_temp_path(final_path);
     let result = async {
@@ -169,22 +180,7 @@ pub async fn write_json_atomic_with_ops<O: AtomicWriteOps>(
     content: &[u8],
     ops: &O,
 ) -> Result<(), AtomicWriteError> {
-    let tmp = create_unique_temp_path(final_path);
-    let result = async {
-        ops.write_temp(&tmp, content).await?;
-        ops.sync_file(&tmp).await?;
-        ops.rename(&tmp, final_path).await?;
-        if let Some(parent) = final_path.parent() {
-            ops.sync_parent(parent).await?;
-        }
-        Ok(())
-    }
-    .await;
-
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp).await;
-    }
-    result
+    write_file_atomic_with_parent_mode(final_path, content, ops, false).await
 }
 
 /// Atomic write using the production filesystem ops. Production callers should
@@ -292,6 +288,18 @@ mod tests {
         write_json_atomic(&final_path, content).await.expect("write");
         let read = tokio::fs::read(&final_path).await.expect("read");
         assert_eq!(read, content);
+    }
+
+    #[tokio::test]
+    async fn write_json_atomic_does_not_create_missing_parent() {
+        let dir = TempDir::new().expect("tempdir");
+        let parent = dir.path().join("missing");
+        let final_path = parent.join("downloads_state.json");
+
+        let err = write_json_atomic(&final_path, br#"{"hello":"world"}"#).await.expect_err("missing parent");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        assert!(!parent.exists());
     }
 
     #[tokio::test]

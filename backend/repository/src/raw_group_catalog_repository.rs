@@ -95,10 +95,6 @@ pub async fn load_raw_group_catalog(
     let path = raw_group_catalog_path(input_storage_dir, cluster);
     let _lock = file_locks.read_lock(&path).await;
 
-    if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
-        return Ok(None);
-    }
-
     let path_clone = path.clone();
     let expected_input_owned = expected_input.to_string();
 

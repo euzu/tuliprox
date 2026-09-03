@@ -17,6 +17,10 @@
   }
 
   &__title {
+    display: flex;
+    align-items: center;
+    gap: var(--gap-small);
+
     h2 {
       margin: 0;
       font-size: var(--font-size-xl);
@@ -43,7 +47,7 @@
     gap: var(--gap-small);
     padding: var(--padding-small) var(--padding-default);
     background-color: var(--warn-background-color);
-    border: var(--warn-color);
+    border: 1px solid var(--warn-color);
     border-radius: var(--border-radius);
     color: var(--text-color);
     font-size: var(--font-size-s);
@@ -53,31 +57,10 @@
     font-size: var(--font-size-default);
   }
 
-  &__targets-bar {
-    margin-bottom: var(--gap-default);
-  }
-
   &__editor-container {
     display: flex;
     flex-direction: column;
     gap: var(--gap-small);
-  }
-
-  &__target-meta {
-    display: flex;
-    gap: var(--gap-small);
-    font-size: var(--font-size-s);
-    color: var(--text-color);
-    opacity: 0.8;
-    padding-bottom: var(--padding-small);
-  }
-
-  &__meta-label {
-    font-weight: 600;
-  }
-
-  &__meta-value {
-    font-style: italic;
   }
 
   &__notice {
@@ -115,12 +98,18 @@
     font-size: var(--font-size-s);
   }
 
-  &__no-targets {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    padding: var(--padding-large);
-    color: var(--text-color);
-    opacity: 0.6;
+}
+
+.tp__target-bouquet-input {
+  width: 100%;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+
+  &:disabled {
+    cursor: default;
+    opacity: 0.65;
   }
 }

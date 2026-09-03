@@ -91,7 +91,7 @@ fn is_allowed_home_view(view: ViewType, access: HomeViewAccess) -> bool {
         ViewType::Config => access.can_read_config,
         ViewType::SourceEditor => access.can_read_sources,
         ViewType::PlaylistUpdate => access.can_write_playlist,
-        ViewType::TargetBouquets | ViewType::PlaylistSettings | ViewType::PlaylistExplorer => access.can_read_playlist,
+        ViewType::PlaylistSettings | ViewType::PlaylistExplorer => access.can_read_playlist,
         ViewType::PlaylistEpg => access.can_read_epg,
         ViewType::Rbac => access.is_admin,
         ViewType::RecordingLibrary | ViewType::RecordingRules | ViewType::RecordingRuleForm => {
@@ -111,7 +111,6 @@ fn first_allowed_home_view(access: HomeViewAccess) -> ViewType {
         ViewType::Users,
         ViewType::Plans,
         ViewType::SourceEditor,
-        ViewType::TargetBouquets,
         ViewType::PlaylistUpdate,
         ViewType::PlaylistSettings,
         ViewType::PlaylistExplorer,
@@ -607,13 +606,6 @@ pub fn Home() -> Html {
                                         <Panel class="tp__full-width tp__full-height" value={ViewType::SourceEditor.intern()} active={view_page.clone()}>
                                            <ErrorBoundary name={translate.t("LABEL.SOURCE_EDITOR")}>
                                              <SourceEditor/>
-                                           </ErrorBoundary>
-                                        </Panel>
-                                        })}
-                                        { html_if!(can_read_playlist, {
-                                        <Panel class="tp__full-width tp__full-height" value={ViewType::TargetBouquets.intern()} active={view_page.clone()}>
-                                           <ErrorBoundary name={translate.t("LABEL.TARGET_BOUQUETS")}>
-                                             <crate::app::components::bouquet_editor::TargetBouquetView/>
                                            </ErrorBoundary>
                                         </Panel>
                                         })}
