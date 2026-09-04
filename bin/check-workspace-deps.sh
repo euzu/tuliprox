@@ -52,7 +52,6 @@ normal tuliprox-iptv -> tuliprox-core
 normal tuliprox-iptv -> tuliprox-parser
 normal tuliprox-iptv -> tuliprox-repository
 normal tuliprox -> tuliprox-messaging
-normal tuliprox -> tuliprox-parser
 normal tuliprox -> tuliprox-repository
 normal tuliprox -> tuliprox-auth
 normal tuliprox -> tuliprox-session

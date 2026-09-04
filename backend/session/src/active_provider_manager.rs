@@ -72,6 +72,7 @@ struct SharedAllocation {
     kind: ConnectionKind,
     created_at: Instant,
     cancel_token: Option<CancellationToken>,
+    session_owner: Option<Arc<str>>,
 }
 
 #[derive(Debug, Clone)]
@@ -82,6 +83,7 @@ struct ActiveConnectionInfo {
     created_at: Instant,
     priority: i8,
     kind: ConnectionKind,
+    session_owner: Option<Arc<str>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -92,9 +94,10 @@ struct SharedSubscriber {
 
 #[derive(Debug, Clone)]
 struct ProviderReservation {
-    owner: Arc<str>,
     expires_at: TokioInstant,
 }
+
+type ProviderReservations = HashMap<Arc<str>, HashMap<Arc<str>, ProviderReservation>>;
 
 #[derive(Debug, Clone, Default)]
 struct SharedConnections {
@@ -120,7 +123,7 @@ struct Connections {
 pub struct ActiveProviderManager {
     providers: ProviderLineupManager,
     connections: RwLock<Connections>,
-    reservations: RwLock<HashMap<Arc<str>, ProviderReservation>>,
+    reservations: RwLock<ProviderReservations>,
     next_allocation_id: AtomicU64,
     shared_stream_manager: OnceLock<Arc<SharedStreamManager>>,
 }
@@ -224,9 +227,12 @@ impl ActiveProviderManager {
         self.providers.reconcile_connections(counts).await;
     }
 
-    fn prune_expired_reservations(reservations: &mut HashMap<Arc<str>, ProviderReservation>) {
+    fn prune_expired_reservations(reservations: &mut ProviderReservations) {
         let now = TokioInstant::now();
-        reservations.retain(|_, reservation| reservation.expires_at > now);
+        reservations.retain(|_, provider_reservations| {
+            provider_reservations.retain(|_, reservation| reservation.expires_at > now);
+            !provider_reservations.is_empty()
+        });
     }
 
     // Reservation ownership is grouped by the `fingerprint|username` prefix and intentionally drops the
@@ -237,36 +243,101 @@ impl ActiveProviderManager {
     // If concurrent streams must be supported, reservation matching must use the full owner identifier.
     fn reservation_family(owner: &str) -> &str { owner.rsplit_once('|').map_or(owner, |(family, _)| family) }
 
-    // Compare reservations at the family level rather than exact owner equality so channel-switching can
-    // take over an existing reservation across different `virtual_id`s for the same client family.
-    // This shares the same tradeoff as `reservation_family`: same-family reservations replace each other.
-    fn is_same_reservation_family(reservation_owner: &str, session_owner: &str) -> bool {
-        Self::reservation_family(reservation_owner) == Self::reservation_family(session_owner)
-    }
+    fn reservation_family_key(owner: &str) -> Arc<str> { Arc::from(Self::reservation_family(owner)) }
 
-    async fn is_reserved_for_other(&self, provider_name: &Arc<str>, session_owner: Option<&str>) -> bool {
+    async fn has_foreign_reservation(&self, provider_name: &Arc<str>, session_owner: Option<&str>) -> bool {
         if !self.providers.reservation_blocks_other_sessions(provider_name) {
             return false;
         }
         let mut reservations = self.reservations.write().await;
         Self::prune_expired_reservations(&mut reservations);
-        reservations.get(provider_name).is_some_and(|reservation| {
-            session_owner.is_none_or(|owner| !Self::is_same_reservation_family(reservation.owner.as_ref(), owner))
+        reservations.get(provider_name).is_some_and(|provider_reservations| {
+            session_owner.map_or(!provider_reservations.is_empty(), |owner| {
+                let owner_family = Self::reservation_family(owner);
+                provider_reservations.keys().any(|family| family.as_ref() != owner_family)
+            })
         })
     }
 
     async fn get_reserved_provider_for_owner(&self, input_name: &Arc<str>, session_owner: &str) -> Option<Arc<str>> {
         let mut reservations = self.reservations.write().await;
         Self::prune_expired_reservations(&mut reservations);
-        reservations.iter().find_map(|(provider_name, reservation)| {
-            if Self::is_same_reservation_family(reservation.owner.as_ref(), session_owner)
-                && self.providers.is_provider_for_input(provider_name, input_name)
-            {
-                Some(provider_name.clone())
-            } else {
-                None
-            }
+        let owner_family = Self::reservation_family(session_owner);
+        reservations.iter().find_map(|(provider_name, provider_reservations)| {
+            (provider_reservations.contains_key(owner_family)
+                && self.providers.is_provider_for_input(provider_name, input_name))
+            .then(|| provider_name.clone())
         })
+    }
+
+    async fn active_reservation_families(&self, provider_name: &Arc<str>) -> HashSet<Arc<str>> {
+        let connections = self.connections.read().await;
+        let mut families = HashSet::new();
+        for per_addr in connections.single.values() {
+            for info in per_addr.values() {
+                if info.allocation.get_provider_name().as_ref() == Some(provider_name) {
+                    if let Some(owner) = info.session_owner.as_deref() {
+                        families.insert(Self::reservation_family_key(owner));
+                    }
+                }
+            }
+        }
+        for shared in connections.shared.by_key.values() {
+            if shared.allocation.get_provider_name().as_ref() == Some(provider_name) {
+                if let Some(owner) = shared.session_owner.as_deref() {
+                    families.insert(Self::reservation_family_key(owner));
+                }
+            }
+        }
+        families
+    }
+
+    async fn reservation_capacity_usage(
+        &self,
+        provider_name: &Arc<str>,
+        session_owner: Option<&str>,
+    ) -> Option<(usize, usize, usize)> {
+        let (current_connections, max_connections) = self.providers.provider_capacity(provider_name).await?;
+        if max_connections == 0 {
+            return Some((current_connections, max_connections, 0));
+        }
+
+        let owner_family = session_owner.map(Self::reservation_family);
+        let active_families = self.active_reservation_families(provider_name).await;
+        let mut reservations = self.reservations.write().await;
+        Self::prune_expired_reservations(&mut reservations);
+        let idle_foreign_reservations = reservations.get(provider_name).map_or(0, |provider_reservations| {
+            provider_reservations
+                .keys()
+                .filter(|family| owner_family != Some(family.as_ref()) && !active_families.contains(family.as_ref()))
+                .count()
+        });
+
+        Some((current_connections, max_connections, idle_foreign_reservations))
+    }
+
+    /// Returns true when the next allocation would consume a slot kept for an idle reservation.
+    async fn reserved_capacity_blocks_next(&self, provider_name: &Arc<str>, session_owner: Option<&str>) -> bool {
+        let Some((current_connections, max_connections, idle_foreign_reservations)) =
+            self.reservation_capacity_usage(provider_name, session_owner).await
+        else {
+            return true;
+        };
+        max_connections > 0
+            && idle_foreign_reservations > 0
+            && current_connections.saturating_add(idle_foreign_reservations) >= max_connections
+    }
+
+    /// Returns true when an already-counted candidate allocation consumed a slot kept for an idle reservation.
+    async fn exceeds_reserved_capacity(&self, provider_name: &Arc<str>, session_owner: Option<&str>) -> bool {
+        let Some((current_connections, max_connections, idle_foreign_reservations)) =
+            self.reservation_capacity_usage(provider_name, session_owner).await
+        else {
+            return true;
+        };
+        max_connections > 0
+            && idle_foreign_reservations > 0
+            && current_connections.saturating_add(idle_foreign_reservations) > max_connections
     }
 
     async fn reserved_provider_names_for_other(
@@ -276,7 +347,7 @@ impl ActiveProviderManager {
     ) -> HashSet<Arc<str>> {
         let mut reserved = HashSet::new();
         for provider_name in self.providers.provider_names_for_input(input_name) {
-            if self.is_reserved_for_other(&provider_name, session_owner).await {
+            if self.has_foreign_reservation(&provider_name, session_owner).await {
                 reserved.insert(provider_name);
             }
         }
@@ -289,25 +360,28 @@ impl ActiveProviderManager {
         // Refresh operates on the reservation family, not the exact owner string. This is what allows a
         // same-client channel switch to move the pinned provider account to the new stream immediately.
         // The tradeoff is that other reservations from the same family are cleared here as well.
-        reservations
-            .retain(|_, reservation| !Self::is_same_reservation_family(reservation.owner.as_ref(), session_owner));
+        let owner_family = Self::reservation_family_key(session_owner);
+        reservations.retain(|_, provider_reservations| {
+            provider_reservations.remove(&owner_family);
+            !provider_reservations.is_empty()
+        });
         if ttl_secs == 0 {
             return;
         }
-        reservations.insert(
-            provider_name.clone(),
-            ProviderReservation {
-                owner: Arc::from(session_owner),
-                expires_at: TokioInstant::now() + Duration::from_secs(ttl_secs),
-            },
+        reservations.entry(provider_name.clone()).or_default().insert(
+            owner_family,
+            ProviderReservation { expires_at: TokioInstant::now() + Duration::from_secs(ttl_secs) },
         );
     }
 
     pub async fn clear_provider_reservation(&self, session_owner: &str) {
         let mut reservations = self.reservations.write().await;
         Self::prune_expired_reservations(&mut reservations);
-        reservations
-            .retain(|_, reservation| !Self::is_same_reservation_family(reservation.owner.as_ref(), session_owner));
+        let owner_family = Self::reservation_family_key(session_owner);
+        reservations.retain(|_, provider_reservations| {
+            provider_reservations.remove(&owner_family);
+            !provider_reservations.is_empty()
+        });
     }
 
     async fn acquire_exact_connection_inner(
@@ -316,14 +390,15 @@ impl ActiveProviderManager {
         allow_grace: bool,
         params: &AcquireProviderParams<'_>,
     ) -> Option<ProviderHandle> {
-        if self.is_reserved_for_other(provider_name, params.session_owner).await {
-            return None;
-        }
         let allocation = self.providers.acquire_exact_connection_with_grace_override(provider_name, allow_grace).await;
         if matches!(allocation, ProviderAllocation::Exhausted) {
             return None;
         }
-        self.register_allocation(allocation, params.addr, params.priority, params.kind).await
+        if self.exceeds_reserved_capacity(provider_name, params.session_owner).await {
+            allocation.release().await;
+            return None;
+        }
+        self.register_allocation(allocation, params).await
     }
 
     async fn finalize_lineup_allocation(
@@ -342,11 +417,9 @@ impl ActiveProviderManager {
                 let new_alloc = self.providers.acquire_connection_with_grace_override(input_name, allow_grace).await;
                 if !matches!(new_alloc, ProviderAllocation::Exhausted) {
                     if let Some(provider_name) = new_alloc.get_provider_name() {
-                        if !self.is_reserved_for_other(&provider_name, params.session_owner).await {
+                        if !self.exceeds_reserved_capacity(&provider_name, params.session_owner).await {
                             allocation.release().await;
-                            return self
-                                .register_allocation(new_alloc, params.addr, params.priority, params.kind)
-                                .await;
+                            return self.register_allocation(new_alloc, params).await;
                         }
                     }
                     new_alloc.release().await;
@@ -354,7 +427,7 @@ impl ActiveProviderManager {
             }
         }
 
-        self.register_allocation(allocation, params.addr, params.priority, params.kind).await
+        self.register_allocation(allocation, params).await
     }
 
     fn select_victim_from_index(
@@ -485,13 +558,19 @@ impl ActiveProviderManager {
         let attempts = candidate_count.max(1);
         let mut skipped_reserved = HashSet::new();
         for _ in 0..attempts {
-            let allocation =
-                self.providers.acquire_connection_with_grace_override(provider_or_input_name, allow_grace).await;
+            let allocation = self
+                .providers
+                .acquire_connection_with_grace_override_excluding(
+                    provider_or_input_name,
+                    allow_grace,
+                    &skipped_reserved,
+                )
+                .await;
             if matches!(allocation, ProviderAllocation::Exhausted) {
                 break;
             }
             if let Some(provider_name) = allocation.get_provider_name() {
-                if self.is_reserved_for_other(&provider_name, params.session_owner).await {
+                if self.exceeds_reserved_capacity(&provider_name, params.session_owner).await {
                     debug_if_enabled!(
                         "Skipping reserved provider {} for {}",
                         sanitize_sensitive_info(&provider_name),
@@ -518,7 +597,7 @@ impl ActiveProviderManager {
             )
             .await
         {
-            return self.register_allocation(preempted_alloc, params.addr, params.priority, params.kind).await;
+            return self.register_allocation(preempted_alloc, params).await;
         }
 
         None
@@ -527,10 +606,9 @@ impl ActiveProviderManager {
     async fn register_allocation(
         &self,
         allocation: ProviderAllocation,
-        addr: &SocketAddr,
-        priority: i8,
-        kind: ConnectionKind,
+        params: &AcquireProviderParams<'_>,
     ) -> Option<ProviderHandle> {
+        let AcquireProviderParams { addr, priority, kind, session_owner } = *params;
         let provider_name = allocation.get_provider_name().unwrap_or_default();
         let allocation_id = self.next_allocation_id.fetch_add(1, Ordering::Relaxed);
         let cancel_token = CancellationToken::new();
@@ -548,6 +626,7 @@ impl ActiveProviderManager {
                 created_at: now,
                 priority,
                 kind,
+                session_owner: session_owner.map(Arc::from),
             },
         );
 
@@ -840,13 +919,18 @@ impl ActiveProviderManager {
 
             // Now try acquire again preserving the original grace policy.
             let attempts = self.providers.provider_names_for_input(input_name).len().max(1);
+            let mut excluded_providers = reserved_providers;
             for _ in 0..attempts {
-                let allocation = self.providers.acquire_connection_with_grace_override(input_name, allow_grace).await;
+                let allocation = self
+                    .providers
+                    .acquire_connection_with_grace_override_excluding(input_name, allow_grace, &excluded_providers)
+                    .await;
                 if matches!(allocation, ProviderAllocation::Exhausted) {
                     break;
                 }
                 if let Some(provider_name) = allocation.get_provider_name() {
-                    if reserved_providers.contains(&provider_name) {
+                    if self.exceeds_reserved_capacity(&provider_name, session_owner).await {
+                        excluded_providers.insert(provider_name);
                         allocation.release().await;
                         continue;
                     }
@@ -984,7 +1068,7 @@ impl ActiveProviderManager {
         provider_name: &Arc<str>,
         session_owner: Option<&str>,
     ) -> bool {
-        self.is_reserved_for_other(provider_name, session_owner).await
+        self.reserved_capacity_blocks_next(provider_name, session_owner).await
     }
 
     pub async fn active_connections(&self) -> Option<HashMap<Arc<str>, usize>> {
@@ -1341,6 +1425,7 @@ impl ActiveProviderManager {
                             info.priority,
                             info.kind,
                             info.created_at,
+                            info.session_owner,
                         ))
                     } else {
                         None
@@ -1368,6 +1453,7 @@ impl ActiveProviderManager {
                         kind: handle.2,
                         created_at: handle.3,
                         cancel_token: handle.0.cancel_token.clone(),
+                        session_owner: handle.4.clone(),
                     },
                 );
                 connections.shared.key_by_addr.insert(*addr, Arc::clone(&shared_key));
@@ -1566,6 +1652,24 @@ mod tests {
                 stalker: None,
             }]),
             1,
+        )
+    }
+
+    fn create_test_app_config_with_capacity_ordered_pool() -> AppConfig {
+        build_test_app_config(
+            Some(vec![ConfigInputAlias {
+                id: 2,
+                name: "provider_2".intern(),
+                url: "http://provider-2.example".to_string(),
+                username: Some("user2".to_string()),
+                password: Some("pass2".to_string()),
+                priority: 1,
+                max_connections: 1,
+                exp_date: None,
+                enabled: true,
+                stalker: None,
+            }]),
+            3,
         )
     }
 
@@ -1878,6 +1982,81 @@ mod tests {
             .expect("reservation should expire after TTL");
         assert_eq!(second.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
         manager.release_connection(&addr_2).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn session_reservations_preserve_capacity_and_priority_order() {
+        let app_cfg = create_test_app_config_with_capacity_ordered_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+        let input_name = "provider_1".intern();
+
+        for index in 0..3 {
+            let owner = format!("session-owner-{index}");
+            let addr = SocketAddr::from(([127, 0, 0, 1], 43200 + index));
+            let allocation = manager
+                .acquire_connection_with_grace_for_session(
+                    &input_name,
+                    &addr,
+                    false,
+                    default_user_priority(),
+                    ConnectionKind::Normal,
+                    Some(&owner),
+                )
+                .await
+                .expect("preferred provider should retain free capacity for another session");
+            assert_eq!(allocation.allocation.get_provider_name().as_deref(), Some("provider_1"));
+            manager.refresh_provider_reservation(&input_name, &owner, 15).await;
+        }
+
+        let fallback_addr = SocketAddr::from(([127, 0, 0, 1], 43203));
+        let fallback = manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &fallback_addr,
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+                Some("session-owner-3"),
+            )
+            .await
+            .expect("lower-priority provider should be used after preferred capacity is exhausted");
+        assert_eq!(fallback.allocation.get_provider_name().as_deref(), Some("provider_2"));
+
+        manager.release_connection(&SocketAddr::from(([127, 0, 0, 1], 43200))).await;
+        manager.release_connection(&fallback_addr).await;
+
+        let foreign_after_release = manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &fallback_addr,
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+                Some("session-owner-4"),
+            )
+            .await
+            .expect("idle reservation should protect one preferred-provider slot");
+        assert_eq!(foreign_after_release.allocation.get_provider_name().as_deref(), Some("provider_2"));
+
+        let reserved_owner_addr = SocketAddr::from(([127, 0, 0, 1], 43204));
+        let reserved_owner = manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &reserved_owner_addr,
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+                Some("session-owner-0"),
+            )
+            .await
+            .expect("reservation owner should reclaim its preferred-provider slot");
+        assert_eq!(reserved_owner.allocation.get_provider_name().as_deref(), Some("provider_1"));
+
+        for index in 1..5 {
+            let addr = SocketAddr::from(([127, 0, 0, 1], 43200 + index));
+            manager.release_connection(&addr).await;
+        }
     }
 
     #[tokio::test(start_paused = true)]

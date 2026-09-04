@@ -8,6 +8,12 @@ description = "Authentication primitives and access control for tuliprox"
 [lints]
 workspace = true
 
+[package.metadata.cargo-machete]
+# `rust-argon2` is imported as `argon2::` (crate rename via `package` field is
+# not used, the crate name in code differs from the dependency name), so
+# cargo-machete does not recognise the usage.
+ignored = ["rust-argon2"]
+
 [dependencies]
 shared = { workspace = true }
 tuliprox-core = { workspace = true }

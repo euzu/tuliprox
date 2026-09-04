@@ -17,9 +17,7 @@ tuliprox-repository = { workspace = true }
 arc-swap.workspace = true
 chrono.workspace = true
 chrono-tz = "0.10.4"
-bytes.workspace = true
 libc = "0.2"
-futures.workspace = true
 log.workspace = true
 reqwest = { version = "0.13.4", features = ["json", "stream", "rustls", "socks", "form", "query"] }
 serde.workspace = true

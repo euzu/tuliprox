@@ -9,6 +9,11 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[package.metadata.cargo-machete]
+# `paste` is pulled in by the `create_bitset!` declarative macro and
+# expanded at the call site; cargo-machete's heuristic cannot see through it.
+ignored = ["paste"]
+
 [dependencies]
 lol_html = "2.9.0"
 shared = { workspace = true }
@@ -17,7 +22,6 @@ tuliprox-hls = { workspace = true }
 tuliprox-iptv = { workspace = true }
 tuliprox-library = { workspace = true }
 tuliprox-messaging = { workspace = true }
-tuliprox-parser = { workspace = true }
 tuliprox-processing = { workspace = true }
 tuliprox-auth = { workspace = true }
 tuliprox-config-loader = { workspace = true }
@@ -45,14 +49,12 @@ tower-http = { version = "0.6.11", features = ["cors", "auth", "fs", "compressio
 tower_governor = { version = "0.8.0", features = ["axum"] }
 jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }
 futures.workspace = true
-path-clean.workspace = true
 pest.workspace = true
 thiserror.workspace = true
 aes = "0.8.4"
 mime = "0.3.17"
 log.workspace = true
 env_logger = "0.11.11"
-rmp-serde = "1.3.1"
 rand = "0.9.5"
 fastrand.workspace = true
 blake3.workspace = true
@@ -64,13 +66,9 @@ tokio = { workspace = true, features = ["rt-multi-thread", "parking_lot", "fs", 
 #tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tokio-util =  { version = "0.7.19", features = ["io", "io-util"] }
 tempfile = "3.27.0"
-strsim = "0.11.1"
-rphonetic = "3.1.0"
 base64.workspace = true
 sha2.workspace = true
 paste.workspace = true
-indexmap.workspace = true
-parking_lot = "0.12.5"
 brotli.workspace = true
 smallvec = "1.15.2"
 notify = "8.2.0"
@@ -81,12 +79,9 @@ hyper-util = "0.1.20"
 socket2 = { version = "0.6.5", features = ["all"] }
 async-compression = { version = "0.4.43", features = ["tokio", "brotli", "deflate", "gzip", "zlib", "zstd"] }
 chrono-tz = "0.10.4"
-zeroize.workspace = true
-uuid = { version = "1.26.0", features = ["v4"] }
 mime_guess = "2.0.5"
 crc32fast = "1.5.1"
 http-body-util = "0.1.5"
-lru = "0.16.4"
 strum.workspace = true
 
 [target.'cfg(unix)'.dependencies]
