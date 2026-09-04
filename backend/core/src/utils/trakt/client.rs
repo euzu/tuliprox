@@ -3,11 +3,7 @@ use crate::model::{TraktApiConfig, TraktChartConfig, TraktListConfig, TraktListI
 use log::{debug, info};
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::Deserialize;
-use shared::{
-    defaults::{DEFAULT_USER_AGENT, TRAKT_API_KEY},
-    error::TuliproxError,
-    utils::trim_last_slash,
-};
+use shared::{defaults::DEFAULT_USER_AGENT, error::TuliproxError, utils::trim_last_slash};
 
 const TRAKT_PAGE_LIMIT: u32 = 100;
 const TRAKT_MAX_PAGES: u32 = 100;
@@ -20,31 +16,39 @@ pub struct TraktClient {
 }
 
 impl TraktClient {
-    pub fn new(client: reqwest::Client, api_config: TraktApiConfig) -> Self {
-        let headers = Self::create_headers(&api_config);
-        Self { client, api_config, headers }
+    pub fn new(client: reqwest::Client, mut api_config: TraktApiConfig) -> Result<Self, TuliproxError> {
+        api_config.api_key = api_config.api_key.trim().to_string();
+        let headers = Self::create_headers(&api_config)?;
+        Ok(Self { client, api_config, headers })
     }
 
-    fn create_headers(api_config: &TraktApiConfig) -> HeaderMap {
-        let mut headers = HeaderMap::new();
+    fn create_headers(api_config: &TraktApiConfig) -> Result<HeaderMap, TuliproxError> {
+        if api_config.api_key.is_empty() {
+            return Err(TuliproxError::Config(
+                "Trakt Client ID is missing; configure trakt.api.api_key before enabling Trakt lists or charts",
+            ));
+        }
+        let mut client_id = HeaderValue::from_str(api_config.api_key.as_str()).map_err(|_| {
+            TuliproxError::Config(
+                "Trakt Client ID contains characters that cannot be used in an HTTP header; update trakt.api.api_key",
+            )
+        })?;
+        client_id.set_sensitive(true);
 
+        let mut headers = HeaderMap::new();
         headers.insert(reqwest::header::CONTENT_TYPE, HeaderValue::from_static(mime::APPLICATION_JSON.as_ref()));
         headers.insert(
             reqwest::header::USER_AGENT,
             HeaderValue::from_str(api_config.user_agent.as_str())
                 .unwrap_or_else(|_| HeaderValue::from_static(DEFAULT_USER_AGENT)),
         );
-        headers.insert(
-            "trakt-api-key",
-            HeaderValue::from_str(api_config.api_key.as_str())
-                .unwrap_or_else(|_| HeaderValue::from_static(TRAKT_API_KEY)),
-        );
+        headers.insert("trakt-api-key", client_id);
         headers.insert(
             "trakt-api-version",
             HeaderValue::from_str(api_config.version.as_str()).unwrap_or_else(|_| HeaderValue::from_static("2")),
         );
 
-        headers
+        Ok(headers)
     }
 
     fn build_list_url(&self, user: &str, list_slug: &str) -> String {
@@ -122,8 +126,9 @@ impl TraktClient {
     ) -> Result<TraktListItemsPage, TuliproxError> {
         let url = self.build_list_url(&list_config.user, &list_config.list_slug);
         let request_url = format!("{url}?page={page}&limit={TRAKT_PAGE_LIMIT}");
+        let list_id = format!("{}:{}", list_config.user, list_config.list_slug);
         let (response_text, page_count, item_count) =
-            self.fetch_trakt_page(request_url, "list", (&list_config.user, &list_config.list_slug), page).await?;
+            self.fetch_trakt_page(request_url, "list", &list_id, page).await?;
         let mut items: Vec<TraktListItem> =
             serde_json::from_str(&response_text).map_err(|error: serde_json::Error| {
                 TuliproxError::Config(format!("Failed to parse Trakt response: {error}"))
@@ -142,7 +147,7 @@ impl TraktClient {
         let request_url = format!("{url}?page={page}&limit={TRAKT_PAGE_LIMIT}");
         let chart_id = format!("{}:{}", chart_config.kind, chart_config.chart);
         let (response_text, page_count, item_count) =
-            self.fetch_trakt_page(request_url, "chart", ("charts", &chart_id), page).await?;
+            self.fetch_trakt_page(request_url, "chart", &chart_id, page).await?;
         let items = parse_chart_items(&response_text, chart_config, page)
             .map_err(|error| TuliproxError::Config(format!("Failed to parse Trakt chart response: {error}")))?;
 
@@ -155,16 +160,16 @@ impl TraktClient {
     async fn fetch_trakt_page(
         &self,
         request_url: String,
-        error_label: &str,
-        error_id: (&str, &str),
+        resource_kind: &str,
+        resource_id: &str,
         page: u32,
     ) -> Result<(String, u32, Option<u32>), TuliproxError> {
         let response = self.client.get(&request_url).headers(self.headers.clone()).send().await.map_err(|err| {
-            TuliproxError::Config(format!("Failed to fetch Trakt {error_label} {request_url}: {err}"))
+            TuliproxError::Config(format!("Failed to fetch Trakt {resource_kind} {request_url}: {err}"))
         })?;
 
         if !response.status().is_success() {
-            handle_trakt_api_error(response.status(), error_id.0, error_id.1)?;
+            handle_trakt_api_error(response.status(), resource_kind, resource_id)?;
         }
 
         let page_count = parse_trakt_pagination_header(response.headers(), "x-pagination-page-count").unwrap_or(page);
@@ -246,6 +251,7 @@ fn parse_trakt_pagination_header(headers: &HeaderMap, name: &'static str) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reqwest::StatusCode;
     use shared::model::{TraktChartKind, TraktChartType, TraktContentType};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -256,19 +262,75 @@ mod tests {
         net::TcpListener,
     };
 
+    #[test]
+    fn trakt_client_rejects_blank_client_id_before_use() {
+        for client_id in ["", " \t\r\n "] {
+            let result =
+                TraktClient::new(reqwest::Client::new(), api_config("http://127.0.0.1:9".to_string(), client_id));
+            let Err(error) = result else { panic!("blank Client ID should be rejected") };
+
+            assert!(error.message().contains("Trakt Client ID is missing"));
+            assert!(error.message().contains("trakt.api.api_key"));
+        }
+    }
+
+    #[test]
+    fn trakt_client_rejects_invalid_client_id_without_echoing_it() {
+        let invalid_client_id = "sensitive-client-id\ninjected-header";
+        let result =
+            TraktClient::new(reqwest::Client::new(), api_config("http://127.0.0.1:9".to_string(), invalid_client_id));
+        let Err(error) = result else { panic!("header-invalid Client ID should be rejected") };
+
+        assert!(error.message().contains("Trakt Client ID"));
+        assert!(error.message().contains("trakt.api.api_key"));
+        assert!(!error.message().contains("sensitive-client-id"));
+        assert!(!error.message().contains("injected-header"));
+    }
+
+    #[tokio::test]
+    async fn valid_client_id_is_trimmed_and_sent_in_trakt_api_key_header() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let base_url = spawn_single_response_trakt_server("[]", Arc::clone(&requests)).await;
+        let client = TraktClient::new(reqwest::Client::new(), api_config(base_url, "  user-supplied-client-id  "))
+            .expect("valid Client ID should construct a Trakt client");
+
+        client
+            .get_chart_items(&chart_config(TraktChartKind::Movies, TraktChartType::Popular))
+            .await
+            .expect("chart request should succeed");
+
+        assert!(client.headers.get("trakt-api-key").expect("Client ID header").is_sensitive());
+        let requests = requests.lock().expect("requests");
+        assert_eq!(request_header(&requests[0], "trakt-api-key"), Some("user-supplied-client-id"));
+    }
+
+    #[tokio::test]
+    async fn unsuccessful_status_is_translated_before_plain_text_body_parsing() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let base_url = spawn_status_response_trakt_server(
+            StatusCode::FORBIDDEN,
+            "remote response body must not be logged",
+            Arc::clone(&requests),
+        )
+        .await;
+        let client = client(base_url);
+
+        let error = client
+            .get_chart_items(&chart_config(TraktChartKind::Movies, TraktChartType::Trending))
+            .await
+            .expect_err("403 should fail");
+
+        assert!(error.message().contains("Trakt denied the request"));
+        assert!(!error.message().contains("remote response body"));
+        assert_eq!(requests.lock().expect("requests").len(), 1);
+    }
+
     #[tokio::test]
     async fn get_list_items_follows_trakt_pagination_headers() {
         let requests = Arc::new(AtomicUsize::new(0));
         let base_url = spawn_paged_trakt_server(Arc::clone(&requests)).await;
-        let client = TraktClient::new(
-            reqwest::Client::new(),
-            TraktApiConfig {
-                api_key: "test-key".to_string(),
-                version: "2".to_string(),
-                url: base_url,
-                user_agent: "tuliprox-test".to_string(),
-            },
-        );
+        let client = TraktClient::new(reqwest::Client::new(), api_config(base_url, "test-key"))
+            .expect("valid Client ID should construct a Trakt client");
         let list_config = TraktListConfig {
             user: "user".to_string(),
             list_slug: "list".to_string(),
@@ -359,6 +421,14 @@ mod tests {
     }
 
     async fn spawn_single_response_trakt_server(body: &'static str, requests: Arc<Mutex<Vec<String>>>) -> String {
+        spawn_status_response_trakt_server(StatusCode::OK, body, requests).await
+    }
+
+    async fn spawn_status_response_trakt_server(
+        status: StatusCode,
+        body: &'static str,
+        requests: Arc<Mutex<Vec<String>>>,
+    ) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind test server");
         let addr = listener.local_addr().expect("local addr");
         tokio::spawn(async move {
@@ -377,8 +447,11 @@ mod tests {
             }
             requests.lock().expect("requests").push(String::from_utf8_lossy(&request_bytes).to_string());
             let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                body.len(), body
+                "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or("Unknown"),
+                body.len(),
+                body
             );
             stream.write_all(response.as_bytes()).await.expect("write response");
         });
@@ -386,15 +459,24 @@ mod tests {
     }
 
     fn client(base_url: String) -> TraktClient {
-        TraktClient::new(
-            reqwest::Client::new(),
-            TraktApiConfig {
-                api_key: "test-key".to_string(),
-                version: "2".to_string(),
-                url: base_url,
-                user_agent: "tuliprox-test".to_string(),
-            },
-        )
+        TraktClient::new(reqwest::Client::new(), api_config(base_url, "test-key"))
+            .expect("valid Client ID should construct a Trakt client")
+    }
+
+    fn api_config(base_url: String, client_id: &str) -> TraktApiConfig {
+        TraktApiConfig {
+            api_key: client_id.to_string(),
+            version: "2".to_string(),
+            url: base_url,
+            user_agent: "tuliprox-test".to_string(),
+        }
+    }
+
+    fn request_header<'a>(request: &'a str, name: &str) -> Option<&'a str> {
+        request.lines().find_map(|line| {
+            let (header_name, value) = line.split_once(':')?;
+            header_name.eq_ignore_ascii_case(name).then(|| value.trim())
+        })
     }
 
     fn chart_config(kind: TraktChartKind, chart: TraktChartType) -> TraktChartConfig {

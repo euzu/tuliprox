@@ -952,6 +952,7 @@
     "API_CONFIG": "API",
     "API_CONFIGURATION": "تكوين API",
     "API_KEY": "مفتاح API",
+    "TRAKT_CLIENT_ID": "معرّف عميل Trakt",
     "API_PROXY": "وكيل API",
     "API_PROXY_CONFIG": "تكوين وكيل API",
     "API_URL": "عنوان URL لـ API",

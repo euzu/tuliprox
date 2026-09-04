@@ -42,6 +42,11 @@ sources:
             skip_video_direct_source: true
             skip_series_direct_source: true
             trakt:
+              # Set enabled to true after configuring api.api_key with your Trakt Client ID.
+              # See the documentation for the TRAKT_CLIENT_ID environment-variable example.
+              enabled: false
+              api:
+                api_key: ""
               lists:
                 - user: "linaspurinis"
                   list_slug: "top-watched-movies-of-the-week"

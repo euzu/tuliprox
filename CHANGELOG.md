@@ -934,6 +934,12 @@
 
 ## 🐛 Fixes
 
+- **Trakt curation now requires an explicitly configured Client ID.** Tuliprox no longer bundles or falls back to a
+  shared Client ID. Blank or header-invalid `trakt.api.api_key` values now produce one target-scoped warning and skip
+  only optional Trakt curation without making an HTTP request; other target processing continues. Trakt `401`, `403`,
+  `404`, and `429` responses now have actionable, resource-aware messages, while independently successful lists and
+  charts remain available.
+
 - **Empty playlist updates no longer replace previously published input or target data.** A completely empty refresh is
   treated as a failed update and keeps the last usable playlist and its virtual-ID mapping intact. This prevents
   transient provider/download failures from making channels disappear or assigning different IDs when service
@@ -1972,7 +1978,7 @@ and assigns it to the variable `station_prefix`.
             resolve_vod: false
             trakt:
               api:
-                key: <my private trakt api key>
+                key: <my Trakt Client ID>
                 version: 2
               lists:
                 - user: "linaspurinis"

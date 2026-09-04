@@ -911,6 +911,7 @@
     "API_CONFIG": "API",
     "API_CONFIGURATION": "Конфигурация API",
     "API_KEY": "API-ключ",
+    "TRAKT_CLIENT_ID": "Идентификатор клиента Trakt",
     "API_PROXY": "Api-прокси",
     "API_PROXY_CONFIG": "Конфигурация Api-прокси",
     "API_URL": "URL API",
