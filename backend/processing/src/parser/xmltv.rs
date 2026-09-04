@@ -247,12 +247,14 @@ impl TVGuide {
                     EPG_TAG_TITLE => title.clone_from(&child.value),
                     EPG_TAG_DESC => desc.clone_from(&child.value),
                     EPG_TAG_ICON => {
-                        icon = child
+                        if let Some(src) = child
                             .attributes
                             .as_ref()
                             .and_then(|attributes| attributes.get("src"))
                             .filter(|src| !src.is_empty())
-                            .cloned();
+                        {
+                            icon = Some(Arc::clone(src));
+                        }
                     }
                     EPG_TAG_CATEGORY => {
                         if let Some(value) = child.value.as_ref().filter(|value| !value.is_empty()) {
@@ -2080,6 +2082,7 @@ mod tests {
   <programme start="20260718180000 +0000" stop="20260718200000 +0000" channel="ESPN.us">
     <title lang="en">Softball</title>
     <icon src="https://example.com/softball.jpg"/>
+    <icon src=""/>
     <category lang="en">Softball</category>
     <category>Sports</category>
     <live/>

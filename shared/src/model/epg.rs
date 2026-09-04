@@ -161,8 +161,6 @@ pub struct EpgProgramme {
     pub title: Option<Arc<str>>,
     pub desc: Option<Arc<str>>,
     #[serde(default)]
-    pub icon: Option<Arc<str>>,
-    #[serde(default)]
     pub catchup_id: Option<Arc<str>>,
     #[serde(default)]
     pub categories: Vec<EpgCategory>,
@@ -177,6 +175,8 @@ pub struct EpgProgramme {
     /// derive `airing_status()` from both flags.
     #[serde(default)]
     pub previously_shown: bool,
+    #[serde(default)]
+    pub icon: Option<Arc<str>>,
     #[serde(skip)]
     channel: Arc<str>,
 }
@@ -204,12 +204,12 @@ impl EpgProgramme {
             channel,
             title,
             desc,
-            icon: None,
             catchup_id,
             categories: Vec::new(),
             is_live: false,
             is_new: false,
             previously_shown: false,
+            icon: None,
         }
     }
 

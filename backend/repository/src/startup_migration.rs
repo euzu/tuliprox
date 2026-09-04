@@ -1023,7 +1023,7 @@ mod tests {
     use super::*;
     use rmp_serde::{from_slice, to_vec};
     use serde::Serialize;
-    use shared::model::{EpgProgramme, LiveStreamProperties};
+    use shared::model::{EpgCategory, EpgProgramme, LiveStreamProperties};
     use std::io::Read;
     use tempfile::tempdir;
 
@@ -1053,6 +1053,11 @@ mod tests {
         stop: i64,
         title: Option<String>,
         desc: Option<String>,
+        catchup_id: Option<String>,
+        categories: Vec<EpgCategory>,
+        is_live: bool,
+        is_new: bool,
+        previously_shown: bool,
     }
 
     #[test]
@@ -1087,12 +1092,17 @@ mod tests {
     }
 
     #[test]
-    fn epg_programme_accepts_legacy_messagepack_without_catchup_id_field() {
+    fn epg_programme_accepts_complete_legacy_messagepack_without_icon_field() {
         let encoded = to_vec(&LegacyEpgProgramme {
             start: 100,
             stop: 200,
             title: Some("Programme".to_string()),
             desc: Some("Description".to_string()),
+            catchup_id: Some("catchup-42".to_string()),
+            categories: vec![EpgCategory { value: "Sports".into(), lang: Some("en".into()) }],
+            is_live: true,
+            is_new: true,
+            previously_shown: true,
         })
         .expect("legacy programme should encode");
 
@@ -1102,10 +1112,11 @@ mod tests {
         assert_eq!(decoded.title.as_deref(), Some("Programme"));
         assert_eq!(decoded.desc.as_deref(), Some("Description"));
         assert!(decoded.icon.is_none());
-        assert!(decoded.catchup_id.is_none());
-        assert!(decoded.categories.is_empty());
-        assert!(!decoded.is_live);
-        assert!(!decoded.is_new);
+        assert_eq!(decoded.catchup_id.as_deref(), Some("catchup-42"));
+        assert_eq!(decoded.categories, vec![EpgCategory { value: "Sports".into(), lang: Some("en".into()) }]);
+        assert!(decoded.is_live);
+        assert!(decoded.is_new);
+        assert!(decoded.previously_shown);
     }
 
     fn test_roots_fingerprint(roots: &[PathBuf]) -> String {
