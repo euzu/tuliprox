@@ -137,12 +137,12 @@ trunk-build: ## Build frontend with Trunk (WASM)
 .PHONY: cargo-machete-check
 cargo-machete-check: ## Detect unused dependencies across all crates (auto-installs cargo-machete if missing)
 	@echo "==> Detecting unused dependencies"
-	@command -v cargo-machete >/dev/null 2>&1 || { \
+	@command -v $(CARGO_MACHETE) >/dev/null 2>&1 || { \
 		echo "📦 cargo-machete not found, installing..."; \
 		$(CARGO) install cargo-machete; \
 		echo "✅ cargo-machete installed"; \
 	}
-	@$(CARGO) machete
+	@$(CARGO_MACHETE)
 
 .PHONY: test
 test: ## Run all workspace tests (Stable) — use detected CPU count for parallelism
