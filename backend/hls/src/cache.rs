@@ -366,10 +366,11 @@ pub enum CacheInvalidationOutcome {
 
 /// File-backed cache for committed HLS segment objects.
 ///
-/// Lock order: the capacity-pressure gate serializes projected reclamation and the following reservation. A failed
-/// reservation releases the cache-path read lease before calling the GC reclaimer because cache-root handoff orders
-/// GC before the exclusive cache-path gate. The read lease is reacquired for generation validation and reservation;
-/// after projected accounting is reserved, the pressure gate is released and the read lease spans the atomic rename.
+/// Lock order: the capacity-admission gate serializes authoritative admission, projected reclamation, and the following
+/// reservation. It is acquired before the cache-path read lease because cache-root handoff orders GC before the
+/// exclusive cache-path gate. The read lease is released before calling the GC reclaimer and reacquired for generation
+/// validation and reservation; after projected accounting is reserved, the pressure gate is released and the read lease
+/// spans the atomic rename.
 /// The `temp_files`, `capacity`, path, reclaimer, and marker standard-library locks are never nested with one another
 /// and are always released before filesystem I/O or `.await`.
 pub struct HlsSegmentCache {
@@ -384,7 +385,7 @@ pub struct HlsSegmentCache {
     capacity: Arc<StdMutex<CacheCapacityState>>,
     capacity_changed: Arc<Notify>,
     capacity_reclaimer: StdRwLock<Option<Weak<dyn HlsCacheCapacityReclaimer>>>,
-    capacity_reclamation_gate: AsyncMutex<()>,
+    capacity_admission_gate: AsyncMutex<()>,
     owned_operation_permits: Arc<Semaphore>,
 }
 
@@ -618,7 +619,7 @@ impl HlsSegmentCache {
             capacity: Arc::new(StdMutex::new(CacheCapacityState::default())),
             capacity_changed: Arc::new(Notify::new()),
             capacity_reclaimer: StdRwLock::new(None),
-            capacity_reclamation_gate: AsyncMutex::new(()),
+            capacity_admission_gate: AsyncMutex::new(()),
             owned_operation_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_OWNED_CACHE_OPERATIONS)),
         }
     }
@@ -728,7 +729,7 @@ impl HlsSegmentCache {
             return Err(cache_object_limit_error(max_object_bytes));
         }
 
-        let _reclamation_gate = self.capacity_reclamation_gate.lock().await;
+        let _admission_gate = self.capacity_admission_gate.lock().await;
         let mut reclamation_attempted = false;
         let mut reclamation_outcome = HlsCacheCapacityReclaimOutcome::default();
         let mut reclamation_pressure: Option<CacheCapacityPressure> = None;
@@ -885,8 +886,10 @@ impl HlsSegmentCache {
         K: HlsCacheObjectKey,
         G: Send + 'static,
     {
+        // Every authoritative admission participates in this gate. Otherwise a new writer that happens to fit after
+        // reclamation can consume the reclaimed bytes before the reclaiming writer performs its retry.
+        let admission_gate = self.capacity_admission_gate.lock().await;
         let mut reclamation_attempted = false;
-        let mut reclamation_gate = None;
         let mut reclamation_outcome = HlsCacheCapacityReclaimOutcome::default();
         let mut reclamation_pressure: Option<CacheCapacityPressure> = None;
         loop {
@@ -945,20 +948,6 @@ impl HlsSegmentCache {
                     let Some(capacity) = hls_cache_capacity_from_io(&error) else {
                         return Err(error);
                     };
-                    if reclamation_gate.is_none() {
-                        log::warn!(
-                            "HLS cache capacity pressure detected: proxy_session={} staged_bytes={} required_session_bytes={} required_global_bytes={}",
-                            safe_proxy_session_id(key.proxy_session_id()),
-                            staged.size,
-                            capacity.required_session_bytes(),
-                            capacity.required_global_bytes(),
-                        );
-                        // GC cache-path handoff takes its run gate before the cache-path write gate. Release this read
-                        // lease before waiting on the pressure gate, then repeat the generation and capacity checks.
-                        drop(commit_gate);
-                        reclamation_gate = Some(self.capacity_reclamation_gate.lock().await);
-                        continue;
-                    }
                     if reclamation_attempted {
                         log::warn!(
                             "HLS cache capacity decision: proxy_session={} resource={} configured_session_bytes={} configured_global_bytes={} current_session_bytes={} current_global_bytes={} staged_bytes={} protected_working_set_bytes={} reclaimable_bytes={} required_session_bytes={} required_global_bytes={} outcome=deferred-protected wake_reason=capacity-or-protection-revision",
@@ -987,8 +976,15 @@ impl HlsSegmentCache {
                         required_global_bytes: capacity.required_global_bytes(),
                         staged_bytes: staged.size,
                     };
-                    // The pressure gate remains held through reclamation and the next authoritative reservation.
-                    // The path read lease cannot: cache-root handoff uses run-gate -> path-write ordering.
+                    log::warn!(
+                        "HLS cache capacity pressure detected: proxy_session={} staged_bytes={} required_session_bytes={} required_global_bytes={}",
+                        safe_proxy_session_id(key.proxy_session_id()),
+                        staged.size,
+                        capacity.required_session_bytes(),
+                        capacity.required_global_bytes(),
+                    );
+                    // The admission gate remains held through reclamation and the next authoritative reservation. The
+                    // path read lease cannot: cache-root handoff uses run-gate -> path-write ordering.
                     drop(commit_gate);
                     reclamation_attempted = true;
                     reclamation_pressure = Some(capacity.pressure());
@@ -1016,7 +1012,7 @@ impl HlsSegmentCache {
                     continue;
                 }
             };
-            drop(reclamation_gate.take());
+            drop(admission_gate);
             let staged_path = staged.path.clone();
             let committed_size = staged.size;
             // Once spawned, the owned mutation deliberately outlives cancellation of the requesting future. This
@@ -1859,18 +1855,20 @@ impl Default for HlsSegmentCache {
 mod tests {
     use super::{
         hls_cache_capacity_from_io, hls_cache_object_limit_from_io, run_owned_cache_operation,
-        CacheInvalidationOutcome, HlsCacheObjectKey, HlsSegmentCache, MapCacheKey, SegmentCacheKey,
+        CacheInvalidationOutcome, HlsCacheCapacityReclaimOutcome, HlsCacheCapacityReclaimRequest,
+        HlsCacheCapacityReclaimer, HlsCacheObjectKey, HlsSegmentCache, MapCacheKey, SegmentCacheKey,
         TransientObjectCacheKey, MAX_CONCURRENT_OWNED_CACHE_OPERATIONS, MAX_TEMP_FILE_CLEANUP_CANDIDATES_PER_RUN,
     };
     use crate::{transient::build_transient_resource_id, HlsOriginResourceFetchError, ProxySessionId};
+    use futures::{future::BoxFuture, FutureExt};
     use std::{
-        collections::HashSet,
+        collections::{HashSet, VecDeque},
         future::Future,
         io,
         pin::Pin,
         sync::{
             atomic::{AtomicBool, Ordering},
-            Arc,
+            Arc, Mutex,
         },
         task::{Context, Poll},
         time::{Duration, SystemTime},
@@ -1893,6 +1891,45 @@ mod tests {
         cache.update_cache_limits(5, 5);
         cache.write_bytes_and_commit(&resident, b"123").await.expect("resident object commits");
         (temp_dir, cache, first, second)
+    }
+
+    struct PausingCapacityReclaimer {
+        cache: Arc<HlsSegmentCache>,
+        victims: Mutex<VecDeque<SegmentCacheKey>>,
+        first_reclaimed: Mutex<Option<oneshot::Sender<()>>>,
+        resume_first: Mutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    impl HlsCacheCapacityReclaimer for PausingCapacityReclaimer {
+        fn reclaim_capacity(
+            &self,
+            _request: HlsCacheCapacityReclaimRequest,
+        ) -> BoxFuture<'_, io::Result<HlsCacheCapacityReclaimOutcome>> {
+            async move {
+                let victim = self.victims.lock().unwrap_or_else(std::sync::PoisonError::into_inner).pop_front();
+                let Some(victim) = victim else {
+                    return Ok(HlsCacheCapacityReclaimOutcome::default());
+                };
+                self.cache.delete_if_inactive(&victim).await?;
+                let first_reclaimed =
+                    self.first_reclaimed.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+                if let Some(first_reclaimed) = first_reclaimed {
+                    let resume_first =
+                        self.resume_first.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+                    let _ = first_reclaimed.send(());
+                    if let Some(resume_first) = resume_first {
+                        let _ = resume_first.await;
+                    }
+                }
+                Ok(HlsCacheCapacityReclaimOutcome {
+                    reclaimed_session_bytes: 10,
+                    reclaimed_global_bytes: 10,
+                    protected_working_set_bytes: 0,
+                    reclaimable_bytes: 10,
+                })
+            }
+            .boxed()
+        }
     }
 
     struct ControlledReader {
@@ -2274,6 +2311,67 @@ mod tests {
 
         assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
         assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_commit_cannot_consume_bytes_reclaimed_for_an_in_flight_writer() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let cache = Arc::new(HlsSegmentCache::with_cache_path(temp_dir.path()));
+        let proxy_session_id = ProxySessionId("serialized-reclamation".to_string());
+        let first_resident = SegmentCacheKey::new(proxy_session_id.clone(), 1, "ts");
+        let second_resident = SegmentCacheKey::new(proxy_session_id.clone(), 2, "ts");
+        let first_target = SegmentCacheKey::new(proxy_session_id.clone(), 3, "ts");
+        let second_target = SegmentCacheKey::new(proxy_session_id.clone(), 4, "ts");
+        cache.update_cache_limits(100, 100);
+        cache.write_bytes_and_commit(&first_resident, b"0123456789").await.expect("first resident commits");
+        cache.write_bytes_and_commit(&second_resident, b"0123456789").await.expect("second resident commits");
+        cache.update_cache_limits(25, 25);
+
+        let first_staged = cache
+            .stage_temp_with_deadline(
+                &first_target,
+                &b"abcdefghij"[..],
+                tokio::time::Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("first target stages");
+        let second_staged = cache
+            .stage_temp_with_deadline(
+                &second_target,
+                &b"klmnopqrst"[..],
+                tokio::time::Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("second target stages");
+        let (first_reclaimed_tx, first_reclaimed_rx) = oneshot::channel();
+        let (resume_first_tx, resume_first_rx) = oneshot::channel();
+        let reclaimer = Arc::new(PausingCapacityReclaimer {
+            cache: Arc::clone(&cache),
+            victims: Mutex::new(VecDeque::from([first_resident, second_resident])),
+            first_reclaimed: Mutex::new(Some(first_reclaimed_tx)),
+            resume_first: Mutex::new(Some(resume_first_rx)),
+        });
+        cache.install_capacity_reclaimer(&reclaimer);
+
+        let first_cache = Arc::clone(&cache);
+        let first_task = tokio::spawn(async move { first_cache.commit_staged(&first_target, first_staged).await });
+        first_reclaimed_rx.await.expect("first reclamation pauses after deleting one resident");
+
+        let second_cache = Arc::clone(&cache);
+        let second_task = tokio::spawn(async move { second_cache.commit_staged(&second_target, second_staged).await });
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        let paused_usage = cache.capacity_usage(&proxy_session_id).await.expect("paused capacity usage");
+        assert_eq!(paused_usage.session_bytes, 10, "a later commit must wait for the reclaiming writer's retry");
+
+        assert!(resume_first_tx.send(()).is_ok());
+        let (first_result, second_result) = tokio::join!(first_task, second_task);
+        assert!(first_result.expect("first task joins").is_ok());
+        assert!(second_result.expect("second task joins").is_ok());
+        let usage = cache.capacity_usage(&proxy_session_id).await.expect("final capacity usage");
+        assert_eq!(usage.session_bytes, 20);
+        assert!(usage.global_bytes <= 25);
     }
 
     #[tokio::test]
