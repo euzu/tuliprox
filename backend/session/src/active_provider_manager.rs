@@ -235,16 +235,6 @@ impl ActiveProviderManager {
         });
     }
 
-    // Reservation ownership is grouped by the `fingerprint|username` prefix and intentionally drops the
-    // trailing session/input suffix. That lets a client switch channels and immediately reuse the same
-    // reserved provider account without waiting for the old channel reservation to expire.
-    // Tradeoff: a new reservation for one channel clears any other reservation in the same family, so
-    // concurrent multi-channel playback for the same client family is not supported by this grouping.
-    // If concurrent streams must be supported, reservation matching must use the full owner identifier.
-    fn reservation_family(owner: &str) -> &str { owner.rsplit_once('|').map_or(owner, |(family, _)| family) }
-
-    fn reservation_family_key(owner: &str) -> Arc<str> { Arc::from(Self::reservation_family(owner)) }
-
     async fn has_foreign_reservation(&self, provider_name: &Arc<str>, session_owner: Option<&str>) -> bool {
         if !self.providers.reservation_blocks_other_sessions(provider_name) {
             return false;
@@ -253,8 +243,7 @@ impl ActiveProviderManager {
         Self::prune_expired_reservations(&mut reservations);
         reservations.get(provider_name).is_some_and(|provider_reservations| {
             session_owner.map_or(!provider_reservations.is_empty(), |owner| {
-                let owner_family = Self::reservation_family(owner);
-                provider_reservations.keys().any(|family| family.as_ref() != owner_family)
+                provider_reservations.keys().any(|reserved_owner| reserved_owner.as_ref() != owner)
             })
         })
     }
@@ -262,34 +251,33 @@ impl ActiveProviderManager {
     async fn get_reserved_provider_for_owner(&self, input_name: &Arc<str>, session_owner: &str) -> Option<Arc<str>> {
         let mut reservations = self.reservations.write().await;
         Self::prune_expired_reservations(&mut reservations);
-        let owner_family = Self::reservation_family(session_owner);
         reservations.iter().find_map(|(provider_name, provider_reservations)| {
-            (provider_reservations.contains_key(owner_family)
+            (provider_reservations.contains_key(session_owner)
                 && self.providers.is_provider_for_input(provider_name, input_name))
             .then(|| provider_name.clone())
         })
     }
 
-    async fn active_reservation_families(&self, provider_name: &Arc<str>) -> HashSet<Arc<str>> {
+    async fn active_reservation_owners(&self, provider_name: &Arc<str>) -> HashSet<Arc<str>> {
         let connections = self.connections.read().await;
-        let mut families = HashSet::new();
+        let mut owners = HashSet::new();
         for per_addr in connections.single.values() {
             for info in per_addr.values() {
                 if info.allocation.get_provider_name().as_ref() == Some(provider_name) {
-                    if let Some(owner) = info.session_owner.as_deref() {
-                        families.insert(Self::reservation_family_key(owner));
+                    if let Some(owner) = info.session_owner.as_ref() {
+                        owners.insert(Arc::clone(owner));
                     }
                 }
             }
         }
         for shared in connections.shared.by_key.values() {
             if shared.allocation.get_provider_name().as_ref() == Some(provider_name) {
-                if let Some(owner) = shared.session_owner.as_deref() {
-                    families.insert(Self::reservation_family_key(owner));
+                if let Some(owner) = shared.session_owner.as_ref() {
+                    owners.insert(Arc::clone(owner));
                 }
             }
         }
-        families
+        owners
     }
 
     async fn reservation_capacity_usage(
@@ -302,14 +290,16 @@ impl ActiveProviderManager {
             return Some((current_connections, max_connections, 0));
         }
 
-        let owner_family = session_owner.map(Self::reservation_family);
-        let active_families = self.active_reservation_families(provider_name).await;
+        let active_owners = self.active_reservation_owners(provider_name).await;
         let mut reservations = self.reservations.write().await;
         Self::prune_expired_reservations(&mut reservations);
         let idle_foreign_reservations = reservations.get(provider_name).map_or(0, |provider_reservations| {
             provider_reservations
                 .keys()
-                .filter(|family| owner_family != Some(family.as_ref()) && !active_families.contains(family.as_ref()))
+                .filter(|reserved_owner| {
+                    let reserved_owner = reserved_owner.as_ref();
+                    session_owner != Some(reserved_owner) && !active_owners.contains(reserved_owner)
+                })
                 .count()
         });
 
@@ -357,19 +347,15 @@ impl ActiveProviderManager {
     pub async fn refresh_provider_reservation(&self, provider_name: &Arc<str>, session_owner: &str, ttl_secs: u64) {
         let mut reservations = self.reservations.write().await;
         Self::prune_expired_reservations(&mut reservations);
-        // Refresh operates on the reservation family, not the exact owner string. This is what allows a
-        // same-client channel switch to move the pinned provider account to the new stream immediately.
-        // The tradeoff is that other reservations from the same family are cleared here as well.
-        let owner_family = Self::reservation_family_key(session_owner);
         reservations.retain(|_, provider_reservations| {
-            provider_reservations.remove(&owner_family);
+            provider_reservations.remove(session_owner);
             !provider_reservations.is_empty()
         });
         if ttl_secs == 0 {
             return;
         }
         reservations.entry(provider_name.clone()).or_default().insert(
-            owner_family,
+            Arc::from(session_owner),
             ProviderReservation { expires_at: TokioInstant::now() + Duration::from_secs(ttl_secs) },
         );
     }
@@ -377,9 +363,8 @@ impl ActiveProviderManager {
     pub async fn clear_provider_reservation(&self, session_owner: &str) {
         let mut reservations = self.reservations.write().await;
         Self::prune_expired_reservations(&mut reservations);
-        let owner_family = Self::reservation_family_key(session_owner);
         reservations.retain(|_, provider_reservations| {
-            provider_reservations.remove(&owner_family);
+            provider_reservations.remove(session_owner);
             !provider_reservations.is_empty()
         });
     }
@@ -2104,20 +2089,21 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn test_same_client_family_can_reuse_reserved_provider_after_channel_switch() {
+    async fn different_session_cannot_take_idle_reservation_from_same_client_family() {
         let app_cfg = create_test_app_config_single_provider_pool();
         let event_manager = Arc::new(EventManager::new());
         let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
 
         let input_name = "provider_1".intern();
-        let first_addr: SocketAddr = "127.0.0.1:43111".parse().unwrap();
-        let second_addr: SocketAddr = "127.0.0.1:43112".parse().unwrap();
+        let Ok(second_addr) = "127.0.0.1:43112".parse() else {
+            return;
+        };
         let owner_channel_1 = "client|ua|user|100";
         let owner_channel_2 = "client|ua|user|200";
 
         manager.refresh_provider_reservation(&input_name, owner_channel_1, 15).await;
 
-        let reacquired = manager
+        let blocked = manager
             .acquire_connection_with_grace_for_session(
                 &input_name,
                 &second_addr,
@@ -2126,12 +2112,87 @@ mod tests {
                 ConnectionKind::Normal,
                 Some(owner_channel_2),
             )
-            .await
-            .expect("same client family should be able to reuse the reserved provider after a channel switch");
+            .await;
+        assert!(blocked.is_none(), "a related but distinct playback must not steal an idle reservation");
 
-        assert_eq!(reacquired.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
+        manager.clear_provider_reservation(owner_channel_1).await;
+        let acquired = manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &second_addr,
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+                Some(owner_channel_2),
+            )
+            .await;
+        assert!(acquired.is_some(), "explicitly clearing the old playback should release its provider");
+        manager.release_connection(&second_addr).await;
+    }
 
+    #[tokio::test(start_paused = true)]
+    async fn concurrent_same_family_playbacks_keep_independent_provider_reservations() {
+        let app_cfg = create_test_app_config_with_dual_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+
+        let input_name = "provider_1".intern();
+        let provider_2 = "provider_2".intern();
+        let Ok(first_addr) = "127.0.0.1:43121".parse() else {
+            return;
+        };
+        let Ok(second_addr) = "127.0.0.1:43122".parse() else {
+            return;
+        };
+        let owner_channel_1 = "proxy|player|user|100";
+        let owner_channel_2 = "proxy|player|user|200";
+
+        let first = manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &first_addr,
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+                Some(owner_channel_1),
+            )
+            .await;
+        assert!(first.is_some(), "first playback should acquire the preferred provider");
+        let Some(first) = first else {
+            return;
+        };
+        assert_eq!(first.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
+        manager.refresh_provider_reservation(&input_name, owner_channel_1, 15).await;
         manager.release_connection(&first_addr).await;
+
+        let second = manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &second_addr,
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+                Some(owner_channel_2),
+            )
+            .await;
+        assert!(second.is_some(), "parallel playback should acquire the remaining provider");
+        let Some(second) = second else {
+            return;
+        };
+        assert_eq!(second.allocation.get_provider_name().as_deref(), Some(provider_2.as_ref()));
+        manager.refresh_provider_reservation(&provider_2, owner_channel_2, 15).await;
+
+        let reservations = manager.reservations.read().await;
+        assert!(reservations.get(&input_name).is_some_and(|entries| entries.contains_key(owner_channel_1)));
+        assert!(reservations.get(&provider_2).is_some_and(|entries| entries.contains_key(owner_channel_2)));
+        drop(reservations);
+
+        manager.clear_provider_reservation(owner_channel_2).await;
+        let reservations = manager.reservations.read().await;
+        assert!(reservations.get(&input_name).is_some_and(|entries| entries.contains_key(owner_channel_1)));
+        assert!(!reservations.values().any(|entries| entries.contains_key(owner_channel_2)));
+        drop(reservations);
+
         manager.release_connection(&second_addr).await;
     }
 

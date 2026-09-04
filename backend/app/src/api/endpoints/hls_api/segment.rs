@@ -2660,7 +2660,8 @@ pub(super) fn hls_entry_user_session_token(
     if let Some(timestamp) = archive_reference {
         return create_m3u_catchup_session_key(fingerprint, username, virtual_id, &format!("archive|{timestamp}|0"));
     }
-    create_playback_session_fingerprint(fingerprint, username, virtual_id, PlaylistItemType::LiveHls, None)
+    let base = create_playback_session_fingerprint(fingerprint, username, virtual_id, PlaylistItemType::LiveHls, None);
+    format!("{base}|hls|{}", generate_random_string(16))
 }
 
 #[allow(clippy::too_many_lines)]

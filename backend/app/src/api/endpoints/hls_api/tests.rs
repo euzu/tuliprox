@@ -160,6 +160,17 @@ fn append_catchup_session_hint_keeps_m3u_catchup_token_without_shared_hls_cache(
 }
 
 #[test]
+fn live_hls_entry_tokens_separate_parallel_playbacks_with_the_same_fingerprint() {
+    let fingerprint = test_fingerprint();
+    let first = super::hls_entry_user_session_token(&fingerprint, "alice", 42, None, None);
+    let second = super::hls_entry_user_session_token(&fingerprint, "alice", 42, None, None);
+
+    assert_ne!(first, second);
+    assert!(first.contains("|hls|"));
+    assert!(second.contains("|hls|"));
+}
+
+#[test]
 fn leaked_dvr_relative_joins_against_media_playlist_and_dvr_session_root() {
     assert_eq!(
         resolve_leaked_hls_relative_origin(
