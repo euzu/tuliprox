@@ -14,6 +14,7 @@ CROSS ?= $(call resolve_tool,cross)
 TRUNK ?= $(call resolve_tool,trunk)
 WASM_BINDGEN ?= $(call resolve_tool,wasm-bindgen)
 CARGO_SET_VERSION ?= $(call resolve_tool,cargo-set-version)
+CARGO_MACHETE ?= $(call resolve_tool,cargo-machete)
 MDBOOK ?= $(call resolve_tool,mdbook)
 PINNED_NIGHTLY_TOOLCHAIN := nightly-2026-05-01
 NIGHTLY_TOOLCHAIN ?= $(shell if $(RUSTUP) toolchain list 2>/dev/null | grep -q '^$(PINNED_NIGHTLY_TOOLCHAIN)'; then echo $(PINNED_NIGHTLY_TOOLCHAIN); else echo nightly; fi)
@@ -40,7 +41,7 @@ help: ## Display this help
 ##@ Prerequisites:
 
 .PHONY: install-tools
-install-tools: rustup install-nightly-fmt cross trunk wasm-bindgen cargo-set-version mdbook markdownlint ## Install required development tools
+install-tools: rustup install-nightly-fmt cross trunk wasm-bindgen cargo-set-version cargo-machete mdbook markdownlint ## Install required development tools
 
 .PHONY: install-nightly-fmt
 install-nightly-fmt: ## Install nightly toolchain specifically for formatting
@@ -96,6 +97,14 @@ $(MDBOOK):
 	@$(CARGO) install mdbook
 	@echo "✅ mdBook installed"
 
+.PHONY: cargo-machete
+cargo-machete: $(CARGO_MACHETE) ## Install cargo-machete (unused dependency detector)
+
+$(CARGO_MACHETE):
+	@echo "📦 Installing $@"
+	@$(CARGO) install cargo-machete
+	@echo "✅ $@ installed"
+
 .PHONY: markdownlint
 markdownlint: ## Install markdownlint-cli2 (requires npm)
 	@echo "📦 Installing markdownlint-cli2"
@@ -115,6 +124,7 @@ verify: ## Run format, clippy, markdown lint, tests, and trunk build (stops on e
 	@$(MAKE) markdown-lint
 	@$(MAKE) test
 	@$(MAKE) trunk-build
+	@$(MAKE) cargo-machete-check
 
 validate: verify ## Alias for verify
 ci: verify ## Alias for verify
@@ -123,6 +133,16 @@ ci: verify ## Alias for verify
 trunk-build: ## Build frontend with Trunk (WASM)
 	@echo "==> Building frontend (trunk)"
 	@cd frontend && NO_COLOR=true $(TRUNK) build
+
+.PHONY: cargo-machete-check
+cargo-machete-check: ## Detect unused dependencies across all crates (auto-installs cargo-machete if missing)
+	@echo "==> Detecting unused dependencies"
+	@command -v cargo-machete >/dev/null 2>&1 || { \
+		echo "📦 cargo-machete not found, installing..."; \
+		$(CARGO) install cargo-machete; \
+		echo "✅ cargo-machete installed"; \
+	}
+	@$(CARGO) machete
 
 .PHONY: test
 test: ## Run all workspace tests (Stable) — use detected CPU count for parallelism

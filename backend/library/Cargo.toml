@@ -8,6 +8,11 @@ description = "Local media library scanning, metadata resolution and enrichment"
 [lints]
 workspace = true
 
+[package.metadata.cargo-machete]
+# `paste` is pulled in by the `create_bitset!` declarative macro and
+# expanded at the call site; cargo-machete's heuristic cannot see through it.
+ignored = ["paste"]
+
 [dependencies]
 shared = { workspace = true }
 tuliprox-core = { workspace = true }
