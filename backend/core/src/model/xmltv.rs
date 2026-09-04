@@ -263,11 +263,13 @@ async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Resul
                         }
                     }
                     EPG_TAG_ICON => {
-                        if let Some(channel) = &mut current_channel {
-                            for attr in e.attributes().flatten() {
-                                if attr.key.as_ref() == EPG_ATTRIB_SRC.as_bytes() {
-                                    if let Some(icon) = get_attr_value(&attr) {
-                                        if !icon.is_empty() {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == EPG_ATTRIB_SRC.as_bytes() {
+                                if let Some(icon) = get_attr_value(&attr) {
+                                    if !icon.is_empty() {
+                                        if let Some(programme) = &mut current_programme {
+                                            programme.icon = Some(icon);
+                                        } else if let Some(channel) = &mut current_channel {
                                             channel.icon = Some(icon);
                                         }
                                     }
@@ -366,6 +368,7 @@ mod tests {
   <channel id="ESPN.us"><display-name>ESPN</display-name></channel>
   <programme start="20990718180000 +0000" stop="20990718200000 +0000" channel="ESPN.us">
     <title>Softball</title>
+    <icon src="https://example.com/softball.jpg"/>
     <category lang="en">Softball</category>
     <category>Sports</category>
     <live/>
@@ -383,6 +386,7 @@ mod tests {
         assert_eq!(programme.categories[0].lang.as_deref(), Some("en"));
         assert_eq!(programme.categories[1].value.as_ref(), "Sports");
         assert!(programme.categories[1].lang.is_none());
+        assert_eq!(programme.icon.as_deref(), Some("https://example.com/softball.jpg"));
         assert!(programme.is_live);
         assert!(programme.is_new);
     }

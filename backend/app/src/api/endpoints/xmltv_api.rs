@@ -10,8 +10,8 @@ use crate::{
     },
     auth::{resolve_api_user_context, Fingerprint},
     model::{
-        ApiProxyServerInfo, Config, ConfigTarget, ProxyUserCredentials, EPG_ATTRIB_ID, EPG_ATTRIB_LANG,
-        EPG_TAG_CATEGORY, EPG_TAG_CHANNEL, EPG_TAG_LIVE, EPG_TAG_NEW,
+        ApiProxyServerInfo, Config, ConfigTarget, ProxyUserCredentials, EPG_ATTRIB_ID, EPG_ATTRIB_LANG, EPG_ATTRIB_SRC,
+        EPG_TAG_CATEGORY, EPG_TAG_CHANNEL, EPG_TAG_ICON, EPG_TAG_LIVE, EPG_TAG_NEW,
     },
     repository::{
         epg_query_channels_by_storage_key, get_file_path_for_db_index, get_target_storage_path,
@@ -216,9 +216,10 @@ macro_rules! continue_on_err {
     };
 }
 
-async fn write_programme_classification_tags<W: AsyncWrite + Unpin>(
+async fn write_programme_metadata_tags<W: AsyncWrite + Unpin>(
     writer: &mut quick_xml::Writer<W>,
     programme: &EpgProgramme,
+    icon: Option<&str>,
 ) -> Result<(), quick_xml::Error> {
     for category in &programme.categories {
         let mut elem = BytesStart::new(EPG_TAG_CATEGORY);
@@ -228,6 +229,12 @@ async fn write_programme_classification_tags<W: AsyncWrite + Unpin>(
         writer.write_event_async(Event::Start(elem)).await?;
         writer.write_event_async(Event::Text(BytesText::new(category.value.as_ref()))).await?;
         writer.write_event_async(Event::End(BytesEnd::new(EPG_TAG_CATEGORY))).await?;
+    }
+
+    if let Some(icon) = icon {
+        let mut elem = BytesStart::new(EPG_TAG_ICON);
+        elem.push_attribute((EPG_ATTRIB_SRC, icon));
+        writer.write_event_async(Event::Empty(elem)).await?;
     }
 
     if programme.is_live {
@@ -425,8 +432,10 @@ async fn serve_epg_with_rewrites(
                         continue_on_err!(writer.write_event_async(Event::End(BytesEnd::new("desc"))).await);
                     }
 
-                    if let Err(err) = write_programme_classification_tags(&mut writer, programme).await {
-                        error!("EPG classification tags write failed: {err}");
+                    if let Err(err) =
+                        write_programme_metadata_tags(&mut writer, programme, programme.icon.as_deref()).await
+                    {
+                        error!("EPG programme metadata write failed: {err}");
                     }
 
                     let _ = writer.write_event_async(Event::End(BytesEnd::new("programme"))).await;
@@ -925,7 +934,7 @@ mod tests {
         empty_stream_epg_entries, from_programme, get_epg_path_for_target, get_epg_path_for_target_by_type,
         group_stream_epg_items, prepare_stream_epg_request, rewrite_epg_channel_resource_url, serve_epg,
         serve_epg_web_ui, serve_short_epg, serve_stream_epg, stream_epg_api, stream_epg_programmes_for_channel,
-        write_programme_classification_tags, MAX_STREAM_EPG_CHANNEL_ID_BYTES, MAX_STREAM_EPG_ITEMS,
+        write_programme_metadata_tags, MAX_STREAM_EPG_CHANNEL_ID_BYTES, MAX_STREAM_EPG_ITEMS,
     };
     use crate::{
         api::model::{create_test_app_state, AppState},
@@ -1431,6 +1440,7 @@ mod tests {
         ];
         programme.is_live = true;
         programme.is_new = true;
+        programme.icon = Some("https://example.com/programme.jpg".intern());
         write_test_epg_db(
             &epg_path,
             EpgChannel {
@@ -1456,6 +1466,7 @@ mod tests {
         assert!(!xml.contains("<title>news &amp; updates</title>"));
         assert!(xml.contains(r#"<category lang="en">News &amp; Analysis</category>"#));
         assert!(xml.contains("<category>Sports</category>"));
+        assert!(xml.contains(r#"<icon src="https://example.com/programme.jpg"/>"#));
         assert!(xml.contains("<live/>"));
         assert!(xml.contains("<new/>"));
 
@@ -1473,12 +1484,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn programme_classification_writer_propagates_io_errors() {
+    async fn programme_metadata_writer_propagates_io_errors() {
         let mut programme = EpgProgramme::new(100, 200, "channel".intern());
         programme.categories = vec![EpgCategory { value: "Sports".intern(), lang: None }];
         let mut writer = quick_xml::Writer::new(ErroringWriter);
 
-        assert!(write_programme_classification_tags(&mut writer, &programme).await.is_err());
+        assert!(write_programme_metadata_tags(&mut writer, &programme, None).await.is_err());
     }
 
     #[tokio::test]

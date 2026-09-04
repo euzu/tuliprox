@@ -161,6 +161,8 @@ pub struct EpgProgramme {
     pub title: Option<Arc<str>>,
     pub desc: Option<Arc<str>>,
     #[serde(default)]
+    pub icon: Option<Arc<str>>,
+    #[serde(default)]
     pub catchup_id: Option<Arc<str>>,
     #[serde(default)]
     pub categories: Vec<EpgCategory>,
@@ -202,6 +204,7 @@ impl EpgProgramme {
             channel,
             title,
             desc,
+            icon: None,
             catchup_id,
             categories: Vec::new(),
             is_live: false,
