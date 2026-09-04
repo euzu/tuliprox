@@ -888,7 +888,9 @@ async fn playlist_resource(
         if let Some((input_id, cluster, provider_id)) = parse_stalker_resource(&resource_url) {
             return stalker_resource_response(&app_state, input_id, cluster, provider_id).await;
         }
-        resource_response(&app_state, &resource_url, &req_headers, None).await.into_response()
+        resource_response(&app_state, &app_state.http_client.load(), &resource_url, &req_headers, None)
+            .await
+            .into_response()
     } else {
         axum::http::StatusCode::BAD_REQUEST.into_response()
     }

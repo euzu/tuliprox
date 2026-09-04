@@ -1090,7 +1090,9 @@ async fn xtream_player_api_resource(
                 }
             } else {
                 trace_if_enabled!("Resource request to {}", sanitize_sensitive_info(&url));
-                resource_response(app_state, &url, req_headers, None).await.into_response()
+                resource_response(app_state, &app_state.http_client.load(), &url, req_headers, None)
+                    .await
+                    .into_response()
             }
         }
     }

@@ -917,7 +917,15 @@ async fn epg_api_resource(
 
     let encrypt_secret = app_state.get_encrypt_secret();
     if let Ok(resource_url) = deobscure_text(&encrypt_secret, &resource) {
-        resource_response(&app_state, &resource_url, &req_headers, None).await.into_response()
+        resource_response(
+            &app_state,
+            &app_state.public_http_client_no_redirect.load(),
+            &resource_url,
+            &req_headers,
+            None,
+        )
+        .await
+        .into_response()
     } else {
         axum::http::StatusCode::BAD_REQUEST.into_response()
     }

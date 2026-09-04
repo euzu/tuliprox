@@ -3386,6 +3386,7 @@ async fn build_resource_stream_response(
 
 async fn fetch_resource_with_retry(
     app_state: &Arc<AppState>,
+    http_client: &reqwest::Client,
     url: &Url,
     resource_url: &str,
     req_headers: &HashMap<String, Vec<u8>>,
@@ -3401,7 +3402,7 @@ async fn fetch_resource_with_retry(
     let Ok(response) =
         send_with_retry_and_provider(&app_state.app_config, url, provider_config.as_ref(), false, |resolved_url| {
             request::get_client_request(
-                &app_state.http_client.load(),
+                http_client,
                 input.map_or(InputFetchMethod::GET, |i| i.method),
                 input.map(|i| &i.headers),
                 resolved_url,
@@ -3439,6 +3440,7 @@ async fn fetch_resource_with_retry(
 /// # Panics
 pub async fn resource_response(
     app_state: &Arc<AppState>,
+    http_client: &reqwest::Client,
     resource_url: &str,
     req_headers: &HeaderMap,
     input: Option<&ConfigInput>,
@@ -3481,7 +3483,9 @@ pub async fn resource_response(
     }
     trace_if_enabled!("Try to fetch resource {}", sanitize_sensitive_info(resource_url));
     if let Ok(url) = Url::parse(resource_url) {
-        if let Some(resp) = fetch_resource_with_retry(app_state, &url, resource_url, &req_headers, input).await {
+        if let Some(resp) =
+            fetch_resource_with_retry(app_state, http_client, &url, resource_url, &req_headers, input).await
+        {
             return resp;
         }
         // Upstream failure after retries

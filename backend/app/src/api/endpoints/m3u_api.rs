@@ -942,7 +942,9 @@ async fn m3u_api_resource(
                     }
                 }
             } else {
-                resource_response(&app_state, &url, &req_headers, None).await.into_response()
+                resource_response(&app_state, &app_state.http_client.load(), &url, &req_headers, None)
+                    .await
+                    .into_response()
             }
         }
     }
