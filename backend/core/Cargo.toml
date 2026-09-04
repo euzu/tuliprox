@@ -31,7 +31,6 @@ futures.workspace = true
 indexmap.workspace = true
 ipnet = "2"
 mime = "0.3.17"
-jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }
 log.workspace = true
 parking_lot = "0.12.5"
 paste.workspace = true

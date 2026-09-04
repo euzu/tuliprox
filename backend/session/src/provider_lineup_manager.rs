@@ -138,10 +138,23 @@ impl ProviderLineup {
         }
     }
 
-    async fn acquire(&self, with_grace: bool, grace_period_timeout_secs: u64) -> ProviderAllocation {
+    async fn acquire_excluding(
+        &self,
+        with_grace: bool,
+        grace_period_timeout_secs: u64,
+        excluded_providers: &std::collections::HashSet<Arc<str>>,
+    ) -> ProviderAllocation {
         match self {
-            ProviderLineup::Single(lineup) => lineup.acquire(with_grace, grace_period_timeout_secs).await,
-            ProviderLineup::Multi(lineup) => lineup.acquire(with_grace, grace_period_timeout_secs).await,
+            ProviderLineup::Single(lineup) => {
+                if excluded_providers.contains(&lineup.provider.name) {
+                    ProviderAllocation::Exhausted
+                } else {
+                    lineup.acquire(with_grace, grace_period_timeout_secs).await
+                }
+            }
+            ProviderLineup::Multi(lineup) => {
+                lineup.acquire_excluding(with_grace, grace_period_timeout_secs, excluded_providers).await
+            }
         }
     }
 }
@@ -296,9 +309,13 @@ impl MultiProviderLineup {
         priority_group: &ProviderPriorityGroup,
         grace: bool,
         grace_period_timeout_secs: u64,
+        excluded_providers: &std::collections::HashSet<Arc<str>>,
     ) -> ProviderAllocation {
         match priority_group {
             ProviderPriorityGroup::SingleProviderGroup(p) => {
+                if excluded_providers.contains(&p.name) {
+                    return ProviderAllocation::Exhausted;
+                }
                 let result = p.try_allocate(grace, grace_period_timeout_secs).await;
                 if !matches!(result, ProviderAllocation::Exhausted) {
                     return result;
@@ -308,6 +325,9 @@ impl MultiProviderLineup {
                 let provider_count = pg.len();
                 if grace {
                     for p in pg {
+                        if excluded_providers.contains(&p.name) {
+                            continue;
+                        }
                         let result = p.try_allocate(true, grace_period_timeout_secs).await;
                         if !matches!(result, ProviderAllocation::Exhausted) {
                             return result;
@@ -321,10 +341,12 @@ impl MultiProviderLineup {
 
                 loop {
                     let p = &pg[idx];
-                    let result = p.try_allocate(grace, grace_period_timeout_secs).await;
-                    if !matches!(result, ProviderAllocation::Exhausted) {
-                        index.store((idx + 1) % provider_count, Ordering::Release);
-                        return result;
+                    if !excluded_providers.contains(&p.name) {
+                        let result = p.try_allocate(grace, grace_period_timeout_secs).await;
+                        if !matches!(result, ProviderAllocation::Exhausted) {
+                            index.store((idx + 1) % provider_count, Ordering::Release);
+                            return result;
+                        }
                     }
 
                     idx = (idx + 1) % provider_count;
@@ -403,12 +425,27 @@ impl MultiProviderLineup {
     ///    ProviderAllocation::GracePeriod(provider) =>  println!("Provider with grace period {}", provider.name),
     /// }
     /// ```
+    #[cfg(test)]
     async fn acquire(&self, with_grace: bool, grace_period_timeout_secs: u64) -> ProviderAllocation {
+        self.acquire_excluding(with_grace, grace_period_timeout_secs, &std::collections::HashSet::new()).await
+    }
+
+    async fn acquire_excluding(
+        &self,
+        with_grace: bool,
+        grace_period_timeout_secs: u64,
+        excluded_providers: &std::collections::HashSet<Arc<str>>,
+    ) -> ProviderAllocation {
         // Prefer providers with available capacity (no grace allocations),
         // scanning priority groups from highest -> lowest.
         for priority_group in &self.providers {
-            let allocation =
-                Self::acquire_next_provider_from_group(priority_group, false, grace_period_timeout_secs).await;
+            let allocation = Self::acquire_next_provider_from_group(
+                priority_group,
+                false,
+                grace_period_timeout_secs,
+                excluded_providers,
+            )
+            .await;
             if !matches!(allocation, ProviderAllocation::Exhausted) {
                 return allocation;
             }
@@ -420,8 +457,13 @@ impl MultiProviderLineup {
 
         // If every provider is at capacity, allow grace allocations while respecting priority order.
         for priority_group in &self.providers {
-            let allocation =
-                Self::acquire_next_provider_from_group(priority_group, true, grace_period_timeout_secs).await;
+            let allocation = Self::acquire_next_provider_from_group(
+                priority_group,
+                true,
+                grace_period_timeout_secs,
+                excluded_providers,
+            )
+            .await;
             if !matches!(allocation, ProviderAllocation::Exhausted) {
                 return allocation;
             }
@@ -641,8 +683,7 @@ impl ProviderLineupManager {
             let mut conn = conn_lock.write().await;
             conn.current_connections = count;
             if count == 0 {
-                conn.granted_grace = false;
-                conn.grace_ts = 0;
+                conn.grace_started_at = None;
             }
         }
 
@@ -760,13 +801,33 @@ impl ProviderLineupManager {
         input_name: &Arc<str>,
         allow_grace: bool,
     ) -> ProviderAllocation {
+        self.acquire_connection_with_grace_override_excluding(
+            input_name,
+            allow_grace,
+            &std::collections::HashSet::new(),
+        )
+        .await
+    }
+
+    pub async fn acquire_connection_with_grace_override_excluding(
+        &self,
+        input_name: &Arc<str>,
+        allow_grace: bool,
+        excluded_providers: &std::collections::HashSet<Arc<str>>,
+    ) -> ProviderAllocation {
         let snapshot = self.snapshot.load_full();
         let lineup_opt = Self::get_provider_config_by_name(input_name, &snapshot.providers);
         let with_grace = allow_grace && self.grace_period_millis.load(Ordering::Acquire) > 0;
         let allocation = match lineup_opt {
             None => ProviderAllocation::Exhausted, // No Name matched, we don't have this provider
             Some((lineup, _config)) => {
-                lineup.acquire(with_grace, self.grace_period_timeout_secs.load(Ordering::Acquire)).await
+                lineup
+                    .acquire_excluding(
+                        with_grace,
+                        self.grace_period_timeout_secs.load(Ordering::Acquire),
+                        excluded_providers,
+                    )
+                    .await
             }
         };
         if matches!(allocation, ProviderAllocation::Exhausted) {
