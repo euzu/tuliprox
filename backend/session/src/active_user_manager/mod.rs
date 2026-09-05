@@ -2850,7 +2850,7 @@ impl ActiveUserManager {
         Some(*session.user_agent_stream_index.get_or_insert_with(|| self.next_user_agent_stream_index()))
     }
 
-    /// Allocates a process-local stream index when the session is materialized after the origin opens.
+    /// Allocates the next process-local, globally unique User-Agent stream index.
     pub fn next_user_agent_stream_index(&self) -> u64 {
         self.next_user_agent_stream_index
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
