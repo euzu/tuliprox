@@ -1581,6 +1581,34 @@ fn create_test_fingerprint(addr: std::net::SocketAddr) -> Fingerprint {
     Fingerprint::new(format!("fp-{addr}"), addr.ip().to_string(), addr)
 }
 
+#[tokio::test]
+async fn resource_cache_is_used_only_by_matching_standard_fetch_policy() {
+    let app_state = create_test_app_state();
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let cache_dir = temp_dir.path().to_string_lossy();
+    let mut cache = LRUResourceCache::new(1024, cache_dir.as_ref());
+    let resource_url = "http://127.0.0.1/icon.png";
+    let cached_path = cache.store_path(resource_url, Some("image/png"));
+    tokio::fs::write(&cached_path, b"cached image").await.expect("write cached image");
+    cache.add_content(resource_url, Some("image/png".to_string()), 12).expect("register cached image");
+    app_state.cache.store(Some(Arc::new(RwLock::new(cache))));
+
+    let standard_response =
+        resource_response(&app_state, ResourceFetchPolicy::Standard, resource_url, &HeaderMap::new(), None)
+            .await
+            .into_response();
+    assert_eq!(standard_response.status(), StatusCode::OK);
+    let standard_body = standard_response.into_body().collect().await.expect("read cached image").to_bytes();
+    assert_eq!(standard_body, Bytes::from_static(b"cached image"));
+
+    let response =
+        resource_response(&app_state, ResourceFetchPolicy::PublicNoRedirect, resource_url, &HeaderMap::new(), None)
+            .await
+            .into_response();
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+}
+
 fn create_test_fingerprint_with_user_agent(addr: std::net::SocketAddr, user_agent: &str) -> Fingerprint {
     Fingerprint::new(format!("{}|{user_agent}", addr.ip()), addr.ip().to_string(), addr)
 }

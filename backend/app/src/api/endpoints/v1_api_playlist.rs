@@ -4,7 +4,7 @@ use crate::{
     api::{
         api_utils::{
             create_api_proxy_user, json_or_bin_response, resource_response, try_option_bad_request,
-            try_result_bad_request, try_unwrap_body,
+            try_result_bad_request, try_unwrap_body, ResourceFetchPolicy,
         },
         auth_middleware::permission_layer,
         endpoints::{
@@ -888,7 +888,7 @@ async fn playlist_resource(
         if let Some((input_id, cluster, provider_id)) = parse_stalker_resource(&resource_url) {
             return stalker_resource_response(&app_state, input_id, cluster, provider_id).await;
         }
-        resource_response(&app_state, &app_state.http_client.load(), &resource_url, &req_headers, None)
+        resource_response(&app_state, ResourceFetchPolicy::Standard, &resource_url, &req_headers, None)
             .await
             .into_response()
     } else {

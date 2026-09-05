@@ -8,6 +8,7 @@ use crate::{
             redirect, redirect_response, resolve_initial_stalker_playback_url, resource_response,
             separate_number_and_remainder, should_allow_exhausted_shared_reconnect, stream_response,
             try_option_bad_request, try_result_bad_request, try_result_not_found, try_unwrap_body, RedirectParams,
+            ResourceFetchPolicy,
         },
         endpoints::{
             hls_api::{
@@ -942,7 +943,7 @@ async fn m3u_api_resource(
                     }
                 }
             } else {
-                resource_response(&app_state, &app_state.http_client.load(), &url, &req_headers, None)
+                resource_response(&app_state, ResourceFetchPolicy::Standard, &url, &req_headers, None)
                     .await
                     .into_response()
             }

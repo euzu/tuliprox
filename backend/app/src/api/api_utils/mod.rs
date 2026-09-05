@@ -3332,6 +3332,7 @@ fn windows_file_identity(file: &tokio::fs::File) -> std::io::Result<(u32, u32, u
 
 async fn build_resource_stream_response(
     app_state: &Arc<AppState>,
+    cache_key: Option<&str>,
     resource_url: &str,
     response: reqwest::Response,
 ) -> axum::response::Response {
@@ -3354,30 +3355,34 @@ async fn build_resource_stream_response(
     // Cache only complete responses (200 OK without Content-Range)
     let can_cache = status == StatusCode::OK && !has_content_range;
     if can_cache {
-        debug!("Caching eligible resource stream {sanitized_resource_url}");
-        let cache_resource_path = if let Some(cache) = app_state.cache.load().as_ref() {
-            Some(cache.write().await.store_path(resource_url, mime_type.as_deref()))
-        } else {
-            None
-        };
-        if let Some(resource_path) = cache_resource_path {
-            match create_new_file_for_write(&resource_path).await {
-                Ok(file) => {
-                    debug!("Persisting resource stream {sanitized_resource_url} to {}", resource_path.display());
-                    let writer = async_file_writer(file);
-                    let add_cache_content = get_add_cache_content(resource_url, mime_type, &app_state.cache);
-                    let tee = tee_stream(byte_stream, writer, &resource_path, add_cache_content);
-                    return try_unwrap_body!(response_builder.body(axum::body::Body::from_stream(tee)));
+        if let Some(cache_key) = cache_key {
+            debug!("Caching eligible resource stream {sanitized_resource_url}");
+            let cache_resource_path = if let Some(cache) = app_state.cache.load().as_ref() {
+                Some(cache.write().await.store_path(cache_key, mime_type.as_deref()))
+            } else {
+                None
+            };
+            if let Some(resource_path) = cache_resource_path {
+                match create_new_file_for_write(&resource_path).await {
+                    Ok(file) => {
+                        debug!("Persisting resource stream {sanitized_resource_url} to {}", resource_path.display());
+                        let writer = async_file_writer(file);
+                        let add_cache_content = get_add_cache_content(cache_key, mime_type, &app_state.cache);
+                        let tee = tee_stream(byte_stream, writer, &resource_path, add_cache_content);
+                        return try_unwrap_body!(response_builder.body(axum::body::Body::from_stream(tee)));
+                    }
+                    Err(err) => {
+                        warn!(
+                            "Failed to create cache file {} for {sanitized_resource_url}: {err}",
+                            resource_path.display()
+                        );
+                    }
                 }
-                Err(err) => {
-                    warn!(
-                        "Failed to create cache file {} for {sanitized_resource_url}: {err}",
-                        resource_path.display()
-                    );
-                }
+            } else {
+                debug!(
+                    "Resource cache unavailable; streaming response for {sanitized_resource_url} without persistence"
+                );
             }
-        } else {
-            debug!("Resource cache unavailable; streaming response for {sanitized_resource_url} without persistence");
         }
     }
 
@@ -3388,6 +3393,7 @@ async fn fetch_resource_with_retry(
     app_state: &Arc<AppState>,
     http_client: &reqwest::Client,
     url: &Url,
+    cache_key: Option<&str>,
     resource_url: &str,
     req_headers: &HashMap<String, Vec<u8>>,
     input: Option<&ConfigInput>,
@@ -3419,7 +3425,7 @@ async fn fetch_resource_with_retry(
     let status = response.status();
 
     if status.is_success() {
-        return Some(build_resource_stream_response(app_state, resource_url, response).await);
+        return Some(build_resource_stream_response(app_state, cache_key, resource_url, response).await);
     }
 
     // Non-retriable Status -> Upstream Response incl. Body
@@ -3437,10 +3443,41 @@ async fn fetch_resource_with_retry(
     Some(try_unwrap_body!(response_builder.body(axum::body::Body::from_stream(stream))))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourceFetchPolicy {
+    Standard,
+    PublicNoRedirect,
+}
+
+impl ResourceFetchPolicy {
+    const fn cache_key(self, resource_url: &str) -> Option<&str> {
+        match self {
+            Self::Standard => Some(resource_url),
+            Self::PublicNoRedirect => None,
+        }
+    }
+
+    const fn requires_public_destination(self) -> bool { matches!(self, Self::PublicNoRedirect) }
+}
+
+async fn validate_public_resource_destination(url: &Url) -> std::io::Result<()> {
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "unsupported resource URL scheme"));
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "resource URL has no host"))?;
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "resource URL has no port"))?;
+    tuliprox_core::utils::network::request::resolve_public_socket_addrs(host, port).await?;
+    Ok(())
+}
+
 /// # Panics
 pub async fn resource_response(
     app_state: &Arc<AppState>,
-    http_client: &reqwest::Client,
+    fetch_policy: ResourceFetchPolicy,
     resource_url: &str,
     req_headers: &HeaderMap,
     input: Option<&ConfigInput>,
@@ -3448,6 +3485,21 @@ pub async fn resource_response(
     if resource_url.is_empty() {
         return StatusCode::NO_CONTENT.into_response();
     }
+
+    let validated_url = if fetch_policy.requires_public_destination() {
+        let Ok(url) = Url::parse(resource_url) else {
+            error!("Url is malformed {}", sanitize_sensitive_info(resource_url));
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        if let Err(err) = validate_public_resource_destination(&url).await {
+            debug!("Rejected non-public resource destination {}: {err}", sanitize_sensitive_info(resource_url));
+            return StatusCode::BAD_GATEWAY.into_response();
+        }
+        Some(url)
+    } else {
+        None
+    };
+
     if resource_url.starts_with("media-server://image/") {
         return match open_media_server_image_resource(app_state, resource_url).await {
             Ok(response) => response,
@@ -3464,10 +3516,11 @@ pub async fn resource_response(
     }
     let filter: HeaderFilter = Some(Box::new(|key| key != "if-none-match" && key != "if-modified-since"));
     let req_headers = get_headers_from_request(req_headers, &filter);
-    if let Some(cache) = app_state.cache.load().as_ref() {
+    let cache_key = fetch_policy.cache_key(resource_url);
+    if let (Some(cache_key), Some(cache)) = (cache_key, app_state.cache.load().as_ref()) {
         let cache_hit = {
             let mut guard = cache.write().await;
-            guard.get_content(resource_url)
+            guard.get_content(cache_key)
         };
 
         if let Some((resource_path, mime_type)) = cache_hit {
@@ -3482,9 +3535,13 @@ pub async fn resource_response(
         }
     }
     trace_if_enabled!("Try to fetch resource {}", sanitize_sensitive_info(resource_url));
-    if let Ok(url) = Url::parse(resource_url) {
+    if let Ok(url) = validated_url.map_or_else(|| Url::parse(resource_url), Ok) {
+        let http_client = match fetch_policy {
+            ResourceFetchPolicy::Standard => app_state.http_client.load(),
+            ResourceFetchPolicy::PublicNoRedirect => app_state.public_http_client_no_redirect.load(),
+        };
         if let Some(resp) =
-            fetch_resource_with_retry(app_state, http_client, &url, resource_url, &req_headers, input).await
+            fetch_resource_with_retry(app_state, &http_client, &url, cache_key, resource_url, &req_headers, input).await
         {
             return resp;
         }

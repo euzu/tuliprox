@@ -12,7 +12,7 @@ use crate::{
             is_seekable_media_request, is_session_based_playback, is_stream_share_enabled, local_stream_response,
             redirect, redirect_response, resolve_initial_stalker_playback_url, resource_response,
             separate_number_and_remainder, should_allow_exhausted_shared_reconnect, stream_response,
-            try_option_bad_request, try_result_bad_request, try_unwrap_body, RedirectParams,
+            try_option_bad_request, try_result_bad_request, try_unwrap_body, RedirectParams, ResourceFetchPolicy,
         },
         endpoints::{
             hls_api::{
@@ -1090,7 +1090,7 @@ async fn xtream_player_api_resource(
                 }
             } else {
                 trace_if_enabled!("Resource request to {}", sanitize_sensitive_info(&url));
-                resource_response(app_state, &app_state.http_client.load(), &url, req_headers, None)
+                resource_response(app_state, ResourceFetchPolicy::Standard, &url, req_headers, None)
                     .await
                     .into_response()
             }

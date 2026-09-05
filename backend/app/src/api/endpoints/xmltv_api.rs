@@ -3,7 +3,7 @@ use crate::{
         api_utils::{
             coalesce_byte_stream, create_api_proxy_user, empty_json_response_as_array, get_user_target,
             get_user_target_by_credentials, internal_server_error, resource_response,
-            stream_json_or_bin_response_try_stream, try_unwrap_body,
+            stream_json_or_bin_response_try_stream, try_unwrap_body, ResourceFetchPolicy,
         },
         model::{AppState, UserApiRequest, UserApiRequestQueryOrBody},
         static_headers::CT_XML,
@@ -917,15 +917,9 @@ async fn epg_api_resource(
 
     let encrypt_secret = app_state.get_encrypt_secret();
     if let Ok(resource_url) = deobscure_text(&encrypt_secret, &resource) {
-        resource_response(
-            &app_state,
-            &app_state.public_http_client_no_redirect.load(),
-            &resource_url,
-            &req_headers,
-            None,
-        )
-        .await
-        .into_response()
+        resource_response(&app_state, ResourceFetchPolicy::PublicNoRedirect, &resource_url, &req_headers, None)
+            .await
+            .into_response()
     } else {
         axum::http::StatusCode::BAD_REQUEST.into_response()
     }
