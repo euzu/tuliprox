@@ -307,9 +307,9 @@ pub struct TraktCategoriesProcessor {
 }
 
 impl TraktCategoriesProcessor {
-    pub fn new(http_client: &reqwest::Client, trakt_config: &TraktConfig) -> Self {
-        let client = TraktClient::new(http_client.clone(), trakt_config.api.clone());
-        Self { client }
+    pub fn new(http_client: &reqwest::Client, trakt_config: &TraktConfig) -> Result<Self, TuliproxError> {
+        let client = TraktClient::new(http_client.clone(), trakt_config.api.clone())?;
+        Ok(Self { client })
     }
 
     pub async fn process_trakt_categories(
@@ -406,8 +406,18 @@ pub async fn process_trakt_categories_for_target(
     if !trakt_config.enabled {
         return Ok(None);
     }
+    if trakt_config.lists.is_empty() && trakt_config.charts.is_empty() {
+        debug!("No Trakt lists or charts configured for target {}", target.name);
+        return Ok(None);
+    }
 
-    let processor = TraktCategoriesProcessor::new(http_client, trakt_config);
+    let processor = match TraktCategoriesProcessor::new(http_client, trakt_config) {
+        Ok(processor) => processor,
+        Err(error) => {
+            warn!("Skipping Trakt curation for target '{}': {}", target.name, error.message());
+            return Ok(None);
+        }
+    };
     processor.process_trakt_categories(playlist, target, trakt_config).await
 }
 
@@ -415,8 +425,18 @@ pub async fn process_trakt_categories_for_target(
 mod tests {
     use super::*;
     use shared::model::{
-        EpisodeStreamProperties, PlaylistItemHeader, SeriesStreamProperties, StreamProperties, TraktContentType,
-        VideoStreamProperties,
+        ConfigTargetDto, EpisodeStreamProperties, PlaylistItemHeader, SeriesStreamProperties, StreamProperties,
+        TargetOutputDto, TraktApiConfigDto, TraktChartConfigDto, TraktChartKind, TraktChartType, TraktConfigDto,
+        TraktContentType, TraktListConfigDto, VideoStreamProperties, XtreamTargetOutputDto,
+    };
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    };
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+        task::JoinHandle,
     };
 
     #[test]
@@ -424,6 +444,82 @@ mod tests {
         let quality = extract_quality("Hello HD UHD 720p");
         assert!(quality.is_some());
         assert_eq!("UHD", quality.unwrap());
+    }
+
+    #[tokio::test]
+    async fn configured_trakt_curation_without_client_id_makes_no_request() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let (base_url, server) = spawn_counting_trakt_server(Arc::clone(&requests)).await;
+        let target = trakt_target("", base_url, true, vec![remote_list_config("Missing")], Vec::new());
+
+        let result = process_trakt_categories_for_target(&reqwest::Client::new(), &[], &target)
+            .await
+            .expect("missing Client ID should not fail target processing");
+
+        assert!(result.is_none());
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn disabled_trakt_config_with_sources_makes_no_request() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let (base_url, server) = spawn_counting_trakt_server(Arc::clone(&requests)).await;
+        let target = trakt_target("", base_url, false, vec![remote_list_config("Disabled")], Vec::new());
+
+        let result = process_trakt_categories_for_target(&reqwest::Client::new(), &[], &target)
+            .await
+            .expect("disabled Trakt config should be a no-op");
+
+        assert!(result.is_none());
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn trakt_config_without_lists_or_charts_makes_no_request() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let (base_url, server) = spawn_counting_trakt_server(Arc::clone(&requests)).await;
+        let target = trakt_target("", base_url, true, Vec::new(), Vec::new());
+
+        let result = process_trakt_categories_for_target(&reqwest::Client::new(), &[], &target)
+            .await
+            .expect("empty Trakt config should be a no-op");
+
+        assert!(result.is_none());
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn failed_list_does_not_suppress_successful_chart() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (base_url, server) = spawn_partial_success_trakt_server(Arc::clone(&requests)).await;
+        let target = trakt_target(
+            "test-client-id",
+            base_url,
+            true,
+            vec![remote_list_config("Unavailable List")],
+            vec![remote_chart_config("Available Chart")],
+        );
+        let playlist = vec![PlaylistGroup {
+            id: 1,
+            title: "Original".intern(),
+            channels: vec![video_item("Movie 1", Some(11))],
+            xtream_cluster: XtreamCluster::Video,
+        }];
+
+        let categories = process_trakt_categories_for_target(&reqwest::Client::new(), &playlist, &target)
+            .await
+            .expect("a failed Trakt source should not fail target processing")
+            .expect("configured Trakt sources should produce a result");
+
+        assert_eq!(categories.len(), 1);
+        assert_eq!(categories[0].title.as_ref(), "Available Chart");
+        assert_eq!(categories[0].channels.len(), 1);
+        assert_eq!(categories[0].channels[0].header.title.as_ref(), "Movie 1");
+        assert_eq!(requests.lock().expect("requests").len(), 2);
+        server.await.expect("test server should finish");
     }
 
     #[test]
@@ -535,6 +631,116 @@ mod tests {
         let categories = match_trakt_items_with_playlist(&trakt_items, &playlist, &config);
 
         assert!(categories.is_empty());
+    }
+
+    async fn spawn_counting_trakt_server(requests: Arc<AtomicUsize>) -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else { return };
+                let _ = read_request(&mut stream).await;
+                requests.fetch_add(1, Ordering::SeqCst);
+                write_response(&mut stream, "200 OK", "[]").await;
+            }
+        });
+        (format!("http://{addr}"), server)
+    }
+
+    async fn spawn_partial_success_trakt_server(requests: Arc<Mutex<Vec<String>>>) -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.expect("accept test request");
+                let request = read_request(&mut stream).await;
+                let is_list_request = request.contains("/users/test-user/lists/test-list/items");
+                requests.lock().expect("requests").push(request);
+                if is_list_request {
+                    write_response(&mut stream, "403 Forbidden", "response body must not affect the next source").await;
+                } else {
+                    write_response(
+                        &mut stream,
+                        "200 OK",
+                        r#"[{"title":"Movie 1","year":2026,"ids":{"trakt":1,"slug":"movie-1","tvdb":null,"imdb":null,"tmdb":11,"tvrage":null}}]"#,
+                    )
+                    .await;
+                }
+            }
+        });
+        (format!("http://{addr}"), server)
+    }
+
+    async fn read_request(stream: &mut TcpStream) -> String {
+        let mut request_bytes = Vec::new();
+        loop {
+            let mut buffer = [0; 1024];
+            let read = stream.read(&mut buffer).await.expect("read request");
+            if read == 0 {
+                break;
+            }
+            request_bytes.extend_from_slice(&buffer[..read]);
+            if request_bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&request_bytes).to_string()
+    }
+
+    async fn write_response(stream: &mut TcpStream, status: &str, body: &str) {
+        let response = format!(
+            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).await.expect("write response");
+    }
+
+    fn trakt_target(
+        client_id: &str,
+        url: String,
+        enabled: bool,
+        lists: Vec<TraktListConfigDto>,
+        charts: Vec<TraktChartConfigDto>,
+    ) -> ConfigTarget {
+        ConfigTarget::from(&ConfigTargetDto {
+            name: "test-target".to_string(),
+            output: vec![TargetOutputDto::Xtream(XtreamTargetOutputDto {
+                trakt: Some(TraktConfigDto {
+                    enabled,
+                    api: TraktApiConfigDto {
+                        api_key: client_id.to_string(),
+                        version: "2".to_string(),
+                        url,
+                        user_agent: "tuliprox-test".to_string(),
+                    },
+                    lists,
+                    charts,
+                }),
+                ..XtreamTargetOutputDto::default()
+            })],
+            ..ConfigTargetDto::default()
+        })
+    }
+
+    fn remote_list_config(category_name: &str) -> TraktListConfigDto {
+        TraktListConfigDto {
+            user: "test-user".to_string(),
+            list_slug: "test-list".to_string(),
+            category_name: category_name.to_string(),
+            content_type: TraktContentType::Vod,
+            tmdb_only: true,
+            fuzzy_match_threshold: 100,
+        }
+    }
+
+    fn remote_chart_config(category_name: &str) -> TraktChartConfigDto {
+        TraktChartConfigDto {
+            kind: TraktChartKind::Movies,
+            chart: TraktChartType::Popular,
+            category_name: category_name.to_string(),
+            tmdb_only: true,
+            fuzzy_match_threshold: 100,
+        }
     }
 
     fn list_config(tmdb_only: bool) -> TraktCategoryConfig { named_list_config("category", tmdb_only) }

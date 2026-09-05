@@ -27,7 +27,7 @@ const LABEL_LIVE: &str = "LABEL.LIVE";
 const LABEL_VOD: &str = "LABEL.VOD";
 const LABEL_SERIES: &str = "LABEL.SERIES";
 const LABEL_FILTER: &str = "LABEL.FILTER";
-const LABEL_TRAKT_API_KEY: &str = "LABEL.API_KEY";
+const LABEL_TRAKT_CLIENT_ID: &str = "LABEL.TRAKT_CLIENT_ID";
 const LABEL_TRAKT_API_VERSION: &str = "LABEL.API_VERSION";
 const LABEL_TRAKT_API_URL: &str = "LABEL.API_URL";
 const LABEL_TRAKT_LISTS: &str = "LABEL.TRAKT_LISTS";
@@ -449,14 +449,14 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
                     <h3>{translate.t(LABEL_API_CONFIGURATION)}</h3>
                     if props.allow_write {
                         <>
-                            { edit_field_text!(trakt_api_form, translate.t(LABEL_TRAKT_API_KEY), api_key, TraktApiConfigFormAction::ApiKey) }
+                            { edit_field_text!(trakt_api_form, translate.t(LABEL_TRAKT_CLIENT_ID), api_key, TraktApiConfigFormAction::ApiKey) }
                             { edit_field_text!(trakt_api_form, translate.t(LABEL_TRAKT_API_VERSION), version, TraktApiConfigFormAction::Version) }
                             { edit_field_text!(trakt_api_form, translate.t(LABEL_TRAKT_API_URL), url, TraktApiConfigFormAction::Url) }
                             { edit_field_text!(trakt_api_form, translate.t(LABEL_USER_AGENT), user_agent, TraktApiConfigFormAction::UserAgent) }
                         </>
                     } else {
                         <>
-                            { config_field!(trakt_api_form.form, translate.t(LABEL_TRAKT_API_KEY), api_key) }
+                            { config_field!(trakt_api_form.form, translate.t(LABEL_TRAKT_CLIENT_ID), api_key) }
                             { config_field!(trakt_api_form.form, translate.t(LABEL_TRAKT_API_VERSION), version) }
                             { config_field!(trakt_api_form.form, translate.t(LABEL_TRAKT_API_URL), url) }
                             { config_field!(trakt_api_form.form, translate.t(LABEL_USER_AGENT), user_agent) }

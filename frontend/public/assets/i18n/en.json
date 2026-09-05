@@ -956,6 +956,7 @@
     "API_CONFIG": "API",
     "API_CONFIGURATION": "API Configuration",
     "API_KEY": "API-Key",
+    "TRAKT_CLIENT_ID": "Trakt Client ID",
     "API_PROXY": "Api-Proxy",
     "API_PROXY_CONFIG": "Api Proxy Config",
     "API_URL": "API-URL",

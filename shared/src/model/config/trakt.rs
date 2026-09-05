@@ -1,6 +1,6 @@
 use crate::defaults::{
-    default_as_true, default_trakt_fuzzy_threshold, is_false, is_true, DEFAULT_USER_AGENT, TRAKT_API_KEY,
-    TRAKT_API_URL, TRAKT_API_VERSION,
+    default_as_true, default_trakt_fuzzy_threshold, is_false, is_true, DEFAULT_USER_AGENT, TRAKT_API_URL,
+    TRAKT_API_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use strum_macros::{Display, EnumString};
@@ -32,8 +32,7 @@ pub struct TraktApiConfigDto {
 
 impl TraktApiConfigDto {
     pub fn prepare(&mut self) {
-        let key = self.api_key.trim();
-        self.api_key = String::from(if key.is_empty() { TRAKT_API_KEY } else { key });
+        self.api_key = self.api_key.trim().to_string();
         let version = self.version.trim();
         self.version = String::from(if version.is_empty() { TRAKT_API_VERSION } else { version });
         let url = self.url.trim();
@@ -151,6 +150,27 @@ impl TraktConfigDto {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trakt_api_prepare_keeps_blank_client_id_absent() {
+        for client_id in ["", " \t\r\n "] {
+            let mut config = TraktApiConfigDto { api_key: client_id.to_string(), ..TraktApiConfigDto::default() };
+
+            config.prepare();
+
+            assert!(config.api_key.is_empty(), "blank Client ID should remain absent");
+        }
+    }
+
+    #[test]
+    fn trakt_api_prepare_trims_supplied_client_id() {
+        let mut config =
+            TraktApiConfigDto { api_key: "  user-supplied-client-id  ".to_string(), ..TraktApiConfigDto::default() };
+
+        config.prepare();
+
+        assert_eq!(config.api_key, "user-supplied-client-id");
+    }
 
     #[test]
     fn trakt_content_type_parsing_and_display_remain_stable() {
