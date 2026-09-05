@@ -248,6 +248,7 @@ specific provider.
 | `xtream_live_stream_without_extension`     | Bool     | `false` | Strips `.ts` from generated stream URLs.                                                                                                                                                                                               |
 | `xtream_live_stream_use_prefix`            | Bool     | `true`  | Injects the `/live/` prefix into URLs.                                                                                                                                                                                                 |
 | `disable_hls_streaming`                    | Bool     | `false` | Rewrites live `.m3u8` requests to `.ts` and bypasses Tuliprox HLS handling.                                                                                                                                                            |
+| `user_agent_stream_index`                  | Bool     | `false` | Appends a process-local stream index to upstream `User-Agent` requests (e.g. `VLC/3.0 42`), keeping it stable for the session.                                                                                                         |
 | `resolve_tmdb`                             | Bool     | `false` | Enables TMDB queries for this specific input based on parsed titles to fill missing posters and release years.                                                                                                                         |
 | `probe_stream`                             | Bool     | `false` | Uses FFprobe to read A/V details (HDR, 4K). Respects `max_connections`.                                                                                                                                                                |
 | `resolve_background`                       | Bool     | `true`  | Metadata scans run asynchronously in the background so the general playlist update (which blocks clients) finishes instantly.                                                                                                          |
@@ -276,6 +277,25 @@ inputs:
     options:
       disable_hls_streaming: true
 ```
+
+#### Stable User-Agent Stream Index Example
+
+```yaml
+inputs:
+  - name: indexed-provider
+    type: xtream
+    url: http://provider.example
+    username: user
+    password: pass
+    headers:
+      User-Agent: VLC/3.0
+    options:
+      user_agent_stream_index: true
+```
+
+The resulting upstream requests use a value such as `User-Agent: VLC/3.0 42`. The counter is global to the running
+Tuliprox process and uses a 64-bit value to avoid reusing an index while an older session is still active. It starts
+again when the process restarts. Shared playback uses the identity of the shared upstream session.
 
 #### Stalker playback notes
 

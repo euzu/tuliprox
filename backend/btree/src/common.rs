@@ -229,6 +229,8 @@ pub(crate) fn require_same_parent_directory(staging: &Path, published: &Path) ->
 pub enum BPlusTreeError {
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
+    #[error("Unreadable value: {0}")]
+    UnreadableValue(io::Error),
     #[error("Data corrupted: {0}")]
     Corrupted(String),
     #[error("Invalid structure: {0}")]
@@ -240,7 +242,7 @@ pub enum BPlusTreeError {
 impl BPlusTreeError {
     pub fn to_io(self) -> io::Error {
         match self {
-            Self::Io(error) => error,
+            Self::Io(error) | Self::UnreadableValue(error) => error,
             Self::KeyNotFound => io::Error::new(io::ErrorKind::NotFound, "Key not found"),
             error => io::Error::new(io::ErrorKind::InvalidData, error),
         }

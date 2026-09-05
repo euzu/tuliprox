@@ -25,7 +25,7 @@ use crate::{
         },
         MediaServerError, MediaServerErrorKind, MediaServerHttpClient, MediaServerImageRef,
     },
-    model::{AppConfig, ConfigInput, ConfigTarget, InputUserInfo, ProxyUserCredentials},
+    model::{AppConfig, ConfigInput, ConfigInputFlags, ConfigTarget, InputUserInfo, ProxyUserCredentials},
     processing::{
         parser::hls::{rewrite_hls, RewriteHlsProps},
         processor::re_resolve_stalker_url,
@@ -1429,6 +1429,28 @@ pub(crate) async fn resolve_initial_stalker_playback_url(
         })
 }
 
+pub(crate) async fn resolve_stream_user_agent_index(
+    app_state: &AppState,
+    input: &ConfigInput,
+    has_provider_handle: bool,
+    username: &str,
+    session_owner: Option<&str>,
+) -> Option<u64> {
+    if input.has_flag(ConfigInputFlags::UserAgentStreamIndex) && has_provider_handle {
+        if let Some(session_token) = session_owner {
+            app_state
+                .active_users
+                .get_or_assign_user_agent_stream_index(username, session_token)
+                .await
+                .or_else(|| Some(app_state.active_users.next_user_agent_stream_index()))
+        } else {
+            Some(app_state.active_users.next_user_agent_stream_index())
+        }
+    } else {
+        None
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::fn_params_excessive_bools)]
 async fn create_stream_response_details(
     app_state: &Arc<AppState>,
@@ -1470,6 +1492,14 @@ async fn create_stream_response_details(
             session_owner,
             accept_requested_stream_url,
         },
+    )
+    .await;
+    let user_agent_stream_index = resolve_stream_user_agent_index(
+        app_state,
+        input,
+        streaming_strategy.provider_handle.is_some(),
+        username,
+        session_owner,
     )
     .await;
     let mut grace_period_options = app_state.get_grace_options();
@@ -1525,6 +1555,7 @@ async fn create_stream_response_details(
                 request_url: None,
                 session_headers: session_headers.cloned(),
                 provider_session_headers: HashMap::new(),
+                user_agent_stream_index,
                 grace_period: grace_period_options,
                 provider_grace_active: false,
                 disable_provider_grace: false,
@@ -1598,6 +1629,10 @@ async fn create_stream_response_details(
                                     content_representation,
                                 });
 
+                            if let Some(stream_index) = user_agent_stream_index {
+                                provider_stream_factory_options.apply_user_agent_stream_index(stream_index);
+                            }
+
                             let provider_config = input.get_resolve_provider(url.as_ref());
                             provider_stream_factory_options.set_provider(provider_config);
                             if input.input_type.is_stalker() {
@@ -1663,6 +1698,9 @@ async fn create_stream_response_details(
                                             content_representation,
                                         },
                                     );
+                                    if let Some(stream_index) = user_agent_stream_index {
+                                        options.apply_user_agent_stream_index(stream_index);
+                                    }
                                     options.set_provider(input.get_resolve_provider(url.as_ref()));
                                     options.require_public_destination();
                                     let retry_reconnect_flag = options.get_reconnect_flag_clone();
@@ -1726,6 +1764,7 @@ async fn create_stream_response_details(
                 request_url: Some(request_url.clone()),
                 session_headers: session_headers.cloned(),
                 provider_session_headers,
+                user_agent_stream_index,
                 grace_period: grace_period_options,
                 provider_grace_active,
                 disable_provider_grace: false,
@@ -2414,6 +2453,15 @@ pub(crate) async fn stream_response(
         // The pinning rule is centralized in `should_pin_provider_for_session` so it stays
         // testable in isolation and in sync with the call site below.
         let should_pin_provider = should_pin_provider_for_session(&stream_details, app_state, item_type);
+        let user_agent_stream_index = stream_details.user_agent_stream_index;
+        // Persist this before response construction because some item types skip the later
+        // create_user_session path, including placeholder sessions created by ensure_user_session_placeholder.
+        if let Some(stream_index) = user_agent_stream_index {
+            app_state
+                .active_users
+                .set_user_agent_stream_index_if_absent(&user.username, session_token, stream_index)
+                .await;
+        }
 
         let mut is_stream_shared = share_stream && !stream_details.has_deferred_provider_open();
         if let Some((_header, _status_code, _url, Some(_custom_video))) = stream_details.stream_info.as_ref() {
@@ -2561,6 +2609,12 @@ pub(crate) async fn stream_response(
                             socket_bound,
                         })
                         .await;
+                    if let Some(stream_index) = user_agent_stream_index {
+                        app_state
+                            .active_users
+                            .set_user_agent_stream_index_if_absent(&user.username, session_token, stream_index)
+                            .await;
+                    }
                     if should_pin_provider {
                         let reservation_ttl_secs = get_session_reservation_ttl_secs(app_state, item_type);
                         if reservation_ttl_secs > 0 {
@@ -2679,6 +2733,12 @@ async fn detected_catchup_hls_response(params: DetectedCatchupHlsResponseParams<
             socket_bound: false,
         })
         .await;
+    if let Some(stream_index) = stream_details.user_agent_stream_index {
+        app_state
+            .active_users
+            .set_user_agent_stream_index_if_absent(&user.username, &created_session_token, stream_index)
+            .await;
+    }
     if !stream_details.provider_session_headers.is_empty() {
         app_state
             .active_users
@@ -3332,6 +3392,7 @@ fn windows_file_identity(file: &tokio::fs::File) -> std::io::Result<(u32, u32, u
 
 async fn build_resource_stream_response(
     app_state: &Arc<AppState>,
+    cache_key: Option<&str>,
     resource_url: &str,
     response: reqwest::Response,
 ) -> axum::response::Response {
@@ -3354,30 +3415,34 @@ async fn build_resource_stream_response(
     // Cache only complete responses (200 OK without Content-Range)
     let can_cache = status == StatusCode::OK && !has_content_range;
     if can_cache {
-        debug!("Caching eligible resource stream {sanitized_resource_url}");
-        let cache_resource_path = if let Some(cache) = app_state.cache.load().as_ref() {
-            Some(cache.write().await.store_path(resource_url, mime_type.as_deref()))
-        } else {
-            None
-        };
-        if let Some(resource_path) = cache_resource_path {
-            match create_new_file_for_write(&resource_path).await {
-                Ok(file) => {
-                    debug!("Persisting resource stream {sanitized_resource_url} to {}", resource_path.display());
-                    let writer = async_file_writer(file);
-                    let add_cache_content = get_add_cache_content(resource_url, mime_type, &app_state.cache);
-                    let tee = tee_stream(byte_stream, writer, &resource_path, add_cache_content);
-                    return try_unwrap_body!(response_builder.body(axum::body::Body::from_stream(tee)));
+        if let Some(cache_key) = cache_key {
+            debug!("Caching eligible resource stream {sanitized_resource_url}");
+            let cache_resource_path = if let Some(cache) = app_state.cache.load().as_ref() {
+                Some(cache.write().await.store_path(cache_key, mime_type.as_deref()))
+            } else {
+                None
+            };
+            if let Some(resource_path) = cache_resource_path {
+                match create_new_file_for_write(&resource_path).await {
+                    Ok(file) => {
+                        debug!("Persisting resource stream {sanitized_resource_url} to {}", resource_path.display());
+                        let writer = async_file_writer(file);
+                        let add_cache_content = get_add_cache_content(cache_key, mime_type, &app_state.cache);
+                        let tee = tee_stream(byte_stream, writer, &resource_path, add_cache_content);
+                        return try_unwrap_body!(response_builder.body(axum::body::Body::from_stream(tee)));
+                    }
+                    Err(err) => {
+                        warn!(
+                            "Failed to create cache file {} for {sanitized_resource_url}: {err}",
+                            resource_path.display()
+                        );
+                    }
                 }
-                Err(err) => {
-                    warn!(
-                        "Failed to create cache file {} for {sanitized_resource_url}: {err}",
-                        resource_path.display()
-                    );
-                }
+            } else {
+                debug!(
+                    "Resource cache unavailable; streaming response for {sanitized_resource_url} without persistence"
+                );
             }
-        } else {
-            debug!("Resource cache unavailable; streaming response for {sanitized_resource_url} without persistence");
         }
     }
 
@@ -3386,7 +3451,9 @@ async fn build_resource_stream_response(
 
 async fn fetch_resource_with_retry(
     app_state: &Arc<AppState>,
+    http_client: &reqwest::Client,
     url: &Url,
+    cache_key: Option<&str>,
     resource_url: &str,
     req_headers: &HashMap<String, Vec<u8>>,
     input: Option<&ConfigInput>,
@@ -3401,7 +3468,7 @@ async fn fetch_resource_with_retry(
     let Ok(response) =
         send_with_retry_and_provider(&app_state.app_config, url, provider_config.as_ref(), false, |resolved_url| {
             request::get_client_request(
-                &app_state.http_client.load(),
+                http_client,
                 input.map_or(InputFetchMethod::GET, |i| i.method),
                 input.map(|i| &i.headers),
                 resolved_url,
@@ -3418,7 +3485,7 @@ async fn fetch_resource_with_retry(
     let status = response.status();
 
     if status.is_success() {
-        return Some(build_resource_stream_response(app_state, resource_url, response).await);
+        return Some(build_resource_stream_response(app_state, cache_key, resource_url, response).await);
     }
 
     // Non-retriable Status -> Upstream Response incl. Body
@@ -3436,9 +3503,41 @@ async fn fetch_resource_with_retry(
     Some(try_unwrap_body!(response_builder.body(axum::body::Body::from_stream(stream))))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourceFetchPolicy {
+    Standard,
+    PublicNoRedirect,
+}
+
+impl ResourceFetchPolicy {
+    const fn cache_key(self, resource_url: &str) -> Option<&str> {
+        match self {
+            Self::Standard => Some(resource_url),
+            Self::PublicNoRedirect => None,
+        }
+    }
+
+    const fn requires_public_destination(self) -> bool { matches!(self, Self::PublicNoRedirect) }
+}
+
+async fn validate_public_resource_destination(url: &Url) -> std::io::Result<()> {
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "unsupported resource URL scheme"));
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "resource URL has no host"))?;
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "resource URL has no port"))?;
+    tuliprox_core::utils::network::request::resolve_public_socket_addrs(host, port).await?;
+    Ok(())
+}
+
 /// # Panics
 pub async fn resource_response(
     app_state: &Arc<AppState>,
+    fetch_policy: ResourceFetchPolicy,
     resource_url: &str,
     req_headers: &HeaderMap,
     input: Option<&ConfigInput>,
@@ -3446,6 +3545,21 @@ pub async fn resource_response(
     if resource_url.is_empty() {
         return StatusCode::NO_CONTENT.into_response();
     }
+
+    let validated_url = if fetch_policy.requires_public_destination() {
+        let Ok(url) = Url::parse(resource_url) else {
+            error!("Url is malformed {}", sanitize_sensitive_info(resource_url));
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        if let Err(err) = validate_public_resource_destination(&url).await {
+            debug!("Rejected non-public resource destination {}: {err}", sanitize_sensitive_info(resource_url));
+            return StatusCode::BAD_GATEWAY.into_response();
+        }
+        Some(url)
+    } else {
+        None
+    };
+
     if resource_url.starts_with("media-server://image/") {
         return match open_media_server_image_resource(app_state, resource_url).await {
             Ok(response) => response,
@@ -3462,10 +3576,11 @@ pub async fn resource_response(
     }
     let filter: HeaderFilter = Some(Box::new(|key| key != "if-none-match" && key != "if-modified-since"));
     let req_headers = get_headers_from_request(req_headers, &filter);
-    if let Some(cache) = app_state.cache.load().as_ref() {
+    let cache_key = fetch_policy.cache_key(resource_url);
+    if let (Some(cache_key), Some(cache)) = (cache_key, app_state.cache.load().as_ref()) {
         let cache_hit = {
             let mut guard = cache.write().await;
-            guard.get_content(resource_url)
+            guard.get_content(cache_key)
         };
 
         if let Some((resource_path, mime_type)) = cache_hit {
@@ -3480,8 +3595,14 @@ pub async fn resource_response(
         }
     }
     trace_if_enabled!("Try to fetch resource {}", sanitize_sensitive_info(resource_url));
-    if let Ok(url) = Url::parse(resource_url) {
-        if let Some(resp) = fetch_resource_with_retry(app_state, &url, resource_url, &req_headers, input).await {
+    if let Ok(url) = validated_url.map_or_else(|| Url::parse(resource_url), Ok) {
+        let http_client = match fetch_policy {
+            ResourceFetchPolicy::Standard => app_state.http_client.load(),
+            ResourceFetchPolicy::PublicNoRedirect => app_state.public_http_client_no_redirect.load(),
+        };
+        if let Some(resp) =
+            fetch_resource_with_retry(app_state, &http_client, &url, cache_key, resource_url, &req_headers, input).await
+        {
             return resp;
         }
         // Upstream failure after retries

@@ -1846,16 +1846,14 @@ where
                 match BPlusTreeNode::<K, V>::load_value_from_info(&mut cursor, &info) {
                     Ok(value) => value,
                     Err(err) => {
-                        self.exhausted = true;
-                        return Some(Err(BPlusTreeError::Io(err)));
+                        return Some(Err(BPlusTreeError::UnreadableValue(err)));
                     }
                 }
             } else if let Some(file) = &mut self.tree.file {
                 match BPlusTreeNode::<K, V>::load_value_from_info(file, &info) {
                     Ok(value) => value,
                     Err(err) => {
-                        self.exhausted = true;
-                        return Some(Err(BPlusTreeError::Io(err)));
+                        return Some(Err(BPlusTreeError::UnreadableValue(err)));
                     }
                 }
             } else {

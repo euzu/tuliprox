@@ -21,6 +21,10 @@ While Tuliprox is usually run via Docker, understanding the CLI flags is crucial
 | `--sh <QUERY>`           | **Stream History Viewer:** Dumps and filters stream history records from binary archive files. Accepts inline JSON or `@file.json`. See [Stream History Viewer](#5-stream-history-viewer) below.                                                                                |
 | `--scan-library`         | Triggers an incremental scan of the local media directory (if configured).                                                                                                                                                                                                      |
 | `--force-library-rescan` | Ignores modification timestamps and forces a full TMDB/PTT re-evaluation of all local media files.                                                                                                                                                                              |
+| `--inspect-db <PATH>`    | **Database Inspection:** Inspects a B+Tree database file. Reports file size, storage version (V2/V3), detected type, healthy entries, and count of corrupted records. See [Database Migration & Inspection](#6-database-migration--inspection-migrate_dbsh--cli) below.         |
+| `--migrate-db <PATH>`    | **Database Migration:** Migrates a legacy (V1/V2) database to B+Tree V3. Automatically creates a timestamped backup before migrating. Recovers all healthy records and bypasses damaged entries.                                                                                |
+| `--db-type <TYPE>`       | Explicit database type override for inspection/migration (`series`, `xtream`, `target-xtream`, `m3u`, `target-m3u`, `epg`, etc.). Auto-detected if omitted.                                                                                                                     |
+| `--no-backup`            | Skips creating a `.bak.<timestamp>` file before running `--migrate-db`.                                                                                                                                                                                                         |
 
 ---
 
@@ -314,7 +318,91 @@ Output is a streaming JSON array to stdout. Warnings and errors go to stderr.
 
 ---
 
-## 6. Hot Reloading Caveats
+## 6. Database Migration & Inspection (`migrate_db.sh` & CLI)
+
+Tuliprox uses a custom B+Tree storage engine. Starting with version 3.3.x, the engine uses the **V3 storage format**
+(a slotted-page architecture with page-level checksums, write-ahead logging, and crash recovery).
+
+During startup or container updates, Tuliprox automatically migrates legacy V1 and V2 database files (such as `series.db`,
+`live.db`, `video.db`, `m3u_*.db`, `epg.db`) to V3.
+
+### Standalone Migration & Inspection Script (`bin/migrate_db.sh`)
+
+If you want to manually verify, repair, or migrate a database file before starting the server—or if you need to run migration
+inside a running Docker container—use the helper script in `bin/`:
+
+```bash
+# Show usage and available options
+./bin/migrate_db.sh --help
+```
+
+#### Inspecting a Database (Read-Only)
+
+To check storage version, entry counts, and detect corrupted records without modifying anything on disk:
+
+```bash
+./bin/migrate_db.sh --inspect /path/to/series.db
+```
+
+Output example:
+
+```text
+=== B+Tree Database Inspection ===
+Path:              /data/input_dir/series.db
+File Size:         27800915 bytes
+Storage Version:   V2
+Database Type:     input_xtream
+Healthy Entries:   22347
+Corrupted Entries: 0
+```
+
+#### Migrating a Local Database (with Automatic Backup)
+
+To convert a legacy V2 database to V3:
+
+```bash
+./bin/migrate_db.sh /path/to/series.db
+```
+
+This creates a safety backup (`series.db.bak.YYYYMMDD_HHMMSS`), reconstructs all healthy records into V3 format, verifies
+the tree integrity, and atomically replaces the file.
+
+Output example:
+
+```text
+=== B+Tree Database Migration Complete ===
+Path:              /data/input_dir/series.db
+Version:           V2 -> V3
+Database Type:     input_xtream
+Backup Created:    /data/input_dir/series.db.bak.20260905_071212
+Recovered Entries: 22347
+Corrupted Skipped: 0
+Database ID:       a84db1e503b942319e0374beb6d0e08b
+Generation:        1
+Status:            SUCCESS (valid V3 database)
+```
+
+#### Running in Docker
+
+If Tuliprox runs inside a Docker container (e.g., named `tuliprox`):
+
+```bash
+# Inspect inside container:
+./bin/migrate_db.sh --docker tuliprox --inspect /app/data/input_dir/series.db
+
+# Migrate inside container:
+./bin/migrate_db.sh --docker tuliprox /app/data/input_dir/series.db
+```
+
+Alternatively, invoke `tuliprox` directly via `docker exec`:
+
+```bash
+docker exec -it tuliprox tuliprox --migrate-db /app/data/input_dir/series.db
+```
+
+---
+
+## 7. Hot Reloading Caveats
 
 Tuliprox supports hot-reloading for specific files (`mapping.yml`, `api-proxy.yml`) if `config_hot_reload: true` is set
 in `config.yml`.

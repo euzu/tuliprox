@@ -916,6 +916,7 @@ async fn forced_legacy_hls_test_response(
         provider: Arc::clone(&input.name),
         stream_url: origin_url.as_str().intern(),
         provider_session_headers: HashMap::new(),
+        user_agent_stream_index: None,
         addr: client_addr,
         socket_bound: false,
         active_addrs: vec![client_addr],
@@ -1345,6 +1346,7 @@ fn test_should_allow_exhausted_shared_reconnect_only_for_matching_shared_session
         provider: Arc::<str>::from("provider"),
         stream_url: Arc::<str>::from("http://provider/live/449924.ts"),
         provider_session_headers: HashMap::new(),
+        user_agent_stream_index: None,
         addr: "127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!()),
         socket_bound: false,
         active_addrs: vec!["127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!())],
@@ -1581,6 +1583,61 @@ fn create_test_fingerprint(addr: std::net::SocketAddr) -> Fingerprint {
     Fingerprint::new(format!("fp-{addr}"), addr.ip().to_string(), addr)
 }
 
+#[tokio::test]
+async fn resource_cache_is_used_only_by_matching_standard_fetch_policy() {
+    const CACHED_BODY: &[u8] = b"cached image";
+    const UPSTREAM_BODY: &[u8] = b"upstream image";
+
+    let app_state = create_test_app_state();
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let cache_dir = temp_dir.path().to_string_lossy();
+    let mut cache = LRUResourceCache::new(1024, cache_dir.as_ref());
+    let resource_url = "http://1.1.1.1/icon.png";
+    let cached_path = cache.store_path(resource_url, Some("image/png"));
+    tokio::fs::write(&cached_path, CACHED_BODY).await.expect("write cached image");
+    cache.add_content(resource_url, Some("image/png".to_string()), CACHED_BODY.len()).expect("register cached image");
+    app_state.cache.store(Some(Arc::new(RwLock::new(cache))));
+
+    let response_head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        UPSTREAM_BODY.len()
+    );
+    let (upstream_addr, upstream_task) = spawn_legacy_hls_test_origin(response_head, UPSTREAM_BODY.to_vec()).await;
+    let proxy = reqwest::Proxy::http(format!("http://{upstream_addr}")).expect("mock proxy URL");
+    let mock_client = reqwest::Client::builder().proxy(proxy).build().expect("mock upstream client");
+    app_state.public_http_client_no_redirect.store(Arc::new(mock_client));
+
+    let standard_response =
+        resource_response(&app_state, ResourceFetchPolicy::Standard, resource_url, &HeaderMap::new(), None)
+            .await
+            .into_response();
+    assert_eq!(standard_response.status(), StatusCode::OK);
+    let standard_body = standard_response.into_body().collect().await.expect("read cached image").to_bytes();
+    assert_eq!(standard_body, Bytes::from_static(CACHED_BODY));
+
+    let response =
+        resource_response(&app_state, ResourceFetchPolicy::PublicNoRedirect, resource_url, &HeaderMap::new(), None)
+            .await
+            .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let response_body = response.into_body().collect().await.expect("read upstream image").to_bytes();
+    assert_eq!(response_body, Bytes::from_static(UPSTREAM_BODY));
+    assert_ne!(response_body, Bytes::from_static(CACHED_BODY));
+
+    let upstream_request = upstream_task.await.expect("mock upstream task completes");
+    assert!(upstream_request.starts_with("GET http://1.1.1.1/icon.png HTTP/1.1\r\n"));
+}
+
+#[tokio::test]
+async fn public_resource_destination_validation_rejects_loopback_url() {
+    let url = Url::parse("http://127.0.0.1/icon.png").expect("loopback URL");
+
+    let result = validate_public_resource_destination(&url).await;
+
+    assert!(result.is_err_and(|err| err.kind() == std::io::ErrorKind::PermissionDenied));
+}
+
 fn create_test_fingerprint_with_user_agent(addr: std::net::SocketAddr, user_agent: &str) -> Fingerprint {
     Fingerprint::new(format!("{}|{user_agent}", addr.ip()), addr.ip().to_string(), addr)
 }
@@ -1666,6 +1723,7 @@ fn create_test_session(
             _ => "http://provider-1.example/live/42.ts",
         }),
         provider_session_headers: HashMap::new(),
+        user_agent_stream_index: None,
         addr: "127.0.0.1:55555".parse().unwrap_or_else(|_| unreachable!()),
         socket_bound: item_type.uses_socket_bound_session(),
         active_addrs: Vec::new(),
@@ -4237,6 +4295,7 @@ async fn should_pin_provider_for_session_skips_reservation_on_failure_custom_vid
         request_url: None,
         session_headers: None,
         provider_session_headers: HashMap::new(),
+        user_agent_stream_index: None,
         grace_period: GracePeriodOptions::default(),
         provider_grace_active: false,
         disable_provider_grace: false,
@@ -4257,6 +4316,7 @@ async fn should_pin_provider_for_session_skips_reservation_on_failure_custom_vid
         request_url: None,
         session_headers: None,
         provider_session_headers: HashMap::new(),
+        user_agent_stream_index: None,
         grace_period: GracePeriodOptions::default(),
         provider_grace_active: false,
         disable_provider_grace: false,
@@ -4284,6 +4344,7 @@ async fn should_pin_provider_for_session_skips_reservation_on_failure_custom_vid
             request_url: None,
             session_headers: None,
             provider_session_headers: HashMap::new(),
+            user_agent_stream_index: None,
             grace_period: GracePeriodOptions::default(),
             provider_grace_active: false,
             disable_provider_grace: false,
@@ -5210,6 +5271,7 @@ fn session_reacquire_cleanup_addrs_excludes_current_and_deduplicates() {
         provider: "provider-a".intern(),
         stream_url: "http://localhost/movie.mkv".intern(),
         provider_session_headers: HashMap::new(),
+        user_agent_stream_index: None,
         addr: seek,
         socket_bound: false,
         active_addrs: vec![primary, overlap, seek, overlap],

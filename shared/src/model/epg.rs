@@ -175,6 +175,8 @@ pub struct EpgProgramme {
     /// derive `airing_status()` from both flags.
     #[serde(default)]
     pub previously_shown: bool,
+    #[serde(default)]
+    pub icon: Option<Arc<str>>,
     #[serde(skip)]
     channel: Arc<str>,
 }
@@ -207,6 +209,7 @@ impl EpgProgramme {
             is_live: false,
             is_new: false,
             previously_shown: false,
+            icon: None,
         }
     }
 

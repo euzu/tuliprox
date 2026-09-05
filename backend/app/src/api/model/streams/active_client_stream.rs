@@ -591,6 +591,11 @@ fn create_deferred_provider_open_future(
             content_representation: stream_details.content_representation,
         })
         .for_deferred_open();
+    if stream_details.provider_handle.is_some() {
+        if let Some(stream_index) = stream_details.user_agent_stream_index {
+            provider_stream_factory_options.apply_user_agent_stream_index(stream_index);
+        }
+    }
     provider_stream_factory_options.set_provider(input.get_resolve_provider(stream_url.as_ref()));
 
     Some(DeferredProviderOpenState::Pending(Box::new(DeferredProviderOpenContext {
@@ -1839,6 +1844,7 @@ mod tests {
             request_url: Some("http://provider-1.example/live/1".intern()),
             session_headers: None,
             provider_session_headers: HashMap::new(),
+            user_agent_stream_index: None,
             grace_period: GracePeriodOptions { period_millis: 100, timeout_secs: 0, hold_stream: true },
             provider_grace_active: true,
             disable_provider_grace: false,
@@ -2749,6 +2755,7 @@ mod tests {
             request_url: Some("http://provider-1.example/live/2.ts".intern()),
             session_headers: None,
             provider_session_headers: HashMap::new(),
+            user_agent_stream_index: None,
             grace_period: GracePeriodOptions { period_millis: 100, timeout_secs: 0, hold_stream: true },
             provider_grace_active: false,
             disable_provider_grace: false,
