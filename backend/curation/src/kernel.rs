@@ -23,6 +23,16 @@ pub(crate) enum CurationMediaKind {
     Series,
 }
 
+impl CurationMediaKind {
+    const fn from_playlist_item_type(item_type: PlaylistItemType) -> Option<Self> {
+        match item_type {
+            PlaylistItemType::Video | PlaylistItemType::LocalVideo => Some(Self::Movie),
+            PlaylistItemType::SeriesInfo | PlaylistItemType::LocalSeriesInfo => Some(Self::Series),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CurationMediaScope {
     Movies,
@@ -125,6 +135,7 @@ impl CuratedMediaReference {
 
 struct PlaylistCandidate<'a> {
     item: &'a PlaylistItem,
+    kind: CurationMediaKind,
     normalized_title: String,
     year: Option<u32>,
     tmdb_id: Option<u32>,
@@ -184,8 +195,9 @@ fn find_best_fuzzy_match_for_item<'playlist, 'reference>(
 ) -> Option<MatchResult<'playlist, 'reference>> {
     let mut best_match: Option<(&CuratedMediaReference, f64)> = None;
 
-    for reference in references.iter().filter(|reference| specification.media_scope.includes_reference(reference.kind))
-    {
+    for reference in references.iter().filter(|reference| {
+        specification.media_scope.includes_reference(reference.kind) && reference.kind == candidate.kind
+    }) {
         let title_score = normalized_levenshtein(&candidate.normalized_title, &reference.normalized_title);
 
         if title_score >= threshold {
@@ -221,9 +233,9 @@ fn find_best_match_for_item<'playlist, 'reference>(
     specification: &CurationCategorySpec<'_>,
 ) -> Option<MatchResult<'playlist, 'reference>> {
     if let Some(playlist_tmdb_id) = candidate.tmdb_id {
-        for reference in
-            references.iter().filter(|reference| specification.media_scope.includes_reference(reference.kind))
-        {
+        for reference in references.iter().filter(|reference| {
+            specification.media_scope.includes_reference(reference.kind) && reference.kind == candidate.kind
+        }) {
             if Some(playlist_tmdb_id) == reference.tmdb_id {
                 trace!("TMDB exact curation match: '{}' (TMDB: {})", candidate.item.header.title, playlist_tmdb_id);
                 return Some(MatchResult { playlist_item: candidate.item, reference });
@@ -253,8 +265,12 @@ pub(crate) fn curate_category(
             if specification.media_scope.includes_cluster(channel.header.xtream_cluster)
                 && specification.media_scope.includes_playlist_item(channel.header.item_type)
             {
+                let Some(kind) = CurationMediaKind::from_playlist_item_type(channel.header.item_type) else {
+                    continue;
+                };
                 let candidate = PlaylistCandidate {
                     item: channel,
+                    kind,
                     normalized_title: normalize_title_for_matching(&channel.header.title),
                     year: extract_year_from_title(&channel.header.title),
                     tmdb_id: channel.get_tmdb_id(),
@@ -521,6 +537,41 @@ mod tests {
     }
 
     #[test]
+    fn both_scope_matches_references_only_to_the_same_media_kind() {
+        let movie = video_item("Shared Title", Some(42));
+        let series = series_item("Shared Title", Some(42));
+        let exact_references = vec![
+            reference(CurationMediaKind::Series, "Series Reference", None, Some(42), Some(1)),
+            reference(CurationMediaKind::Movie, "Movie Reference", None, Some(42), Some(2)),
+        ];
+        let exact_specification =
+            CurationCategorySpec { media_scope: CurationMediaScope::Both, ..specification("Mixed", true) };
+
+        let movie_match = find_best_match_for_item(&candidate(&movie), &exact_references, &exact_specification)
+            .expect("movie candidate should match the movie reference");
+        let series_match = find_best_match_for_item(&candidate(&series), &exact_references, &exact_specification)
+            .expect("series candidate should match the series reference");
+
+        assert_eq!(movie_match.reference.kind, CurationMediaKind::Movie);
+        assert_eq!(series_match.reference.kind, CurationMediaKind::Series);
+
+        let fuzzy_references = vec![
+            reference(CurationMediaKind::Series, "Shared Title", None, None, Some(1)),
+            reference(CurationMediaKind::Movie, "Shared Title", None, None, Some(2)),
+        ];
+        let fuzzy_specification =
+            CurationCategorySpec { media_scope: CurationMediaScope::Both, ..fuzzy_specification("Mixed", 100) };
+
+        let movie_match = find_best_match_for_item(&candidate(&movie), &fuzzy_references, &fuzzy_specification)
+            .expect("movie candidate should fuzzy-match the movie reference");
+        let series_match = find_best_match_for_item(&candidate(&series), &fuzzy_references, &fuzzy_specification)
+            .expect("series candidate should fuzzy-match the series reference");
+
+        assert_eq!(movie_match.reference.kind, CurationMediaKind::Movie);
+        assert_eq!(series_match.reference.kind, CurationMediaKind::Series);
+    }
+
+    #[test]
     fn movie_scope_does_not_match_series_roots_and_series_scope_ignores_episodes() {
         let series = series_item("Shared Title", Some(42));
         let episode = episode_item("Shared Title", &"parent".intern(), 7001);
@@ -632,6 +683,8 @@ mod tests {
     fn candidate(item: &PlaylistItem) -> PlaylistCandidate<'_> {
         PlaylistCandidate {
             item,
+            kind: CurationMediaKind::from_playlist_item_type(item.header.item_type)
+                .expect("test candidate must be a movie or series root"),
             normalized_title: normalize_title_for_matching(&item.header.title),
             year: extract_year_from_title(&item.header.title),
             tmdb_id: item.get_tmdb_id(),
