@@ -21,6 +21,7 @@ pub struct MigrationValidation {
     pub entries: usize,
     pub database_id: [u8; 16],
     pub generation: u64,
+    pub corrupted_entries: usize,
 }
 
 pub fn storage_version(path: &Path) -> io::Result<Option<u32>> {
@@ -110,6 +111,37 @@ where
     )
 }
 
+pub fn scan_v2_entries<K, V>(path: &Path) -> io::Result<(usize, usize)>
+where
+    K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
+    V: Serialize + for<'de> Deserialize<'de> + Clone,
+{
+    let version =
+        storage_version(path)?.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "not a B+Tree database"))?;
+    let normalized_source = if version == LEGACY_V1 {
+        let temporary = tempfile::NamedTempFile::new()?;
+        std::fs::copy(path, temporary.path())?;
+        normalize_v1_copy(temporary.path())?;
+        Some(temporary)
+    } else if version == LEGACY_V2 {
+        None
+    } else {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported legacy B+Tree version"));
+    };
+    let read_path = normalized_source.as_ref().map_or(path, tempfile::NamedTempFile::path);
+    let mut legacy = v2::BPlusTreeQuery::<K, V>::try_new(read_path)?;
+    let mut live = 0usize;
+    let mut corrupt = 0usize;
+    for entry in legacy.range_iter(Bound::Unbounded, Bound::Unbounded) {
+        match entry {
+            Ok(_) => live += 1,
+            Err(crate::common::BPlusTreeError::UnreadableValue(_)) => corrupt += 1,
+            Err(error) => return Err(error.to_io()),
+        }
+    }
+    Ok((live, corrupt))
+}
+
 pub fn migrate_v2_typed_with_index<K, V, SortKey, F>(source: &Path, sort_key: F) -> io::Result<MigrationValidation>
 where
     K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
@@ -183,17 +215,41 @@ where
         let mut tree = BPlusTree::new();
         tree.set_metadata(metadata);
         let mut entries = 0usize;
+        let mut corrupted_entries = 0usize;
         for entry in legacy.range_iter(Bound::Unbounded, Bound::Unbounded) {
-            let (key, value) = entry.map_err(v2::BPlusTreeError::to_io)?;
+            let (key, value) = match entry {
+                Ok(item) => item,
+                Err(crate::common::BPlusTreeError::UnreadableValue(err)) => {
+                    log::warn!("Skipping unreadable/corrupted entry in legacy B+Tree {}: {err}", read_path.display());
+                    corrupted_entries += 1;
+                    continue;
+                }
+                Err(err) => return Err(err.to_io()),
+            };
             tree.insert(key, map(value));
             entries = entries
                 .checked_add(1)
                 .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "migration entry count overflow"))?;
         }
         drop(legacy);
+        if entries == 0 && corrupted_entries > 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("all {corrupted_entries} entries in legacy database were corrupted"),
+            ));
+        }
+        if corrupted_entries > 0 {
+            log::warn!(
+                "Legacy migration of {} completed with {} healthy entries ({} corrupted entries skipped)",
+                read_path.display(),
+                entries,
+                corrupted_entries
+            );
+        }
         if tree.len() != entries {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "legacy migration produced duplicate keys"));
         }
+
         let verification = store(&mut tree, &destination)?;
         if verification.live_entries
             != u64::try_from(entries)
@@ -221,7 +277,7 @@ where
             publish(&destination_index, &crate::common::get_file_path_for_db_index(source))?;
         }
         publish(&destination, source)?;
-        Ok(MigrationValidation { entries, database_id, generation })
+        Ok(MigrationValidation { entries, database_id, generation, corrupted_entries })
     })();
     if let Some(temporary) = normalized_source {
         let _ = std::fs::remove_file(temporary);
@@ -302,6 +358,26 @@ mod tests {
                 vec![(1, String::from("one")), (2, String::from("two"))]
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_scan_supports_v1_without_modifying_the_source() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("inspect-v1.db");
+        let mut legacy = v2::BPlusTree::new();
+        legacy.insert(1u32, String::from("one"));
+        legacy.insert(2u32, String::from("two"));
+        legacy.store(&path)?;
+        let mut file = OpenOptions::new().write(true).open(&path)?;
+        file.seek(SeekFrom::Start(4))?;
+        file.write_all(&LEGACY_V1.to_le_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        let before = std::fs::read(&path)?;
+
+        assert_eq!(scan_v2_entries::<u32, String>(&path)?, (2, 0));
+        assert_eq!(std::fs::read(&path)?, before);
         Ok(())
     }
 
@@ -406,6 +482,52 @@ mod tests {
         let values = crate::sorted_index::v4::OwnedIterator::<u32, String, usize>::open(query, &index)?
             .collect::<io::Result<Vec<_>>>()?;
         assert_eq!(values, vec![(2, String::from("a")), (1, String::from("bbb"))]);
+        Ok(())
+    }
+
+    #[test]
+    fn typed_migration_skips_corrupted_value_and_migrates_healthy_records() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("single-value-corrupted-v2.db");
+        let mut legacy = v2::BPlusTree::new();
+        let large1 = "A".repeat(500);
+        let large2 = "B".repeat(500);
+        let large3 = "C".repeat(500);
+        legacy.insert(1u32, large1.clone());
+        legacy.insert(2u32, large2.clone());
+        legacy.insert(3u32, large3.clone());
+        legacy.store(&path)?;
+
+        let mut bytes = std::fs::read(&path)?;
+        let serialized = crate::codec::binary_serialize(&large2)?;
+        let mut pattern = vec![v2::COMPRESSION_FLAG_LZ4];
+        pattern.extend_from_slice(&(serialized.len() as u32).to_le_bytes());
+        // Find the second occurrence (key 2)
+        let mut occurrences = Vec::new();
+        for pos in 0..bytes.len().saturating_sub(pattern.len()) {
+            if bytes[pos..pos + pattern.len()] == pattern {
+                occurrences.push(pos);
+            }
+        }
+        assert!(occurrences.len() >= 2, "found occurrences: {:?}", occurrences.len());
+        let pos = occurrences[1];
+        // pos is flag (0x01)
+        // pos+1..pos+5 is prepended length
+        // pos+5 is first token in LZ4.
+        // If we set pos+5 = 0x1f (1 literal, 15+ match), pos+6 = 'B' (literal), pos+7..pos+9 = 0x0000 (offset = 0!)
+        bytes[pos + 5] = 0x1f;
+        bytes[pos + 6] = b'B';
+        bytes[pos + 7] = 0x00;
+        bytes[pos + 8] = 0x00;
+        std::fs::write(&path, &bytes)?;
+
+        let validation = migrate_v2_typed::<u32, String>(&path)?;
+        assert_eq!(validation.entries, 2);
+        assert_eq!(validation.corrupted_entries, 1);
+        let mut query = super::super::BPlusTreeQuery::<u32, String>::try_new(&path)?;
+        assert_eq!(query.query(&1).map_err(io::Error::other)?, Some(large1));
+        assert_eq!(query.query(&2).map_err(io::Error::other)?, None);
+        assert_eq!(query.query(&3).map_err(io::Error::other)?, Some(large3));
         Ok(())
     }
 }

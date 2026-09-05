@@ -78,3 +78,44 @@ t ≤ 30 s   New connection from the 4G IP can now acquire the slot normally
 > active streaming connections. In practice this is not an issue since Tuliprox is designed to run on Linux servers and Docker containers.
 
 ---
+
+## 3. Database Migration Failures (`LZ4 decompression failed: 0 is not a valid match offset`)
+
+**The Problem:**
+During startup migration of legacy V2 databases (e.g., `series.db`, `live.db`), the server or container fails with:
+
+```text
+ERROR tuliprox::repository::bplustree::migration] Startup migration failed: Failed to migrate B+Tree /app/data/input_dir/series.db: LZ4 decompression failed: 0 is not a valid match offset
+```
+
+**Root Cause:**
+In the legacy B+Tree V2 storage format, entries were updated in-place without page-level checksums or write-ahead logging.
+If an unexpected power loss, kill signal, or torn disk write occurred during an update, a single value's LZ4 block could
+contain zeroed bytes (offset `0` is invalid according to the LZ4 format specification). In older versions, a single unreadable
+record caused the entire database migration to abort.
+
+**The Solution & Resilience:**
+
+1. **Automatic Error Recovery:** Tuliprox's migration engine now automatically catches decompression and decoding errors on
+   damaged individual records, logs a warning with the path of the skipped record, and continues migrating all healthy records
+   into a valid, crash-safe V3 database.
+2. **Manual Inspection & Repair:** You can inspect the health of any database or manually trigger the migration using the
+   included helper script:
+
+```bash
+# Inspect the database (shows healthy vs. corrupt records without changing anything):
+./bin/migrate_db.sh --inspect /path/to/series.db
+
+# Migrate and salvage all healthy records (creates a timestamped backup automatically):
+./bin/migrate_db.sh /path/to/series.db
+```
+
+If Tuliprox runs in Docker:
+
+```bash
+docker exec -it tuliprox tuliprox --migrate-db /app/data/input_dir/series.db
+```
+
+See [Database Migration & Inspection](./operations-debugging.md#6-database-migration--inspection-migrate_dbsh--cli) for full details.
+
+---
