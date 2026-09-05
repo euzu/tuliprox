@@ -222,6 +222,10 @@ impl ProviderStreamFactoryOptions {
 
     pub fn set_provider(&mut self, provider: Option<Arc<ConfigProvider>>) { self.provider = provider; }
 
+    pub fn apply_user_agent_stream_index(&mut self, stream_index: u64) {
+        crate::utils::request::append_user_agent_stream_index(&mut self.headers, stream_index);
+    }
+
     pub fn require_public_destination(&mut self) {
         self.flags.set(ProviderStreamFactoryFlags::PublicDestinationRequired);
     }

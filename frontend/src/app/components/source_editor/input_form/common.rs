@@ -6,7 +6,7 @@ use super::{
     LABEL_PROBE_FILTER, LABEL_PROBE_LIVE, LABEL_PROBE_LIVE_INTERVAL_HOURS, LABEL_PROBE_SERIES, LABEL_PROBE_VOD,
     LABEL_RESOLVE, LABEL_RESOLVE_BACKGROUND, LABEL_RESOLVE_DELAY_SEC, LABEL_RESOLVE_FILTER, LABEL_RESOLVE_SERIES,
     LABEL_RESOLVE_TMDB, LABEL_RESOLVE_VOD, LABEL_SEQUENTIAL_GROUP, LABEL_SKIP, LABEL_SKIP_LIVE, LABEL_SKIP_SERIES,
-    LABEL_SKIP_VOD, LABEL_URL, LABEL_USERNAME, LABEL_XTREAM_LIVE_STREAM_USE_PREFIX,
+    LABEL_SKIP_VOD, LABEL_URL, LABEL_USERNAME, LABEL_USER_AGENT_STREAM_INDEX, LABEL_XTREAM_LIVE_STREAM_USE_PREFIX,
     LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION,
 };
 use crate::{
@@ -236,9 +236,16 @@ pub(super) fn InputOptionsForm(props: &InputOptionsFormProps) -> Html {
             </TitledCard>
             { config_field_child!(translate.t(LABEL_HEADERS), "INPUT_FORM.HEADERS", {
                 let headers = headers.clone();
-                html! { <KeyValueEditor entries={(*headers).clone()} readonly={!props.allow_write}
-                    key_placeholder={translate.t("LABEL.HEADER_NAME")} value_placeholder={translate.t("LABEL.HEADER_VALUE")}
-                    on_change={Callback::from(move |value| headers.set(value))} /> }
+                html! { <>
+                    if props.allow_write {
+                        { edit_field_bool!(state, translate.t(LABEL_USER_AGENT_STREAM_INDEX), user_agent_stream_index, ConfigInputOptionsFormAction::UserAgentStreamIndex) }
+                    } else {
+                        { config_field_bool!(state.form, translate.t(LABEL_USER_AGENT_STREAM_INDEX), user_agent_stream_index) }
+                    }
+                    <KeyValueEditor entries={(*headers).clone()} readonly={!props.allow_write}
+                        key_placeholder={translate.t("LABEL.HEADER_NAME")} value_placeholder={translate.t("LABEL.HEADER_VALUE")}
+                        on_change={Callback::from(move |value| headers.set(value))} />
+                </> }
             })}
         </Card>
     }

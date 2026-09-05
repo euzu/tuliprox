@@ -367,6 +367,7 @@
       "XTREAM_LIVE_STREAM_USE_PREFIX": "If true, adds /live/ prefix to Xtream stream links (default true).",
       "XTREAM_LIVE_STREAM_WITHOUT_EXTENSION": "If true, removes .ts extension from Xtream stream links (default false).",
       "DISABLE_HLS_STREAMING": "Replaces live Xtream .m3u8 requests with .ts. Enable only when the provider supports MPEG-TS endpoints; this does not transcode HLS.",
+      "USER_AGENT_STREAM_INDEX": "Appends a process-local numeric index to the configured User-Agent. The index stays stable for one playback session across manifests, segments, seeks, reconnects, and provider failover.",
       "XTREAM_SKIP_LIVE": "If true, the live section of the Xtream provider is skipped during update.",
       "XTREAM_SKIP_SERIES": "If true, the series section of the Xtream provider is skipped during update.",
       "XTREAM_SKIP_VOD": "If true, the VOD section of the Xtream provider is skipped during update."
@@ -1177,6 +1178,7 @@
     "LIVE_STREAM_USE_PREFIX": "Use prefix",
     "LIVE_STREAM_WITHOUT_EXTENSION": "Without ext.",
     "DISABLE_HLS_STREAMING": "Force MPEG-TS",
+    "USER_AGENT_STREAM_INDEX": "Append stream index to User-Agent",
     "LOG": "Log",
     "LOGS": "Logs",
     "LIVE_LOGS": "Live Logs",

@@ -2297,7 +2297,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
 
     let disabled_headers = app_state.get_disabled_headers();
     let default_user_agent = app_state.app_config.config.load().default_user_agent.clone();
-    let headers = build_hls_manifest_request_headers(
+    let mut headers = build_hls_manifest_request_headers(
         &input.headers,
         req_headers,
         disabled_headers.as_ref(),
@@ -2463,6 +2463,24 @@ pub(in crate::api) async fn handle_hls_stream_request(
             reservation.selected_provider_config,
         )
     };
+
+    let user_agent_stream_index = crate::api::api_utils::resolve_stream_user_agent_index(
+        app_state,
+        input,
+        provider_handle.is_some(),
+        &user.username,
+        session_token.as_deref(),
+    )
+    .await;
+    if let Some(stream_index) = user_agent_stream_index {
+        request::append_user_agent_stream_index(&mut headers, stream_index);
+        if let Some(session_token) = session_token.as_deref() {
+            app_state
+                .active_users
+                .set_user_agent_stream_index_if_absent(&user.username, session_token, stream_index)
+                .await;
+        }
+    }
 
     // Playlist requests only need the chosen provider account to derive the URL and pin the session.
     // Holding the provider slot until the first segment request causes stale active connections and

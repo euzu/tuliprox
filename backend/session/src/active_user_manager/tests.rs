@@ -149,6 +149,42 @@ async fn target_scoped_session_lookup_does_not_use_same_virtual_id_from_other_ta
         .is_none());
 }
 
+#[tokio::test]
+async fn user_agent_stream_index_is_stable_per_session_and_unique_between_sessions() {
+    let config = Config::default();
+    let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+    let event_manager = Arc::new(EventManager::new());
+    let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+    let addr = SocketAddr::from(([127, 0, 0, 1], 55_500));
+    let mut user = ProxyUserCredentials::default();
+    user.username = "indexed-user".to_string();
+
+    for token in ["indexed-session-a", "indexed-session-b"] {
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: token,
+                virtual_id: 42,
+                provider: "provider-a",
+                stream_url: "http://localhost/live.m3u8",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+    }
+
+    let first = manager.get_or_assign_user_agent_stream_index(&user.username, "indexed-session-a").await;
+    let repeated = manager.get_or_assign_user_agent_stream_index(&user.username, "indexed-session-a").await;
+    let second = manager.get_or_assign_user_agent_stream_index(&user.username, "indexed-session-b").await;
+
+    assert!(first.is_some());
+    assert_eq!(repeated, first);
+    assert!(second.is_some());
+    assert_ne!(second, first);
+}
+
 /// Session refresh normalizes Expired -> Prepared.
 /// When a new request arrives on an expired session, the lifecycle should be
 /// reset to Prepared so that full activation evaluation happens.
@@ -174,6 +210,7 @@ async fn create_user_session_normalizes_expired_lifecycle() {
             provider: "provider-a".intern(),
             stream_url: "http://localhost/live.m3u8".intern(),
             provider_session_headers: HashMap::new(),
+            user_agent_stream_index: None,
             addr,
             socket_bound: false,
             active_addrs: vec![addr],
@@ -235,6 +272,7 @@ async fn create_user_session_does_not_normalize_pending_provider_lifecycle() {
             provider: "provider-a".intern(),
             stream_url: "http://localhost/live.m3u8".intern(),
             provider_session_headers: HashMap::new(),
+            user_agent_stream_index: None,
             addr,
             socket_bound: false,
             active_addrs: vec![addr],
@@ -5505,6 +5543,7 @@ async fn check_divergence_detects_connection_count_mismatch() {
             provider: "provider-a".intern(),
             stream_url: "http://localhost/stream.ts".intern(),
             provider_session_headers: HashMap::new(),
+            user_agent_stream_index: None,
             addr,
             socket_bound: false,
             active_addrs: vec![addr],
@@ -5548,6 +5587,7 @@ async fn check_divergence_detects_stream_without_counted_session() {
             provider: "provider-a".intern(),
             stream_url: "http://localhost/stream.ts".intern(),
             provider_session_headers: HashMap::new(),
+            user_agent_stream_index: None,
             addr,
             socket_bound: false,
             active_addrs: vec![addr],
@@ -5632,6 +5672,7 @@ async fn divergence_log_rate_limited_within_cooldown_window() {
             provider: "provider-a".intern(),
             stream_url: "http://localhost/stream.ts".intern(),
             provider_session_headers: HashMap::new(),
+            user_agent_stream_index: None,
             addr,
             socket_bound: false,
             active_addrs: vec![addr],

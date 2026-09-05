@@ -134,6 +134,8 @@ pub struct UserSession {
     pub provider: Arc<str>,
     pub stream_url: Arc<str>,
     pub provider_session_headers: HashMap<String, String>,
+    /// Stable suffix appended to upstream User-Agent headers for this playback session.
+    pub user_agent_stream_index: Option<u64>,
     pub addr: SocketAddr,
     pub socket_bound: bool,
     pub active_addrs: Vec<SocketAddr>,
@@ -537,6 +539,7 @@ pub struct ActiveUserManager {
     grace_period_timeout_secs: AtomicU64,
     adaptive_session_ttl_secs: AtomicU64,
     log_active_user: AtomicBool,
+    next_user_agent_stream_index: AtomicU64,
     gc_ts: Option<AtomicU64>,
     connections: RwLock<UserConnections>,
     adaptive_expiry_queue: Arc<Mutex<BinaryHeap<Reverse<AdaptiveExpiryEntry>>>>,
@@ -636,6 +639,7 @@ impl ActiveUserManager {
             grace_period_timeout_secs: AtomicU64::new(grace_period_timeout_secs),
             adaptive_session_ttl_secs: AtomicU64::new(get_adaptive_session_ttl_secs(config)),
             log_active_user: AtomicBool::new(log_active_user),
+            next_user_agent_stream_index: AtomicU64::new(1),
             connections: RwLock::new(UserConnections::default()),
             adaptive_expiry_queue: Arc::new(Mutex::new(BinaryHeap::new())),
             adaptive_expiry_index: Arc::new(Mutex::new(HashMap::new())),
@@ -1691,6 +1695,7 @@ impl ActiveUserManager {
             provider: params.provider.intern(),
             stream_url: params.stream_url.intern(),
             provider_session_headers: HashMap::new(),
+            user_agent_stream_index: None,
             addr: *params.addr,
             socket_bound: params.socket_bound,
             active_addrs: vec![*params.addr],
@@ -2834,6 +2839,37 @@ impl ActiveUserManager {
         };
         session.provider_session_headers.clone_from(provider_session_headers);
         session.ts = current_time_secs();
+        true
+    }
+
+    /// Returns the stable User-Agent suffix for a playback session, assigning one on first use.
+    pub async fn get_or_assign_user_agent_stream_index(&self, username: &str, token: &str) -> Option<u64> {
+        let mut user_connections = self.connections.write().await;
+        let session =
+            user_connections.by_key.get_mut(username)?.sessions.iter_mut().find(|session| session.token == token)?;
+        Some(*session.user_agent_stream_index.get_or_insert_with(|| self.next_user_agent_stream_index()))
+    }
+
+    /// Allocates a process-local stream index when the session is materialized after the origin opens.
+    pub fn next_user_agent_stream_index(&self) -> u64 {
+        self.next_user_agent_stream_index
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(if current == 0 || current == u64::MAX { 1 } else { current + 1 })
+            })
+            .map_or(1, |val| if val == 0 { 1 } else { val })
+    }
+
+    /// Persists a previously allocated index without replacing an existing session identity.
+    pub async fn set_user_agent_stream_index_if_absent(&self, username: &str, token: &str, index: u64) -> bool {
+        let mut user_connections = self.connections.write().await;
+        let Some(session) = user_connections
+            .by_key
+            .get_mut(username)
+            .and_then(|connection| connection.sessions.iter_mut().find(|session| session.token == token))
+        else {
+            return false;
+        };
+        session.user_agent_stream_index.get_or_insert(index);
         true
     }
 

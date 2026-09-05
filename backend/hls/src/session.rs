@@ -269,6 +269,8 @@ pub struct HlsSession {
     pub active_segment_fetches: usize,
     pub segment_fetch_notifiers: HashMap<u64, Arc<Notify>>,
     pub origin_request_headers: HeaderMap,
+    /// Stable playback-session suffix used by all origin requests in this session.
+    pub user_agent_stream_index: Option<u64>,
     pub origin_provider_session_headers: HeaderMap,
     pub activity: HlsSessionActivity,
     pub origin_epoch: u64,
@@ -338,6 +340,7 @@ impl HlsSession {
             active_segment_fetches: 0,
             segment_fetch_notifiers: HashMap::new(),
             origin_request_headers: HeaderMap::new(),
+            user_agent_stream_index: None,
             origin_provider_session_headers: HeaderMap::new(),
             activity: HlsSessionActivity::default(),
             origin_epoch: 0,
@@ -816,6 +819,7 @@ impl fmt::Debug for HlsSession {
             .field("active_segment_fetches", &self.active_segment_fetches)
             .field("segment_fetch_notifiers_len", &self.segment_fetch_notifiers.len())
             .field("origin_request_headers_len", &self.origin_request_headers.len())
+            .field("user_agent_stream_index", &self.user_agent_stream_index)
             .field("origin_provider_session_headers_len", &self.origin_provider_session_headers.len())
             .field("activity", &self.activity)
             .field("origin_control", &self.origin_control)
