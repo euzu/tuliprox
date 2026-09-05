@@ -22,7 +22,7 @@ use shared::{
     model::{PlaylistGroup, XtreamCluster},
 };
 use std::{future::Future, sync::Arc};
-use tuliprox_core::model::{AppConfig, Config, ConfigInput};
+use tuliprox_core::model::{AppConfig, ClusterUpdateRejection, Config, ConfigInput};
 
 /// What a provider produced for one input.
 ///
@@ -32,6 +32,9 @@ use tuliprox_core::model::{AppConfig, Config, ConfigInput};
 pub struct PlaylistFetch {
     pub groups: Vec<PlaylistGroup>,
     pub errors: Vec<TuliproxError>,
+    /// Completed cluster updates that were rejected by the domain policy.
+    /// These are nonfatal and are intentionally separate from `errors`.
+    pub quality_rejections: Vec<ClusterUpdateRejection>,
     /// The provider wrote the playlist to disk itself, so the caller must not.
     pub persisted: bool,
     /// The fetch stopped part-way and should be resumed rather than treated as a result.
@@ -60,6 +63,12 @@ impl PlaylistFetch {
     }
 
     #[must_use]
+    pub fn with_quality_rejections(mut self, quality_rejections: Vec<ClusterUpdateRejection>) -> Self {
+        self.quality_rejections = quality_rejections;
+        self
+    }
+
+    #[must_use]
     pub fn persisted(mut self, persisted: bool) -> Self {
         self.persisted = persisted;
         self
@@ -71,8 +80,9 @@ impl PlaylistFetch {
         self
     }
 
-    /// Whether the fetch completed without errors. A fetch that produced no groups and no
-    /// errors counts as successful — an empty catalog is a legitimate answer.
+    /// Whether the fetch completed without technical errors. A fetch that produced no groups
+    /// and no errors counts as successful — an empty catalog is a legitimate answer. Quality
+    /// rejections are completed, nonfatal decisions and therefore do not make this false.
     #[must_use]
     pub fn is_ok(&self) -> bool { self.errors.is_empty() && !self.partial }
 
@@ -144,15 +154,14 @@ impl<E: shared::model::EventSink> PlaylistProvider for XtreamProvider<'_, E> {
     fn name(&self) -> &'static str { "xtream" }
 
     async fn fetch(&self, request: &PlaylistFetchRequest<'_>) -> PlaylistFetch {
-        let (groups, errors, persisted) = crate::xtream::download_xtream_playlist(
+        crate::xtream::download_xtream_playlist(
             request.app_config,
             request.client,
             self.events,
             request.input,
             request.xtream_clusters,
         )
-        .await;
-        PlaylistFetch::groups(groups).with_errors(errors).persisted(persisted)
+        .await
     }
 }
 
@@ -195,7 +204,8 @@ impl PlaylistProvider for BatchContainerProvider {
 #[cfg(test)]
 mod tests {
     use super::PlaylistFetch;
-    use shared::error::TuliproxError;
+    use shared::{error::TuliproxError, model::XtreamCluster};
+    use tuliprox_core::model::ClusterUpdateRejection;
 
     #[test]
     fn an_empty_catalog_is_a_success_not_a_failure() {
@@ -245,5 +255,22 @@ mod tests {
         ]);
         assert!(fetch.needs_operator(), "one blip must not hide a config problem");
         assert!(!fetch.is_retryable());
+    }
+
+    #[test]
+    fn a_quality_rejection_is_not_a_technical_fetch_failure() {
+        let rejection = ClusterUpdateRejection {
+            cluster: XtreamCluster::Video,
+            current_count: 12_543,
+            candidate_count: 217,
+            threshold: 90,
+            quality: 1,
+        };
+        let fetch = PlaylistFetch::groups(Vec::new()).with_quality_rejections(vec![rejection]);
+
+        assert!(fetch.is_ok());
+        assert!(fetch.errors.is_empty());
+        assert!(!fetch.partial);
+        assert_eq!(fetch.quality_rejections, vec![rejection]);
     }
 }

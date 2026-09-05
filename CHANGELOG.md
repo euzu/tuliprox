@@ -112,6 +112,13 @@
   effect on the next playlist update. Leaving every cluster unselected means no bouquet restriction; an individual
   cluster may intentionally have no selected groups while another cluster remains configured.
 
+- **Per-cluster update quality guards for Xtream and Stalker inputs.** Optional `update_quality` thresholds protect
+  Live, VOD, and Series refreshes independently, retaining the last accepted cluster when a candidate falls outside
+  the configured range. Xtream retains the active cluster database and categories; Stalker retains the previous active
+  manifest entry and generation. Rejections leave the input usable and mark the run partial. Omitted thresholds default
+  to `0`, preserving existing configuration behavior. The Source Editor exposes the same settings through the shared
+  range-slider component used by the reverse-proxy view.
+
 - **Target filters can run during processing or immediately before persistence.** The existing scalar `filter` syntax
   remains the `processing` stage. The staged map accepts optional `processing` and `persist` filters; `persist` sees
   the fully finalized state after EPG processing, mappings, merge, deduplication, sorting, numbering, and counters.

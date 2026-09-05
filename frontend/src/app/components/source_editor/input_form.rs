@@ -33,10 +33,10 @@ use shared::{
     concat_string,
     error::TuliproxError,
     model::{
-        ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigInputStagedDto, ConfigProviderDto,
-        EpgSmartMatchConfigDto, EpgSourceDto, InputFetchMethod, MediaServerInputConfigDto, MediaServerLibrarySelector,
-        OnConnectErrorPolicy, ProviderUrlSelectionPolicy, StagedInputType, StalkerDeviceProfileDto,
-        StalkerInputConfigDto,
+        ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigInputStagedDto, ConfigInputUpdateQualityDto,
+        ConfigProviderDto, EpgSmartMatchConfigDto, EpgSourceDto, InputFetchMethod, InputType,
+        MediaServerInputConfigDto, MediaServerLibrarySelector, OnConnectErrorPolicy, ProviderUrlSelectionPolicy,
+        StagedInputType, StalkerDeviceProfileDto, StalkerInputConfigDto,
     },
     utils::{Internable, BATCH_SCHEME_PREFIX},
 };
@@ -101,6 +101,7 @@ const LABEL_PROBE_SERIES: &str = "LABEL.PROBE_SERIES";
 const LABEL_RESOLVE_VOD: &str = "LABEL.RESOLVE_VOD";
 const LABEL_RESOLVE_SERIES: &str = "LABEL.RESOLVE_SERIES";
 const LABEL_METADATA: &str = "LABEL.METADATA";
+const LABEL_UPDATE_QUALITY: &str = "LABEL.UPDATE_QUALITY";
 const LABEL_CACHE_DURATION: &str = "LABEL.CACHE_DURATION";
 const LABEL_MAIN: &str = "LABEL.MAIN_CONFIG";
 const LABEL_OPTIONS: &str = "LABEL.OPTIONS";
@@ -141,6 +142,21 @@ fn staged_type_options() -> Rc<Vec<String>> {
 
 fn staged_type_from_selection(selections: &[String]) -> StagedInputType {
     selections.first().and_then(|value| value.parse::<StagedInputType>().ok()).unwrap_or_default()
+}
+
+fn options_kind_for(input_type: InputType, staged_type: StagedInputType) -> OptionsKind {
+    match input_type {
+        InputType::Xtream | InputType::XtreamBatch => OptionsKind::Xtream,
+        InputType::Stalker | InputType::StalkerBatch => OptionsKind::Stalker,
+        InputType::Staged if staged_type == StagedInputType::Xtream => OptionsKind::Xtream,
+        InputType::M3u
+        | InputType::M3uBatch
+        | InputType::Library
+        | InputType::Emby
+        | InputType::Jellyfin
+        | InputType::Plex
+        | InputType::Staged => OptionsKind::Basic,
+    }
 }
 
 fn libraries_to_text(libraries: &[MediaServerLibrarySelector]) -> String {
@@ -347,6 +363,7 @@ generate_form_reducer!(
       SkipLive => skip_live: bool,
       SkipVod => skip_vod: bool,
       SkipSeries => skip_series: bool,
+      UpdateQuality => update_quality: ConfigInputUpdateQualityDto,
       XtreamLiveStreamUsePrefix => xtream_live_stream_use_prefix: bool,
       XtreamLiveStreamWithoutExtension => xtream_live_stream_without_extension: bool,
       DisableHlsStreaming => disable_hls_streaming: bool,
@@ -841,10 +858,8 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
 
     let library_input = input_form_state.form.input_type.is_library();
     let media_server_input = input_form_state.form.input_type.is_media_server();
-    let xtream_input = input_form_state.form.input_type.is_xtream();
     let stalker_input = input_form_state.form.input_type.is_stalker();
     let staged_input = input_form_state.form.input_type.is_staged();
-    let staged_xtream_input = staged_input && input_form_state.form.staged_type == StagedInputType::Xtream;
     let options_input = !library_input && !media_server_input;
 
     let render_main = || match input_form_state.form.input_type {
@@ -869,13 +884,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     };
 
     let render_options = || {
-        let kind = if stalker_input {
-            OptionsKind::Stalker
-        } else if xtream_input || staged_xtream_input {
-            OptionsKind::Xtream
-        } else {
-            OptionsKind::Basic
-        };
+        let kind = options_kind_for(input_form_state.form.input_type, input_form_state.form.staged_type);
         let extra = if stalker_input {
             stalker_options_fields(&stalker_config_state, props.allow_write, &translate)
         } else {
@@ -1417,6 +1426,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
 mod tests {
     use super::*;
     use shared::model::{MediaServerLibraryKind, MediaServerLibrarySelectorDetailsDto, StalkerAuthMode};
+    use yew::Reducible;
 
     #[test]
     fn media_server_libraries_page_round_trips() {
@@ -1471,6 +1481,71 @@ mod tests {
     fn staged_inputs_use_staged_persist_hint() {
         assert_eq!(input_persist_hint_key(true), "INPUT_FORM.STAGED_PERSIST");
         assert_eq!(input_persist_hint_key(false), "INPUT_FORM.PERSIST");
+    }
+
+    #[test]
+    fn update_quality_is_visible_only_for_cluster_capable_input_types() {
+        let cases = [
+            (InputType::Xtream, StagedInputType::M3u, true),
+            (InputType::XtreamBatch, StagedInputType::M3u, true),
+            (InputType::Stalker, StagedInputType::M3u, true),
+            (InputType::StalkerBatch, StagedInputType::M3u, true),
+            (InputType::Staged, StagedInputType::Xtream, true),
+            (InputType::M3u, StagedInputType::M3u, false),
+            (InputType::M3uBatch, StagedInputType::M3u, false),
+            (InputType::Staged, StagedInputType::M3u, false),
+            (InputType::Library, StagedInputType::M3u, false),
+            (InputType::Emby, StagedInputType::M3u, false),
+            (InputType::Jellyfin, StagedInputType::M3u, false),
+            (InputType::Plex, StagedInputType::M3u, false),
+        ];
+
+        for (input_type, staged_type, expected) in cases {
+            assert_eq!(options_kind_for(input_type, staged_type).supports_update_quality(), expected);
+        }
+    }
+
+    #[test]
+    fn update_quality_reducer_preserves_loaded_and_applied_values() {
+        let loaded = ConfigInputOptionsDto {
+            update_quality: ConfigInputUpdateQualityDto { live: 91, vod: 82, series: 73 },
+            ..ConfigInputOptionsDto::default()
+        };
+        let state = Rc::new(ConfigInputOptionsDtoFormState { form: ConfigInputOptionsDto::default(), modified: false })
+            .reduce(ConfigInputOptionsFormAction::SetAll(loaded.clone()));
+        assert_eq!(state.form, loaded);
+        assert!(!state.modified());
+
+        let updated = ConfigInputUpdateQualityDto { live: 95, vod: 90, series: 85 };
+        let state = state.reduce(ConfigInputOptionsFormAction::UpdateQuality(updated));
+
+        assert_eq!(state.form.update_quality, updated);
+        assert!(state.modified());
+        let applied = state.form.clone();
+        assert_eq!(applied.update_quality, updated);
+    }
+
+    #[test]
+    fn update_quality_translations_exist_in_every_frontend_locale() -> Result<(), serde_json::Error> {
+        let locales = [
+            ("en", include_str!("../../../../public/assets/i18n/en.json")),
+            ("ru", include_str!("../../../../public/assets/i18n/ru.json")),
+            ("ar", include_str!("../../../../public/assets/i18n/ar.json")),
+        ];
+
+        for (locale, source) in locales {
+            let translations: serde_json::Value = serde_json::from_str(source)?;
+            for pointer in ["/LABEL/UPDATE_QUALITY", "/EXPLANATION/INPUT_FORM/UPDATE_QUALITY"] {
+                assert!(
+                    translations
+                        .pointer(pointer)
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|value| !value.is_empty()),
+                    "missing {pointer} translation for {locale}"
+                );
+            }
+        }
+        Ok(())
     }
 
     #[test]

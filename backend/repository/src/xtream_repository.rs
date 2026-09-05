@@ -41,8 +41,8 @@ use std::{
 };
 use tuliprox_core::{
     model::{
-        AppConfig, Config, ConfigInput, ConfigInputFlags, ConfigTarget, PlaylistXtreamCategory, ProxyUserCredentials,
-        XtreamCategory,
+        evaluate_update_quality, AppConfig, ClusterUpdateRejection, Config, ConfigInput, ConfigInputFlags,
+        ConfigTarget, PlaylistXtreamCategory, ProxyUserCredentials, UpdateQualityDecision, XtreamCategory,
     },
     utils::{
         file_exists_async, file_reader, json_write_documents_to_file, parent_or_dot, remove_file_if_exists,
@@ -720,6 +720,35 @@ pub async fn iter_raw_xtream_input_playlist(
     iter_raw_playlist::<Xtream, u32, _>(app_config, &xtream_path, |_| true).await
 }
 
+/// Counts entries in one active persisted raw input cluster without materializing them.
+pub async fn count_input_xtream_cluster(
+    app_config: &AppConfig,
+    input: &ConfigInput,
+    cluster: XtreamCluster,
+) -> Result<Option<usize>, TuliproxError> {
+    let storage_dir = app_config.config.load().storage_dir.clone();
+    let storage_path = get_input_storage_path(&input.name, &storage_dir).await.map_err(|err| {
+        TuliproxError::RepositoryXtream(format!("Failed to resolve active input storage for {}: {err}", input.name))
+    })?;
+    let xtream_path = xtream_get_file_path(&storage_path, cluster);
+    let file_lock = app_config.file_locks.read_lock(&xtream_path).await;
+    let query_path = xtream_path.clone();
+    let count = tokio::task::spawn_blocking(move || -> io::Result<Option<usize>> {
+        let _guard = file_lock;
+        let mut query = match BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&query_path) {
+            Ok(query) => query,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        query.len().map(Some).map_err(BPlusTreeError::to_io)
+    })
+    .await
+    .map_err(|err| cant_read_result!(RepositoryXtream, "xtream", &xtream_path, err))?
+    .map_err(|err| cant_read_result!(RepositoryXtream, "xtream", &xtream_path, err))?;
+
+    Ok(count)
+}
+
 pub fn playlist_iter_to_stream<I, P>(channels: Option<(FileReadGuard, I)>) -> impl Stream<Item = Result<Bytes, String>>
 where
     I: Iterator<Item = (P, bool)> + 'static,
@@ -758,6 +787,15 @@ pub async fn xtream_get_playlist_categories(
 }
 
 const BATCH_SIZE: usize = 1000;
+
+/// Result of publishing one fully staged Xtream input cluster.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum XtreamClusterPublishOutcome {
+    /// The staged database and categories replaced the active cluster.
+    Published,
+    /// The staged candidate was rejected and the active cluster was retained.
+    RetainedPrevious(ClusterUpdateRejection),
+}
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct XtreamRefreshPaths {
@@ -1036,14 +1074,80 @@ struct StagedXtreamClusterRefresh {
     item_count: usize,
 }
 
+enum StagedXtreamClusterOutcome {
+    Ready(StagedXtreamClusterRefresh),
+    RetainedPrevious(ClusterUpdateRejection),
+}
+
+fn count_xtream_tree_entries(path: &Path) -> io::Result<Option<usize>> {
+    let mut query = match BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(path) {
+        Ok(query) => query,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    query.len().map(Some).map_err(BPlusTreeError::to_io)
+}
+
+fn evaluate_staged_xtream_cluster_quality(
+    paths: &XtreamRefreshPaths,
+    cluster: XtreamCluster,
+    threshold: u8,
+) -> Result<Option<ClusterUpdateRejection>, TuliproxError> {
+    if threshold == 0 {
+        return Ok(None);
+    }
+
+    let candidate_count = count_xtream_tree_entries(&paths.staging_database)
+        .map_err(|error| {
+            TuliproxError::RepositoryXtream(format!(
+                "Failed to count staging Xtream tree {} for {cluster} quality evaluation: {error}",
+                paths.staging_database.display()
+            ))
+        })?
+        .ok_or_else(|| {
+            TuliproxError::RepositoryXtream(format!(
+                "Staging Xtream tree {} disappeared before {cluster} quality evaluation",
+                paths.staging_database.display()
+            ))
+        })?;
+    let current_count = count_xtream_tree_entries(&paths.published_database).map_err(|error| {
+        TuliproxError::RepositoryXtream(format!(
+            "Failed to count published Xtream tree {} for {cluster} quality evaluation: {error}",
+            paths.published_database.display()
+        ))
+    })?;
+
+    let rejection = match evaluate_update_quality(current_count, candidate_count, threshold) {
+        UpdateQualityDecision::Disabled
+        | UpdateQualityDecision::BootstrapAccepted { .. }
+        | UpdateQualityDecision::Accepted { .. } => None,
+        UpdateQualityDecision::Rejected { current, candidate, threshold, quality } => Some(ClusterUpdateRejection {
+            cluster,
+            current_count: current,
+            candidate_count: candidate,
+            threshold,
+            quality,
+        }),
+        UpdateQualityDecision::RejectedWithoutBaseline => Some(ClusterUpdateRejection {
+            cluster,
+            current_count: current_count.unwrap_or_default(),
+            candidate_count,
+            threshold: threshold.min(100),
+            quality: 0,
+        }),
+    };
+    Ok(rejection)
+}
+
 #[allow(clippy::too_many_lines)]
 async fn stage_input_xtream_playlist_cluster_to_disk(
     app_config: &Arc<AppConfig>,
     input: &ConfigInput,
     cluster: XtreamCluster,
+    quality_threshold: u8,
     categories: DynReader,
     streams: DynReader,
-) -> Result<StagedXtreamClusterRefresh, TuliproxError> {
+) -> Result<StagedXtreamClusterOutcome, TuliproxError> {
     let cfg = app_config.config.load();
     let storage_path = ensure_input_storage_path(&cfg, &input.name).await?;
     drop(cfg);
@@ -1182,6 +1286,36 @@ async fn stage_input_xtream_playlist_cluster_to_disk(
     // handle escapes its blocking closure, so none is held while this async lock is acquired.
     let publish_lock = Arc::new(app_config.file_locks.write_lock(&refresh_lease.paths().published_database).await);
 
+    let quality_lease = refresh_lease.clone();
+    let quality_lock = Arc::clone(&publish_lock);
+    let quality_rejection = tokio::task::spawn_blocking(move || {
+        let _publish_guard = quality_lock;
+        let rejection = evaluate_staged_xtream_cluster_quality(quality_lease.paths(), cluster, quality_threshold)?;
+        if rejection.is_some() {
+            quality_lease.cleanup_staging_artifacts().map_err(|error| {
+                TuliproxError::RepositoryXtream(format!(
+                    "Failed to clean rejected Xtream staging artifacts for {cluster}: {error}"
+                ))
+            })?;
+        }
+        Ok::<_, TuliproxError>(rejection)
+    })
+    .await
+    .map_err(|error| {
+        TuliproxError::RepositoryXtream(format!(
+            "Quality-evaluation task failed to join during {cluster} refresh: {error}"
+        ))
+    })??;
+
+    if let Some(rejection) = quality_rejection {
+        drop(publish_lock);
+        log::debug!(
+            "Xtream cluster candidate rejected; retained active cluster: cluster={cluster} generation={} rejection={rejection:?}",
+            refresh_lease.paths().generation
+        );
+        return Ok(StagedXtreamClusterOutcome::RetainedPrevious(rejection));
+    }
+
     let merge_lease = refresh_lease.clone();
     let merge_lock = Arc::clone(&publish_lock);
     let merge_outcome = tokio::task::spawn_blocking(move || {
@@ -1226,7 +1360,7 @@ async fn stage_input_xtream_playlist_cluster_to_disk(
         TuliproxError::RepositoryXtream(format!("Compaction task failed to join during {cluster} refresh: {error}"))
     })??;
 
-    Ok(StagedXtreamClusterRefresh {
+    Ok(StagedXtreamClusterOutcome::Ready(StagedXtreamClusterRefresh {
         refresh_lease,
         publish_lock,
         storage_path,
@@ -1234,7 +1368,7 @@ async fn stage_input_xtream_playlist_cluster_to_disk(
         cluster,
         raw_groups,
         item_count,
-    })
+    }))
 }
 
 async fn publish_staged_xtream_cluster(
@@ -1361,17 +1495,35 @@ async fn published_xtream_cluster_has_items(
 pub async fn persist_input_xtream_playlist_clusters_to_disk(
     app_config: &Arc<AppConfig>,
     input: &ConfigInput,
-    cluster_readers: Vec<(XtreamCluster, DynReader, DynReader)>,
-) -> Result<(), TuliproxError> {
+    cluster_readers: Vec<(XtreamCluster, u8, DynReader, DynReader)>,
+) -> Result<Vec<XtreamClusterPublishOutcome>, TuliproxError> {
     let mut staged = Vec::with_capacity(cluster_readers.len());
-    for (cluster, categories, streams) in cluster_readers {
-        staged
-            .push(stage_input_xtream_playlist_cluster_to_disk(app_config, input, cluster, categories, streams).await?);
+    for (cluster, quality_threshold, categories, streams) in cluster_readers {
+        staged.push(
+            stage_input_xtream_playlist_cluster_to_disk(
+                app_config,
+                input,
+                cluster,
+                quality_threshold,
+                categories,
+                streams,
+            )
+            .await?,
+        );
     }
 
-    let staged_clusters: HashSet<XtreamCluster> = staged.iter().map(|refresh| refresh.cluster).collect();
-    let mut has_items = staged.iter().any(|refresh| refresh.item_count > 0);
-    if !has_items {
+    let staged_clusters: HashSet<XtreamCluster> = staged
+        .iter()
+        .filter_map(|outcome| match outcome {
+            StagedXtreamClusterOutcome::Ready(refresh) => Some(refresh.cluster),
+            StagedXtreamClusterOutcome::RetainedPrevious(_) => None,
+        })
+        .collect();
+    let has_publishable_clusters = !staged_clusters.is_empty();
+    let mut has_items = staged
+        .iter()
+        .any(|outcome| matches!(outcome, StagedXtreamClusterOutcome::Ready(refresh) if refresh.item_count > 0));
+    if has_publishable_clusters && !has_items {
         let cfg = app_config.config.load();
         let storage_path = ensure_input_storage_path(&cfg, &input.name).await?;
         drop(cfg);
@@ -1386,27 +1538,48 @@ pub async fn persist_input_xtream_playlist_clusters_to_disk(
         }
     }
 
-    if !has_items {
+    if has_publishable_clusters && !has_items {
         return Err(TuliproxError::RepositoryPlaylist(format!(
             "Refusing to publish empty disk-based Xtream playlist for input '{}'; existing data was retained",
             input.name
         )));
     }
 
-    for refresh in staged {
-        publish_staged_xtream_cluster(app_config, refresh).await?;
+    let mut outcomes = Vec::with_capacity(staged.len());
+    for outcome in staged {
+        match outcome {
+            StagedXtreamClusterOutcome::Ready(refresh) => {
+                publish_staged_xtream_cluster(app_config, refresh).await?;
+                outcomes.push(XtreamClusterPublishOutcome::Published);
+            }
+            StagedXtreamClusterOutcome::RetainedPrevious(rejection) => {
+                outcomes.push(XtreamClusterPublishOutcome::RetainedPrevious(rejection));
+            }
+        }
     }
-    Ok(())
+    Ok(outcomes)
 }
 
 pub async fn persist_input_xtream_playlist_cluster_to_disk(
     app_config: &Arc<AppConfig>,
     input: &ConfigInput,
     cluster: XtreamCluster,
+    quality_threshold: u8,
     categories: DynReader,
     streams: DynReader,
-) -> Result<(), TuliproxError> {
-    persist_input_xtream_playlist_clusters_to_disk(app_config, input, vec![(cluster, categories, streams)]).await
+) -> Result<XtreamClusterPublishOutcome, TuliproxError> {
+    let mut outcomes = persist_input_xtream_playlist_clusters_to_disk(
+        app_config,
+        input,
+        vec![(cluster, quality_threshold, categories, streams)],
+    )
+    .await?;
+    outcomes.pop().ok_or_else(|| {
+        TuliproxError::RepositoryXtream(format!(
+            "Missing Xtream publish outcome for input '{}' cluster {cluster}",
+            input.name
+        ))
+    })
 }
 
 fn publish_staged_file_same_directory(staging: &Path, published: &Path) -> io::Result<()> {
@@ -1644,7 +1817,7 @@ pub async fn persist_input_xtream_playlist(
                 }
                 fetched_col.push(pli);
             }
-            groups.insert(plg.id, plg);
+            groups.insert((plg.xtream_cluster, plg.id), plg);
         }
     }
 
@@ -1694,8 +1867,9 @@ pub async fn persist_input_xtream_playlist(
         }
 
         for item in col {
+            let group_key = (item.header.xtream_cluster, item.header.category_id);
             groups
-                .entry(item.header.category_id)
+                .entry(group_key)
                 .or_insert_with(|| PlaylistGroup {
                     id: item.header.category_id,
                     title: item.header.group.clone(),
@@ -1707,7 +1881,7 @@ pub async fn persist_input_xtream_playlist(
         }
     }
 
-    let result = groups.into_iter().map(|(_, group)| group).collect();
+    let result = groups.into_values().collect();
 
     let err = if errors.is_empty() { None } else { Some(TuliproxError::RepositoryXtream(errors.join("\n"))) };
 
@@ -2052,21 +2226,25 @@ mod tests {
     #[cfg(unix)]
     use super::refresh_staging_path;
     use super::{
-        merge_preserved_stream_properties, needs_update_info_details, persist_input_xtream_playlist_cluster_to_disk,
-        preserve_details_input_xtream_playlist_cluster_to_disk, preserve_details_with_injected_operation_failure,
-        publish_staged_file_same_directory, DetailPreservationOperation, PreserveDetailsOutcome, XtreamRefreshLease,
-        XtreamRefreshPaths,
+        count_input_xtream_cluster, get_collection_path, load_input_xtream_playlist, merge_preserved_stream_properties,
+        needs_update_info_details, persist_input_xtream_playlist, persist_input_xtream_playlist_cluster_to_disk,
+        persists_input_series_info, preserve_details_input_xtream_playlist_cluster_to_disk,
+        preserve_details_with_injected_operation_failure, publish_staged_file_same_directory,
+        xtream_cluster_category_collection, DetailPreservationOperation, PreserveDetailsOutcome,
+        XtreamClusterPublishOutcome, XtreamRefreshLease, XtreamRefreshPaths,
     };
     use crate::{
         bplustree::{ensure_distinct_sidecar_lock_domains, sidecar_lock_path},
         build_input_storage_path, cleanup_orphaned_staging_artifacts, get_file_path_for_db_index,
-        refresh_generation_guard_path, BPlusTreeQuery, BPlusTreeUpdate,
+        get_input_storage_path, refresh_generation_guard_path, BPlusTreeQuery, BPlusTreeUpdate,
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
     use shared::{
         model::{
-            CatchupProperties, ConfigPaths, InputType, LiveStreamProperties, SeriesStreamProperties, StreamProperties,
-            VideoStreamProperties, VirtualId, XtreamCluster, XtreamPlaylistItem,
+            CatchupProperties, ConfigPaths, InputType, LiveStreamProperties, PlaylistGroup, PlaylistItem,
+            PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties,
+            SeriesStreamProperties, StreamProperties, VideoStreamProperties, VirtualId, XtreamCluster,
+            XtreamPlaylistItem,
         },
         utils::Internable,
     };
@@ -2082,8 +2260,8 @@ mod tests {
     use tokio::io::AsyncWriteExt;
     use tuliprox_core::{
         model::{
-            ApiProxyConfig, AppConfig, Config, ConfigInput, CustomStreamResponse, HdHomeRunConfig,
-            MediaToolCapabilities, SourcesConfig,
+            ApiProxyConfig, AppConfig, ClusterUpdateRejection, Config, ConfigInput, CustomStreamResponse,
+            HdHomeRunConfig, MediaToolCapabilities, SourcesConfig,
         },
         utils::{request::DynReader, FileLockManager},
     };
@@ -2119,10 +2297,11 @@ mod tests {
         })
     }
 
-    fn json_reader(content: &'static str) -> DynReader {
+    fn json_reader(content: &str) -> DynReader {
         let (mut writer, reader) = tokio::io::duplex(4096);
+        let content = content.as_bytes().to_vec();
         tokio::spawn(async move {
-            writer.write_all(content.as_bytes()).await.expect("fixture should fit into duplex reader");
+            writer.write_all(&content).await.expect("fixture should fit into duplex reader");
             writer.shutdown().await.expect("fixture writer should shut down");
         });
         Box::pin(reader)
@@ -2138,6 +2317,7 @@ mod tests {
             &app_config,
             &input,
             XtreamCluster::Live,
+            0,
             json_reader(r#"[{"category_id":"1","category_name":"News"}]"#),
             json_reader(r#"[{"name":"Channel","stream_id":7,"category_id":"1","added":"0"}]"#),
         )
@@ -2153,6 +2333,7 @@ mod tests {
             &app_config,
             &input,
             XtreamCluster::Live,
+            0,
             json_reader("[]"),
             json_reader("[]"),
         )
@@ -2187,6 +2368,7 @@ mod tests {
                 &app_config,
                 &input,
                 cluster,
+                0,
                 json_reader(category),
                 json_reader(stream),
             )
@@ -2197,6 +2379,7 @@ mod tests {
             &app_config,
             &input,
             XtreamCluster::Live,
+            0,
             json_reader("[]"),
             json_reader("[]"),
         )
@@ -2209,6 +2392,481 @@ mod tests {
         assert!(playlist.iter().all(|group| group.xtream_cluster != XtreamCluster::Live));
         assert!(playlist.iter().any(|group| group.xtream_cluster == XtreamCluster::Video));
         Ok(())
+    }
+
+    fn disk_test_input(name: &str) -> ConfigInput {
+        ConfigInput {
+            name: name.intern(),
+            input_type: InputType::Xtream,
+            url: "http://provider.example".to_string(),
+            username: Some("user".to_string()),
+            password: Some("password".to_string()),
+            ..ConfigInput::default()
+        }
+    }
+
+    fn cluster_fixture_readers(
+        cluster: XtreamCluster,
+        category_name: &str,
+        count: usize,
+        first_provider_id: u32,
+    ) -> (DynReader, DynReader) {
+        let category_id = match cluster {
+            XtreamCluster::Live => 1_u32,
+            XtreamCluster::Video => 2,
+            XtreamCluster::Series => 3,
+        };
+        let categories = serde_json::json!([{
+            "category_id": category_id,
+            "category_name": category_name,
+        }])
+        .to_string();
+        let streams = (0..count)
+            .map(|offset| {
+                let provider_id =
+                    first_provider_id + u32::try_from(offset).expect("fixture item count should fit into u32");
+                let name = format!("{category_name}-{provider_id}");
+                match cluster {
+                    XtreamCluster::Live => serde_json::json!({
+                        "name": name,
+                        "stream_id": provider_id,
+                        "category_id": category_id,
+                        "added": "0",
+                    }),
+                    XtreamCluster::Video => serde_json::json!({
+                        "name": name,
+                        "stream_id": provider_id,
+                        "category_id": category_id,
+                        "added": "0",
+                        "container_extension": "mp4",
+                    }),
+                    XtreamCluster::Series => serde_json::json!({
+                        "name": name,
+                        "series_id": provider_id,
+                        "category_id": category_id,
+                        "last_modified": "0",
+                    }),
+                }
+            })
+            .collect::<Vec<_>>();
+        let streams = serde_json::Value::Array(streams).to_string();
+        (json_reader(&categories), json_reader(&streams))
+    }
+
+    fn live_fixture_stream(provider_id: u32, category_id: u32, name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "name": name,
+            "stream_id": provider_id,
+            "category_id": category_id,
+            "added": "0",
+        })
+    }
+
+    async fn publish_live_fixture_rows(
+        app_config: &Arc<AppConfig>,
+        input: &ConfigInput,
+        threshold: u8,
+        categories: serde_json::Value,
+        streams: Vec<serde_json::Value>,
+    ) -> XtreamClusterPublishOutcome {
+        persist_input_xtream_playlist_cluster_to_disk(
+            app_config,
+            input,
+            XtreamCluster::Live,
+            threshold,
+            json_reader(&categories.to_string()),
+            json_reader(&serde_json::Value::Array(streams).to_string()),
+        )
+        .await
+        .expect("Live fixture refresh should complete")
+    }
+
+    async fn publish_test_cluster(
+        app_config: &Arc<AppConfig>,
+        input: &ConfigInput,
+        cluster: XtreamCluster,
+        threshold: u8,
+        category_name: &str,
+        count: usize,
+        first_provider_id: u32,
+    ) -> XtreamClusterPublishOutcome {
+        let (categories, streams) = cluster_fixture_readers(cluster, category_name, count, first_provider_id);
+        persist_input_xtream_playlist_cluster_to_disk(app_config, input, cluster, threshold, categories, streams)
+            .await
+            .expect("test cluster refresh should complete")
+    }
+
+    fn active_cluster_count(storage_path: &Path, cluster: XtreamCluster) -> usize {
+        super::count_xtream_tree_entries(&super::xtream_get_file_path(storage_path, cluster))
+            .expect("active cluster should be countable")
+            .expect("active cluster should exist")
+    }
+
+    fn active_category_bytes(storage_path: &Path, cluster: XtreamCluster) -> Vec<u8> {
+        fs::read(get_collection_path(storage_path, xtream_cluster_category_collection(cluster)))
+            .expect("active categories should be readable")
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct ActiveClusterSnapshot {
+        database: Vec<u8>,
+        categories: Vec<u8>,
+    }
+
+    fn active_cluster_snapshot(storage_path: &Path, cluster: XtreamCluster) -> ActiveClusterSnapshot {
+        let database_path = super::xtream_get_file_path(storage_path, cluster);
+        ActiveClusterSnapshot {
+            database: fs::read(&database_path).expect("active database should be readable"),
+            categories: active_category_bytes(storage_path, cluster),
+        }
+    }
+
+    fn read_series_props(path: &Path, provider_id: u32) -> SeriesStreamProperties {
+        let mut query = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(path).expect("query open should succeed");
+        let item = query.query_zero_copy(&provider_id).expect("query should succeed").expect("item should exist");
+        match item.additional_properties {
+            Some(StreamProperties::Series(series)) => *series,
+            other => panic!("expected series stream properties, got {other:?}"),
+        }
+    }
+
+    fn assert_no_refresh_artifacts(storage_path: &Path) {
+        let entries = fs::read_dir(storage_path)
+            .expect("input storage should be readable")
+            .collect::<io::Result<Vec<_>>>()
+            .expect("input storage entries should be readable");
+        let refresh_artifacts = entries
+            .into_iter()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("refresh-"))
+            .collect::<Vec<_>>();
+        assert!(refresh_artifacts.is_empty(), "staging artifacts survived: {refresh_artifacts:?}");
+    }
+
+    #[test]
+    fn disk_quality_disabled_does_not_read_staging_or_baseline() {
+        let directory = tempdir().expect("temp directory");
+        let paths = fixed_refresh_paths(directory.path(), 18);
+
+        let rejection = super::evaluate_staged_xtream_cluster_quality(&paths, XtreamCluster::Live, 0)
+            .expect("disabled quality evaluation should not access missing files");
+
+        assert!(rejection.is_none());
+    }
+
+    #[tokio::test]
+    async fn disk_quality_bootstrap_publishes_nonempty_candidate_and_rejects_empty_without_baseline() {
+        let populated_directory = tempdir().expect("populated bootstrap directory");
+        let populated_config = test_app_config(populated_directory.path());
+        let populated_input = disk_test_input("bootstrap-populated");
+
+        let populated_outcome = publish_test_cluster(
+            &populated_config,
+            &populated_input,
+            XtreamCluster::Live,
+            90,
+            "bootstrap-live",
+            3,
+            1_000,
+        )
+        .await;
+        let populated_storage =
+            get_input_storage_path(&populated_input.name, populated_directory.path().to_string_lossy().as_ref())
+                .await
+                .expect("populated bootstrap storage");
+
+        assert_eq!(populated_outcome, XtreamClusterPublishOutcome::Published);
+        assert_eq!(active_cluster_count(&populated_storage, XtreamCluster::Live), 3);
+        assert!(String::from_utf8_lossy(&active_category_bytes(&populated_storage, XtreamCluster::Live))
+            .contains("bootstrap-live"));
+        assert_no_refresh_artifacts(&populated_storage);
+
+        let empty_directory = tempdir().expect("empty bootstrap directory");
+        let empty_config = test_app_config(empty_directory.path());
+        let empty_input = disk_test_input("bootstrap-empty");
+        let empty_outcome =
+            publish_test_cluster(&empty_config, &empty_input, XtreamCluster::Video, 90, "empty-vod", 0, 2_000).await;
+        let empty_storage =
+            get_input_storage_path(&empty_input.name, empty_directory.path().to_string_lossy().as_ref())
+                .await
+                .expect("empty bootstrap storage");
+
+        assert_eq!(
+            empty_outcome,
+            XtreamClusterPublishOutcome::RetainedPrevious(ClusterUpdateRejection {
+                cluster: XtreamCluster::Video,
+                current_count: 0,
+                candidate_count: 0,
+                threshold: 90,
+                quality: 0,
+            })
+        );
+        assert!(!super::xtream_get_file_path(&empty_storage, XtreamCluster::Video).exists());
+        assert!(!get_collection_path(&empty_storage, xtream_cluster_category_collection(XtreamCluster::Video)).exists());
+        assert_no_refresh_artifacts(&empty_storage);
+    }
+
+    #[tokio::test]
+    async fn disk_quality_enforces_exact_90_percent_boundaries_and_retains_rejected_files() {
+        for (name, candidate_count, accepted) in [
+            ("lower-boundary", 90, true),
+            ("below-lower-boundary", 89, false),
+            ("upper-boundary", 110, true),
+            ("above-upper-boundary", 111, false),
+        ] {
+            let directory = tempdir().expect("boundary directory");
+            let app_config = test_app_config(directory.path());
+            let input = disk_test_input(name);
+            assert_eq!(
+                publish_test_cluster(&app_config, &input, XtreamCluster::Live, 0, "old-live", 100, 10_000,).await,
+                XtreamClusterPublishOutcome::Published,
+                "baseline publish failed for {name}"
+            );
+            let storage_path = get_input_storage_path(&input.name, directory.path().to_string_lossy().as_ref())
+                .await
+                .expect("boundary storage");
+            let before = active_cluster_snapshot(&storage_path, XtreamCluster::Live);
+
+            let outcome =
+                publish_test_cluster(&app_config, &input, XtreamCluster::Live, 90, "new-live", candidate_count, 20_000)
+                    .await;
+
+            if accepted {
+                assert_eq!(outcome, XtreamClusterPublishOutcome::Published, "case: {name}");
+                assert_eq!(active_cluster_count(&storage_path, XtreamCluster::Live), candidate_count);
+                assert!(String::from_utf8_lossy(&active_category_bytes(&storage_path, XtreamCluster::Live))
+                    .contains("new-live"));
+            } else {
+                assert_eq!(
+                    outcome,
+                    XtreamClusterPublishOutcome::RetainedPrevious(ClusterUpdateRejection {
+                        cluster: XtreamCluster::Live,
+                        current_count: 100,
+                        candidate_count,
+                        threshold: 90,
+                        quality: 89,
+                    }),
+                    "case: {name}"
+                );
+                assert_eq!(active_cluster_snapshot(&storage_path, XtreamCluster::Live), before, "case: {name}");
+            }
+            assert_no_refresh_artifacts(&storage_path);
+        }
+    }
+
+    #[tokio::test]
+    async fn disk_quality_rejects_duplicate_rows_that_represent_only_half_the_provider_ids() {
+        let directory = tempdir().expect("duplicate rejection directory");
+        let app_config = test_app_config(directory.path());
+        let input = disk_test_input("duplicate-rejection");
+        let first_provider_id = 1_000_u32;
+        assert_eq!(
+            publish_test_cluster(&app_config, &input, XtreamCluster::Live, 0, "old-live", 100, first_provider_id,)
+                .await,
+            XtreamClusterPublishOutcome::Published
+        );
+        let storage_path = get_input_storage_path(&input.name, directory.path().to_string_lossy().as_ref())
+            .await
+            .expect("duplicate rejection storage");
+        let before = active_cluster_snapshot(&storage_path, XtreamCluster::Live);
+        let streams = (0..50_u32)
+            .flat_map(|offset| {
+                let provider_id = first_provider_id + offset;
+                [
+                    live_fixture_stream(provider_id, 1, &format!("candidate-{provider_id}")),
+                    live_fixture_stream(provider_id, 1, &format!("duplicate-{provider_id}")),
+                ]
+            })
+            .collect();
+
+        let outcome = publish_live_fixture_rows(
+            &app_config,
+            &input,
+            100,
+            serde_json::json!([{"category_id": 1, "category_name": "candidate-live"}]),
+            streams,
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            XtreamClusterPublishOutcome::RetainedPrevious(ClusterUpdateRejection {
+                cluster: XtreamCluster::Live,
+                current_count: 100,
+                candidate_count: 50,
+                threshold: 100,
+                quality: 50,
+            })
+        );
+        assert_eq!(active_cluster_snapshot(&storage_path, XtreamCluster::Live), before);
+        assert_no_refresh_artifacts(&storage_path);
+    }
+
+    #[tokio::test]
+    async fn disk_quality_accepts_unique_population_and_publishes_the_last_duplicate_row() {
+        let directory = tempdir().expect("duplicate acceptance directory");
+        let app_config = test_app_config(directory.path());
+        let input = disk_test_input("duplicate-acceptance");
+        let first_provider_id = 1_000_u32;
+        let winning_provider_id = first_provider_id + 42;
+        assert_eq!(
+            publish_test_cluster(&app_config, &input, XtreamCluster::Live, 0, "old-live", 100, first_provider_id,)
+                .await,
+            XtreamClusterPublishOutcome::Published
+        );
+        let storage_path = get_input_storage_path(&input.name, directory.path().to_string_lossy().as_ref())
+            .await
+            .expect("duplicate acceptance storage");
+        let mut streams = (0..100_u32)
+            .map(|offset| {
+                let provider_id = first_provider_id + offset;
+                live_fixture_stream(provider_id, 1, &format!("candidate-{provider_id}"))
+            })
+            .collect::<Vec<_>>();
+        streams.push(live_fixture_stream(winning_provider_id, 2, "winning-duplicate"));
+
+        let outcome = publish_live_fixture_rows(
+            &app_config,
+            &input,
+            100,
+            serde_json::json!([
+                {"category_id": 1, "category_name": "candidate-live"},
+                {"category_id": 2, "category_name": "winning-category"}
+            ]),
+            streams,
+        )
+        .await;
+
+        assert_eq!(outcome, XtreamClusterPublishOutcome::Published);
+        assert_eq!(active_cluster_count(&storage_path, XtreamCluster::Live), 100);
+        let active_path = super::xtream_get_file_path(&storage_path, XtreamCluster::Live);
+        let mut query = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&active_path)
+            .expect("accepted Live cluster should open");
+        let winner = query
+            .query_zero_copy(&winning_provider_id)
+            .expect("winner lookup should succeed")
+            .expect("winner should exist");
+        assert_eq!(winner.name.as_ref(), "winning-duplicate");
+        assert_eq!(winner.category_id, 2);
+        assert!(String::from_utf8_lossy(&active_category_bytes(&storage_path, XtreamCluster::Live))
+            .contains("winning-category"));
+        assert_no_refresh_artifacts(&storage_path);
+    }
+
+    #[tokio::test]
+    async fn disk_series_quality_compares_catalog_rows_and_ignores_embedded_episode_details() {
+        let directory = tempdir().expect("series population directory");
+        let app_config = test_app_config(directory.path());
+        let input = disk_test_input("series-logical-population");
+        let provider_id = 30_000;
+        assert_eq!(
+            publish_test_cluster(&app_config, &input, XtreamCluster::Series, 0, "old-series", 1, provider_id,).await,
+            XtreamClusterPublishOutcome::Published
+        );
+        let storage_path = get_input_storage_path(&input.name, directory.path().to_string_lossy().as_ref())
+            .await
+            .expect("series population storage");
+        let episodes = (0..200_u32)
+            .map(|id| SeriesStreamDetailEpisodeProperties { id, ..SeriesStreamDetailEpisodeProperties::default() })
+            .collect();
+        let enriched = SeriesStreamProperties {
+            series_id: provider_id,
+            details: Some(SeriesStreamDetailProperties::new(None, Vec::new(), Some(episodes))),
+            ..SeriesStreamProperties::default()
+        };
+        persists_input_series_info(
+            &app_config,
+            &storage_path,
+            XtreamCluster::Series,
+            &input.name,
+            provider_id,
+            &enriched,
+        )
+        .await
+        .expect("series enrichment should persist");
+        let active_path = super::xtream_get_file_path(&storage_path, XtreamCluster::Series);
+        assert_eq!(
+            read_series_props(&active_path, provider_id)
+                .details
+                .and_then(|details| details.episodes)
+                .map(|episodes| episodes.len()),
+            Some(200)
+        );
+
+        let equal_catalog =
+            publish_test_cluster(&app_config, &input, XtreamCluster::Series, 100, "equal-series", 1, provider_id).await;
+
+        assert_eq!(equal_catalog, XtreamClusterPublishOutcome::Published);
+        assert_eq!(active_cluster_count(&storage_path, XtreamCluster::Series), 1);
+        let accepted_snapshot = active_cluster_snapshot(&storage_path, XtreamCluster::Series);
+
+        let different_catalog =
+            publish_test_cluster(&app_config, &input, XtreamCluster::Series, 100, "different-series", 2, 40_000).await;
+
+        assert_eq!(
+            different_catalog,
+            XtreamClusterPublishOutcome::RetainedPrevious(ClusterUpdateRejection {
+                cluster: XtreamCluster::Series,
+                current_count: 1,
+                candidate_count: 2,
+                threshold: 100,
+                quality: 0,
+            })
+        );
+        assert_eq!(active_cluster_snapshot(&storage_path, XtreamCluster::Series), accepted_snapshot);
+        assert_no_refresh_artifacts(&storage_path);
+    }
+
+    #[tokio::test]
+    async fn disk_quality_publishes_accepted_clusters_and_retains_rejected_cluster_independently() {
+        let directory = tempdir().expect("mixed cluster directory");
+        let app_config = test_app_config(directory.path());
+        let input = disk_test_input("mixed-clusters");
+
+        for (cluster, category_name, first_provider_id) in [
+            (XtreamCluster::Live, "old-live", 10_000),
+            (XtreamCluster::Video, "old-vod", 20_000),
+            (XtreamCluster::Series, "old-series", 30_000),
+        ] {
+            assert_eq!(
+                publish_test_cluster(&app_config, &input, cluster, 0, category_name, 100, first_provider_id).await,
+                XtreamClusterPublishOutcome::Published
+            );
+        }
+        let storage_path = get_input_storage_path(&input.name, directory.path().to_string_lossy().as_ref())
+            .await
+            .expect("mixed cluster storage");
+        let previous_vod = active_cluster_snapshot(&storage_path, XtreamCluster::Video);
+
+        let live_outcome =
+            publish_test_cluster(&app_config, &input, XtreamCluster::Live, 90, "new-live", 90, 40_000).await;
+        let vod_outcome =
+            publish_test_cluster(&app_config, &input, XtreamCluster::Video, 90, "new-vod", 89, 50_000).await;
+        let series_outcome =
+            publish_test_cluster(&app_config, &input, XtreamCluster::Series, 90, "new-series", 110, 60_000).await;
+
+        assert_eq!(live_outcome, XtreamClusterPublishOutcome::Published);
+        assert_eq!(
+            vod_outcome,
+            XtreamClusterPublishOutcome::RetainedPrevious(ClusterUpdateRejection {
+                cluster: XtreamCluster::Video,
+                current_count: 100,
+                candidate_count: 89,
+                threshold: 90,
+                quality: 89,
+            })
+        );
+        assert_eq!(series_outcome, XtreamClusterPublishOutcome::Published);
+        assert_eq!(active_cluster_count(&storage_path, XtreamCluster::Live), 90);
+        assert_eq!(active_cluster_count(&storage_path, XtreamCluster::Video), 100);
+        assert_eq!(active_cluster_count(&storage_path, XtreamCluster::Series), 110);
+        assert!(
+            String::from_utf8_lossy(&active_category_bytes(&storage_path, XtreamCluster::Live)).contains("new-live")
+        );
+        assert_eq!(active_cluster_snapshot(&storage_path, XtreamCluster::Video), previous_vod);
+        assert!(String::from_utf8_lossy(&active_category_bytes(&storage_path, XtreamCluster::Series))
+            .contains("new-series"));
+        assert_no_refresh_artifacts(&storage_path);
     }
 
     fn wait_for_child(mut child: Child, timeout: Duration) -> io::Result<ExitStatus> {
@@ -2458,6 +3116,158 @@ mod tests {
             .expect("batch preparation should succeed");
         tree.upsert_batch_encoded(prepared).expect("batch upsert should succeed");
         tree.commit().expect("tree commit should succeed");
+    }
+
+    fn make_input_group(
+        cluster: XtreamCluster,
+        category_id: u32,
+        category_name: &str,
+        provider_id: u32,
+    ) -> PlaylistGroup {
+        let stream_id = provider_id.to_string().intern();
+        let category_name = category_name.intern();
+        PlaylistGroup {
+            id: category_id,
+            title: Arc::clone(&category_name),
+            channels: vec![PlaylistItem {
+                header: PlaylistItemHeader {
+                    id: Arc::clone(&stream_id),
+                    input_stream_id: stream_id,
+                    name: format!("stream-{provider_id}").intern(),
+                    title: format!("stream-{provider_id}").intern(),
+                    group: category_name,
+                    url: format!("http://provider.example/{cluster}/{provider_id}").intern(),
+                    item_type: PlaylistItemType::from(cluster),
+                    xtream_cluster: cluster,
+                    category_id,
+                    input_name: "provider-a".intern(),
+                    ..PlaylistItemHeader::default()
+                },
+            }],
+            xtream_cluster: cluster,
+        }
+    }
+
+    #[tokio::test]
+    async fn input_cluster_count_returns_none_for_missing_baseline() {
+        let directory = tempdir().expect("temp directory");
+        let app_config = test_app_config(directory.path());
+        let input =
+            ConfigInput { name: "provider-a".intern(), input_type: InputType::Xtream, ..ConfigInput::default() };
+
+        assert_eq!(
+            count_input_xtream_cluster(&app_config, &input, XtreamCluster::Live)
+                .await
+                .expect("missing baseline should be readable"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn input_cluster_count_reads_the_canonical_active_raw_cluster() {
+        let directory = tempdir().expect("temp directory");
+        let app_config = test_app_config(directory.path());
+        let input =
+            ConfigInput { name: "provider-a".intern(), input_type: InputType::Xtream, ..ConfigInput::default() };
+
+        let storage_path = get_input_storage_path(&input.name, directory.path().to_string_lossy().as_ref())
+            .await
+            .expect("canonical input storage");
+        write_single_item(
+            &super::xtream_get_file_path(&storage_path, XtreamCluster::Live),
+            &make_live_item(700, None, None, None, None, 0),
+        );
+
+        assert_eq!(
+            count_input_xtream_cluster(&app_config, &input, XtreamCluster::Live)
+                .await
+                .expect("active baseline should be readable"),
+            Some(1)
+        );
+        assert_eq!(
+            count_input_xtream_cluster(&app_config, &input, XtreamCluster::Video)
+                .await
+                .expect("other cluster should remain absent"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn in_memory_fallback_keeps_colliding_category_ids_separate_by_cluster() {
+        let directory = tempdir().expect("temp directory");
+        let app_config = test_app_config(directory.path());
+        let storage_path = get_input_storage_path("provider-a", directory.path().to_string_lossy().as_ref())
+            .await
+            .expect("canonical input storage");
+
+        let (_, seed_error) = persist_input_xtream_playlist(
+            &app_config,
+            &storage_path,
+            vec![
+                make_input_group(XtreamCluster::Live, 1, "Previous Live", 100),
+                make_input_group(XtreamCluster::Video, 2, "Previous VOD", 200),
+                make_input_group(XtreamCluster::Series, 3, "Previous Series", 300),
+            ],
+        )
+        .await;
+        assert!(seed_error.is_none(), "failed to seed persisted VOD: {seed_error:?}");
+        let previous_vod = load_input_xtream_playlist(&app_config, &storage_path, &[XtreamCluster::Video])
+            .await
+            .expect("seeded VOD should load");
+        let category_path =
+            get_collection_path(&storage_path, xtream_cluster_category_collection(XtreamCluster::Video));
+        let previous_categories = fs::read(&category_path).expect("persisted VOD categories");
+
+        let (merged, persist_error) = persist_input_xtream_playlist(
+            &app_config,
+            &storage_path,
+            vec![
+                make_input_group(XtreamCluster::Live, 1, "New Live", 101),
+                make_input_group(XtreamCluster::Series, 2, "New Series", 301),
+            ],
+        )
+        .await;
+
+        assert!(persist_error.is_none(), "failed to persist accepted clusters: {persist_error:?}");
+        assert_eq!(fs::read(&category_path).expect("retained VOD categories"), previous_categories);
+        assert!(merged
+            .iter()
+            .all(|group| { group.channels.iter().all(|item| item.header.xtream_cluster == group.xtream_cluster) }));
+
+        let retained_vod = merged
+            .iter()
+            .find(|group| group.xtream_cluster == XtreamCluster::Video && group.id == 2)
+            .expect("persisted VOD fallback");
+        assert_eq!(retained_vod.title.as_ref(), "Previous VOD");
+        assert_eq!(retained_vod.channels.len(), 1);
+        assert_eq!(retained_vod.channels[0].header.id.as_ref(), "200");
+
+        let accepted_live = merged
+            .iter()
+            .find(|group| group.xtream_cluster == XtreamCluster::Live && group.id == 1)
+            .expect("accepted Live candidate");
+        assert_eq!(accepted_live.title.as_ref(), "New Live");
+        assert_eq!(accepted_live.channels[0].header.id.as_ref(), "101");
+
+        let accepted_series = merged
+            .iter()
+            .find(|group| group.xtream_cluster == XtreamCluster::Series && group.id == 2)
+            .expect("accepted Series candidate sharing VOD category id");
+        assert_eq!(accepted_series.title.as_ref(), "New Series");
+        assert_eq!(accepted_series.channels[0].header.id.as_ref(), "301");
+
+        let loaded = load_input_xtream_playlist(&app_config, &storage_path, &[XtreamCluster::Video])
+            .await
+            .expect("retained VOD should load");
+        assert_eq!(loaded.len(), previous_vod.len());
+        assert_eq!(loaded[0].id, previous_vod[0].id);
+        assert_eq!(loaded[0].title, previous_vod[0].title);
+        assert_eq!(loaded[0].xtream_cluster, previous_vod[0].xtream_cluster);
+        assert_eq!(loaded[0].channels.len(), previous_vod[0].channels.len());
+        assert_eq!(loaded[0].channels[0].header.id, previous_vod[0].channels[0].header.id);
+        assert_eq!(loaded[0].channels[0].header.name, previous_vod[0].channels[0].header.name);
+        assert_eq!(loaded[0].channels[0].header.category_id, previous_vod[0].channels[0].header.category_id);
+        assert_eq!(loaded[0].channels[0].header.xtream_cluster, previous_vod[0].channels[0].header.xtream_cluster);
     }
 
     fn read_live_props(path: &Path, provider_id: u32) -> LiveStreamProperties {
@@ -2869,6 +3679,7 @@ mod tests {
                     &app_config,
                     &input,
                     XtreamCluster::Live,
+                    0,
                     json_reader(r#"[{"category_id":"1","category_name":"Sports"}]"#),
                     json_reader(r#"[{"name":"Live","stream_id":700,"category_id":"1","added":"0"}]"#),
                 )

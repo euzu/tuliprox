@@ -9,8 +9,8 @@ use crate::{
     error::TuliproxError,
     foundation::{get_filter, Filter},
     model::{
-        config::media_server_catalog::MediaServerInputConfigDto, ClusterFlags, EpgConfigDto, PatternTemplate, Prepare,
-        StalkerAuthMode, StalkerInputConfigDto,
+        config::media_server_catalog::MediaServerInputConfigDto, ClusterFlags, ConfigInputUpdateQualityDto,
+        EpgConfigDto, PatternTemplate, Prepare, StalkerAuthMode, StalkerInputConfigDto,
     },
     utils::{
         arc_str_option_serde, arc_str_serde, arc_str_vec_serde, deserialize_timestamp, get_credentials_from_url_str,
@@ -275,6 +275,8 @@ pub struct ConfigInputOptionsDto {
     pub skip_vod: bool,
     #[serde(default, alias = "xtream_skip_series", alias = "stalker_skip_series", skip_serializing_if = "is_false")]
     pub skip_series: bool,
+    #[serde(default, skip_serializing_if = "ConfigInputUpdateQualityDto::is_disabled")]
+    pub update_quality: ConfigInputUpdateQualityDto,
     #[serde(default = "default_xtream_live_stream_use_prefix", skip_serializing_if = "is_true")]
     pub xtream_live_stream_use_prefix: bool,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -324,6 +326,7 @@ impl Default for ConfigInputOptionsDto {
             skip_live: false,
             skip_vod: false,
             skip_series: false,
+            update_quality: ConfigInputUpdateQualityDto::default(),
             xtream_live_stream_use_prefix: default_xtream_live_stream_use_prefix(),
             xtream_live_stream_without_extension: false,
             disable_hls_streaming: false,
@@ -351,6 +354,7 @@ impl ConfigInputOptionsDto {
         !self.skip_live
             && !self.skip_vod
             && !self.skip_series
+            && self.update_quality.is_empty()
             && self.xtream_live_stream_use_prefix
             && !self.xtream_live_stream_without_extension
             && !self.disable_hls_streaming
@@ -373,6 +377,7 @@ impl ConfigInputOptionsDto {
         self.skip_live = false;
         self.skip_vod = false;
         self.skip_series = false;
+        self.update_quality.clean();
         self.xtream_live_stream_use_prefix = default_as_true();
         self.xtream_live_stream_without_extension = false;
         self.disable_hls_streaming = false;
@@ -398,6 +403,7 @@ impl Prepare for ConfigInputOptionsDto {
     type Ctx<'a> = Option<&'a [PatternTemplate]>;
 
     fn prepare(&mut self, templates: Self::Ctx<'_>) -> Result<(), TuliproxError> {
+        self.update_quality.prepare(())?;
         if let Some(raw_filter) = &self.resolve_filter {
             self.t_resolve_filter = Some(get_filter(raw_filter, templates)?);
         }
@@ -1987,6 +1993,67 @@ mod tests {
         assert_eq!(value.get("skip_vod"), Some(&serde_json::Value::Bool(true)));
         assert!(value.get("xtream_skip_live").is_none());
         assert!(value.get("stalker_skip_vod").is_none());
+    }
+
+    #[test]
+    fn config_input_options_without_update_quality_remains_backward_compatible() -> Result<(), serde_json::Error> {
+        let options: ConfigInputOptionsDto = serde_json::from_str("{}")?;
+        let value = serde_json::to_value(&options)?;
+
+        assert_eq!(options.update_quality, ConfigInputUpdateQualityDto::default());
+        assert!(options.is_empty());
+        assert!(value.get("update_quality").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn config_input_options_update_quality_round_trips_and_keeps_options_non_empty() -> Result<(), serde_json::Error> {
+        let options: ConfigInputOptionsDto = serde_json::from_value(serde_json::json!({
+            "update_quality": {
+                "live": 95,
+                "vod": 90,
+                "series": 100
+            }
+        }))?;
+
+        assert!(!options.is_empty());
+        assert_eq!(options.update_quality.live, 95);
+        assert_eq!(options.update_quality.vod, 90);
+        assert_eq!(options.update_quality.series, 100);
+        assert_eq!(
+            serde_json::to_value(options)?,
+            serde_json::json!({
+                "update_quality": {
+                    "live": 95,
+                    "vod": 90,
+                    "series": 100
+                }
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn config_input_options_prepare_validates_update_quality() {
+        let mut options: ConfigInputOptionsDto = serde_saphyr::from_str("update_quality:\n  live: 101\n")
+            .expect("manually edited update quality should deserialize before validation");
+
+        let error = options.prepare(None).expect_err("invalid update quality must be rejected");
+
+        assert!(error.to_string().contains("options.update_quality.live"));
+    }
+
+    #[test]
+    fn config_input_options_clean_resets_update_quality() {
+        let mut options = ConfigInputOptionsDto {
+            update_quality: ConfigInputUpdateQualityDto { live: 95, vod: 90, series: 85 },
+            ..ConfigInputOptionsDto::default()
+        };
+
+        options.clean();
+
+        assert_eq!(options.update_quality, ConfigInputUpdateQualityDto::default());
+        assert!(options.is_empty());
     }
 
     #[test]

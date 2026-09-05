@@ -10,9 +10,7 @@
 
 #![allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
 
-use super::stalker_refresh::{
-    advance_stalker_refresh, StalkerClusterSelection, StalkerRefreshMode, StalkerRefreshOutcome,
-};
+use super::stalker_refresh::{advance_stalker_refresh, StalkerRefreshMode, StalkerRefreshOutcome, StalkerRefreshPlan};
 use log::{debug, info, warn};
 use lru::LruCache;
 use parking_lot::Mutex;
@@ -29,7 +27,10 @@ use std::{
     time::{Duration, Instant},
 };
 use tuliprox_core::model::{AppConfig, ConfigInput, ConfigInputFlags, StalkerInputConfig};
-use tuliprox_iptv::stalker::{client::StalkerApiClient, error::StalkerError, parser};
+use tuliprox_iptv::{
+    provider::PlaylistFetch,
+    stalker::{client::StalkerApiClient, error::StalkerError, parser},
+};
 use tuliprox_repository::{
     stalker_generation_repository::{load_active_manifest, load_checkpoint},
     stalker_repository::{ensure_stalker_storage_path, load_stalker_items_at, read_stalker_item_at},
@@ -111,19 +112,14 @@ pub async fn download_stalker_playlist(
     clusters: Option<&[StalkerCluster]>,
     refresh_mode: StalkerRefreshMode,
     materialize_active: bool,
-) -> (Vec<PlaylistGroup>, Vec<TuliproxError>, bool, bool) {
+) -> PlaylistFetch {
     let stalker_cfg = match input.stalker.as_ref() {
         Some(cfg) => cfg.clone(),
         None => {
-            return (
-                vec![],
-                vec![TuliproxError::ConfigInput(format!(
-                    "Stalker input '{}' has no stalker configuration block",
-                    input.name
-                ))],
-                false,
-                false,
-            );
+            return PlaylistFetch::failed(TuliproxError::ConfigInput(format!(
+                "Stalker input '{}' has no stalker configuration block",
+                input.name
+            )));
         }
     };
 
@@ -136,40 +132,33 @@ pub async fn download_stalker_playlist(
 
     if resolved_clusters.is_empty() {
         info!("Stalker input '{}' has all clusters skipped", input.name);
-        return (vec![], vec![], false, false);
+        return PlaylistFetch::nothing_to_do();
     }
-    let refresh_selection = StalkerClusterSelection::requested(input, &resolved_clusters);
+    let refresh_plan = StalkerRefreshPlan::requested(input, &resolved_clusters);
 
     let portal_url = match resolve_stalker_portal_url(input) {
         Ok(url) => url,
-        Err(err) => return (vec![], vec![err], false, false),
+        Err(err) => return PlaylistFetch::failed(err),
     };
 
     let identity_fingerprint = stalker_identity_fingerprint(&portal_url, &stalker_cfg);
     let api_client = match cached_runtime_stalker_client(client, portal_url, &stalker_cfg) {
         Ok(client) => client,
         Err(err) => {
-            return (
-                vec![],
-                vec![TuliproxError::ConfigInput(format!(
-                    "failed to build Stalker client for input '{}': {err}",
-                    input.name
-                ))],
-                false,
-                false,
-            );
+            return PlaylistFetch::failed(TuliproxError::ConfigInput(format!(
+                "failed to build Stalker client for input '{}': {err}",
+                input.name
+            )));
         }
     };
 
     let storage_path = match ensure_stalker_storage_path(app_config, &input.name).await {
         Ok(p) => p,
         Err(err) => {
-            return (
-                vec![],
-                vec![TuliproxError::Io(format!("could not prepare Stalker storage for input '{}': {err}", input.name))],
-                false,
-                false,
-            );
+            return PlaylistFetch::failed(TuliproxError::Io(format!(
+                "could not prepare Stalker storage for input '{}': {err}",
+                input.name
+            )));
         }
     };
     let catalog_storage_path = raw_group_catalog_storage_path(&storage_path);
@@ -178,15 +167,10 @@ pub async fn download_stalker_playlist(
         let handshake = match api_client.handshake().await {
             Ok(handshake) => handshake,
             Err(err) => {
-                return (
-                    vec![],
-                    vec![TuliproxError::ProviderConnection(format!(
-                        "Stalker handshake for input '{}' failed: {err}",
-                        input.name
-                    ))],
-                    false,
-                    false,
-                );
+                return PlaylistFetch::failed(TuliproxError::ProviderConnection(format!(
+                    "Stalker handshake for input '{}' failed: {err}",
+                    input.name
+                )));
             }
         };
         loop {
@@ -194,7 +178,7 @@ pub async fn download_stalker_playlist(
                 app_config,
                 api_client.as_ref(),
                 &handshake,
-                refresh_selection,
+                refresh_plan,
                 &storage_path,
                 identity_fingerprint,
                 refresh_mode.budget(),
@@ -205,7 +189,7 @@ pub async fn download_stalker_playlist(
                 } else {
                     let checkpoint = match load_checkpoint(&storage_path, identity_fingerprint).await {
                         Ok(checkpoint) => checkpoint,
-                        Err(err) => return (Vec::new(), vec![err], false, false),
+                        Err(err) => return PlaylistFetch::failed(err),
                     };
                     break StalkerRefreshOutcome::Yielded {
                         phase: checkpoint.as_ref().map_or(
@@ -227,18 +211,21 @@ pub async fn download_stalker_playlist(
                     tokio::task::yield_now().await;
                 }
                 Ok(outcome) => break outcome,
-                Err(err) => return (Vec::new(), vec![err], false, false),
+                Err(err) => return PlaylistFetch::failed(err),
             }
         }
     } else {
-        return (Vec::new(), Vec::new(), app_config.config.load().disk_based_processing, true);
+        return PlaylistFetch::nothing_to_do().persisted(app_config.config.load().disk_based_processing).partial(true);
     };
 
     let yielded = matches!(&outcome, StalkerRefreshOutcome::Yielded { .. });
     let terminal = matches!(&outcome, StalkerRefreshOutcome::Terminal(_));
     let mut errors = Vec::new();
+    let mut quality_rejections = Vec::new();
     match outcome {
-        StalkerRefreshOutcome::Complete => {}
+        StalkerRefreshOutcome::Complete { quality_rejections: completed_rejections } => {
+            quality_rejections = completed_rejections;
+        }
         StalkerRefreshOutcome::Yielded { phase, processed, skipped, error } => {
             info!(
                 "Stalker input '{}' yielded in phase {phase:?} after {processed} records ({skipped} skipped)",
@@ -255,7 +242,10 @@ pub async fn download_stalker_playlist(
         Ok(manifest) => manifest,
         Err(err) => {
             errors.push(err);
-            return (Vec::new(), errors, false, yielded);
+            return PlaylistFetch::groups(Vec::new())
+                .with_errors(errors)
+                .with_quality_rejections(quality_rejections)
+                .partial(yielded);
         }
     };
     if terminal {
@@ -268,7 +258,11 @@ pub async fn download_stalker_playlist(
     }
     let use_disk_based_processing = app_config.config.load().disk_based_processing;
     if !materialize_active {
-        return (Vec::new(), errors, use_disk_based_processing, yielded);
+        return PlaylistFetch::groups(Vec::new())
+            .with_errors(errors)
+            .with_quality_rejections(quality_rejections)
+            .persisted(use_disk_based_processing)
+            .partial(yielded);
     }
     let mut groups = Vec::new();
     let mut counts = [0_usize; 3];
@@ -324,7 +318,11 @@ pub async fn download_stalker_playlist(
         }
     }
     parser::log_stalker_download_summary(&input.name, counts[0], counts[1], counts[2]);
-    (groups, errors, use_disk_based_processing, yielded)
+    PlaylistFetch::groups(groups)
+        .with_errors(errors)
+        .with_quality_rejections(quality_rejections)
+        .persisted(use_disk_based_processing)
+        .partial(yielded)
 }
 
 /// Resolve a per-input portal URL using the standard `provider://` resolution pipeline.

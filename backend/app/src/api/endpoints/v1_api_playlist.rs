@@ -29,7 +29,7 @@ use crate::{
     iptv::{stalker::client::validate_public_playable_url, xtream},
     model::{
         parse_xmltv_for_web_ui_from_file, parse_xmltv_for_web_ui_from_url, AppConfig, ConfigInput, ConfigInputFlags,
-        ConfigInputOptions, EpgSource, EpgSourceType, IcsDummyPolicy, InputSource,
+        ConfigInputOptions, ConfigInputUpdateQuality, EpgSource, EpgSourceType, IcsDummyPolicy, InputSource,
     },
     processing::{
         epg::get_input_raw_epg_file_path,
@@ -72,6 +72,7 @@ fn create_config_input_for_m3u(url: &str) -> ConfigInput {
         enabled: true,
         options: Some(ConfigInputOptions {
             flags: ConfigInputFlags::XtreamLiveStreamUsePrefix | ConfigInputFlags::ResolveBackground,
+            update_quality: ConfigInputUpdateQuality::default(),
             resolve_delay: shared::defaults::default_resolve_delay_secs(),
             probe_delay: shared::defaults::default_probe_delay_secs(),
             probe_live_interval_hours: 120,
@@ -93,6 +94,7 @@ fn create_config_input_for_xtream(username: &str, password: &str, host: &str) ->
         enabled: true,
         options: Some(ConfigInputOptions {
             flags: ConfigInputFlags::XtreamLiveStreamUsePrefix | ConfigInputFlags::ResolveBackground,
+            update_quality: ConfigInputUpdateQuality::default(),
             resolve_delay: shared::defaults::default_resolve_delay_secs(),
             probe_delay: shared::defaults::default_probe_delay_secs(),
             probe_live_interval_hours: 120,
@@ -1203,8 +1205,8 @@ mod tests {
             SharedStreamManager,
         },
         model::{
-            AppConfig, Config, ConfigInput, ConfigInputOptions, ConfigProvider, ConfigSource, ConfigTarget,
-            SourcesConfig, StreamHistoryConfig, VideoDownloadConfig,
+            AppConfig, Config, ConfigInput, ConfigInputOptions, ConfigInputUpdateQuality, ConfigProvider, ConfigSource,
+            ConfigTarget, SourcesConfig, StreamHistoryConfig, VideoDownloadConfig,
         },
         processing::epg::{get_input_raw_epg_file_path, get_input_raw_xmltv_file_path},
         repository::GeoIp,
@@ -2221,6 +2223,7 @@ mod tests {
             enabled: true,
             options: Some(ConfigInputOptions {
                 flags: crate::model::ConfigInputFlagsSet::new(),
+                update_quality: ConfigInputUpdateQuality::default(),
                 resolve_delay: shared::defaults::default_resolve_delay_secs(),
                 probe_delay: shared::defaults::default_probe_delay_secs(),
                 probe_live_interval_hours: 120,
