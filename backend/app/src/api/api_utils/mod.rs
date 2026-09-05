@@ -2454,6 +2454,8 @@ pub(crate) async fn stream_response(
         // testable in isolation and in sync with the call site below.
         let should_pin_provider = should_pin_provider_for_session(&stream_details, app_state, item_type);
         let user_agent_stream_index = stream_details.user_agent_stream_index;
+        // Persist this before response construction because some item types skip the later
+        // create_user_session path, including placeholder sessions created by ensure_user_session_placeholder.
         if let Some(stream_index) = user_agent_stream_index {
             app_state
                 .active_users
