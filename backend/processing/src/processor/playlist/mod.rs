@@ -9,7 +9,6 @@ use crate::{
     processor::{
         epg::{clear_invalid_live_epg_ids, process_playlist_epg, retain_epg_referenced_by_groups},
         sort::sort_playlist,
-        trakt::process_trakt_categories_for_target,
         xtream_series::playlist_resolve_series,
         xtream_vod::playlist_resolve_vod,
         StalkerRefreshMode,
@@ -17,7 +16,7 @@ use crate::{
 };
 use futures::{FutureExt, StreamExt};
 use indexmap::IndexMap;
-use log::{debug, error, info, log_enabled, warn, Level};
+use log::{debug, error, info, log_enabled, trace, warn, Level};
 use path_clean::PathClean;
 use shared::{
     concat_string,
@@ -52,6 +51,7 @@ use tuliprox_core::{
     },
     utils::{debug_if_enabled, log_memory_snapshot, trace_if_enabled, StepMeasure, StepMeasureCallback},
 };
+use tuliprox_curation::curate_trakt_categories;
 use tuliprox_iptv::{
     epg::{CountingEpgSink, EpgFetchRequest, EpgProvider},
     error::ProviderErrorKind,
