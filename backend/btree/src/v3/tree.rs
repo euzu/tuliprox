@@ -2438,7 +2438,7 @@ impl<K, V> BPlusTreeQuery<K, V> {
 
     pub fn filepath(&self) -> &Path { &self.snapshot.filepath }
 
-    pub(crate) fn snapshot_identity(&self) -> ([u8; 16], u64) { (self.header.database_id, self.header.generation) }
+    pub fn snapshot_identity(&self) -> ([u8; 16], u64) { (self.header.database_id, self.header.generation) }
 
     pub(crate) fn snapshot_metadata(&self) -> &BPlusTreeMetadata { &self.header.metadata }
 

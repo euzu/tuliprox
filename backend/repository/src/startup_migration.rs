@@ -398,42 +398,44 @@ impl BPlusTreeStartupMigrator {
     }
 
     fn migration_kind(path: &Path, roots: &[PathBuf]) -> Option<TypedMigration> {
-        let relative = roots.iter().find_map(|root| path.strip_prefix(root).ok())?;
-        let components = relative.iter().filter_map(OsStr::to_str).collect::<Vec<_>>();
-        match components.as_slice() {
-            ["metadata_retry_state.db"] => Some(TypedMigration::MetadataRetry),
-            ["qos_snapshot.db"] => Some(TypedMigration::QosSnapshot),
-            ["qos_snapshot_meta.db"] => Some(TypedMigration::QosCheckpoint),
-            ["geoip.db"] => Some(TypedMigration::GeoIp),
-            [directory, "metadata_retry_state.db"] if directory.starts_with("input_") => {
-                Some(TypedMigration::MetadataRetry)
+        if let Some(relative) = roots.iter().find_map(|root| path.strip_prefix(root).ok()) {
+            let components = relative.iter().filter_map(OsStr::to_str).collect::<Vec<_>>();
+            match components.as_slice() {
+                ["metadata_retry_state.db"] => return Some(TypedMigration::MetadataRetry),
+                ["qos_snapshot.db"] => return Some(TypedMigration::QosSnapshot),
+                ["qos_snapshot_meta.db"] => return Some(TypedMigration::QosCheckpoint),
+                ["geoip.db"] => return Some(TypedMigration::GeoIp),
+                [directory, "metadata_retry_state.db"] if directory.starts_with("input_") => {
+                    return Some(TypedMigration::MetadataRetry);
+                }
+                [directory, name] if directory.starts_with("input_") && name.starts_with("m3u_") => {
+                    return Some(TypedMigration::InputM3u);
+                }
+                [directory, name]
+                    if directory.starts_with("input_")
+                        && (name.starts_with("lib_") || name.starts_with("media_server_")) =>
+                {
+                    return Some(TypedMigration::Library);
+                }
+                [directory, name]
+                    if directory.starts_with("input_") && matches!(*name, "live.db" | "video.db" | "series.db") =>
+                {
+                    return Some(TypedMigration::InputXtream);
+                }
+                [_, "id_mapping.db"] => return Some(TypedMigration::IdMapping),
+                [_, "id_mapping.uuid.db"] => return Some(TypedMigration::UuidMapping),
+                [_, "m3u", "m3u.db"] => return Some(TypedMigration::TargetM3u),
+                [_, "m3u" | "xtream", "epg.db"] => return Some(TypedMigration::Epg),
+                [_, "xtream", "live.db" | "video.db" | "series.db"] => return Some(TypedMigration::TargetXtream),
+                _ => {}
             }
-            [directory, name] if directory.starts_with("input_") && name.starts_with("m3u_") => {
-                Some(TypedMigration::InputM3u)
-            }
-            [directory, name]
-                if directory.starts_with("input_")
-                    && (name.starts_with("lib_") || name.starts_with("media_server_")) =>
-            {
-                Some(TypedMigration::Library)
-            }
-            [directory, name]
-                if directory.starts_with("input_") && matches!(*name, "live.db" | "video.db" | "series.db") =>
-            {
-                Some(TypedMigration::InputXtream)
-            }
-            [_, "id_mapping.db"] => Some(TypedMigration::IdMapping),
-            [_, "id_mapping.uuid.db"] => Some(TypedMigration::UuidMapping),
-            [_, "m3u", "m3u.db"] => Some(TypedMigration::TargetM3u),
-            [_, "m3u" | "xtream", "epg.db"] => Some(TypedMigration::Epg),
-            [_, "xtream", "live.db" | "video.db" | "series.db"] => Some(TypedMigration::TargetXtream),
-            _ => None,
         }
+        None
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TypedMigration {
+pub enum TypedMigration {
     MetadataRetry,
     QosSnapshot,
     QosCheckpoint,
@@ -446,6 +448,347 @@ enum TypedMigration {
     TargetXtream,
     InputXtream,
     Epg,
+}
+
+impl TypedMigration {
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().replace('_', "-").as_str() {
+            "series" | "xtream" | "input-xtream" | "live" | "video" => Some(Self::InputXtream),
+            "target-xtream" => Some(Self::TargetXtream),
+            "m3u" | "input-m3u" => Some(Self::InputM3u),
+            "target-m3u" => Some(Self::TargetM3u),
+            "epg" => Some(Self::Epg),
+            "id-mapping" => Some(Self::IdMapping),
+            "uuid-mapping" => Some(Self::UuidMapping),
+            "metadata-retry" => Some(Self::MetadataRetry),
+            "qos" | "qos-snapshot" => Some(Self::QosSnapshot),
+            "qos-meta" | "qos-checkpoint" => Some(Self::QosCheckpoint),
+            "geoip" => Some(Self::GeoIp),
+            "library" => Some(Self::Library),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn infer_from_path(path: &Path) -> Option<Self> {
+        let filename = path.file_name().and_then(OsStr::to_str)?;
+        let parent_name = path.parent().and_then(|p| p.file_name()).and_then(OsStr::to_str).unwrap_or("");
+        let path_str = path.to_str().unwrap_or("");
+
+        match filename {
+            "metadata_retry_state.db" => Some(Self::MetadataRetry),
+            "qos_snapshot.db" => Some(Self::QosSnapshot),
+            "qos_snapshot_meta.db" => Some(Self::QosCheckpoint),
+            "geoip.db" => Some(Self::GeoIp),
+            "id_mapping.uuid.db" => Some(Self::UuidMapping),
+            "id_mapping.db" => Some(Self::IdMapping),
+            "epg.db" => Some(Self::Epg),
+            "m3u.db" => Some(Self::TargetM3u),
+            name if name.starts_with("m3u_") => Some(Self::InputM3u),
+            name if name.starts_with("lib_") || name.starts_with("media_server_") => Some(Self::Library),
+            "series.db" | "live.db" | "video.db" => {
+                if parent_name == "xtream" || path_str.contains("/target/xtream") {
+                    Some(Self::TargetXtream)
+                } else {
+                    Some(Self::InputXtream)
+                }
+            }
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::MetadataRetry => "metadata_retry",
+            Self::QosSnapshot => "qos_snapshot",
+            Self::QosCheckpoint => "qos_checkpoint",
+            Self::GeoIp => "geoip",
+            Self::IdMapping => "id_mapping",
+            Self::UuidMapping => "uuid_mapping",
+            Self::TargetM3u => "target_m3u",
+            Self::InputM3u => "input_m3u",
+            Self::Library => "library",
+            Self::TargetXtream => "target_xtream",
+            Self::InputXtream => "input_xtream",
+            Self::Epg => "epg",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SingleMigrationReport {
+    pub path: PathBuf,
+    pub original_version: u32,
+    pub target_version: u32,
+    pub backup_path: Option<PathBuf>,
+    pub live_entries: usize,
+    pub corrupted_entries: usize,
+    pub database_id: [u8; 16],
+    pub generation: u64,
+    pub already_current: bool,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SingleInspectionReport {
+    pub path: PathBuf,
+    pub version: Option<u32>,
+    pub file_size: u64,
+    pub kind: String,
+    pub live_entries: usize,
+    pub corrupted_entries: usize,
+    pub database_id: Option<[u8; 16]>,
+    pub generation: Option<u64>,
+}
+
+fn lock_database_exclusively(path: &Path) -> io::Result<std::fs::File> {
+    let file = OpenOptions::new().read(true).write(true).open(path)?;
+    if let Err(error) = file.try_lock() {
+        if matches!(error, std::fs::TryLockError::WouldBlock) {
+            return Err(io::Error::new(io::ErrorKind::WouldBlock, format!("Database is locked: {}", path.display())));
+        }
+        return Err(error.into());
+    }
+    Ok(file)
+}
+
+pub fn migrate_single_database(
+    path: &Path,
+    explicit_kind: Option<&str>,
+    backup: bool,
+) -> io::Result<SingleMigrationReport> {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if !canonical.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("Database file does not exist: {}", path.display()),
+        ));
+    }
+
+    let _lock_file = lock_database_exclusively(&canonical)?;
+
+    let version = typed_migration::storage_version(&canonical)?;
+    let Some(current_version) = version else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} is not a valid B+Tree database (magic header 'BTRE' missing)", path.display()),
+        ));
+    };
+
+    if current_version == STORAGE_VERSION {
+        return Ok(SingleMigrationReport {
+            path: canonical,
+            original_version: current_version,
+            target_version: STORAGE_VERSION,
+            backup_path: None,
+            live_entries: 0,
+            corrupted_entries: 0,
+            database_id: [0; 16],
+            generation: 0,
+            already_current: true,
+            kind: "already_v3".to_string(),
+        });
+    }
+
+    if current_version != LEGACY_STORAGE_VERSION && current_version != 2 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Unsupported storage version {current_version} in {} (expected 1 or 2)", path.display()),
+        ));
+    }
+
+    let kind = explicit_kind
+        .and_then(TypedMigration::parse)
+        .or_else(|| TypedMigration::infer_from_path(&canonical))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Could not determine database type for {}. Please specify --db-type (e.g. series, xtream, m3u, epg)",
+                    path.display()
+                ),
+            )
+        })?;
+
+    let backup_path = if backup {
+        let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+        let backup_file = canonical.with_file_name(format!(
+            "{}.bak.{timestamp}",
+            canonical.file_name().and_then(OsStr::to_str).unwrap_or("database")
+        ));
+        std::fs::copy(&canonical, &backup_file)?;
+        info!("Created backup of {} at {}", canonical.display(), backup_file.display());
+        Some(backup_file)
+    } else {
+        None
+    };
+
+    let validation = match kind {
+        TypedMigration::MetadataRetry => {
+            typed_migration::migrate_v2_typed::<MetadataRetryDbKey, MetadataRetryDbValue>(&canonical)?
+        }
+        TypedMigration::QosSnapshot => typed_migration::migrate_v2_typed::<String, QosSnapshotRecord>(&canonical)?,
+        TypedMigration::QosCheckpoint => typed_migration::migrate_v2_typed::<u8, QosAggregationCheckpoint>(&canonical)?,
+        TypedMigration::GeoIp => typed_migration::migrate_v2_typed::<u32, (u32, String)>(&canonical)?,
+        TypedMigration::IdMapping => typed_migration::migrate_v2_typed::<u32, VirtualIdRecord>(&canonical)?,
+        TypedMigration::UuidMapping => typed_migration::migrate_v2_typed::<UUIDType, u32>(&canonical)?,
+        TypedMigration::TargetM3u => {
+            typed_migration::migrate_v2_typed_with_index::<u32, M3uPlaylistItem, u32, _>(&canonical, |item| {
+                item.source_ordinal
+            })?
+        }
+        TypedMigration::InputM3u => typed_migration::migrate_v2_typed::<Arc<str>, M3uPlaylistItem>(&canonical)?,
+        TypedMigration::Library => typed_migration::migrate_v2_typed::<UUIDType, XtreamPlaylistItem>(&canonical)?,
+        TypedMigration::TargetXtream => {
+            typed_migration::migrate_v2_typed_with_index::<u32, XtreamPlaylistItem, u32, _>(&canonical, |item| {
+                item.source_ordinal
+            })?
+        }
+        TypedMigration::InputXtream => typed_migration::migrate_v2_typed::<u32, XtreamPlaylistItem>(&canonical)?,
+        TypedMigration::Epg => typed_migration::migrate_v2_typed::<Arc<str>, EpgChannel>(&canonical)?,
+    };
+
+    Ok(SingleMigrationReport {
+        path: canonical,
+        original_version: current_version,
+        target_version: STORAGE_VERSION,
+        backup_path,
+        live_entries: validation.entries,
+        corrupted_entries: validation.corrupted_entries,
+        database_id: validation.database_id,
+        generation: validation.generation,
+        already_current: false,
+        kind: kind.label().to_string(),
+    })
+}
+
+fn count_v2_entries<K, V>(path: &Path) -> io::Result<(usize, usize)>
+where
+    K: Ord + serde::Serialize + for<'de> serde::Deserialize<'de> + Clone,
+    V: serde::Serialize + for<'de> serde::Deserialize<'de> + Clone,
+{
+    typed_migration::scan_v2_entries::<K, V>(path)
+}
+
+fn count_v3_entries<K, V>(path: &Path) -> io::Result<(usize, usize, [u8; 16], u64)>
+where
+    K: Ord + serde::Serialize + for<'de> serde::Deserialize<'de> + Clone + 'static,
+    V: serde::Serialize + for<'de> serde::Deserialize<'de> + Clone + 'static,
+{
+    let mut query = BPlusTreeQuery::<K, V>::try_new(path)?;
+    let (id, gen) = query.snapshot_identity();
+    let mut live = 0usize;
+    let mut corrupt = 0usize;
+    for item in query.iter() {
+        match item {
+            Ok(_) => live += 1,
+            Err(_) => corrupt += 1,
+        }
+    }
+    Ok((live, corrupt, id, gen))
+}
+
+pub fn inspect_single_database(path: &Path, explicit_kind: Option<&str>) -> io::Result<SingleInspectionReport> {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if !canonical.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("Database file does not exist: {}", path.display()),
+        ));
+    }
+    let file_size = std::fs::metadata(&canonical)?.len();
+    let version = typed_migration::storage_version(&canonical)?;
+    let Some(ver) = version else {
+        return Ok(SingleInspectionReport {
+            path: canonical,
+            version: None,
+            file_size,
+            kind: "not_a_bplustree".to_string(),
+            live_entries: 0,
+            corrupted_entries: 0,
+            database_id: None,
+            generation: None,
+        });
+    };
+
+    let kind = explicit_kind.and_then(TypedMigration::parse).or_else(|| TypedMigration::infer_from_path(&canonical));
+
+    let kind_label = kind.map_or("unknown", TypedMigration::label);
+
+    if ver == LEGACY_STORAGE_VERSION || ver == 2 {
+        if let Some(kind) = kind {
+            let (live, corrupt) = match kind {
+                TypedMigration::MetadataRetry => {
+                    count_v2_entries::<MetadataRetryDbKey, MetadataRetryDbValue>(&canonical)?
+                }
+                TypedMigration::QosSnapshot => count_v2_entries::<String, QosSnapshotRecord>(&canonical)?,
+                TypedMigration::QosCheckpoint => count_v2_entries::<u8, QosAggregationCheckpoint>(&canonical)?,
+                TypedMigration::GeoIp => count_v2_entries::<u32, (u32, String)>(&canonical)?,
+                TypedMigration::IdMapping => count_v2_entries::<u32, VirtualIdRecord>(&canonical)?,
+                TypedMigration::UuidMapping => count_v2_entries::<UUIDType, u32>(&canonical)?,
+                TypedMigration::TargetM3u => count_v2_entries::<u32, M3uPlaylistItem>(&canonical)?,
+                TypedMigration::InputM3u => count_v2_entries::<Arc<str>, M3uPlaylistItem>(&canonical)?,
+                TypedMigration::Library => count_v2_entries::<UUIDType, XtreamPlaylistItem>(&canonical)?,
+                TypedMigration::TargetXtream | TypedMigration::InputXtream => {
+                    count_v2_entries::<u32, XtreamPlaylistItem>(&canonical)?
+                }
+                TypedMigration::Epg => count_v2_entries::<Arc<str>, EpgChannel>(&canonical)?,
+            };
+            return Ok(SingleInspectionReport {
+                path: canonical,
+                version: Some(ver),
+                file_size,
+                kind: kind.label().to_string(),
+                live_entries: live,
+                corrupted_entries: corrupt,
+                database_id: None,
+                generation: None,
+            });
+        }
+    } else if ver == STORAGE_VERSION {
+        if let Some(kind) = kind {
+            let (live, corrupt, id, gen) = match kind {
+                TypedMigration::MetadataRetry => {
+                    count_v3_entries::<MetadataRetryDbKey, MetadataRetryDbValue>(&canonical)?
+                }
+                TypedMigration::QosSnapshot => count_v3_entries::<String, QosSnapshotRecord>(&canonical)?,
+                TypedMigration::QosCheckpoint => count_v3_entries::<u8, QosAggregationCheckpoint>(&canonical)?,
+                TypedMigration::GeoIp => count_v3_entries::<u32, (u32, String)>(&canonical)?,
+                TypedMigration::IdMapping => count_v3_entries::<u32, VirtualIdRecord>(&canonical)?,
+                TypedMigration::UuidMapping => count_v3_entries::<UUIDType, u32>(&canonical)?,
+                TypedMigration::TargetM3u => count_v3_entries::<u32, M3uPlaylistItem>(&canonical)?,
+                TypedMigration::InputM3u => count_v3_entries::<Arc<str>, M3uPlaylistItem>(&canonical)?,
+                TypedMigration::Library => count_v3_entries::<UUIDType, XtreamPlaylistItem>(&canonical)?,
+                TypedMigration::TargetXtream | TypedMigration::InputXtream => {
+                    count_v3_entries::<u32, XtreamPlaylistItem>(&canonical)?
+                }
+                TypedMigration::Epg => count_v3_entries::<Arc<str>, EpgChannel>(&canonical)?,
+            };
+            return Ok(SingleInspectionReport {
+                path: canonical,
+                version: Some(ver),
+                file_size,
+                kind: kind.label().to_string(),
+                live_entries: live,
+                corrupted_entries: corrupt,
+                database_id: Some(id),
+                generation: Some(gen),
+            });
+        }
+    }
+
+    Ok(SingleInspectionReport {
+        path: canonical,
+        version: Some(ver),
+        file_size,
+        kind: kind_label.to_string(),
+        live_entries: 0,
+        corrupted_entries: 0,
+        database_id: None,
+        generation: None,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1249,7 +1592,40 @@ mod tests {
             assert_eq!(BPlusTreeStartupMigrator::migration_kind(&temp.path().join(relative), &roots), Some(expected));
         }
         assert_eq!(BPlusTreeStartupMigrator::migration_kind(&temp.path().join("backup/tree.db"), &roots), None);
+        assert_eq!(BPlusTreeStartupMigrator::migration_kind(&temp.path().join("backup/series.db"), &roots), None);
         assert_eq!(BPlusTreeStartupMigrator::migration_kind(&temp.path().join("input_news/vod.db"), &roots), None);
+        Ok(())
+    }
+
+    #[test]
+    fn single_database_migration_rejects_a_locked_file() -> io::Result<()> {
+        let temp = tempdir()?;
+        let path = temp.path().join("series.db");
+        let mut tree = crate::bplustree::v2::BPlusTree::<u32, XtreamPlaylistItem>::new();
+        tree.store(&path)?;
+        let before = std::fs::read(&path)?;
+        let file = OpenOptions::new().read(true).write(true).open(&path)?;
+        file.lock()?;
+
+        let error = migrate_single_database(&path, Some("series"), false)
+            .expect_err("an exclusively locked database must not be migrated");
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(std::fs::read(&path)?, before);
+        file.unlock()?;
+        Ok(())
+    }
+
+    #[test]
+    fn single_database_inspection_reports_v1_entries() -> io::Result<()> {
+        let temp = tempdir()?;
+        let path = write_legacy_geoip(temp.path(), LEGACY_STORAGE_VERSION)?;
+        let before = std::fs::read(&path)?;
+
+        let report = inspect_single_database(&path, Some("geoip"))?;
+        assert_eq!(report.version, Some(LEGACY_STORAGE_VERSION));
+        assert_eq!(report.live_entries, 1);
+        assert_eq!(report.corrupted_entries, 0);
+        assert_eq!(std::fs::read(&path)?, before);
         Ok(())
     }
 

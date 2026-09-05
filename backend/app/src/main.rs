@@ -150,6 +150,22 @@ struct Args {
     /// Query stream history (inline JSON or @file.json)
     #[arg(long = "sh")]
     stream_history: Option<String>,
+
+    /// Migrate a single B+Tree database file to V3 format
+    #[arg(long = "migrate-db")]
+    migrate_db: Option<PathBuf>,
+
+    /// Inspect a B+Tree database file (version, entries, corruption detection)
+    #[arg(long = "inspect-db")]
+    inspect_db: Option<PathBuf>,
+
+    /// Explicit database type for migrate-db or inspect-db (series, xtream, m3u, epg, etc.)
+    #[arg(long = "db-type")]
+    db_type: Option<String>,
+
+    /// Skip creating a backup file before migration
+    #[arg(long = "no-backup", default_value_t = false)]
+    no_backup: bool,
 }
 
 impl Args {
@@ -176,10 +192,99 @@ const BUILD_TIMESTAMP: &str = env!("VERGEN_BUILD_TIMESTAMP");
 // #[export_name = "malloc_conf"]
 // pub static malloc_conf: &[u8] = b"lg_prof_interval:25,prof:true,prof_leak:true,prof_active:true,prof_prefix:/tmp/jeprof\0";
 
+fn format_hex_id(id: &[u8; 16]) -> String {
+    use std::fmt::Write;
+    let mut hex = String::with_capacity(32);
+    for b in id {
+        let _ = write!(hex, "{b:02x}");
+    }
+    hex
+}
+
+fn handle_inspect_db(db_path: &Path, db_type: Option<&str>) {
+    match repository::inspect_single_database(db_path, db_type) {
+        Ok(report) => {
+            println!("=== B+Tree Database Inspection ===");
+            println!("Path:              {}", report.path.display());
+            println!("File Size:         {} bytes", report.file_size);
+            if let Some(v) = report.version {
+                println!("Storage Version:   V{v}");
+            } else {
+                println!("Storage Version:   Not a B+Tree file");
+            }
+            println!("Database Type:     {}", report.kind);
+            println!("Healthy Entries:   {}", report.live_entries);
+            if report.corrupted_entries > 0 {
+                println!(
+                    "Corrupted Entries: {} (corrupted LZ4 blocks or deserialization errors)",
+                    report.corrupted_entries
+                );
+            } else {
+                println!("Corrupted Entries: 0");
+            }
+            if let Some(id) = report.database_id {
+                println!("Database ID:       {}", format_hex_id(&id));
+            }
+            if let Some(gen) = report.generation {
+                println!("Generation:        {gen}");
+            }
+            std::process::exit(0);
+        }
+        Err(err) => {
+            eprintln!("Error inspecting database: {err}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn handle_migrate_db(db_path: &Path, db_type: Option<&str>, no_backup: bool) {
+    let make_backup = !no_backup;
+    match repository::migrate_single_database(db_path, db_type, make_backup) {
+        Ok(report) => {
+            if report.already_current {
+                println!(
+                    "Database is already at storage version 3 (current). No migration needed: {}",
+                    report.path.display()
+                );
+                std::process::exit(0);
+            }
+            println!("=== B+Tree Database Migration Complete ===");
+            println!("Path:              {}", report.path.display());
+            println!("Version:           V{} -> V{}", report.original_version, report.target_version);
+            println!("Database Type:     {}", report.kind);
+            if let Some(ref bp) = report.backup_path {
+                println!("Backup Created:    {}", bp.display());
+            }
+            println!("Recovered Entries: {}", report.live_entries);
+            if report.corrupted_entries > 0 {
+                println!("Corrupted Skipped: {} (unreadable records safely bypassed)", report.corrupted_entries);
+            } else {
+                println!("Corrupted Skipped: 0");
+            }
+            println!("Database ID:       {}", format_hex_id(&report.database_id));
+            println!("Generation:        {}", report.generation);
+            println!("Status:            SUCCESS (valid V3 database)");
+            std::process::exit(0);
+        }
+        Err(err) => {
+            eprintln!("Error migrating database: {err}");
+            std::process::exit(1);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     api::api_utils::init_uptime_clock();
     let args = Args::parse();
+
+    if let Some(ref db_path) = args.inspect_db {
+        handle_inspect_db(db_path, args.db_type.as_deref());
+    }
+
+    if let Some(ref db_path) = args.migrate_db {
+        handle_migrate_db(db_path, args.db_type.as_deref(), args.no_backup);
+    }
 
     db_viewer(&args.db_viewer_args());
 
