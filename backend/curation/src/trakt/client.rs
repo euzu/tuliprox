@@ -1,22 +1,28 @@
-use super::errors::handle_trakt_api_error;
-use crate::model::{TraktApiConfig, TraktChartConfig, TraktListConfig, TraktListItem, TraktMovie, TraktShow};
+use super::{
+    errors::handle_trakt_api_error,
+    model::{TraktListItem, TraktMovie, TraktShow, TraktTrendingMovieItem, TraktTrendingShowItem},
+};
 use log::{debug, info};
 use reqwest::header::{HeaderMap, HeaderValue};
-use serde::Deserialize;
-use shared::{defaults::DEFAULT_USER_AGENT, error::TuliproxError, utils::trim_last_slash};
+use shared::{
+    defaults::DEFAULT_USER_AGENT,
+    error::TuliproxError,
+    model::{TraktChartKind, TraktChartType},
+    utils::trim_last_slash,
+};
+use tuliprox_core::model::{TraktApiConfig, TraktChartConfig, TraktListConfig};
 
 const TRAKT_PAGE_LIMIT: u32 = 100;
 const TRAKT_MAX_PAGES: u32 = 100;
 
-pub struct TraktClient {
+pub(super) struct TraktClient {
     client: reqwest::Client,
     api_config: TraktApiConfig,
-    // Pre-computed headers to avoid recreating them each time
     headers: HeaderMap,
 }
 
 impl TraktClient {
-    pub fn new(client: reqwest::Client, mut api_config: TraktApiConfig) -> Result<Self, TuliproxError> {
+    pub(super) fn new(client: reqwest::Client, mut api_config: TraktApiConfig) -> Result<Self, TuliproxError> {
         api_config.api_key = api_config.api_key.trim().to_string();
         let headers = Self::create_headers(&api_config)?;
         Ok(Self { client, api_config, headers })
@@ -59,7 +65,10 @@ impl TraktClient {
         format!("{}/{}/{}", trim_last_slash(&self.api_config.url), chart_config.kind, chart_config.chart)
     }
 
-    pub async fn get_chart_items(&self, chart_config: &TraktChartConfig) -> Result<Vec<TraktListItem>, TuliproxError> {
+    pub(super) async fn get_chart_items(
+        &self,
+        chart_config: &TraktChartConfig,
+    ) -> Result<Vec<TraktListItem>, TuliproxError> {
         let id_label = format!("{}:{}", chart_config.kind, chart_config.chart);
         self.paginate_items(
             "chart",
@@ -69,15 +78,15 @@ impl TraktClient {
         .await
     }
 
-    pub async fn get_list_items(&self, list_config: &TraktListConfig) -> Result<Vec<TraktListItem>, TuliproxError> {
+    pub(super) async fn get_list_items(
+        &self,
+        list_config: &TraktListConfig,
+    ) -> Result<Vec<TraktListItem>, TuliproxError> {
         let id_label = format!("{}:{}", list_config.user, list_config.list_slug);
         self.paginate_items("list", id_label, |page| async move { self.get_list_items_page(list_config, page).await })
             .await
     }
 
-    /// Shared body of `get_chart_items` and `get_list_items`.
-    /// Walks Trakt's paginated response one page at a time via `fetch_page`,
-    /// logging per-page progress with `kind_label` and `id_label` for context.
     async fn paginate_items<F, Fut>(
         &self,
         kind_label: &'static str,
@@ -129,11 +138,9 @@ impl TraktClient {
         let list_id = format!("{}:{}", list_config.user, list_config.list_slug);
         let (response_text, page_count, item_count) =
             self.fetch_trakt_page(request_url, "list", &list_id, page).await?;
-        let mut items: Vec<TraktListItem> =
-            serde_json::from_str(&response_text).map_err(|error: serde_json::Error| {
-                TuliproxError::Config(format!("Failed to parse Trakt response: {error}"))
-            })?;
-        items.iter_mut().for_each(TraktListItem::prepare);
+        let items: Vec<TraktListItem> = serde_json::from_str(&response_text).map_err(|error: serde_json::Error| {
+            TuliproxError::Config(format!("Failed to parse Trakt response: {error}"))
+        })?;
 
         Ok(TraktListItemsPage { items, page_count, item_count })
     }
@@ -154,9 +161,6 @@ impl TraktClient {
         Ok(TraktListItemsPage { items, page_count, item_count })
     }
 
-    /// Shared body of `get_list_items_page` / `get_chart_items_page`.
-    /// Issues the GET, validates the status, parses the pagination headers, and
-    /// returns the raw response body. Per-type item parsing stays with the caller.
     async fn fetch_trakt_page(
         &self,
         request_url: String,
@@ -195,7 +199,7 @@ fn parse_chart_items(
 ) -> Result<Vec<TraktListItem>, serde_json::Error> {
     let rank_base = page.saturating_sub(1).saturating_mul(TRAKT_PAGE_LIMIT);
     match (chart_config.kind, chart_config.chart) {
-        (shared::model::TraktChartKind::Movies, shared::model::TraktChartType::Popular) => {
+        (TraktChartKind::Movies, TraktChartType::Popular) => {
             let items = serde_json::from_str::<Vec<TraktMovie>>(response_text)?;
             Ok(items
                 .into_iter()
@@ -203,7 +207,7 @@ fn parse_chart_items(
                 .map(|(index, movie)| TraktListItem::from_movie_chart(movie, chart_rank(rank_base, index)))
                 .collect())
         }
-        (shared::model::TraktChartKind::Movies, shared::model::TraktChartType::Trending) => {
+        (TraktChartKind::Movies, TraktChartType::Trending) => {
             let items = serde_json::from_str::<Vec<TraktTrendingMovieItem>>(response_text)?;
             Ok(items
                 .into_iter()
@@ -211,7 +215,7 @@ fn parse_chart_items(
                 .map(|(index, item)| TraktListItem::from_movie_chart(item.movie, chart_rank(rank_base, index)))
                 .collect())
         }
-        (shared::model::TraktChartKind::Shows, shared::model::TraktChartType::Popular) => {
+        (TraktChartKind::Shows, TraktChartType::Popular) => {
             let items = serde_json::from_str::<Vec<TraktShow>>(response_text)?;
             Ok(items
                 .into_iter()
@@ -219,7 +223,7 @@ fn parse_chart_items(
                 .map(|(index, show)| TraktListItem::from_show_chart(show, chart_rank(rank_base, index)))
                 .collect())
         }
-        (shared::model::TraktChartKind::Shows, shared::model::TraktChartType::Trending) => {
+        (TraktChartKind::Shows, TraktChartType::Trending) => {
             let items = serde_json::from_str::<Vec<TraktTrendingShowItem>>(response_text)?;
             Ok(items
                 .into_iter()
@@ -234,16 +238,6 @@ fn chart_rank(rank_base: u32, index: usize) -> u32 {
     rank_base.saturating_add(u32::try_from(index).unwrap_or(u32::MAX)).saturating_add(1)
 }
 
-#[derive(Deserialize)]
-struct TraktTrendingMovieItem {
-    movie: TraktMovie,
-}
-
-#[derive(Deserialize)]
-struct TraktTrendingShowItem {
-    show: TraktShow,
-}
-
 fn parse_trakt_pagination_header(headers: &HeaderMap, name: &'static str) -> Option<u32> {
     headers.get(name).and_then(|value| value.to_str().ok()).and_then(|value| value.parse::<u32>().ok())
 }
@@ -252,7 +246,7 @@ fn parse_trakt_pagination_header(headers: &HeaderMap, name: &'static str) -> Opt
 mod tests {
     use super::*;
     use reqwest::StatusCode;
-    use shared::model::{TraktChartKind, TraktChartType, TraktContentType};
+    use shared::model::TraktContentType;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
@@ -343,8 +337,7 @@ mod tests {
         let items = client.get_list_items(&list_config).await.expect("paged list should load");
 
         assert_eq!(items.len(), 2);
-        assert_eq!(items[0].content_type, TraktContentType::Vod);
-        assert_eq!(items[1].content_type, TraktContentType::Vod);
+        assert!(items.iter().all(|item| item.item_type == "movie"));
         assert_eq!(requests.load(Ordering::SeqCst), 2);
     }
 
@@ -363,7 +356,6 @@ mod tests {
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].rank, Some(1));
-        assert_eq!(items[0].content_type, TraktContentType::Vod);
         assert_eq!(items[0].movie.as_ref().expect("movie").ids.tmdb, Some(11));
         assert!(requests.lock().expect("requests")[0].contains("GET /movies/trending?page=1&limit=100 "));
     }
@@ -383,7 +375,6 @@ mod tests {
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].rank, Some(1));
-        assert_eq!(items[0].content_type, TraktContentType::Series);
         assert_eq!(items[0].show.as_ref().expect("show").ids.tmdb, Some(22));
         assert!(requests.lock().expect("requests")[0].contains("GET /shows/popular?page=1&limit=100 "));
     }

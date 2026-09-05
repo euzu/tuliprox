@@ -11,7 +11,6 @@ mod providers;
 mod resolve_options;
 mod sort;
 mod stream_probe;
-mod trakt;
 mod xtream_series;
 mod xtream_vod;
 pub use self::{

@@ -1365,6 +1365,11 @@
 
 ## 🛠 Maintenance
 
+- **Playlist curation now has a dedicated capability boundary**: matching, ordering, and virtual-category projection
+  live in the source-neutral `tuliprox-curation` crate, while Trakt HTTP/JSON handling translates records at the edge.
+  Existing `output[].trakt` configuration, category identity, matching behavior, and partial-success semantics remain
+  unchanged.
+
 - **`AdmissionRequest` bundles the request-scoped admission arguments**: five functions each threaded the same ten
   positional parameters, three of them consecutive bare `bool`s (`use_session_admission`, then
   `activate_unbound_session` a slot later). Call sites read `..., true, Some(session_token), true, guard)` — a shape
