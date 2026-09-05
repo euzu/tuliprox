@@ -282,6 +282,8 @@ pub struct ConfigInputOptionsDto {
     #[serde(default, skip_serializing_if = "is_false")]
     pub disable_hls_streaming: bool,
     #[serde(default, skip_serializing_if = "is_false")]
+    pub user_agent_stream_index: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub resolve_tmdb: bool,
     #[serde(default = "default_resolve_background", skip_serializing_if = "is_true")]
     pub resolve_background: bool,
@@ -327,6 +329,7 @@ impl Default for ConfigInputOptionsDto {
             xtream_live_stream_use_prefix: default_xtream_live_stream_use_prefix(),
             xtream_live_stream_without_extension: false,
             disable_hls_streaming: false,
+            user_agent_stream_index: false,
             resolve_tmdb: false,
             resolve_background: default_resolve_background(),
             resolve_series: false,
@@ -354,6 +357,7 @@ impl ConfigInputOptionsDto {
             && self.xtream_live_stream_use_prefix
             && !self.xtream_live_stream_without_extension
             && !self.disable_hls_streaming
+            && !self.user_agent_stream_index
             && !self.resolve_tmdb
             && self.resolve_background
             && !self.resolve_series
@@ -376,6 +380,7 @@ impl ConfigInputOptionsDto {
         self.xtream_live_stream_use_prefix = default_as_true();
         self.xtream_live_stream_without_extension = false;
         self.disable_hls_streaming = false;
+        self.user_agent_stream_index = false;
         self.resolve_tmdb = false;
         self.resolve_background = default_as_true();
         self.resolve_series = false;
@@ -2013,6 +2018,20 @@ mod tests {
         let restored: ConfigInputOptionsDto = serde_json::from_str(&json)?;
 
         assert!(restored.disable_hls_streaming);
+        Ok(())
+    }
+
+    #[test]
+    fn user_agent_stream_index_round_trips_and_keeps_options_non_empty() -> Result<(), serde_json::Error> {
+        let mut options = ConfigInputOptionsDto { user_agent_stream_index: true, ..ConfigInputOptionsDto::default() };
+        let json = serde_json::to_string(&options)?;
+        let restored: ConfigInputOptionsDto = serde_json::from_str(&json)?;
+
+        assert!(restored.user_agent_stream_index);
+        assert!(!options.is_empty());
+        options.clean();
+        assert!(!options.user_agent_stream_index);
+        assert!(options.is_empty());
         Ok(())
     }
 

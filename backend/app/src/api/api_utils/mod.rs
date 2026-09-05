@@ -25,7 +25,7 @@ use crate::{
         },
         MediaServerError, MediaServerErrorKind, MediaServerHttpClient, MediaServerImageRef,
     },
-    model::{AppConfig, ConfigInput, ConfigTarget, InputUserInfo, ProxyUserCredentials},
+    model::{AppConfig, ConfigInput, ConfigInputFlags, ConfigTarget, InputUserInfo, ProxyUserCredentials},
     processing::{
         parser::hls::{rewrite_hls, RewriteHlsProps},
         processor::re_resolve_stalker_url,
@@ -1429,6 +1429,28 @@ pub(crate) async fn resolve_initial_stalker_playback_url(
         })
 }
 
+pub(crate) async fn resolve_stream_user_agent_index(
+    app_state: &AppState,
+    input: &ConfigInput,
+    has_provider_handle: bool,
+    username: &str,
+    session_owner: Option<&str>,
+) -> Option<u64> {
+    if input.has_flag(ConfigInputFlags::UserAgentStreamIndex) && has_provider_handle {
+        if let Some(session_token) = session_owner {
+            app_state
+                .active_users
+                .get_or_assign_user_agent_stream_index(username, session_token)
+                .await
+                .or_else(|| Some(app_state.active_users.next_user_agent_stream_index()))
+        } else {
+            Some(app_state.active_users.next_user_agent_stream_index())
+        }
+    } else {
+        None
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::fn_params_excessive_bools)]
 async fn create_stream_response_details(
     app_state: &Arc<AppState>,
@@ -1470,6 +1492,14 @@ async fn create_stream_response_details(
             session_owner,
             accept_requested_stream_url,
         },
+    )
+    .await;
+    let user_agent_stream_index = resolve_stream_user_agent_index(
+        app_state,
+        input,
+        streaming_strategy.provider_handle.is_some(),
+        username,
+        session_owner,
     )
     .await;
     let mut grace_period_options = app_state.get_grace_options();
@@ -1525,6 +1555,7 @@ async fn create_stream_response_details(
                 request_url: None,
                 session_headers: session_headers.cloned(),
                 provider_session_headers: HashMap::new(),
+                user_agent_stream_index,
                 grace_period: grace_period_options,
                 provider_grace_active: false,
                 disable_provider_grace: false,
@@ -1598,6 +1629,10 @@ async fn create_stream_response_details(
                                     content_representation,
                                 });
 
+                            if let Some(stream_index) = user_agent_stream_index {
+                                provider_stream_factory_options.apply_user_agent_stream_index(stream_index);
+                            }
+
                             let provider_config = input.get_resolve_provider(url.as_ref());
                             provider_stream_factory_options.set_provider(provider_config);
                             if input.input_type.is_stalker() {
@@ -1663,6 +1698,9 @@ async fn create_stream_response_details(
                                             content_representation,
                                         },
                                     );
+                                    if let Some(stream_index) = user_agent_stream_index {
+                                        options.apply_user_agent_stream_index(stream_index);
+                                    }
                                     options.set_provider(input.get_resolve_provider(url.as_ref()));
                                     options.require_public_destination();
                                     let retry_reconnect_flag = options.get_reconnect_flag_clone();
@@ -1726,6 +1764,7 @@ async fn create_stream_response_details(
                 request_url: Some(request_url.clone()),
                 session_headers: session_headers.cloned(),
                 provider_session_headers,
+                user_agent_stream_index,
                 grace_period: grace_period_options,
                 provider_grace_active,
                 disable_provider_grace: false,
@@ -2414,6 +2453,15 @@ pub(crate) async fn stream_response(
         // The pinning rule is centralized in `should_pin_provider_for_session` so it stays
         // testable in isolation and in sync with the call site below.
         let should_pin_provider = should_pin_provider_for_session(&stream_details, app_state, item_type);
+        let user_agent_stream_index = stream_details.user_agent_stream_index;
+        // Persist this before response construction because some item types skip the later
+        // create_user_session path, including placeholder sessions created by ensure_user_session_placeholder.
+        if let Some(stream_index) = user_agent_stream_index {
+            app_state
+                .active_users
+                .set_user_agent_stream_index_if_absent(&user.username, session_token, stream_index)
+                .await;
+        }
 
         let mut is_stream_shared = share_stream && !stream_details.has_deferred_provider_open();
         if let Some((_header, _status_code, _url, Some(_custom_video))) = stream_details.stream_info.as_ref() {
@@ -2561,6 +2609,12 @@ pub(crate) async fn stream_response(
                             socket_bound,
                         })
                         .await;
+                    if let Some(stream_index) = user_agent_stream_index {
+                        app_state
+                            .active_users
+                            .set_user_agent_stream_index_if_absent(&user.username, session_token, stream_index)
+                            .await;
+                    }
                     if should_pin_provider {
                         let reservation_ttl_secs = get_session_reservation_ttl_secs(app_state, item_type);
                         if reservation_ttl_secs > 0 {
@@ -2679,6 +2733,12 @@ async fn detected_catchup_hls_response(params: DetectedCatchupHlsResponseParams<
             socket_bound: false,
         })
         .await;
+    if let Some(stream_index) = stream_details.user_agent_stream_index {
+        app_state
+            .active_users
+            .set_user_agent_stream_index_if_absent(&user.username, &created_session_token, stream_index)
+            .await;
+    }
     if !stream_details.provider_session_headers.is_empty() {
         app_state
             .active_users

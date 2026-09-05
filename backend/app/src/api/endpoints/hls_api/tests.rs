@@ -3,8 +3,8 @@ use super::{
         hls_manifest_terminal_preflight, hls_terminal_endpoint_action, hls_terminal_failed_closed_response,
         HlsManifestTerminalPreflight, HlsTerminalEndpointAction,
     },
-    build_hls_manifest_request_headers, extract_hls_provider_session_headers, hls_api_register,
-    hls_availability_reevaluation_registration_failure_response, hls_canonical_owner_registration,
+    apply_hls_user_agent_stream_index, build_hls_manifest_request_headers, extract_hls_provider_session_headers,
+    hls_api_register, hls_availability_reevaluation_registration_failure_response, hls_canonical_owner_registration,
     hls_temporary_resource_unavailable_response, m3u_archive_epg_reference_ts,
     m3u_catchup_epg_reference_from_session_token, resolve_leaked_hls_relative_origin, HlsCanonicalOwnerRegistration,
     HlsCanonicalOwnerRegistrationFailure, HlsCanonicalOwnerRegistrationKind, MAX_HLS_MANIFEST_BYTES,
@@ -3149,6 +3149,32 @@ fn hls_manifest_headers_apply_disabled_headers_and_default_user_agent_policy() {
     assert!(!headers.contains_key("x-origin-secret"));
     assert!(!headers.contains_key("x-blocked"));
     assert!(!headers.contains_key("cf-ray"));
+}
+
+#[tokio::test]
+async fn hls_user_agent_stream_index_is_stable_for_the_session() {
+    let app_state = test_app_state();
+    let session = Arc::new(tokio::sync::RwLock::new(HlsSession::new(HlsSessionKey::new(1, "stream-1"), b"secret", 0)));
+    let mut manifest_headers = HeaderMap::new();
+    manifest_headers.insert(header::USER_AGENT, HeaderValue::from_static("VLC/3.0"));
+
+    apply_hls_user_agent_stream_index(&session, &mut manifest_headers, true, &app_state.active_users).await;
+    let stream_index = session.read().await.user_agent_stream_index.unwrap_or_default();
+    assert_ne!(stream_index, 0);
+    assert_eq!(
+        manifest_headers.get(header::USER_AGENT).and_then(|value| value.to_str().ok()),
+        Some(format!("VLC/3.0 {stream_index}").as_str())
+    );
+
+    let mut segment_headers = HeaderMap::new();
+    segment_headers.insert(header::USER_AGENT, HeaderValue::from_static("VLC/3.0"));
+    apply_hls_user_agent_stream_index(&session, &mut segment_headers, true, &app_state.active_users).await;
+
+    assert_eq!(
+        segment_headers.get(header::USER_AGENT).and_then(|value| value.to_str().ok()),
+        Some(format!("VLC/3.0 {stream_index}").as_str())
+    );
+    assert_eq!(session.read().await.user_agent_stream_index, Some(stream_index));
 }
 
 #[tokio::test]
@@ -10779,6 +10805,7 @@ fn stats_provider_test_user_session(provider: &str) -> UserSession {
         provider: Arc::from(provider),
         stream_url: Arc::from("http://origin.example.com/live/12345.m3u8"),
         provider_session_headers: HashMap::new(),
+        user_agent_stream_index: None,
         addr: test_addr(),
         socket_bound: false,
         active_addrs: Vec::new(),

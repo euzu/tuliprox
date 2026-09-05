@@ -44,6 +44,7 @@ create_bitset!(
     XtreamLiveStreamUsePrefix,
     XtreamLiveStreamWithoutExtension,
     DisableHlsStreaming,
+    UserAgentStreamIndex,
     ResolveTmdb,
     ResolveBackground,
     ResolveSeries,
@@ -89,6 +90,7 @@ impl From<&ConfigInputOptionsDto> for ConfigInputOptions {
             (xtream_live_stream_use_prefix, XtreamLiveStreamUsePrefix),
             (xtream_live_stream_without_extension, XtreamLiveStreamWithoutExtension),
             (disable_hls_streaming, DisableHlsStreaming),
+            (user_agent_stream_index, UserAgentStreamIndex),
             (resolve_tmdb, ResolveTmdb),
             (resolve_background, ResolveBackground),
             (resolve_series, ResolveSeries),
@@ -1095,6 +1097,15 @@ mod tests {
         let options = ConfigInputOptions::from(&dto);
 
         assert!(options.has_flag(ConfigInputFlags::DisableHlsStreaming));
+    }
+
+    #[test]
+    fn input_options_conversion_sets_user_agent_stream_index_flag() {
+        let dto = ConfigInputOptionsDto { user_agent_stream_index: true, ..ConfigInputOptionsDto::default() };
+
+        let options = ConfigInputOptions::from(&dto);
+
+        assert!(options.has_flag(ConfigInputFlags::UserAgentStreamIndex));
     }
 
     #[test]
