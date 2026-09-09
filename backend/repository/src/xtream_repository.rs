@@ -6,6 +6,7 @@ use crate::{
     },
     error_macros::{cant_read_result, cant_write_result},
     playlist_backend::{ensure_storage_path, iter_raw_playlist, PlaylistBackend, PlaylistKey, Xtream},
+    playlist_repository::PlaylistPublicationPlan,
     playlist_scratch::PlaylistScratch,
     storage::{
         ensure_input_storage_path, get_input_storage_path, get_target_id_mapping_file, get_target_storage_path,
@@ -98,13 +99,14 @@ async fn write_playlists_to_file<K, F>(
     with_index: bool,
     key_of: F,
     collections: Vec<(XtreamCluster, Vec<XtreamPlaylistItem>)>,
+    allow_empty_publication: bool,
 ) -> Result<(), TuliproxError>
 where
     K: PlaylistKey,
     F: Fn(&XtreamPlaylistItem) -> K + Copy + Send + 'static,
 {
     for (cluster, playlist) in collections {
-        if playlist.is_empty() {
+        if playlist.is_empty() && !allow_empty_publication {
             continue;
         }
         let xtream_path = xtream_get_file_path(storage_path, cluster);
@@ -315,6 +317,7 @@ pub async fn xtream_write_playlist(
     app_cfg: &Arc<AppConfig>,
     target: &ConfigTarget,
     playlist: &mut [PlaylistGroup],
+    publication_plan: PlaylistPublicationPlan,
 ) -> Result<(), TuliproxError> {
     let path = {
         let config = app_cfg.config.load();
@@ -357,11 +360,14 @@ pub async fn xtream_write_playlist(
 
     let root_path = path.clone();
     let app_config = app_cfg.clone();
-    for (col_path, data) in [
-        (get_live_cat_collection_path(&root_path), &cat_live_col),
-        (get_vod_cat_collection_path(&root_path), &cat_vod_col),
-        (get_series_cat_collection_path(&root_path), &cat_series_col),
+    for (cluster, col_path, data) in [
+        (XtreamCluster::Live, get_live_cat_collection_path(&root_path), &cat_live_col),
+        (XtreamCluster::Video, get_vod_cat_collection_path(&root_path), &cat_vod_col),
+        (XtreamCluster::Series, get_series_cat_collection_path(&root_path), &cat_series_col),
     ] {
+        if data.is_empty() && !publication_plan.allows_empty_xtream_cluster(cluster) {
+            continue;
+        }
         let lock = app_config.file_locks.write_lock(&col_path).await;
         match json_write_documents_to_file(&col_path, data).await {
             Ok(()) => {}
@@ -377,12 +383,16 @@ pub async fn xtream_write_playlist(
     for (cluster, col) in
         [(XtreamCluster::Live, &live_col), (XtreamCluster::Video, &vod_col), (XtreamCluster::Series, &series_col)]
     {
-        if col.is_empty() {
-            continue;
-        }
         let data = col.iter().map(|item| XtreamPlaylistItem::from(&**item)).collect::<Vec<XtreamPlaylistItem>>();
-        if let Err(err) =
-            write_playlists_to_file(app_cfg, &path, true, |item| item.virtual_id, vec![(cluster, data)]).await
+        if let Err(err) = write_playlists_to_file(
+            app_cfg,
+            &path,
+            true,
+            |item| item.virtual_id,
+            vec![(cluster, data)],
+            publication_plan.allows_empty_xtream_cluster(cluster),
+        )
+        .await
         {
             errors.push(format!("Persisting collection failed:{err}"));
         }
@@ -1687,6 +1697,7 @@ pub async fn persist_input_xtream_playlist(
             false,
             |item| ProviderId::new(item.provider_id),
             vec![(cluster, col.iter().map(Into::into).collect::<Vec<XtreamPlaylistItem>>())],
+            false,
         )
         .await
         {

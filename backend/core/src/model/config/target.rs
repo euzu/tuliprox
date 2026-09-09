@@ -434,6 +434,28 @@ mod tests {
     }
 
     #[test]
+    fn hdhomerun_keeps_its_configured_underlying_output_delegation() {
+        let dto = ConfigTargetDto {
+            output: vec![
+                TargetOutputDto::Xtream(XtreamTargetOutputDto::default()),
+                TargetOutputDto::M3u(M3uTargetOutputDto::default()),
+                TargetOutputDto::HdHomeRun(HdHomeRunTargetOutputDto {
+                    device: "device".to_string(),
+                    username: "viewer".to_string(),
+                    use_output: Some(TargetType::Xtream),
+                }),
+            ],
+            ..ConfigTargetDto::default()
+        };
+
+        let target = ConfigTarget::from(&dto);
+
+        assert_eq!(target.get_hdhomerun_output().and_then(|output| output.use_output), Some(TargetType::Xtream));
+        assert!(target.has_output(TargetType::Xtream));
+        assert!(target.has_output(TargetType::M3u));
+    }
+
+    #[test]
     fn execution_plan_preserves_both_deduplication_passes() {
         let deduplicate = DeduplicateConfig::default();
         let dto = ConfigTargetDto {

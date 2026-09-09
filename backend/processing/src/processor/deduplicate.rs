@@ -141,7 +141,7 @@ mod tests {
     }
 
     #[test]
-    fn post_merge_dedup_can_choose_a_generated_curation_alias_over_its_base_row() {
+    fn post_merge_dedup_selects_the_eligible_winner_before_curation_projection() {
         let mut playlist =
             vec![make_group("Base", vec![make_item("Movie HD")]), make_group("Trending", vec![make_item("Movie 4K")])];
         let config = DeduplicateConfig {
@@ -152,6 +152,7 @@ mod tests {
 
         let removed = deduplicate_playlist(config, &mut playlist);
 
+        // Target-wide curation evaluates only this surviving winner.
         assert_eq!(removed, 1);
         assert_eq!(playlist.len(), 1);
         assert_eq!(playlist[0].title.as_ref(), "Trending");

@@ -15,4 +15,4 @@ pub use kernel::{
     CurationEvaluation, CurationFailure, CurationIncompleteReason, CurationMediaKind, CurationMembership,
     CurationRunOutcome, CurationSelectorKey, CurationSelectorSummary, CurationUnavailableReason, SelectorOutcome,
 };
-pub use trakt::{curate_trakt_categories, evaluate_trakt_curation};
+pub use trakt::{evaluate_trakt_curation, project_trakt_categories};

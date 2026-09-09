@@ -16,7 +16,7 @@ use crate::{
 };
 use futures::{FutureExt, StreamExt};
 use indexmap::IndexMap;
-use log::{debug, error, info, log_enabled, trace, warn, Level};
+use log::{debug, error, info, log_enabled, warn, Level};
 use path_clean::PathClean;
 use shared::{
     concat_string,
@@ -25,9 +25,9 @@ use shared::{
     foundation::{get_field_value, set_field_value, Filter, ValueAccessor, ValueProvider},
     model::{
         ClusterFlags, ConfigTargetOptions, CounterModifier, EventMessage, EventSink, FieldGet, FieldSet, InputStats,
-        InputType, MappingStage, PipelineStats, PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistStats,
-        PlaylistUpdateProgressEvent, PlaylistUpdateSummary, ProviderFetchFailure, SourceStats, StreamProperties,
-        TargetStats, UUIDType, WatchDisabled, WatchDisabledReason, WatchUnmatched, XtreamCluster,
+        InputType, MappingStage, PipelineStats, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemType,
+        PlaylistStats, PlaylistUpdateProgressEvent, PlaylistUpdateSummary, ProviderFetchFailure, SourceStats,
+        StreamProperties, TargetStats, UUIDType, WatchDisabled, WatchDisabledReason, WatchUnmatched, XtreamCluster,
     },
     utils::{create_alias_uuid, interner_gc, sanitize_sensitive_info, Internable},
 };
@@ -46,12 +46,15 @@ use tuliprox_core::{
     model::{
         is_valid, retain_filtered_playlist, AppConfig, CompiledMapping, ConfigFavourites, ConfigInput,
         ConfigInputFlags, ConfigInputOptions, ConfigRename, ConfigTarget, Epg, FilterOutcome, MappingProgram,
-        ProcessTargets, ProviderIdType, ResolveReason, ReverseProxyDisabledHeaderConfig, TransformStage, UpdateGuard,
-        UpdateTask,
+        ProcessTargets, ProviderIdType, ResolveReason, ReverseProxyDisabledHeaderConfig, TraktConfig, TransformStage,
+        UpdateGuard, UpdateTask,
     },
     utils::{debug_if_enabled, log_memory_snapshot, trace_if_enabled, StepMeasure, StepMeasureCallback},
 };
-use tuliprox_curation::curate_trakt_categories;
+use tuliprox_curation::{
+    evaluate_trakt_curation, project_trakt_categories, CurationEvaluation, CurationFailure, CurationRunOutcome,
+    SelectorOutcome,
+};
 use tuliprox_iptv::{
     epg::{CountingEpgSink, EpgFetchRequest, EpgProvider},
     error::ProviderErrorKind,
@@ -62,8 +65,8 @@ use tuliprox_iptv::{
     xtream,
 };
 use tuliprox_repository::{
-    load_input_playlist, persist_input_playlist, persist_playlist, CategoryKey, MemoryPlaylistSource, PlaylistSource,
-    PlaylistStorageState,
+    load_input_playlist, persist_input_playlist, persist_playlist, CategoryKey, MemoryPlaylistSource,
+    PlaylistPublicationPlan, PlaylistSource, PlaylistStorageState,
 };
 use tuliprox_session::ActiveProviderManager;
 

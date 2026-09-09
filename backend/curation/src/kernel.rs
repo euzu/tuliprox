@@ -56,19 +56,9 @@ pub struct CurationMembership {
 /// Outcome of evaluating one required selector.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelectorOutcome {
-    Complete {
-        key: CurationSelectorKey,
-        reference_count: usize,
-        memberships: Vec<CurationMembership>,
-    },
-    Incomplete {
-        key: CurationSelectorKey,
-        reason: CurationIncompleteReason,
-    },
-    Unavailable {
-        key: CurationSelectorKey,
-        reason: CurationUnavailableReason,
-    },
+    Complete { key: CurationSelectorKey, reference_count: usize, memberships: Vec<CurationMembership> },
+    Incomplete { key: CurationSelectorKey, reason: CurationIncompleteReason },
+    Unavailable { key: CurationSelectorKey, reason: CurationUnavailableReason },
 }
 
 impl SelectorOutcome {
@@ -173,6 +163,12 @@ impl CurationMatchPolicy {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub(crate) struct CurationSelectorSpec {
+    pub(crate) media_scope: CurationMediaScope,
+    pub(crate) match_policy: CurationMatchPolicy,
+}
+
+#[derive(Debug, Clone, Copy)]
 pub(crate) enum ProjectionIdentityStrategy<'a> {
     LegacyCategoryScoped { namespace: &'a str },
 }
@@ -190,8 +186,7 @@ impl ProjectionIdentityStrategy<'_> {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CurationCategorySpec<'a> {
     pub(crate) name: &'a str,
-    pub(crate) media_scope: CurationMediaScope,
-    pub(crate) match_policy: CurationMatchPolicy,
+    pub(crate) selector: CurationSelectorSpec,
     pub(crate) projection_identity: ProjectionIdentityStrategy<'a>,
 }
 
@@ -229,6 +224,7 @@ struct PlaylistCandidate<'a> {
 struct MatchResult<'playlist, 'reference> {
     playlist_item: &'playlist PlaylistItem,
     reference: &'reference CuratedMediaReference,
+    candidate_order: usize,
 }
 
 pub(crate) fn normalize_title_for_matching(title: &str) -> String {
@@ -275,7 +271,7 @@ fn calculate_year_bonus(playlist_year: Option<u32>, reference_year: Option<u32>)
 fn find_best_fuzzy_match_for_item<'playlist, 'reference>(
     candidate: &PlaylistCandidate<'playlist>,
     references: &'reference [CuratedMediaReference],
-    specification: &CurationCategorySpec<'_>,
+    specification: CurationSelectorSpec,
     threshold: f64,
 ) -> Option<MatchResult<'playlist, 'reference>> {
     let mut best_match: Option<(&CuratedMediaReference, f64)> = None;
@@ -306,7 +302,7 @@ fn find_best_fuzzy_match_for_item<'playlist, 'reference>(
             candidate.item.header.title,
             reference.title
         );
-        return Some(MatchResult { playlist_item: candidate.item, reference });
+        return Some(MatchResult { playlist_item: candidate.item, reference, candidate_order: 0 });
     }
 
     None
@@ -315,7 +311,7 @@ fn find_best_fuzzy_match_for_item<'playlist, 'reference>(
 fn find_best_match_for_item<'playlist, 'reference>(
     candidate: &PlaylistCandidate<'playlist>,
     references: &'reference [CuratedMediaReference],
-    specification: &CurationCategorySpec<'_>,
+    specification: CurationSelectorSpec,
 ) -> Option<MatchResult<'playlist, 'reference>> {
     if let Some(playlist_tmdb_id) = candidate.tmdb_id {
         for reference in references.iter().filter(|reference| {
@@ -323,7 +319,7 @@ fn find_best_match_for_item<'playlist, 'reference>(
         }) {
             if Some(playlist_tmdb_id) == reference.tmdb_id {
                 trace!("TMDB exact curation match: '{}' (TMDB: {})", candidate.item.header.title, playlist_tmdb_id);
-                return Some(MatchResult { playlist_item: candidate.item, reference });
+                return Some(MatchResult { playlist_item: candidate.item, reference, candidate_order: 0 });
             }
         }
     }
@@ -335,7 +331,7 @@ fn find_best_match_for_item<'playlist, 'reference>(
 fn find_matches<'playlist, 'reference>(
     references: &'reference [CuratedMediaReference],
     playlist: &'playlist [PlaylistGroup],
-    specification: &CurationCategorySpec<'_>,
+    specification: CurationSelectorSpec,
 ) -> Vec<MatchResult<'playlist, 'reference>> {
     let reference_count =
         references.iter().filter(|reference| specification.media_scope.includes_reference(reference.kind)).count();
@@ -345,6 +341,7 @@ fn find_matches<'playlist, 'reference>(
     );
 
     let mut matches = Vec::new();
+    let mut candidate_order = 0usize;
     for playlist_group in playlist {
         for channel in &playlist_group.channels {
             if specification.media_scope.includes_cluster(channel.header.xtream_cluster)
@@ -360,9 +357,11 @@ fn find_matches<'playlist, 'reference>(
                     year: extract_year_from_title(&channel.header.title),
                     tmdb_id: channel.get_tmdb_id(),
                 };
-                if let Some(matched) = find_best_match_for_item(&candidate, references, specification) {
+                if let Some(mut matched) = find_best_match_for_item(&candidate, references, specification) {
+                    matched.candidate_order = candidate_order;
                     matches.push(matched);
                 }
+                candidate_order += 1;
             }
         }
     }
@@ -371,16 +370,27 @@ fn find_matches<'playlist, 'reference>(
 
 fn sort_matches(matches: &mut [MatchResult<'_, '_>]) {
     matches.sort_by(|left, right| {
-        (left.reference.rank.unwrap_or(9999), left.reference.title.to_lowercase())
-            .cmp(&(right.reference.rank.unwrap_or(9999), right.reference.title.to_lowercase()))
+        (left.reference.rank.unwrap_or(9999), left.reference.title.to_lowercase(), left.candidate_order).cmp(&(
+            right.reference.rank.unwrap_or(9999),
+            right.reference.title.to_lowercase(),
+            right.candidate_order,
+        ))
     });
+}
+
+fn subject_uuid(item: &PlaylistItem) -> UUIDType {
+    if item.header.uuid == UUIDType::default() {
+        item.get_uuid()
+    } else {
+        item.header.uuid
+    }
 }
 
 pub(crate) fn evaluate_selector(
     key: CurationSelectorKey,
     references: &[CuratedMediaReference],
     playlist: &[PlaylistGroup],
-    specification: &CurationCategorySpec<'_>,
+    specification: CurationSelectorSpec,
 ) -> SelectorOutcome {
     let reference_count =
         references.iter().filter(|reference| specification.media_scope.includes_reference(reference.kind)).count();
@@ -388,55 +398,80 @@ pub(crate) fn evaluate_selector(
     sort_matches(&mut matches);
     let memberships = matches
         .into_iter()
-        .enumerate()
-        .map(|(candidate_order, matched)| CurationMembership {
+        .map(|matched| CurationMembership {
             selector_key: key,
-            subject_uuid: if matched.playlist_item.header.uuid == UUIDType::default() {
-                matched.playlist_item.get_uuid()
-            } else {
-                matched.playlist_item.header.uuid
-            },
+            subject_uuid: subject_uuid(matched.playlist_item),
             media_kind: CurationMediaKind::from_playlist_item_type(matched.playlist_item.header.item_type)
                 .expect("curation matches contain only movie or series roots"),
             rank: matched.reference.rank,
             title_tiebreak: matched.reference.title.to_lowercase(),
-            candidate_order,
+            candidate_order: matched.candidate_order,
         })
         .collect();
     SelectorOutcome::Complete { key, reference_count, memberships }
 }
 
+pub(crate) struct CurationProjectionCatalog<'playlist> {
+    items_by_uuid: HashMap<UUIDType, &'playlist PlaylistItem>,
+    series_children_by_parent_code: HashMap<Arc<str>, Vec<&'playlist PlaylistItem>>,
+}
+
+impl<'playlist> CurationProjectionCatalog<'playlist> {
+    pub(crate) fn new(playlist: &'playlist [PlaylistGroup]) -> Self {
+        let items_by_uuid = playlist
+            .iter()
+            .flat_map(|group| &group.channels)
+            .filter(|item| CurationMediaKind::from_playlist_item_type(item.header.item_type).is_some())
+            .map(|item| (subject_uuid(item), item))
+            .collect();
+        Self { items_by_uuid, series_children_by_parent_code: series_children_by_parent_code(playlist) }
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn curate_category(
     references: &[CuratedMediaReference],
     playlist: &[PlaylistGroup],
     specification: &CurationCategorySpec<'_>,
 ) -> Vec<PlaylistGroup> {
-    let matches = find_matches(references, playlist, specification);
-    let series_children = series_children_by_parent_code(playlist);
-    create_category_from_matches(matches, specification, &series_children)
+    let mut matches = find_matches(references, playlist, specification.selector);
+    sort_matches(&mut matches);
+    let items = matches.into_iter().map(|matched| matched.playlist_item).collect();
+    let projection_catalog = CurationProjectionCatalog::new(playlist);
+    create_category_from_items(items, specification, &projection_catalog.series_children_by_parent_code)
 }
 
-fn create_category_from_matches(
-    mut matches: Vec<MatchResult<'_, '_>>,
+pub(crate) fn project_memberships<'membership>(
+    memberships: impl IntoIterator<Item = &'membership CurationMembership>,
+    projection_catalog: &CurationProjectionCatalog<'_>,
+    specification: &CurationCategorySpec<'_>,
+) -> Vec<PlaylistGroup> {
+    let items = memberships
+        .into_iter()
+        .filter(|membership| specification.selector.media_scope.includes_reference(membership.media_kind))
+        .filter_map(|membership| projection_catalog.items_by_uuid.get(&membership.subject_uuid).copied())
+        .collect();
+    create_category_from_items(items, specification, &projection_catalog.series_children_by_parent_code)
+}
+
+fn create_category_from_items(
+    items: Vec<&PlaylistItem>,
     specification: &CurationCategorySpec<'_>,
     series_children_by_parent_code: &HashMap<Arc<str>, Vec<&PlaylistItem>>,
 ) -> Vec<PlaylistGroup> {
-    if matches.is_empty() {
+    if items.is_empty() {
         return Vec::new();
     }
-
-    sort_matches(&mut matches);
 
     let group_title = specification.name.intern();
     let mut matched_items_by_cluster: IndexMap<XtreamCluster, Vec<PlaylistItem>> = IndexMap::new();
 
-    for matched in matches {
-        let projected_item = clone_item_for_category(matched.playlist_item, specification, &group_title);
+    for item in items {
+        let projected_item = clone_item_for_category(item, specification, &group_title);
         let parent_uuid = projected_item.header.uuid.intern();
         let is_series_info =
             matches!(projected_item.header.item_type, PlaylistItemType::SeriesInfo | PlaylistItemType::LocalSeriesInfo);
-        let child_lookup_keys =
-            if is_series_info { series_info_child_lookup_keys(matched.playlist_item) } else { Vec::new() };
+        let child_lookup_keys = if is_series_info { series_info_child_lookup_keys(item) } else { Vec::new() };
         let cluster = projected_item.header.xtream_cluster;
         matched_items_by_cluster.entry(cluster).or_default().push(projected_item);
 
@@ -545,7 +580,7 @@ mod tests {
         ];
         let candidate = candidate(&playlist_item);
 
-        let matched = find_best_match_for_item(&candidate, &references, &specification("Featured", false))
+        let matched = find_best_match_for_item(&candidate, &references, specification("Featured", false).selector)
             .expect("TMDB identity should take precedence");
 
         assert_eq!(matched.reference.tmdb_id, Some(222));
@@ -557,10 +592,10 @@ mod tests {
         let without_tmdb = video_item("The Captive", None);
         let matching_tmdb = video_item("Cautivos", Some(456));
         let references = vec![reference(CurationMediaKind::Movie, "The Captive", Some(1915), Some(456), Some(1))];
-        let exact_only = specification("Featured", true);
+        let exact_only = specification("Featured", true).selector;
 
-        assert!(find_best_match_for_item(&candidate(&without_tmdb), &references, &exact_only).is_none());
-        assert!(find_best_match_for_item(&candidate(&matching_tmdb), &references, &exact_only).is_some());
+        assert!(find_best_match_for_item(&candidate(&without_tmdb), &references, exact_only).is_none());
+        assert!(find_best_match_for_item(&candidate(&matching_tmdb), &references, exact_only).is_some());
     }
 
     #[test]
@@ -569,10 +604,10 @@ mod tests {
         let candidate = candidate(&playlist_item);
         let matching_year = vec![reference(CurationMediaKind::Movie, "The Matrix", Some(1999), None, Some(1))];
         let different_year = vec![reference(CurationMediaKind::Movie, "The Matrix", Some(2000), None, Some(2))];
-        let specification = specification("Featured", false);
+        let specification = specification("Featured", false).selector;
 
-        assert!(find_best_match_for_item(&candidate, &matching_year, &specification).is_some());
-        assert!(find_best_match_for_item(&candidate, &different_year, &specification).is_none());
+        assert!(find_best_match_for_item(&candidate, &matching_year, specification).is_some());
+        assert!(find_best_match_for_item(&candidate, &different_year, specification).is_none());
     }
 
     #[test]
@@ -583,9 +618,12 @@ mod tests {
             reference(CurationMediaKind::Movie, "The Matrix", None, Some(222), Some(2)),
         ];
 
-        let matched =
-            find_best_match_for_item(&candidate(&playlist_item), &references, &specification("Featured", false))
-                .expect("a perfect fuzzy title should match");
+        let matched = find_best_match_for_item(
+            &candidate(&playlist_item),
+            &references,
+            specification("Featured", false).selector,
+        )
+        .expect("a perfect fuzzy title should match");
 
         assert_eq!(matched.reference.tmdb_id, Some(111));
     }
@@ -598,15 +636,18 @@ mod tests {
             reference(CurationMediaKind::Movie, "matrixx", None, Some(222), Some(2)),
         ];
 
-        let matched =
-            find_best_match_for_item(&candidate(&playlist_item), &references, &fuzzy_specification("Featured", 80))
-                .expect("the best reference above an 80 percent threshold should match");
+        let matched = find_best_match_for_item(
+            &candidate(&playlist_item),
+            &references,
+            fuzzy_specification("Featured", 80).selector,
+        )
+        .expect("the best reference above an 80 percent threshold should match");
 
         assert_eq!(matched.reference.tmdb_id, Some(222));
         assert!(find_best_match_for_item(
             &candidate(&playlist_item),
             &references,
-            &fuzzy_specification("Featured", 90),
+            fuzzy_specification("Featured", 90).selector,
         )
         .is_none());
     }
@@ -640,10 +681,10 @@ mod tests {
             xtream_cluster: XtreamCluster::Video,
         }];
         let key = CurationSelectorKey(3);
-        let specification = specification("Ignored by membership evaluation", true);
+        let specification = specification("Ignored by membership evaluation", true).selector;
 
         let SelectorOutcome::Complete { reference_count, memberships, .. } =
-            evaluate_selector(key, &[], &playlist, &specification)
+            evaluate_selector(key, &[], &playlist, specification)
         else {
             panic!("an empty source is complete")
         };
@@ -652,7 +693,7 @@ mod tests {
 
         let no_match = vec![reference(CurationMediaKind::Movie, "Missing", None, Some(8), Some(1))];
         let SelectorOutcome::Complete { reference_count, memberships, .. } =
-            evaluate_selector(key, &no_match, &playlist, &specification)
+            evaluate_selector(key, &no_match, &playlist, specification)
         else {
             panic!("a complete source with no local match is complete")
         };
@@ -661,7 +702,7 @@ mod tests {
 
         let matched = vec![reference(CurationMediaKind::Movie, "Matched", None, Some(7), Some(1))];
         let SelectorOutcome::Complete { reference_count, memberships, .. } =
-            evaluate_selector(key, &matched, &playlist, &specification)
+            evaluate_selector(key, &matched, &playlist, specification)
         else {
             panic!("matching source is complete")
         };
@@ -689,12 +730,13 @@ mod tests {
             CurationSelectorKey(0),
             &references,
             &playlist,
-            &specification("Membership", true),
+            specification("Membership", true).selector,
         ) else {
             panic!("selector should complete")
         };
 
         assert_eq!(memberships.len(), 2);
+        assert_eq!(memberships.iter().map(|membership| membership.candidate_order).collect::<Vec<_>>(), [0, 1]);
         assert_ne!(memberships[0].subject_uuid, memberships[1].subject_uuid);
     }
 
@@ -718,8 +760,13 @@ mod tests {
             reference(CurationMediaKind::Movie, "Movie", None, Some(1), Some(1)),
             reference(CurationMediaKind::Series, "Show", None, Some(2), Some(2)),
         ];
-        let specification =
-            CurationCategorySpec { media_scope: CurationMediaScope::Both, ..specification("Mixed", true) };
+        let specification = CurationCategorySpec {
+            selector: CurationSelectorSpec {
+                media_scope: CurationMediaScope::Both,
+                ..specification("Mixed", true).selector
+            },
+            ..specification("Mixed", true)
+        };
 
         let categories = curate_category(&references, &playlist, &specification);
 
@@ -739,11 +786,11 @@ mod tests {
             reference(CurationMediaKind::Movie, "Movie Reference", None, Some(42), Some(2)),
         ];
         let exact_specification =
-            CurationCategorySpec { media_scope: CurationMediaScope::Both, ..specification("Mixed", true) };
+            CurationSelectorSpec { media_scope: CurationMediaScope::Both, ..specification("Mixed", true).selector };
 
-        let movie_match = find_best_match_for_item(&candidate(&movie), &exact_references, &exact_specification)
+        let movie_match = find_best_match_for_item(&candidate(&movie), &exact_references, exact_specification)
             .expect("movie candidate should match the movie reference");
-        let series_match = find_best_match_for_item(&candidate(&series), &exact_references, &exact_specification)
+        let series_match = find_best_match_for_item(&candidate(&series), &exact_references, exact_specification)
             .expect("series candidate should match the series reference");
 
         assert_eq!(movie_match.reference.kind, CurationMediaKind::Movie);
@@ -753,12 +800,14 @@ mod tests {
             reference(CurationMediaKind::Series, "Shared Title", None, None, Some(1)),
             reference(CurationMediaKind::Movie, "Shared Title", None, None, Some(2)),
         ];
-        let fuzzy_specification =
-            CurationCategorySpec { media_scope: CurationMediaScope::Both, ..fuzzy_specification("Mixed", 100) };
+        let fuzzy_specification = CurationSelectorSpec {
+            media_scope: CurationMediaScope::Both,
+            ..fuzzy_specification("Mixed", 100).selector
+        };
 
-        let movie_match = find_best_match_for_item(&candidate(&movie), &fuzzy_references, &fuzzy_specification)
+        let movie_match = find_best_match_for_item(&candidate(&movie), &fuzzy_references, fuzzy_specification)
             .expect("movie candidate should fuzzy-match the movie reference");
-        let series_match = find_best_match_for_item(&candidate(&series), &fuzzy_references, &fuzzy_specification)
+        let series_match = find_best_match_for_item(&candidate(&series), &fuzzy_references, fuzzy_specification)
             .expect("series candidate should fuzzy-match the series reference");
 
         assert_eq!(movie_match.reference.kind, CurationMediaKind::Movie);
@@ -852,8 +901,10 @@ mod tests {
         if exact_only {
             CurationCategorySpec {
                 name: category_name,
-                media_scope: CurationMediaScope::Movies,
-                match_policy: CurationMatchPolicy::ExactTmdbOnly,
+                selector: CurationSelectorSpec {
+                    media_scope: CurationMediaScope::Movies,
+                    match_policy: CurationMatchPolicy::ExactTmdbOnly,
+                },
                 projection_identity: ProjectionIdentityStrategy::LegacyCategoryScoped { namespace: "legacy-category" },
             }
         } else {
@@ -864,14 +915,20 @@ mod tests {
     fn fuzzy_specification(category_name: &str, threshold_percent: u8) -> CurationCategorySpec<'_> {
         CurationCategorySpec {
             name: category_name,
-            media_scope: CurationMediaScope::Movies,
-            match_policy: CurationMatchPolicy::ExactTmdbThenFuzzy { threshold_percent },
+            selector: CurationSelectorSpec {
+                media_scope: CurationMediaScope::Movies,
+                match_policy: CurationMatchPolicy::ExactTmdbThenFuzzy { threshold_percent },
+            },
             projection_identity: ProjectionIdentityStrategy::LegacyCategoryScoped { namespace: "legacy-category" },
         }
     }
 
     fn series_specification(category_name: &str, exact_only: bool) -> CurationCategorySpec<'_> {
-        CurationCategorySpec { media_scope: CurationMediaScope::Series, ..specification(category_name, exact_only) }
+        let specification = specification(category_name, exact_only);
+        CurationCategorySpec {
+            selector: CurationSelectorSpec { media_scope: CurationMediaScope::Series, ..specification.selector },
+            ..specification
+        }
     }
 
     fn candidate(item: &PlaylistItem) -> PlaylistCandidate<'_> {
