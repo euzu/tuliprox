@@ -47,7 +47,8 @@ impl TraktApiConfigDto {
 pub struct TraktListConfigDto {
     pub user: String,
     pub list_slug: String,
-    pub category_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_name: Option<String>,
     pub content_type: TraktContentType,
     #[serde(default, skip_serializing_if = "is_false")]
     pub tmdb_only: bool,
@@ -92,7 +93,8 @@ pub enum TraktChartType {
 pub struct TraktChartConfigDto {
     pub kind: TraktChartKind,
     pub chart: TraktChartType,
-    pub category_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_name: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub tmdb_only: bool,
     #[serde(default = "default_trakt_fuzzy_threshold")]
@@ -104,7 +106,7 @@ impl Default for TraktChartConfigDto {
         Self {
             kind: TraktChartKind::default(),
             chart: TraktChartType::default(),
-            category_name: String::new(),
+            category_name: None,
             tmdb_only: false,
             fuzzy_match_threshold: default_trakt_fuzzy_threshold(),
         }
@@ -116,7 +118,7 @@ impl Default for TraktListConfigDto {
         TraktListConfigDto {
             user: String::new(),
             list_slug: String::new(),
-            category_name: String::new(),
+            category_name: None,
             content_type: TraktContentType::default(),
             tmdb_only: false,
             fuzzy_match_threshold: default_trakt_fuzzy_threshold(),
@@ -129,6 +131,10 @@ impl Default for TraktListConfigDto {
 pub struct TraktConfigDto {
     #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
+    #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
+    pub catalog_selection: bool,
+    #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
+    pub include_xtream_base_categories: bool,
     #[serde(default)]
     pub api: TraktApiConfigDto,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -139,12 +145,29 @@ pub struct TraktConfigDto {
 
 impl Default for TraktConfigDto {
     fn default() -> Self {
-        Self { enabled: true, api: TraktApiConfigDto::default(), lists: Vec::new(), charts: Vec::new() }
+        Self {
+            enabled: true,
+            catalog_selection: true,
+            include_xtream_base_categories: true,
+            api: TraktApiConfigDto::default(),
+            lists: Vec::new(),
+            charts: Vec::new(),
+        }
     }
 }
 
 impl TraktConfigDto {
-    pub fn prepare(&mut self) { self.api.prepare(); }
+    pub fn prepare(&mut self) {
+        self.api.prepare();
+        for category_name in self
+            .lists
+            .iter_mut()
+            .map(|selector| &mut selector.category_name)
+            .chain(self.charts.iter_mut().map(|selector| &mut selector.category_name))
+        {
+            *category_name = category_name.take().map(|name| name.trim().to_string()).filter(|name| !name.is_empty());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -210,12 +233,28 @@ mod tests {
         )
         .expect("charts-only Trakt config should deserialize");
 
+        assert!(config.catalog_selection);
+        assert!(config.include_xtream_base_categories);
         assert!(config.lists.is_empty());
         assert_eq!(config.charts.len(), 1);
         assert_eq!(config.charts[0].kind, TraktChartKind::Movies);
         assert_eq!(config.charts[0].kind.content_type(), TraktContentType::Vod);
         assert_eq!(config.charts[0].chart, TraktChartType::Trending);
+        assert_eq!(config.charts[0].category_name.as_deref(), Some("Trending Movies"));
         assert_eq!(config.charts[0].fuzzy_match_threshold, default_trakt_fuzzy_threshold());
+    }
+
+    #[test]
+    fn selector_category_is_optional_and_projection_switches_are_independent() {
+        let config = serde_json::from_str::<TraktConfigDto>(
+            r#"{"catalog_selection":false,"include_xtream_base_categories":false,"lists":[{"user":"alice","list_slug":"watchlist","content_type":"both"}]}"#,
+        )
+        .expect("selection-only Trakt selector should deserialize");
+
+        assert!(!config.catalog_selection);
+        assert!(!config.include_xtream_base_categories);
+        assert_eq!(config.lists.len(), 1);
+        assert!(config.lists[0].category_name.is_none());
     }
 
     #[test]

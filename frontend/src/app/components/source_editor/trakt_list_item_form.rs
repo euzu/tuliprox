@@ -1,7 +1,7 @@
 use crate::{
     app::components::{build_options, select::Select, selection_parse_first, Card, DropDownSelection, TextButton},
-    config_field, config_field_bool, config_field_child, config_field_custom, edit_field_bool, edit_field_number_u8,
-    edit_field_text, generate_form_reducer,
+    config_field, config_field_bool, config_field_child, config_field_custom, config_field_optional, edit_field_bool,
+    edit_field_number_u8, edit_field_text, edit_field_text_option, generate_form_reducer,
     i18n::use_translation,
 };
 use shared::model::{TraktContentType, TraktListConfigDto};
@@ -31,7 +31,7 @@ generate_form_reducer!(
     fields {
         User => user: String,
         ListSlug => list_slug: String,
-        CategoryName => category_name: String,
+        CategoryName => category_name: Option<String>,
         ContentType => content_type: TraktContentType,
         TmdbOnly => tmdb_only: bool,
         FuzzyMatchThreshold => fuzzy_match_threshold: u8,
@@ -56,7 +56,7 @@ pub fn TraktListItemForm(props: &TraktListItemFormProps) -> Html {
         form: props.initial.clone().unwrap_or_else(|| TraktListConfigDto {
             user: String::new(),
             list_slug: String::new(),
-            category_name: String::new(),
+            category_name: None,
             content_type: TraktContentType::Both,
             tmdb_only: false,
             fuzzy_match_threshold: 80,
@@ -80,10 +80,7 @@ pub fn TraktListItemForm(props: &TraktListItemFormProps) -> Html {
         let on_submit = props.on_submit.clone();
         Callback::from(move |_| {
             let data = form_state.form.clone();
-            if !data.user.trim().is_empty()
-                && !data.list_slug.trim().is_empty()
-                && !data.category_name.trim().is_empty()
-            {
+            if !data.user.trim().is_empty() && !data.list_slug.trim().is_empty() {
                 on_submit.emit(data);
             }
         })
@@ -101,12 +98,12 @@ pub fn TraktListItemForm(props: &TraktListItemFormProps) -> Html {
             if props.readonly {
                 { config_field!(form_state.form, translate.t(LABEL_TRAKT_USER), user) }
                 { config_field!(form_state.form, translate.t(LABEL_TRAKT_LIST_SLUG), list_slug) }
-                { config_field!(form_state.form, translate.t(LABEL_TRAKT_CATEGORY_NAME), category_name) }
+                { config_field_optional!(form_state.form, translate.t(LABEL_TRAKT_CATEGORY_NAME), category_name) }
             } else {
                 <>
                     { edit_field_text!(form_state, translate.t(LABEL_TRAKT_USER), user, TraktListFormAction::User) }
                     { edit_field_text!(form_state, translate.t(LABEL_TRAKT_LIST_SLUG), list_slug, TraktListFormAction::ListSlug) }
-                    { edit_field_text!(form_state, translate.t(LABEL_TRAKT_CATEGORY_NAME), category_name, TraktListFormAction::CategoryName) }
+                    { edit_field_text_option!(form_state, translate.t(LABEL_TRAKT_CATEGORY_NAME), category_name, TraktListFormAction::CategoryName) }
                 </>
             }
 

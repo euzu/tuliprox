@@ -39,7 +39,7 @@ impl From<&TraktApiConfig> for TraktApiConfigDto {
 pub struct TraktListConfig {
     pub user: String,
     pub list_slug: String,
-    pub category_name: String,
+    pub category_name: Option<String>,
     pub content_type: TraktContentType,
     pub tmdb_only: bool,
     pub fuzzy_match_threshold: u8, // Percentage (0-100)
@@ -76,7 +76,7 @@ impl From<&TraktListConfig> for TraktListConfigDto {
 pub struct TraktChartConfig {
     pub kind: TraktChartKind,
     pub chart: TraktChartType,
-    pub category_name: String,
+    pub category_name: Option<String>,
     pub tmdb_only: bool,
     pub fuzzy_match_threshold: u8, // Percentage (0-100)
 }
@@ -109,6 +109,8 @@ impl From<&TraktChartConfig> for TraktChartConfigDto {
 #[derive(Debug, Clone)]
 pub struct TraktConfig {
     pub enabled: bool,
+    pub catalog_selection: bool,
+    pub include_xtream_base_categories: bool,
     pub api: TraktApiConfig,
     pub lists: Vec<TraktListConfig>,
     pub charts: Vec<TraktChartConfig>,
@@ -119,6 +121,8 @@ impl From<&TraktConfigDto> for TraktConfig {
     fn from(dto: &TraktConfigDto) -> Self {
         Self {
             enabled: dto.enabled,
+            catalog_selection: dto.catalog_selection,
+            include_xtream_base_categories: dto.include_xtream_base_categories,
             api: TraktApiConfig::from(&dto.api),
             lists: dto.lists.iter().map(Into::into).collect(),
             charts: dto.charts.iter().map(Into::into).collect(),
@@ -129,6 +133,8 @@ impl From<&TraktConfig> for TraktConfigDto {
     fn from(dto: &TraktConfig) -> Self {
         Self {
             enabled: dto.enabled,
+            catalog_selection: dto.catalog_selection,
+            include_xtream_base_categories: dto.include_xtream_base_categories,
             api: TraktApiConfigDto::from(&dto.api),
             lists: dto.lists.iter().map(TraktListConfigDto::from).collect(),
             charts: dto.charts.iter().map(TraktChartConfigDto::from).collect(),
@@ -144,6 +150,8 @@ mod tests {
     fn resolved_trakt_config_round_trips_through_the_compatible_dto() {
         let dto = TraktConfigDto {
             enabled: true,
+            catalog_selection: true,
+            include_xtream_base_categories: true,
             api: TraktApiConfigDto {
                 api_key: "client-id".to_string(),
                 version: "2".to_string(),
@@ -153,7 +161,7 @@ mod tests {
             lists: vec![TraktListConfigDto {
                 user: "alice".to_string(),
                 list_slug: "watchlist".to_string(),
-                category_name: "Watchlist".to_string(),
+                category_name: Some("Watchlist".to_string()),
                 content_type: TraktContentType::Vod,
                 tmdb_only: false,
                 fuzzy_match_threshold: 80,
@@ -161,7 +169,7 @@ mod tests {
             charts: vec![TraktChartConfigDto {
                 kind: TraktChartKind::Shows,
                 chart: TraktChartType::Popular,
-                category_name: "Popular Shows".to_string(),
+                category_name: Some("Popular Shows".to_string()),
                 tmdb_only: true,
                 fuzzy_match_threshold: 90,
             }],

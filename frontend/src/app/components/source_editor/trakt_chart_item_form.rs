@@ -1,7 +1,7 @@
 use crate::{
     app::components::{build_options, select::Select, selection_parse_first, Card, DropDownSelection, TextButton},
-    config_field_bool, config_field_child, config_field_custom, edit_field_bool, edit_field_number_u8, edit_field_text,
-    generate_form_reducer,
+    config_field_bool, config_field_child, config_field_custom, config_field_optional, edit_field_bool,
+    edit_field_number_u8, edit_field_text_option, generate_form_reducer,
     i18n::use_translation,
 };
 use shared::model::{TraktChartConfigDto, TraktChartKind, TraktChartType};
@@ -37,7 +37,7 @@ generate_form_reducer!(
     fields {
         Kind => kind: TraktChartKind,
         Chart => chart: TraktChartType,
-        CategoryName => category_name: String,
+        CategoryName => category_name: Option<String>,
         TmdbOnly => tmdb_only: bool,
         FuzzyMatchThreshold => fuzzy_match_threshold: u8,
     }
@@ -80,12 +80,7 @@ pub fn TraktChartItemForm(props: &TraktChartItemFormProps) -> Html {
     let handle_submit = {
         let form_state = form_state.clone();
         let on_submit = props.on_submit.clone();
-        Callback::from(move |_| {
-            let data = form_state.form.clone();
-            if !data.category_name.trim().is_empty() {
-                on_submit.emit(data);
-            }
-        })
+        Callback::from(move |_| on_submit.emit(form_state.form.clone()))
     };
     let handle_cancel = {
         let on_cancel = props.on_cancel.clone();
@@ -97,7 +92,7 @@ pub fn TraktChartItemForm(props: &TraktChartItemFormProps) -> Html {
             if props.readonly {
                 { config_field_custom!(translate.t(LABEL_TRAKT_CHART_KIND), translate.t(trakt_chart_kind_label_key(form_state.form.kind))) }
                 { config_field_custom!(translate.t(LABEL_TRAKT_CHART_TYPE), translate.t(trakt_chart_type_label_key(form_state.form.chart))) }
-                { config_field_custom!(translate.t(LABEL_TRAKT_CATEGORY_NAME), form_state.form.category_name.clone()) }
+                { config_field_optional!(form_state.form, translate.t(LABEL_TRAKT_CATEGORY_NAME), category_name) }
                 { config_field_bool!(form_state.form, translate.t(LABEL_TRAKT_TMDB_ONLY), tmdb_only) }
                 { config_field_custom!(translate.t(LABEL_TRAKT_FUZZY_MATCH_THRESHOLD), form_state.form.fuzzy_match_threshold.to_string()) }
             } else {
@@ -131,7 +126,7 @@ pub fn TraktChartItemForm(props: &TraktChartItemFormProps) -> Html {
                         />
                     }
                 })}
-                { edit_field_text!(form_state, translate.t(LABEL_TRAKT_CATEGORY_NAME), category_name, TraktChartFormAction::CategoryName) }
+                { edit_field_text_option!(form_state, translate.t(LABEL_TRAKT_CATEGORY_NAME), category_name, TraktChartFormAction::CategoryName) }
                 { edit_field_bool!(form_state, translate.t(LABEL_TRAKT_TMDB_ONLY), tmdb_only, TraktChartFormAction::TmdbOnly) }
                 { edit_field_number_u8!(form_state, translate.t(LABEL_TRAKT_FUZZY_MATCH_THRESHOLD), fuzzy_match_threshold, TraktChartFormAction::FuzzyMatchThreshold) }
             }

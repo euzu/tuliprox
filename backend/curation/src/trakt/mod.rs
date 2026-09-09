@@ -186,8 +186,16 @@ impl TraktCategoriesProcessor {
             match self.client.get_list_items(list_config).await {
                 Ok(items) => {
                     debug!("Processing Trakt list {source_label} with {} items", items.len());
-                    let references = translate_items(items);
-                    append_categories(&references, playlist, &specification, &mut new_categories, &mut total_matches);
+                    if list_config.category_name.as_deref().is_some_and(|name| !name.trim().is_empty()) {
+                        let references = translate_items(items);
+                        append_categories(
+                            &references,
+                            playlist,
+                            &specification,
+                            &mut new_categories,
+                            &mut total_matches,
+                        );
+                    }
                 }
                 Err(error) => warn!("Failed to fetch Trakt list {source_label}: {}", error.message()),
             }
@@ -200,8 +208,16 @@ impl TraktCategoriesProcessor {
             match self.client.get_chart_items(chart_config).await {
                 Ok(items) => {
                     debug!("Processing Trakt chart {source_label} with {} items", items.len());
-                    let references = translate_items(items);
-                    append_categories(&references, playlist, &specification, &mut new_categories, &mut total_matches);
+                    if chart_config.category_name.as_deref().is_some_and(|name| !name.trim().is_empty()) {
+                        let references = translate_items(items);
+                        append_categories(
+                            &references,
+                            playlist,
+                            &specification,
+                            &mut new_categories,
+                            &mut total_matches,
+                        );
+                    }
                 }
                 Err(error) => warn!("Failed to fetch Trakt chart {source_label}: {}", error.message()),
             }
@@ -237,11 +253,21 @@ fn translate_items(items: Vec<TraktListItem>) -> Vec<CuratedMediaReference> {
 }
 
 fn list_category_spec(config: &TraktListConfig) -> CurationCategorySpec<'_> {
-    category_spec(&config.category_name, config.content_type, config.tmdb_only, config.fuzzy_match_threshold)
+    category_spec(
+        config.category_name.as_deref().unwrap_or_default(),
+        config.content_type,
+        config.tmdb_only,
+        config.fuzzy_match_threshold,
+    )
 }
 
 fn chart_category_spec(config: &TraktChartConfig) -> CurationCategorySpec<'_> {
-    category_spec(&config.category_name, config.kind.content_type(), config.tmdb_only, config.fuzzy_match_threshold)
+    category_spec(
+        config.category_name.as_deref().unwrap_or_default(),
+        config.kind.content_type(),
+        config.tmdb_only,
+        config.fuzzy_match_threshold,
+    )
 }
 
 fn category_spec(
@@ -609,6 +635,8 @@ mod tests {
     ) -> TraktConfig {
         TraktConfig {
             enabled,
+            catalog_selection: true,
+            include_xtream_base_categories: true,
             api: TraktApiConfig {
                 api_key: client_id.to_string(),
                 version: "2".to_string(),
@@ -624,7 +652,7 @@ mod tests {
         TraktListConfig {
             user: "test-user".to_string(),
             list_slug: "test-list".to_string(),
-            category_name: category_name.to_string(),
+            category_name: Some(category_name.to_string()),
             content_type: TraktContentType::Vod,
             tmdb_only: true,
             fuzzy_match_threshold: 100,
@@ -635,7 +663,7 @@ mod tests {
         TraktChartConfig {
             kind: TraktChartKind::Movies,
             chart: TraktChartType::Popular,
-            category_name: category_name.to_string(),
+            category_name: Some(category_name.to_string()),
             tmdb_only: true,
             fuzzy_match_threshold: 100,
         }
