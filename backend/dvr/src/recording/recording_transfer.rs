@@ -1273,7 +1273,12 @@ pub async fn ensure_recording_worker_running(
                             if let Some(input_name) = input_name {
                                 loop {
                                     let capacities = capacity.capacities_for_input(&input_name).await;
-                                    if background_download_should_wait(priority, &capacities, &download_cfg) {
+                                    // Loaded per attempt, not captured at spawn: a worker can
+                                    // outlive several reloads, and an operator raising the
+                                    // background limit expects it to take effect.
+                                    let live_config = app_config.config.load();
+                                    let capacity_cfg = live_config.recording().unwrap_or(&download_cfg);
+                                    if background_download_should_wait(priority, &capacities, capacity_cfg) {
                                         if let Err(err) = broadcast_worker_mutation(
                                             &event_manager,
                                             set_active_download_state(
@@ -1836,6 +1841,7 @@ fn start_recording_scheduler(
     let slot_waiters = Arc::clone(&recordings.slot_waiters);
     let bridge_capacity = Arc::clone(&capacity);
     let bridge_recording_cfg = recording_cfg.clone();
+    let bridge_app_config = Arc::clone(&app_config);
     let bridge_cancel_token = cancel_token.clone();
     tokio::spawn(async move {
         loop {
@@ -1845,6 +1851,9 @@ fn start_recording_scheduler(
             }
             let mut capacities_by_input: HashMap<Arc<str>, ProviderCapacities> = HashMap::new();
             let mut ready_waiter = None;
+            // Reloaded on each capacity signal rather than captured at spawn.
+            let live_config = bridge_app_config.config.load();
+            let waiter_cfg = live_config.recording().unwrap_or(&bridge_recording_cfg);
             let mut waiters = slot_waiters.snapshots().await;
             waiters.sort_by_key(|waiter| waiter.priority);
             for waiter in waiters {
@@ -1862,7 +1871,7 @@ fn start_recording_scheduler(
                 if !capacities_have_free_slot(&capacities) {
                     continue;
                 }
-                if background_download_should_wait(waiter.priority, &capacities, &bridge_recording_cfg) {
+                if background_download_should_wait(waiter.priority, &capacities, waiter_cfg) {
                     continue;
                 }
                 ready_waiter = Some(waiter.id);

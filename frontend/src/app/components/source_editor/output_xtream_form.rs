@@ -663,7 +663,7 @@ mod tests {
         let result = build_trakt_output_config(true, TraktApiConfigDto::default(), Vec::new(), charts.clone())
             .expect("charts-only trakt config");
 
-        assert!(result.lists.is_empty());
+        assert_eq!(result.lists, [] as [shared::model::TraktListConfigDto; 0]);
         assert_eq!(result.charts, charts);
     }
 

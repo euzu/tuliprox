@@ -6313,7 +6313,10 @@ mod tests {
             admission_strategies: Some(vec![]),
         });
 
-        assert!(get_effective_admission_strategies(&app_state.admission_ctx()).is_empty());
+        assert_eq!(
+            get_effective_admission_strategies(&app_state.admission_ctx()),
+            [] as [shared::model::AdmissionStrategy; 0]
+        );
     }
 
     #[tokio::test]
@@ -7396,7 +7399,7 @@ mod tests {
         let admission = result.admission;
 
         assert_eq!(admission.permission, UserConnectionPermission::Allowed);
-        assert!(app_state.active_users.active_streams().await.is_empty());
+        assert_eq!(app_state.active_users.active_streams().await, [] as [shared::model::StreamInfo; 0]);
     }
 
     #[tokio::test]
@@ -7522,7 +7525,7 @@ mod tests {
 
         assert_eq!(admission.permission, UserConnectionPermission::Allowed);
         assert_eq!(grace_mode, None);
-        assert!(app_state.active_users.active_streams().await.is_empty());
+        assert_eq!(app_state.active_users.active_streams().await, [] as [shared::model::StreamInfo; 0]);
     }
 
     #[tokio::test]
@@ -8507,7 +8510,7 @@ mod tests {
 
         app_state.connection_manager.release_connection(&hls_addr).await;
         assert_eq!(app_state.active_users.user_connections(&user.username).await, 0);
-        assert!(app_state.active_users.active_streams().await.is_empty());
+        assert_eq!(app_state.active_users.active_streams().await, [] as [shared::model::StreamInfo; 0]);
 
         let mut close_rx = app_state.connection_manager.get_close_connection_channel();
         let result = resolve_admission_with_strategies(
@@ -8528,7 +8531,7 @@ mod tests {
 
         assert_eq!(admission.permission, UserConnectionPermission::Allowed);
         assert_eq!(grace_mode, None);
-        assert!(app_state.active_users.active_streams().await.is_empty());
+        assert_eq!(app_state.active_users.active_streams().await, [] as [shared::model::StreamInfo; 0]);
         assert_eq!(
             tokio::time::timeout(std::time::Duration::from_millis(100), close_rx.recv())
                 .await

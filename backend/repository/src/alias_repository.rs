@@ -1027,7 +1027,7 @@ portal;http://portal.example/c/;00:1A:79:12:34:56;mac_plus_credentials;primary;m
         let input = "#url;auth_mode\nhttp://portal.example/c/;invalid\n";
         let aliases = csv_read_inputs_from_reader(InputType::StalkerBatch, Cursor::new(input))?;
 
-        assert!(aliases.is_empty());
+        assert_eq!(aliases, [] as [shared::model::ConfigInputAliasDto; 0]);
         Ok(())
     }
 
@@ -1061,7 +1061,7 @@ primary;http://portal.example/c/;00:1A:79:12:34:56;mac_only;mag254_strict;portal
         let result = csv_read_inputs_from_reader(InputType::M3uBatch, reader);
         assert!(result.is_ok());
         let aliases = result.unwrap();
-        assert!(!aliases.is_empty());
+        assert_ne!(aliases, [] as [shared::model::ConfigInputAliasDto; 0]);
         for config in aliases {
             assert!(config.url.contains("username"));
         }
@@ -1073,7 +1073,7 @@ primary;http://portal.example/c/;00:1A:79:12:34:56;mac_only;mag254_strict;portal
         let result = csv_read_inputs_from_reader(InputType::M3uBatch, reader);
         assert!(result.is_ok());
         let aliases = result.unwrap();
-        assert!(!aliases.is_empty());
+        assert_ne!(aliases, [] as [shared::model::ConfigInputAliasDto; 0]);
         for config in aliases {
             assert!(config.url.contains("username"));
         }
@@ -1085,7 +1085,7 @@ primary;http://portal.example/c/;00:1A:79:12:34:56;mac_only;mag254_strict;portal
         let result = csv_read_inputs_from_reader(InputType::XtreamBatch, reader);
         assert!(result.is_ok());
         let aliases = result.unwrap();
-        assert!(!aliases.is_empty());
+        assert_ne!(aliases, [] as [shared::model::ConfigInputAliasDto; 0]);
         for config in aliases {
             assert!(!config.url.contains("username"));
         }
@@ -1097,7 +1097,7 @@ primary;http://portal.example/c/;00:1A:79:12:34:56;mac_only;mag254_strict;portal
         let result = csv_read_inputs_from_reader(InputType::XtreamBatch, reader);
         assert!(result.is_ok());
         let aliases = result.unwrap();
-        assert!(!aliases.is_empty());
+        assert_ne!(aliases, [] as [shared::model::ConfigInputAliasDto; 0]);
         for config in aliases {
             assert!(!config.url.contains("username"));
         }
@@ -1257,7 +1257,7 @@ input_1;user;password;http://provider.tv;1;0;keep-me;old-enabled;old-expiry;trai
         .await?;
 
         assert!(!changed);
-        assert!(updated.is_empty());
+        assert_eq!(updated, [] as [std::string::String; 0]);
         assert!(!backup_dir.exists());
         Ok(())
     }

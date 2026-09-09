@@ -1402,7 +1402,7 @@ mod tests {
         assert_eq!(operation.database_path(), path);
         assert_eq!(operation.wal_path(), wal_path(path));
         assert_ne!(operation.transaction_id(), 0);
-        assert!(!operation.phase().is_empty());
+        assert_ne!(operation.phase(), "");
         assert!(operation.source().is_some());
         Ok(())
     }
@@ -1647,7 +1647,7 @@ mod tests {
             assert_eq!(operation.database_path(), path);
             assert_eq!(operation.wal_path(), wal_path(&path));
             assert_ne!(operation.transaction_id(), 0);
-            assert!(!operation.phase().is_empty());
+            assert_ne!(operation.phase(), "");
             assert!(operation.source().is_some());
         }
 

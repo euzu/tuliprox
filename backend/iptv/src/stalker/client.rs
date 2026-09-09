@@ -999,6 +999,6 @@ mod tests {
     #[test]
     fn identity_cookie_pairs_empty_without_device() {
         let config = StalkerInputConfig::default();
-        assert!(identity_cookie_pairs(&config).is_empty());
+        assert_eq!(identity_cookie_pairs(&config), [] as [(std::string::String, std::string::String); 0]);
     }
 }

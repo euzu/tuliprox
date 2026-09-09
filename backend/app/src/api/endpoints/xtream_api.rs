@@ -2705,7 +2705,7 @@ mod tests {
             .expect("M3U input handled by bridge");
 
         assert_eq!(resolved.url, "http://provider.example/channel/video-1704067200-3600.m3u8");
-        assert!(!resolved.discriminator.is_empty());
+        assert_ne!(resolved.discriminator, "");
     }
 
     #[test]

@@ -71,7 +71,7 @@ mod tests {
             "http://portal/c/".to_string(),
             "http://portal/server/load.php".to_string(),
         );
-        assert!(session.fingerprint_evidence.is_empty());
+        assert_eq!(session.fingerprint_evidence, [] as [std::string::String; 0]);
         assert_eq!(session.token, "abc");
     }
 

@@ -5024,7 +5024,7 @@ mod tests {
         let removed = manager.release_connection_as_kicked(&addr).await;
         assert!(removed.addr_removed);
         assert_eq!(removed.removed_streams.len(), 1);
-        assert!(manager.active_streams().await.is_empty());
+        assert_eq!(manager.active_streams().await, [] as [shared::model::StreamInfo; 0]);
     }
 
     #[tokio::test]
@@ -5074,13 +5074,13 @@ mod tests {
 
         let released = manager.release_connection(&addr).await;
         assert!(released.addr_removed);
-        assert!(released.removed_streams.is_empty());
-        assert!(manager.active_streams().await.is_empty());
+        assert_eq!(released.removed_streams, [] as [shared::model::StreamInfo; 0]);
+        assert_eq!(manager.active_streams().await, [] as [shared::model::StreamInfo; 0]);
 
         let kicked = manager.release_connection_as_kicked(&addr).await;
         assert!(kicked.addr_removed);
         assert_eq!(kicked.removed_streams.len(), 1);
-        assert!(manager.active_streams().await.is_empty());
+        assert_eq!(manager.active_streams().await, [] as [shared::model::StreamInfo; 0]);
     }
 
     #[tokio::test]
@@ -5877,7 +5877,7 @@ mod tests {
 
         assert!(manager.release_stream_by_uid(&addr, 44).await.is_some());
         assert_eq!(manager.active_users_and_connections().await, (0, 0));
-        assert!(manager.active_streams().await.is_empty());
+        assert_eq!(manager.active_streams().await, [] as [shared::model::StreamInfo; 0]);
     }
 
     #[tokio::test]
@@ -5933,7 +5933,7 @@ mod tests {
 
         manager.release_connection(&unrelated_addr).await;
         assert_eq!(manager.active_users_and_connections().await, (0, 0));
-        assert!(manager.active_streams().await.is_empty());
+        assert_eq!(manager.active_streams().await, [] as [shared::model::StreamInfo; 0]);
     }
 
     #[tokio::test]
@@ -6066,7 +6066,7 @@ mod tests {
         assert!(released.removed_streams.is_empty(), "adaptive session should remain logically active");
         assert_eq!(manager.user_connections("user1").await, 0);
         assert_eq!(manager.active_users_and_connections().await, (0, 0));
-        assert!(manager.active_streams().await.is_empty());
+        assert_eq!(manager.active_streams().await, [] as [shared::model::StreamInfo; 0]);
 
         let connections = manager.connections.read().await;
         let preserved_stream = connections
@@ -6156,7 +6156,7 @@ mod tests {
 
         let released = manager.release_connection(&addr).await;
         assert!(released.addr_removed);
-        assert!(released.removed_streams.is_empty());
+        assert_eq!(released.removed_streams, [] as [shared::model::StreamInfo; 0]);
         assert!(manager.release_stream(&addr).await.is_none());
     }
 
@@ -6220,7 +6220,7 @@ mod tests {
         manager
             .process_due_adaptive_expiry_entries(current_time_secs().saturating_add(default_hls_session_ttl_secs() + 1))
             .await;
-        assert!(manager.active_streams().await.is_empty());
+        assert_eq!(manager.active_streams().await, [] as [shared::model::StreamInfo; 0]);
     }
 
     #[tokio::test]
@@ -6476,7 +6476,7 @@ mod tests {
 
         let released = manager.release_stream(&addr).await;
         assert!(released.is_some(), "stream without schedulable expiry must be removed");
-        assert!(manager.active_streams().await.is_empty());
+        assert_eq!(manager.active_streams().await, [] as [shared::model::StreamInfo; 0]);
     }
 
     #[tokio::test]
@@ -6556,7 +6556,7 @@ mod tests {
             *expiry_index.get(&key).unwrap()
         };
         assert!(new_expires_at > old_expires_at);
-        assert!(manager.active_streams().await.is_empty());
+        assert_eq!(manager.active_streams().await, [] as [shared::model::StreamInfo; 0]);
     }
 
     #[tokio::test]
@@ -6701,7 +6701,7 @@ mod tests {
 
         let queued_event = cleanup_rx.try_recv().expect("prefilled cleanup event should remain queued");
         assert!(matches!(queued_event, CleanupEvent::ReleaseConnection { .. }));
-        assert!(manager.active_streams().await.is_empty());
+        assert_eq!(manager.active_streams().await, [] as [shared::model::StreamInfo; 0]);
     }
 
     #[tokio::test]
@@ -7539,7 +7539,7 @@ mod tests {
         assert!(manager.release_stream(&range_addr).await.is_none());
         let released = manager.release_connection(&range_addr).await;
         assert!(released.addr_removed);
-        assert!(released.removed_streams.is_empty());
+        assert_eq!(released.removed_streams, [] as [shared::model::StreamInfo; 0]);
 
         {
             let connections = manager.connections.read().await;
@@ -7568,7 +7568,7 @@ mod tests {
         assert!(manager.release_stream(&seek_addr).await.is_none());
         let released = manager.release_connection(&seek_addr).await;
         assert!(released.addr_removed);
-        assert!(released.removed_streams.is_empty());
+        assert_eq!(released.removed_streams, [] as [shared::model::StreamInfo; 0]);
 
         let connections = manager.connections.read().await;
         let connection_data = connections.by_key.get("user1").expect("user connection data");
@@ -7632,7 +7632,7 @@ mod tests {
         );
 
         assert_eq!(manager.user_connections(&user.username).await, 0);
-        assert!(manager.active_streams().await.is_empty());
+        assert_eq!(manager.active_streams().await, [] as [shared::model::StreamInfo; 0]);
 
         let connections = manager.connections.read().await;
         let preserved_stream = connections
@@ -8490,7 +8490,7 @@ mod tests {
         manager.release_stream_by_uid(&normal_addr, normal_stream_uid).await.expect("normal stream should release");
         let connections = manager.connections.read().await;
         let connection_data = connections.by_key.get(&user.username).expect("user connection data");
-        assert!(connection_data.streams.is_empty());
+        assert_eq!(connection_data.streams, [] as [shared::model::StreamInfo; 0]);
         assert!(connection_data.stream_kinds.is_empty());
         assert_no_real_connection_slots(connection_data);
         drop(connections);

@@ -13641,7 +13641,7 @@ mod tests {
         assert!(
             app_state.active_provider.is_provider_reserved_for_other_session(&account_name, Some("other-owner")).await
         );
-        assert!(app_state.active_users.active_streams().await.is_empty());
+        assert_eq!(app_state.active_users.active_streams().await, [] as [shared::model::StreamInfo; 0]);
     }
 
     #[tokio::test]
@@ -14005,7 +14005,7 @@ mod tests {
             assert_eq!(binding.input_name.as_ref(), "test-input");
             assert_eq!(binding.account_name.as_ref(), "test-input");
         }
-        assert!(app_state.active_users.active_streams().await.is_empty());
+        assert_eq!(app_state.active_users.active_streams().await, [] as [shared::model::StreamInfo; 0]);
     }
 
     #[tokio::test]
@@ -14911,7 +14911,7 @@ mod tests {
             .is_some());
         assert!(app_state.hls_proxy.sessions().get_by_key(&session_key).await.is_none());
         assert_eq!(app_state.hls_proxy.metrics().snapshot().refresh_started, 0);
-        assert!(app_state.active_users.active_streams().await.is_empty());
+        assert_eq!(app_state.active_users.active_streams().await, [] as [shared::model::StreamInfo; 0]);
     }
 
     #[test]
@@ -15838,7 +15838,7 @@ mod tests {
         assert!(!response.headers().contains_key(header::LOCATION));
         assert_eq!(response.headers()[header::CONTENT_TYPE], "application/vnd.apple.mpegurl");
         assert!(app_state.hls_proxy.access_leases().read().await.is_empty());
-        assert!(app_state.active_users.active_streams().await.is_empty());
+        assert_eq!(app_state.active_users.active_streams().await, [] as [shared::model::StreamInfo; 0]);
     }
 
     #[tokio::test]
@@ -15864,7 +15864,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert!(app_state.hls_proxy.access_leases().read().await.is_empty());
-        assert!(app_state.active_users.active_streams().await.is_empty());
+        assert_eq!(app_state.active_users.active_streams().await, [] as [shared::model::StreamInfo; 0]);
     }
 
     #[test]
@@ -16056,7 +16056,7 @@ mod tests {
 
         assert_eq!(reservation.request_url, "http://account.example.com/live/account-user/account-pass/12345.m3u8");
         assert!(reservation.selected_provider_config.is_some());
-        assert!(app_state.active_users.active_streams().await.is_empty());
+        assert_eq!(app_state.active_users.active_streams().await, [] as [shared::model::StreamInfo; 0]);
         app_state.connection_manager.release_provider_handle(reservation.provider_handle).await;
 
         assert!(
@@ -18598,7 +18598,7 @@ mod tests {
     }
 
     async fn assert_no_hls_cache_stream_registered(app_state: &Arc<AppState>) {
-        assert!(app_state.active_users.active_streams().await.is_empty());
+        assert_eq!(app_state.active_users.active_streams().await, [] as [shared::model::StreamInfo; 0]);
     }
 
     async fn response_body(response: Response<Body>) -> bytes::Bytes {

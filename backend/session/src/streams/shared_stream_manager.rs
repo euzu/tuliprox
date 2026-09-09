@@ -1183,7 +1183,7 @@ mod tests {
 
         SharedStreamState::cleanup_subscriber(&state, &shared_manager, &connection_manager, &addr, owner).await;
 
-        assert!(user_manager.active_streams().await.is_empty());
+        assert_eq!(user_manager.active_streams().await, [] as [shared::model::StreamInfo; 0]);
         assert_eq!(provider_manager.get_provider_connections_count().await, 0);
         let register = shared_manager.shared_streams.read().await;
         assert!(!register.by_key.contains_key(stream_url));

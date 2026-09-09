@@ -754,7 +754,7 @@ mod tests {
 
         let status = replace_server_status_snapshot(&mut status_holder, empty_backend_snapshot, &[]);
 
-        assert!(status.active_user_streams.is_empty());
+        assert_eq!(status.active_user_streams, [] as [shared::model::StreamInfo; 0]);
     }
 
     #[test]
@@ -1049,7 +1049,7 @@ mod tests {
             &[test_task("running", TransferStatusDto::Completed, RecordingKind::Live)],
         );
 
-        assert!(streams.is_empty());
+        assert_eq!(streams, [] as [shared::model::StreamInfo; 0]);
     }
 
     #[test]

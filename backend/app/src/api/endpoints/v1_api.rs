@@ -410,7 +410,7 @@ mod tests {
         let clean = create_status_check(&app_state).await;
         assert_eq!(clean.active_users, 0);
         assert_eq!(clean.active_user_connections, 0);
-        assert!(clean.active_user_streams.is_empty());
+        assert_eq!(clean.active_user_streams, [] as [shared::model::StreamInfo; 0]);
         assert_eq!(clean.active_provider_connections.unwrap_or_default().values().sum::<usize>(), 0);
     }
 }

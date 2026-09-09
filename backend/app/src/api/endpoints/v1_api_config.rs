@@ -12,7 +12,7 @@ use crate::{
     },
     iptv::xtream::{get_xtream_stream_url_base, xtream_login},
     model::{
-        recording_root_change, validate_library_paths_from_dto, ApiProxyConfig, InputSource, RecordingRootChange,
+        recording_reload_outcome, validate_library_paths_from_dto, ApiProxyConfig, InputSource, RecordingReloadOutcome,
         UserPlan,
     },
     utils::request::download_text_content,
@@ -164,25 +164,22 @@ async fn intern_save_config_main(file_path: &str, backup_dir: &str, cfg: &Config
     None
 }
 
-/// Decide whether this config may move the recording root.
+/// Decide what an incoming config does to the recording block.
 ///
-/// Counting the queue is the check: an entry only exists while a recording it
-/// points at is expected to be found.
-async fn recording_root_change_for(app_state: &Arc<AppState>, incoming: &ConfigDto) -> RecordingRootChange {
+/// Counting the queue is the root check: an entry only exists while a
+/// recording it points at is expected to be found.
+async fn recording_reload_for(app_state: &Arc<AppState>, incoming: &ConfigDto) -> RecordingReloadOutcome {
     let current = app_state.app_config.config.load();
-    let Some(current_dir) = current.recording().map(|recording| recording.directory.clone()) else {
-        return RecordingRootChange::Allowed;
+    let Some(current_recording) = current.recording() else {
+        return RecordingReloadOutcome::Unchanged;
     };
-    let incoming_dir = incoming
-        .video
-        .as_ref()
-        .and_then(|video| video.recording.as_ref())
-        .and_then(|recording| recording.directory.clone());
-    let Some(incoming_dir) = incoming_dir else {
-        return RecordingRootChange::Allowed;
+    let incoming_recording = incoming.video.as_ref().and_then(|video| video.recording.as_ref());
+    let Some(incoming_recording) = incoming_recording else {
+        return RecordingReloadOutcome::Unchanged;
     };
+    let incoming_recording = tuliprox_core::model::RecordingConfig::from(incoming_recording);
     let existing = app_state.recordings.committed_snapshot().await.1.len();
-    recording_root_change(&current_dir, &incoming_dir, existing)
+    recording_reload_outcome(current_recording, &incoming_recording, existing)
 }
 
 async fn save_config_main(
@@ -214,13 +211,13 @@ async fn save_config_main(
         return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()}))).into_response();
     }
     if !cfg.is_valid() {
-        (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Invalid content"}))).into_response()
-    } else if let RecordingRootChange::RefusedWithExistingRecordings { existing } =
-        recording_root_change_for(&app_state, &cfg).await
-    {
-        let refusal = RecordingRootChange::RefusedWithExistingRecordings { existing };
-        (axum::http::StatusCode::CONFLICT, axum::Json(json!({"error": refusal.to_string()}))).into_response()
-    } else if let Err(err) = validate_library_paths_from_dto(&cfg) {
+        return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Invalid content"}))).into_response();
+    }
+    let reload = recording_reload_for(&app_state, &cfg).await;
+    if let RecordingReloadOutcome::Refused(refusal) = &reload {
+        return (axum::http::StatusCode::CONFLICT, axum::Json(json!({"error": refusal.to_string()}))).into_response();
+    }
+    if let Err(err) = validate_library_paths_from_dto(&cfg) {
         (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()}))).into_response()
     } else {
         if let Err(err) = persist_messaging_templates(&app_state.app_config, &mut cfg).await {
@@ -240,7 +237,20 @@ async fn save_config_main(
                 return internal_server_error!();
             }
         };
-        response_with_revision_header(StatusCode::OK.into_response(), HEADER_CONFIG_MAIN_REVISION, &updated_revision)
+        // A setting that will not take effect until a restart has to say so,
+        // or the operator reads the 200 as "applied" and waits forever.
+        let pending: Vec<String> = match &reload {
+            RecordingReloadOutcome::Applied { restart_required, .. } => {
+                restart_required.iter().map(|field| format!("{field:?}")).collect()
+            }
+            _ => Vec::new(),
+        };
+        let body = if pending.is_empty() {
+            StatusCode::OK.into_response()
+        } else {
+            (StatusCode::OK, axum::Json(json!({"restart_required": pending}))).into_response()
+        };
+        response_with_revision_header(body, HEADER_CONFIG_MAIN_REVISION, &updated_revision)
     }
 }
 
@@ -796,7 +806,7 @@ mod tests {
 
         let api_proxy = app_config.api_proxy.expect("api proxy should remain present");
         assert_eq!(api_proxy.server.len(), 1);
-        assert!(api_proxy.user.is_empty());
+        assert_eq!(api_proxy.user, [] as [shared::model::TargetUserDto; 0]);
         assert!(api_proxy.use_user_db);
     }
 
@@ -807,7 +817,7 @@ mod tests {
 
         filter_api_proxy_by_permissions(&mut api_proxy, permissions);
 
-        assert!(api_proxy.server.is_empty());
+        assert_eq!(api_proxy.server, [] as [shared::model::ApiProxyServerInfoDto; 0]);
         assert_eq!(api_proxy.user.len(), 1);
         assert!(!api_proxy.use_user_db);
         assert_eq!(api_proxy.auth_error_status, 403);

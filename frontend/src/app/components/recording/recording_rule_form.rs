@@ -531,7 +531,7 @@ mod tests {
         let s = mk_source(&["inp-a"], &["tgt-a"]);
         let sources: Vec<Rc<ConfigSourceDto>> = vec![Rc::new(s)];
         let result = targets_for_input(&sources, "missing");
-        assert!(result.is_empty());
+        assert_eq!(result, [] as [std::rc::Rc<shared::model::ConfigTargetDto>; 0]);
     }
 
     #[test]
