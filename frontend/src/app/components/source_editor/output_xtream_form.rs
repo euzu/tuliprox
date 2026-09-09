@@ -39,6 +39,8 @@ const LABEL_USER_AGENT: &str = "LABEL.API_USER_AGENT";
 const LABEL_MAIN: &str = "LABEL.MAIN_CONFIG";
 const LABEL_TRAKT: &str = "LABEL.TRAKT";
 const LABEL_ENABLED: &str = "LABEL.ENABLED";
+const LABEL_TRAKT_CATALOG_SELECTION: &str = "LABEL.TRAKT_CATALOG_SELECTION";
+const LABEL_TRAKT_INCLUDE_XTREAM_BASE_CATEGORIES: &str = "LABEL.TRAKT_INCLUDE_XTREAM_BASE_CATEGORIES";
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum XtreamOutputFormPage {
@@ -91,6 +93,8 @@ generate_form_reducer!(
     action_name: TraktConfigFormAction,
     fields {
         Enabled => enabled: bool,
+        CatalogSelection => catalog_selection: bool,
+        IncludeXtreamBaseCategories => include_xtream_base_categories: bool,
     }
 );
 
@@ -126,6 +130,8 @@ pub struct XtreamTargetOutputViewProps {
 
 fn build_trakt_output_config(
     enabled: bool,
+    catalog_selection: bool,
+    include_xtream_base_categories: bool,
     api: TraktApiConfigDto,
     lists: Vec<TraktListConfigDto>,
     charts: Vec<TraktChartConfigDto>,
@@ -133,7 +139,7 @@ fn build_trakt_output_config(
     if lists.is_empty() && charts.is_empty() {
         None
     } else {
-        Some(TraktConfigDto { enabled, api, lists, charts })
+        Some(TraktConfigDto { enabled, catalog_selection, include_xtream_base_categories, api, lists, charts })
     }
 }
 
@@ -148,7 +154,11 @@ fn trakt_list_summary(item: &TraktListConfigDto) -> String {
     append_trakt_matching_summary_suffix(
         format!(
             "{} / {} - {} ({}, {}%)",
-            item.user, item.list_slug, item.category_name, item.content_type, item.fuzzy_match_threshold
+            item.user,
+            item.list_slug,
+            item.category_name.as_deref().unwrap_or("selection only"),
+            item.content_type,
+            item.fuzzy_match_threshold
         ),
         item.tmdb_only,
     )
@@ -156,7 +166,13 @@ fn trakt_list_summary(item: &TraktListConfigDto) -> String {
 
 fn trakt_chart_summary(item: &TraktChartConfigDto) -> String {
     append_trakt_matching_summary_suffix(
-        format!("{}/{} - {} ({}%)", item.kind, item.chart, item.category_name, item.fuzzy_match_threshold),
+        format!(
+            "{}/{} - {} ({}%)",
+            item.kind,
+            item.chart,
+            item.category_name.as_deref().unwrap_or("selection only"),
+            item.fuzzy_match_threshold
+        ),
         item.tmdb_only,
     )
 }
@@ -441,9 +457,21 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
                     />
                 } else {
                 { if props.allow_write {
-                    html! { { edit_field_bool!(trakt_form, translate.t(LABEL_ENABLED), enabled, TraktConfigFormAction::Enabled) } }
+                    html! {
+                        <>
+                            { edit_field_bool!(trakt_form, translate.t(LABEL_ENABLED), enabled, TraktConfigFormAction::Enabled) }
+                            { edit_field_bool!(trakt_form, translate.t(LABEL_TRAKT_CATALOG_SELECTION), catalog_selection, TraktConfigFormAction::CatalogSelection) }
+                            { edit_field_bool!(trakt_form, translate.t(LABEL_TRAKT_INCLUDE_XTREAM_BASE_CATEGORIES), include_xtream_base_categories, TraktConfigFormAction::IncludeXtreamBaseCategories) }
+                        </>
+                    }
                 } else {
-                    html! { { config_field_bool!(trakt_form.form, translate.t(LABEL_ENABLED), enabled) } }
+                    html! {
+                        <>
+                            { config_field_bool!(trakt_form.form, translate.t(LABEL_ENABLED), enabled) }
+                            { config_field_bool!(trakt_form.form, translate.t(LABEL_TRAKT_CATALOG_SELECTION), catalog_selection) }
+                            { config_field_bool!(trakt_form.form, translate.t(LABEL_TRAKT_INCLUDE_XTREAM_BASE_CATEGORIES), include_xtream_base_categories) }
+                        </>
+                    }
                 }}
                 <div class="tp__form-section">
                     <h3>{translate.t(LABEL_API_CONFIGURATION)}</h3>
@@ -599,6 +627,8 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
             let trakt_charts = (*trakt_charts_state).clone();
             output.trakt = build_trakt_output_config(
                 trakt_state.data().enabled,
+                trakt_state.data().catalog_selection,
+                trakt_state.data().include_xtream_base_categories,
                 trakt_api_state.data().clone(),
                 trakt_lists,
                 trakt_charts,
@@ -646,7 +676,8 @@ mod tests {
 
     #[test]
     fn build_trakt_output_config_returns_none_when_empty() {
-        let result = build_trakt_output_config(true, TraktApiConfigDto::default(), Vec::new(), Vec::new());
+        let result =
+            build_trakt_output_config(true, true, true, TraktApiConfigDto::default(), Vec::new(), Vec::new());
         assert!(result.is_none());
     }
 
@@ -655,14 +686,17 @@ mod tests {
         let charts = vec![TraktChartConfigDto {
             kind: TraktChartKind::Movies,
             chart: TraktChartType::Trending,
-            category_name: "Trending Movies".to_string(),
+            category_name: Some("Trending Movies".to_string()),
             tmdb_only: true,
             fuzzy_match_threshold: 90,
         }];
 
-        let result = build_trakt_output_config(true, TraktApiConfigDto::default(), Vec::new(), charts.clone())
-            .expect("charts-only trakt config");
+        let result =
+            build_trakt_output_config(true, false, false, TraktApiConfigDto::default(), Vec::new(), charts.clone())
+                .expect("charts-only trakt config");
 
+        assert!(!result.catalog_selection);
+        assert!(!result.include_xtream_base_categories);
         assert!(result.lists.is_empty());
         assert_eq!(result.charts, charts);
     }

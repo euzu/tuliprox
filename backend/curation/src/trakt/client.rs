@@ -362,7 +362,7 @@ mod tests {
         let list_config = TraktListConfig {
             user: "user".to_string(),
             list_slug: "list".to_string(),
-            category_name: "category".to_string(),
+            category_name: Some("category".to_string()),
             content_type: TraktContentType::Vod,
             tmdb_only: false,
             fuzzy_match_threshold: 90,
@@ -530,7 +530,7 @@ mod tests {
         TraktChartConfig {
             kind,
             chart,
-            category_name: "category".to_string(),
+            category_name: Some("category".to_string()),
             tmdb_only: false,
             fuzzy_match_threshold: 90,
         }
