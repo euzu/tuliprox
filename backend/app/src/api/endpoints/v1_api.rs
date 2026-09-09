@@ -248,7 +248,11 @@ mod tests {
 
         let response = router
             .oneshot(
-                Request::builder().method("GET").uri("/api/v1/recording/tasks").body(Body::empty()).expect("request"),
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/recording/requests")
+                    .body(Body::empty())
+                    .expect("request"),
             )
             .await
             .expect("response");
@@ -267,7 +271,11 @@ mod tests {
 
         let response = router
             .oneshot(
-                Request::builder().method("GET").uri("/api/v1/recording/tasks").body(Body::empty()).expect("request"),
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/recording/requests")
+                    .body(Body::empty())
+                    .expect("request"),
             )
             .await
             .expect("response");
@@ -280,7 +288,7 @@ mod tests {
         let app_state = create_test_app_state(config_with_recording_enabled(true));
         let router = v1_api_register(false, &app_state, "").with_state(app_state);
 
-        for path in ["/api/v1/recording/tasks", "/api/v1/library/recording/playback/missing"] {
+        for path in ["/api/v1/recording/requests", "/api/v1/library/recording/playback/missing"] {
             let response = router
                 .clone()
                 .oneshot(Request::builder().method("OPTIONS").uri(path).body(Body::empty()).expect("request"))

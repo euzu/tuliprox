@@ -5,12 +5,12 @@ use crate::{
         endpoints::recording_media_api::AuthClaims,
         model::{
             event_manager::EventMessage,
-            mutate, recording_quota,
+            mutate,
             recording_rule_service::{DeleteFuture, RuleServiceError},
             recording_service::{
                 CreateRecordingInput, EditRecordingPatch, RecordingService, RecordingSourceInput, ServiceError,
             },
-            recording_ws, AppState, RecordingQueue, RecordingTask,
+            AppState, RecordingQueue, RecordingTask,
         },
     },
     repository::recording_rule_repository::RecordingRuleRepository,
@@ -29,7 +29,7 @@ use shared::model::{
         RecordingSourceRequest, RecordingVisibility,
     },
     recording_rule::{RecordingRule, RuleBody, RuleSource, RuleVisibility},
-    Permission, RecordingKind, RecordingTaskDto, UserId, XtreamCluster, ROLE_ADMIN,
+    Permission, RecordingKind, UserId, XtreamCluster, ROLE_ADMIN,
 };
 use std::sync::Arc;
 
@@ -67,54 +67,13 @@ fn service_error_status(err: &ServiceError) -> StatusCode {
     }
 }
 
-/// GET /api/v1/recording/tasks
-pub async fn list_recording_tasks(
-    axum::extract::Query(params): axum::extract::Query<ListTasksParams>,
-    State(app_state): State<Arc<AppState>>,
-    AuthClaims(claims): AuthClaims,
-) -> impl IntoResponse {
-    if !claims.permissions.contains(Permission::RecordingRead) {
-        return error_response(StatusCode::FORBIDDEN, "recording_forbidden");
-    }
-    // Filtering by an arbitrary owner is an administrator capability.
-    // The visibility filter below already prevents a regular user from
-    // *seeing* another owner's private tasks, but accepting the
-    // parameter and silently returning an empty list made the API read
-    // as if cross-owner queries were supported. Reject it explicitly.
-    if params.owner.is_some() && !is_admin(&claims) {
-        return error_response(StatusCode::FORBIDDEN, "recording_forbidden");
-    }
-    let (revision, mut tasks) = recording_ws::recording_snapshot(&app_state.recordings, &claims).await;
-    if let Some(owner) = params.owner.as_deref() {
-        tasks.retain(|task| task.owner_id.as_ref().is_some_and(|id| id.0 == owner));
-    }
-    if let Some(visibility) = params.visibility.as_deref() {
-        tasks.retain(|task| {
-            matches!(
-                (visibility, task.visibility),
-                ("private", RecordingVisibility::Private) | ("shared", RecordingVisibility::Shared)
-            )
-        });
-    }
-    Json(RecordingSnapshotResponse { revision: revision.0, tasks }).into_response()
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ListTasksParams {
-    #[serde(default)]
-    pub owner: Option<String>,
-    #[serde(default)]
-    pub visibility: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RecordingSnapshotResponse {
-    pub revision: u64,
-    pub tasks: Vec<RecordingTaskDto>,
-}
-
-/// POST /api/v1/recording/tasks
-pub async fn create_recording_task(
+/// POST /api/v1/recording/requests
+///
+/// A command, not a query: it answers `204` and nothing else. The new
+/// entry reaches the caller on the recording snapshot like every other
+/// change, so there is one description of a recording rather than two
+/// that can disagree.
+pub async fn create_recording_request(
     State(app_state): State<Arc<AppState>>,
     AuthClaims(claims): AuthClaims,
     Json(body): Json<CreateRecordingRequest>,
@@ -157,10 +116,9 @@ pub async fn create_recording_task(
         epg: body.epg,
     };
     match service.create_recording(&claims, &input).await {
-        Ok(view) => {
+        Ok(_) => {
             let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
-            Json(CreateRecordingTaskResponse { id: view.uuid, title: view.filename_preview, recording: None })
-                .into_response()
+            StatusCode::NO_CONTENT.into_response()
         }
         Err(err) => service_error_response(&err),
     }
@@ -263,17 +221,10 @@ async fn create_http_recording_task(
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, "recording_worker_failed");
     }
     let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
-    Json(task.to_view(is_owner)).into_response()
+    StatusCode::NO_CONTENT.into_response()
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct CreateRecordingTaskResponse {
-    pub id: String,
-    pub title: String,
-    pub recording: Option<shared::model::recording::RecordingTaskDto>,
-}
-
-/// PATCH /api/v1/recording/tasks/{id}
+/// PATCH /api/v1/recording/requests/{id}
 pub async fn edit_recording_task(
     axum::extract::Path(id): axum::extract::Path<String>,
     State(app_state): State<Arc<AppState>>,
@@ -322,12 +273,19 @@ impl From<EditRecordingTaskBody> for EditRecordingPatch {
     }
 }
 
-/// POST /api/v1/recording/tasks/{id}/pause
+/// POST /api/v1/recording/materializations/{id}/pause
+///
+/// Administrator-only: a materialization can be shared, so pausing it
+/// stops a transfer other users are attached to and are still being
+/// charged for.
 pub async fn pause_recording_task(
     axum::extract::Path(id): axum::extract::Path<String>,
     State(app_state): State<Arc<AppState>>,
     AuthClaims(claims): AuthClaims,
 ) -> impl IntoResponse {
+    if !is_admin(&claims) {
+        return error_response(StatusCode::FORBIDDEN, "recording_forbidden");
+    }
     let service = RecordingService::new(app_state.recordings.clone(), app_state.app_config.clone());
     match service.pause_recording(&claims, &id).await {
         Ok(()) => {
@@ -338,12 +296,17 @@ pub async fn pause_recording_task(
     }
 }
 
-/// POST /api/v1/recording/tasks/{id}/resume
+/// POST /api/v1/recording/materializations/{id}/resume
+///
+/// Administrator-only, for the same reason as pause.
 pub async fn resume_recording_task(
     axum::extract::Path(id): axum::extract::Path<String>,
     State(app_state): State<Arc<AppState>>,
     AuthClaims(claims): AuthClaims,
 ) -> impl IntoResponse {
+    if !is_admin(&claims) {
+        return error_response(StatusCode::FORBIDDEN, "recording_forbidden");
+    }
     let service = RecordingService::new(app_state.recordings.clone(), app_state.app_config.clone());
     match service.resume_recording(&claims, &id).await {
         Ok(_) => {
@@ -354,12 +317,17 @@ pub async fn resume_recording_task(
     }
 }
 
-/// POST /api/v1/recording/tasks/{id}/retry
+/// POST /api/v1/recording/materializations/{id}/retry
+///
+/// Administrator-only, for the same reason as pause.
 pub async fn retry_recording_task(
     axum::extract::Path(id): axum::extract::Path<String>,
     State(app_state): State<Arc<AppState>>,
     AuthClaims(claims): AuthClaims,
 ) -> impl IntoResponse {
+    if !is_admin(&claims) {
+        return error_response(StatusCode::FORBIDDEN, "recording_forbidden");
+    }
     let service = RecordingService::new(app_state.recordings.clone(), app_state.app_config.clone());
     match service.retry_recording(&claims, &id).await {
         Ok(_) => {
@@ -520,40 +488,6 @@ pub struct OverlapSegmentDto {
 }
 
 /// GET /api/v1/recording/quota
-pub async fn get_recording_quota(
-    State(app_state): State<Arc<AppState>>,
-    AuthClaims(claims): AuthClaims,
-) -> impl IntoResponse {
-    if !claims.permissions.contains(Permission::RecordingRead) {
-        return error_response(StatusCode::FORBIDDEN, "recording_forbidden");
-    }
-    let Some(subject_id) = claims.subject_id.as_ref() else {
-        return error_response(StatusCode::UNAUTHORIZED, "recording_token_refresh_required");
-    };
-    let tasks = all_recording_tasks(&app_state).await;
-    let totals = recording_quota::compute_totals(&tasks);
-    let config = app_state.app_config.config.load();
-    let limits = quota_limits_from_config(config.recording().and_then(|recording| recording.quota.as_ref()));
-    let quota = recording_quota::regular_user_dto(subject_id, &totals, &limits, &tasks);
-    Json(RecordingQuotaResponse {
-        private_used_bytes: quota.private.measured_bytes.saturating_add(quota.private.reserved_bytes),
-        private_limit_bytes: quota.private.limit_bytes,
-        shared_used_bytes: quota.shared.used_bytes,
-        shared_limit_bytes: quota.shared.limit_bytes,
-        revision: app_state.recordings.revision.load(std::sync::atomic::Ordering::SeqCst),
-    })
-    .into_response()
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RecordingQuotaResponse {
-    pub private_used_bytes: u64,
-    pub private_limit_bytes: Option<u64>,
-    pub shared_used_bytes: u64,
-    pub shared_limit_bytes: Option<u64>,
-    pub revision: u64,
-}
-
 /// GET /api/v1/recording/health
 ///
 /// Liveness of the DVR supervisors. Administrator-only: the tick
@@ -624,27 +558,6 @@ fn recording_rule_repo(app_state: &AppState) -> RecordingRuleRepository {
 fn can_write_rules(claims: &shared::model::Claims) -> bool { claims.permissions.contains(Permission::RecordingManage) }
 
 fn is_admin(claims: &shared::model::Claims) -> bool { claims.roles.iter().any(|role| role == ROLE_ADMIN) }
-
-fn quota_limits_from_config(config: Option<&crate::model::RecordingQuotaConfig>) -> recording_quota::QuotaLimits {
-    let mut per_user_bytes = std::collections::HashMap::new();
-    if let Some(config) = config {
-        for (user_id, bytes) in &config.per_user_bytes {
-            per_user_bytes.insert(UserId::from(user_id.clone()), *bytes);
-        }
-        recording_quota::QuotaLimits {
-            default_private_bytes: config.default_private_bytes,
-            per_user_bytes,
-            shared_bytes: config.shared_bytes,
-        }
-    } else {
-        recording_quota::QuotaLimits::default()
-    }
-}
-
-async fn all_recording_tasks(app_state: &AppState) -> Vec<RecordingTask> {
-    let (_revision, tasks) = app_state.recordings.committed_snapshot().await;
-    tasks
-}
 
 async fn resolve_recording_source(
     app_state: &Arc<AppState>,
@@ -1097,16 +1010,19 @@ pub async fn require_recording_enabled(
 /// in `v1_api::router_v1` calls `recording_api_register(router)` which
 /// merges the recording routes into the v1 router tree.
 pub fn recording_api_register(router: Router<Arc<AppState>>) -> axum::Router<Arc<AppState>> {
+    // A request id is the caller's own library entry. A materialization id
+    // is the physical recording behind it, which several entries may
+    // share, so those routes are administrator-only and are the only ones
+    // that can stop or destroy work another user is still attached to.
     let recording_routes = Router::new()
-        .route("/tasks", get(list_recording_tasks).post(create_recording_task))
-        .route("/tasks/{id}", patch(edit_recording_task).delete(delete_recording_task))
-        .route("/tasks/{id}/cancel", post(cancel_recording_task))
-        .route("/tasks/{id}/pause", post(pause_recording_task))
-        .route("/tasks/{id}/resume", post(resume_recording_task))
-        .route("/tasks/{id}/retry", post(retry_recording_task))
-        .route("/tasks/{id}/remove", axum::routing::delete(remove_recording_task))
+        .route("/requests", post(create_recording_request))
+        .route("/requests/{id}", patch(edit_recording_task).delete(remove_recording_task))
+        .route("/requests/{id}/cancel", post(cancel_recording_task))
+        .route("/materializations/{id}/pause", post(pause_recording_task))
+        .route("/materializations/{id}/resume", post(resume_recording_task))
+        .route("/materializations/{id}/retry", post(retry_recording_task))
+        .route("/materializations/{id}", axum::routing::delete(delete_recording_task))
         .route("/conflicts/preview", post(preview_recording_conflicts))
-        .route("/quota", get(get_recording_quota))
         .route("/health", get(get_recording_health))
         .route("/rules", get(list_recording_rules).post(create_recording_rule))
         .route("/rules/{id}", patch(edit_recording_rule).delete(delete_recording_rule));
@@ -1471,19 +1387,58 @@ mod tests {
         assert_eq!(body, json!({"error": "recording_unknown"}));
     }
 
-    #[test]
-    fn list_tasks_params_accepts_missing_owner_and_visibility() {
-        let parsed: ListTasksParams = serde_json::from_value(json!({})).expect("parse empty params");
-        assert!(parsed.owner.is_none());
-        assert!(parsed.visibility.is_none());
+    /// Method and path pairs the router must answer, and the ones it must
+    /// not. `METHOD_NOT_ALLOWED` proves the path exists but the method is
+    /// wrong; `NOT_FOUND` proves the path is gone.
+    async fn route_status(method: &str, path: &str) -> StatusCode {
+        use tower::ServiceExt;
+        let router = recording_api_register(axum::Router::new());
+        let app_state = crate::api::model::create_test_app_state(tuliprox_core::model::Config::default());
+        router
+            .with_state(app_state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response")
+            .status()
     }
 
-    #[test]
-    fn list_tasks_params_accepts_explicit_owner_and_visibility() {
-        let parsed: ListTasksParams =
-            serde_json::from_value(json!({"owner": "web:alice", "visibility": "private"})).expect("parse full params");
-        assert_eq!(parsed.owner.as_deref(), Some("web:alice"));
-        assert_eq!(parsed.visibility.as_deref(), Some("private"));
+    #[tokio::test]
+    async fn the_command_routes_exist_at_the_documented_paths() {
+        // A user addresses their own request; only an administrator
+        // addresses the materialization behind it. The two id spaces are
+        // deliberately different paths so a library-entry id can never be
+        // passed to a command that stops shared physical work.
+        for (method, path) in [
+            ("POST", "/recording/requests"),
+            ("PATCH", "/recording/requests/abc"),
+            ("POST", "/recording/requests/abc/cancel"),
+            ("DELETE", "/recording/requests/abc"),
+            ("POST", "/recording/materializations/abc/pause"),
+            ("POST", "/recording/materializations/abc/resume"),
+            ("POST", "/recording/materializations/abc/retry"),
+            ("DELETE", "/recording/materializations/abc"),
+        ] {
+            assert_ne!(route_status(method, path).await, StatusCode::NOT_FOUND, "missing route: {method} {path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn there_is_no_rest_route_that_lists_recordings_or_reports_quota() {
+        // The snapshot is the only description of recording state. A GET
+        // list is what a client polls, and a second description is what
+        // lets the two disagree.
+        for (method, path) in [("GET", "/recording/tasks"), ("GET", "/recording/quota")] {
+            assert_eq!(route_status(method, path).await, StatusCode::NOT_FOUND, "route still present: {method} {path}");
+        }
+        // The requests path exists, but only as a command endpoint: a GET
+        // against it is refused rather than quietly serving a list.
+        assert_eq!(route_status("GET", "/recording/requests").await, StatusCode::METHOD_NOT_ALLOWED);
     }
 
     #[test]

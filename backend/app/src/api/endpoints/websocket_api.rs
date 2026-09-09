@@ -392,9 +392,18 @@ async fn recording_frame_for_session(app_state: &AppState, claims: &Claims) -> P
             code: RecordingViewDenial::TokenRefreshRequired.code().to_string(),
         };
     }
-    let (revision, tasks) =
-        crate::api::model::recording::recording_ws::recording_snapshot(&app_state.recordings, claims).await;
-    ProtocolMessage::RecordingSnapshotResponse { revision, tasks }
+    let snapshot = crate::api::model::recording::recording_ws::recording_snapshot(
+        &app_state.recordings,
+        claims,
+        &app_state.app_config,
+    )
+    .await;
+    ProtocolMessage::RecordingSnapshotResponse {
+        revision: snapshot.revision,
+        available: snapshot.available,
+        quota: snapshot.quota,
+        tasks: snapshot.tasks,
+    }
 }
 
 async fn send_recording_snapshot_event(

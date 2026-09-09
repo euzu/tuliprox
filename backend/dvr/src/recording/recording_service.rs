@@ -1015,7 +1015,7 @@ fn map_queue_error(err: &QueueMutationError) -> ServiceError {
     }
 }
 
-pub(crate) fn quota_limits_from_config(config: Option<&tuliprox_core::model::RecordingQuotaConfig>) -> QuotaLimits {
+pub fn quota_limits_from_config(config: Option<&tuliprox_core::model::RecordingQuotaConfig>) -> QuotaLimits {
     let mut per_user_bytes = HashMap::new();
     if let Some(config) = config {
         for (user_id, bytes) in &config.per_user_bytes {

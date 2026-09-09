@@ -60,6 +60,19 @@ pub struct RecordingAllowedActions {
     pub remove: bool,
 }
 
+/// The caller's own quota, as carried in the recording snapshot.
+///
+/// Only the caller's private pool and the shared pool: there is no
+/// per-user breakdown here, because one user's consumption is not another
+/// user's business.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RecordingQuotaSummaryDto {
+    pub private_used_bytes: u64,
+    pub private_limit_bytes: Option<u64>,
+    pub shared_used_bytes: u64,
+    pub shared_limit_bytes: Option<u64>,
+}
+
 /// Owner-safe public projection of a recording task. This is the only
 /// recording shape crossing the API or WebSocket boundary. It never carries
 /// the source URL, provider/source identifiers, configured headers,

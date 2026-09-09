@@ -105,6 +105,10 @@ pub enum ProtocolMessage {
     RecordingSnapshotRequest,
     RecordingSnapshotResponse {
         revision: QueueRevision,
+        /// Whether the DVR can accept work at all. Carried here so a
+        /// client never has to poll a separate availability route.
+        available: bool,
+        quota: crate::model::RecordingQuotaSummaryDto,
         tasks: Vec<RecordingTaskDto>,
     },
     /// Notification that the rule repository changed. The frontend

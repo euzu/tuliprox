@@ -10,7 +10,7 @@ use crate::recording::recording_queue::RecordingQueue;
 use shared::model::{
     permission::Permission,
     recording::{RecordingMetadata, RecordingVisibility},
-    Claims, QueueRevision, RecordingTaskDto, UserId, CURRENT_PERMISSION_SCHEMA_VERSION,
+    Claims, QueueRevision, RecordingQuotaSummaryDto, RecordingTaskDto, UserId, CURRENT_PERMISSION_SCHEMA_VERSION,
 };
 use std::sync::atomic::Ordering;
 
@@ -71,23 +71,65 @@ pub fn task_visible_to(meta: &RecordingMetadata, claims: &Claims, subject_id: &U
     }
 }
 
+/// Everything a session needs to render the recording library, so it never
+/// has to poll a list, a quota, or an availability route.
+pub struct RecordingSnapshot {
+    pub revision: QueueRevision,
+    pub available: bool,
+    pub quota: RecordingQuotaSummaryDto,
+    pub tasks: Vec<RecordingTaskDto>,
+}
+
 /// Owner-filtered full snapshot. Every task is projected through
 /// `RecordingTask::to_view`, so no internal field and no foreign owner id
 /// can reach the session.
-pub async fn recording_snapshot(queue: &RecordingQueue, claims: &Claims) -> (QueueRevision, Vec<RecordingTaskDto>) {
+pub async fn recording_snapshot(
+    queue: &RecordingQueue,
+    claims: &Claims,
+    app_config: &tuliprox_core::model::AppConfig,
+) -> RecordingSnapshot {
+    let available = crate::recording::recording_supervisor::recording_enabled(app_config);
+    let empty = |revision| RecordingSnapshot {
+        revision,
+        available,
+        quota: RecordingQuotaSummaryDto::default(),
+        tasks: Vec::new(),
+    };
     if !can_view_recording(claims) {
-        return (current_revision(queue), Vec::new());
+        return empty(current_revision(queue));
     }
     let Some(subject) = claims.subject_id.clone() else {
-        return (current_revision(queue), Vec::new());
+        return empty(current_revision(queue));
     };
     let (revision, tasks) = queue.committed_snapshot().await;
+    let quota = quota_summary_for(&subject, &tasks, app_config);
     let tasks = tasks
         .iter()
         .filter(|task| task_visible_to(&task.recording, claims, &subject))
         .map(|task| task.to_view(task.owner_id() == &subject))
         .collect();
-    (revision, tasks)
+    RecordingSnapshot { revision, available, quota, tasks }
+}
+
+/// The caller's own quota position, computed from the same committed
+/// snapshot the task list came from so the two cannot disagree.
+fn quota_summary_for(
+    subject: &UserId,
+    tasks: &[crate::recording::recording_queue::RecordingTask],
+    app_config: &tuliprox_core::model::AppConfig,
+) -> RecordingQuotaSummaryDto {
+    let totals = crate::recording::recording_quota::compute_totals(tasks);
+    let config = app_config.config.load();
+    let limits = crate::recording::recording_service::quota_limits_from_config(
+        config.recording().and_then(|recording| recording.quota.as_ref()),
+    );
+    let quota = crate::recording::recording_quota::regular_user_dto(subject, &totals, &limits, tasks);
+    RecordingQuotaSummaryDto {
+        private_used_bytes: quota.private.measured_bytes.saturating_add(quota.private.reserved_bytes),
+        private_limit_bytes: quota.private.limit_bytes,
+        shared_used_bytes: quota.shared.used_bytes,
+        shared_limit_bytes: quota.shared.limit_bytes,
+    }
 }
 
 fn current_revision(queue: &RecordingQueue) -> QueueRevision { QueueRevision(queue.revision.load(Ordering::SeqCst)) }
@@ -197,19 +239,50 @@ mod tests {
         assert!(task_visible_to(&shared, &alice_claims(), &UserId::from("web:alice")));
     }
 
+    /// An `AppConfig` with no recording block, which is all these tests
+    /// need: they assert on filtering, not on quota.
+    fn bare_app_config() -> tuliprox_core::model::AppConfig {
+        use std::sync::Arc;
+        tuliprox_core::model::AppConfig {
+            config: Arc::new(arc_swap::ArcSwap::from_pointee(tuliprox_core::model::Config::default())),
+            sources: Arc::new(arc_swap::ArcSwap::from_pointee(tuliprox_core::model::SourcesConfig::default())),
+            hdhomerun: Arc::new(arc_swap::ArcSwapOption::empty()),
+            api_proxy: Arc::new(arc_swap::ArcSwapOption::empty()),
+            file_locks: Arc::new(tuliprox_core::utils::FileLockManager::default()),
+            paths: Arc::new(arc_swap::ArcSwap::from_pointee(shared::model::ConfigPaths {
+                home_path: String::new(),
+                config_path: String::new(),
+                storage_path: String::new(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
+                mapping_file_path: None,
+                mapping_files_used: None,
+                template_file_path: None,
+                template_files_used: None,
+                api_proxy_file_path: String::new(),
+                custom_stream_response_path: None,
+            })),
+            custom_stream_response: Arc::new(arc_swap::ArcSwapOption::empty()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            media_tools: Arc::new(tuliprox_core::model::MediaToolCapabilities::default()),
+        }
+    }
+
     #[tokio::test]
     async fn recording_snapshot_yields_no_subject_id() {
         let queue = RecordingQueue::new();
-        let (rev, tasks) = recording_snapshot(&queue, &no_subject_claims()).await;
-        assert_eq!(rev.0, 0);
-        assert!(tasks.is_empty());
+        let snapshot = recording_snapshot(&queue, &no_subject_claims(), &bare_app_config()).await;
+        assert_eq!(snapshot.revision.0, 0);
+        assert!(snapshot.tasks.is_empty());
+        assert_eq!(snapshot.quota, RecordingQuotaSummaryDto::default(), "a session with no subject is charged nothing");
     }
 
     #[tokio::test]
     async fn recording_snapshot_yields_no_recording_read_perm() {
         let queue = RecordingQueue::new();
-        let (rev, tasks) = recording_snapshot(&queue, &no_read_claims()).await;
-        assert_eq!(rev.0, 0);
-        assert!(tasks.is_empty());
+        let snapshot = recording_snapshot(&queue, &no_read_claims(), &bare_app_config()).await;
+        assert_eq!(snapshot.revision.0, 0);
+        assert!(snapshot.tasks.is_empty());
     }
 }
