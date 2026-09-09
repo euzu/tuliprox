@@ -3,7 +3,7 @@
 use super::{recording_ctx::RecordingCtx, recording_source_resolution as source_resolution};
 use crate::{
     recording::{
-        recording_path,
+        recording_disk, recording_path,
         recording_queue::{
             mutate, PersistedRecordingQueue, PersistedRecordingTask, QueueMutationError, RecordingQueue, RecordingTask,
             RecordingTaskState,
@@ -351,6 +351,11 @@ impl RecordingService {
         let mut persisted = RecordingQueue::to_persisted(&recording);
         let view_task = recording.clone();
         let quota_limits = quota_limits_from_config(recording_cfg.quota.as_ref());
+        // Measured before the mutation: it is a syscall, and the lock is
+        // held for the whole closure. `None` means the root could not be
+        // measured, and an unmeasurable disk is not grounds to refuse.
+        let disk_safety_bytes = recording_cfg.disk.as_ref().and_then(|disk| disk.safety_bytes).unwrap_or(0);
+        let free_bytes = recording_disk::free_bytes_for(std::path::Path::new(&recording_cfg.directory));
 
         mutate(&self.recordings, |candidate| {
             reserve_recording_relative_path(candidate, &mut persisted)?;
@@ -364,6 +369,17 @@ impl RecordingService {
                 AdmissionOutcome::OverLimit { .. }
             ) {
                 return Err(QueueMutationError::QuotaExceeded);
+            }
+            // Quota is per-owner and logical; this is the physical
+            // question, and one can pass while the other fails.
+            if let Some(free_bytes) = free_bytes {
+                let active = recording_disk::active_disk_reservations(candidate_tasks(candidate));
+                if matches!(
+                    recording_disk::would_fit_on_disk(free_bytes, disk_safety_bytes, active, reserved_bytes),
+                    recording_disk::DiskAdmission::Insufficient { .. }
+                ) {
+                    return Err(QueueMutationError::DiskFull);
+                }
             }
             candidate.scheduled.push(persisted);
             Ok(())
@@ -2309,5 +2325,133 @@ mod tests {
             matches!(result, Err(ServiceError::Disabled)),
             "absent recording config must fail closed with Disabled, got: {result:?}"
         );
+    }
+
+    /// A service rooted at `dir` with the supplied disk block, and the
+    /// source and server configuration a recording needs to resolve its
+    /// own target and URL.
+    fn service_with_disk(
+        dir: &std::path::Path,
+        queue: &Arc<RecordingQueue>,
+        disk: Option<tuliprox_core::model::RecordingDiskConfig>,
+    ) -> RecordingService {
+        let mut rec_cfg =
+            RecordingConfig::from(&shared::model::RecordingConfigDto { enabled: true, ..Default::default() });
+        rec_cfg.directory = dir.to_string_lossy().into_owned();
+        rec_cfg.disk = disk;
+        let config = tuliprox_core::model::Config {
+            video: Some(tuliprox_core::model::VideoConfig {
+                extensions: Vec::new(),
+                web_search: None,
+                recording: Some(rec_cfg),
+            }),
+            ..tuliprox_core::model::Config::default()
+        };
+
+        let input = Arc::new(tuliprox_core::model::ConfigInput { id: 7, name: "input-a".into(), ..Default::default() });
+        let target = Arc::new(tuliprox_core::model::ConfigTarget {
+            id: 11,
+            enabled: true,
+            name: "1".to_string(),
+            options: None,
+            sort: None,
+            filter: shared::foundation::Filter::default(),
+            output: vec![],
+            rename: None,
+            mapping_ids: None,
+            mapping: Arc::default(),
+            favourites: None,
+            processing_order: shared::model::ProcessingOrder::default(),
+            watch: None,
+            use_memory_cache: false,
+        });
+        let sources = tuliprox_core::model::SourcesConfig {
+            inputs: vec![Arc::clone(&input)],
+            sources: vec![tuliprox_core::model::ConfigSource { inputs: vec!["input-a".into()], targets: vec![target] }],
+            ..tuliprox_core::model::SourcesConfig::default()
+        };
+
+        let app_config = test_app_config();
+        app_config.config.store(Arc::new(config));
+        app_config.sources.store(Arc::new(sources));
+        RecordingService::new(Arc::clone(queue), app_config)
+    }
+
+    fn creating_claims() -> shared::model::Claims {
+        shared::model::Claims {
+            username: "alice".to_string(),
+            iss: "tuliprox".to_string(),
+            iat: 0,
+            exp: 0,
+            roles: Vec::new(),
+            permissions: Permission::RecordingCreate | Permission::RecordingManage | Permission::RecordingDelete,
+            pwd_version: 0,
+            subject_id: Some(UserId::from("web:alice")),
+            permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,
+        }
+    }
+
+    fn disk_test_input() -> CreateRecordingInput {
+        let now = chrono::Utc::now().timestamp();
+        CreateRecordingInput {
+            source: RecordingSourceInput {
+                target_id: "1".to_string(),
+                virtual_id: "42".to_string(),
+                cluster: XtreamCluster::Live,
+                input_name: "input-a".to_string(),
+            },
+            program_title: "title".to_string(),
+            program_start: now,
+            program_end: now + 600,
+            pre_roll_secs: 0,
+            post_roll_secs: 0,
+            visibility: RecordingVisibility::Private,
+            channel_id: None,
+            channel_name: None,
+            provenance: RecordingProvenance::default(),
+            epg: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_recording_with_no_room_on_disk_is_refused() {
+        // Logical quota and physical space are different questions, and
+        // until now only the first was ever asked: `would_fit_on_disk` was
+        // implemented and tested but no caller ever ran it, so a server
+        // with a full disk accepted recordings until ffmpeg failed on
+        // ENOSPC. The safety margin drives headroom to zero here rather
+        // than actually filling a filesystem.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let queue = Arc::new(RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open repository"));
+        let service = service_with_disk(
+            dir.path(),
+            &queue,
+            Some(tuliprox_core::model::RecordingDiskConfig {
+                high_water_percent: None,
+                low_water_percent: None,
+                cleanup_interval_secs: None,
+                safety_bytes: Some(u64::MAX),
+            }),
+        );
+
+        let result = service.create_recording(&creating_claims(), &disk_test_input()).await;
+
+        assert!(matches!(result, Err(ServiceError::DiskFull)), "got {result:?}");
+        assert!(queue.scheduled.read().await.is_empty(), "a refused admission must not leave a recording behind");
+    }
+
+    #[tokio::test]
+    async fn the_same_recording_is_admitted_when_the_disk_has_room() {
+        // The counterpart: without the safety margin the identical request
+        // succeeds, so the refusal above is the disk rule and not the
+        // fixture failing for some unrelated reason.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let queue = Arc::new(RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open repository"));
+        let service = service_with_disk(dir.path(), &queue, None);
+
+        let result = service.create_recording(&creating_claims(), &disk_test_input()).await;
+
+        assert!(result.is_ok(), "got {result:?}");
+        assert_eq!(queue.scheduled.read().await.len(), 1);
     }
 }

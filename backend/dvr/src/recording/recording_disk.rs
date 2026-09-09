@@ -62,26 +62,24 @@ pub fn would_fit_on_disk(
     }
 }
 
-/// Sum the active disk reservations across a set of currently-active
-/// tasks. Active disk reservations must be counted: tasks in
-/// `Downloading` (and any other state holding disk headroom).
-/// Generic downloads are excluded.
+/// Sum the disk headroom currently held by in-flight recordings.
 ///
-/// The caller is expected to be under the queue mutation boundary
-/// (so the sum is consistent across the set).
-pub fn active_disk_reservations<V>(tasks: &[V]) -> u64
+/// Takes an iterator rather than a slice so the caller can pass the
+/// candidate queue's borrowed tasks straight through, without building a
+/// copy of the whole queue on every admission.
+///
+/// The caller is expected to be under the queue mutation boundary, so the
+/// sum is consistent with the state it is about to commit.
+pub fn active_disk_reservations<'a, V, I>(tasks: I) -> u64
 where
-    V: super::recording_quota::QuotaRecordingTaskView,
+    V: super::recording_quota::QuotaRecordingTaskView + 'a,
+    I: IntoIterator<Item = &'a V>,
 {
     let mut total = 0u64;
     for task in tasks {
-        // "Active" means holding disk headroom right now. Today
-        // that is `Downloading`; the worker pre-start path checks
-        // admission before transitioning into the active state, so
-        // `Downloading` is the only contributor for the conservative
-        // charge. Anything
-        // else with `reserved_bytes > 0` is **not** holding
-        // headroom yet — the headroom is reserved at start.
+        // Only a running recording is holding headroom. A scheduled or
+        // queued one carries a reservation but has not taken the space
+        // yet, and counting it here would refuse admissions that fit.
         if matches!(task.state(), crate::recording::recording_queue::RecordingTaskState::Running) {
             total = total.saturating_add(super::recording_quota::charge_for_task(task));
         }
