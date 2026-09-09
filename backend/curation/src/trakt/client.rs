@@ -15,6 +15,31 @@ use tuliprox_core::model::{TraktApiConfig, TraktChartConfig, TraktListConfig};
 const TRAKT_PAGE_LIMIT: u32 = 100;
 const TRAKT_MAX_PAGES: u32 = 100;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TraktFetchFailureKind {
+    Incomplete,
+    Unavailable,
+}
+
+#[derive(Debug)]
+pub(super) struct TraktFetchFailure {
+    pub(super) kind: TraktFetchFailureKind,
+    error: TuliproxError,
+}
+
+impl TraktFetchFailure {
+    fn incomplete(message: String) -> Self {
+        Self { kind: TraktFetchFailureKind::Incomplete, error: TuliproxError::RepositoryTrakt(message) }
+    }
+
+    fn from_page_error(page: u32, error: TuliproxError) -> Self {
+        let kind = if page > 1 { TraktFetchFailureKind::Incomplete } else { TraktFetchFailureKind::Unavailable };
+        Self { kind, error }
+    }
+
+    pub(super) fn message(&self) -> &str { self.error.message() }
+}
+
 pub(super) struct TraktClient {
     client: reqwest::Client,
     api_config: TraktApiConfig,
@@ -68,7 +93,7 @@ impl TraktClient {
     pub(super) async fn get_chart_items(
         &self,
         chart_config: &TraktChartConfig,
-    ) -> Result<Vec<TraktListItem>, TuliproxError> {
+    ) -> Result<Vec<TraktListItem>, TraktFetchFailure> {
         let id_label = format!("{}:{}", chart_config.kind, chart_config.chart);
         self.paginate_items(
             "chart",
@@ -81,7 +106,7 @@ impl TraktClient {
     pub(super) async fn get_list_items(
         &self,
         list_config: &TraktListConfig,
-    ) -> Result<Vec<TraktListItem>, TuliproxError> {
+    ) -> Result<Vec<TraktListItem>, TraktFetchFailure> {
         let id_label = format!("{}:{}", list_config.user, list_config.list_slug);
         self.paginate_items("list", id_label, |page| async move { self.get_list_items_page(list_config, page).await })
             .await
@@ -92,7 +117,7 @@ impl TraktClient {
         kind_label: &'static str,
         id_label: String,
         mut fetch_page: F,
-    ) -> Result<Vec<TraktListItem>, TuliproxError>
+    ) -> Result<Vec<TraktListItem>, TraktFetchFailure>
     where
         F: FnMut(u32) -> Fut,
         Fut: std::future::Future<Output = Result<TraktListItemsPage, TuliproxError>>,
@@ -102,20 +127,23 @@ impl TraktClient {
         let mut page = 1;
         let mut items = Vec::new();
         loop {
-            let mut page_items = fetch_page(page).await?;
+            let mut page_items =
+                fetch_page(page).await.map_err(|error| TraktFetchFailure::from_page_error(page, error))?;
             let page_count = page_items.page_count;
             let item_count = page_items.item_count;
+            let fetched_count = page_items.items.len();
             debug!(
-                "Fetched Trakt {kind_label} {id_label} page {page}/{page_count} with {} items",
-                page_items.items.len()
+                "Fetched Trakt {kind_label} {id_label} page {page}/{page_count} with {fetched_count} items"
             );
-            let is_last_page = page >= page_count || page >= TRAKT_MAX_PAGES || page_items.items.is_empty();
             items.append(&mut page_items.items);
-            if is_last_page {
-                if page >= TRAKT_MAX_PAGES && page < page_count {
-                    debug!(
-                        "Stopped Trakt {kind_label} {id_label} after {TRAKT_MAX_PAGES} pages; reported page count was {page_count}"
-                    );
+
+            if page >= page_count {
+                if item_count.is_some_and(|count| usize::try_from(count).ok() != Some(items.len())) {
+                    return Err(TraktFetchFailure::incomplete(format!(
+                        "Trakt {kind_label} {id_label} snapshot was incomplete: fetched {} items but the source reported {}",
+                        items.len(),
+                        item_count.unwrap_or_default()
+                    )));
                 }
                 info!(
                     "Successfully fetched {} items from Trakt {kind_label} {id_label}{}",
@@ -123,6 +151,12 @@ impl TraktClient {
                     item_count.map(|count| format!(" (reported item count: {count})")).unwrap_or_default()
                 );
                 return Ok(items);
+            }
+
+            if page >= TRAKT_MAX_PAGES || fetched_count == 0 {
+                return Err(TraktFetchFailure::incomplete(format!(
+                    "Trakt {kind_label} {id_label} snapshot was incomplete at page {page} of {page_count}"
+                )));
             }
             page += 1;
         }
@@ -342,11 +376,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pagination_at_the_safety_cap_is_currently_returned_as_success() {
+    async fn pagination_at_the_safety_cap_is_reported_as_incomplete() {
         let client = TraktClient::new(reqwest::Client::new(), api_config("http://127.0.0.1:9".to_string(), "test-key"))
             .expect("client");
 
-        let items = client
+        let error = client
             .paginate_items("list", "large-list".to_string(), |page| async move {
                 let item = serde_json::from_str::<TraktListItem>(&trakt_movie_json(page))
                     .expect("test Trakt item should parse");
@@ -357,9 +391,10 @@ mod tests {
                 })
             })
             .await
-            .expect("the current client treats the cap as a successful prefix");
+            .expect_err("a bounded prefix must not be accepted as an authoritative snapshot");
 
-        assert_eq!(items.len(), TRAKT_MAX_PAGES as usize);
+        assert_eq!(error.kind, TraktFetchFailureKind::Incomplete);
+        assert!(error.message().contains("incomplete"));
     }
 
     #[tokio::test]
