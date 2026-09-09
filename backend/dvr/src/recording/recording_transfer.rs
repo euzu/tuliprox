@@ -1199,6 +1199,56 @@ fn preemption_reason_for(download: &RecordingTask) -> &'static str {
     }
 }
 
+pub(crate) const QUOTA_GONE_BEFORE_START: &str = "Quota was exhausted while this recording waited to start";
+pub(crate) const DISK_GONE_BEFORE_START: &str = "Disk space was exhausted while this recording waited to start";
+
+/// Re-run admission for the recording that is about to open its
+/// destination, returning the reason it can no longer start.
+///
+/// Admission happened when the request was accepted, which can be a long
+/// time before this point: the recording may have waited for provider
+/// capacity, sat through a retry backoff, or been scheduled hours ahead.
+/// The quota and the free space it was admitted against are not the ones
+/// it is about to consume. Without this the first sign of a full disk is
+/// a write failure part-way through a recording.
+///
+/// The subject is excluded from both sums and then added back as the
+/// candidate charge, so it is not counted twice.
+async fn refused_before_start(
+    download_queue: &Arc<RecordingQueue>,
+    app_config: &AppConfig,
+    uuid: &str,
+) -> Option<&'static str> {
+    let config = app_config.config.load();
+    let recording_cfg = config.recording()?;
+    let (_, tasks) = download_queue.committed_snapshot().await;
+    let subject = tasks.iter().find(|task| task.uuid == uuid)?;
+    let charge = crate::recording::recording_quota::charge_for_task(subject);
+    let others = || tasks.iter().filter(|task| task.uuid != uuid);
+
+    let limits = crate::recording::recording_service::quota_limits_from_config(recording_cfg.quota.as_ref());
+    let pool = crate::recording::recording_quota::quota_pool_for_task(subject);
+    let used = crate::recording::recording_quota::used_bytes_in_pool(others(), &pool);
+    if matches!(
+        crate::recording::recording_quota::would_exceed(&pool, used, charge, &limits),
+        crate::recording::recording_quota::AdmissionOutcome::OverLimit { .. }
+    ) {
+        return Some(QUOTA_GONE_BEFORE_START);
+    }
+
+    // An unmeasurable root is not grounds to refuse, exactly as at admission.
+    let free = crate::recording::recording_disk::free_bytes_for(Path::new(&recording_cfg.directory))?;
+    let safety = recording_cfg.disk.as_ref().and_then(|disk| disk.safety_bytes).unwrap_or(0);
+    let active = crate::recording::recording_disk::active_disk_reservations(others());
+    if matches!(
+        crate::recording::recording_disk::would_fit_on_disk(free, safety, active, charge),
+        crate::recording::recording_disk::DiskAdmission::Insufficient { .. }
+    ) {
+        return Some(DISK_GONE_BEFORE_START);
+    }
+    None
+}
+
 #[allow(clippy::too_many_lines)]
 pub async fn ensure_recording_worker_running(
     cfg: &AppConfig,
@@ -1447,6 +1497,18 @@ pub async fn ensure_recording_worker_running(
                                 capacity.release(provider_handle).await;
                                 break 'worker;
                             };
+                            // Last point before a destination is opened.
+                            if let Some(reason) = refused_before_start(&dq, &app_config, &worker_uuid).await {
+                                capacity.release(provider_handle).await;
+                                match fail_active_download(&dq, &worker_uuid, reason).await {
+                                    Ok(_) => publish_recording_change(&event_manager),
+                                    Err(err) => {
+                                        error!("Download worker commit failed: {err}");
+                                        break 'worker;
+                                    }
+                                }
+                                continue;
+                            }
                             match download.kind {
                                 RecordingKind::Vod | RecordingKind::Series => 'http_execution: {
                                     let execution_download = match recording_execution_download(&app_config, &download)
@@ -1914,7 +1976,7 @@ fn start_recording_scheduler(
 mod tests {
     use super::{
         ensure_recording_worker_running, finalize_http_transfer, http_transfer_path, recording_deadline_instant,
-        wait_for_provider_slot, LIVE_CAPACITY_WINDOW_CLOSED,
+        wait_for_provider_slot, DISK_GONE_BEFORE_START, LIVE_CAPACITY_WINDOW_CLOSED,
     };
     use crate::recording::{
         recording_capacity::{stub::StubCapacity, RecordingCapacityPort},
@@ -2368,6 +2430,94 @@ mod tests {
             b"recorded"
         );
         assert!(!crate::recording_partial_path(&capture.file_path).exists(), "and nothing was left staged");
+        assert_eq!(settled.recording.reserved_bytes, 0, "and it is not still holding disk");
+    }
+
+    #[tokio::test]
+    async fn a_recording_whose_disk_filled_while_it_waited_never_opens_a_destination() {
+        // Admission happened when the request was accepted; this recording
+        // then waited. By the time it reaches the front of the queue the
+        // space it was admitted against is gone. Without the recheck the
+        // first sign of that is a write failure part-way through.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let recordings_dir = dir.path().join("recordings");
+        std::fs::create_dir_all(&recordings_dir).expect("create recording dir");
+        let log = dir.path().join("spawns.log");
+        let script = counting_ffmpeg(dir.path(), &log);
+
+        let queue = Arc::new(RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open repository"));
+        let now = chrono::Utc::now().timestamp();
+        let mut capture = scheduled_task(RecordingKind::Live, now, 1_800);
+        capture.uuid = "live".to_string();
+        capture.state = RecordingTaskState::Queued;
+        capture.input_name = Some(Arc::from("provider"));
+        capture.recording.source.virtual_id = "42".to_string();
+        capture.recording.reserved_bytes = 1_024;
+        capture.file_dir.clone_from(&recordings_dir);
+        capture.file_path = recordings_dir.join("capture.ts");
+        let persisted = RecordingQueue::to_persisted(&capture);
+        crate::recording::recording_queue::mutate(&queue, move |candidate| {
+            candidate.queue.push(persisted.clone());
+            Ok(())
+        })
+        .await
+        .expect("seed");
+
+        // The safety margin stands in for a disk that filled up: it drives
+        // headroom to zero without needing a real full filesystem.
+        let app_config = app_config_with_server();
+        let mut rec_cfg =
+            RecordingConfig::from(&shared::model::RecordingConfigDto { enabled: true, ..Default::default() });
+        rec_cfg.directory = recordings_dir.to_string_lossy().into_owned();
+        rec_cfg.disk = Some(tuliprox_core::model::RecordingDiskConfig {
+            high_water_percent: None,
+            low_water_percent: None,
+            cleanup_interval_secs: None,
+            safety_bytes: Some(u64::MAX),
+        });
+        let mut config = tuliprox_core::model::Config::clone(&app_config.config.load());
+        config.video = Some(tuliprox_core::model::VideoConfig {
+            extensions: Vec::new(),
+            web_search: None,
+            recording: Some(rec_cfg.clone()),
+        });
+        app_config.config.store(Arc::new(config));
+
+        let stub = StubCapacity::with_room();
+        let capacity: Arc<dyn RecordingCapacityPort> = Arc::clone(&stub) as Arc<dyn RecordingCapacityPort>;
+        ensure_recording_worker_running(
+            &app_config,
+            &rec_cfg,
+            &queue,
+            &Arc::new(EventManager::new()),
+            &capacity,
+            &script,
+        )
+        .await
+        .expect("worker started");
+
+        let settled = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(done) = queue.finished.read().await.first().cloned() {
+                    break done;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        let Ok(settled) = settled else {
+            panic!(
+                "never settled: active={:?} spawns={}",
+                queue.active.read().await.as_ref().map(|active| (active.state, active.error.clone())),
+                spawn_count(&log),
+            );
+        };
+
+        assert_eq!(settled.state, RecordingTaskState::Failed, "{:?}", settled.error);
+        assert_eq!(settled.error.as_deref(), Some(DISK_GONE_BEFORE_START), "and it says which resource ran out");
+        assert_eq!(spawn_count(&log), 0, "the encoder was never started");
+        assert!(!capture.file_path.exists(), "and no destination was opened");
+        assert_eq!(stub.release_count(), 1, "the provider slot it had was given back");
         assert_eq!(settled.recording.reserved_bytes, 0, "and it is not still holding disk");
     }
 }
