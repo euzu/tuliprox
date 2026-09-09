@@ -264,8 +264,9 @@ pub async fn m3u_write_playlist(
     target_output: &M3uTargetOutput,
     target_path: &Path,
     new_playlist: &[PlaylistGroup],
+    allow_empty_publication: bool,
 ) -> Result<(), TuliproxError> {
-    if new_playlist.is_empty() {
+    if new_playlist.is_empty() && !allow_empty_publication {
         return Ok(());
     }
 

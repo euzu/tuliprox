@@ -22,7 +22,6 @@ mod step_measure;
 mod sys_utils;
 mod telegram;
 mod time_utils;
-mod trakt;
 
 #[macro_export]
 macro_rules! debug_if_enabled {
@@ -87,7 +86,6 @@ pub use self::{
     sys_utils::*,
     telegram::*,
     time_utils::*,
-    trakt::*,
 };
 pub use debug_if_enabled;
 pub use shared::utils::*;

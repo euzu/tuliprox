@@ -106,6 +106,21 @@
 
 ## 🌟 New Features
 
+- **Trakt curation can now select one target-wide VOD/Series catalog and project Xtream categories independently.**
+  `output[].trakt.catalog_selection` accepts `full` (the compatibility default) or `curated`;
+  `include_xtream_base_categories` defaults to `true`; and each list/chart has a default-true
+  `create_xtream_category`. Existing YAML therefore keeps the full catalog, normal Xtream categories, and current
+  category-scoped alias IDs. Selection-only selectors may omit `category_name`, while category-producing selectors
+  still require it. The Source Editor exposes the same controls in all supported locales.
+  - Curation now evaluates exact surviving target UUIDs after favourites, group merge, and post-merge content
+    deduplication. M3U and STRM receive selected normal entries rather than Xtream aliases, while Xtream watch behavior
+    continues to observe its category view.
+  - Every enabled list/chart is required for a refresh. Partial selector success, missing/invalid credentials, request
+    failures, malformed responses, and incomplete pagination now fail that target before IDs, persistence, cache, or
+    watch effects instead of publishing a partial/base fallback.
+  - A complete empty or no-match result under `catalog_selection: curated` intentionally clears managed VOD/Series
+    Xtream, M3U, and STRM state while preserving Live. Ordinary or failed empty refreshes retain previous artifacts.
+
 - **Target-specific bouquet filters are now managed directly from the Source Editor.** Each target shows its current
   bouquet status below the regular filter settings and opens a full-size editor for selecting Live, VOD, and Series
   groups. Bouquet filters support both whitelist and blacklist mode, are stored by the target's unique name, and take
@@ -1364,6 +1379,11 @@
   - The rules use OR semantics: any matching CIDR or country allows the request.
 
 ## 🛠 Maintenance
+
+- **Playlist curation now has a dedicated capability boundary**: matching and ordered membership evaluation live in the
+  source-neutral `tuliprox-curation` kernel, while Trakt HTTP/JSON handling translates records at the edge and the
+  category-scoped compatibility projector remains separate from membership identity. Existing category identity and
+  matching rules remain unchanged; the target-wide selection entry above documents the intentional outcome changes.
 
 - **`AdmissionRequest` bundles the request-scoped admission arguments**: five functions each threaded the same ten
   positional parameters, three of them consecutive bare `bool`s (`use_session_admission`, then

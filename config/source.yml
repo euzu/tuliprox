@@ -45,12 +45,16 @@ sources:
               # Set enabled to true after configuring api.api_key with your Trakt Client ID.
               # See the documentation for the TRAKT_CLIENT_ID environment-variable example.
               enabled: false
+              # "full" preserves the entire catalog (default); "curated" keeps selected VOD/Series plus all Live.
+              catalog_selection: curated
+              include_xtream_base_categories: true
               api:
                 api_key: ""
               lists:
                 - user: "linaspurinis"
                   list_slug: "top-watched-movies-of-the-week"
                   category_name: "📈 Top Weekly Movies"
+                  create_xtream_category: true
                   content_type: "vod"
                   fuzzy_match_threshold: 80
                 - user: "garycrawfordgc"
@@ -60,7 +64,8 @@ sources:
                   fuzzy_match_threshold: 75
                 - user: "trakt"
                   list_slug: "trending"
-                  category_name: "🔥 Trending"
+                  # Selection-only selectors contribute memberships without creating an Xtream alias category.
+                  create_xtream_category: false
                   content_type: "both"
                   fuzzy_match_threshold: 80
                 - user: "mmozeiko"

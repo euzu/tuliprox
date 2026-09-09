@@ -1,8 +1,11 @@
 use reqwest::StatusCode;
 use shared::error::TuliproxError;
 
-/// Handle Trakt API response status and convert to appropriate error
-pub fn handle_trakt_api_error(status: StatusCode, resource_kind: &str, resource_id: &str) -> Result<(), TuliproxError> {
+pub(super) fn handle_trakt_api_error(
+    status: StatusCode,
+    resource_kind: &str,
+    resource_id: &str,
+) -> Result<(), TuliproxError> {
     match status.as_u16() {
         401 => Err(TuliproxError::RepositoryTrakt(
             "Trakt rejected the configured Client ID (HTTP 401 Unauthorized); check trakt.api.api_key",

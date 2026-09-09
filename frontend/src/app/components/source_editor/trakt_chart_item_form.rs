@@ -1,13 +1,14 @@
 use crate::{
     app::components::{build_options, select::Select, selection_parse_first, Card, DropDownSelection, TextButton},
-    config_field_bool, config_field_child, config_field_custom, edit_field_bool, edit_field_number_u8, edit_field_text,
-    generate_form_reducer,
+    config_field_bool, config_field_child, config_field_custom, config_field_optional, edit_field_bool,
+    edit_field_number_u8, edit_field_text_option, generate_form_reducer,
     i18n::use_translation,
 };
 use shared::model::{TraktChartConfigDto, TraktChartKind, TraktChartType};
 use yew::{component, html, use_memo, use_reducer, Callback, Html, Properties, UseReducerHandle};
 
 const LABEL_TRAKT_CATEGORY_NAME: &str = "LABEL.TRAKT_CATEGORY_NAME";
+const LABEL_TRAKT_CREATE_XTREAM_CATEGORY: &str = "LABEL.TRAKT_CREATE_XTREAM_CATEGORY";
 const LABEL_TRAKT_TMDB_ONLY: &str = "LABEL.TRAKT_TMDB_ONLY";
 const LABEL_TRAKT_FUZZY_MATCH_THRESHOLD: &str = "LABEL.TRAKT_FUZZY_MATCH_THRESHOLD";
 const LABEL_TRAKT_CHART_KIND: &str = "LABEL.TRAKT_CHART_KIND";
@@ -37,7 +38,8 @@ generate_form_reducer!(
     fields {
         Kind => kind: TraktChartKind,
         Chart => chart: TraktChartType,
-        CategoryName => category_name: String,
+        CategoryName => category_name: Option<String>,
+        CreateXtreamCategory => create_xtream_category: bool,
         TmdbOnly => tmdb_only: bool,
         FuzzyMatchThreshold => fuzzy_match_threshold: u8,
     }
@@ -51,6 +53,14 @@ pub struct TraktChartItemFormProps {
     pub initial: Option<TraktChartConfigDto>,
     #[prop_or(false)]
     pub readonly: bool,
+    #[prop_or(true)]
+    pub validate_category_name: bool,
+}
+
+fn can_submit_chart(data: &TraktChartConfigDto, validate_category_name: bool) -> bool {
+    !validate_category_name
+        || !data.create_xtream_category
+        || data.category_name.as_deref().is_some_and(|name| !name.trim().is_empty())
 }
 
 #[component]
@@ -80,9 +90,10 @@ pub fn TraktChartItemForm(props: &TraktChartItemFormProps) -> Html {
     let handle_submit = {
         let form_state = form_state.clone();
         let on_submit = props.on_submit.clone();
+        let validate_category_name = props.validate_category_name;
         Callback::from(move |_| {
             let data = form_state.form.clone();
-            if !data.category_name.trim().is_empty() {
+            if can_submit_chart(&data, validate_category_name) {
                 on_submit.emit(data);
             }
         })
@@ -97,7 +108,10 @@ pub fn TraktChartItemForm(props: &TraktChartItemFormProps) -> Html {
             if props.readonly {
                 { config_field_custom!(translate.t(LABEL_TRAKT_CHART_KIND), translate.t(trakt_chart_kind_label_key(form_state.form.kind))) }
                 { config_field_custom!(translate.t(LABEL_TRAKT_CHART_TYPE), translate.t(trakt_chart_type_label_key(form_state.form.chart))) }
-                { config_field_custom!(translate.t(LABEL_TRAKT_CATEGORY_NAME), form_state.form.category_name.clone()) }
+                { config_field_bool!(form_state.form, translate.t(LABEL_TRAKT_CREATE_XTREAM_CATEGORY), create_xtream_category) }
+                if form_state.form.create_xtream_category {
+                    { config_field_optional!(form_state.form, translate.t(LABEL_TRAKT_CATEGORY_NAME), category_name) }
+                }
                 { config_field_bool!(form_state.form, translate.t(LABEL_TRAKT_TMDB_ONLY), tmdb_only) }
                 { config_field_custom!(translate.t(LABEL_TRAKT_FUZZY_MATCH_THRESHOLD), form_state.form.fuzzy_match_threshold.to_string()) }
             } else {
@@ -131,7 +145,10 @@ pub fn TraktChartItemForm(props: &TraktChartItemFormProps) -> Html {
                         />
                     }
                 })}
-                { edit_field_text!(form_state, translate.t(LABEL_TRAKT_CATEGORY_NAME), category_name, TraktChartFormAction::CategoryName) }
+                { edit_field_bool!(form_state, translate.t(LABEL_TRAKT_CREATE_XTREAM_CATEGORY), create_xtream_category, TraktChartFormAction::CreateXtreamCategory) }
+                if form_state.form.create_xtream_category {
+                    { edit_field_text_option!(form_state, translate.t(LABEL_TRAKT_CATEGORY_NAME), category_name, TraktChartFormAction::CategoryName) }
+                }
                 { edit_field_bool!(form_state, translate.t(LABEL_TRAKT_TMDB_ONLY), tmdb_only, TraktChartFormAction::TmdbOnly) }
                 { edit_field_number_u8!(form_state, translate.t(LABEL_TRAKT_FUZZY_MATCH_THRESHOLD), fuzzy_match_threshold, TraktChartFormAction::FuzzyMatchThreshold) }
             }
@@ -155,5 +172,26 @@ pub fn TraktChartItemForm(props: &TraktChartItemFormProps) -> Html {
                 }
             </div>
         </Card>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chart_submit_validation_matches_conditional_category_contract() {
+        let mut chart = TraktChartConfigDto::default();
+
+        assert!(chart.create_xtream_category);
+        assert!(!can_submit_chart(&chart, true));
+        chart.category_name = Some("Trending".to_string());
+        assert!(can_submit_chart(&chart, true));
+        chart.category_name = None;
+        chart.create_xtream_category = false;
+        assert!(can_submit_chart(&chart, true));
+
+        chart.create_xtream_category = true;
+        assert!(can_submit_chart(&chart, false), "disabled Trakt keeps incomplete edits");
     }
 }

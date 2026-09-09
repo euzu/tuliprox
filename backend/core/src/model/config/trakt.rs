@@ -1,6 +1,6 @@
-use crate::model::{config::trakt_api::TraktMatchItem, macros};
+use crate::model::macros;
 use shared::model::{
-    PlaylistItem, TraktApiConfigDto, TraktChartConfigDto, TraktChartKind, TraktChartType, TraktConfigDto,
+    TraktApiConfigDto, TraktCatalogSelection, TraktChartConfigDto, TraktChartKind, TraktChartType, TraktConfigDto,
     TraktContentType, TraktListConfigDto,
 };
 
@@ -39,7 +39,8 @@ impl From<&TraktApiConfig> for TraktApiConfigDto {
 pub struct TraktListConfig {
     pub user: String,
     pub list_slug: String,
-    pub category_name: String,
+    pub category_name: Option<String>,
+    pub create_xtream_category: bool,
     pub content_type: TraktContentType,
     pub tmdb_only: bool,
     pub fuzzy_match_threshold: u8, // Percentage (0-100)
@@ -52,6 +53,7 @@ impl From<&TraktListConfigDto> for TraktListConfig {
             user: dto.user.clone(),
             list_slug: dto.list_slug.clone(),
             category_name: dto.category_name.clone(),
+            create_xtream_category: dto.create_xtream_category,
             content_type: dto.content_type,
             tmdb_only: dto.tmdb_only,
             fuzzy_match_threshold: dto.fuzzy_match_threshold,
@@ -65,6 +67,7 @@ impl From<&TraktListConfig> for TraktListConfigDto {
             user: instance.user.clone(),
             list_slug: instance.list_slug.clone(),
             category_name: instance.category_name.clone(),
+            create_xtream_category: instance.create_xtream_category,
             content_type: instance.content_type,
             tmdb_only: instance.tmdb_only,
             fuzzy_match_threshold: instance.fuzzy_match_threshold,
@@ -76,7 +79,8 @@ impl From<&TraktListConfig> for TraktListConfigDto {
 pub struct TraktChartConfig {
     pub kind: TraktChartKind,
     pub chart: TraktChartType,
-    pub category_name: String,
+    pub category_name: Option<String>,
+    pub create_xtream_category: bool,
     pub tmdb_only: bool,
     pub fuzzy_match_threshold: u8, // Percentage (0-100)
 }
@@ -88,6 +92,7 @@ impl From<&TraktChartConfigDto> for TraktChartConfig {
             kind: dto.kind,
             chart: dto.chart,
             category_name: dto.category_name.clone(),
+            create_xtream_category: dto.create_xtream_category,
             tmdb_only: dto.tmdb_only,
             fuzzy_match_threshold: dto.fuzzy_match_threshold,
         }
@@ -100,6 +105,7 @@ impl From<&TraktChartConfig> for TraktChartConfigDto {
             kind: instance.kind,
             chart: instance.chart,
             category_name: instance.category_name.clone(),
+            create_xtream_category: instance.create_xtream_category,
             tmdb_only: instance.tmdb_only,
             fuzzy_match_threshold: instance.fuzzy_match_threshold,
         }
@@ -107,38 +113,10 @@ impl From<&TraktChartConfig> for TraktChartConfigDto {
 }
 
 #[derive(Debug, Clone)]
-pub struct TraktCategoryConfig {
-    pub category_name: String,
-    pub content_type: TraktContentType,
-    pub tmdb_only: bool,
-    pub fuzzy_match_threshold: u8, // Percentage (0-100)
-}
-
-impl From<&TraktListConfig> for TraktCategoryConfig {
-    fn from(config: &TraktListConfig) -> Self {
-        Self {
-            category_name: config.category_name.clone(),
-            content_type: config.content_type,
-            tmdb_only: config.tmdb_only,
-            fuzzy_match_threshold: config.fuzzy_match_threshold,
-        }
-    }
-}
-
-impl From<&TraktChartConfig> for TraktCategoryConfig {
-    fn from(config: &TraktChartConfig) -> Self {
-        Self {
-            category_name: config.category_name.clone(),
-            content_type: config.kind.content_type(),
-            tmdb_only: config.tmdb_only,
-            fuzzy_match_threshold: config.fuzzy_match_threshold,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
 pub struct TraktConfig {
     pub enabled: bool,
+    pub catalog_selection: TraktCatalogSelection,
+    pub include_xtream_base_categories: bool,
     pub api: TraktApiConfig,
     pub lists: Vec<TraktListConfig>,
     pub charts: Vec<TraktChartConfig>,
@@ -149,6 +127,8 @@ impl From<&TraktConfigDto> for TraktConfig {
     fn from(dto: &TraktConfigDto) -> Self {
         Self {
             enabled: dto.enabled,
+            catalog_selection: dto.catalog_selection,
+            include_xtream_base_categories: dto.include_xtream_base_categories,
             api: TraktApiConfig::from(&dto.api),
             lists: dto.lists.iter().map(Into::into).collect(),
             charts: dto.charts.iter().map(Into::into).collect(),
@@ -159,6 +139,8 @@ impl From<&TraktConfig> for TraktConfigDto {
     fn from(dto: &TraktConfig) -> Self {
         Self {
             enabled: dto.enabled,
+            catalog_selection: dto.catalog_selection,
+            include_xtream_base_categories: dto.include_xtream_base_categories,
             api: TraktApiConfigDto::from(&dto.api),
             lists: dto.lists.iter().map(TraktListConfigDto::from).collect(),
             charts: dto.charts.iter().map(TraktChartConfigDto::from).collect(),
@@ -166,11 +148,43 @@ impl From<&TraktConfig> for TraktConfigDto {
     }
 }
 
-// Matching results
-#[derive(Debug, Clone)]
-pub struct TraktMatchResult<'a> {
-    pub playlist_item: &'a PlaylistItem,
-    pub trakt_item: &'a TraktMatchItem<'a>,
-    pub match_score: f64,
-    // pub match_type: MatchType,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolved_trakt_config_round_trips_through_the_compatible_dto() {
+        let dto = TraktConfigDto {
+            enabled: true,
+            catalog_selection: TraktCatalogSelection::Full,
+            include_xtream_base_categories: true,
+            api: TraktApiConfigDto {
+                api_key: "client-id".to_string(),
+                version: "2".to_string(),
+                url: "https://api.trakt.tv".to_string(),
+                user_agent: "agent".to_string(),
+            },
+            lists: vec![TraktListConfigDto {
+                user: "alice".to_string(),
+                list_slug: "watchlist".to_string(),
+                category_name: Some("Watchlist".to_string()),
+                create_xtream_category: true,
+                content_type: TraktContentType::Vod,
+                tmdb_only: false,
+                fuzzy_match_threshold: 80,
+            }],
+            charts: vec![TraktChartConfigDto {
+                kind: TraktChartKind::Shows,
+                chart: TraktChartType::Popular,
+                category_name: Some("Popular Shows".to_string()),
+                create_xtream_category: false,
+                tmdb_only: true,
+                fuzzy_match_threshold: 90,
+            }],
+        };
+
+        let resolved = TraktConfig::from(&dto);
+
+        assert_eq!(TraktConfigDto::from(&resolved), dto);
+    }
 }

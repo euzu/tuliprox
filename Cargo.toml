@@ -42,6 +42,7 @@ tuliprox-session = { version = "3", path = "backend/session" }
 tuliprox-media-server = { version = "3", path = "backend/media-server" }
 tuliprox-repository = { version = "3", path = "backend/repository" }
 tuliprox-core = { version = "3", path = "backend/core" }
+tuliprox-curation = { version = "3", path = "backend/curation" }
 tuliprox-library = { version = "3", path = "backend/library" }
 serde         = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json    = { version = "1.0.151" }

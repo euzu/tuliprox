@@ -4475,7 +4475,6 @@ dependencies = [
  "ipnet",
  "libc",
  "log",
- "mime",
  "parking_lot",
  "paste",
  "path-clean",
@@ -4501,6 +4500,23 @@ dependencies = [
  "url",
  "windows-sys 0.61.2",
  "zeroize",
+]
+
+[[package]]
+name = "tuliprox-curation"
+version = "3.3.108"
+dependencies = [
+ "indexmap",
+ "log",
+ "mime",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "shared",
+ "strsim",
+ "tokio",
+ "tuliprox-core",
 ]
 
 [[package]]
@@ -4743,6 +4759,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tuliprox-core",
+ "tuliprox-curation",
  "tuliprox-iptv",
  "tuliprox-library",
  "tuliprox-media-server",

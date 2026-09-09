@@ -1,7 +1,8 @@
 use crate::{
     app::components::{
-        config::HasFormData, BlockId, BlockInstance, Card, EditMode, FilterInput, IconButton, Panel,
-        SourceEditorContext, TextButton, TitledCard, TraktChartItemForm, TraktListItemForm,
+        build_options, config::HasFormData, select::Select, selection_parse_first, BlockId, BlockInstance, Card,
+        DropDownSelection, EditMode, FilterInput, IconButton, Panel, SourceEditorContext, TextButton, TitledCard,
+        TraktChartItemForm, TraktListItemForm,
     },
     config_field, config_field_bool, config_field_child, config_field_custom, edit_field_bool, edit_field_text,
     generate_form_reducer,
@@ -11,15 +12,16 @@ use shared::{
     concat_string,
     error::TuliproxError,
     model::{
-        TargetOutputDto, TraktApiConfigDto, TraktChartConfigDto, TraktConfigDto, TraktListConfigDto,
-        XtreamTargetOutputDto,
+        TargetOutputDto, TraktApiConfigDto, TraktCatalogSelection, TraktChartConfigDto, TraktConfigDto,
+        TraktListConfigDto, XtreamTargetOutputDto,
     },
     utils::Internable,
 };
 use std::{fmt::Display, rc::Rc, str::FromStr, sync::Arc};
 use web_sys::MouseEvent;
 use yew::{
-    component, html, use_context, use_effect_with, use_reducer, use_state, Callback, Html, Properties, UseReducerHandle,
+    component, html, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback, Html, Properties,
+    UseReducerHandle,
 };
 
 const LABEL_SKIP_DIRECT_SOURCE: &str = "LABEL.SKIP_DIRECT_SOURCE";
@@ -39,6 +41,11 @@ const LABEL_USER_AGENT: &str = "LABEL.API_USER_AGENT";
 const LABEL_MAIN: &str = "LABEL.MAIN_CONFIG";
 const LABEL_TRAKT: &str = "LABEL.TRAKT";
 const LABEL_ENABLED: &str = "LABEL.ENABLED";
+const LABEL_TRAKT_CATALOG_SELECTION: &str = "LABEL.TRAKT_CATALOG_SELECTION";
+const LABEL_TRAKT_CATALOG_SELECTION_FULL: &str = "LABEL.TRAKT_CATALOG_SELECTION_FULL";
+const LABEL_TRAKT_CATALOG_SELECTION_CURATED: &str = "LABEL.TRAKT_CATALOG_SELECTION_CURATED";
+const LABEL_TRAKT_INCLUDE_XTREAM_BASE_CATEGORIES: &str = "LABEL.TRAKT_INCLUDE_XTREAM_BASE_CATEGORIES";
+const LABEL_TRAKT_SELECTION_ONLY: &str = "LABEL.TRAKT_SELECTION_ONLY";
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum XtreamOutputFormPage {
@@ -91,6 +98,8 @@ generate_form_reducer!(
     action_name: TraktConfigFormAction,
     fields {
         Enabled => enabled: bool,
+        CatalogSelection => catalog_selection: TraktCatalogSelection,
+        IncludeXtreamBaseCategories => include_xtream_base_categories: bool,
     }
 );
 
@@ -126,6 +135,8 @@ pub struct XtreamTargetOutputViewProps {
 
 fn build_trakt_output_config(
     enabled: bool,
+    catalog_selection: TraktCatalogSelection,
+    include_xtream_base_categories: bool,
     api: TraktApiConfigDto,
     lists: Vec<TraktListConfigDto>,
     charts: Vec<TraktChartConfigDto>,
@@ -133,7 +144,14 @@ fn build_trakt_output_config(
     if lists.is_empty() && charts.is_empty() {
         None
     } else {
-        Some(TraktConfigDto { enabled, api, lists, charts })
+        Some(TraktConfigDto { enabled, catalog_selection, include_xtream_base_categories, api, lists, charts })
+    }
+}
+
+fn trakt_catalog_selection_label_key(selection: TraktCatalogSelection) -> &'static str {
+    match selection {
+        TraktCatalogSelection::Full => LABEL_TRAKT_CATALOG_SELECTION_FULL,
+        TraktCatalogSelection::Curated => LABEL_TRAKT_CATALOG_SELECTION_CURATED,
     }
 }
 
@@ -144,19 +162,29 @@ fn append_trakt_matching_summary_suffix(mut summary: String, tmdb_only: bool) ->
     summary
 }
 
-fn trakt_list_summary(item: &TraktListConfigDto) -> String {
+fn trakt_list_summary(item: &TraktListConfigDto, selection_only: &str) -> String {
     append_trakt_matching_summary_suffix(
         format!(
             "{} / {} - {} ({}, {}%)",
-            item.user, item.list_slug, item.category_name, item.content_type, item.fuzzy_match_threshold
+            item.user,
+            item.list_slug,
+            if item.create_xtream_category { item.category_name.as_deref().unwrap_or("-") } else { selection_only },
+            item.content_type,
+            item.fuzzy_match_threshold
         ),
         item.tmdb_only,
     )
 }
 
-fn trakt_chart_summary(item: &TraktChartConfigDto) -> String {
+fn trakt_chart_summary(item: &TraktChartConfigDto, selection_only: &str) -> String {
     append_trakt_matching_summary_suffix(
-        format!("{}/{} - {} ({}%)", item.kind, item.chart, item.category_name, item.fuzzy_match_threshold),
+        format!(
+            "{}/{} - {} ({}%)",
+            item.kind,
+            item.chart,
+            if item.create_xtream_category { item.category_name.as_deref().unwrap_or("-") } else { selection_only },
+            item.fuzzy_match_threshold
+        ),
         item.tmdb_only,
     )
 }
@@ -193,6 +221,16 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
 
     let trakt_lists_state = use_state(Vec::<TraktListConfigDto>::new);
     let trakt_charts_state = use_state(Vec::<TraktChartConfigDto>::new);
+    let catalog_selection_options = use_memo(trakt_state.form.catalog_selection, {
+        let translate = translate.clone();
+        move |selection| {
+            build_options(
+                [TraktCatalogSelection::Full, TraktCatalogSelection::Curated],
+                selection,
+                |value| html! { translate.t(trakt_catalog_selection_label_key(*value)) },
+            )
+        }
+    });
     let show_trakt_list_form_state = use_state(|| false);
     let show_trakt_chart_form_state = use_state(|| false);
     let editing_trakt_list_index_state = use_state(|| None::<usize>);
@@ -431,6 +469,7 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
                         on_cancel={handle_close_trakt_list_form}
                         initial={initial_trakt_list}
                         readonly={!props.allow_write}
+                        validate_category_name={trakt_form.form.enabled}
                     />
                 } else if *show_trakt_chart_form {
                     <TraktChartItemForm
@@ -438,12 +477,42 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
                         on_cancel={handle_close_trakt_chart_form}
                         initial={initial_trakt_chart}
                         readonly={!props.allow_write}
+                        validate_category_name={trakt_form.form.enabled}
                     />
                 } else {
                 { if props.allow_write {
-                    html! { { edit_field_bool!(trakt_form, translate.t(LABEL_ENABLED), enabled, TraktConfigFormAction::Enabled) } }
+                    html! {
+                        <>
+                            { edit_field_bool!(trakt_form, translate.t(LABEL_ENABLED), enabled, TraktConfigFormAction::Enabled) }
+                            { config_field_child!(translate.t(LABEL_TRAKT_CATALOG_SELECTION), "OUTPUT_XTREAM_FORM.TRAKT_CATALOG_SELECTION", {
+                                let selection_form = trakt_form.clone();
+                                html! {
+                                    <Select
+                                        name={"trakt_catalog_selection"}
+                                        multi_select={false}
+                                        on_select={Callback::from(move |(_, selections):(String, DropDownSelection)| {
+                                            if let Some(selection) = selection_parse_first::<TraktCatalogSelection>(&selections) {
+                                                selection_form.dispatch(TraktConfigFormAction::CatalogSelection(selection));
+                                            }
+                                        })}
+                                        options={catalog_selection_options.clone()}
+                                    />
+                                }
+                            })}
+                            { edit_field_bool!(trakt_form, translate.t(LABEL_TRAKT_INCLUDE_XTREAM_BASE_CATEGORIES), include_xtream_base_categories, TraktConfigFormAction::IncludeXtreamBaseCategories) }
+                        </>
+                    }
                 } else {
-                    html! { { config_field_bool!(trakt_form.form, translate.t(LABEL_ENABLED), enabled) } }
+                    html! {
+                        <>
+                            { config_field_bool!(trakt_form.form, translate.t(LABEL_ENABLED), enabled) }
+                            { config_field_custom!(
+                                translate.t(LABEL_TRAKT_CATALOG_SELECTION),
+                                translate.t(trakt_catalog_selection_label_key(trakt_form.form.catalog_selection))
+                            ) }
+                            { config_field_bool!(trakt_form.form, translate.t(LABEL_TRAKT_INCLUDE_XTREAM_BASE_CATEGORIES), include_xtream_base_categories) }
+                        </>
+                    }
                 }}
                 <div class="tp__form-section">
                     <h3>{translate.t(LABEL_API_CONFIGURATION)}</h3>
@@ -486,7 +555,7 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
                                         </div>
                                     }
                                     <div class="tp__form-list__item-content">
-                                        <span>{trakt_list_summary(item.1)}</span>
+                                        <span>{trakt_list_summary(item.1, &translate.t(LABEL_TRAKT_SELECTION_ONLY))}</span>
                                     </div>
                                 </div>
                             }
@@ -525,7 +594,7 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
                                         </div>
                                     }
                                     <div class="tp__form-list__item-content">
-                                        <span>{trakt_chart_summary(item.1)}</span>
+                                        <span>{trakt_chart_summary(item.1, &translate.t(LABEL_TRAKT_SELECTION_ONLY))}</span>
                                     </div>
                                 </div>
                             }
@@ -599,6 +668,8 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
             let trakt_charts = (*trakt_charts_state).clone();
             output.trakt = build_trakt_output_config(
                 trakt_state.data().enabled,
+                trakt_state.data().catalog_selection,
+                trakt_state.data().include_xtream_base_categories,
                 trakt_api_state.data().clone(),
                 trakt_lists,
                 trakt_charts,
@@ -646,7 +717,14 @@ mod tests {
 
     #[test]
     fn build_trakt_output_config_returns_none_when_empty() {
-        let result = build_trakt_output_config(true, TraktApiConfigDto::default(), Vec::new(), Vec::new());
+        let result = build_trakt_output_config(
+            true,
+            TraktCatalogSelection::Full,
+            true,
+            TraktApiConfigDto::default(),
+            Vec::new(),
+            Vec::new(),
+        );
         assert!(result.is_none());
     }
 
@@ -655,16 +733,44 @@ mod tests {
         let charts = vec![TraktChartConfigDto {
             kind: TraktChartKind::Movies,
             chart: TraktChartType::Trending,
-            category_name: "Trending Movies".to_string(),
+            category_name: Some("Trending Movies".to_string()),
+            create_xtream_category: false,
             tmdb_only: true,
             fuzzy_match_threshold: 90,
         }];
 
-        let result = build_trakt_output_config(true, TraktApiConfigDto::default(), Vec::new(), charts.clone())
-            .expect("charts-only trakt config");
+        let result = build_trakt_output_config(
+            true,
+            TraktCatalogSelection::Curated,
+            false,
+            TraktApiConfigDto::default(),
+            Vec::new(),
+            charts.clone(),
+        )
+        .expect("charts-only trakt config");
 
+        assert_eq!(result.catalog_selection, TraktCatalogSelection::Curated);
+        assert!(!result.include_xtream_base_categories);
         assert!(result.lists.is_empty());
         assert_eq!(result.charts, charts);
+    }
+
+    #[test]
+    fn selector_summary_and_defaults_expose_independent_policy() {
+        let chart = TraktChartConfigDto {
+            category_name: Some("Preserved category".to_string()),
+            create_xtream_category: false,
+            ..TraktChartConfigDto::default()
+        };
+
+        let summary = trakt_chart_summary(&chart, "Selection only");
+        assert!(summary.contains("Selection only"));
+        assert!(!summary.contains("Preserved category"));
+
+        let defaults = TraktConfigDto::default();
+        assert_eq!(defaults.catalog_selection, TraktCatalogSelection::Full);
+        assert!(defaults.include_xtream_base_categories);
+        assert!(TraktChartConfigDto::default().create_xtream_category);
     }
 
     #[test]

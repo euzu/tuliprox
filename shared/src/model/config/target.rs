@@ -282,7 +282,7 @@ impl Prepare for XtreamTargetOutputDto {
             self.t_filter = Some(get_filter(raw_filter, templates)?);
         }
         if let Some(trakt) = &mut self.trakt {
-            trakt.prepare();
+            trakt.prepare()?;
         }
         Ok(())
     }

@@ -4,12 +4,16 @@ use shared::{
     foundation::{get_filter, MapperScript, ValueProvider},
     model::{
         ClusterFlags, ConfigInputDto, ConfigRenameDto, ConfigTargetDto, ConfigTargetOptions, FieldSetAccessor,
-        ItemField, M3uPlaylistItem, MappingStage, PlaylistEntry, PlaylistItem, PlaylistItemHeader, PlaylistItemType,
-        XtreamCluster, XtreamPlaylistItem,
+        ItemField, M3uPlaylistItem, M3uTargetOutputDto, MappingStage, PlaylistEntry, PlaylistItem, PlaylistItemHeader,
+        PlaylistItemType, TargetOutputDto, TraktApiConfigDto, TraktCatalogSelection, TraktConfigDto, TraktContentType,
+        TraktListConfigDto, UUIDType, XtreamCluster, XtreamPlaylistItem, XtreamTargetOutputDto,
     },
     utils::Internable,
 };
-use tuliprox_core::model::{CompiledMappingRule, CompiledTargetMappings, Config, ConfigInputAlias};
+use tuliprox_core::model::{CompiledMappingRule, CompiledTargetMappings, Config, ConfigInputAlias, TraktConfig};
+use tuliprox_curation::{
+    CurationEvaluation, CurationMediaKind, CurationMembership, CurationSelectorKey, CurationSelectorSummary,
+};
 
 fn serialize_without_trailing_fields<T: serde::Serialize>(value: &T, trailing_fields: &[u8]) -> Vec<u8> {
     let mut encoded = rmp_serde::to_vec(value).expect("playlist item should serialize");
@@ -1481,6 +1485,795 @@ match {
             assert_eq!(stats[&input.name].processed_stats.channel_count, 3);
         });
     }
+}
+
+#[test]
+fn current_target_finalization_order_merges_before_dedup_and_presentation() {
+    assert_eq!(
+        FINALIZATION_ORDER,
+        [
+            FinalizationStage::Merge,
+            FinalizationStage::Deduplicate,
+            FinalizationStage::Sort,
+            FinalizationStage::AssignChannelNumbers,
+            FinalizationStage::AssignCounters,
+        ]
+    );
+}
+
+#[test]
+fn curation_eligible_catalog_is_merged_and_deduplicated_before_matching() {
+    let mut target = ConfigTarget::from(&ConfigTargetDto::default());
+    target.execution_plan.post_merge_content_dedup = Some(shared::model::DeduplicateConfig::default());
+    let losing_uuid = UUIDType::from_valid_uuid("00000000-0000-4000-8000-000000000051");
+    let winning_uuid = UUIDType::from_valid_uuid("00000000-0000-4000-8000-000000000052");
+    let playlist = vec![
+        PlaylistGroup {
+            id: 1,
+            title: "Movies".intern(),
+            channels: vec![catalog_test_item(
+                "Movie HD",
+                losing_uuid,
+                PlaylistItemType::Video,
+                XtreamCluster::Video,
+                None,
+            )],
+            xtream_cluster: XtreamCluster::Video,
+        },
+        PlaylistGroup {
+            id: 2,
+            title: "movies".intern(),
+            channels: vec![catalog_test_item(
+                "Movie 4K",
+                winning_uuid,
+                PlaylistItemType::Video,
+                XtreamCluster::Video,
+                None,
+            )],
+            xtream_cluster: XtreamCluster::Video,
+        },
+    ];
+    let mut step = StepMeasure::new("test", |_, _| {});
+
+    let eligible = prepare_eligible_catalog(&target, playlist, &mut step);
+
+    assert_eq!(eligible.len(), 1);
+    assert_eq!(eligible[0].channels.len(), 1);
+    assert_eq!(eligible[0].channels[0].header.uuid, winning_uuid);
+}
+
+#[test]
+fn persist_filter_can_select_a_generated_curation_group() {
+    let mut target = ConfigTarget::from(&ConfigTargetDto::default());
+    target.filter.persist = Some(get_filter(r#"Group = "Trending""#, None).expect("persist filter"));
+    let mut playlist = vec![
+        PlaylistGroup {
+            id: 1,
+            title: "Base".intern(),
+            channels: vec![PlaylistItem {
+                header: PlaylistItemHeader { group: "Base".intern(), ..Default::default() },
+            }],
+            xtream_cluster: XtreamCluster::Video,
+        },
+        PlaylistGroup {
+            id: 2,
+            title: "Trending".intern(),
+            channels: vec![PlaylistItem {
+                header: PlaylistItemHeader { group: "Trending".intern(), ..Default::default() },
+            }],
+            xtream_cluster: XtreamCluster::Video,
+        },
+    ];
+
+    apply_persist_filter(&target, &mut playlist);
+
+    assert_eq!(playlist.len(), 1);
+    assert_eq!(playlist[0].title.as_ref(), "Trending");
+}
+
+#[test]
+fn persist_filter_can_select_a_base_group() {
+    let mut target = ConfigTarget::from(&ConfigTargetDto::default());
+    target.filter.persist = Some(get_filter(r#"Group = "Base""#, None).expect("persist filter"));
+    let mut playlist = vec![
+        PlaylistGroup {
+            id: 1,
+            title: "Base".intern(),
+            channels: vec![PlaylistItem {
+                header: PlaylistItemHeader { group: "Base".intern(), ..Default::default() },
+            }],
+            xtream_cluster: XtreamCluster::Video,
+        },
+        PlaylistGroup {
+            id: 2,
+            title: "Curated".intern(),
+            channels: vec![PlaylistItem {
+                header: PlaylistItemHeader { group: "Curated".intern(), ..Default::default() },
+            }],
+            xtream_cluster: XtreamCluster::Video,
+        },
+    ];
+
+    apply_persist_filter(&target, &mut playlist);
+
+    assert_eq!(playlist.len(), 1);
+    assert_eq!(playlist[0].title.as_ref(), "Base");
+}
+
+#[tokio::test]
+async fn trakt_target_curation_is_a_noop_without_xtream_configuration() {
+    let target = ConfigTarget::from(&ConfigTargetDto::default());
+
+    let views = prepare_target_playlist_views(&reqwest::Client::new(), &target, Vec::new())
+        .await
+        .expect("unconfigured curation should not fail");
+
+    assert!(views.base.is_empty());
+    assert!(views.xtream.is_none());
+    assert_eq!(views.publication_plan, PlaylistPublicationPlan::Ordinary);
+}
+
+#[tokio::test]
+async fn unavailable_required_selector_returns_target_failure_instead_of_base_fallback() {
+    let target = ConfigTarget::from(&ConfigTargetDto {
+        name: "curation-failure".to_string(),
+        output: vec![TargetOutputDto::Xtream(XtreamTargetOutputDto {
+            trakt: Some(TraktConfigDto {
+                lists: vec![TraktListConfigDto {
+                    user: "alice".to_string(),
+                    list_slug: "watchlist".to_string(),
+                    category_name: Some("Watchlist".to_string()),
+                    create_xtream_category: true,
+                    content_type: TraktContentType::Vod,
+                    tmdb_only: true,
+                    fuzzy_match_threshold: 100,
+                }],
+                ..TraktConfigDto::default()
+            }),
+            ..XtreamTargetOutputDto::default()
+        })],
+        ..ConfigTargetDto::default()
+    });
+    let base = vec![PlaylistGroup {
+        id: 1,
+        title: "Movies".intern(),
+        channels: vec![catalog_test_item(
+            "Base movie",
+            UUIDType::from_valid_uuid("00000000-0000-4000-8000-000000000061"),
+            PlaylistItemType::Video,
+            XtreamCluster::Video,
+            None,
+        )],
+        xtream_cluster: XtreamCluster::Video,
+    }];
+
+    let error = prepare_target_playlist_views(&reqwest::Client::new(), &target, base)
+        .await
+        .expect_err("missing credentials must stop target publication");
+
+    assert!(error.message().contains("existing finalized artifacts were retained"));
+}
+
+mod curation_effect_gate {
+    use super::*;
+    use arc_swap::{ArcSwap, ArcSwapOption};
+    use shared::model::{ConfigPaths, NoopSink};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        path::Path,
+    };
+    use tempfile::tempdir;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        task::JoinHandle,
+    };
+    use tuliprox_core::{
+        model::{ApiProxyConfig, CustomStreamResponse, HdHomeRunConfig, MediaToolCapabilities, SourcesConfig},
+        utils::FileLockManager,
+    };
+
+    fn app_config(storage_dir: &Path) -> Arc<AppConfig> {
+        Arc::new(AppConfig {
+            config: Arc::new(ArcSwap::from_pointee(Config {
+                storage_dir: storage_dir.to_string_lossy().into_owned(),
+                ..Config::default()
+            })),
+            sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
+            hdhomerun: Arc::new(ArcSwapOption::<HdHomeRunConfig>::default()),
+            api_proxy: Arc::new(ArcSwapOption::<ApiProxyConfig>::default()),
+            file_locks: Arc::new(FileLockManager::default()),
+            paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
+                home_path: String::new(),
+                config_path: String::new(),
+                storage_path: String::new(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
+                mapping_file_path: None,
+                mapping_files_used: None,
+                template_file_path: None,
+                template_files_used: None,
+                api_proxy_file_path: String::new(),
+                custom_stream_response_path: None,
+            })),
+            custom_stream_response: Arc::new(ArcSwapOption::<CustomStreamResponse>::default()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            media_tools: Arc::new(MediaToolCapabilities::new()),
+        })
+    }
+
+    fn processing_context(
+        app_config: Arc<AppConfig>,
+        playlist_state: Option<Arc<PlaylistStorageState>>,
+    ) -> PlaylistProcessingContext<NoopSink> {
+        PlaylistProcessingContext {
+            client: reqwest::Client::new(),
+            config: app_config,
+            user_targets: Arc::new(ProcessTargets {
+                enabled: false,
+                inputs: Vec::new(),
+                targets: Vec::new(),
+                target_names: Vec::new(),
+            }),
+            events: NoopSink,
+            playlist_state,
+            disabled_headers: None,
+            processed_inputs: Arc::new(Mutex::new(HashSet::new())),
+            input_locks: Arc::new(Mutex::new(HashMap::new())),
+            provider_manager: None,
+            metadata_manager: None,
+            pre_processed_inputs: None,
+            stalker_refresh_mode: StalkerRefreshMode::Complete,
+            partial_refresh: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    fn file_snapshot(root: &Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
+        fn collect(root: &Path, path: &Path, snapshot: &mut BTreeMap<std::path::PathBuf, Vec<u8>>) {
+            let Ok(entries) = std::fs::read_dir(path) else { return };
+            for entry in entries.flatten() {
+                let entry_path = entry.path();
+                if entry_path.is_dir() {
+                    collect(root, &entry_path, snapshot);
+                } else {
+                    snapshot.insert(
+                        entry_path.strip_prefix(root).expect("snapshot path under root").to_path_buf(),
+                        std::fs::read(&entry_path).expect("snapshot file"),
+                    );
+                }
+            }
+        }
+
+        let mut snapshot = BTreeMap::new();
+        collect(root, root, &mut snapshot);
+        snapshot
+    }
+
+    async fn empty_trakt_server() -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind Trakt test server");
+        let address = listener.local_addr().expect("Trakt test address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept Trakt request");
+            let mut request = Vec::new();
+            loop {
+                let mut buffer = [0u8; 1024];
+                let read = stream.read(&mut buffer).await.expect("read Trakt request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n[]")
+                .await
+                .expect("write Trakt response");
+        });
+        (format!("http://{address}"), server)
+    }
+
+    #[tokio::test]
+    async fn unavailable_curation_retains_seeded_artifacts_cache_and_watch_state() {
+        let directory = tempdir().expect("tempdir");
+        let app_config = app_config(directory.path());
+        let playlist_state = Arc::new(PlaylistStorageState::new());
+        let target = ConfigTarget::from(&ConfigTargetDto {
+            name: "curation-effect-gate".to_string(),
+            output: vec![
+                TargetOutputDto::Xtream(XtreamTargetOutputDto {
+                    trakt: Some(TraktConfigDto {
+                        lists: vec![TraktListConfigDto {
+                            user: "alice".to_string(),
+                            list_slug: "watchlist".to_string(),
+                            category_name: Some("Watchlist".to_string()),
+                            create_xtream_category: true,
+                            content_type: TraktContentType::Vod,
+                            tmdb_only: true,
+                            fuzzy_match_threshold: 100,
+                        }],
+                        ..TraktConfigDto::default()
+                    }),
+                    ..XtreamTargetOutputDto::default()
+                }),
+                TargetOutputDto::M3u(M3uTargetOutputDto {
+                    filename: Some("curation-effect-gate.m3u".to_string()),
+                    ..M3uTargetOutputDto::default()
+                }),
+            ],
+            watch: Some(vec![".*".to_string()]),
+            use_memory_cache: true,
+            ..ConfigTargetDto::default()
+        });
+        let mut seeded = vec![PlaylistGroup {
+            id: 1,
+            title: "Movies".intern(),
+            channels: vec![catalog_test_item(
+                "Seeded movie",
+                UUIDType::from_valid_uuid("00000000-0000-4000-8000-000000000071"),
+                PlaylistItemType::Video,
+                XtreamCluster::Video,
+                None,
+            )],
+            xtream_cluster: XtreamCluster::Video,
+        }];
+        let seeded_result = persist_playlist(
+            &app_config,
+            &mut seeded,
+            None,
+            None,
+            &target,
+            Some(&playlist_state),
+            PlaylistPublicationPlan::Ordinary,
+        )
+        .await;
+        assert!(seeded_result.is_ok(), "seed persist failed: {seeded_result:?}");
+        assert!(process_watch(&app_config, &NoopSink, &target, &seeded).await);
+        let before_files = file_snapshot(directory.path());
+        let before_cache_len = playlist_state
+            .data
+            .read()
+            .await
+            .get(&target.name)
+            .and_then(|storage| storage.xtream.as_ref())
+            .map_or(0, |storage| storage.vod.len());
+
+        let context = processing_context(Arc::clone(&app_config), Some(Arc::clone(&playlist_state)));
+        let prepared =
+            PreparedTarget { target, playlist: Vec::new(), epg: Vec::new(), processing: PipelineStats::default() };
+
+        let (result, errors) = finalize_prepared_target(Arc::new(context), prepared).await;
+
+        assert!(result.is_err());
+        assert!(errors.is_empty());
+        assert_eq!(file_snapshot(directory.path()), before_files);
+        let after_cache_len = playlist_state
+            .data
+            .read()
+            .await
+            .get("curation-effect-gate")
+            .and_then(|storage| storage.xtream.as_ref())
+            .map_or(0, |storage| storage.vod.len());
+        assert_eq!(after_cache_len, before_cache_len);
+    }
+
+    #[tokio::test]
+    async fn complete_empty_curation_publishes_empty_watch_group_state() {
+        let directory = tempdir().expect("tempdir");
+        let app_config = app_config(directory.path());
+        let (base_url, server) = empty_trakt_server().await;
+        let target_name = "curation-empty-watch";
+        let target = ConfigTarget::from(&ConfigTargetDto {
+            name: target_name.to_string(),
+            output: vec![TargetOutputDto::Xtream(XtreamTargetOutputDto {
+                trakt: Some(TraktConfigDto {
+                    catalog_selection: TraktCatalogSelection::Curated,
+                    api: TraktApiConfigDto {
+                        api_key: "test-client-id".to_string(),
+                        version: "2".to_string(),
+                        url: base_url,
+                        user_agent: "tuliprox-test".to_string(),
+                    },
+                    lists: vec![TraktListConfigDto {
+                        user: "alice".to_string(),
+                        list_slug: "watchlist".to_string(),
+                        category_name: Some("Watchlist".to_string()),
+                        create_xtream_category: true,
+                        content_type: TraktContentType::Vod,
+                        tmdb_only: true,
+                        fuzzy_match_threshold: 100,
+                    }],
+                    ..TraktConfigDto::default()
+                }),
+                ..XtreamTargetOutputDto::default()
+            })],
+            watch: Some(vec![".*".to_string()]),
+            ..ConfigTargetDto::default()
+        });
+        let mut seeded = vec![PlaylistGroup {
+            id: 1,
+            title: "Movies".intern(),
+            channels: vec![catalog_test_item(
+                "Seeded movie",
+                UUIDType::from_valid_uuid("00000000-0000-4000-8000-000000000072"),
+                PlaylistItemType::Video,
+                XtreamCluster::Video,
+                None,
+            )],
+            xtream_cluster: XtreamCluster::Video,
+        }];
+        let seed_result =
+            persist_playlist(&app_config, &mut seeded, None, None, &target, None, PlaylistPublicationPlan::Ordinary)
+                .await;
+        assert!(seed_result.is_ok(), "seed persist failed: {seed_result:?}");
+        assert!(process_watch(&app_config, &NoopSink, &target, &seeded).await);
+        let watch_index = directory.path().join(format!("{target_name}.groups.bin"));
+        let before: BTreeSet<Arc<str>> =
+            tuliprox_core::utils::binary_deserialize(&std::fs::read(&watch_index).expect("seeded watch index"))
+                .expect("decode seeded watch index");
+        assert_eq!(before.len(), 1);
+
+        let context = processing_context(Arc::clone(&app_config), None);
+        let prepared =
+            PreparedTarget { target, playlist: seeded, epg: Vec::new(), processing: PipelineStats::default() };
+        let (result, errors) = finalize_prepared_target(Arc::new(context), prepared).await;
+        server.await.expect("Trakt server should finish");
+
+        assert!(result.is_ok(), "complete empty finalization failed: {result:?}");
+        assert!(errors.is_empty());
+        let after: BTreeSet<Arc<str>> =
+            tuliprox_core::utils::binary_deserialize(&std::fs::read(watch_index).expect("empty watch index"))
+                .expect("decode empty watch index");
+        assert!(after.is_empty());
+    }
+}
+
+fn catalog_test_item(
+    title: &str,
+    uuid: UUIDType,
+    item_type: PlaylistItemType,
+    cluster: XtreamCluster,
+    parent_code: Option<&str>,
+) -> PlaylistItem {
+    PlaylistItem {
+        header: PlaylistItemHeader {
+            id: title.intern(),
+            name: title.intern(),
+            title: title.intern(),
+            group: match cluster {
+                XtreamCluster::Live => "Live".intern(),
+                XtreamCluster::Video => "Movies".intern(),
+                XtreamCluster::Series => "Series".intern(),
+            },
+            uuid,
+            item_type,
+            xtream_cluster: cluster,
+            parent_code: parent_code.unwrap_or_default().intern(),
+            ..PlaylistItemHeader::default()
+        },
+    }
+}
+
+fn complete_catalog_evaluation(memberships: Vec<CurationMembership>) -> CurationEvaluation {
+    CurationEvaluation {
+        selectors: vec![CurationSelectorSummary {
+            key: CurationSelectorKey(0),
+            reference_count: memberships.len(),
+            membership_count: memberships.len(),
+        }],
+        memberships,
+    }
+}
+
+fn catalog_membership(uuid: UUIDType, media_kind: CurationMediaKind, order: usize) -> CurationMembership {
+    CurationMembership {
+        selector_key: CurationSelectorKey(0),
+        subject_uuid: uuid,
+        media_kind,
+        rank: Some(u32::try_from(order + 1).expect("test rank")),
+        title_tiebreak: format!("item-{order}"),
+        candidate_order: order,
+    }
+}
+
+#[test]
+fn catalog_selection_preserves_live_and_selected_series_children() {
+    let live_uuid = UUIDType::from_valid_uuid("00000000-0000-4000-8000-000000000001");
+    let selected_movie_uuid = UUIDType::from_valid_uuid("00000000-0000-4000-8000-000000000002");
+    let rejected_movie_uuid = UUIDType::from_valid_uuid("00000000-0000-4000-8000-000000000003");
+    let series_uuid = UUIDType::from_valid_uuid("00000000-0000-4000-8000-000000000004");
+    let episode_uuid = UUIDType::from_valid_uuid("00000000-0000-4000-8000-000000000005");
+    let rejected_series_uuid = UUIDType::from_valid_uuid("00000000-0000-4000-8000-000000000006");
+    let rejected_episode_uuid = UUIDType::from_valid_uuid("00000000-0000-4000-8000-000000000007");
+    let playlist = vec![
+        PlaylistGroup {
+            id: 1,
+            title: "Live".intern(),
+            channels: vec![catalog_test_item(
+                "Live channel",
+                live_uuid,
+                PlaylistItemType::Live,
+                XtreamCluster::Live,
+                None,
+            )],
+            xtream_cluster: XtreamCluster::Live,
+        },
+        PlaylistGroup {
+            id: 2,
+            title: "Movies".intern(),
+            channels: vec![
+                catalog_test_item(
+                    "Selected movie",
+                    selected_movie_uuid,
+                    PlaylistItemType::Video,
+                    XtreamCluster::Video,
+                    None,
+                ),
+                catalog_test_item(
+                    "Rejected movie",
+                    rejected_movie_uuid,
+                    PlaylistItemType::Video,
+                    XtreamCluster::Video,
+                    None,
+                ),
+            ],
+            xtream_cluster: XtreamCluster::Video,
+        },
+        PlaylistGroup {
+            id: 3,
+            title: "Series".intern(),
+            channels: vec![
+                catalog_test_item(
+                    "Selected series",
+                    series_uuid,
+                    PlaylistItemType::SeriesInfo,
+                    XtreamCluster::Series,
+                    None,
+                ),
+                catalog_test_item(
+                    "Selected episode",
+                    episode_uuid,
+                    PlaylistItemType::Series,
+                    XtreamCluster::Series,
+                    Some(&series_uuid.to_string()),
+                ),
+                catalog_test_item(
+                    "Rejected series",
+                    rejected_series_uuid,
+                    PlaylistItemType::SeriesInfo,
+                    XtreamCluster::Series,
+                    None,
+                ),
+                catalog_test_item(
+                    "Rejected episode",
+                    rejected_episode_uuid,
+                    PlaylistItemType::Series,
+                    XtreamCluster::Series,
+                    Some(&rejected_series_uuid.to_string()),
+                ),
+            ],
+            xtream_cluster: XtreamCluster::Series,
+        },
+    ];
+    let evaluation = complete_catalog_evaluation(vec![
+        catalog_membership(selected_movie_uuid, CurationMediaKind::Movie, 0),
+        catalog_membership(series_uuid, CurationMediaKind::Series, 1),
+    ]);
+
+    let selected = select_target_catalog(playlist.clone(), &evaluation, true);
+    let titles =
+        selected.iter().flat_map(|group| &group.channels).map(|item| item.header.title.as_ref()).collect::<Vec<_>>();
+
+    assert_eq!(titles, ["Live channel", "Selected movie", "Selected series", "Selected episode"]);
+    assert_eq!(
+        select_target_catalog(playlist.clone(), &evaluation, false).iter().flat_map(|group| &group.channels).count(),
+        7
+    );
+    assert_eq!(selected[0].channels[0].header.uuid, live_uuid, "target-wide selection must not rewrite Live");
+
+    let remote_empty = select_target_catalog(playlist, &complete_catalog_evaluation(Vec::new()), true);
+    assert_eq!(remote_empty.len(), 1);
+    assert_eq!(remote_empty[0].xtream_cluster, XtreamCluster::Live);
+    assert_eq!(remote_empty[0].channels[0].header.uuid, live_uuid);
+}
+
+#[test]
+fn xtream_base_and_selector_category_projection_are_independent() {
+    let selected_uuid = UUIDType::from_valid_uuid("00000000-0000-4000-8000-000000000011");
+    let rejected_uuid = UUIDType::from_valid_uuid("00000000-0000-4000-8000-000000000012");
+    let playlist = vec![PlaylistGroup {
+        id: 1,
+        title: "Movies".intern(),
+        channels: vec![
+            catalog_test_item("Selected", selected_uuid, PlaylistItemType::Video, XtreamCluster::Video, None),
+            catalog_test_item("Rejected", rejected_uuid, PlaylistItemType::Video, XtreamCluster::Video, None),
+        ],
+        xtream_cluster: XtreamCluster::Video,
+    }];
+    let evaluation = complete_catalog_evaluation(vec![catalog_membership(selected_uuid, CurationMediaKind::Movie, 0)]);
+    let dto = TraktConfigDto {
+        enabled: true,
+        catalog_selection: TraktCatalogSelection::Curated,
+        include_xtream_base_categories: false,
+        api: TraktApiConfigDto::default(),
+        lists: vec![TraktListConfigDto {
+            user: "alice".to_string(),
+            list_slug: "watchlist".to_string(),
+            category_name: Some("Curated".to_string()),
+            create_xtream_category: true,
+            content_type: TraktContentType::Vod,
+            tmdb_only: true,
+            fuzzy_match_threshold: 100,
+        }],
+        charts: Vec::new(),
+    };
+    let config = TraktConfig::from(&dto);
+
+    let views = build_curated_playlist_views(playlist.clone(), &evaluation, &config, false);
+
+    assert_eq!(views.base.len(), 1);
+    assert_eq!(views.base[0].channels.len(), 1);
+    assert!(
+        target_watch_view(&views.base, views.xtream.as_deref()).iter().any(|group| group.title.as_ref() == "Curated"),
+        "configured Trakt watches observe the Xtream category appearance"
+    );
+    let xtream = views.xtream.expect("complete curation has an Xtream view");
+    assert_eq!(xtream.len(), 1);
+    assert_eq!(xtream[0].title.as_ref(), "Curated");
+    assert_eq!(xtream[0].channels.len(), 1);
+    assert_ne!(xtream[0].channels[0].header.uuid, selected_uuid);
+
+    let mut compatible_dto = dto;
+    compatible_dto.catalog_selection = TraktCatalogSelection::Full;
+    compatible_dto.include_xtream_base_categories = true;
+    compatible_dto.lists[0].create_xtream_category = false;
+    compatible_dto.lists[0].category_name = None;
+    let compatible = build_curated_playlist_views(playlist, &evaluation, &TraktConfig::from(&compatible_dto), false);
+    assert_eq!(compatible.base[0].channels.len(), 2);
+    assert_eq!(compatible.xtream.expect("Xtream view").len(), 1, "selection-only selector creates no category");
+}
+
+#[test]
+fn curation_policy_truth_table_covers_a_through_h() {
+    let selected_uuid = UUIDType::from_valid_uuid("00000000-0000-4000-8000-000000000041");
+    let rejected_uuid = UUIDType::from_valid_uuid("00000000-0000-4000-8000-000000000042");
+    let playlist = vec![PlaylistGroup {
+        id: 1,
+        title: "Movies".intern(),
+        channels: vec![
+            catalog_test_item("Selected", selected_uuid, PlaylistItemType::Video, XtreamCluster::Video, None),
+            catalog_test_item("Rejected", rejected_uuid, PlaylistItemType::Video, XtreamCluster::Video, None),
+        ],
+        xtream_cluster: XtreamCluster::Video,
+    }];
+    let evaluation = complete_catalog_evaluation(vec![catalog_membership(selected_uuid, CurationMediaKind::Movie, 0)]);
+
+    let cases = [
+        ("A", TraktCatalogSelection::Full, true, true),
+        ("B", TraktCatalogSelection::Curated, true, true),
+        ("C", TraktCatalogSelection::Curated, true, false),
+        ("D", TraktCatalogSelection::Curated, false, true),
+        ("E", TraktCatalogSelection::Full, true, false),
+        ("F", TraktCatalogSelection::Full, false, true),
+        ("G", TraktCatalogSelection::Full, false, false),
+        ("H", TraktCatalogSelection::Curated, false, false),
+    ];
+
+    for (case, catalog_selection, include_base, create_category) in cases {
+        let config = TraktConfig::from(&TraktConfigDto {
+            enabled: true,
+            catalog_selection,
+            include_xtream_base_categories: include_base,
+            api: TraktApiConfigDto::default(),
+            lists: vec![TraktListConfigDto {
+                user: "alice".to_string(),
+                list_slug: "watchlist".to_string(),
+                category_name: Some("Curated".to_string()),
+                create_xtream_category: create_category,
+                content_type: TraktContentType::Vod,
+                tmdb_only: true,
+                fuzzy_match_threshold: 100,
+            }],
+            charts: Vec::new(),
+        });
+
+        let views = build_curated_playlist_views(playlist.clone(), &evaluation, &config, false);
+        let base_items = views.base.iter().flat_map(|group| &group.channels).collect::<Vec<_>>();
+        let expected_base_count = if catalog_selection == TraktCatalogSelection::Full { 2 } else { 1 };
+        assert_eq!(base_items.len(), expected_base_count, "case {case} selected catalog");
+        assert!(base_items.iter().any(|item| item.header.uuid == selected_uuid), "case {case} selected subject");
+
+        let xtream = views.xtream.expect("complete curation Xtream view");
+        let base_groups = xtream.iter().filter(|group| group.title.as_ref() == "Movies").count();
+        let category_groups = xtream.iter().filter(|group| group.title.as_ref() == "Curated").count();
+        assert_eq!(base_groups, usize::from(include_base), "case {case} base appearance");
+        assert_eq!(category_groups, usize::from(create_category), "case {case} category appearance");
+        let expected_unfiltered_items = usize::from(include_base) * expected_base_count + usize::from(create_category);
+        assert_eq!(
+            xtream.iter().map(|group| group.channels.len()).sum::<usize>(),
+            expected_unfiltered_items,
+            "case {case} unfiltered Xtream catalog"
+        );
+        if let Some(alias) =
+            xtream.iter().find(|group| group.title.as_ref() == "Curated").and_then(|group| group.channels.first())
+        {
+            assert_ne!(alias.header.uuid, selected_uuid, "case {case} alias identity");
+        }
+    }
+}
+
+#[test]
+fn large_catalog_projection_smoke_keeps_two_explicit_views_bounded() {
+    const CATALOG_SIZE: usize = 10_000;
+    const SELECTOR_COUNT: usize = 4;
+    const MEMBERSHIP_STRIDE: usize = 10;
+
+    let uuid_for = |index: usize| {
+        let mut bytes = [0u8; 32];
+        bytes[..8].copy_from_slice(&u64::try_from(index + 1).expect("test index").to_be_bytes());
+        UUIDType(bytes)
+    };
+    let playlist = vec![PlaylistGroup {
+        id: 1,
+        title: "Movies".intern(),
+        channels: (0..CATALOG_SIZE)
+            .map(|index| {
+                catalog_test_item(
+                    &format!("Movie {index}"),
+                    uuid_for(index),
+                    PlaylistItemType::Video,
+                    XtreamCluster::Video,
+                    None,
+                )
+            })
+            .collect(),
+        xtream_cluster: XtreamCluster::Video,
+    }];
+    let mut memberships = Vec::with_capacity(CATALOG_SIZE / MEMBERSHIP_STRIDE * SELECTOR_COUNT);
+    let mut selectors = Vec::with_capacity(SELECTOR_COUNT);
+    for selector in 0..SELECTOR_COUNT {
+        let key = CurationSelectorKey(selector);
+        let start = memberships.len();
+        for index in (selector..CATALOG_SIZE).step_by(MEMBERSHIP_STRIDE) {
+            memberships.push(CurationMembership {
+                selector_key: key,
+                subject_uuid: uuid_for(index),
+                media_kind: CurationMediaKind::Movie,
+                rank: Some(u32::try_from(index).expect("test rank")),
+                title_tiebreak: format!("movie-{index}"),
+                candidate_order: index,
+            });
+        }
+        selectors.push(CurationSelectorSummary {
+            key,
+            reference_count: memberships.len() - start,
+            membership_count: memberships.len() - start,
+        });
+    }
+    let evaluation = CurationEvaluation { selectors, memberships };
+    let config = TraktConfig::from(&TraktConfigDto {
+        lists: (0..SELECTOR_COUNT)
+            .map(|selector| TraktListConfigDto {
+                user: "alice".to_string(),
+                list_slug: format!("list-{selector}"),
+                category_name: Some(format!("Curated {selector}")),
+                create_xtream_category: true,
+                content_type: TraktContentType::Vod,
+                tmdb_only: true,
+                fuzzy_match_threshold: 100,
+            })
+            .collect(),
+        ..TraktConfigDto::default()
+    });
+
+    let views = build_curated_playlist_views(playlist, &evaluation, &config, false);
+
+    assert_eq!(views.base[0].channels.len(), CATALOG_SIZE);
+    let xtream = views.xtream.expect("Xtream view");
+    assert_eq!(xtream.len(), SELECTOR_COUNT + 1);
+    assert_eq!(xtream.iter().map(|group| group.channels.len()).sum::<usize>(), CATALOG_SIZE + 4_000);
 }
 
 #[cfg(test)]

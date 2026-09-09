@@ -1,22 +1,54 @@
-use super::errors::handle_trakt_api_error;
-use crate::model::{TraktApiConfig, TraktChartConfig, TraktListConfig, TraktListItem, TraktMovie, TraktShow};
+use super::{
+    errors::handle_trakt_api_error,
+    model::{TraktListItem, TraktMovie, TraktShow, TraktTrendingMovieItem, TraktTrendingShowItem},
+};
 use log::{debug, info};
 use reqwest::header::{HeaderMap, HeaderValue};
-use serde::Deserialize;
-use shared::{defaults::DEFAULT_USER_AGENT, error::TuliproxError, utils::trim_last_slash};
+use shared::{
+    defaults::DEFAULT_USER_AGENT,
+    error::TuliproxError,
+    model::{TraktChartKind, TraktChartType},
+    utils::trim_last_slash,
+};
+use tuliprox_core::model::{TraktApiConfig, TraktChartConfig, TraktListConfig};
 
 const TRAKT_PAGE_LIMIT: u32 = 100;
 const TRAKT_MAX_PAGES: u32 = 100;
 
-pub struct TraktClient {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TraktFetchFailureKind {
+    Interrupted,
+    PaginationTruncated,
+    Unavailable,
+}
+
+#[derive(Debug)]
+pub(super) struct TraktFetchFailure {
+    pub(super) kind: TraktFetchFailureKind,
+    error: TuliproxError,
+}
+
+impl TraktFetchFailure {
+    fn pagination_truncated(message: String) -> Self {
+        Self { kind: TraktFetchFailureKind::PaginationTruncated, error: TuliproxError::RepositoryTrakt(message) }
+    }
+
+    fn from_page_error(page: u32, error: TuliproxError) -> Self {
+        let kind = if page > 1 { TraktFetchFailureKind::Interrupted } else { TraktFetchFailureKind::Unavailable };
+        Self { kind, error }
+    }
+
+    pub(super) fn message(&self) -> &str { self.error.message() }
+}
+
+pub(super) struct TraktClient {
     client: reqwest::Client,
     api_config: TraktApiConfig,
-    // Pre-computed headers to avoid recreating them each time
     headers: HeaderMap,
 }
 
 impl TraktClient {
-    pub fn new(client: reqwest::Client, mut api_config: TraktApiConfig) -> Result<Self, TuliproxError> {
+    pub(super) fn new(client: reqwest::Client, mut api_config: TraktApiConfig) -> Result<Self, TuliproxError> {
         api_config.api_key = api_config.api_key.trim().to_string();
         let headers = Self::create_headers(&api_config)?;
         Ok(Self { client, api_config, headers })
@@ -59,7 +91,10 @@ impl TraktClient {
         format!("{}/{}/{}", trim_last_slash(&self.api_config.url), chart_config.kind, chart_config.chart)
     }
 
-    pub async fn get_chart_items(&self, chart_config: &TraktChartConfig) -> Result<Vec<TraktListItem>, TuliproxError> {
+    pub(super) async fn get_chart_items(
+        &self,
+        chart_config: &TraktChartConfig,
+    ) -> Result<Vec<TraktListItem>, TraktFetchFailure> {
         let id_label = format!("{}:{}", chart_config.kind, chart_config.chart);
         self.paginate_items(
             "chart",
@@ -69,21 +104,21 @@ impl TraktClient {
         .await
     }
 
-    pub async fn get_list_items(&self, list_config: &TraktListConfig) -> Result<Vec<TraktListItem>, TuliproxError> {
+    pub(super) async fn get_list_items(
+        &self,
+        list_config: &TraktListConfig,
+    ) -> Result<Vec<TraktListItem>, TraktFetchFailure> {
         let id_label = format!("{}:{}", list_config.user, list_config.list_slug);
         self.paginate_items("list", id_label, |page| async move { self.get_list_items_page(list_config, page).await })
             .await
     }
 
-    /// Shared body of `get_chart_items` and `get_list_items`.
-    /// Walks Trakt's paginated response one page at a time via `fetch_page`,
-    /// logging per-page progress with `kind_label` and `id_label` for context.
     async fn paginate_items<F, Fut>(
         &self,
         kind_label: &'static str,
         id_label: String,
         mut fetch_page: F,
-    ) -> Result<Vec<TraktListItem>, TuliproxError>
+    ) -> Result<Vec<TraktListItem>, TraktFetchFailure>
     where
         F: FnMut(u32) -> Fut,
         Fut: std::future::Future<Output = Result<TraktListItemsPage, TuliproxError>>,
@@ -93,20 +128,21 @@ impl TraktClient {
         let mut page = 1;
         let mut items = Vec::new();
         loop {
-            let mut page_items = fetch_page(page).await?;
+            let mut page_items =
+                fetch_page(page).await.map_err(|error| TraktFetchFailure::from_page_error(page, error))?;
             let page_count = page_items.page_count;
             let item_count = page_items.item_count;
-            debug!(
-                "Fetched Trakt {kind_label} {id_label} page {page}/{page_count} with {} items",
-                page_items.items.len()
-            );
-            let is_last_page = page >= page_count || page >= TRAKT_MAX_PAGES || page_items.items.is_empty();
+            let fetched_count = page_items.items.len();
+            debug!("Fetched Trakt {kind_label} {id_label} page {page}/{page_count} with {fetched_count} items");
             items.append(&mut page_items.items);
-            if is_last_page {
-                if page >= TRAKT_MAX_PAGES && page < page_count {
-                    debug!(
-                        "Stopped Trakt {kind_label} {id_label} after {TRAKT_MAX_PAGES} pages; reported page count was {page_count}"
-                    );
+
+            if page >= page_count {
+                if item_count.is_some_and(|count| usize::try_from(count).ok() != Some(items.len())) {
+                    return Err(TraktFetchFailure::pagination_truncated(format!(
+                        "Trakt {kind_label} {id_label} snapshot was incomplete: fetched {} items but the source reported {}",
+                        items.len(),
+                        item_count.unwrap_or_default()
+                    )));
                 }
                 info!(
                     "Successfully fetched {} items from Trakt {kind_label} {id_label}{}",
@@ -114,6 +150,12 @@ impl TraktClient {
                     item_count.map(|count| format!(" (reported item count: {count})")).unwrap_or_default()
                 );
                 return Ok(items);
+            }
+
+            if page >= TRAKT_MAX_PAGES || fetched_count == 0 {
+                return Err(TraktFetchFailure::pagination_truncated(format!(
+                    "Trakt {kind_label} {id_label} snapshot was incomplete at page {page} of {page_count}"
+                )));
             }
             page += 1;
         }
@@ -129,11 +171,9 @@ impl TraktClient {
         let list_id = format!("{}:{}", list_config.user, list_config.list_slug);
         let (response_text, page_count, item_count) =
             self.fetch_trakt_page(request_url, "list", &list_id, page).await?;
-        let mut items: Vec<TraktListItem> =
-            serde_json::from_str(&response_text).map_err(|error: serde_json::Error| {
-                TuliproxError::Config(format!("Failed to parse Trakt response: {error}"))
-            })?;
-        items.iter_mut().for_each(TraktListItem::prepare);
+        let items: Vec<TraktListItem> = serde_json::from_str(&response_text).map_err(|error: serde_json::Error| {
+            TuliproxError::Config(format!("Failed to parse Trakt response: {error}"))
+        })?;
 
         Ok(TraktListItemsPage { items, page_count, item_count })
     }
@@ -154,9 +194,6 @@ impl TraktClient {
         Ok(TraktListItemsPage { items, page_count, item_count })
     }
 
-    /// Shared body of `get_list_items_page` / `get_chart_items_page`.
-    /// Issues the GET, validates the status, parses the pagination headers, and
-    /// returns the raw response body. Per-type item parsing stays with the caller.
     async fn fetch_trakt_page(
         &self,
         request_url: String,
@@ -195,7 +232,7 @@ fn parse_chart_items(
 ) -> Result<Vec<TraktListItem>, serde_json::Error> {
     let rank_base = page.saturating_sub(1).saturating_mul(TRAKT_PAGE_LIMIT);
     match (chart_config.kind, chart_config.chart) {
-        (shared::model::TraktChartKind::Movies, shared::model::TraktChartType::Popular) => {
+        (TraktChartKind::Movies, TraktChartType::Popular) => {
             let items = serde_json::from_str::<Vec<TraktMovie>>(response_text)?;
             Ok(items
                 .into_iter()
@@ -203,7 +240,7 @@ fn parse_chart_items(
                 .map(|(index, movie)| TraktListItem::from_movie_chart(movie, chart_rank(rank_base, index)))
                 .collect())
         }
-        (shared::model::TraktChartKind::Movies, shared::model::TraktChartType::Trending) => {
+        (TraktChartKind::Movies, TraktChartType::Trending) => {
             let items = serde_json::from_str::<Vec<TraktTrendingMovieItem>>(response_text)?;
             Ok(items
                 .into_iter()
@@ -211,7 +248,7 @@ fn parse_chart_items(
                 .map(|(index, item)| TraktListItem::from_movie_chart(item.movie, chart_rank(rank_base, index)))
                 .collect())
         }
-        (shared::model::TraktChartKind::Shows, shared::model::TraktChartType::Popular) => {
+        (TraktChartKind::Shows, TraktChartType::Popular) => {
             let items = serde_json::from_str::<Vec<TraktShow>>(response_text)?;
             Ok(items
                 .into_iter()
@@ -219,7 +256,7 @@ fn parse_chart_items(
                 .map(|(index, show)| TraktListItem::from_show_chart(show, chart_rank(rank_base, index)))
                 .collect())
         }
-        (shared::model::TraktChartKind::Shows, shared::model::TraktChartType::Trending) => {
+        (TraktChartKind::Shows, TraktChartType::Trending) => {
             let items = serde_json::from_str::<Vec<TraktTrendingShowItem>>(response_text)?;
             Ok(items
                 .into_iter()
@@ -234,16 +271,6 @@ fn chart_rank(rank_base: u32, index: usize) -> u32 {
     rank_base.saturating_add(u32::try_from(index).unwrap_or(u32::MAX)).saturating_add(1)
 }
 
-#[derive(Deserialize)]
-struct TraktTrendingMovieItem {
-    movie: TraktMovie,
-}
-
-#[derive(Deserialize)]
-struct TraktTrendingShowItem {
-    show: TraktShow,
-}
-
 fn parse_trakt_pagination_header(headers: &HeaderMap, name: &'static str) -> Option<u32> {
     headers.get(name).and_then(|value| value.to_str().ok()).and_then(|value| value.parse::<u32>().ok())
 }
@@ -252,7 +279,7 @@ fn parse_trakt_pagination_header(headers: &HeaderMap, name: &'static str) -> Opt
 mod tests {
     use super::*;
     use reqwest::StatusCode;
-    use shared::model::{TraktChartKind, TraktChartType, TraktContentType};
+    use shared::model::TraktContentType;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
@@ -334,7 +361,8 @@ mod tests {
         let list_config = TraktListConfig {
             user: "user".to_string(),
             list_slug: "list".to_string(),
-            category_name: "category".to_string(),
+            category_name: Some("category".to_string()),
+            create_xtream_category: true,
             content_type: TraktContentType::Vod,
             tmdb_only: false,
             fuzzy_match_threshold: 90,
@@ -343,9 +371,68 @@ mod tests {
         let items = client.get_list_items(&list_config).await.expect("paged list should load");
 
         assert_eq!(items.len(), 2);
-        assert_eq!(items[0].content_type, TraktContentType::Vod);
-        assert_eq!(items[1].content_type, TraktContentType::Vod);
+        assert!(items.iter().all(|item| item.item_type == "movie"));
         assert_eq!(requests.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn pagination_at_the_safety_cap_is_reported_as_incomplete() {
+        let client = TraktClient::new(reqwest::Client::new(), api_config("http://127.0.0.1:9".to_string(), "test-key"))
+            .expect("client");
+
+        let error = client
+            .paginate_items("list", "large-list".to_string(), |page| async move {
+                let item = serde_json::from_str::<TraktListItem>(&trakt_movie_json(page))
+                    .expect("test Trakt item should parse");
+                Ok(TraktListItemsPage {
+                    items: vec![item],
+                    page_count: TRAKT_MAX_PAGES + 1,
+                    item_count: Some(TRAKT_MAX_PAGES + 1),
+                })
+            })
+            .await
+            .expect_err("a bounded prefix must not be accepted as an authoritative snapshot");
+
+        assert_eq!(error.kind, TraktFetchFailureKind::PaginationTruncated);
+        assert!(error.message().contains("incomplete"));
+    }
+
+    #[tokio::test]
+    async fn interrupted_later_page_is_not_reported_as_source_unavailable() {
+        let client = TraktClient::new(reqwest::Client::new(), api_config("http://127.0.0.1:9".to_string(), "test-key"))
+            .expect("client");
+
+        let error = client
+            .paginate_items("list", "interrupted-list".to_string(), |page| async move {
+                if page == 1 {
+                    let item = serde_json::from_str::<TraktListItem>(&trakt_movie_json(page))
+                        .expect("test Trakt item should parse");
+                    Ok(TraktListItemsPage { items: vec![item], page_count: 2, item_count: Some(2) })
+                } else {
+                    Err(TuliproxError::RepositoryTrakt("later page failed".to_string()))
+                }
+            })
+            .await
+            .expect_err("interrupted pagination must fail");
+
+        assert_eq!(error.kind, TraktFetchFailureKind::Interrupted);
+    }
+
+    #[tokio::test]
+    async fn inconsistent_reported_item_count_is_incomplete() {
+        let client = TraktClient::new(reqwest::Client::new(), api_config("http://127.0.0.1:9".to_string(), "test-key"))
+            .expect("client");
+
+        let error = client
+            .paginate_items("list", "short-list".to_string(), |page| async move {
+                let item = serde_json::from_str::<TraktListItem>(&trakt_movie_json(page))
+                    .expect("test Trakt item should parse");
+                Ok(TraktListItemsPage { items: vec![item], page_count: 1, item_count: Some(2) })
+            })
+            .await
+            .expect_err("reported count mismatch must fail");
+
+        assert_eq!(error.kind, TraktFetchFailureKind::PaginationTruncated);
     }
 
     #[tokio::test]
@@ -363,7 +450,6 @@ mod tests {
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].rank, Some(1));
-        assert_eq!(items[0].content_type, TraktContentType::Vod);
         assert_eq!(items[0].movie.as_ref().expect("movie").ids.tmdb, Some(11));
         assert!(requests.lock().expect("requests")[0].contains("GET /movies/trending?page=1&limit=100 "));
     }
@@ -383,7 +469,6 @@ mod tests {
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].rank, Some(1));
-        assert_eq!(items[0].content_type, TraktContentType::Series);
         assert_eq!(items[0].show.as_ref().expect("show").ids.tmdb, Some(22));
         assert!(requests.lock().expect("requests")[0].contains("GET /shows/popular?page=1&limit=100 "));
     }
@@ -483,7 +568,8 @@ mod tests {
         TraktChartConfig {
             kind,
             chart,
-            category_name: "category".to_string(),
+            category_name: Some("category".to_string()),
+            create_xtream_category: true,
             tmdb_only: false,
             fuzzy_match_threshold: 90,
         }
