@@ -46,7 +46,8 @@ It is stable for follow-up requests of the same playback, but it is not always d
 
 - plain TS live uses a socket-scoped playback token
 - VOD, series, catchup, and local playback use a logical token suitable for reopen/seek/range workflows
-- HLS/DASH playlist starts use a token scoped to that initial adaptive playback start, and rewritten segment URLs carry that token forward
+- HLS playlist starts use a token scoped to that initial adaptive playback start, and rewritten segment URLs carry that token forward
+- DASH playlist starts use an equally scoped token, but the redirected player fetches DASH segments directly from the provider
 
 It is used to answer questions like:
 
@@ -116,6 +117,20 @@ Why:
 
 This means the same provider-affine HLS, VOD, series, or catchup stream must keep the same provider account for
 its follow-up requests, even though those requests may arrive on different sockets.
+
+### DASH delivery boundary (redirect only)
+
+Tuliprox treats DASH as **redirect-only**:
+
+- DASH requests (`PlaylistItemType::LiveDash` or requests with `.mpd` extension) always resolve to an HTTP redirect directly to
+  the upstream provider URL.
+- DASH reverse-proxying and segment caching are **not supported**. Enabling reverse-proxy mode for a user or target does not route
+  DASH streams through the HLS proxy handler or cache segments in Tuliprox.
+- DASH maintains provider-account affinity at the logical playback level (reusing session tokens and reserving the pinned
+  provider account across reopen/refresh within `hls_session_ttl_secs`).
+- Because segments are fetched directly between the player and the upstream provider, Tuliprox cannot count individual segment
+  requests or confirm first-byte delivery for DASH segments. Full segment lease guarantees apply only to streams proxied
+  directly through Tuliprox (TS, HLS, VOD, Series, Catchup).
 
 ### Adaptive preserved session
 

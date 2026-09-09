@@ -810,6 +810,19 @@ impl ActiveUserManager {
             .collect()
     }
 
+    /// Atomically removes all user requests and sessions during terminal shutdown.
+    pub async fn drain_for_shutdown(&self) -> Vec<shared::model::StreamInfo> {
+        let connections = std::mem::take(&mut *self.connections.write().await);
+        self.adaptive_expiry_queue.lock().await.clear();
+        self.adaptive_expiry_index.lock().await.clear();
+        self.transition_gates.lock().await.clear();
+        connections
+            .by_key
+            .into_values()
+            .flat_map(|data| data.streams.into_iter().filter(|stream| !stream.preserved))
+            .collect()
+    }
+
     async fn log_active_user(&self) {
         let is_log_user_enabled = self.is_log_user_enabled();
         let (user_count, user_connection_count) = { self.active_users_and_connections().await };
@@ -1593,6 +1606,14 @@ impl ActiveUserManager {
                 }
             })
             .fold((0usize, 0usize), |(user_count, conn_count), effective| (user_count + 1, conn_count + effective))
+    }
+
+    pub async fn playback_resource_counts(&self) -> (usize, usize) {
+        self.gc();
+        let user_connections = self.connections.read().await;
+        user_connections.by_key.values().fold((0, 0), |(requests, sessions), connection| {
+            (requests + connection.stream_request_claims.len(), sessions + connection.sessions.len())
+        })
     }
 
     pub async fn update_stream_detail(

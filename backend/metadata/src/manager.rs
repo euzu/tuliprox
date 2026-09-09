@@ -2958,8 +2958,7 @@ impl InputWorker {
 
         // Reserve provider capacity only for actual probe work (ffprobe paths).
         let provider_handle = if needs_probe_connection {
-            let Some(handle) = ctx.active_provider.acquire_connection_for_probe(input_name, probe_priority).await
-            else {
+            let Some(handle) = ctx.active_provider.acquire_connection_for_probe(input_name, probe_priority) else {
                 debug_if_enabled!("No provider connection available for background task {}, skipping...", task);
                 return Err(shared::error::TuliproxError::Config(TASK_ERR_NO_CONNECTION.to_string()));
             };
@@ -3070,7 +3069,7 @@ impl InputWorker {
         };
 
         if provider_handle.is_some() {
-            ctx.connection_manager.release_provider_handle(provider_handle).await;
+            ctx.connection_manager.release_provider_handle(provider_handle);
         }
         match res {
             Ok((tmdb_and_date_present, probe_pending)) => {

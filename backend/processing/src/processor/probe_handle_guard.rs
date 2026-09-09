@@ -1,33 +1,22 @@
 use std::sync::Arc;
 use tuliprox_core::model::ProviderHandle;
-use tuliprox_session::ActiveProviderManager;
+use tuliprox_session::{ActiveProviderManager, ManagedProviderHandle};
 
-pub struct ProbeHandleGuard {
-    manager: Arc<ActiveProviderManager>,
-    handle: Option<ProviderHandle>,
-}
+/// Thin wrapper around `ManagedProviderHandle` for probe allocations. It preserves the
+/// same synchronous release contract without duplicating the release/drop logic.
+pub struct ProbeHandleGuard(ManagedProviderHandle);
 
 impl ProbeHandleGuard {
     pub fn new(manager: &Arc<ActiveProviderManager>, handle: ProviderHandle) -> Self {
-        Self { manager: Arc::clone(manager), handle: Some(handle) }
+        Self(ManagedProviderHandle::new(Arc::clone(manager), handle))
     }
 
     #[inline]
-    pub fn handle(&self) -> Option<&ProviderHandle> { self.handle.as_ref() }
+    pub fn handle(&self) -> Option<&ProviderHandle> { self.0.handle() }
 
-    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
-    pub async fn release(mut self) {
-        if let Some(handle) = self.handle.take() {
-            self.manager.release_handle_sync(&handle);
-        }
-    }
-}
-
-impl Drop for ProbeHandleGuard {
-    fn drop(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            self.manager.release_handle_sync(&handle);
-        }
+    pub fn release(self) {
+        // The inner managed handle releases the slot synchronously on drop.
+        drop(self);
     }
 }
 
@@ -100,7 +89,6 @@ mod tests {
 
         let handle = manager
             .acquire_connection_for_probe(&input_name, default_probe_user_priority())
-            .await
             .expect("probe allocation should succeed");
         assert_eq!(manager.get_provider_connections_count(), 1);
 
@@ -123,7 +111,6 @@ mod tests {
 
             let handle = manager
                 .acquire_connection_for_probe(&input_name, default_probe_user_priority())
-                .await
                 .expect("probe allocation should succeed");
             assert_eq!(manager.get_provider_connections_count(), 1);
 

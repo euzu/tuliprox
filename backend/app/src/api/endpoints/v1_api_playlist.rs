@@ -1411,7 +1411,7 @@ mod tests {
         let active_provider = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
         let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
         let history_config = Some(StreamHistoryConfig::default());
-        active_provider.set_shared_stream_manager(Arc::clone(&shared_stream_manager));
+        active_provider.set_shared_stream_manager(&shared_stream_manager);
 
         let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
         let config = app_cfg.config.load();

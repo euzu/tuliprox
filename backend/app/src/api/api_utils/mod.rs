@@ -358,10 +358,19 @@ pub(crate) use tuliprox_core::utils::response_compression::{
     mark_response_as_uncompressed, should_compress_response_extensions,
 };
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Default)]
 struct StreamMeteringConfig {
     meter_uid: u32,
     meter_stream: bool,
+    pending_shared_registration: Option<tuliprox_session::PendingSharedMeterRegistration>,
+}
+
+impl StreamMeteringConfig {
+    fn commit_shared_registration(&mut self) {
+        if let Some(registration) = self.pending_shared_registration.take() {
+            registration.commit();
+        }
+    }
 }
 
 #[allow(clippy::missing_panics_doc)]
@@ -1147,29 +1156,25 @@ fn create_unmapped_provider_stream(app_config: &AppConfig) -> ProviderStreamStat
     }
 }
 
-async fn acquire_stream_provider_handle(
+fn acquire_stream_provider_handle(
     app_state: &Arc<AppState>,
     input: &ConfigInput,
     fingerprint: &Fingerprint,
-    options: StreamingAcquireOptions<'_>,
+    options: &StreamingAcquireOptions<'_>,
 ) -> Option<tuliprox_session::ManagedProviderHandle> {
     let lease = options.session_owner.map(|owner| PlaybackLeaseRef::new(owner, options.playback_kind));
     let managed = |handle| tuliprox_session::ManagedProviderHandle::new(Arc::clone(&app_state.active_provider), handle);
     match options.force_provider {
         Some(provider) => {
             // First try to stay on the exact pinned provider account without over-allocating.
-            if let Some(handle) = app_state
-                .active_provider
-                .acquire_exact_connection_with_lease_for_session(
-                    provider,
-                    &fingerprint.addr,
-                    options.allow_provider_grace,
-                    options.user_priority,
-                    options.connection_kind,
-                    lease,
-                )
-                .await
-            {
+            if let Some(handle) = app_state.active_provider.acquire_exact_connection_with_lease_for_session(
+                provider,
+                &fingerprint.addr,
+                options.allow_provider_grace,
+                options.user_priority,
+                options.connection_kind,
+                lease,
+            ) {
                 Some(managed(handle))
             } else if options.allow_forced_provider_fallback {
                 debug_if_enabled!(
@@ -1187,7 +1192,6 @@ async fn acquire_stream_provider_handle(
                         options.connection_kind,
                         lease,
                     )
-                    .await
                     .map(managed)
             } else {
                 debug_if_enabled!(
@@ -1208,7 +1212,6 @@ async fn acquire_stream_provider_handle(
                 options.connection_kind,
                 lease,
             )
-            .await
             .map(managed),
     }
 }
@@ -1266,7 +1269,7 @@ async fn resolve_streaming_strategy(
 ) -> StreamingStrategy {
     // allocate a provider connection
     let accept_requested_stream_url = options.accept_requested_stream_url || input.input_type.is_stalker();
-    let mut provider_connection_handle = acquire_stream_provider_handle(app_state, input, fingerprint, options).await;
+    let mut provider_connection_handle = acquire_stream_provider_handle(app_state, input, fingerprint, &options);
 
     // panel_api provisioning/loading is handled later in the stream creation flow
 
@@ -1870,7 +1873,7 @@ where
             return Some(StatusCode::BAD_REQUEST.into_response());
         };
 
-        if redirect_request {
+        if redirect_request || is_dash_request {
             let target_name = params.target.name.as_str();
             let virtual_id = params.item.get_virtual_id();
             let stream_url = match get_xtream_player_api_stream_url(
@@ -2083,7 +2086,7 @@ pub async fn force_provider_stream_response(
             sanitize_sensitive_info(&user_session.token),
             sanitize_sensitive_info(&fingerprint.addr.to_string())
         );
-        cleanup_forced_reopen_addrs(app_state, &user_session.token, &cleanup_addrs).await;
+        cleanup_forced_reopen_addrs(app_state, &user_session.token, &cleanup_addrs);
     }
 
     // Provider-affine playback must stay on the same provider account across seeks/range reconnects.
@@ -2140,24 +2143,20 @@ pub async fn force_provider_stream_response(
         let metering = prepare_stream_metering(
             app_state,
             user_session.stream_url.as_ref(),
-            share_stream,
+            false,
             stream_details.stream.is_some(),
             stream_details.has_deferred_provider_open(),
-        )
-        .await;
+        );
         let provider_response =
             stream_details.stream_info.as_ref().map(|(h, sc, url, cvt)| (h.clone(), *sc, url.clone(), *cvt));
         if ctx.session_reservation_ttl_secs > 0 {
             if let Some(provider_name) = stream_details.provider_name.as_ref() {
-                app_state
-                    .active_provider
-                    .refresh_adaptive_playback_lease(
-                        provider_name,
-                        &user_session.token,
-                        PlaybackKind::classify(item_type, extract_extension_from_url(user_session.stream_url.as_ref())),
-                        ctx.session_reservation_ttl_secs,
-                    )
-                    .await;
+                app_state.active_provider.refresh_adaptive_playback_lease(
+                    provider_name,
+                    &user_session.token,
+                    PlaybackKind::classify(item_type, extract_extension_from_url(user_session.stream_url.as_ref())),
+                    ctx.session_reservation_ttl_secs,
+                );
             }
         }
         app_state.active_users.update_session_addr(&ctx.user.username, &user_session.token, &fingerprint.addr).await;
@@ -2470,15 +2469,6 @@ pub(crate) async fn stream_response(
             debug_if_enabled!("panel_api provisioning response to client: status={} headers={:?}", status, headers);
         }
 
-        let metering = prepare_stream_metering(
-            app_state,
-            stream_url,
-            share_stream,
-            stream_details.stream.is_some(),
-            stream_details.has_deferred_provider_open(),
-        )
-        .await;
-
         // Captured before `stream_details` is moved into `create_active_client_stream`.
         // The pinning rule is centralized in `should_pin_provider_for_session` so it stays
         // testable in isolation and in sync with the call site below.
@@ -2501,7 +2491,7 @@ pub(crate) async fn stream_response(
         }
         let shared_subscriber_id =
             tuliprox_core::model::SharedSubscriberId::from_stream_uid(app_state.connection_manager.next_stream_uid());
-        let pending_shared_cleanup = if is_stream_shared {
+        let mut pending_shared_cleanup = if is_stream_shared {
             match SharedStreamManager::reserve_subscriber_cleanup(
                 &app_state.connection_manager,
                 shared_subscriber_id,
@@ -2526,10 +2516,30 @@ pub(crate) async fn stream_response(
         } else {
             None
         };
+        let mut metering = prepare_stream_metering(
+            app_state,
+            stream_url,
+            is_stream_shared,
+            stream_details.stream.is_some(),
+            stream_details.has_deferred_provider_open(),
+        );
+        if let (Some(cleanup), Some(request_id)) = (
+            pending_shared_cleanup.as_mut(),
+            stream_details
+                .provider_handle
+                .as_ref()
+                .and_then(|managed| managed.handle())
+                .and_then(|handle| handle.playback_request_id),
+        ) {
+            cleanup.set_provider_request_identity(session_token, request_id);
+        }
         let provider_handle = if is_stream_shared && !stream_details.has_deferred_provider_open() {
-            // The shared-stream manager is the new owner; transfer the raw handle without
-            // an intermediate await so the slot is never left without a release owner.
-            stream_details.provider_handle.take().and_then(|mut managed| managed.disarm())
+            // Transfer the ManagedProviderHandle to the shared-stream manager.
+            // Ownership stays with the managed type across all awaits; the shared-stream
+            // manager disarms it only once it holds the write lock and commits to a new
+            // shared origin. If the future is cancelled before that point the Drop guard
+            // releases the slot.
+            stream_details.provider_handle.take()
         } else {
             None
         };
@@ -2543,7 +2553,8 @@ pub(crate) async fn stream_response(
             stream_channel.shared_stream_id = None;
         }
         if is_stream_shared {
-            stream_details.shared_subscriber_id = Some(shared_subscriber_id);
+            stream_details.shared_subscriber_id =
+                pending_shared_cleanup.as_ref().map(tuliprox_session::PendingSharedSubscriberCleanup::capability);
         }
         let stream = match create_active_client_stream(crate::api::model::ActiveClientStreamParams {
             stream_details,
@@ -2585,26 +2596,28 @@ pub(crate) async fn stream_response(
             };
             // Shared Stream response
             let shared_headers = provider_response.as_ref().map_or_else(Vec::new, |(h, _, _, _)| h.clone());
-            if let Some((broadcast_stream, _shared_provider)) = SharedStreamManager::register_shared_stream(
-                SharedStreamCtx {
-                    app_config: &app_state.app_config,
-                    shared_stream_manager: &app_state.shared_stream_manager,
-                    active_provider: &app_state.active_provider,
-                    connection_manager: &app_state.connection_manager,
-                },
-                stream_url,
-                stream,
-                &fingerprint.addr,
-                shared_subscriber_id,
-                shared_headers,
-                stream_options.buffer_size,
-                provider_handle,
-                pending_shared_cleanup,
-                connection_priority_for_kind(user, connection_kind),
-                connection_kind,
-            )
-            .await
+            if let Some((broadcast_stream, _shared_provider, _cleanup_capability)) =
+                SharedStreamManager::register_shared_stream(
+                    SharedStreamCtx {
+                        app_config: &app_state.app_config,
+                        shared_stream_manager: &app_state.shared_stream_manager,
+                        active_provider: &app_state.active_provider,
+                        connection_manager: &app_state.connection_manager,
+                    },
+                    stream_url,
+                    stream,
+                    &fingerprint.addr,
+                    shared_subscriber_id,
+                    shared_headers,
+                    stream_options.buffer_size,
+                    provider_handle,
+                    pending_shared_cleanup,
+                    connection_priority_for_kind(user, connection_kind),
+                    connection_kind,
+                )
+                .await
             {
+                metering.commit_shared_registration();
                 let (status_code, header_map) =
                     get_stream_response_with_headers(provider_response.map(|(h, s, _, _)| (h, s)));
                 let mut response = axum::response::Response::builder().status(status_code);
@@ -2700,15 +2713,12 @@ pub(crate) async fn stream_response(
                     if should_pin_provider {
                         let reservation_ttl_secs = get_session_reservation_ttl_secs(app_state, item_type);
                         if reservation_ttl_secs > 0 {
-                            app_state
-                                .active_provider
-                                .refresh_adaptive_playback_lease(
-                                    &provider,
-                                    session_token,
-                                    PlaybackKind::classify(item_type, playback_extension),
-                                    reservation_ttl_secs,
-                                )
-                                .await;
+                            app_state.active_provider.refresh_adaptive_playback_lease(
+                                &provider,
+                                session_token,
+                                PlaybackKind::classify(item_type, playback_extension),
+                                reservation_ttl_secs,
+                            );
                         }
                     }
                 }
@@ -2836,15 +2846,12 @@ async fn detected_catchup_hls_response(params: DetectedCatchupHlsResponseParams<
             )
             .await;
     }
-    app_state
-        .active_provider
-        .refresh_adaptive_playback_lease(
-            &provider,
-            &created_session_token,
-            PlaybackKind::Catchup,
-            get_catchup_session_ttl_secs(app_state),
-        )
-        .await;
+    app_state.active_provider.refresh_adaptive_playback_lease(
+        &provider,
+        &created_session_token,
+        PlaybackKind::Catchup,
+        get_catchup_session_ttl_secs(app_state),
+    );
     app_state.connection_manager.release_managed_provider_handle(stream_details.provider_handle.take());
     app_state
         .active_users
@@ -2873,7 +2880,7 @@ async fn cleanup_failed_detected_catchup_hls(
 ) {
     app_state.connection_manager.release_managed_provider_handle(stream_details.provider_handle.take());
     app_state.active_users.terminate_session(username, session_token).await;
-    app_state.active_provider.clear_provider_reservation(session_token).await;
+    app_state.active_provider.clear_provider_reservation(session_token);
 }
 
 async fn probe_catchup_payload(stream: BoxedProviderStream, deadline: Duration) -> Result<CatchupPayload, StreamError> {
@@ -2934,7 +2941,7 @@ fn is_stream_metrics_enabled(app_state: &Arc<AppState>) -> bool {
         .is_some_and(|stream| stream.metrics_enabled)
 }
 
-async fn prepare_stream_metering(
+fn prepare_stream_metering(
     app_state: &Arc<AppState>,
     stream_url: &str,
     share_stream: bool,
@@ -2946,14 +2953,17 @@ async fn prepare_stream_metering(
     }
 
     if share_stream {
-        let meter_uid = app_state
+        let (meter_uid, pending_registration) = app_state
             .shared_stream_manager
-            .get_or_register_meter_uid(stream_url, || app_state.connection_manager.next_stream_uid())
-            .await;
-        return StreamMeteringConfig { meter_uid, meter_stream: has_stream || has_deferred_provider_open };
+            .reserve_meter_uid(stream_url, || app_state.connection_manager.next_stream_uid());
+        return StreamMeteringConfig {
+            meter_uid,
+            meter_stream: has_stream || has_deferred_provider_open,
+            pending_shared_registration: pending_registration,
+        };
     } else if has_stream || has_deferred_provider_open {
         let meter_uid = app_state.connection_manager.next_stream_uid();
-        return StreamMeteringConfig { meter_uid, meter_stream: true };
+        return StreamMeteringConfig { meter_uid, meter_stream: true, pending_shared_registration: None };
     }
 
     StreamMeteringConfig::default()
@@ -2981,8 +2991,8 @@ pub(crate) fn get_hls_session_ttl_secs(app_state: &Arc<AppState>) -> u64 {
     get_stream_config_u64(app_state, |stream| stream.hls_session_ttl_secs, default_hls_session_ttl_secs())
 }
 
-async fn cleanup_forced_reopen_addrs(app_state: &Arc<AppState>, session_owner: &str, cleanup_addrs: &[SocketAddr]) {
-    app_state.active_provider.release_playback_connections(session_owner, cleanup_addrs).await;
+fn cleanup_forced_reopen_addrs(app_state: &Arc<AppState>, session_owner: &str, cleanup_addrs: &[SocketAddr]) {
+    app_state.active_provider.release_playback_connections(session_owner, cleanup_addrs);
 }
 
 pub(crate) fn get_catchup_session_ttl_secs(app_state: &Arc<AppState>) -> u64 {
@@ -3048,7 +3058,7 @@ async fn try_shared_stream_response_if_any(
         connection_kind,
     )
     .await;
-    let (stream, provider) = match shared_subscription {
+    let (stream, provider, cleanup_capability) = match shared_subscription {
         Ok(Some(subscription)) => subscription,
         Ok(None) => return None,
         Err(reason) => return Some(stream_admission_rejected_response(reason.into(), &user.username)),
@@ -3061,7 +3071,7 @@ async fn try_shared_stream_response_if_any(
             grace_period_options.period_millis = 0;
         }
         let mut stream_details = StreamDetails::from_stream(stream, grace_period_options);
-        stream_details.shared_subscriber_id = Some(subscriber_id);
+        stream_details.shared_subscriber_id = Some(cleanup_capability);
 
         stream_details.provider_name = provider;
         let socket_bound =
@@ -3084,12 +3094,21 @@ async fn try_shared_stream_response_if_any(
         }
         stream_channel.shared = true;
         stream_channel.shared_joined_existing = Some(true);
-        let meter_uid = app_state
-            .shared_stream_manager
-            .get_or_register_meter_uid(stream_url, || app_state.connection_manager.next_stream_uid())
-            .await;
+        // Joining an existing origin reuses its meter identity. When metrics are disabled
+        // no meter exists to reserve; reserving one here would leave an ownerless entry that
+        // teardown cannot match and remove.
+        let (meter_uid, pending_registration) = if is_stream_metrics_enabled(app_state) {
+            app_state
+                .shared_stream_manager
+                .reserve_meter_uid(stream_url, || app_state.connection_manager.next_stream_uid())
+        } else {
+            (0, None)
+        };
+        if let Some(registration) = pending_registration {
+            registration.commit();
+        }
         stream_channel.shared_stream_id = Some(u64::from(meter_uid));
-        let metering = StreamMeteringConfig { meter_uid, meter_stream: false };
+        let metering = StreamMeteringConfig { meter_uid, meter_stream: false, pending_shared_registration: None };
         let stream = match create_active_client_stream(crate::api::model::ActiveClientStreamParams {
             stream_details,
             app_state,
@@ -3368,7 +3387,7 @@ pub(crate) async fn local_stream_response(
             })
             .await;
     }
-    let metering = prepare_stream_metering(app_state, &pli.url, false, true, false).await;
+    let metering = prepare_stream_metering(app_state, &pli.url, false, true, false);
     let stream = match create_active_client_stream(crate::api::model::ActiveClientStreamParams {
         stream_details: StreamDetails::from_stream(stream, grace_period_options),
         app_state,

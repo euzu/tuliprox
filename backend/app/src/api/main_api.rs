@@ -48,6 +48,7 @@ use axum::{
 use dashmap::DashSet;
 use log::{debug, error, info, warn};
 use shared::{
+    defaults::default_cleanup_queue_capacity,
     error::TuliproxError,
     model::ServerLifecycleEvent,
     utils::{concat_path_leading_slash, sanitize_sensitive_info},
@@ -402,17 +403,23 @@ async fn create_shared_data(
         config.reverse_proxy.as_ref().and_then(|reverse_proxy| reverse_proxy.hls_cache.as_ref()),
         &rewrite_secret,
     ));
-    active_provider.set_shared_stream_manager(Arc::clone(&shared_stream_manager));
+    active_provider.set_shared_stream_manager(&shared_stream_manager);
     let active_users = Arc::new(ActiveUserManager::new(&config, &geoip, &event_manager));
     active_users.start_adaptive_expiry_worker();
 
     let history_config = config.reverse_proxy.as_ref().and_then(|r| r.stream_history.as_ref());
-    let connection_manager = Arc::new(ConnectionManager::new(
+    let cleanup_capacity = config
+        .reverse_proxy
+        .as_ref()
+        .and_then(|r| r.stream.as_ref())
+        .map_or_else(default_cleanup_queue_capacity, |stream| stream.cleanup_queue_capacity);
+    let connection_manager = Arc::new(ConnectionManager::new_with_capacity(
         &active_users,
         &active_provider,
         &shared_stream_manager,
         &event_manager,
         history_config,
+        cleanup_capacity,
     ));
 
     let client = create_http_client(app_config)?;
@@ -1169,7 +1176,7 @@ mod tests {
             let event_manager = Arc::new(EventManager::new());
             let active_provider = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
             let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
-            active_provider.set_shared_stream_manager(Arc::clone(&shared_stream_manager));
+            active_provider.set_shared_stream_manager(&shared_stream_manager);
             let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
             let config = app_cfg.config.load();
             let active_users = Arc::new(ActiveUserManager::new(&config, &geoip, &event_manager));
@@ -1242,7 +1249,6 @@ mod tests {
             state
                 .active_provider
                 .acquire_connection(&input.into(), &addr, default_user_priority(), ConnectionKind::Normal)
-                .await
                 .expect("connection allocation")
         }
 

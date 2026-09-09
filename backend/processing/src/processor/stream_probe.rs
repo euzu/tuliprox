@@ -239,7 +239,6 @@ async fn prepare_generic_stream_metadata<E: EventSink>(
     } else {
         active_provider
             .acquire_connection_for_probe(&input.name, probe_priority)
-            .await
             .map(|handle| ProbeHandleGuard::new(active_provider, handle))
     };
 
@@ -286,7 +285,7 @@ async fn prepare_generic_stream_metadata<E: EventSink>(
     };
 
     if let Some(handle) = acquired_handle {
-        handle.release().await;
+        handle.release();
     }
 
     let (raw_video, raw_audio, stats) = match probe_data {

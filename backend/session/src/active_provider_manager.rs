@@ -1,5 +1,3 @@
-#![allow(clippy::unused_async, clippy::unused_async_trait_impl)]
-
 use crate::{
     provider_leases::{ProviderLeaseTable, ProviderLeaseUsage},
     provider_lineup_manager::ProviderLineupManager,
@@ -12,8 +10,8 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     net::SocketAddr,
     sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc, LazyLock, OnceLock, RwLockReadGuard, RwLockWriteGuard,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, LazyLock, OnceLock, RwLockReadGuard, RwLockWriteGuard, Weak,
     },
     time::Instant,
 };
@@ -168,6 +166,9 @@ struct Connections {
     // Index to quickly find connections by provider name for preemption
     // ProviderName -> Set<AllocationId>
     by_provider: HashMap<Arc<str>, HashSet<AllocationId>>,
+    // Index to find every allocation (single and shared) owned by a playback session.
+    // SessionOwner -> Set<AllocationId>
+    by_owner: HashMap<Arc<str>, HashSet<AllocationId>>,
     // Priority index per provider alias for O(log n) victim lookup
     // ProviderName -> BTreeMap<PriorityKey, PriorityOwner>
     priority_index: HashMap<Arc<str>, BTreeMap<PriorityKey, PriorityOwner>>,
@@ -204,7 +205,7 @@ impl ManagedProviderHandle {
 impl Drop for ManagedProviderHandle {
     fn drop(&mut self) {
         if let Some(handle) = self.handle.take() {
-            self.manager.release_handle_sync(&handle);
+            self.manager.release_handle(&handle);
         }
     }
 }
@@ -212,14 +213,14 @@ impl Drop for ManagedProviderHandle {
 pub struct ActiveProviderManager {
     // Serializes capacity transitions across counters, allocation indices and leases.
     capacity_transition: std::sync::Mutex<()>,
+    is_shutting_down: AtomicBool,
     providers: ProviderLineupManager,
     connections: std::sync::RwLock<Connections>,
     leases: std::sync::RwLock<ProviderLeaseTable>,
     next_allocation_id: AtomicU64,
-    shared_stream_manager: OnceLock<Arc<SharedStreamManager>>,
+    shared_stream_manager: OnceLock<Weak<SharedStreamManager>>,
 }
 
-#[allow(clippy::unused_async)]
 impl ActiveProviderManager {
     fn lock_capacity_transition(&self) -> std::sync::MutexGuard<'_, ()> {
         match self.capacity_transition.lock() {
@@ -298,6 +299,24 @@ impl ActiveProviderManager {
         }
     }
 
+    fn index_owner(connections: &mut Connections, allocation_id: AllocationId, owner: Option<&Arc<str>>) {
+        if let Some(owner) = owner {
+            connections.by_owner.entry(Arc::clone(owner)).or_default().insert(allocation_id);
+        }
+    }
+
+    fn unindex_owner(connections: &mut Connections, allocation_id: AllocationId, owner: Option<&Arc<str>>) {
+        if let Some(owner) = owner {
+            let remove = connections.by_owner.get_mut(owner).is_some_and(|set| {
+                set.remove(&allocation_id);
+                set.is_empty()
+            });
+            if remove {
+                connections.by_owner.remove(owner);
+            }
+        }
+    }
+
     fn shared_effective_priority(
         subscribers: &HashMap<SharedSubscriberId, SharedSubscriber>,
         kind: ConnectionKind,
@@ -318,6 +337,7 @@ impl ActiveProviderManager {
         let inputs = Self::get_config_inputs(cfg);
         Self {
             capacity_transition: std::sync::Mutex::new(()),
+            is_shutting_down: AtomicBool::new(false),
             providers: ProviderLineupManager::new(inputs, grace_period_options, event_manager),
             connections: std::sync::RwLock::new(Connections::default()),
             leases: std::sync::RwLock::new(ProviderLeaseTable::default()),
@@ -326,8 +346,28 @@ impl ActiveProviderManager {
         }
     }
 
-    pub fn set_shared_stream_manager(&self, manager: Arc<SharedStreamManager>) {
-        let _ = self.shared_stream_manager.set(manager);
+    pub fn set_shared_stream_manager(&self, manager: &Arc<SharedStreamManager>) {
+        let _ = self.shared_stream_manager.set(Arc::downgrade(manager));
+    }
+
+    /// Closes provider admission and releases all physical allocations and leases.
+    pub fn shutdown(&self) {
+        self.is_shutting_down.store(true, Ordering::Release);
+        let _transition = self.lock_capacity_transition();
+        let connections = std::mem::take(&mut *self.write_connections());
+        self.write_leases().clear();
+
+        for info in connections.single.into_values() {
+            info.cancel_token.cancel();
+            info.allocation.release();
+        }
+        for shared in connections.shared.by_key.into_values() {
+            if let Some(cancel_token) = shared.cancel_token {
+                cancel_token.cancel();
+            }
+            shared.allocation.release();
+        }
+        self.providers.reconcile_connections(HashMap::new());
     }
 
     fn get_config_inputs(cfg: &AppConfig) -> Vec<Arc<ConfigInput>> {
@@ -336,14 +376,14 @@ impl ActiveProviderManager {
 
     fn get_grace_options(cfg: &AppConfig) -> GracePeriodOptions { cfg.config.load().get_grace_options() }
 
-    pub async fn update_config(&self, cfg: &AppConfig) {
+    pub fn update_config(&self, cfg: &AppConfig) {
         let grace_period_options = Self::get_grace_options(cfg);
         let inputs = Self::get_config_inputs(cfg);
         self.providers.update_config(inputs, &grace_period_options);
-        self.reconcile_connections().await;
+        self.reconcile_connections();
     }
 
-    pub async fn reconcile_connections(&self) {
+    pub fn reconcile_connections(&self) {
         let _transition = self.lock_capacity_transition();
         let mut counts = HashMap::<Arc<str>, usize>::new();
         {
@@ -383,6 +423,27 @@ impl ActiveProviderManager {
         Self::prune_expired_leases(&mut leases);
         let provider_name = leases.provider_for_owner(session_owner)?;
         self.providers.is_provider_for_input(&provider_name, input_name).then_some(provider_name)
+    }
+
+    /// True when `session_owner` already backs a live allocation on `provider_name`,
+    /// without materialising the full owner set for a membership test.
+    fn has_active_owner_for_provider(&self, provider_name: &Arc<str>, session_owner: &str) -> bool {
+        let connections = self.read_connections();
+        connections.by_owner.get(session_owner).is_some_and(|alloc_ids| {
+            alloc_ids.iter().any(|id| {
+                if let Some(info) = connections.single.get(id) {
+                    info.allocation.get_provider_name().as_ref() == Some(provider_name)
+                } else if let Some(key) = connections.shared.shared_by_allocation_id.get(id) {
+                    connections
+                        .shared
+                        .by_key
+                        .get(key)
+                        .is_some_and(|shared| shared.allocation.get_provider_name().as_ref() == Some(provider_name))
+                } else {
+                    false
+                }
+            })
+        })
     }
 
     fn active_reservation_owners(&self, provider_name: &Arc<str>) -> HashSet<Arc<str>> {
@@ -430,7 +491,6 @@ impl ActiveProviderManager {
         if max_connections == 0 {
             return Some((current_connections, max_connections, 0));
         }
-
         let counted_owners = self.active_reservation_owners(provider_name);
         let mut leases = self.write_leases();
         Self::prune_expired_leases(&mut leases);
@@ -513,8 +573,11 @@ impl ActiveProviderManager {
         reserved
     }
 
-    pub async fn refresh_provider_reservation(&self, provider_name: &Arc<str>, session_owner: &str, ttl_secs: u64) {
+    pub fn refresh_provider_reservation(&self, provider_name: &Arc<str>, session_owner: &str, ttl_secs: u64) {
         let _transition = self.lock_capacity_transition();
+        if self.is_shutting_down.load(Ordering::Acquire) {
+            return;
+        }
         let granted_ttl = self.renewal_granted_ttl(provider_name, session_owner, ttl_secs);
         let mut leases = self.write_leases();
         Self::prune_expired_leases(&mut leases);
@@ -534,7 +597,7 @@ impl ActiveProviderManager {
     /// Adaptive playback consists of many short requests, so the lease must stay
     /// reconnect-capable: between two segment requests the slot is kept as an idle
     /// lease on the same provider instead of being released and reselected.
-    pub async fn refresh_adaptive_playback_lease(
+    pub fn refresh_adaptive_playback_lease(
         &self,
         provider_name: &Arc<str>,
         session_owner: &str,
@@ -542,6 +605,9 @@ impl ActiveProviderManager {
         ttl_secs: u64,
     ) {
         let _transition = self.lock_capacity_transition();
+        if self.is_shutting_down.load(Ordering::Acquire) {
+            return;
+        }
         let granted_ttl = self.renewal_granted_ttl(provider_name, session_owner, ttl_secs);
         let mut leases = self.write_leases();
         Self::prune_expired_leases(&mut leases);
@@ -549,16 +615,18 @@ impl ActiveProviderManager {
     }
 
     /// Renews the lease of a playback. A zero TTL clears it.
-    pub async fn refresh_playback_lease(
-        &self,
-        provider_name: &Arc<str>,
-        lease_ref: &PlaybackLeaseRef<'_>,
-        ttl_secs: u64,
-    ) {
+    pub fn refresh_playback_lease(&self, provider_name: &Arc<str>, lease_ref: &PlaybackLeaseRef<'_>, ttl_secs: u64) {
         let _transition = self.lock_capacity_transition();
+        if self.is_shutting_down.load(Ordering::Acquire) {
+            return;
+        }
         let granted_ttl = self.renewal_granted_ttl(provider_name, lease_ref.owner, ttl_secs);
         let mut leases = self.write_leases();
         Self::prune_expired_leases(&mut leases);
+        if ttl_secs == 0 {
+            leases.release_identified_owner(lease_ref.owner, lease_ref.request_id);
+            return;
+        }
         leases.renew_identified_owner(
             lease_ref.owner,
             provider_name,
@@ -590,13 +658,13 @@ impl ActiveProviderManager {
         }
     }
 
-    pub async fn clear_provider_reservation(&self, session_owner: &str) {
+    pub fn clear_provider_reservation(&self, session_owner: &str) {
         let _transition = self.lock_capacity_transition();
         let mut leases = self.write_leases();
         leases.release_owner(session_owner);
     }
 
-    pub async fn clear_identified_provider_reservation(
+    pub fn clear_identified_provider_reservation(
         &self,
         session_owner: &str,
         provider_name: &Arc<str>,
@@ -614,36 +682,22 @@ impl ActiveProviderManager {
 
     /// Confirms real media activity for a playback lease. Only a confirmed lease may
     /// outlive its request as a reconnect slot.
-    pub fn confirm_playback_activity_sync(&self, owner: &str) -> Option<PlaybackLeaseId> {
-        self.confirm_owner_sync(owner, None)
-    }
-
-    pub async fn confirm_playback_activity(&self, owner: &str) -> Option<PlaybackLeaseId> {
-        self.confirm_playback_activity_sync(owner)
-    }
+    pub fn confirm_playback_activity(&self, owner: &str) -> Option<PlaybackLeaseId> { self.confirm_owner(owner, None) }
 
     /// Confirms real media activity for a specific request ID of a playback lease.
-    pub fn confirm_identified_playback_activity_sync(
+    pub fn confirm_identified_playback_activity(
         &self,
         owner: &str,
         request_id: PlaybackRequestId,
     ) -> Option<PlaybackLeaseId> {
-        self.confirm_owner_sync(owner, Some(request_id))
-    }
-
-    pub async fn confirm_identified_playback_activity(
-        &self,
-        owner: &str,
-        request_id: PlaybackRequestId,
-    ) -> Option<PlaybackLeaseId> {
-        self.confirm_identified_playback_activity_sync(owner, request_id)
+        self.confirm_owner(owner, Some(request_id))
     }
 
     /// Records media activity under the capacity transition. The confirmation only
     /// grants a reservation right when the lease already backs a live allocation or a
     /// free slot remains; otherwise the media bytes are recorded without a reservation
     /// so a late cache confirmation cannot over-commit a provider at its limit.
-    fn confirm_owner_sync(&self, owner: &str, request_id: Option<PlaybackRequestId>) -> Option<PlaybackLeaseId> {
+    fn confirm_owner(&self, owner: &str, request_id: Option<PlaybackRequestId>) -> Option<PlaybackLeaseId> {
         let _transition = self.lock_capacity_transition();
         let (provider_name, wants_reservation) = {
             let mut leases = self.write_leases();
@@ -667,7 +721,7 @@ impl ActiveProviderManager {
     /// lease either already backs a live allocation, or a free slot remains below the
     /// configured maximum after foreign reservations are counted.
     fn confirmation_reserve_allowed(&self, provider_name: &Arc<str>, session_owner: &str) -> bool {
-        if self.active_reservation_owners(provider_name).contains(session_owner) {
+        if self.has_active_owner_for_provider(provider_name, session_owner) {
             return true;
         }
         let Some((current, max, foreign)) = self.reservation_capacity_usage(provider_name, Some(session_owner)) else {
@@ -680,25 +734,20 @@ impl ActiveProviderManager {
     ///
     /// `idle_ttl_secs` overrides the reconnect window stored on the lease; `None`
     /// keeps the window the endpoint configured when it renewed the lease.
-    pub async fn finish_playback_request(
-        &self,
-        owner: &str,
-        outcome: PlaybackRequestOutcome,
-        idle_ttl_secs: Option<u64>,
-    ) {
-        self.finish_playback_request_inner(owner, None, outcome, idle_ttl_secs).await;
+    pub fn finish_playback_request(&self, owner: &str, outcome: PlaybackRequestOutcome, idle_ttl_secs: Option<u64>) {
+        self.finish_playback_request_inner(owner, None, outcome, idle_ttl_secs);
     }
 
-    pub async fn finish_identified_playback_request(
+    pub fn finish_identified_playback_request(
         &self,
         owner: &str,
         request_id: PlaybackRequestId,
         outcome: PlaybackRequestOutcome,
     ) {
-        self.finish_playback_request_inner(owner, Some(request_id), outcome, None).await;
+        self.finish_playback_request_inner(owner, Some(request_id), outcome, None);
     }
 
-    async fn finish_playback_request_inner(
+    fn finish_playback_request_inner(
         &self,
         owner: &str,
         request_id: Option<PlaybackRequestId>,
@@ -709,11 +758,15 @@ impl ActiveProviderManager {
         // A delayed completion must not end a newer request of this playback.
         // Only active connections from a DIFFERENT request ID (or shared streams) prevent lease finish.
         let connections = self.read_connections();
-        let has_other_active_connection =
-            connections.single.values().any(|info| {
-                info.session_owner.as_deref() == Some(owner)
-                    && (request_id.is_none() || info.playback_request_id != request_id)
-            }) || connections.shared.by_key.values().any(|info| info.session_owner.as_deref() == Some(owner));
+        let has_other_active_connection = connections.by_owner.get(owner).is_some_and(|alloc_ids| {
+            alloc_ids.iter().any(|id| {
+                connections
+                    .single
+                    .get(id)
+                    .is_some_and(|info| request_id.is_none() || info.playback_request_id != request_id)
+                    || connections.shared.shared_by_allocation_id.contains_key(id)
+            })
+        });
         if has_other_active_connection {
             if let Some(req_id) = request_id {
                 let mut leases = self.write_leases();
@@ -910,13 +963,19 @@ impl ActiveProviderManager {
         }
     }
 
-    async fn acquire_connection_inner(
+    fn acquire_connection_inner(
         &self,
         provider_or_input_name: &Arc<str>,
         allow_grace: bool,
         params: &AcquireProviderParams<'_>,
     ) -> Option<ProviderHandle> {
+        if self.is_shutting_down.load(Ordering::Acquire) {
+            return None;
+        }
         let _transition = self.lock_capacity_transition();
+        if self.is_shutting_down.load(Ordering::Acquire) {
+            return None;
+        }
         if let Some(owner) = params.session_owner() {
             if let Some(reserved_provider) = self.get_reserved_provider_for_owner(provider_or_input_name, owner) {
                 return self.acquire_exact_connection_inner(&reserved_provider, allow_grace, params);
@@ -998,6 +1057,7 @@ impl ActiveProviderManager {
             None
         };
 
+        let session_owner_arc = session_owner.map(Arc::from);
         let mut connections = self.write_connections();
         connections.single.insert(
             allocation_id,
@@ -1009,11 +1069,12 @@ impl ActiveProviderManager {
                 created_at: now,
                 priority,
                 kind,
-                session_owner: session_owner.map(Arc::from),
+                session_owner: session_owner_arc.clone(),
                 playback_request_id: lease.map(|lease| lease.request_id),
             },
         );
         connections.single_by_addr.entry(*addr).or_default().insert(allocation_id);
+        Self::index_owner(&mut connections, allocation_id, session_owner_arc.as_ref());
 
         // Unlimited providers are not subject to preemption, so we deliberately
         // skip populating the by_provider / priority_index / soft_priority_index
@@ -1093,6 +1154,7 @@ impl ActiveProviderManager {
 
                     if let Some(shared) = connections.shared.by_key.remove(&key) {
                         connections.shared.shared_by_allocation_id.remove(&shared.allocation_id);
+                        Self::unindex_owner(&mut connections, shared.allocation_id, shared.session_owner.as_ref());
                         for subscriber_id in shared.connections.keys() {
                             connections.shared.key_by_subscriber.remove(subscriber_id);
                         }
@@ -1120,8 +1182,7 @@ impl ActiveProviderManager {
                     // Stop the shared stream broadcast task to match the released capacity.
                     // Without this, the broadcast keeps running and consuming a provider slot
                     // that was already freed by allocation.release().
-                    if let Some(ssm) = self.shared_stream_manager.get() {
-                        let ssm = Arc::clone(ssm);
+                    if let Some(ssm) = self.shared_stream_manager.get().and_then(Weak::upgrade) {
                         tokio::spawn(async move {
                             ssm.teardown_preempted_stream(&stream_url, alloc_id).await;
                         });
@@ -1144,6 +1205,7 @@ impl ActiveProviderManager {
                             sanitize_sensitive_info(input_name),
                             new_priority
                         );
+                        Self::unindex_owner(&mut connections, victim_alloc_id, info.session_owner.as_ref());
                         if let Some(set) = connections.single_by_addr.get_mut(&info.client_addr) {
                             set.remove(&victim_alloc_id);
                             if set.is_empty() {
@@ -1214,6 +1276,7 @@ impl ActiveProviderManager {
                             None
                         } else if let Some(shared) = connections.shared.by_key.remove(&key) {
                             connections.shared.shared_by_allocation_id.remove(&shared.allocation_id);
+                            Self::unindex_owner(&mut connections, shared.allocation_id, shared.session_owner.as_ref());
                             for subscriber_id in shared.connections.keys() {
                                 connections.shared.key_by_subscriber.remove(subscriber_id);
                             }
@@ -1241,8 +1304,7 @@ impl ActiveProviderManager {
                     allocation.release();
                     // Shared broadcast has to be torn down explicitly, otherwise the provider
                     // stream may continue after allocation counters were already released.
-                    if let Some(ssm) = self.shared_stream_manager.get() {
-                        let ssm = Arc::clone(ssm);
+                    if let Some(ssm) = self.shared_stream_manager.get().and_then(Weak::upgrade) {
                         tokio::spawn(async move {
                             ssm.teardown_preempted_stream(&stream_url, alloc_id).await;
                         });
@@ -1267,6 +1329,7 @@ impl ActiveProviderManager {
                                 "Preempting single connection from {} (prio={v_prio}) for higher priority request (prio={new_priority})",
                                 sanitize_sensitive_info(&info.client_addr.to_string())
                             );
+                            Self::unindex_owner(&mut connections, victim_alloc_id, info.session_owner.as_ref());
                             if let Some(set) = connections.single_by_addr.get_mut(&info.client_addr) {
                                 set.remove(&victim_alloc_id);
                                 if set.is_empty() {
@@ -1327,7 +1390,7 @@ impl ActiveProviderManager {
         None
     }
 
-    pub async fn acquire_exact_connection_with_grace(
+    pub fn acquire_exact_connection_with_grace(
         &self,
         provider_name: &Arc<str>,
         addr: &SocketAddr,
@@ -1336,10 +1399,9 @@ impl ActiveProviderManager {
         kind: ConnectionKind,
     ) -> Option<ProviderHandle> {
         self.acquire_exact_connection_with_grace_for_session(provider_name, addr, allow_grace, priority, kind, None)
-            .await
     }
 
-    pub async fn acquire_exact_connection_with_grace_for_session(
+    pub fn acquire_exact_connection_with_grace_for_session(
         &self,
         provider_name: &Arc<str>,
         addr: &SocketAddr,
@@ -1348,7 +1410,13 @@ impl ActiveProviderManager {
         kind: ConnectionKind,
         session_owner: Option<&str>,
     ) -> Option<ProviderHandle> {
+        if self.is_shutting_down.load(Ordering::Acquire) {
+            return None;
+        }
         let _transition = self.lock_capacity_transition();
+        if self.is_shutting_down.load(Ordering::Acquire) {
+            return None;
+        }
         let lease = session_owner.map(PlaybackLeaseRef::for_session_owner);
         self.acquire_exact_connection_inner(
             provider_name,
@@ -1357,7 +1425,7 @@ impl ActiveProviderManager {
         )
     }
 
-    pub async fn force_exact_acquire_connection(
+    pub fn force_exact_acquire_connection(
         &self,
         provider_name: &Arc<str>,
         addr: &SocketAddr,
@@ -1365,11 +1433,11 @@ impl ActiveProviderManager {
         kind: ConnectionKind,
     ) -> Option<ProviderHandle> {
         // Compatibility wrapper: keep the exact-provider behavior but do not over-allocate exhausted accounts.
-        self.acquire_exact_connection_with_grace(provider_name, addr, false, priority, kind).await
+        self.acquire_exact_connection_with_grace(provider_name, addr, false, priority, kind)
     }
 
     // Returns the next available provider connection
-    pub async fn acquire_connection(
+    pub fn acquire_connection(
         &self,
         input_name: &Arc<str>,
         addr: &SocketAddr,
@@ -1377,11 +1445,10 @@ impl ActiveProviderManager {
         kind: ConnectionKind,
     ) -> Option<ProviderHandle> {
         self.acquire_connection_inner(input_name, true, &AcquireProviderParams { addr, priority, kind, lease: None })
-            .await
     }
 
     /// Acquire a provider connection while explicitly controlling provider-side grace allocations.
-    pub async fn acquire_connection_with_grace(
+    pub fn acquire_connection_with_grace(
         &self,
         input_name: &Arc<str>,
         addr: &SocketAddr,
@@ -1389,10 +1456,10 @@ impl ActiveProviderManager {
         priority: i8,
         kind: ConnectionKind,
     ) -> Option<ProviderHandle> {
-        self.acquire_connection_with_grace_for_session(input_name, addr, allow_grace, priority, kind, None).await
+        self.acquire_connection_with_grace_for_session(input_name, addr, allow_grace, priority, kind, None)
     }
 
-    pub async fn acquire_connection_with_grace_for_session(
+    pub fn acquire_connection_with_grace_for_session(
         &self,
         input_name: &Arc<str>,
         addr: &SocketAddr,
@@ -1409,11 +1476,10 @@ impl ActiveProviderManager {
             kind,
             session_owner.map(PlaybackLeaseRef::for_session_owner),
         )
-        .await
     }
 
     /// Lineup acquisition with an explicit playback lease identity.
-    pub async fn acquire_connection_with_lease_for_session(
+    pub fn acquire_connection_with_lease_for_session(
         &self,
         input_name: &Arc<str>,
         addr: &SocketAddr,
@@ -1423,11 +1489,10 @@ impl ActiveProviderManager {
         lease: Option<PlaybackLeaseRef<'_>>,
     ) -> Option<ProviderHandle> {
         self.acquire_connection_inner(input_name, allow_grace, &AcquireProviderParams { addr, priority, kind, lease })
-            .await
     }
 
     /// Exact-provider acquisition with an explicit playback lease identity.
-    pub async fn acquire_exact_connection_with_lease_for_session(
+    pub fn acquire_exact_connection_with_lease_for_session(
         &self,
         provider_name: &Arc<str>,
         addr: &SocketAddr,
@@ -1446,25 +1511,23 @@ impl ActiveProviderManager {
 
     /// Acquire a provider connection for probe tasks with configurable priority.
     /// Probes never consume grace capacity.
-    pub async fn acquire_connection_for_probe(&self, input_name: &Arc<str>, priority: i8) -> Option<ProviderHandle> {
+    pub fn acquire_connection_for_probe(&self, input_name: &Arc<str>, priority: i8) -> Option<ProviderHandle> {
         self.acquire_connection_inner(
             input_name,
             false,
             &AcquireProviderParams { addr: &DUMMY_ADDR, priority, kind: ConnectionKind::Normal, lease: None },
         )
-        .await
     }
 
     /// Acquire a provider connection for background transfers (downloads/recordings).
     /// Transfers participate in the same provider priority/preemption model as normal
     /// streams, but they never consume grace capacity and wait externally on notifications.
-    pub async fn acquire_connection_for_download(&self, input_name: &Arc<str>, priority: i8) -> Option<ProviderHandle> {
+    pub fn acquire_connection_for_download(&self, input_name: &Arc<str>, priority: i8) -> Option<ProviderHandle> {
         self.acquire_connection_inner(
             input_name,
             false,
             &AcquireProviderParams { addr: &DUMMY_ADDR, priority, kind: ConnectionKind::Normal, lease: None },
         )
-        .await
     }
 
     // This method is used for redirects to cycle through the provider
@@ -1526,6 +1589,7 @@ impl ActiveProviderManager {
 
         if shared.connections.is_empty() {
             connections.shared.shared_by_allocation_id.remove(&shared.allocation_id);
+            Self::unindex_owner(&mut connections, shared.allocation_id, shared.session_owner.as_ref());
             if !shared_is_unlimited {
                 if let Some(name) = shared.allocation.get_provider_name() {
                     if let Some(list) = connections.by_provider.get_mut(&name) {
@@ -1574,7 +1638,7 @@ impl ActiveProviderManager {
         None
     }
 
-    pub async fn release_shared_connection(&self, subscriber_id: SharedSubscriberId) {
+    pub fn release_shared_connection(&self, subscriber_id: SharedSubscriberId) {
         let _transition = self.lock_capacity_transition();
         self.release_shared_connection_inner(subscriber_id);
     }
@@ -1590,7 +1654,7 @@ impl ActiveProviderManager {
     }
 
     #[allow(clippy::too_many_lines)]
-    pub async fn release_connection(&self, addr: &SocketAddr) {
+    pub fn release_connection(&self, addr: &SocketAddr) {
         let _transition = self.lock_capacity_transition();
         // Single connection - all index updates in one lock scope
         let single_allocations = {
@@ -1599,6 +1663,7 @@ impl ActiveProviderManager {
                 let mut allocations = Vec::with_capacity(alloc_ids.len());
                 for id in alloc_ids {
                     if let Some(info) = connections.single.remove(&id) {
+                        Self::unindex_owner(&mut connections, id, info.session_owner.as_ref());
                         if !info.allocation.is_unlimited_provider() {
                             if let Some(name) = info.allocation.get_provider_name() {
                                 if let Some(list) = connections.by_provider.get_mut(&name) {
@@ -1640,7 +1705,7 @@ impl ActiveProviderManager {
         }
     }
 
-    pub fn release_handle_sync(&self, handle: &ProviderHandle) {
+    pub fn release_handle(&self, handle: &ProviderHandle) {
         let _transition = self.lock_capacity_transition();
         let mut released = None;
         let mut released_priority_key: Option<(Arc<str>, PriorityKey, ConnectionKind)> = None;
@@ -1649,6 +1714,7 @@ impl ActiveProviderManager {
 
             // Try removing from Single directly by allocation_id
             if let Some(info) = connections.single.remove(&handle.allocation_id) {
+                Self::unindex_owner(&mut connections, handle.allocation_id, info.session_owner.as_ref());
                 let pkey = (info.priority, Reverse(info.created_at), handle.allocation_id);
                 released = Some(info.allocation);
                 let released_kind = info.kind;
@@ -1678,6 +1744,7 @@ impl ActiveProviderManager {
                 // Try removing from Shared
                 if let Some(key) = connections.shared.shared_by_allocation_id.remove(&handle.allocation_id) {
                     if let Some(shared) = connections.shared.by_key.remove(&key) {
+                        Self::unindex_owner(&mut connections, handle.allocation_id, shared.session_owner.as_ref());
                         let pkey = (shared.priority, Reverse(shared.created_at), handle.allocation_id);
                         let shared_kind = shared.kind;
                         let shared_is_unlimited = shared.allocation.is_unlimited_provider();
@@ -1711,10 +1778,8 @@ impl ActiveProviderManager {
         }
     }
 
-    pub async fn release_handle(&self, handle: &ProviderHandle) { self.release_handle_sync(handle); }
-
     /// Stops only stale requests of this playback, even on a multiplexed proxy socket.
-    pub async fn release_playback_connections(&self, owner: &str, addrs: &[SocketAddr]) {
+    pub fn release_playback_connections(&self, owner: &str, addrs: &[SocketAddr]) {
         let handles = {
             let connections = self.read_connections();
             let mut handles = Vec::new();
@@ -1742,7 +1807,7 @@ impl ActiveProviderManager {
             if let Some(token) = &handle.cancel_token {
                 token.cancel();
             }
-            self.release_handle(&handle).await;
+            self.release_handle(&handle);
         }
     }
 
@@ -1855,13 +1920,19 @@ impl ActiveProviderManager {
     }
 
     /// Promotes exactly the allocation owned by this handle into a shared origin.
-    pub async fn make_shared_connection(
+    pub fn make_shared_connection(
         &self,
         handle: &ProviderHandle,
         key: &str,
         subscriber_id: SharedSubscriberId,
     ) -> bool {
+        if self.is_shutting_down.load(Ordering::Acquire) {
+            return false;
+        }
         let _transition = self.lock_capacity_transition();
+        if self.is_shutting_down.load(Ordering::Acquire) {
+            return false;
+        }
         let mut connections = self.write_connections();
         if connections.shared.by_key.contains_key(key) {
             return false;
@@ -1924,6 +1995,13 @@ impl ActiveProviderManager {
         priority: i8,
         kind: ConnectionKind,
     ) -> Result<(), String> {
+        if self.is_shutting_down.load(Ordering::Acquire) {
+            return Err("Provider manager is shutting down".to_string());
+        }
+        let _transition = self.lock_capacity_transition();
+        if self.is_shutting_down.load(Ordering::Acquire) {
+            return Err("Provider manager is shutting down".to_string());
+        }
         let mut connections = self.write_connections();
 
         // Extract metadata before taking a second mutable borrow on `connections`.
@@ -2009,7 +2087,7 @@ impl ActiveProviderManager {
 #[cfg(test)]
 mod tests {
     use super::{ActiveProviderManager, ConnectionKind, PlaybackLeaseRef};
-    use crate::EventManager;
+    use crate::{EventManager, SharedStreamManager};
     use arc_swap::{ArcSwap, ArcSwapOption};
     use shared::{
         defaults::{default_probe_user_priority, default_user_priority},
@@ -2019,7 +2097,7 @@ mod tests {
     use std::{
         collections::{HashMap, HashSet},
         net::SocketAddr,
-        sync::Arc,
+        sync::{Arc, Weak},
         time::Duration,
     };
     use tuliprox_core::{
@@ -2135,6 +2213,20 @@ mod tests {
         )
     }
 
+    #[test]
+    fn shared_stream_manager_backref_is_weak_and_does_not_leak() {
+        let app_cfg = create_test_app_config_single_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let provider = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
+        let shared = Arc::new(SharedStreamManager::new(Arc::clone(&provider)));
+        provider.set_shared_stream_manager(&shared);
+
+        // The only strong reference to the shared manager is the local `shared`; the
+        // provider holds a Weak backref, so dropping `shared` releases both managers.
+        drop(shared);
+        assert!(provider.shared_stream_manager.get().and_then(Weak::upgrade).is_none());
+    }
+
     #[tokio::test]
     async fn confirmed_playbacks_fill_higher_priority_provider_before_alias() {
         let app_cfg = create_test_app_config_with_pool(2, 3);
@@ -2155,11 +2247,10 @@ mod tests {
                     ConnectionKind::Normal,
                     Some(&owner),
                 )
-                .await
                 .expect("pool has capacity for five confirmed playbacks");
             let provider = handle.allocation.get_provider_name().expect("provider name");
             // Only real media activity confirms a playback and lets it reserve capacity.
-            manager.confirm_playback_activity(&owner).await;
+            manager.confirm_playback_activity(&owner);
             selected.push(provider.to_string());
         }
 
@@ -2177,16 +2268,14 @@ mod tests {
         for attempt in 0..32 {
             let manager = Arc::clone(&manager);
             tasks.spawn(async move {
-                manager
-                    .acquire_connection_with_grace_for_session(
-                        &Arc::from("provider_1"),
-                        &addr,
-                        false,
-                        0,
-                        ConnectionKind::Normal,
-                        Some(&format!("playback-{attempt}")),
-                    )
-                    .await
+                manager.acquire_connection_with_grace_for_session(
+                    &Arc::from("provider_1"),
+                    &addr,
+                    false,
+                    0,
+                    ConnectionKind::Normal,
+                    Some(&format!("playback-{attempt}")),
+                )
             });
         }
         let mut handles = Vec::new();
@@ -2205,7 +2294,7 @@ mod tests {
             3
         );
         for handle in handles {
-            manager.release_handle(&handle).await;
+            manager.release_handle(&handle);
         }
         assert_eq!(manager.get_provider_connections_count(), 0);
         Ok(())
@@ -2219,26 +2308,23 @@ mod tests {
         let input = Arc::from("provider_1");
         let first = manager
             .acquire_connection_with_grace_for_session(&input, &addr, false, 0, ConnectionKind::Normal, Some("first"))
-            .await
             .ok_or("first allocation missing")?;
         let other = manager
             .acquire_connection_with_grace_for_session(&input, &addr, false, 0, ConnectionKind::Normal, Some("other"))
-            .await
             .ok_or("other allocation missing")?;
-        manager.release_playback_connections("first", &[addr]).await;
+        manager.release_playback_connections("first", &[addr]);
         assert!(first.cancel_token.as_ref().is_some_and(|token| token.is_cancelled()));
         assert!(!other.cancel_token.as_ref().is_some_and(|token| token.is_cancelled()));
         assert_eq!(manager.get_provider_connections_count(), 1);
         let replacement = manager
             .acquire_connection_with_grace_for_session(&input, &addr, false, 0, ConnectionKind::Normal, Some("first"))
-            .await
             .ok_or("replacement missing")?;
-        manager.refresh_adaptive_playback_lease(&input, "first", tuliprox_core::model::PlaybackKind::LiveHls, 15).await;
-        manager.confirm_playback_activity("first").await;
-        manager.finish_playback_request("first", PlaybackRequestOutcome::ProviderFailed, None).await;
+        manager.refresh_adaptive_playback_lease(&input, "first", tuliprox_core::model::PlaybackKind::LiveHls, 15);
+        manager.confirm_playback_activity("first");
+        manager.finish_playback_request("first", PlaybackRequestOutcome::ProviderFailed, None);
         assert_eq!(manager.provider_lease_usage(&input).active, 1);
-        manager.release_handle(&replacement).await;
-        manager.release_handle(&other).await;
+        manager.release_handle(&replacement);
+        manager.release_handle(&other);
         Ok(())
     }
 
@@ -2262,11 +2348,10 @@ mod tests {
                     ConnectionKind::Normal,
                     Some(owner),
                 )
-                .await
                 .expect("manifest start allocates on the preferred provider");
             assert_eq!(handle.allocation.get_provider_name().as_deref(), Some("provider_1"));
-            manager.refresh_provider_reservation(&input_name, owner, 15).await;
-            manager.release_connection(&addr).await;
+            manager.refresh_provider_reservation(&input_name, owner, 15);
+            manager.release_connection(&addr);
         }
 
         // Unconfirmed leases never reserve capacity, so an unrelated client is served
@@ -2280,7 +2365,6 @@ mod tests {
                 ConnectionKind::Normal,
                 Some("other-client"),
             )
-            .await
             .expect("unrelated client must still get the preferred provider");
         assert_eq!(other.allocation.get_provider_name().as_deref(), Some("provider_1"));
 
@@ -2308,16 +2392,15 @@ mod tests {
                 ConnectionKind::Normal,
                 Some(owner),
             )
-            .await
             .expect("first playback acquires the preferred provider");
         assert_eq!(handle.allocation.get_provider_name().as_deref(), Some("provider_1"));
-        manager.refresh_provider_reservation(&input_name, owner, 15).await;
-        manager.confirm_playback_activity(owner).await;
-        manager.release_connection(&addr).await;
+        manager.refresh_provider_reservation(&input_name, owner, 15);
+        manager.confirm_playback_activity(owner);
+        manager.release_connection(&addr);
 
         // Live TS is not reconnect capable: the confirmed lease is dropped on release,
         // so the provider is immediately free again for the next higher-priority client.
-        manager.finish_playback_request(owner, PlaybackRequestOutcome::Completed, None).await;
+        manager.finish_playback_request(owner, PlaybackRequestOutcome::Completed, None);
         let next = manager
             .acquire_connection_with_grace_for_session(
                 &input_name,
@@ -2327,7 +2410,6 @@ mod tests {
                 ConnectionKind::Normal,
                 Some("next-client"),
             )
-            .await
             .expect("freed capacity must be selectable again");
         assert_eq!(next.allocation.get_provider_name().as_deref(), Some("provider_1"));
     }
@@ -2350,7 +2432,6 @@ mod tests {
                 ConnectionKind::Normal,
                 Some("device-one"),
             )
-            .await
             .expect("first device behind the proxy acquires a slot");
         let second = manager
             .acquire_connection_with_grace_for_session(
@@ -2361,24 +2442,23 @@ mod tests {
                 ConnectionKind::Normal,
                 Some("device-two"),
             )
-            .await
             .expect("second device behind the proxy acquires its own slot");
         assert_ne!(first.allocation_id, second.allocation_id);
-        manager.confirm_playback_activity("device-one").await;
-        manager.confirm_playback_activity("device-two").await;
+        manager.confirm_playback_activity("device-one");
+        manager.confirm_playback_activity("device-two");
 
         // Releasing one playback must free exactly its own allocation and leave the
         // other device's slot on the same transport untouched.
-        manager.release_handle(&first).await;
-        manager.finish_playback_request("device-one", PlaybackRequestOutcome::Completed, None).await;
+        manager.release_handle(&first);
+        manager.finish_playback_request("device-one", PlaybackRequestOutcome::Completed, None);
         let remaining = manager.provider_capacities_for_input(&input_name);
         let primary = remaining.iter().find(|(name, _, _)| name.as_ref() == "provider_1").expect("primary pool entry");
         assert_eq!(primary.1, 1, "exactly one slot must remain in use on the shared socket");
         assert!(manager.read_leases().lease_of_owner("device-one").is_none());
         assert!(manager.read_leases().lease_of_owner("device-two").is_some());
 
-        manager.release_handle(&second).await;
-        manager.finish_playback_request("device-two", PlaybackRequestOutcome::Completed, None).await;
+        manager.release_handle(&second);
+        manager.finish_playback_request("device-two", PlaybackRequestOutcome::Completed, None);
     }
 
     #[tokio::test]
@@ -2394,15 +2474,12 @@ mod tests {
 
         manager
             .acquire_connection(&input_name, &addr_1, default_user_priority(), ConnectionKind::Normal)
-            .await
             .expect("acquire #1 on unlimited provider");
         manager
             .acquire_connection(&input_name, &addr_2, default_user_priority(), ConnectionKind::Normal)
-            .await
             .expect("acquire #2 on unlimited provider");
         manager
             .acquire_connection(&input_name, &addr_3, default_user_priority(), ConnectionKind::Normal)
-            .await
             .expect("acquire #3 on unlimited provider");
 
         {
@@ -2424,9 +2501,9 @@ mod tests {
             );
         }
 
-        manager.release_connection(&addr_1).await;
-        manager.release_connection(&addr_2).await;
-        manager.release_connection(&addr_3).await;
+        manager.release_connection(&addr_1);
+        manager.release_connection(&addr_2);
+        manager.release_connection(&addr_3);
     }
 
     #[tokio::test]
@@ -2442,12 +2519,10 @@ mod tests {
         // Acquire one low-priority and one high-priority connection on the unlimited provider.
         let low = manager
             .acquire_connection(&input_name, &low_addr, 50, ConnectionKind::Normal)
-            .await
             .expect("low-priority acquire on unlimited provider");
         let low_token = low.cancel_token.clone().expect("cancel token for low-priority connection");
         let _high = manager
             .acquire_connection(&input_name, &high_addr, 0, ConnectionKind::Normal)
-            .await
             .expect("high-priority acquire on unlimited provider");
 
         // A request at an even higher priority must not be able to preempt the unlimited
@@ -2468,8 +2543,8 @@ mod tests {
             "low-priority unlimited-provider connection must not be cancelled by preemption"
         );
 
-        manager.release_connection(&low_addr).await;
-        manager.release_connection(&high_addr).await;
+        manager.release_connection(&low_addr);
+        manager.release_connection(&high_addr);
     }
 
     #[tokio::test]
@@ -2484,24 +2559,21 @@ mod tests {
 
         let first_alloc = manager
             .acquire_connection(&input_name, &client_1_addr, default_user_priority(), ConnectionKind::Normal)
-            .await
             .expect("client1 initial allocation");
         let pinned_provider = first_alloc.allocation.get_provider_name().expect("provider name expected");
         assert_eq!(pinned_provider.as_ref(), "provider_1");
 
         // provider_1 has max_connections=1 and is already in use by client1
-        let forced = manager
-            .force_exact_acquire_connection(
-                &pinned_provider,
-                &client_2_addr,
-                default_user_priority(),
-                ConnectionKind::Normal,
-            )
-            .await;
+        let forced = manager.force_exact_acquire_connection(
+            &pinned_provider,
+            &client_2_addr,
+            default_user_priority(),
+            ConnectionKind::Normal,
+        );
         assert!(forced.is_none(), "forced exact acquire must not over-allocate busy provider");
 
-        manager.release_connection(&client_1_addr).await;
-        manager.release_connection(&client_2_addr).await;
+        manager.release_connection(&client_1_addr);
+        manager.release_connection(&client_2_addr);
     }
 
     #[tokio::test]
@@ -2517,17 +2589,15 @@ mod tests {
         // Step 1: Client1 starts movie -> provider_1
         let first_alloc = manager
             .acquire_connection(&input_name, &client_1_addr, default_user_priority(), ConnectionKind::Normal)
-            .await
             .expect("client1 initial allocation");
         assert_eq!(first_alloc.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
 
         // Step 2: Client1 stops -> release provider_1
-        manager.release_connection(&client_1_addr).await;
+        manager.release_connection(&client_1_addr);
 
         // Step 3: Client2 starts live -> provider_1
         let live_alloc = manager
             .acquire_connection(&input_name, &client_2_addr, default_user_priority(), ConnectionKind::Normal)
-            .await
             .expect("client2 live allocation");
         let busy_provider = live_alloc.allocation.get_provider_name().expect("provider name expected");
         assert_eq!(busy_provider.as_ref(), input_name.as_ref());
@@ -2537,15 +2607,14 @@ mod tests {
         // This emulates force-session fallback path by acquiring without provider grace.
         let fallback_alloc = manager
             .acquire_connection_with_grace(&input_name, &client_1_addr, false, 0, ConnectionKind::Normal)
-            .await
             .expect("client1 fallback allocation without grace");
         let fallback_provider = fallback_alloc.allocation.get_provider_name().expect("fallback provider expected");
 
         assert_ne!(fallback_provider.as_ref(), busy_provider.as_ref());
         assert_eq!(fallback_provider.as_ref(), "provider_2");
 
-        manager.release_connection(&client_1_addr).await;
-        manager.release_connection(&client_2_addr).await;
+        manager.release_connection(&client_1_addr);
+        manager.release_connection(&client_2_addr);
     }
 
     #[tokio::test]
@@ -2561,7 +2630,6 @@ mod tests {
         // Initial playback for client1.
         let first_alloc = manager
             .acquire_connection(&input_name, &client_1_addr, default_user_priority(), ConnectionKind::Normal)
-            .await
             .expect("client1 initial allocation");
         let pinned_provider = first_alloc.allocation.get_provider_name().expect("provider name expected");
         assert_eq!(pinned_provider.as_ref(), "provider_1");
@@ -2569,7 +2637,6 @@ mod tests {
         // Another client occupies the alternate account while client1 keeps seeking.
         let second_alloc = manager
             .acquire_connection(&input_name, &client_2_addr, default_user_priority(), ConnectionKind::Normal)
-            .await
             .expect("client2 allocation");
         let second_provider = second_alloc.allocation.get_provider_name().expect("provider name expected");
         assert_eq!(second_provider.as_ref(), "provider_2");
@@ -2577,7 +2644,7 @@ mod tests {
         // Simulate repeated seek/range reconnects for client1:
         // release old connection for the same client, then force exact pinned provider.
         for _ in 0..3 {
-            manager.release_connection(&client_1_addr).await;
+            manager.release_connection(&client_1_addr);
             let seek_alloc = manager
                 .force_exact_acquire_connection(
                     &pinned_provider,
@@ -2585,15 +2652,14 @@ mod tests {
                     default_user_priority(),
                     ConnectionKind::Normal,
                 )
-                .await
                 .expect("seek reacquire should stay on pinned provider");
             let seek_provider = seek_alloc.allocation.get_provider_name().expect("provider name expected");
             assert_eq!(seek_provider.as_ref(), pinned_provider.as_ref());
         }
 
         // Stream stop / cleanup.
-        manager.release_connection(&client_1_addr).await;
-        manager.release_connection(&client_2_addr).await;
+        manager.release_connection(&client_1_addr);
+        manager.release_connection(&client_2_addr);
     }
 
     #[tokio::test]
@@ -2607,7 +2673,6 @@ mod tests {
 
         let probe_handle = manager
             .acquire_connection_for_probe(&input_name, default_probe_user_priority())
-            .await
             .expect("probe allocation should succeed");
         let probe_token = probe_handle.cancel_token.clone().expect("probe handle must carry cancel token");
 
@@ -2620,7 +2685,6 @@ mod tests {
                 default_user_priority(),
                 ConnectionKind::Normal,
             )
-            .await
             .expect("user allocation should preempt probe");
         assert_eq!(user_alloc.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
 
@@ -2628,7 +2692,7 @@ mod tests {
         tokio::task::yield_now().await;
         assert!(probe_token.is_cancelled(), "probe token should be cancelled immediately after preemption");
 
-        manager.release_connection(&user_addr).await;
+        manager.release_connection(&user_addr);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2643,8 +2707,8 @@ mod tests {
         let addr_1: SocketAddr = "127.0.0.1:43101".parse().unwrap();
         let addr_2: SocketAddr = "127.0.0.1:43102".parse().unwrap();
 
-        manager.refresh_provider_reservation(&input_name, owner_1, 15).await;
-        manager.confirm_playback_activity(owner_1).await;
+        manager.refresh_provider_reservation(&input_name, owner_1, 15);
+        manager.confirm_playback_activity(owner_1);
 
         let first = manager
             .acquire_connection_with_grace_for_session(
@@ -2655,21 +2719,18 @@ mod tests {
                 ConnectionKind::Normal,
                 Some(owner_1),
             )
-            .await
             .expect("reserved owner should reacquire its provider");
         assert_eq!(first.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
-        manager.release_connection(&addr_1).await;
+        manager.release_connection(&addr_1);
 
-        let blocked = manager
-            .acquire_connection_with_grace_for_session(
-                &input_name,
-                &addr_2,
-                false,
-                default_user_priority(),
-                ConnectionKind::Normal,
-                Some(owner_2),
-            )
-            .await;
+        let blocked = manager.acquire_connection_with_grace_for_session(
+            &input_name,
+            &addr_2,
+            false,
+            default_user_priority(),
+            ConnectionKind::Normal,
+            Some(owner_2),
+        );
         assert!(blocked.is_none(), "other sessions must not take a reserved provider before TTL expiry");
 
         tokio::time::advance(Duration::from_secs(16)).await;
@@ -2683,10 +2744,9 @@ mod tests {
                 ConnectionKind::Normal,
                 Some(owner_2),
             )
-            .await
             .expect("reservation should expire after TTL");
         assert_eq!(second.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
-        manager.release_connection(&addr_2).await;
+        manager.release_connection(&addr_2);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2711,31 +2771,28 @@ mod tests {
                 ConnectionKind::Normal,
                 Some(owner_y),
             )
-            .await
             .expect("y acquires the single slot");
 
         // X starts a lease and confirms media while Y holds the slot, so its
         // reservation right is denied. A later refresh must not restore it.
-        manager.refresh_provider_reservation(&input_name, owner_x, 15).await;
-        manager.confirm_playback_activity(owner_x).await;
-        manager.refresh_provider_reservation(&input_name, owner_x, 15).await;
+        manager.refresh_provider_reservation(&input_name, owner_x, 15);
+        manager.confirm_playback_activity(owner_x);
+        manager.refresh_provider_reservation(&input_name, owner_x, 15);
 
-        manager.release_handle(&y).await;
+        manager.release_handle(&y);
 
         // If X's refresh had re-granted the denied reservation, Z would be blocked here.
-        let z = manager
-            .acquire_connection_with_grace_for_session(
-                &input_name,
-                &addr_z,
-                false,
-                default_user_priority(),
-                ConnectionKind::Normal,
-                Some(owner_z),
-            )
-            .await;
+        let z = manager.acquire_connection_with_grace_for_session(
+            &input_name,
+            &addr_z,
+            false,
+            default_user_priority(),
+            ConnectionKind::Normal,
+            Some(owner_z),
+        );
         assert!(z.is_some(), "a denied reservation must not be restored by a later refresh");
         if let Some(z) = z {
-            manager.release_handle(&z).await;
+            manager.release_handle(&z);
         }
     }
 
@@ -2758,10 +2815,9 @@ mod tests {
                 ConnectionKind::Normal,
                 Some(owner),
             )
-            .await
             .expect("first acquire");
-        manager.release_handle(&first).await;
-        manager.clear_provider_reservation(owner).await;
+        manager.release_handle(&first);
+        manager.clear_provider_reservation(owner);
 
         // Second incarnation acquires a fresh lease on the same account.
         let second = manager
@@ -2773,18 +2829,17 @@ mod tests {
                 ConnectionKind::Normal,
                 Some(owner),
             )
-            .await
             .expect("second acquire");
 
         // An untagged clear has no delete right and must not remove the successor.
-        manager.clear_identified_provider_reservation(owner, &input_name, None).await;
+        manager.clear_identified_provider_reservation(owner, &input_name, None);
         assert!(
             manager.binding_tag_for_owner(owner).is_some(),
             "an untagged clear must not delete the successor reservation"
         );
 
-        manager.release_handle(&second).await;
-        manager.clear_provider_reservation(owner).await;
+        manager.release_handle(&second);
+        manager.clear_provider_reservation(owner);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2806,11 +2861,10 @@ mod tests {
                     ConnectionKind::Normal,
                     Some(&owner),
                 )
-                .await
                 .expect("preferred provider should retain free capacity for another session");
             assert_eq!(allocation.allocation.get_provider_name().as_deref(), Some("provider_1"));
-            manager.refresh_provider_reservation(&input_name, &owner, 15).await;
-            manager.confirm_playback_activity(&owner).await;
+            manager.refresh_provider_reservation(&input_name, &owner, 15);
+            manager.confirm_playback_activity(&owner);
         }
 
         let fallback_addr = SocketAddr::from(([127, 0, 0, 1], 43203));
@@ -2823,12 +2877,11 @@ mod tests {
                 ConnectionKind::Normal,
                 Some("session-owner-3"),
             )
-            .await
             .expect("lower-priority provider should be used after preferred capacity is exhausted");
         assert_eq!(fallback.allocation.get_provider_name().as_deref(), Some("provider_2"));
 
-        manager.release_connection(&SocketAddr::from(([127, 0, 0, 1], 43200))).await;
-        manager.release_connection(&fallback_addr).await;
+        manager.release_connection(&SocketAddr::from(([127, 0, 0, 1], 43200)));
+        manager.release_connection(&fallback_addr);
 
         let foreign_after_release = manager
             .acquire_connection_with_grace_for_session(
@@ -2839,7 +2892,6 @@ mod tests {
                 ConnectionKind::Normal,
                 Some("session-owner-4"),
             )
-            .await
             .expect("idle reservation should protect one preferred-provider slot");
         assert_eq!(foreign_after_release.allocation.get_provider_name().as_deref(), Some("provider_2"));
 
@@ -2853,13 +2905,12 @@ mod tests {
                 ConnectionKind::Normal,
                 Some("session-owner-0"),
             )
-            .await
             .expect("reservation owner should reclaim its preferred-provider slot");
         assert_eq!(reserved_owner.allocation.get_provider_name().as_deref(), Some("provider_1"));
 
         for index in 1..5 {
             let addr = SocketAddr::from(([127, 0, 0, 1], 43200 + index));
-            manager.release_connection(&addr).await;
+            manager.release_connection(&addr);
         }
     }
 
@@ -2875,7 +2926,7 @@ mod tests {
         let addr_1: SocketAddr = "127.0.0.1:43121".parse().unwrap();
         let addr_2: SocketAddr = "127.0.0.1:43122".parse().unwrap();
 
-        manager.refresh_provider_reservation(&input_name, owner_1, 15).await;
+        manager.refresh_provider_reservation(&input_name, owner_1, 15);
 
         let first = manager
             .acquire_connection_with_grace_for_session(
@@ -2886,7 +2937,6 @@ mod tests {
                 ConnectionKind::Normal,
                 Some(owner_1),
             )
-            .await
             .expect("reserved owner should reacquire its unlimited provider");
         assert_eq!(first.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
 
@@ -2899,12 +2949,11 @@ mod tests {
                 ConnectionKind::Normal,
                 Some(owner_2),
             )
-            .await
             .expect("other sessions should not be blocked by reservations on unlimited providers");
         assert_eq!(second.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
 
-        manager.release_connection(&addr_1).await;
-        manager.release_connection(&addr_2).await;
+        manager.release_connection(&addr_1);
+        manager.release_connection(&addr_2);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2920,34 +2969,30 @@ mod tests {
         let owner_channel_1 = "client|ua|user|100";
         let owner_channel_2 = "client|ua|user|200";
 
-        manager.refresh_provider_reservation(&input_name, owner_channel_1, 15).await;
-        manager.confirm_playback_activity(owner_channel_1).await;
+        manager.refresh_provider_reservation(&input_name, owner_channel_1, 15);
+        manager.confirm_playback_activity(owner_channel_1);
 
-        let blocked = manager
-            .acquire_connection_with_grace_for_session(
-                &input_name,
-                &second_addr,
-                false,
-                default_user_priority(),
-                ConnectionKind::Normal,
-                Some(owner_channel_2),
-            )
-            .await;
+        let blocked = manager.acquire_connection_with_grace_for_session(
+            &input_name,
+            &second_addr,
+            false,
+            default_user_priority(),
+            ConnectionKind::Normal,
+            Some(owner_channel_2),
+        );
         assert!(blocked.is_none(), "a related but distinct playback must not steal an idle reservation");
 
-        manager.clear_provider_reservation(owner_channel_1).await;
-        let acquired = manager
-            .acquire_connection_with_grace_for_session(
-                &input_name,
-                &second_addr,
-                false,
-                default_user_priority(),
-                ConnectionKind::Normal,
-                Some(owner_channel_2),
-            )
-            .await;
+        manager.clear_provider_reservation(owner_channel_1);
+        let acquired = manager.acquire_connection_with_grace_for_session(
+            &input_name,
+            &second_addr,
+            false,
+            default_user_priority(),
+            ConnectionKind::Normal,
+            Some(owner_channel_2),
+        );
         assert!(acquired.is_some(), "explicitly clearing the old playback should release its provider");
-        manager.release_connection(&second_addr).await;
+        manager.release_connection(&second_addr);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2967,55 +3012,51 @@ mod tests {
         let owner_channel_1 = "proxy|player|user|100";
         let owner_channel_2 = "proxy|player|user|200";
 
-        let first = manager
-            .acquire_connection_with_grace_for_session(
-                &input_name,
-                &first_addr,
-                false,
-                default_user_priority(),
-                ConnectionKind::Normal,
-                Some(owner_channel_1),
-            )
-            .await;
+        let first = manager.acquire_connection_with_grace_for_session(
+            &input_name,
+            &first_addr,
+            false,
+            default_user_priority(),
+            ConnectionKind::Normal,
+            Some(owner_channel_1),
+        );
         assert!(first.is_some(), "first playback should acquire the preferred provider");
         let Some(first) = first else {
             return;
         };
         assert_eq!(first.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
-        manager.refresh_provider_reservation(&input_name, owner_channel_1, 15).await;
-        manager.confirm_playback_activity(owner_channel_1).await;
-        manager.release_connection(&first_addr).await;
+        manager.refresh_provider_reservation(&input_name, owner_channel_1, 15);
+        manager.confirm_playback_activity(owner_channel_1);
+        manager.release_connection(&first_addr);
 
-        let second = manager
-            .acquire_connection_with_grace_for_session(
-                &input_name,
-                &second_addr,
-                false,
-                default_user_priority(),
-                ConnectionKind::Normal,
-                Some(owner_channel_2),
-            )
-            .await;
+        let second = manager.acquire_connection_with_grace_for_session(
+            &input_name,
+            &second_addr,
+            false,
+            default_user_priority(),
+            ConnectionKind::Normal,
+            Some(owner_channel_2),
+        );
         assert!(second.is_some(), "parallel playback should acquire the remaining provider");
         let Some(second) = second else {
             return;
         };
         assert_eq!(second.allocation.get_provider_name().as_deref(), Some(provider_2.as_ref()));
-        manager.refresh_provider_reservation(&provider_2, owner_channel_2, 15).await;
-        manager.confirm_playback_activity(owner_channel_2).await;
+        manager.refresh_provider_reservation(&provider_2, owner_channel_2, 15);
+        manager.confirm_playback_activity(owner_channel_2);
 
         let leases = manager.read_leases();
         assert_eq!(leases.provider_for_owner(owner_channel_1).as_deref(), Some(input_name.as_ref()));
         assert_eq!(leases.provider_for_owner(owner_channel_2).as_deref(), Some(provider_2.as_ref()));
         drop(leases);
 
-        manager.clear_provider_reservation(owner_channel_2).await;
+        manager.clear_provider_reservation(owner_channel_2);
         let leases = manager.read_leases();
         assert_eq!(leases.provider_for_owner(owner_channel_1).as_deref(), Some(input_name.as_ref()));
         assert!(leases.lease_of_owner(owner_channel_2).is_none());
         drop(leases);
 
-        manager.release_connection(&second_addr).await;
+        manager.release_connection(&second_addr);
     }
 
     #[tokio::test(start_paused = true)]
@@ -3029,33 +3070,29 @@ mod tests {
         let owner_2 = "session-owner-2";
         let addr_2: SocketAddr = "127.0.0.1:43132".parse().unwrap();
 
-        manager.refresh_provider_reservation(&input_name, owner_1, 15).await;
-        manager.confirm_playback_activity(owner_1).await;
+        manager.refresh_provider_reservation(&input_name, owner_1, 15);
+        manager.confirm_playback_activity(owner_1);
 
-        let blocked = manager
-            .acquire_connection_with_grace_for_session(
-                &input_name,
-                &addr_2,
-                false,
-                default_user_priority(),
-                ConnectionKind::Normal,
-                Some(owner_2),
-            )
-            .await;
+        let blocked = manager.acquire_connection_with_grace_for_session(
+            &input_name,
+            &addr_2,
+            false,
+            default_user_priority(),
+            ConnectionKind::Normal,
+            Some(owner_2),
+        );
         assert!(blocked.is_none(), "reservation should initially block another session");
 
-        manager.clear_provider_reservation(owner_1).await;
+        manager.clear_provider_reservation(owner_1);
 
-        let acquired = manager
-            .acquire_connection_with_grace_for_session(
-                &input_name,
-                &addr_2,
-                false,
-                default_user_priority(),
-                ConnectionKind::Normal,
-                Some(owner_2),
-            )
-            .await;
+        let acquired = manager.acquire_connection_with_grace_for_session(
+            &input_name,
+            &addr_2,
+            false,
+            default_user_priority(),
+            ConnectionKind::Normal,
+            Some(owner_2),
+        );
         assert!(acquired.is_some(), "clearing reservation should unblock the provider");
     }
 
@@ -3074,7 +3111,6 @@ mod tests {
         // Low-priority user connects (priority 5 = lower importance)
         let low_alloc = manager
             .acquire_connection(&input_name, &low_prio_addr, 5, ConnectionKind::Normal)
-            .await
             .expect("low-priority user should get connection");
         assert_eq!(low_alloc.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
 
@@ -3084,11 +3120,10 @@ mod tests {
         // High-priority user arrives (priority -1 = higher importance), should preempt low-priority user
         let high_alloc = manager
             .acquire_connection_with_grace(&input_name, &high_prio_addr, false, -1, ConnectionKind::Normal)
-            .await
             .expect("high-priority user should preempt low-priority user and get connection");
         assert_eq!(high_alloc.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
 
-        manager.release_connection(&high_prio_addr).await;
+        manager.release_connection(&high_prio_addr);
     }
 
     #[tokio::test]
@@ -3105,7 +3140,6 @@ mod tests {
         // User 1 connects with priority 0
         let alloc1 = manager
             .acquire_connection(&input_name, &user_1_addr, default_user_priority(), ConnectionKind::Normal)
-            .await
             .expect("user1 should get connection");
         assert_eq!(alloc1.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
 
@@ -3113,18 +3147,16 @@ mod tests {
         assert!(manager.is_exhausted(&input_name));
 
         // User 2 arrives with the same priority 0 — should NOT preempt user 1
-        let alloc2 = manager
-            .acquire_connection_with_grace(
-                &input_name,
-                &user_2_addr,
-                false,
-                default_user_priority(),
-                ConnectionKind::Normal,
-            )
-            .await;
+        let alloc2 = manager.acquire_connection_with_grace(
+            &input_name,
+            &user_2_addr,
+            false,
+            default_user_priority(),
+            ConnectionKind::Normal,
+        );
         assert!(alloc2.is_none(), "same-priority user should not preempt existing user");
 
-        manager.release_connection(&user_1_addr).await;
+        manager.release_connection(&user_1_addr);
     }
 
     #[tokio::test]
@@ -3141,7 +3173,6 @@ mod tests {
         // High-priority user connects (priority -10)
         let alloc1 = manager
             .acquire_connection(&input_name, &high_prio_addr, -10, ConnectionKind::Normal)
-            .await
             .expect("high-priority user should get connection");
         assert_eq!(alloc1.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
 
@@ -3150,10 +3181,10 @@ mod tests {
 
         // Low-priority user arrives (priority 10) — should NOT preempt high-priority user
         let alloc2 =
-            manager.acquire_connection_with_grace(&input_name, &low_prio_addr, false, 10, ConnectionKind::Normal).await;
+            manager.acquire_connection_with_grace(&input_name, &low_prio_addr, false, 10, ConnectionKind::Normal);
         assert!(alloc2.is_none(), "low-priority user should not preempt high-priority user");
 
-        manager.release_connection(&high_prio_addr).await;
+        manager.release_connection(&high_prio_addr);
     }
 
     #[tokio::test]
@@ -3171,7 +3202,6 @@ mod tests {
         // Low-priority user connects (priority 20 = low importance)
         let low_alloc = manager
             .acquire_connection(&input_name, &low_prio_addr, 20, ConnectionKind::Normal)
-            .await
             .expect("low-priority user should get connection");
         assert_eq!(low_alloc.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
         let low_token = low_alloc.cancel_token.clone().expect("must have cancel token");
@@ -3183,7 +3213,6 @@ mod tests {
         // This should get a GracePeriod allocation and then evict the low-prio user
         let high_alloc = manager
             .acquire_connection(&input_name, &high_prio_addr, 0, ConnectionKind::Normal)
-            .await
             .expect("high-priority user should get grace allocation and evict low-prio");
         assert_eq!(high_alloc.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
 
@@ -3193,7 +3222,7 @@ mod tests {
         // Provider should not be over limit (eviction freed a slot)
         assert!(!manager.is_over_limit(&input_name), "provider should not be over limit after eviction");
 
-        manager.release_connection(&high_prio_addr).await;
+        manager.release_connection(&high_prio_addr);
     }
 
     #[tokio::test]
@@ -3209,7 +3238,6 @@ mod tests {
         // User 1 connects with priority 0
         let alloc1 = manager
             .acquire_connection(&input_name, &user_1_addr, default_user_priority(), ConnectionKind::Normal)
-            .await
             .expect("user1 should get connection");
         assert_eq!(alloc1.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
         let token1 = alloc1.cancel_token.clone().expect("must have cancel token");
@@ -3220,7 +3248,6 @@ mod tests {
         // User 2 arrives with the same priority and should be granted grace instead of being rejected.
         let alloc2 = manager
             .acquire_connection(&input_name, &user_2_addr, default_user_priority(), ConnectionKind::Normal)
-            .await
             .expect("same-priority user should get grace allocation");
         assert!(matches!(alloc2.allocation, ProviderAllocation::GracePeriod(_)));
         assert_eq!(alloc2.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
@@ -3229,8 +3256,8 @@ mod tests {
         assert!(!token1.is_cancelled(), "same-prio user should not be evicted");
         assert!(manager.is_over_limit(&input_name), "provider should be temporarily over limit during grace");
 
-        manager.release_connection(&user_1_addr).await;
-        manager.release_connection(&user_2_addr).await;
+        manager.release_connection(&user_1_addr);
+        manager.release_connection(&user_2_addr);
     }
 
     #[tokio::test]
@@ -3255,7 +3282,6 @@ mod tests {
                 20,
                 ConnectionKind::Normal,
             )
-            .await
             .expect("old low-priority allocation should succeed");
         let old_token = old_alloc.cancel_token.clone().expect("old allocation should have cancel token");
         assert_eq!(old_alloc.allocation.get_provider_name().as_deref(), Some("provider_2"));
@@ -3268,7 +3294,6 @@ mod tests {
                 20,
                 ConnectionKind::Normal,
             )
-            .await
             .expect("new low-priority allocation should succeed");
         let new_token = new_alloc.cancel_token.clone().expect("new allocation should have cancel token");
         assert_eq!(new_alloc.allocation.get_provider_name().as_deref(), Some("provider_1"));
@@ -3306,16 +3331,15 @@ mod tests {
         // priority and created_at are exactly tied across provider aliases.
         let high_alloc = manager
             .acquire_connection(&input_name, &high_prio_addr, 0, ConnectionKind::Normal)
-            .await
             .expect("higher-priority request should preempt the first-inserted low-priority victim on exact tie");
         assert_eq!(high_alloc.allocation.get_provider_name().as_deref(), Some("provider_2"));
 
         assert!(old_token.is_cancelled(), "first-inserted low-priority victim should be canceled first on exact tie");
         assert!(!new_token.is_cancelled(), "later allocation should remain active after the stable tie-break");
 
-        manager.release_connection(&high_prio_addr).await;
-        manager.release_connection(&old_low_addr).await;
-        manager.release_connection(&new_low_addr).await;
+        manager.release_connection(&high_prio_addr);
+        manager.release_connection(&old_low_addr);
+        manager.release_connection(&new_low_addr);
     }
 
     #[tokio::test]
@@ -3328,16 +3352,13 @@ mod tests {
         let input = "provider_1".intern();
         let unrelated = manager
             .acquire_connection(&input, &addr, 0, ConnectionKind::Normal)
-            .await
             .ok_or("unrelated allocation missing")?;
-        let origin = manager
-            .acquire_connection(&input, &addr, 5, ConnectionKind::Normal)
-            .await
-            .ok_or("origin allocation missing")?;
+        let origin =
+            manager.acquire_connection(&input, &addr, 5, ConnectionKind::Normal).ok_or("origin allocation missing")?;
         let first = SharedSubscriberId::from_stream_uid(1);
         let second = SharedSubscriberId::from_stream_uid(2);
         let key = "https://example.invalid/shared.ts";
-        assert!(manager.make_shared_connection(&origin, key, first).await);
+        assert!(manager.make_shared_connection(&origin, key, first));
         assert_eq!(manager.get_provider_connections_count(), 2);
         assert!(manager.read_connections().single.contains_key(&unrelated.allocation_id));
         assert!(manager
@@ -3356,14 +3377,14 @@ mod tests {
             assert_eq!(shared.connections.get(&first).map(|subscriber| subscriber.priority), Some(5));
             assert_eq!(shared.priority, 1);
         }
-        manager.release_shared_connection(second).await;
-        manager.release_shared_connection(second).await;
+        manager.release_shared_connection(second);
+        manager.release_shared_connection(second);
         assert_eq!(manager.get_provider_connections_count(), 2);
         assert_eq!(manager.read_connections().shared.by_key.get(key).map(|shared| shared.priority), Some(5));
-        manager.release_shared_connection(first).await;
-        manager.release_handle(&origin).await;
+        manager.release_shared_connection(first);
+        manager.release_handle(&origin);
         assert_eq!(manager.get_provider_connections_count(), 1);
-        manager.release_handle(&unrelated).await;
+        manager.release_handle(&unrelated);
         assert_eq!(manager.get_provider_connections_count(), 0);
         Ok(())
     }
@@ -3382,10 +3403,9 @@ mod tests {
         // A starts shared stream with high importance (priority 0).
         let alloc_a = manager
             .acquire_connection(&input_name, &addr_a, 0, ConnectionKind::Normal)
-            .await
             .expect("A should get initial connection");
         let shared_token = alloc_a.cancel_token.clone().expect("shared allocation should have cancel token");
-        assert!(manager.make_shared_connection(&alloc_a, stream_key, SharedSubscriberId::from_stream_uid(1)).await);
+        assert!(manager.make_shared_connection(&alloc_a, stream_key, SharedSubscriberId::from_stream_uid(1)));
 
         // B joins the same shared stream with lower importance (priority 1).
         let join_result = manager.add_shared_connection(
@@ -3398,7 +3418,7 @@ mod tests {
         assert!(join_result.is_ok(), "B should join existing shared stream, got: {join_result:?}");
 
         // A leaves shared stream. Shared allocation should now inherit B's lower priority.
-        manager.release_connection(&addr_a).await;
+        manager.release_connection(&addr_a);
         {
             let connections = manager.read_connections();
             let shared = connections.shared.by_key.get(stream_key).expect("shared entry should remain for B");
@@ -3408,14 +3428,13 @@ mod tests {
         // A starts another stream with higher importance and should preempt B's shared stream.
         let alloc_a2 = manager
             .acquire_connection(&input_name, &addr_a, 0, ConnectionKind::Normal)
-            .await
             .expect("A should preempt lower-priority shared stream");
         assert_eq!(alloc_a2.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
         assert!(shared_token.is_cancelled(), "shared stream should be cancelled when preempted");
         assert!(!manager.is_over_limit(&input_name), "provider should not remain over limit after preemption");
 
-        manager.release_connection(&addr_a).await;
-        manager.release_connection(&addr_b).await;
+        manager.release_connection(&addr_a);
+        manager.release_connection(&addr_b);
     }
 
     #[tokio::test]
@@ -3432,12 +3451,9 @@ mod tests {
 
         let shared_alloc = manager
             .acquire_connection(&input_name, &addr_a, 5, ConnectionKind::Normal)
-            .await
             .expect("low-priority shared stream should get initial connection");
         let shared_token = shared_alloc.cancel_token.clone().expect("shared allocation should have cancel token");
-        assert!(
-            manager.make_shared_connection(&shared_alloc, stream_key, SharedSubscriberId::from_stream_uid(1)).await
-        );
+        assert!(manager.make_shared_connection(&shared_alloc, stream_key, SharedSubscriberId::from_stream_uid(1)));
 
         manager
             .add_shared_connection(
@@ -3451,7 +3467,6 @@ mod tests {
 
         let high_alloc = manager
             .acquire_connection(&input_name, &addr_high, 0, ConnectionKind::Normal)
-            .await
             .expect("higher-priority user should preempt lower-priority shared stream");
         assert_eq!(high_alloc.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
         assert!(shared_token.is_cancelled(), "shared stream should be cancelled when preempted");
@@ -3464,9 +3479,9 @@ mod tests {
             );
         }
 
-        manager.release_connection(&addr_high).await;
-        manager.release_connection(&addr_a).await;
-        manager.release_connection(&addr_b).await;
+        manager.release_connection(&addr_high);
+        manager.release_connection(&addr_a);
+        manager.release_connection(&addr_b);
     }
 
     #[tokio::test]
@@ -3481,8 +3496,7 @@ mod tests {
         let addr_b: SocketAddr = "127.0.0.1:49002".parse().unwrap();
 
         // Add connection A (low priority)
-        let alloc_a =
-            manager.acquire_connection(&input_name, &addr_a, 10, ConnectionKind::Normal).await.expect("alloc_a");
+        let alloc_a = manager.acquire_connection(&input_name, &addr_a, 10, ConnectionKind::Normal).expect("alloc_a");
 
         // Check index has 1 entry
         {
@@ -3494,7 +3508,6 @@ mod tests {
         // High-priority user evicts low-priority via grace path
         let alloc_b = manager
             .acquire_connection(&input_name, &addr_b, -5, ConnectionKind::Normal)
-            .await
             .expect("alloc_b should evict alloc_a");
 
         // Check index: should have 1 entry (alloc_a evicted, alloc_b added)
@@ -3508,7 +3521,7 @@ mod tests {
         }
 
         // Release alloc_b
-        manager.release_handle(&alloc_b).await;
+        manager.release_handle(&alloc_b);
 
         // Check index: should be empty
         {
@@ -3519,7 +3532,63 @@ mod tests {
         }
 
         // Verify alloc_a handle can be safely released (already evicted - no-op)
-        manager.release_handle(&alloc_a).await;
+        manager.release_handle(&alloc_a);
+    }
+
+    #[tokio::test]
+    async fn test_owner_index_consistent_through_lifecycle() {
+        let app_cfg = build_test_app_config(None, 2);
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+
+        let input_name = "provider_1".intern();
+        let addr_a: SocketAddr = "127.0.0.1:49051".parse().unwrap();
+        let addr_b: SocketAddr = "127.0.0.1:49052".parse().unwrap();
+
+        let owner_a = "owner-a";
+        let owner_b = "owner-b";
+        let alloc_a = manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &addr_a,
+                false,
+                0,
+                ConnectionKind::Normal,
+                Some(owner_a),
+            )
+            .expect("alloc_a");
+        let alloc_b = manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &addr_b,
+                false,
+                0,
+                ConnectionKind::Normal,
+                Some(owner_b),
+            )
+            .expect("alloc_b");
+
+        {
+            let connections = manager.read_connections();
+            assert_eq!(connections.by_owner.get(owner_a).map_or(0, HashSet::len), 1, "owner-a has one allocation");
+            assert_eq!(connections.by_owner.get(owner_b).map_or(0, HashSet::len), 1, "owner-b has one allocation");
+            assert!(connections.by_owner.get(owner_a).unwrap().contains(&alloc_a.allocation_id));
+            assert!(connections.by_owner.get(owner_b).unwrap().contains(&alloc_b.allocation_id));
+        }
+
+        manager.release_handle(&alloc_a);
+
+        {
+            let connections = manager.read_connections();
+            assert!(connections.by_owner.get(owner_a).is_none(), "owner-a index is removed after release");
+            assert_eq!(connections.by_owner.get(owner_b).map_or(0, HashSet::len), 1, "owner-b still indexed");
+        }
+
+        manager.release_handle(&alloc_b);
+        {
+            let connections = manager.read_connections();
+            assert!(connections.by_owner.is_empty(), "owner index is empty after all releases");
+        }
     }
 
     #[tokio::test]
@@ -3534,20 +3603,18 @@ mod tests {
 
         let soft_alloc = manager
             .acquire_connection(&input_name, &soft_addr, default_user_priority(), ConnectionKind::Soft)
-            .await
             .expect("soft allocation");
         let soft_token = soft_alloc.cancel_token.clone().expect("soft allocations expose a cancel token");
 
         let normal_alloc = manager
             .acquire_connection(&input_name, &normal_addr, default_user_priority(), ConnectionKind::Normal)
-            .await
             .expect("normal allocation should preempt soft allocation");
 
         tokio::task::yield_now().await;
         assert!(soft_token.is_cancelled(), "soft allocation should be preempted by normal traffic");
         assert_eq!(manager.get_provider_connections_count(), 1);
 
-        manager.release_handle(&normal_alloc).await;
+        manager.release_handle(&normal_alloc);
     }
 
     #[tokio::test]
@@ -3562,20 +3629,18 @@ mod tests {
 
         let low_soft_alloc = manager
             .acquire_connection(&input_name, &low_soft_addr, 10, ConnectionKind::Soft)
-            .await
             .expect("low-priority soft allocation");
         let low_soft_token = low_soft_alloc.cancel_token.clone().expect("soft allocations expose a cancel token");
 
         let high_soft_alloc = manager
             .acquire_connection(&input_name, &high_soft_addr, -5, ConnectionKind::Soft)
-            .await
             .expect("higher-priority soft allocation should preempt lower-priority soft allocation");
 
         tokio::task::yield_now().await;
         assert!(low_soft_token.is_cancelled(), "lower-priority soft allocation should be preempted");
         assert_eq!(manager.get_provider_connections_count(), 1);
 
-        manager.release_handle(&high_soft_alloc).await;
+        manager.release_handle(&high_soft_alloc);
     }
 
     #[tokio::test]
@@ -3590,7 +3655,6 @@ mod tests {
 
         let promoted_alloc = manager
             .acquire_connection(&input_name, &promoted_addr, default_user_priority(), ConnectionKind::Soft)
-            .await
             .expect("initial soft allocation");
         let promoted_token = promoted_alloc.cancel_token.clone().expect("soft allocations expose a cancel token");
 
@@ -3599,20 +3663,18 @@ mod tests {
             "soft allocation should be promotable to normal"
         );
 
-        let challenger = manager
-            .acquire_connection_with_grace(
-                &input_name,
-                &challenger_addr,
-                false,
-                default_user_priority(),
-                ConnectionKind::Normal,
-            )
-            .await;
+        let challenger = manager.acquire_connection_with_grace(
+            &input_name,
+            &challenger_addr,
+            false,
+            default_user_priority(),
+            ConnectionKind::Normal,
+        );
         assert!(challenger.is_none(), "same-priority normal traffic should not preempt a promoted normal connection");
         assert!(!promoted_token.is_cancelled(), "promoted connection should remain active");
         assert_eq!(manager.get_provider_connections_count(), 1);
 
-        manager.release_handle(&promoted_alloc).await;
+        manager.release_handle(&promoted_alloc);
     }
 
     #[tokio::test]
@@ -3633,7 +3695,6 @@ mod tests {
                 ConnectionKind::Soft,
                 Some(PlaybackLeaseRef::new("owner-1", PlaybackKind::LiveTs)),
             )
-            .await
             .expect("first soft allocation");
 
         let alloc_2 = manager
@@ -3645,7 +3706,6 @@ mod tests {
                 ConnectionKind::Soft,
                 Some(PlaybackLeaseRef::new("owner-2", PlaybackKind::LiveTs)),
             )
-            .await
             .expect("second soft allocation");
 
         assert!(manager.reclassify_connection_for_owner(&shared_addr, Some("owner-1"), ConnectionKind::Normal, 0));
@@ -3661,8 +3721,8 @@ mod tests {
             assert_eq!(info_2.priority, -10);
         }
 
-        manager.release_handle(&alloc_1).await;
-        manager.release_handle(&alloc_2).await;
+        manager.release_handle(&alloc_1);
+        manager.release_handle(&alloc_2);
     }
 
     /// A=2 / B=3 pool: five confirmed playbacks exhaust the pool and a sixth start is
@@ -3687,39 +3747,34 @@ mod tests {
                     ConnectionKind::Normal,
                     Some(&owner),
                 )
-                .await
                 .expect("pool has capacity for five playbacks");
-            manager.confirm_playback_activity(&owner).await;
+            manager.confirm_playback_activity(&owner);
             acquired.push((handle, owner));
         }
 
-        let sixth = manager
-            .acquire_connection_with_grace_for_session(
-                &input_name,
-                &SocketAddr::from(([172, 18, 0, 9], 60_005)),
-                false,
-                default_user_priority(),
-                ConnectionKind::Normal,
-                Some("playback-5"),
-            )
-            .await;
+        let sixth = manager.acquire_connection_with_grace_for_session(
+            &input_name,
+            &SocketAddr::from(([172, 18, 0, 9], 60_005)),
+            false,
+            default_user_priority(),
+            ConnectionKind::Normal,
+            Some("playback-5"),
+        );
         assert!(sixth.is_none(), "sixth start must be rejected once the pool is exhausted");
 
-        manager.release_handle(&acquired[0].0).await;
-        let replacement = manager
-            .acquire_connection_with_grace_for_session(
-                &input_name,
-                &SocketAddr::from(([172, 18, 0, 9], 60_006)),
-                false,
-                default_user_priority(),
-                ConnectionKind::Normal,
-                Some("playback-6"),
-            )
-            .await;
+        manager.release_handle(&acquired[0].0);
+        let replacement = manager.acquire_connection_with_grace_for_session(
+            &input_name,
+            &SocketAddr::from(([172, 18, 0, 9], 60_006)),
+            false,
+            default_user_priority(),
+            ConnectionKind::Normal,
+            Some("playback-6"),
+        );
         assert!(replacement.is_some(), "freed capacity must be selectable again");
-        manager.release_handle(&replacement.expect("replacement handle")).await;
+        manager.release_handle(&replacement.expect("replacement handle"));
         for (handle, _owner) in &acquired[1..] {
-            manager.release_handle(handle).await;
+            manager.release_handle(handle);
         }
         assert_eq!(manager.get_provider_connections_count(), 0);
     }
@@ -3743,26 +3798,54 @@ mod tests {
                 ConnectionKind::Normal,
                 Some(PlaybackLeaseRef::new(owner, PlaybackKind::LiveHls)),
             )
-            .await
             .expect("acquire a reconnect-capable slot");
         let request_id = handle.playback_request_id.expect("identified request id");
-        manager.refresh_adaptive_playback_lease(&input_name, owner, PlaybackKind::LiveHls, 15).await;
-        manager.confirm_playback_activity(owner).await;
+        manager.refresh_adaptive_playback_lease(&input_name, owner, PlaybackKind::LiveHls, 15);
+        manager.confirm_playback_activity(owner);
 
         // Physical release must not conclude the request; the outcome is decided later.
-        manager.release_handle(&handle).await;
+        manager.release_handle(&handle);
         assert_eq!(
             manager.provider_lease_usage(&input_name).active,
             1,
             "physical release must not finish a confirmed lease"
         );
 
-        manager.finish_identified_playback_request(owner, request_id, PlaybackRequestOutcome::ProviderFailed).await;
+        manager.finish_identified_playback_request(owner, request_id, PlaybackRequestOutcome::ProviderFailed);
         assert_eq!(
             manager.provider_lease_usage(&input_name).total(),
             0,
             "provider error must not keep an idle reconnect lease"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stale_refresh_does_not_recreate_terminal_request() {
+        let app_cfg = create_test_app_config_single_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+        let input_name = "provider_1".intern();
+        let owner = "terminal-refresh-owner";
+        let handle = manager
+            .acquire_connection_with_lease_for_session(
+                &input_name,
+                &SocketAddr::from(([172, 18, 0, 9], 55_002)),
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+                Some(PlaybackLeaseRef::new(owner, PlaybackKind::LiveHls)),
+            )
+            .expect("acquire identified request");
+        let request_id = handle.playback_request_id.expect("identified request id");
+        let lease_ref = PlaybackLeaseRef { owner, kind: PlaybackKind::LiveHls, request_id };
+
+        manager.release_handle(&handle);
+        manager.finish_identified_playback_request(owner, request_id, PlaybackRequestOutcome::ProviderFailed);
+        assert_eq!(manager.provider_lease_usage(&input_name).total(), 0);
+
+        manager.refresh_playback_lease(&input_name, &lease_ref, 15);
+        manager.confirm_identified_playback_activity(owner, request_id);
+        assert_eq!(manager.provider_lease_usage(&input_name).total(), 0);
     }
 
     /// Counterexample: the same sequence with a clean end keeps the configured idle window.
@@ -3784,14 +3867,13 @@ mod tests {
                 ConnectionKind::Normal,
                 Some(PlaybackLeaseRef::new(owner, PlaybackKind::LiveHls)),
             )
-            .await
             .expect("acquire a reconnect-capable slot");
         let request_id = handle.playback_request_id.expect("identified request id");
-        manager.refresh_adaptive_playback_lease(&input_name, owner, PlaybackKind::LiveHls, 15).await;
-        manager.confirm_playback_activity(owner).await;
+        manager.refresh_adaptive_playback_lease(&input_name, owner, PlaybackKind::LiveHls, 15);
+        manager.confirm_playback_activity(owner);
 
-        manager.release_handle(&handle).await;
-        manager.finish_identified_playback_request(owner, request_id, PlaybackRequestOutcome::Completed).await;
+        manager.release_handle(&handle);
+        manager.finish_identified_playback_request(owner, request_id, PlaybackRequestOutcome::Completed);
         let usage = manager.provider_lease_usage(&input_name);
         assert_eq!(usage.active, 0, "clean end must move the lease out of active");
         assert_eq!(usage.idle, 1, "clean end must keep the configured reconnect window");
@@ -3815,10 +3897,9 @@ mod tests {
                 ConnectionKind::Normal,
                 Some(PlaybackLeaseRef::new("x", PlaybackKind::LiveHls)),
             )
-            .await
             .expect("x acquires the only slot");
-        manager.refresh_adaptive_playback_lease(&input_name, "x", PlaybackKind::LiveHls, 15).await;
-        manager.release_handle(&x_handle).await;
+        manager.refresh_adaptive_playback_lease(&input_name, "x", PlaybackKind::LiveHls, 15);
+        manager.release_handle(&x_handle);
 
         let y_handle = manager
             .acquire_connection_with_lease_for_session(
@@ -3829,19 +3910,18 @@ mod tests {
                 ConnectionKind::Normal,
                 Some(PlaybackLeaseRef::new("y", PlaybackKind::LiveHls)),
             )
-            .await
             .expect("y acquires the now-free slot");
 
-        manager.confirm_playback_activity("x").await;
+        manager.confirm_playback_activity("x");
         assert_eq!(manager.get_provider_connections_count(), 1, "y still holds the only slot");
         assert!(
             !manager.is_provider_reserved_for_other_session(&input_name, Some("y")),
             "x's late confirmation must not over-commit the provider"
         );
 
-        manager.confirm_playback_activity("y").await;
-        manager.release_handle(&y_handle).await;
-        manager.finish_playback_request("y", PlaybackRequestOutcome::Completed, None).await;
+        manager.confirm_playback_activity("y");
+        manager.release_handle(&y_handle);
+        manager.finish_playback_request("y", PlaybackRequestOutcome::Completed, None);
     }
 
     /// Counterexample: the same X fetch → release → first-byte sequence without a
@@ -3862,19 +3942,18 @@ mod tests {
                 ConnectionKind::Normal,
                 Some(PlaybackLeaseRef::new("x", PlaybackKind::LiveHls)),
             )
-            .await
             .expect("x acquires the only slot");
-        manager.refresh_adaptive_playback_lease(&input_name, "x", PlaybackKind::LiveHls, 15).await;
-        manager.release_handle(&x_handle).await;
+        manager.refresh_adaptive_playback_lease(&input_name, "x", PlaybackKind::LiveHls, 15);
+        manager.release_handle(&x_handle);
 
         // No competing playback took the slot, so X's first byte reserves it.
-        manager.confirm_playback_activity("x").await;
+        manager.confirm_playback_activity("x");
         assert!(
             manager.is_provider_reserved_for_other_session(&input_name, Some("other")),
             "a free slot must be reservable by the confirming playback"
         );
 
-        manager.finish_playback_request("x", PlaybackRequestOutcome::Completed, None).await;
+        manager.finish_playback_request("x", PlaybackRequestOutcome::Completed, None);
     }
 
     /// The RAII owner releases the allocation synchronously even when dropped outside
@@ -3897,7 +3976,6 @@ mod tests {
                     ConnectionKind::Normal,
                     Some("managed-owner"),
                 )
-                .await
                 .expect("allocation should succeed");
             assert_eq!(manager.get_provider_connections_count(), 1);
 
@@ -3917,17 +3995,21 @@ mod tests {
         sorted[index.min(sorted.len() - 1)]
     }
 
-    fn resident_set_kib() -> u64 {
+    #[cfg(target_os = "linux")]
+    fn resident_set_kib() -> Option<u64> {
         let Ok(content) = std::fs::read_to_string("/proc/self/status") else {
-            return 0;
+            return None;
         };
         for line in content.lines() {
             if let Some(rest) = line.strip_prefix("VmRSS:") {
-                return rest.split_whitespace().next().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+                return rest.split_whitespace().next().and_then(|v| v.parse::<u64>().ok());
             }
         }
-        0
+        None
     }
+
+    #[cfg(not(target_os = "linux"))]
+    fn resident_set_kib() -> Option<u64> { None }
 
     struct LeaseWorkloadStats {
         ops: u64,
@@ -3961,33 +4043,30 @@ mod tests {
                     let owner = format!("bench-{task_index}-{round}");
                     let addr = SocketAddr::from(([127, 0, 0, 1], 40_000 + (task_index as u16)));
                     let acquire_at = std::time::Instant::now();
-                    let Some(handle) = manager
-                        .acquire_connection_with_grace_for_session(
-                            &input_name,
-                            &addr,
-                            false,
-                            0,
-                            ConnectionKind::Normal,
-                            Some(&owner),
-                        )
-                        .await
-                    else {
+                    let Some(handle) = manager.acquire_connection_with_grace_for_session(
+                        &input_name,
+                        &addr,
+                        false,
+                        0,
+                        ConnectionKind::Normal,
+                        Some(&owner),
+                    ) else {
                         continue;
                     };
                     let acquire_us = acquire_at.elapsed().as_micros() as u64;
 
                     let confirm_at = std::time::Instant::now();
-                    manager.confirm_playback_activity(&owner).await;
+                    manager.confirm_playback_activity(&owner);
                     let confirm_us = confirm_at.elapsed().as_micros() as u64;
 
                     let release_at = std::time::Instant::now();
-                    manager.release_handle(&handle).await;
+                    manager.release_handle(&handle);
                     let release_us = release_at.elapsed().as_micros() as u64;
 
                     // A physical release never concludes the request; model the real
                     // lifecycle by finishing with a clean outcome so the lease returns
                     // to baseline (LiveTs is not reconnect-capable, so it is removed).
-                    manager.finish_playback_request(&owner, PlaybackRequestOutcome::Completed, None).await;
+                    manager.finish_playback_request(&owner, PlaybackRequestOutcome::Completed, None);
 
                     samples.lock().unwrap().push((acquire_us, confirm_us, release_us));
                 }
@@ -4038,13 +4117,17 @@ mod tests {
         // Warm-up before measurement so allocator and lock caches are exercised.
         for index in 0..64u16 {
             let addr = SocketAddr::from(([127, 0, 0, 1], 40_000 + index));
-            let Some(handle) = manager
-                .acquire_connection_with_grace_for_session(&input_name, &addr, false, 0, ConnectionKind::Normal, None)
-                .await
-            else {
+            let Some(handle) = manager.acquire_connection_with_grace_for_session(
+                &input_name,
+                &addr,
+                false,
+                0,
+                ConnectionKind::Normal,
+                None,
+            ) else {
                 continue;
             };
-            manager.release_handle(&handle).await;
+            manager.release_handle(&handle);
         }
 
         let baseline_rss_kib = resident_set_kib();
@@ -4057,9 +4140,12 @@ mod tests {
                 "unexpected acquire failures at concurrency {concurrency}"
             );
             let throughput = stats.ops as f64 / stats.elapsed_secs.max(f64::EPSILON);
-            let rss_delta_kib = resident_set_kib().saturating_sub(baseline_rss_kib);
+            let rss_delta_kib = resident_set_kib()
+                .zip(baseline_rss_kib)
+                .map(|(rss, baseline)| rss.saturating_sub(baseline).to_string())
+                .unwrap_or_else(|| "unsupported".to_string());
             eprintln!(
-                "concurrency={concurrency:>3} ops={:>5} throughput={:>9.1} ops/s | acquire p50/p95/p99={}/{}/{}us | confirm p50/p95/p99={}/{}/{}us | release p50/p95/p99={}/{}/{}us | rss_delta={}KiB",
+                "concurrency={concurrency:>3} ops={:>5} throughput={:>9.1} ops/s | acquire p50/p95/p99={}/{}/{}us | confirm p50/p95/p99={}/{}/{}us | release p50/p95/p99={}/{}/{}us | rss_delta_kib={}",
                 stats.ops,
                 throughput,
                 stats.acquire_p50,

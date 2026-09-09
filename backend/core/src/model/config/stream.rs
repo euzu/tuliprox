@@ -40,6 +40,7 @@ pub struct StreamConfig {
     pub throttle_kbps: u64,
     pub shared_burst_buffer_mb: u64,
     pub shared_subscriber_idle_timeout_secs: u64,
+    pub cleanup_queue_capacity: usize,
     pub admission_strategies: Option<Vec<AdmissionStrategy>>,
 }
 
@@ -59,6 +60,7 @@ impl Default for StreamConfig {
             throttle_kbps: 0,
             shared_burst_buffer_mb: 12,
             shared_subscriber_idle_timeout_secs: 300,
+            cleanup_queue_capacity: 4096,
             admission_strategies: None,
         }
     }
@@ -78,6 +80,7 @@ impl From<&StreamConfigDto> for StreamConfig {
             throttle_kbps: dto.throttle.as_ref().map_or(0u64, |throttle| parse_to_kbps(throttle).unwrap_or(0u64)),
             shared_burst_buffer_mb: dto.shared_burst_buffer_mb,
             shared_subscriber_idle_timeout_secs: dto.shared_subscriber_idle_timeout_secs,
+            cleanup_queue_capacity: dto.cleanup_queue_capacity,
             admission_strategies: dto.admission_strategies.clone(),
         }
     }
@@ -98,6 +101,7 @@ impl From<&StreamConfig> for StreamConfigDto {
             throttle_kbps: instance.throttle_kbps,
             shared_burst_buffer_mb: instance.shared_burst_buffer_mb,
             shared_subscriber_idle_timeout_secs: instance.shared_subscriber_idle_timeout_secs,
+            cleanup_queue_capacity: instance.cleanup_queue_capacity,
             admission_strategies: instance.admission_strategies.clone(),
         }
     }
@@ -136,6 +140,7 @@ mod tests {
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
             shared_subscriber_idle_timeout_secs: 300,
+            cleanup_queue_capacity: 4096,
             admission_strategies: Some(vec![
                 AdmissionStrategy::EvictUserOldest,
                 AdmissionStrategy::GraceHoldStream,

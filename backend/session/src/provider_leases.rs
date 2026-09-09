@@ -151,6 +151,9 @@ impl ProviderLeaseTable {
     #[inline]
     pub fn len(&self) -> usize { self.leases.len() }
 
+    /// Removes every lease during terminal server shutdown.
+    pub fn clear(&mut self) { *self = Self::default(); }
+
     pub fn lease(&self, id: PlaybackLeaseId) -> Option<&ProviderSlotLease> { self.leases.get(&id) }
 
     pub fn lease_of_owner(&self, owner: &str) -> Option<&ProviderSlotLease> {

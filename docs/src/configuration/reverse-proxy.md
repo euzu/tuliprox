@@ -148,6 +148,10 @@ Stream-type provider behavior:
   reopen requests must stay on the provider account pinned in that session; if that account is unavailable, Tuliprox  
   fails the follow-up instead of silently migrating it.
 * `retry: false` disables stream-open retry/failover for stream requests.
+* **DASH delivery scope:** DASH streams (`LiveDash`, `.mpd`) are delivered exclusively via HTTP redirect to the upstream
+  provider. Tuliprox does not reverse-proxy or cache DASH segments. Even when reverse-proxy mode is active, DASH requests
+  are not routed into the HLS proxy pipeline. DASH sessions retain provider-account affinity during reopen/refresh within
+  `hls_session_ttl_secs`.
 
 #### Ring-Buffer Calculation
 

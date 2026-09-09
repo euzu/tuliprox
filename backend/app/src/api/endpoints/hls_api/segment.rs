@@ -2155,7 +2155,7 @@ pub(super) async fn terminate_failed_hls_manifest_session(
 ) {
     let _transition_guard = app_state.active_users.acquire_playback_transition(username, session_token).await;
     app_state.active_users.terminate_session(username, session_token).await;
-    app_state.active_provider.clear_provider_reservation(session_token).await;
+    app_state.active_provider.clear_provider_reservation(session_token);
 }
 
 pub(super) fn normalize_xtream_live_hls_url(hls_url: &str, input: &ConfigInput) -> String {
@@ -2370,9 +2370,8 @@ pub(in crate::api) async fn handle_hls_stream_request(
     let (request_url, session_token, provider_handle, _selected_provider_config) = if let Some(session) = user_session {
         let pinned_provider = if session.provider.is_empty() { &input.name } else { &session.provider };
         let pinned_kind = if archive_reference.is_some() { PlaybackKind::Catchup } else { PlaybackKind::LiveHls };
-        let provider_handle = if let Some(handle) = app_state
-            .active_provider
-            .acquire_exact_connection_with_lease_for_session(
+        let provider_handle = if let Some(handle) =
+            app_state.active_provider.acquire_exact_connection_with_lease_for_session(
                 pinned_provider,
                 &fingerprint.addr,
                 false,
@@ -2382,9 +2381,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
                 ),
                 session.connection_kind.or(connection_kind).unwrap_or(crate::api::model::ConnectionKind::Normal),
                 Some(PlaybackLeaseRef::new(session.token.as_str(), pinned_kind)),
-            )
-            .await
-        {
+            ) {
             Some(handle)
         } else {
             debug_if_enabled!(
@@ -2414,7 +2411,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
                 let Some((_provider_name, stream_url)) =
                     select_provider_stream_url(&url, input, cfg, false, &app_state.app_config).await
                 else {
-                    app_state.connection_manager.release_provider_handle(provider_handle).await;
+                    app_state.connection_manager.release_provider_handle(provider_handle);
                     return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
                 };
                 let session_token = app_state
@@ -2432,10 +2429,12 @@ pub(in crate::api) async fn handle_hls_stream_request(
                     })
                     .await;
                 let hls_session_ttl_secs = get_hls_session_ttl_secs(app_state);
-                app_state
-                    .active_provider
-                    .refresh_adaptive_playback_lease(&cfg.name, &session_token, pinned_kind, hls_session_ttl_secs)
-                    .await;
+                app_state.active_provider.refresh_adaptive_playback_lease(
+                    &cfg.name,
+                    &session_token,
+                    pinned_kind,
+                    hls_session_ttl_secs,
+                );
                 (stream_url, Some(session_token), provider_handle, Some(selected_provider_config))
             }
             None => (url, None, None, None),
@@ -2525,7 +2524,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
     // Playlist requests only need the chosen provider account to derive the URL and pin the session.
     // Holding the provider slot until the first segment request causes stale active connections and
     // breaks forced same-account reuse on the next HLS/Catchup stream request.
-    app_state.connection_manager.release_provider_handle(provider_handle).await;
+    app_state.connection_manager.release_provider_handle(provider_handle);
 
     let input_source = InputSource::from(input).with_url(request_url);
     let download_result = download_legacy_hls_manifest(app_state, &input_source, &headers).await;

@@ -630,8 +630,7 @@ impl HlsOriginIoContext {
         self
     }
 
-    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
-    pub async fn take_preacquired_provider_handle(&self) -> Option<tuliprox_session::ManagedProviderHandle> {
+    pub fn take_preacquired_provider_handle(&self) -> Option<tuliprox_session::ManagedProviderHandle> {
         let handle = self.preacquired_provider_handle.as_ref()?;
         let mut guard = match handle.lock() {
             Ok(g) => g,
@@ -658,7 +657,7 @@ pub fn hls_origin_account_status(ctx: &HlsCtx, binding: &HlsOriginAccountBinding
     HlsOriginAccountStatus::Known
 }
 
-pub async fn acquire_bound_hls_origin_account_handle(
+pub fn acquire_bound_hls_origin_account_handle(
     ctx: &HlsCtx,
     binding: &HlsOriginAccountBinding,
     client_addr: &SocketAddr,
@@ -677,17 +676,14 @@ pub async fn acquire_bound_hls_origin_account_handle(
     if ctx.active_provider.is_provider_reserved_for_other_session(&binding.account_name, Some(&binding.session_owner)) {
         return Err(HlsBoundAccountAcquireErrorKind::ReservedForOther);
     }
-    let handle = ctx
-        .active_provider
-        .acquire_exact_connection_with_lease_for_session(
-            &binding.account_name,
-            client_addr,
-            allow_grace,
-            priority,
-            connection_kind,
-            Some(PlaybackLeaseRef::new(&binding.session_owner, PlaybackKind::LiveHls)),
-        )
-        .await;
+    let handle = ctx.active_provider.acquire_exact_connection_with_lease_for_session(
+        &binding.account_name,
+        client_addr,
+        allow_grace,
+        priority,
+        connection_kind,
+        Some(PlaybackLeaseRef::new(&binding.session_owner, PlaybackKind::LiveHls)),
+    );
     if let Some(handle) = handle {
         return Ok(handle);
     }
@@ -737,7 +733,7 @@ async fn begin_hls_origin_account_io_inner(
         let guard = HlsOriginAccountIoLeaseGuard::new(binding.clone(), lease);
         // Release any unused pre-acquired handle synchronously on drop. It needs no
         // cleanup permit, so a join cannot self-block on a single-permit cleanup queue.
-        drop(origin_io.take_preacquired_provider_handle().await);
+        drop(origin_io.take_preacquired_provider_handle());
         return Ok(guard);
     }
 
@@ -750,45 +746,30 @@ async fn begin_hls_origin_account_io_inner(
     let mut pending_guard = PendingAcquireGuard::new(Arc::clone(&lease));
     let cleanup_permit = reserve_cleanup_permit(origin_io, deadline).await?;
 
-    let acquired_handle = if let Some(mut managed) = origin_io.take_preacquired_provider_handle().await {
+    let acquired_handle = if let Some(mut managed) = origin_io.take_preacquired_provider_handle() {
         // Disarm the managed owner only after the cleanup permit is already reserved,
         // so the naked handle is immediately paired with its release responsibility.
         // The wrapper always carries its handle; fall back to a fresh acquire defensively.
         match managed.disarm() {
             Some(handle) => Ok(handle),
-            None => {
-                acquire_bound_hls_origin_account_handle(
-                    &origin_io.ctx,
-                    binding,
-                    &origin_io.client_addr,
-                    origin_io.allow_grace,
-                    origin_io.priority,
-                    origin_io.connection_kind,
-                )
-                .await
-            }
+            None => acquire_bound_hls_origin_account_handle(
+                &origin_io.ctx,
+                binding,
+                &origin_io.client_addr,
+                origin_io.allow_grace,
+                origin_io.priority,
+                origin_io.connection_kind,
+            ),
         }
     } else {
-        let acquire = acquire_bound_hls_origin_account_handle(
+        acquire_bound_hls_origin_account_handle(
             &origin_io.ctx,
             binding,
             &origin_io.client_addr,
             origin_io.allow_grace,
             origin_io.priority,
             origin_io.connection_kind,
-        );
-        if let Some(deadline) = deadline {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if let Ok(result) = tokio::time::timeout(remaining, acquire).await {
-                result
-            } else {
-                clear_pending_hls_origin_account_io_lease(session, &pending_guard.lease, Some(deadline)).await;
-                pending_guard.disarm();
-                return Err(HlsBoundAccountAcquireErrorKind::AcquireTimedOut);
-            }
-        } else {
-            acquire.await
-        }
+        )
     };
 
     match acquired_handle {
@@ -934,22 +915,17 @@ async fn store_acquired_hls_origin_account_io_handle(
     let provider_binding_tag = handle.binding_tag;
     let mut handle_guard = ManagedHandleGuard::new(handle, cleanup_permit);
     if let Some(request_id) = playback_request_id {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            clear_pending_hls_origin_account_io_lease(session, &pending_guard.lease, deadline).await;
+            pending_guard.disarm();
+            return Err(HlsBoundAccountAcquireErrorKind::AcquireTimedOut);
+        }
         let lease_ref = PlaybackLeaseRef { owner: &binding.session_owner, kind: PlaybackKind::LiveHls, request_id };
-        let refresh = origin_io.ctx.active_provider.refresh_playback_lease(
+        origin_io.ctx.active_provider.refresh_playback_lease(
             &binding.account_name,
             &lease_ref,
             origin_io.reservation_ttl_secs,
         );
-        match deadline {
-            Some(deadline) => {
-                if timeout(deadline.saturating_duration_since(Instant::now()), refresh).await.is_err() {
-                    clear_pending_hls_origin_account_io_lease(session, &pending_guard.lease, Some(deadline)).await;
-                    pending_guard.disarm();
-                    return Err(HlsBoundAccountAcquireErrorKind::AcquireTimedOut);
-                }
-            }
-            None => refresh.await,
-        }
     }
 
     let lease = Arc::clone(&pending_guard.lease);
@@ -1094,15 +1070,11 @@ pub async fn finish_hls_origin_account_io(
         let mut handle_guard = ManagedHandleGuard::new(provider_handle, cleanup_permit);
         if should_refresh_reservation {
             if let Some(request_id) = binding.playback_request_id {
-                origin_io
-                    .ctx
-                    .active_provider
-                    .refresh_playback_lease(
-                        &binding.account_name,
-                        &PlaybackLeaseRef { owner: &binding.session_owner, kind: PlaybackKind::LiveHls, request_id },
-                        confirmed_ttl_secs,
-                    )
-                    .await;
+                origin_io.ctx.active_provider.refresh_playback_lease(
+                    &binding.account_name,
+                    &PlaybackLeaseRef { owner: &binding.session_owner, kind: PlaybackKind::LiveHls, request_id },
+                    confirmed_ttl_secs,
+                );
             }
         }
         if let Some((handle, permit)) = handle_guard.take_resource() {

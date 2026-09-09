@@ -584,7 +584,7 @@ mod tests {
         let name = path.file_name().unwrap().to_str().unwrap();
 
         assert!(name.starts_with("Family___Kids_Living_Room--"));
-        assert!(name.ends_with(".yml"));
+        assert!(Path::new(name).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("yml")));
         assert_eq!(path.parent().unwrap(), Path::new("/app/config/bouquets"));
     }
 

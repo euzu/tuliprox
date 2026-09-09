@@ -858,7 +858,6 @@ pub async fn update_vod_metadata(
                 } else {
                     active_provider
                         .acquire_connection_for_probe(&input.name, probe_priority)
-                        .await
                         .map(|handle| ProbeHandleGuard::new(active_provider, handle))
                 };
 
@@ -927,7 +926,7 @@ pub async fn update_vod_metadata(
                 }
 
                 if let Some(guard) = temp_handle {
-                    guard.release().await;
+                    guard.release();
                 }
             } else {
                 debug_if_enabled!(

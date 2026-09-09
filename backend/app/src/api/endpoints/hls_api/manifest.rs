@@ -650,26 +650,23 @@ pub(super) async fn try_reserve_hls_entry_origin_account_for_redirect(
     connection_kind: crate::api::model::ConnectionKind,
     create_user_session: bool,
 ) -> Option<HlsEntryOriginAccountReservation> {
-    let provider_handle = app_state
-        .active_provider
-        .acquire_connection_with_lease_for_session(
-            &input.name,
-            &fingerprint.addr,
-            false,
-            connection_priority_for_kind(user, connection_kind),
-            connection_kind,
-            Some(PlaybackLeaseRef::new(session_owner, playback_kind)),
-        )
-        .await?;
+    let provider_handle = app_state.active_provider.acquire_connection_with_lease_for_session(
+        &input.name,
+        &fingerprint.addr,
+        false,
+        connection_priority_for_kind(user, connection_kind),
+        connection_kind,
+        Some(PlaybackLeaseRef::new(session_owner, playback_kind)),
+    )?;
 
     let Some(provider_config) = provider_handle.allocation.get_provider_config() else {
-        app_state.connection_manager.release_provider_handle(Some(provider_handle)).await;
+        app_state.connection_manager.release_provider_handle(Some(provider_handle));
         return None;
     };
     let Some((_provider_name, stream_url)) =
         select_provider_stream_url(request_url, input, &provider_config, false, &app_state.app_config).await
     else {
-        app_state.connection_manager.release_provider_handle(Some(provider_handle)).await;
+        app_state.connection_manager.release_provider_handle(Some(provider_handle));
         return None;
     };
 
@@ -692,10 +689,12 @@ pub(super) async fn try_reserve_hls_entry_origin_account_for_redirect(
         user_session_token.to_string()
     };
 
-    app_state
-        .active_provider
-        .refresh_adaptive_playback_lease(&provider_config.name, session_owner, playback_kind, reservation_ttl_secs)
-        .await;
+    app_state.active_provider.refresh_adaptive_playback_lease(
+        &provider_config.name,
+        session_owner,
+        playback_kind,
+        reservation_ttl_secs,
+    );
 
     Some(HlsEntryOriginAccountReservation {
         request_url: stream_url,
@@ -780,7 +779,7 @@ pub(super) async fn try_reserve_hls_virtual_entry_origin_account_for_redirect(
         return false;
     };
 
-    app_state.connection_manager.release_provider_handle(reservation.provider_handle).await;
+    app_state.connection_manager.release_provider_handle(reservation.provider_handle);
     true
 }
 
@@ -1640,10 +1639,7 @@ pub(super) async fn try_hls_cache_canonical_manifest_response(
             (HlsManifestAcceptanceDirective::none(), Some(owner_key))
         }
         HlsManifestAcceptanceEvaluationOutcome::SessionSuperseded => {
-            app_state
-                .connection_manager
-                .release_provider_handle(prepared_origin.preacquired_origin_account_handle)
-                .await;
+            app_state.connection_manager.release_provider_handle(prepared_origin.preacquired_origin_account_handle);
             return Some(hls_canonical_retry_after_response());
         }
     };
@@ -1714,7 +1710,7 @@ pub(super) async fn try_hls_cache_canonical_manifest_response(
         HlsManifestRefreshOrdering::Background
     };
     if let Some(owner_key) = availability_reevaluation_owner_key {
-        app_state.connection_manager.release_provider_handle(preacquired_provider_handle).await;
+        app_state.connection_manager.release_provider_handle(preacquired_provider_handle);
         touch_initial_manifest_access_lease_window(
             app_state,
             access_lease_id,

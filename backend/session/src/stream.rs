@@ -1,4 +1,4 @@
-use crate::ManagedProviderHandle;
+use crate::{ManagedProviderHandle, SharedCleanupCapability};
 use axum::http::StatusCode;
 use bytes::Bytes;
 use futures::stream::BoxStream;
@@ -8,7 +8,7 @@ use shared::{
 };
 use std::{collections::HashMap, sync::Arc};
 use tokio_util::sync::CancellationToken;
-use tuliprox_core::model::{GracePeriodOptions, SharedSubscriberId, StreamError};
+use tuliprox_core::model::{GracePeriodOptions, StreamError};
 use url::Url;
 
 pub type BoxedProviderStream = BoxStream<'static, Result<Bytes, StreamError>>;
@@ -68,7 +68,7 @@ pub enum ProviderStreamState {
 }
 
 pub struct StreamDetails {
-    pub shared_subscriber_id: Option<SharedSubscriberId>,
+    pub shared_subscriber_id: Option<SharedCleanupCapability>,
     pub stream: Option<BoxedProviderStream>,
     pub stream_info: ProviderStreamInfo,
     pub provider_name: Option<Arc<str>>,

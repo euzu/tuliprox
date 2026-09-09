@@ -334,9 +334,9 @@ impl ActiveClientStreamState {
         // mandatory capacity transition and must not be dropped by queue pressure.
         let provider_manager = &self.connection_manager.provider_manager;
         if let Some(request_id) = request_id {
-            provider_manager.confirm_identified_playback_activity_sync(&owner, request_id);
+            provider_manager.confirm_identified_playback_activity(&owner, request_id);
         } else {
-            provider_manager.confirm_playback_activity_sync(&owner);
+            provider_manager.confirm_playback_activity(&owner);
         }
     }
 
@@ -930,11 +930,9 @@ pub(crate) async fn create_active_client_stream(
     // before this registration starts. That terminal event also removes this exact user request, so reserving
     // another permit from the same bounded queue would create a circular admission
     // dependency under saturation.
-    let cleanup_owned_by_shared_subscriber = stream_channel.shared && stream_details.shared_subscriber_id.is_some();
-    let request_uid = stream_details.shared_subscriber_id.map_or_else(
-        || app_state.connection_manager.next_stream_uid(),
-        tuliprox_core::model::SharedSubscriberId::stream_uid,
-    );
+    let request_uid = stream_details
+        .shared_subscriber_id
+        .map_or_else(|| app_state.connection_manager.next_stream_uid(), |capability| capability.stream_uid());
     let provider_request_id = stream_details
         .provider_handle
         .as_ref()
@@ -954,27 +952,28 @@ pub(crate) async fn create_active_client_stream(
         user_agent,
         session_token,
     };
-    let mut registered_request = if cleanup_owned_by_shared_subscriber {
-        app_state
-            .connection_manager
-            .update_connection_with_uid_using_shared_cleanup(
-                connection,
-                tuliprox_session::ConnectionHistoryMode::EmitConnect,
-                request_uid,
-                provider_request_id,
-            )
-            .await
-    } else {
-        app_state
-            .connection_manager
-            .update_connection_with_uid(
-                connection,
-                tuliprox_session::ConnectionHistoryMode::EmitConnect,
-                request_uid,
-                provider_request_id,
-            )
-            .await
-    };
+    let mut registered_request =
+        if let Some(capability) = stream_details.shared_subscriber_id.filter(|_| stream_channel.shared) {
+            app_state
+                .connection_manager
+                .update_connection_with_uid_using_shared_cleanup(
+                    connection,
+                    tuliprox_session::ConnectionHistoryMode::EmitConnect,
+                    capability,
+                    provider_request_id,
+                )
+                .await
+        } else {
+            app_state
+                .connection_manager
+                .update_connection_with_uid(
+                    connection,
+                    tuliprox_session::ConnectionHistoryMode::EmitConnect,
+                    request_uid,
+                    provider_request_id,
+                )
+                .await
+        };
     let request_uid = registered_request.request_uid;
     let display_stream_uid = registered_request.display_uid();
     let stream_uid = Some(request_uid);
@@ -1341,7 +1340,10 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                                         )
                                         .await;
                                     if let Some(id) = stream_details.shared_subscriber_id {
-                                        connection_manager.shared_stream_manager.release_subscriber(id).await;
+                                        connection_manager
+                                            .shared_stream_manager
+                                            .release_subscriber(id.subscriber_id())
+                                            .await;
                                     }
                                     info!("User connections exhausted for active clients: {username}");
                                     updated = true;
@@ -1357,7 +1359,7 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                                 )
                                 .await;
                             if let Some(id) = stream_details.shared_subscriber_id {
-                                connection_manager.shared_stream_manager.release_subscriber(id).await;
+                                connection_manager.shared_stream_manager.release_subscriber(id.subscriber_id()).await;
                             }
                             info!("User connections exhausted for active clients: {username}");
                             updated = true;
@@ -1403,7 +1405,10 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                                     .await;
                                 // Release the shared stream subscription to stop the subscriber loop
                                 if let Some(id) = stream_details.shared_subscriber_id {
-                                    connection_manager.shared_stream_manager.release_subscriber(id).await;
+                                    connection_manager
+                                        .shared_stream_manager
+                                        .release_subscriber(id.subscriber_id())
+                                        .await;
                                 }
                                 info!("Provider connections exhausted for active clients: {provider_name}");
                             }
@@ -1597,7 +1602,7 @@ mod tests {
         let event_manager = Arc::new(EventManager::new());
         let provider_manager = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
         let shared_manager = Arc::new(SharedStreamManager::new(Arc::clone(&provider_manager)));
-        provider_manager.set_shared_stream_manager(Arc::clone(&shared_manager));
+        provider_manager.set_shared_stream_manager(&shared_manager);
 
         let geo_ip = Arc::new(ArcSwapOption::<GeoIp>::default());
         let config = app_cfg.config.load();
@@ -1611,7 +1616,7 @@ mod tests {
         let event_manager = Arc::new(EventManager::new());
         let active_provider = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
         let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
-        active_provider.set_shared_stream_manager(Arc::clone(&shared_stream_manager));
+        active_provider.set_shared_stream_manager(&shared_stream_manager);
 
         let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
         let config = app_cfg.config.load();
@@ -1690,7 +1695,7 @@ mod tests {
         let event_manager = Arc::new(EventManager::new());
         let active_provider = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
         let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
-        active_provider.set_shared_stream_manager(Arc::clone(&shared_stream_manager));
+        active_provider.set_shared_stream_manager(&shared_stream_manager);
 
         let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
         let config_loaded = app_cfg.config.load();
@@ -1910,7 +1915,6 @@ mod tests {
                 0,
                 crate::api::model::ConnectionKind::Normal,
             )
-            .await
             .expect("direct test stream should acquire the provider slot")
     }
 
@@ -2009,7 +2013,6 @@ mod tests {
                 0,
                 crate::api::model::ConnectionKind::Normal,
             )
-            .await
             .expect("deferred client should receive provider grace allocation");
         let mut stream_details = create_deferred_provider_grace_details(
             provider_name,
@@ -2195,7 +2198,6 @@ mod tests {
                 0,
                 crate::api::model::ConnectionKind::Normal,
             )
-            .await
             .expect("holder should consume the provider's live capacity");
         let (flag, grace_task, deferred_handle) =
             start_deferred_provider_grace_resolution(&app_state, &provider_name, deferred_addr, None).await;
@@ -2206,7 +2208,7 @@ mod tests {
             "provider grace resolution must begin in GracePending while provider capacity is exhausted"
         );
 
-        app_state.connection_manager.release_provider_handle(Some(holder_handle)).await;
+        app_state.connection_manager.release_provider_handle(Some(holder_handle));
         let join_result = tokio::time::timeout(Duration::from_millis(1), grace_task).await;
 
         assert!(
@@ -2219,7 +2221,7 @@ mod tests {
             "capacity-notify should resolve provider grace from GracePending to Inner before the deadline"
         );
 
-        app_state.connection_manager.release_provider_handle(Some(deferred_handle)).await;
+        app_state.connection_manager.release_provider_handle(Some(deferred_handle));
     }
 
     #[tokio::test(start_paused = true)]
@@ -2263,13 +2265,12 @@ mod tests {
                 0,
                 crate::api::model::ConnectionKind::Normal,
             )
-            .await
             .expect("holder should consume the provider's live capacity");
         let (_flag, grace_task, deferred_handle) =
             start_deferred_provider_grace_resolution(&app_state, &provider_name, deferred_addr, Some("tok-grace"))
                 .await;
 
-        app_state.connection_manager.release_provider_handle(Some(holder_handle)).await;
+        app_state.connection_manager.release_provider_handle(Some(holder_handle));
         let join_result = tokio::time::timeout(Duration::from_millis(1), grace_task).await;
         assert!(join_result.is_ok(), "grace task should finish after capacity notify");
 
@@ -2284,7 +2285,7 @@ mod tests {
         );
         assert_eq!(session.permission, UserConnectionPermission::Allowed);
 
-        app_state.connection_manager.release_provider_handle(Some(deferred_handle)).await;
+        app_state.connection_manager.release_provider_handle(Some(deferred_handle));
     }
 
     #[tokio::test(start_paused = true)]
@@ -2328,7 +2329,6 @@ mod tests {
                 0,
                 crate::api::model::ConnectionKind::Normal,
             )
-            .await
             .expect("holder should consume the provider's live capacity");
         let (_flag, grace_task, deferred_handle) = start_deferred_provider_grace_resolution(
             &app_state,
@@ -2349,7 +2349,7 @@ mod tests {
             .await
             .expect("replacement pending version should be created");
 
-        app_state.connection_manager.release_provider_handle(Some(holder_handle)).await;
+        app_state.connection_manager.release_provider_handle(Some(holder_handle));
         let join_result = tokio::time::timeout(Duration::from_millis(1), grace_task).await;
         assert!(join_result.is_ok(), "grace task should finish after capacity notify");
 
@@ -2365,7 +2365,7 @@ mod tests {
         assert!(pending.wake_source.is_none());
         assert_eq!(session.permission, UserConnectionPermission::GracePeriod);
 
-        app_state.connection_manager.release_provider_handle(Some(deferred_handle)).await;
+        app_state.connection_manager.release_provider_handle(Some(deferred_handle));
     }
 
     #[tokio::test]
@@ -2382,7 +2382,6 @@ mod tests {
                 0,
                 crate::api::model::ConnectionKind::Normal,
             )
-            .await
             .expect("deferred provider allocation");
         let stream_details = create_deferred_provider_grace_details(
             &provider_name,
@@ -2414,7 +2413,7 @@ mod tests {
         );
         assert!(!context.provider_stream_factory_options.response_head_is_available());
         drop(context);
-        app_state.connection_manager.release_provider_handle(Some(provider_handle)).await;
+        app_state.connection_manager.release_provider_handle(Some(provider_handle));
     }
 
     #[tokio::test(start_paused = true)]
@@ -2434,7 +2433,6 @@ mod tests {
                 0,
                 crate::api::model::ConnectionKind::Normal,
             )
-            .await
             .expect("holder should consume the provider's live capacity");
         let deferred_handle = app_state
             .active_provider
@@ -2445,7 +2443,6 @@ mod tests {
                 0,
                 crate::api::model::ConnectionKind::Normal,
             )
-            .await
             .expect("deferred client should receive provider grace allocation");
         let stream_details = create_deferred_provider_grace_details(
             &provider_name,
@@ -2479,24 +2476,21 @@ mod tests {
             "deferred active-client-stream should park in GracePending while waiting for provider grace resolution"
         );
 
-        let third_handle = app_state
-            .active_provider
-            .acquire_exact_connection_with_grace(
-                &provider_name,
-                &third_addr,
-                true,
-                0,
-                crate::api::model::ConnectionKind::Normal,
-            )
-            .await;
+        let third_handle = app_state.active_provider.acquire_exact_connection_with_grace(
+            &provider_name,
+            &third_addr,
+            true,
+            0,
+            crate::api::model::ConnectionKind::Normal,
+        );
 
         assert!(
             third_handle.is_none(),
             "deferred active-client-stream should retain the deferred provider grace reservation while GracePending"
         );
 
-        app_state.connection_manager.release_provider_handle(Some(holder_handle)).await;
-        app_state.connection_manager.release_provider_handle(Some(deferred_handle)).await;
+        app_state.connection_manager.release_provider_handle(Some(holder_handle));
+        app_state.connection_manager.release_provider_handle(Some(deferred_handle));
     }
 
     #[tokio::test(start_paused = true)]
@@ -2516,7 +2510,6 @@ mod tests {
                 0,
                 crate::api::model::ConnectionKind::Normal,
             )
-            .await
             .expect("holder should consume the provider's live capacity");
         let deferred_handle = app_state
             .active_provider
@@ -2527,7 +2520,6 @@ mod tests {
                 0,
                 crate::api::model::ConnectionKind::Normal,
             )
-            .await
             .expect("deferred shared client should receive provider grace allocation");
         let stream_details = create_deferred_provider_grace_details(
             &provider_name,
@@ -2561,24 +2553,21 @@ mod tests {
             "shared deferred active-client-stream should stay pending instead of returning an empty stream"
         );
 
-        let third_handle = app_state
-            .active_provider
-            .acquire_exact_connection_with_grace(
-                &provider_name,
-                &third_addr,
-                true,
-                0,
-                crate::api::model::ConnectionKind::Normal,
-            )
-            .await;
+        let third_handle = app_state.active_provider.acquire_exact_connection_with_grace(
+            &provider_name,
+            &third_addr,
+            true,
+            0,
+            crate::api::model::ConnectionKind::Normal,
+        );
 
         assert!(
             third_handle.is_none(),
             "shared deferred active-client-stream should retain the deferred provider grace reservation while pending"
         );
 
-        app_state.connection_manager.release_provider_handle(Some(holder_handle)).await;
-        app_state.connection_manager.release_provider_handle(Some(deferred_handle)).await;
+        app_state.connection_manager.release_provider_handle(Some(holder_handle));
+        app_state.connection_manager.release_provider_handle(Some(deferred_handle));
     }
 
     #[tokio::test(start_paused = true)]
@@ -2693,7 +2682,6 @@ mod tests {
                 0,
                 crate::api::model::ConnectionKind::Normal,
             )
-            .await
             .expect("holder should consume the provider's live capacity");
         let (flag, grace_task, deferred_handle) = start_deferred_provider_grace_resolution(
             &app_state,
@@ -2733,8 +2721,8 @@ mod tests {
         );
         assert_eq!(session.permission, UserConnectionPermission::Exhausted);
 
-        app_state.connection_manager.release_provider_handle(Some(holder_handle)).await;
-        app_state.connection_manager.release_provider_handle(Some(deferred_handle)).await;
+        app_state.connection_manager.release_provider_handle(Some(holder_handle));
+        app_state.connection_manager.release_provider_handle(Some(deferred_handle));
     }
 
     /// Regression test: verifies that when user-grace fails and remaining strategies are
@@ -2763,6 +2751,7 @@ mod tests {
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
             shared_subscriber_idle_timeout_secs: 300,
+            cleanup_queue_capacity: 4096,
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
         });
 

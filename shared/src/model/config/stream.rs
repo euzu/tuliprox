@@ -1,10 +1,10 @@
 use crate::{
     defaults::{
-        default_as_true, default_catchup_session_ttl_secs, default_grace_period_millis,
+        default_as_true, default_catchup_session_ttl_secs, default_cleanup_queue_capacity, default_grace_period_millis,
         default_grace_period_timeout_secs, default_hls_session_ttl_secs, default_shared_burst_buffer_mb,
         default_shared_subscriber_idle_timeout_secs, default_stream_buffer_max_bytes_mb,
-        is_default_catchup_session_ttl_secs, is_default_grace_period_millis, is_default_grace_period_timeout_secs,
-        is_default_hls_session_ttl_secs, is_default_shared_burst_buffer_mb,
+        is_default_catchup_session_ttl_secs, is_default_cleanup_queue_capacity, is_default_grace_period_millis,
+        is_default_grace_period_timeout_secs, is_default_hls_session_ttl_secs, is_default_shared_burst_buffer_mb,
         is_default_shared_subscriber_idle_timeout_secs, is_default_stream_buffer_max_bytes_mb, is_false, is_true,
     },
     error::TuliproxError,
@@ -112,6 +112,11 @@ pub struct StreamConfigDto {
         skip_serializing_if = "is_default_shared_subscriber_idle_timeout_secs"
     )]
     pub shared_subscriber_idle_timeout_secs: u64,
+    /// Upper bound on concurrently living cleanup owners (open request bodies and shared
+    /// subscribers). Requests beyond this are rejected with a bounded error instead of
+    /// growing memory without limit.
+    #[serde(default = "default_cleanup_queue_capacity", skip_serializing_if = "is_default_cleanup_queue_capacity")]
+    pub cleanup_queue_capacity: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admission_strategies: Option<Vec<AdmissionStrategy>>,
 }
@@ -128,6 +133,7 @@ impl Default for StreamConfigDto {
             throttle_kbps: 0,
             shared_burst_buffer_mb: default_shared_burst_buffer_mb(),
             shared_subscriber_idle_timeout_secs: default_shared_subscriber_idle_timeout_secs(),
+            cleanup_queue_capacity: default_cleanup_queue_capacity(),
             grace_period_hold_stream: true,
             hls_session_ttl_secs: default_hls_session_ttl_secs(),
             catchup_session_ttl_secs: default_catchup_session_ttl_secs(),
@@ -147,6 +153,7 @@ impl StreamConfigDto {
             && self.throttle_kbps == 0
             && self.shared_burst_buffer_mb == default_shared_burst_buffer_mb()
             && self.shared_subscriber_idle_timeout_secs == default_shared_subscriber_idle_timeout_secs()
+            && self.cleanup_queue_capacity == default_cleanup_queue_capacity()
             && self.grace_period_hold_stream
             && self.hls_session_ttl_secs == default_hls_session_ttl_secs()
             && self.catchup_session_ttl_secs == default_catchup_session_ttl_secs()
@@ -185,6 +192,10 @@ impl StreamConfigDto {
             return Err(TuliproxError::ConfigStream(
                 "`shared_subscriber_idle_timeout_secs` must be at least 1 second".to_string(),
             ));
+        }
+
+        if self.cleanup_queue_capacity == 0 {
+            return Err(TuliproxError::ConfigStream("`cleanup_queue_capacity` must be at least 1".to_string()));
         }
 
         if let Some(strategies) = &self.admission_strategies {

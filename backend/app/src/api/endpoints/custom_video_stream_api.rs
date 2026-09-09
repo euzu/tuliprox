@@ -687,7 +687,7 @@ mod tests {
         let event_manager = Arc::new(EventManager::new());
         let active_provider = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
         let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
-        active_provider.set_shared_stream_manager(Arc::clone(&shared_stream_manager));
+        active_provider.set_shared_stream_manager(&shared_stream_manager);
 
         let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
         let config = app_cfg.config.load();
@@ -759,7 +759,6 @@ mod tests {
         let handle = app
             .active_provider
             .acquire_connection(&input.name, &addr, 0, tuliprox_session::ConnectionKind::Normal)
-            .await
             .ok_or("allocation missing")?;
         let response = crate::api::model::create_custom_video_stream_response(
             &app.provider_stream_ctx(),
@@ -769,7 +768,7 @@ mod tests {
         .into_response();
         assert_eq!(response.status(), StatusCode::OK);
         // Confirmation is a queue barrier for any cleanup emitted by the response.
-        app.active_provider.refresh_provider_reservation(&input.name, "cleanup-barrier", 30).await;
+        app.active_provider.refresh_provider_reservation(&input.name, "cleanup-barrier", 30);
         app.connection_manager.send_cleanup(tuliprox_session::CleanupEvent::ConfirmPlaybackLease {
             owner: Arc::from("cleanup-barrier"),
             request_id: None,
@@ -781,8 +780,8 @@ mod tests {
         })
         .await?;
         assert_eq!(app.active_provider.get_provider_connections_count(), 1);
-        app.active_provider.clear_provider_reservation("cleanup-barrier").await;
-        app.active_provider.release_handle(&handle).await;
+        app.active_provider.clear_provider_reservation("cleanup-barrier");
+        app.active_provider.release_handle(&handle);
         Ok(())
     }
 

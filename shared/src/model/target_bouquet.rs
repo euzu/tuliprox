@@ -118,7 +118,7 @@ mod tests {
                 "news".to_string(),
                 "News".to_string(),
                 " Zebra".to_string(),
-                "".to_string(),
+                String::new(),
             ]),
             vod: Some(vec![]),
             series: None,

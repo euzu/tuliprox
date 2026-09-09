@@ -356,7 +356,7 @@ impl HlsMediaActivityMarker {
                             marker.session_owner.as_deref(),
                             marker.playback_request_id,
                         ) {
-                            active_provider.confirm_identified_playback_activity(owner, request_id).await;
+                            active_provider.confirm_identified_playback_activity(owner, request_id);
                         }
                     }
                     marker.log_uncommitted_activity(outcome, "media-delivery");

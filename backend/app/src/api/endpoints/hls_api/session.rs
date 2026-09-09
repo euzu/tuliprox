@@ -804,18 +804,14 @@ pub(super) async fn prepare_hls_origin_runtime_with_new_account(
     now_ms: u64,
 ) -> Result<PreparedHlsOriginRuntime, HlsOriginRuntimeAcquireError> {
     let session_owner = build_hls_origin_session_owner(proxy_session_id);
-    let Some(provider_handle) = app_state
-        .active_provider
-        .acquire_connection_with_lease_for_session(
-            &input.name,
-            &fingerprint.addr,
-            allow_grace,
-            priority,
-            connection_kind,
-            Some(PlaybackLeaseRef::new(&session_owner, PlaybackKind::LiveHls)),
-        )
-        .await
-    else {
+    let Some(provider_handle) = app_state.active_provider.acquire_connection_with_lease_for_session(
+        &input.name,
+        &fingerprint.addr,
+        allow_grace,
+        priority,
+        connection_kind,
+        Some(PlaybackLeaseRef::new(&session_owner, PlaybackKind::LiveHls)),
+    ) else {
         debug!(
             "HLS origin account acquire unavailable: work={} work_class={} grace={}",
             work_kind.as_log_value(),
@@ -828,7 +824,7 @@ pub(super) async fn prepare_hls_origin_runtime_with_new_account(
     };
 
     let Some(provider_config) = provider_handle.allocation.get_provider_config() else {
-        app_state.connection_manager.release_provider_handle(Some(provider_handle)).await;
+        app_state.connection_manager.release_provider_handle(Some(provider_handle));
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
 
@@ -841,7 +837,7 @@ pub(super) async fn prepare_hls_origin_runtime_with_new_account(
     )
     .await
     else {
-        app_state.connection_manager.release_provider_handle(Some(provider_handle)).await;
+        app_state.connection_manager.release_provider_handle(Some(provider_handle));
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
 
@@ -851,7 +847,7 @@ pub(super) async fn prepare_hls_origin_runtime_with_new_account(
         &provider_handle.allocation,
         now_ms,
     ) else {
-        app_state.connection_manager.release_provider_handle(Some(provider_handle)).await;
+        app_state.connection_manager.release_provider_handle(Some(provider_handle));
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
 
@@ -997,14 +993,11 @@ pub(super) async fn detach_unprotected_hls_origin_account_bindings(app_state: &A
             );
             binding
         };
-        app_state
-            .active_provider
-            .clear_identified_provider_reservation(
-                &binding.session_owner,
-                &binding.account_name,
-                binding.provider_binding_tag,
-            )
-            .await;
+        app_state.active_provider.clear_identified_provider_reservation(
+            &binding.session_owner,
+            &binding.account_name,
+            binding.provider_binding_tag,
+        );
     }
 }
 
@@ -1029,34 +1022,27 @@ pub(super) async fn prepare_hls_origin_policy_preempt_runtime(
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
 
-    app_state
-        .active_provider
-        .clear_identified_provider_reservation(
-            &candidate.session_owner,
-            &candidate.account_name,
-            candidate.provider_binding_tag,
-        )
-        .await;
+    app_state.active_provider.clear_identified_provider_reservation(
+        &candidate.session_owner,
+        &candidate.account_name,
+        candidate.provider_binding_tag,
+    );
     let session_owner = build_hls_origin_session_owner(proxy_session_id);
-    let Some(provider_handle) = app_state
-        .active_provider
-        .acquire_exact_connection_with_lease_for_session(
-            &candidate.account_name,
-            &fingerprint.addr,
-            false,
-            priority,
-            connection_kind,
-            Some(PlaybackLeaseRef::new(&session_owner, PlaybackKind::LiveHls)),
-        )
-        .await
-    else {
-        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate).await;
+    let Some(provider_handle) = app_state.active_provider.acquire_exact_connection_with_lease_for_session(
+        &candidate.account_name,
+        &fingerprint.addr,
+        false,
+        priority,
+        connection_kind,
+        Some(PlaybackLeaseRef::new(&session_owner, PlaybackKind::LiveHls)),
+    ) else {
+        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate);
         debug!("HLS origin policy preemption denied: reason=exact-acquire-failed");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
     let Some(provider_config) = provider_handle.allocation.get_provider_config() else {
-        app_state.connection_manager.release_provider_handle(Some(provider_handle)).await;
-        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate).await;
+        app_state.connection_manager.release_provider_handle(Some(provider_handle));
+        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate);
         debug!("HLS origin policy preemption denied: reason=missing-provider-config");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
@@ -1069,8 +1055,8 @@ pub(super) async fn prepare_hls_origin_policy_preempt_runtime(
     )
     .await
     else {
-        app_state.connection_manager.release_provider_handle(Some(provider_handle)).await;
-        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate).await;
+        app_state.connection_manager.release_provider_handle(Some(provider_handle));
+        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate);
         debug!("HLS origin policy preemption denied: reason=invalid-origin-url");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
@@ -1080,8 +1066,8 @@ pub(super) async fn prepare_hls_origin_policy_preempt_runtime(
         &provider_handle.allocation,
         now_ms,
     ) else {
-        app_state.connection_manager.release_provider_handle(Some(provider_handle)).await;
-        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate).await;
+        app_state.connection_manager.release_provider_handle(Some(provider_handle));
+        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate);
         debug!("HLS origin policy preemption denied: reason=invalid-allocation");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
@@ -1106,8 +1092,8 @@ pub(super) async fn prepare_hls_origin_policy_preempt_runtime(
         }
     }
     if !detached_victim {
-        app_state.connection_manager.release_provider_handle(Some(provider_handle)).await;
-        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate).await;
+        app_state.connection_manager.release_provider_handle(Some(provider_handle));
+        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate);
         debug!("HLS origin policy preemption denied: reason=stale-candidate");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     }
@@ -1147,19 +1133,16 @@ pub(super) async fn prepare_hls_origin_policy_preempt_runtime(
     })
 }
 
-async fn restore_hls_origin_policy_preempt_candidate_reservation<C: HlsOriginReservationCandidate>(
+fn restore_hls_origin_policy_preempt_candidate_reservation<C: HlsOriginReservationCandidate>(
     app_state: &Arc<AppState>,
     candidate: &C,
 ) {
-    app_state
-        .active_provider
-        .refresh_adaptive_playback_lease(
-            candidate.account_name(),
-            candidate.session_owner(),
-            PlaybackKind::LiveHls,
-            candidate.reservation_ttl_secs(),
-        )
-        .await;
+    app_state.active_provider.refresh_adaptive_playback_lease(
+        candidate.account_name(),
+        candidate.session_owner(),
+        PlaybackKind::LiveHls,
+        candidate.reservation_ttl_secs(),
+    );
 }
 
 pub(super) async fn find_hls_origin_policy_preempt_candidate(
@@ -1243,34 +1226,27 @@ pub(super) async fn prepare_hls_speculative_origin_runtime(
         debug!("HLS account overlap denied: reason=no-soft-active-candidate");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
-    app_state
-        .active_provider
-        .clear_identified_provider_reservation(
-            &candidate.session_owner,
-            &candidate.account_name,
-            candidate.provider_binding_tag,
-        )
-        .await;
+    app_state.active_provider.clear_identified_provider_reservation(
+        &candidate.session_owner,
+        &candidate.account_name,
+        candidate.provider_binding_tag,
+    );
     let session_owner = build_hls_origin_session_owner(proxy_session_id);
-    let Some(provider_handle) = app_state
-        .active_provider
-        .acquire_exact_connection_with_lease_for_session(
-            &candidate.account_name,
-            &fingerprint.addr,
-            false,
-            priority,
-            connection_kind,
-            Some(PlaybackLeaseRef::new(&session_owner, PlaybackKind::LiveHls)),
-        )
-        .await
-    else {
-        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate).await;
+    let Some(provider_handle) = app_state.active_provider.acquire_exact_connection_with_lease_for_session(
+        &candidate.account_name,
+        &fingerprint.addr,
+        false,
+        priority,
+        connection_kind,
+        Some(PlaybackLeaseRef::new(&session_owner, PlaybackKind::LiveHls)),
+    ) else {
+        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate);
         debug!("HLS account overlap denied: reason=speculative-acquire-failed");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
     let Some(provider_config) = provider_handle.allocation.get_provider_config() else {
-        app_state.connection_manager.release_provider_handle(Some(provider_handle)).await;
-        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate).await;
+        app_state.connection_manager.release_provider_handle(Some(provider_handle));
+        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate);
         debug!("HLS account overlap denied: reason=missing-provider-config");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
@@ -1283,8 +1259,8 @@ pub(super) async fn prepare_hls_speculative_origin_runtime(
     )
     .await
     else {
-        app_state.connection_manager.release_provider_handle(Some(provider_handle)).await;
-        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate).await;
+        app_state.connection_manager.release_provider_handle(Some(provider_handle));
+        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate);
         debug!("HLS account overlap denied: reason=invalid-origin-url");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
@@ -1469,14 +1445,11 @@ pub(super) async fn reclaim_hls_account_overlap_if_needed(
             }
             (session_guard.proxy_session_id.clone(), binding)
         };
-        app_state
-            .active_provider
-            .clear_identified_provider_reservation(
-                &loser_binding.session_owner,
-                &loser_binding.account_name,
-                loser_binding.provider_binding_tag,
-            )
-            .await;
+        app_state.active_provider.clear_identified_provider_reservation(
+            &loser_binding.session_owner,
+            &loser_binding.account_name,
+            loser_binding.provider_binding_tag,
+        );
         {
             let mut loser = session.write().await;
             // The loser snapshot was taken before the locks were released; a successor
@@ -1634,14 +1607,11 @@ pub(super) async fn rebind_hls_origin_account(
         safe_proxy_session,
         sanitize_sensitive_info(stale_binding.account_name.as_ref())
     );
-    app_state
-        .active_provider
-        .clear_identified_provider_reservation(
-            &stale_binding.session_owner,
-            &stale_binding.account_name,
-            stale_binding.provider_binding_tag,
-        )
-        .await;
+    app_state.active_provider.clear_identified_provider_reservation(
+        &stale_binding.session_owner,
+        &stale_binding.account_name,
+        stale_binding.provider_binding_tag,
+    );
     {
         let mut session_guard = session.write().await;
         if let Some(binding) = session_guard.origin_account_binding.as_mut().filter(|binding| {
@@ -1658,18 +1628,14 @@ pub(super) async fn rebind_hls_origin_account(
         session_guard.invalidate_queued_origin_work();
     }
 
-    let Some(provider_handle) = app_state
-        .active_provider
-        .acquire_connection_with_lease_for_session(
-            &input.name,
-            &fingerprint.addr,
-            false,
-            priority,
-            connection_kind,
-            Some(PlaybackLeaseRef::new(&stale_binding.session_owner, PlaybackKind::LiveHls)),
-        )
-        .await
-    else {
+    let Some(provider_handle) = app_state.active_provider.acquire_connection_with_lease_for_session(
+        &input.name,
+        &fingerprint.addr,
+        false,
+        priority,
+        connection_kind,
+        Some(PlaybackLeaseRef::new(&stale_binding.session_owner, PlaybackKind::LiveHls)),
+    ) else {
         mark_hls_origin_rebind_failed(session, stale_binding, now_ms, "no_account_available").await;
         return Err(HlsOriginRuntimeAcquireError::NoAccountAvailable {
             reason: hls_no_account_reason_for_binding(Some(stale_binding)),
@@ -1677,7 +1643,7 @@ pub(super) async fn rebind_hls_origin_account(
     };
 
     let Some(provider_config) = provider_handle.allocation.get_provider_config() else {
-        app_state.connection_manager.release_provider_handle(Some(provider_handle)).await;
+        app_state.connection_manager.release_provider_handle(Some(provider_handle));
         mark_hls_origin_rebind_failed(session, stale_binding, now_ms, "no_provider_config").await;
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
@@ -1691,13 +1657,13 @@ pub(super) async fn rebind_hls_origin_account(
     )
     .await
     else {
-        app_state.connection_manager.release_provider_handle(Some(provider_handle)).await;
+        app_state.connection_manager.release_provider_handle(Some(provider_handle));
         mark_hls_origin_rebind_failed(session, stale_binding, now_ms, "invalid_origin_url").await;
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
 
     let Some(new_account_name) = provider_handle.allocation.get_provider_name() else {
-        app_state.connection_manager.release_provider_handle(Some(provider_handle)).await;
+        app_state.connection_manager.release_provider_handle(Some(provider_handle));
         mark_hls_origin_rebind_failed(session, stale_binding, now_ms, "missing_account_name").await;
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
@@ -2093,7 +2059,7 @@ pub(super) async fn prepare_hls_transient_origin_io_for_authorized_resource_work
     };
     let Some(binding) = session.read().await.origin_account_binding.clone().filter(HlsOriginAccountBinding::is_active)
     else {
-        app_state.connection_manager.release_provider_handle(Some(provider_handle)).await;
+        app_state.connection_manager.release_provider_handle(Some(provider_handle));
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
     let origin_io = HlsOriginIoContext {

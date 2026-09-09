@@ -19,13 +19,13 @@ use std::{
     net::SocketAddr,
     str::FromStr,
     sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Arc, Mutex, MutexGuard,
     },
     thread,
     time::Duration,
 };
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{mpsc, Notify, RwLock, RwLockReadGuard};
 use tuliprox_core::{
     model::{
         DisconnectQos, Fingerprint, PlaybackRequestOutcome, ProviderHandle, SharedSubscriberId, StreamHistoryConfig,
@@ -48,6 +48,22 @@ const SOCKET_EXPIRY_QUEUE_REBUILD_FACTOR: usize = 2;
 // Avoid rebuilding the expiry heap unless it contains at least this many stale entries.
 const SOCKET_EXPIRY_QUEUE_REBUILD_MIN_STALE: usize = 256;
 fn notify_capacity(capacity_notify: &Notify) { capacity_notify.notify_waiters(); }
+
+/// Proof that a shared-stream response owns the guaranteed terminal cleanup permit for
+/// its subscriber. The constructor is crate-private, so callers outside this crate cannot
+/// fabricate the claim; it is only produced when a cleanup permit is actually reserved.
+#[derive(Debug, Clone, Copy)]
+pub struct SharedCleanupCapability {
+    subscriber_id: SharedSubscriberId,
+}
+
+impl SharedCleanupCapability {
+    pub(crate) fn new(subscriber_id: SharedSubscriberId) -> Self { Self { subscriber_id } }
+
+    pub fn stream_uid(&self) -> u32 { self.subscriber_id.stream_uid() }
+
+    pub fn subscriber_id(&self) -> SharedSubscriberId { self.subscriber_id }
+}
 
 struct BackpressureState<T> {
     overflow: VecDeque<T>,
@@ -231,6 +247,8 @@ pub enum CleanupEvent {
     ReleaseSharedSubscriber {
         addr: SocketAddr,
         subscriber_id: SharedSubscriberId,
+        request_id: Option<tuliprox_core::model::PlaybackRequestId>,
+        owner: Option<Arc<str>>,
     },
     ReleaseStream {
         request_id: Option<tuliprox_core::model::PlaybackRequestId>,
@@ -314,7 +332,7 @@ async fn release_connection_parts(
     if matches!(reason, DisconnectReason::ClientKicked) {
         for stream_info in &removed.removed_streams {
             if let Some(session_token) = stream_info.session_token.as_deref() {
-                deps.provider_manager.clear_provider_reservation(session_token).await;
+                deps.provider_manager.clear_provider_reservation(session_token);
             }
         }
         // Explicitly terminate all sessions for the kicked addr. This expires them
@@ -337,7 +355,7 @@ async fn release_connection_parts(
             None,
         );
     }
-    deps.provider_manager.release_connection(addr).await;
+    deps.provider_manager.release_connection(addr);
     deps.shared_stream_manager.release_connection(addr, send_shared_stop_signal).await;
     if removed.addr_removed && !removed.removed_streams.is_empty() {
         deps.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Disconnected(*addr)));
@@ -378,9 +396,9 @@ async fn handle_release_stream(
     }
 }
 
-async fn handle_release_provider_handle(deps: &CleanupWorkerDeps, handle: Option<ProviderHandle>) {
+fn handle_release_provider_handle(deps: &CleanupWorkerDeps, handle: Option<ProviderHandle>) {
     if let Some(handle) = handle {
-        deps.provider_manager.release_handle(&handle).await;
+        deps.provider_manager.release_handle(&handle);
         notify_capacity(deps.capacity_notify.as_ref());
     }
 }
@@ -398,7 +416,7 @@ async fn handle_release_stream_and_provider_handle(
     request_id: Option<tuliprox_core::model::PlaybackRequestId>,
 ) {
     let provider_released = if let Some(handle) = handle {
-        deps.provider_manager.release_handle(&handle).await;
+        deps.provider_manager.release_handle(&handle);
         true
     } else {
         false
@@ -451,7 +469,7 @@ async fn handle_update_detail_and_release_provider(
         deps.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info)));
     }
     if let Some(handle) = handle {
-        deps.provider_manager.release_handle(&handle).await;
+        deps.provider_manager.release_handle(&handle);
         notify_capacity(deps.capacity_notify.as_ref());
     }
 }
@@ -504,9 +522,11 @@ async fn release_stream_with_disconnect(
             // already gone: the identity travels with the cleanup event.
             if let (Some(owner), Some(request_id)) = (owner.as_deref(), request_id) {
                 let reason = resolve_disconnect_reason_from_provider_end(provider_end_reason);
-                deps.provider_manager
-                    .finish_identified_playback_request(owner, request_id, playback_outcome_for_reason(reason))
-                    .await;
+                deps.provider_manager.finish_identified_playback_request(
+                    owner,
+                    request_id,
+                    playback_outcome_for_reason(reason),
+                );
                 notify_capacity(deps.capacity_notify.as_ref());
             }
             None
@@ -516,9 +536,11 @@ async fn release_stream_with_disconnect(
             if let (Some(session_token), Some(request_id)) =
                 (owner.as_deref().or(stream_info.session_token.as_deref()), request_id)
             {
-                deps.provider_manager
-                    .finish_identified_playback_request(session_token, request_id, playback_outcome_for_reason(reason))
-                    .await;
+                deps.provider_manager.finish_identified_playback_request(
+                    session_token,
+                    request_id,
+                    playback_outcome_for_reason(reason),
+                );
             }
             notify_capacity(deps.capacity_notify.as_ref());
             None
@@ -532,9 +554,11 @@ async fn release_stream_with_disconnect(
             if let (Some(session_token), Some(request_id)) =
                 (owner.as_deref().or(stream_info.session_token.as_deref()), request_id)
             {
-                deps.provider_manager
-                    .finish_identified_playback_request(session_token, request_id, playback_outcome_for_reason(reason))
-                    .await;
+                deps.provider_manager.finish_identified_playback_request(
+                    session_token,
+                    request_id,
+                    playback_outcome_for_reason(reason),
+                );
             }
             let provider_reconnect_count = (reconnect_count > 0).then_some(reconnect_count);
             emit_disconnect_record(
@@ -586,6 +610,8 @@ pub struct ConnectionManager {
     capacity_notify: Arc<Notify>,
     stream_uid_counter: AtomicU32,
     history_writer: Arc<ArcSwapOption<StreamHistoryWriter>>,
+    is_shutting_down: AtomicBool,
+    admission_gate: RwLock<()>,
 }
 
 pub struct ConnectionParams<'a> {
@@ -684,6 +710,18 @@ pub enum ConnectionRejectionReason {
     RegistrationFailed,
 }
 
+impl std::fmt::Display for ConnectionRejectionReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CleanupReceiverClosed => write!(f, "cleanup receiver closed"),
+            Self::CleanupAdmissionTimeout => write!(f, "cleanup admission timed out"),
+            Self::RegistrationFailed => write!(f, "connection registration failed"),
+        }
+    }
+}
+
+impl std::error::Error for ConnectionRejectionReason {}
+
 pub struct RegisteredPlaybackRequest {
     pub request_uid: u32,
     pub display_stream: Option<StreamInfo>,
@@ -753,9 +791,30 @@ impl ConnectionManager {
         event_manager: &Arc<EventManager>,
         history_config: Option<&StreamHistoryConfig>,
     ) -> Self {
+        Self::new_with_capacity(
+            user_manager,
+            provider_manager,
+            shared_stream_manager,
+            event_manager,
+            history_config,
+            CLEANUP_QUEUE_CAPACITY,
+        )
+    }
+
+    /// Same as [`ConnectionManager::new`], but with an explicit cleanup-queue capacity
+    /// derived from configuration instead of the hard-coded default.
+    pub fn new_with_capacity(
+        user_manager: &Arc<ActiveUserManager>,
+        provider_manager: &Arc<ActiveProviderManager>,
+        shared_stream_manager: &Arc<SharedStreamManager>,
+        event_manager: &Arc<EventManager>,
+        history_config: Option<&StreamHistoryConfig>,
+        cleanup_capacity: usize,
+    ) -> Self {
+        let cleanup_capacity = cleanup_capacity.max(1);
         let history_writer = Arc::new(ArcSwapOption::new(build_history_writer(history_config)));
         let (close_socket_signal_tx, _) = tokio::sync::broadcast::channel(256);
-        let (cleanup_tx, cleanup_rx) = mpsc::channel(CLEANUP_QUEUE_CAPACITY);
+        let (cleanup_tx, cleanup_rx) = mpsc::channel(cleanup_capacity);
         user_manager.set_cleanup_sender(cleanup_tx.clone());
         user_manager.set_provider_manager(Arc::clone(provider_manager));
         let socket_cleanup_tx = cleanup_tx.clone();
@@ -767,11 +826,13 @@ impl ConnectionManager {
             shared_stream_manager: Arc::clone(shared_stream_manager),
             event_manager: Arc::clone(event_manager),
             close_socket_signal_tx,
-            cleanup_sender: BackpressureSender::new(cleanup_tx, "cleanup", CLEANUP_QUEUE_CAPACITY),
+            cleanup_sender: BackpressureSender::new(cleanup_tx, "cleanup", cleanup_capacity),
             socket_activity_tracker: socket_activity_tracker.clone(),
             capacity_notify: Arc::clone(&capacity_notify),
             stream_uid_counter: AtomicU32::new(1),
             history_writer: Arc::clone(&history_writer),
+            is_shutting_down: AtomicBool::new(false),
+            admission_gate: RwLock::new(()),
         };
 
         Self::spawn_cleanup_worker(
@@ -789,13 +850,15 @@ impl ConnectionManager {
     }
 
     /// Reload the history writer on config change. Shuts down the old writer first so
-    /// `recover_pending_files` in `build_history_writer` does not collide with an active writer.
+    /// `recover_pending_files` does not collide with an active writer. Recovery runs on the
+    /// blocking pool instead of a runtime worker so large pending-file sets cannot stall
+    /// live stream heartbeats.
     pub async fn reload_history_writer(&self, config: Option<&StreamHistoryConfig>) {
         let old_writer = self.history_writer.swap(None);
         if let Some(w) = old_writer {
             w.shutdown().await;
         }
-        let new_writer = build_history_writer(config);
+        let new_writer = build_history_writer_async(config).await;
         self.history_writer.store(new_writer);
     }
 
@@ -964,7 +1027,7 @@ impl ConnectionManager {
         tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
                 match event {
-                    CleanupEvent::ReleaseSharedSubscriber { addr, subscriber_id } => {
+                    CleanupEvent::ReleaseSharedSubscriber { addr, subscriber_id, request_id, owner } => {
                         deps.shared_stream_manager.release_subscriber(subscriber_id).await;
                         handle_release_stream(
                             &deps,
@@ -974,8 +1037,8 @@ impl ConnectionManager {
                             0,
                             None,
                             None,
-                            None,
-                            None,
+                            request_id,
+                            owner,
                         )
                         .await;
                         notify_capacity(deps.capacity_notify.as_ref());
@@ -1007,7 +1070,7 @@ impl ConnectionManager {
                         .await;
                     }
                     CleanupEvent::ReleaseProviderHandle { handle } => {
-                        handle_release_provider_handle(&deps, handle).await;
+                        handle_release_provider_handle(&deps, handle);
                     }
                     CleanupEvent::ReleaseStreamAndProviderHandle {
                         request_id,
@@ -1040,9 +1103,9 @@ impl ConnectionManager {
                     }
                     CleanupEvent::ConfirmPlaybackLease { owner, request_id } => {
                         if let Some(request_id) = request_id {
-                            deps.provider_manager.confirm_identified_playback_activity(&owner, request_id).await;
+                            deps.provider_manager.confirm_identified_playback_activity(&owner, request_id);
                         } else {
-                            deps.provider_manager.confirm_playback_activity(&owner).await;
+                            deps.provider_manager.confirm_playback_activity(&owner);
                         }
                     }
                     CleanupEvent::Defer(future) => {
@@ -1135,7 +1198,7 @@ impl ConnectionManager {
     /// called before invoking this method.
     pub async fn release_provider_deferred(&self, addr: &SocketAddr) {
         let addr_owned = *addr;
-        self.provider_manager.release_connection(&addr_owned).await;
+        self.provider_manager.release_connection(&addr_owned);
         self.shared_stream_manager.release_connection(&addr_owned, true).await;
         notify_capacity(self.capacity_notify.as_ref());
     }
@@ -1151,7 +1214,7 @@ impl ConnectionManager {
         // Provider release and capacity notification are deferred via `release_provider_deferred`.
         for stream_info in &removed.removed_streams {
             if let Some(session_token) = stream_info.session_token.as_deref() {
-                self.provider_manager.clear_provider_reservation(session_token).await;
+                self.provider_manager.clear_provider_reservation(session_token);
             }
         }
         for username in &removed.disconnected_users {
@@ -1177,7 +1240,7 @@ impl ConnectionManager {
     }
 
     pub async fn release_provider_connection(&self, addr: &SocketAddr) {
-        self.provider_manager.release_connection(addr).await;
+        self.provider_manager.release_connection(addr);
         self.shared_stream_manager.release_connection(addr, false).await;
         notify_capacity(self.capacity_notify.as_ref());
     }
@@ -1204,9 +1267,9 @@ impl ConnectionManager {
         }
     }
 
-    pub async fn release_provider_handle(&self, provider_handle: Option<ProviderHandle>) {
+    pub fn release_provider_handle(&self, provider_handle: Option<ProviderHandle>) {
         if let Some(handle) = provider_handle {
-            self.provider_manager.release_handle(&handle).await;
+            self.provider_manager.release_handle(&handle);
             notify_capacity(self.capacity_notify.as_ref());
         }
     }
@@ -1249,10 +1312,25 @@ impl ConnectionManager {
 
     pub fn capacity_notified(&self) -> Arc<Notify> { Arc::clone(&self.capacity_notify) }
 
-    /// Emit disconnect records for all still-active streams and flush the history writer.
+    #[inline]
+    pub fn is_shutting_down(&self) -> bool { self.is_shutting_down.load(Ordering::Acquire) }
+
+    pub(crate) async fn begin_admission(&self) -> Option<RwLockReadGuard<'_, ()>> {
+        if self.is_shutting_down() {
+            return None;
+        }
+        let guard = self.admission_gate.read().await;
+        (!self.is_shutting_down()).then_some(guard)
+    }
+
+    /// Emit disconnect records for all still-active streams, unregister shared streams,
+    /// drain queued cleanups, and flush the history writer.
     /// Call once at graceful shutdown before dropping the `ConnectionManager`.
     pub async fn shutdown(&self) {
-        let active_streams = self.user_manager.get_all_active_streams().await;
+        self.is_shutting_down.store(true, Ordering::Release);
+        let _admission_closed = self.admission_gate.write().await;
+        self.shared_stream_manager.shutdown().await;
+        let active_streams = self.user_manager.drain_for_shutdown().await;
         for stream_info in &active_streams {
             let qos = self.event_manager.read_meter_qos(stream_info.meter_uid).await;
             let bytes_sent = qos.map(|qos| qos.bytes_total);
@@ -1265,15 +1343,11 @@ impl ConnectionManager {
                 None,
                 None,
             );
+            self.event_manager.unregister_meter_client(stream_info.uid).await;
         }
-        // Release every active connection synchronously so no claim or provider slot
-        // survives shutdown. The cleanup worker is not needed for this final drain.
-        let mut addrs: Vec<SocketAddr> = active_streams.iter().map(|stream| stream.addr).collect();
-        addrs.sort_unstable();
-        addrs.dedup();
-        for addr in &addrs {
-            release_connection_with_reason(self, addr, DisconnectReason::Shutdown, true).await;
-        }
+        // This terminal transition does not depend on queue capacity or body-held
+        // cleanup permits. Later guard drops are idempotent against the emptied indices.
+        self.provider_manager.shutdown();
         if let Some(w) = self.history_writer.load_full() {
             w.shutdown().await;
         }
@@ -1323,10 +1397,11 @@ impl ConnectionManager {
         &self,
         update: ConnectionParams<'_>,
         history_mode: ConnectionHistoryMode,
-        uid: u32,
+        capability: SharedCleanupCapability,
         provider_request_id: Option<tuliprox_core::model::PlaybackRequestId>,
     ) -> RegisteredPlaybackRequest {
-        self.update_connection_with_uid_impl(update, history_mode, uid, provider_request_id, true).await
+        self.update_connection_with_uid_impl(update, history_mode, capability.stream_uid(), provider_request_id, true)
+            .await
     }
 
     async fn update_connection_with_uid_impl(
@@ -1340,6 +1415,10 @@ impl ConnectionManager {
         let username = update.username;
         let fingerprint = update.fingerprint;
         let track_direct_body_activity = uses_direct_body_idle_timeout(update.stream_channel);
+        let Some(_admission) = self.begin_admission().await else {
+            warn!("Connection manager is shutting down; rejecting connection registration for user {username}");
+            return RegisteredPlaybackRequest::rejected(uid, ConnectionRejectionReason::CleanupReceiverClosed);
+        };
         // Admission: reserve a guaranteed cleanup right before any registration mutation,
         // bounded so a saturated or stalled cleanup queue cannot hang request setup.
         let rollback_permit = if cleanup_owned_by_shared_subscriber {
@@ -1437,6 +1516,22 @@ fn build_history_writer(config: Option<&StreamHistoryConfig>) -> Option<Arc<Stre
     }
     if let Err(e) = recover_pending_files(&cfg.stream_history_directory) {
         log::warn!("Stream history recovery failed: {e}");
+    }
+    Some(Arc::new(StreamHistoryWriter::new(cfg)))
+}
+
+/// Async variant used on hot config reload: recovery I/O and compression run on the blocking
+/// pool so a runtime worker is never blocked while streams are being served.
+async fn build_history_writer_async(config: Option<&StreamHistoryConfig>) -> Option<Arc<StreamHistoryWriter>> {
+    let cfg = config?;
+    if !cfg.stream_history_enabled {
+        return None;
+    }
+    let directory = cfg.stream_history_directory.clone();
+    match tokio::task::spawn_blocking(move || recover_pending_files(&directory)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => log::warn!("Stream history recovery failed: {e}"),
+        Err(join_err) => log::warn!("Stream history recovery task panicked: {join_err}"),
     }
     Some(Arc::new(StreamHistoryWriter::new(cfg)))
 }
@@ -1656,7 +1751,7 @@ mod tests {
         let event_manager = Arc::new(EventManager::new());
         let provider_manager = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
         let shared_manager = Arc::new(SharedStreamManager::new(Arc::clone(&provider_manager)));
-        provider_manager.set_shared_stream_manager(Arc::clone(&shared_manager));
+        provider_manager.set_shared_stream_manager(&shared_manager);
 
         let geo_ip = Arc::new(ArcSwapOption::<GeoIp>::default());
         let config = app_cfg.config.load();
@@ -2322,7 +2417,7 @@ mod tests {
                     session_token: None,
                 },
                 ConnectionHistoryMode::EmitConnect,
-                1,
+                SharedCleanupCapability::new(tuliprox_core::model::SharedSubscriberId::from_stream_uid(1)),
                 None,
             ),
         )
@@ -2361,7 +2456,6 @@ mod tests {
                 crate::ConnectionKind::Normal,
                 Some(owner),
             )
-            .await
             .expect("acquire provider slot");
         let request_id = handle.playback_request_id.expect("identified request id");
         assert!(manager.provider_manager.provider_lease_usage(&input_name).total() > 0);
@@ -2409,7 +2503,7 @@ mod tests {
         .await
         .expect("provider request must finish even without a user row");
 
-        manager.provider_manager.release_handle(&handle).await;
+        manager.provider_manager.release_handle(&handle);
     }
 
     /// Shutdown releases every active stream so no claim or provider slot survives.
@@ -2446,5 +2540,143 @@ mod tests {
 
         manager.shutdown().await;
         assert!(manager.user_manager.active_streams().await.is_empty(), "shutdown must release active streams");
+    }
+
+    #[tokio::test]
+    async fn shutdown_parallel_requests_on_distinct_sockets_drains_all_claims() {
+        let manager = create_test_connection_manager();
+        let first_addr: SocketAddr = "127.0.0.1:56241".parse().unwrap();
+        let second_addr: SocketAddr = "127.0.0.1:56242".parse().unwrap();
+        let first_fingerprint =
+            tuliprox_core::model::Fingerprint::new("range-first".to_string(), "127.0.0.1".to_string(), first_addr);
+        let second_fingerprint =
+            tuliprox_core::model::Fingerprint::new("range-second".to_string(), "127.0.0.1".to_string(), second_addr);
+        let mut channel = make_stream_info("provider_1", "parallel-range").channel;
+        channel.item_type = PlaylistItemType::Video;
+        channel.cluster = XtreamCluster::Video;
+        let owner = "shutdown-parallel-range";
+        let input_name = "provider_1".intern();
+        let handle = manager
+            .provider_manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &first_addr,
+                false,
+                0,
+                crate::ConnectionKind::Normal,
+                Some(owner),
+            )
+            .expect("provider allocation");
+        let request_id = handle.playback_request_id.expect("provider request id");
+
+        manager.add_connection(&first_addr).await;
+        manager.add_connection(&second_addr).await;
+        let mut first = manager
+            .update_connection_with_uid(
+                ConnectionParams {
+                    meter_uid: 0,
+                    username: "shutdown-range-user",
+                    max_connections: 2,
+                    soft_connections: 0,
+                    connection_kind: crate::ConnectionKind::Normal,
+                    priority: 0,
+                    soft_priority: 0,
+                    fingerprint: &first_fingerprint,
+                    provider: Arc::clone(&input_name),
+                    stream_channel: &channel,
+                    user_agent: std::borrow::Cow::Borrowed("player/1.0"),
+                    session_token: Some(owner),
+                },
+                ConnectionHistoryMode::EmitConnect,
+                1,
+                Some(request_id),
+            )
+            .await;
+        let mut second = manager
+            .update_connection_with_uid(
+                ConnectionParams {
+                    meter_uid: 0,
+                    username: "shutdown-range-user",
+                    max_connections: 2,
+                    soft_connections: 0,
+                    connection_kind: crate::ConnectionKind::Normal,
+                    priority: 0,
+                    soft_priority: 0,
+                    fingerprint: &second_fingerprint,
+                    provider: Arc::clone(&input_name),
+                    stream_channel: &channel,
+                    user_agent: std::borrow::Cow::Borrowed("player/1.0"),
+                    session_token: Some(owner),
+                },
+                ConnectionHistoryMode::EmitConnect,
+                2,
+                None,
+            )
+            .await;
+        assert!(first.display_stream.is_some());
+        assert!(second.display_stream.is_some());
+        assert_eq!(manager.user_manager.active_streams().await.len(), 1);
+        assert_eq!(manager.user_manager.playback_resource_counts().await.0, 2);
+        assert_eq!(manager.provider_manager.get_provider_connections_count(), 1);
+
+        let first_cleanup = first.into_body_cleanup().expect("first cleanup");
+        let second_cleanup = second.into_body_cleanup().expect("second cleanup");
+        manager.shutdown().await;
+
+        assert_eq!(manager.user_manager.playback_resource_counts().await, (0, 0));
+        assert_eq!(manager.provider_manager.get_provider_connections_count(), 0);
+        assert_eq!(manager.provider_manager.provider_lease_usage(&input_name).total(), 0);
+
+        drop(first_cleanup);
+        drop(second_cleanup);
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn shutdown_with_all_cleanup_permits_held_completes() {
+        let manager = create_test_connection_manager();
+        let mut permits = Vec::with_capacity(CLEANUP_QUEUE_CAPACITY);
+        for _ in 0..CLEANUP_QUEUE_CAPACITY {
+            permits.push(manager.cleanup_tx().reserve_owned().await.expect("cleanup receiver open"));
+        }
+        assert_eq!(manager.cleanup_tx().capacity(), 0);
+
+        tokio::time::timeout(Duration::from_secs(2), manager.shutdown())
+            .await
+            .expect("shutdown must not require cleanup queue capacity");
+        drop(permits);
+    }
+
+    #[tokio::test]
+    async fn new_with_capacity_sizes_the_cleanup_queue() {
+        let app_cfg = create_test_app_config();
+        let event_manager = Arc::new(EventManager::new());
+        let provider_manager = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
+        let shared_manager = Arc::new(SharedStreamManager::new(Arc::clone(&provider_manager)));
+        provider_manager.set_shared_stream_manager(&shared_manager);
+        let geo_ip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let config = app_cfg.config.load();
+        let user_manager = Arc::new(ActiveUserManager::new(&config, &geo_ip, &event_manager));
+
+        let manager = Arc::new(ConnectionManager::new_with_capacity(
+            &user_manager,
+            &provider_manager,
+            &shared_manager,
+            &event_manager,
+            None,
+            2,
+        ));
+        assert_eq!(manager.cleanup_tx().capacity(), 2);
+
+        // A capacity of zero is clamped to one so the cleanup queue is always usable.
+        let manager = Arc::new(ConnectionManager::new_with_capacity(
+            &user_manager,
+            &provider_manager,
+            &shared_manager,
+            &event_manager,
+            None,
+            0,
+        ));
+        assert_eq!(manager.cleanup_tx().capacity(), 1);
     }
 }
