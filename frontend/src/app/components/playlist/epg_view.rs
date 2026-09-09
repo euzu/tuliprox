@@ -957,7 +957,7 @@ pub fn EpgView() -> Html {
                     return;
                 };
                 match RecordingService::new().create_task(request).await {
-                    Ok(_) => services.toastr.success(translate.t("MESSAGES.RECORDING.QUEUED")),
+                    Ok(()) => services.toastr.success(translate.t("MESSAGES.RECORDING.QUEUED")),
                     Err(err) => services.toastr.error(err.to_string()),
                 }
             });

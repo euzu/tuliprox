@@ -247,6 +247,10 @@ pub fn recording_library_view() -> Html {
     let sort_state = use_state(|| None::<(usize, SortOrder)>);
     // Distinguishes "still waiting for the first snapshot" from "nothing recorded"
     let initial_loaded = use_state(|| false);
+    // The highest revision rendered so far. A `use_mut_ref` rather than
+    // `use_state` because the subscription closure is created once and
+    // would otherwise keep reading the value it captured.
+    let seen_revision = use_mut_ref(|| None::<u64>);
 
     let request_snapshot = {
         let services = services.clone();
@@ -260,14 +264,28 @@ pub fn recording_library_view() -> Html {
         let services = services.clone();
         let request_snapshot_effect = request_snapshot.clone();
         let initial_loaded = initial_loaded.clone();
+        let seen_revision = seen_revision.clone();
         use_effect_with((), move |()| {
             request_snapshot_effect.emit(());
             let sub_id = services.event.subscribe(move |msg| match msg {
-                crate::model::EventMessage::RecordingSnapshot { tasks, .. } => {
+                crate::model::EventMessage::RecordingSnapshot { revision, tasks, .. } => {
+                    // Revisions are global, so gaps are normal and expected.
+                    // Going backwards is not: that is a reordered delivery,
+                    // and applying it would regress the list to a state the
+                    // server has already moved past.
+                    let mut seen = seen_revision.borrow_mut();
+                    if seen.is_some_and(|last| revision <= last) {
+                        return;
+                    }
+                    *seen = Some(revision);
+                    drop(seen);
                     initial_loaded.set(true);
                     tasks_state.set(tasks);
                 }
                 crate::model::EventMessage::WebSocketStatus(true) => {
+                    // A reconnect must be able to replace stale local state
+                    // even if the server's revision has not moved.
+                    *seen_revision.borrow_mut() = None;
                     request_snapshot_effect.emit(());
                 }
                 _ => {}

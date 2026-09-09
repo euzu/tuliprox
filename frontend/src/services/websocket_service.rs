@@ -390,9 +390,13 @@ fn handle_socket_protocol_msg(
                     | ProtocolMessage::StatusRequest(_)
                     | ProtocolMessage::UserAction(_)
                     | ProtocolMessage::RecordingSnapshotRequest => {}
-                    ProtocolMessage::RecordingSnapshotResponse { revision, tasks } => {
-                        event_service
-                            .broadcast(EventMessage::RecordingSnapshot { revision: revision.0, tasks: Rc::new(tasks) });
+                    ProtocolMessage::RecordingSnapshotResponse { revision, available, quota, tasks } => {
+                        event_service.broadcast(EventMessage::RecordingSnapshot {
+                            revision: revision.0,
+                            available,
+                            quota,
+                            tasks: Rc::new(tasks),
+                        });
                     }
                     ProtocolMessage::RecordingRulesChanged => {
                         event_service.broadcast(EventMessage::RecordingRulesChanged);

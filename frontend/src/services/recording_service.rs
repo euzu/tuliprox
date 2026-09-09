@@ -349,13 +349,17 @@ impl RecordingService {
     /// server; production uses the default constructed by `new`.
     pub fn with_base_path(base_path: String) -> Self { Self { base_path } }
 
-    fn tasks_path(&self) -> String { concat_path_leading_slash(&self.base_path, "tasks") }
+    fn requests_path(&self) -> String { concat_path_leading_slash(&self.base_path, "requests") }
 
-    fn task_path(&self, id: &str) -> String { concat_path_leading_slash(&self.base_path, &format!("tasks/{id}")) }
+    fn request_path(&self, id: &str) -> String { concat_path_leading_slash(&self.base_path, &format!("requests/{id}")) }
+
+    /// The physical recording behind an entry. Administrator-only on the
+    /// server, and a different id space from a request.
+    fn materialization_path(&self, id: &str) -> String {
+        concat_path_leading_slash(&self.base_path, &format!("materializations/{id}"))
+    }
 
     fn conflicts_path(&self) -> String { concat_path_leading_slash(&self.base_path, "conflicts/preview") }
-
-    fn quota_path(&self) -> String { concat_path_leading_slash(&self.base_path, "quota") }
 
     fn rules_path(&self) -> String { concat_path_leading_slash(&self.base_path, "rules") }
 
@@ -363,29 +367,12 @@ impl RecordingService {
 
     fn availability_path(&self) -> String { concat_path_leading_slash(&self.base_path, "availability") }
 
-    /// GET /recording/tasks — list visible tasks.
-    pub async fn list_tasks(&self) -> Result<RecordingSnapshot, RecordingError> {
-        let body: RecordingSnapshot = request_get(&self.tasks_path(), None, Some(Encoding::Json))
-            .await
-            .map_err(network)?
-            .ok_or_else(|| RecordingError::Other("empty response".into()))?;
-        Ok(body)
-    }
-
-    /// POST /recording/tasks — create a recording. The request must
-    /// carry source identifiers, never a free-form URL.
-    pub async fn create_task(&self, request: CreateRecordingTaskRequest) -> Result<RecordingTaskDto, RecordingError> {
-        let body: RecordingTaskDto = request_post(&self.tasks_path(), &request, None, Some(Encoding::Json))
-            .await
-            .map_err(network)?
-            .ok_or_else(|| RecordingError::Other("empty response".into()))?;
-        Ok(body)
-    }
-
-    /// PATCH /recording/tasks/{id}. Backend returns 204 No Content.
-    pub async fn edit_task(&self, id: &str, request: EditRecordingTaskRequest) -> Result<(), RecordingError> {
-        let _ = request_patch::<&EditRecordingTaskRequest, serde_json::Value>(
-            &self.task_path(id),
+    /// POST /recording/requests — create a recording. The request must
+    /// carry source identifiers, never a free-form URL. Answers 204: the
+    /// new entry arrives on the recording snapshot, not in this response.
+    pub async fn create_task(&self, request: CreateRecordingTaskRequest) -> Result<(), RecordingError> {
+        let _ = request_post::<&CreateRecordingTaskRequest, serde_json::Value>(
+            &self.requests_path(),
             &request,
             None,
             Some(Encoding::Json),
@@ -395,11 +382,24 @@ impl RecordingService {
         Ok(())
     }
 
-    /// POST /recording/tasks/{id}/pause
+    /// PATCH /recording/requests/{id}
+    pub async fn edit_task(&self, id: &str, request: EditRecordingTaskRequest) -> Result<(), RecordingError> {
+        let _ = request_patch::<&EditRecordingTaskRequest, serde_json::Value>(
+            &self.request_path(id),
+            &request,
+            None,
+            Some(Encoding::Json),
+        )
+        .await
+        .map_err(network)?;
+        Ok(())
+    }
+
+    /// POST /recording/materializations/{id}/pause
     pub async fn pause_task(&self, id: &str) -> Result<(), RecordingError> {
         let req = RecordingTaskId { id: id.to_string() };
         let _ = request_post::<&RecordingTaskId, serde_json::Value>(
-            &format!("{}/pause", self.task_path(id)),
+            &format!("{}/pause", self.materialization_path(id)),
             &req,
             None,
             Some(Encoding::Json),
@@ -409,11 +409,11 @@ impl RecordingService {
         Ok(())
     }
 
-    /// POST /recording/tasks/{id}/resume
+    /// POST /recording/materializations/{id}/resume
     pub async fn resume_task(&self, id: &str) -> Result<(), RecordingError> {
         let req = RecordingTaskId { id: id.to_string() };
         let _ = request_post::<&RecordingTaskId, serde_json::Value>(
-            &format!("{}/resume", self.task_path(id)),
+            &format!("{}/resume", self.materialization_path(id)),
             &req,
             None,
             Some(Encoding::Json),
@@ -423,11 +423,11 @@ impl RecordingService {
         Ok(())
     }
 
-    /// POST /recording/tasks/{id}/retry
+    /// POST /recording/materializations/{id}/retry
     pub async fn retry_task(&self, id: &str) -> Result<(), RecordingError> {
         let req = RecordingTaskId { id: id.to_string() };
         let _ = request_post::<&RecordingTaskId, serde_json::Value>(
-            &format!("{}/retry", self.task_path(id)),
+            &format!("{}/retry", self.materialization_path(id)),
             &req,
             None,
             Some(Encoding::Json),
@@ -437,19 +437,19 @@ impl RecordingService {
         Ok(())
     }
 
-    /// DELETE /recording/tasks/{id}/remove
+    /// DELETE /recording/requests/{id} — the caller leaves their own
+    /// entry. The file survives while anyone else is still attached.
     pub async fn remove_task(&self, id: &str) -> Result<(), RecordingError> {
-        let _ =
-            request_delete::<serde_json::Value>(&format!("{}/remove", self.task_path(id)), None, Some(Encoding::Json))
-                .await
-                .map_err(network)?;
+        let _ = request_delete::<serde_json::Value>(&self.request_path(id), None, Some(Encoding::Json))
+            .await
+            .map_err(network)?;
         Ok(())
     }
 
     pub async fn cancel_task(&self, id: &str) -> Result<(), RecordingError> {
         let req = RecordingTaskId { id: id.to_string() };
         let _ = request_post::<&RecordingTaskId, serde_json::Value>(
-            &format!("{}/cancel", self.task_path(id)),
+            &format!("{}/cancel", self.request_path(id)),
             &req,
             None,
             Some(Encoding::Json),
@@ -459,9 +459,10 @@ impl RecordingService {
         Ok(())
     }
 
-    /// DELETE /recording/tasks/{id}
+    /// DELETE /recording/materializations/{id} — administrator-only
+    /// physical deletion.
     pub async fn delete_task(&self, id: &str) -> Result<(), RecordingError> {
-        request_delete::<()>(&self.task_path(id), None, None).await.map_err(network)?;
+        request_delete::<()>(&self.materialization_path(id), None, None).await.map_err(network)?;
         Ok(())
     }
 
@@ -473,15 +474,6 @@ impl RecordingService {
         request: &PreviewConflictsRequest,
     ) -> Result<RecordingConflictPreview, RecordingError> {
         let body: RecordingConflictPreview = request_post(&self.conflicts_path(), request, None, Some(Encoding::Json))
-            .await
-            .map_err(network)?
-            .ok_or_else(|| RecordingError::Other("empty response".into()))?;
-        Ok(body)
-    }
-
-    /// GET /recording/quota
-    pub async fn get_quota(&self) -> Result<RecordingQuota, RecordingError> {
-        let body: RecordingQuota = request_get(&self.quota_path(), None, Some(Encoding::Json))
             .await
             .map_err(network)?
             .ok_or_else(|| RecordingError::Other("empty response".into()))?;
@@ -792,10 +784,10 @@ mod tests {
     #[test]
     fn paths_include_api_v1_recording_prefix() {
         let svc = RecordingService::with_base_path("/api/v1/recording".to_string());
-        assert_eq!(svc.tasks_path(), "/api/v1/recording/tasks");
-        assert_eq!(svc.task_path("rec-1"), "/api/v1/recording/tasks/rec-1");
+        assert_eq!(svc.requests_path(), "/api/v1/recording/requests");
+        assert_eq!(svc.request_path("rec-1"), "/api/v1/recording/requests/rec-1");
+        assert_eq!(svc.materialization_path("mat-1"), "/api/v1/recording/materializations/mat-1");
         assert_eq!(svc.conflicts_path(), "/api/v1/recording/conflicts/preview");
-        assert_eq!(svc.quota_path(), "/api/v1/recording/quota");
         assert_eq!(svc.rules_path(), "/api/v1/recording/rules");
         assert_eq!(svc.rule_path("rule-1"), "/api/v1/recording/rules/rule-1");
         assert_eq!(svc.availability_path(), "/api/v1/recording/availability");

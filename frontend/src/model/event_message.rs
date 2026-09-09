@@ -24,6 +24,8 @@ pub enum EventMessage {
     StreamMeterBatch(Vec<StreamMeterEntry>),
     RecordingSnapshot {
         revision: u64,
+        available: bool,
+        quota: shared::model::RecordingQuotaSummaryDto,
         tasks: Rc<Vec<RecordingTaskDto>>,
     },
     RecordingRulesChanged,

@@ -418,7 +418,7 @@ pub fn PlaylistExplorer() -> Html {
                                         epg: None,
                                     };
                                     match RecordingService::new().create_task(request).await {
-                                        Ok(_) => {
+                                        Ok(()) => {
                                             services.toastr.success(translate_clone.t("MESSAGES.RECORDING.QUEUED"));
                                         }
                                         Err(error) => services.toastr.error(error.to_string()),
@@ -481,7 +481,7 @@ pub fn PlaylistExplorer() -> Html {
                                 };
                                 let recording_svc = RecordingService::new();
                                 match recording_svc.create_task(request).await {
-                                    Ok(_) => {
+                                    Ok(()) => {
                                         services.toastr.success(translate_clone.t("MESSAGES.RECORDING.QUEUED"));
                                     }
                                     Err(err) => {
