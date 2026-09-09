@@ -1483,6 +1483,49 @@ match {
     }
 }
 
+#[test]
+fn current_target_finalization_order_merges_before_dedup_and_presentation() {
+    assert_eq!(
+        FINALIZATION_ORDER,
+        [
+            FinalizationStage::Merge,
+            FinalizationStage::Deduplicate,
+            FinalizationStage::Sort,
+            FinalizationStage::AssignChannelNumbers,
+            FinalizationStage::AssignCounters,
+        ]
+    );
+}
+
+#[test]
+fn persist_filter_can_select_a_generated_curation_group() {
+    let mut target = ConfigTarget::from(&ConfigTargetDto::default());
+    target.filter.persist = Some(get_filter(r#"Group = "Trending""#, None).expect("persist filter"));
+    let mut playlist = vec![
+        PlaylistGroup {
+            id: 1,
+            title: "Base".intern(),
+            channels: vec![PlaylistItem {
+                header: PlaylistItemHeader { group: "Base".intern(), ..Default::default() },
+            }],
+            xtream_cluster: XtreamCluster::Video,
+        },
+        PlaylistGroup {
+            id: 2,
+            title: "Trending".intern(),
+            channels: vec![PlaylistItem {
+                header: PlaylistItemHeader { group: "Trending".intern(), ..Default::default() },
+            }],
+            xtream_cluster: XtreamCluster::Video,
+        },
+    ];
+
+    apply_persist_filter(&target, &mut playlist);
+
+    assert_eq!(playlist.len(), 1);
+    assert_eq!(playlist[0].title.as_ref(), "Trending");
+}
+
 #[tokio::test]
 async fn trakt_finalization_stage_is_a_noop_without_xtream_configuration() {
     let target = ConfigTarget::from(&ConfigTargetDto::default());

@@ -342,6 +342,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pagination_at_the_safety_cap_is_currently_returned_as_success() {
+        let client = TraktClient::new(reqwest::Client::new(), api_config("http://127.0.0.1:9".to_string(), "test-key"))
+            .expect("client");
+
+        let items = client
+            .paginate_items("list", "large-list".to_string(), |page| async move {
+                let item = serde_json::from_str::<TraktListItem>(&trakt_movie_json(page))
+                    .expect("test Trakt item should parse");
+                Ok(TraktListItemsPage {
+                    items: vec![item],
+                    page_count: TRAKT_MAX_PAGES + 1,
+                    item_count: Some(TRAKT_MAX_PAGES + 1),
+                })
+            })
+            .await
+            .expect("the current client treats the cap as a successful prefix");
+
+        assert_eq!(items.len(), TRAKT_MAX_PAGES as usize);
+    }
+
+    #[tokio::test]
     async fn get_chart_items_fetches_public_trending_movies() {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let base_url = spawn_single_response_trakt_server(
