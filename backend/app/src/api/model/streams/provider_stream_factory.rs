@@ -1035,7 +1035,6 @@ async fn get_provider_stream(
     }
     debug_if_enabled!("Stopped reconnecting stream {}", sanitize_sensitive_info(stream_options.get_log_url().as_ref()));
     stream_options.cancel_reconnect();
-    ctx.connection_manager.release_provider_connection(&stream_options.addr).await;
     Err(ProviderStreamRequestFailure::Status {
         status: StatusCode::SERVICE_UNAVAILABLE,
         provider_error_class: "service_unavailable",
@@ -1088,7 +1087,6 @@ pub async fn create_provider_stream(
         Ok(None) => None,
         Err(failure) => {
             let status = failure.status();
-            ctx.connection_manager.release_provider_connection(&stream_options.addr).await;
             record_provider_open_failure(
                 ctx,
                 &stream_options,

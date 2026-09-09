@@ -934,6 +934,29 @@
 
 ## 🐛 Fixes
 
+- **Provider priority was ignored and a second concurrent client failed with a source error while capacity was free.**
+  Provider-slot reservations were granted as soon as a playback opened a provider, so an HLS/DASH entry that only ever
+  served a manifest — or a player that retried its manifest and gave up — still held a reservation for the whole
+  `hls_session_ttl_secs` window. Because HLS entry session tokens carry a per-attempt suffix, every retry created a
+  *separate* reservation under a *separate* owner. Those reservations were foreign to one another and to unrelated
+  clients, so a higher-priority provider was skipped as reserved even after the active connection counters had reached
+  zero and playback fell through to a lower-priority alias. Clients sharing one reverse-proxy socket hit this
+  constantly, which looked like exhausted capacity or socket-based reservation collisions.
+
+  Reservations are now provider slot leases with an explicit confirmation step. A lease starts unconfirmed, pins the
+  provider for its own playback, and blocks nobody else. Only real media delivery confirms it — the first provider media
+  byte forwarded to a client as an `OK`/`206` media response. Manifest, HEAD, key, map and error fetches never confirm a
+  lease — and only a confirmed lease with a configured reconnect
+  window reserves capacity against other playbacks. Unconfirmed leases expire after a short startup deadline regardless
+  of TTL, so abandoned starts and manifest-retry loops no longer accumulate. One owner holds at most one lease, so
+  repeated requests of the same playback reuse their slot instead of stacking a reservation per attempt.
+
+  Lease end is outcome-driven: a clean finish of a reconnect-capable playback (HLS, DASH, VOD, series, catchup) keeps the
+  slot as an idle lease for its window, while provider failure, preemption, kick and timeout release capacity
+  immediately. The `Skipping reserved provider ... for <SocketAddr>` message is replaced by a structured decision log
+  carrying the reason, current and maximum connections, foreign reserved slots, and the active/starting/idle slot split,
+  so a fallback decision can be audited without inferring it from a socket address.
+
 - **Empty playlist updates no longer replace previously published input or target data.** A completely empty refresh is
   treated as a failed update and keeps the last usable playlist and its virtual-ID mapping intact. This prevents
   transient provider/download failures from making channels disappear or assigning different IDs when service

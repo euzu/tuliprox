@@ -1161,7 +1161,7 @@ pub(in crate::api) async fn ensure_download_worker_running(
                             };
                             if let Some(input_name) = input_name {
                                 loop {
-                                    let capacities = active_provider.provider_capacities_for_input(&input_name).await;
+                                    let capacities = active_provider.provider_capacities_for_input(&input_name);
                                     if background_download_should_wait(priority, &capacities, &download_cfg) {
                                         if let Err(err) = broadcast_worker_mutation(
                                             &event_manager,
@@ -1729,7 +1729,7 @@ pub(in crate::api) fn start_download_scheduler(
                 let capacities = if let Some(capacities) = capacities_by_input.get(input_name) {
                     capacities.clone()
                 } else {
-                    let capacities = bridge_active_provider.provider_capacities_for_input(input_name).await;
+                    let capacities = bridge_active_provider.provider_capacities_for_input(input_name);
                     capacities_by_input.insert(Arc::clone(input_name), capacities.clone());
                     capacities
                 };

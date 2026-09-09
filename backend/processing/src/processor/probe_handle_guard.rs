@@ -15,23 +15,18 @@ impl ProbeHandleGuard {
     #[inline]
     pub fn handle(&self) -> Option<&ProviderHandle> { self.handle.as_ref() }
 
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn release(mut self) {
         if let Some(handle) = self.handle.take() {
-            self.manager.release_handle(&handle).await;
+            self.manager.release_handle_sync(&handle);
         }
     }
 }
 
 impl Drop for ProbeHandleGuard {
     fn drop(&mut self) {
-        let Some(handle) = self.handle.take() else {
-            return;
-        };
-        let manager = Arc::clone(&self.manager);
-        if let Ok(runtime_handle) = tokio::runtime::Handle::try_current() {
-            runtime_handle.spawn(async move {
-                manager.release_handle(&handle).await;
-            });
+        if let Some(handle) = self.handle.take() {
+            self.manager.release_handle_sync(&handle);
         }
     }
 }
@@ -107,13 +102,37 @@ mod tests {
             .acquire_connection_for_probe(&input_name, default_probe_user_priority())
             .await
             .expect("probe allocation should succeed");
-        assert_eq!(manager.get_provider_connections_count().await, 1);
+        assert_eq!(manager.get_provider_connections_count(), 1);
 
         let guard = ProbeHandleGuard::new(&manager, handle);
         drop(guard);
-        tokio::task::yield_now().await;
-        tokio::task::yield_now().await;
 
-        assert_eq!(manager.get_provider_connections_count().await, 0);
+        assert_eq!(manager.get_provider_connections_count(), 0);
+    }
+
+    #[test]
+    fn probe_handle_guard_releases_provider_slot_outside_tokio_runtime() {
+        let rt =
+            tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio runtime should build");
+
+        let (manager, guard) = rt.block_on(async {
+            let app_cfg = create_test_app_config();
+            let event_manager = Arc::new(EventManager::new());
+            let manager = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
+            let input_name = "provider_1".intern();
+
+            let handle = manager
+                .acquire_connection_for_probe(&input_name, default_probe_user_priority())
+                .await
+                .expect("probe allocation should succeed");
+            assert_eq!(manager.get_provider_connections_count(), 1);
+
+            let guard = ProbeHandleGuard::new(&manager, handle);
+            (manager, guard)
+        });
+
+        // Drop outside of any tokio runtime context:
+        drop(guard);
+        assert_eq!(manager.get_provider_connections_count(), 0);
     }
 }

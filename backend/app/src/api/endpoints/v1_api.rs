@@ -58,7 +58,7 @@ pub async fn create_status_check(app_state: &Arc<AppState>) -> StatusCheck {
     };
 
     let active_provider_connections =
-        app_state.active_provider.active_connections().await.map(|c| c.into_iter().collect::<BTreeMap<_, _>>());
+        app_state.active_provider.active_connections().map(|c| c.into_iter().collect::<BTreeMap<_, _>>());
 
     StatusCheck {
         status: "ok".to_string(),

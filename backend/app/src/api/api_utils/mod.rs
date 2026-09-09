@@ -9,11 +9,10 @@ use crate::{
             create_active_client_stream, create_channel_unavailable_stream, create_custom_video_stream_response,
             create_provider_connections_exhausted_stream, create_provider_stream,
             get_custom_stream_response_error_status, get_stream_response_with_headers, is_custom_video_stream_enabled,
-            tee_stream, AppState, BoxedProviderStream, CustomVideoStreamType, PendingProviderReason,
-            ProviderAllocation, ProviderConfig, ProviderHandle, ProviderStreamCustomReason,
-            ProviderStreamFactoryOptions, ProviderStreamInfo, ProviderStreamState, SharedStreamCtx,
-            SharedStreamManager, StreamDetails, StreamError, StreamingStrategy, ThrottledStream, UserApiRequest,
-            UserSession,
+            tee_stream, AppState, BoxedProviderStream, CustomVideoStreamType, PendingProviderReason, PlaybackLeaseRef,
+            ProviderAllocation, ProviderConfig, ProviderStreamCustomReason, ProviderStreamFactoryOptions,
+            ProviderStreamInfo, ProviderStreamState, SharedStreamCtx, SharedStreamManager, StreamAdmissionError,
+            StreamDetails, StreamError, StreamingStrategy, ThrottledStream, UserApiRequest, UserSession,
         },
     },
     auth::Fingerprint,
@@ -25,7 +24,9 @@ use crate::{
         },
         MediaServerError, MediaServerErrorKind, MediaServerHttpClient, MediaServerImageRef,
     },
-    model::{AppConfig, ConfigInput, ConfigInputFlags, ConfigTarget, InputUserInfo, ProxyUserCredentials},
+    model::{
+        AppConfig, ConfigInput, ConfigInputFlags, ConfigTarget, InputUserInfo, PlaybackKind, ProxyUserCredentials,
+    },
     processing::{
         parser::hls::{rewrite_hls, RewriteHlsProps},
         processor::re_resolve_stalker_url,
@@ -181,6 +182,14 @@ pub(crate) fn admission_failure_response(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     create_custom_video_stream_response(&app_state.provider_stream_ctx(), &fingerprint.addr, video_type).into_response()
+}
+
+/// Produces a defined non-success response for a rejected playback request. Unlike the
+/// upstream provider response, this carries no Content-Length/Content-Range so downstream
+/// players receive an unambiguous error instead of an empty success body.
+fn stream_admission_rejected_response(error: StreamAdmissionError, username: &str) -> axum::response::Response {
+    error!("Stream admission rejected for user {username}: {error:?}");
+    StatusCode::SERVICE_UNAVAILABLE.into_response()
 }
 
 #[macro_export]
@@ -439,6 +448,7 @@ struct StreamingAcquireOptions<'a> {
     user_priority: i8,
     connection_kind: crate::api::model::ConnectionKind,
     session_owner: Option<&'a str>,
+    playback_kind: PlaybackKind,
     accept_requested_stream_url: bool,
 }
 
@@ -1142,23 +1152,25 @@ async fn acquire_stream_provider_handle(
     input: &ConfigInput,
     fingerprint: &Fingerprint,
     options: StreamingAcquireOptions<'_>,
-) -> Option<ProviderHandle> {
+) -> Option<tuliprox_session::ManagedProviderHandle> {
+    let lease = options.session_owner.map(|owner| PlaybackLeaseRef::new(owner, options.playback_kind));
+    let managed = |handle| tuliprox_session::ManagedProviderHandle::new(Arc::clone(&app_state.active_provider), handle);
     match options.force_provider {
         Some(provider) => {
             // First try to stay on the exact pinned provider account without over-allocating.
             if let Some(handle) = app_state
                 .active_provider
-                .acquire_exact_connection_with_grace_for_session(
+                .acquire_exact_connection_with_lease_for_session(
                     provider,
                     &fingerprint.addr,
                     options.allow_provider_grace,
                     options.user_priority,
                     options.connection_kind,
-                    options.session_owner,
+                    lease,
                 )
                 .await
             {
-                Some(handle)
+                Some(managed(handle))
             } else if options.allow_forced_provider_fallback {
                 debug_if_enabled!(
                     "Pinned provider {} unavailable for {}; falling back to lineup allocation",
@@ -1167,15 +1179,16 @@ async fn acquire_stream_provider_handle(
                 );
                 app_state
                     .active_provider
-                    .acquire_connection_with_grace_for_session(
+                    .acquire_connection_with_lease_for_session(
                         &input.name,
                         &fingerprint.addr,
                         options.allow_provider_grace,
                         options.user_priority,
                         options.connection_kind,
-                        options.session_owner,
+                        lease,
                     )
                     .await
+                    .map(managed)
             } else {
                 debug_if_enabled!(
                     "Pinned provider {} unavailable for {}; strict provider affinity prevents fallback",
@@ -1185,19 +1198,18 @@ async fn acquire_stream_provider_handle(
                 None
             }
         }
-        None => {
-            app_state
-                .active_provider
-                .acquire_connection_with_grace_for_session(
-                    &input.name,
-                    &fingerprint.addr,
-                    options.allow_provider_grace,
-                    options.user_priority,
-                    options.connection_kind,
-                    options.session_owner,
-                )
-                .await
-        }
+        None => app_state
+            .active_provider
+            .acquire_connection_with_lease_for_session(
+                &input.name,
+                &fingerprint.addr,
+                options.allow_provider_grace,
+                options.user_priority,
+                options.connection_kind,
+                lease,
+            )
+            .await
+            .map(managed),
     }
 }
 
@@ -1208,13 +1220,9 @@ pub(crate) fn resolve_redirect_location<'a>(
     input.map_or(Ok(Cow::Borrowed(stream_url)), |input| input.resolve_url(stream_url))
 }
 
-async fn get_redirect_alternative_url(
-    app_state: &Arc<AppState>,
-    redirect_url: &Arc<str>,
-    input: &ConfigInput,
-) -> Arc<str> {
+fn get_redirect_alternative_url(app_state: &Arc<AppState>, redirect_url: &Arc<str>, input: &ConfigInput) -> Arc<str> {
     if let Some((base_url, username, password)) = input.get_matched_config_by_url(redirect_url) {
-        if let Some(provider_cfg) = app_state.active_provider.get_next_provider(&input.name).await {
+        if let Some(provider_cfg) = app_state.active_provider.get_next_provider(&input.name) {
             let mut new_url = redirect_url.replacen(base_url, provider_cfg.url.as_str(), 1);
             if let (Some(old_username), Some(old_password)) = (username, password) {
                 if let (Some(new_username), Some(new_password)) =
@@ -1263,7 +1271,8 @@ async fn resolve_streaming_strategy(
     // panel_api provisioning/loading is handled later in the stream creation flow
 
     let mut release_failed_mapping = false;
-    let stream_response_params = if let Some(allocation) = provider_connection_handle.as_ref().map(|ph| &ph.allocation)
+    let stream_response_params = if let Some(allocation) =
+        provider_connection_handle.as_ref().and_then(|managed| managed.handle()).map(|ph| &ph.allocation)
     {
         match allocation {
             ProviderAllocation::Exhausted => {
@@ -1319,12 +1328,9 @@ async fn resolve_streaming_strategy(
     };
 
     if release_failed_mapping {
-        if let Some(handle) = provider_connection_handle.take() {
-            let connection_manager = Arc::clone(&app_state.connection_manager);
-            tokio::spawn(async move {
-                connection_manager.release_provider_handle(Some(handle)).await;
-            });
-        }
+        // The managed owner releases the provider slot synchronously on drop; no
+        // task-per-drop and no lossy cleanup message.
+        drop(provider_connection_handle.take());
     }
 
     StreamingStrategy {
@@ -1490,6 +1496,7 @@ async fn create_stream_response_details(
             user_priority,
             connection_kind,
             session_owner,
+            playback_kind: PlaybackKind::classify(item_type, extract_extension_from_url(stream_url)),
             accept_requested_stream_url,
         },
     )
@@ -1514,16 +1521,19 @@ async fn create_stream_response_details(
     let provider_grace_active =
         matches!(streaming_strategy.provider_stream_state, ProviderStreamState::GracePeriod(_, _));
 
-    let guard_provider_name =
-        streaming_strategy.provider_handle.as_ref().and_then(|guard| guard.allocation.get_provider_name());
+    let guard_provider_name = streaming_strategy
+        .provider_handle
+        .as_ref()
+        .and_then(|managed| managed.handle())
+        .and_then(|handle| handle.allocation.get_provider_name());
 
     if matches!(
         streaming_strategy.provider_stream_state,
         ProviderStreamState::Custom { reason: ProviderStreamCustomReason::ProviderExhausted, .. }
     ) && can_provision_on_exhausted(app_state, input)
     {
-        if let Some(handle) = streaming_strategy.provider_handle.take() {
-            app_state.connection_manager.release_provider_handle(Some(handle)).await;
+        if let Some(managed) = streaming_strategy.provider_handle.take() {
+            drop(managed);
         }
         debug_if_enabled!(
             "panel_api: provider connections exhausted; sending provisioning stream for input {}",
@@ -1549,6 +1559,7 @@ async fn create_stream_response_details(
             // Use input.name as fallback so the provider field is never empty.
             let provider_name = guard_provider_name.clone().unwrap_or_else(|| input.name.clone());
             Ok(StreamDetails {
+                shared_subscriber_id: None,
                 stream,
                 stream_info,
                 provider_name: Some(provider_name),
@@ -1560,7 +1571,7 @@ async fn create_stream_response_details(
                 provider_grace_active: false,
                 disable_provider_grace: false,
                 reconnect_flag: None,
-                provider_handle: streaming_strategy.provider_handle.clone(),
+                provider_handle: streaming_strategy.provider_handle.take(),
                 content_representation,
                 grace_resolution_context,
             })
@@ -1580,7 +1591,7 @@ async fn create_stream_response_details(
                 is_reopen,
             ) {
                 if let Some(provider_name) = guard_provider_name.as_ref() {
-                    app_state.active_provider.is_over_limit(provider_name).await
+                    app_state.active_provider.is_over_limit(provider_name)
                 } else {
                     false
                 }
@@ -1748,9 +1759,12 @@ async fn create_stream_response_details(
 
             // An intentional deferred open must retain its grace allocation until body polling
             // resumes the provider request. Other failed opens release their allocation here.
-            let provider_handle = if stream.is_none() && !defer_provider_stream_until_grace_check {
-                let provider_handle = streaming_strategy.provider_handle.take();
-                app_state.connection_manager.release_provider_handle(provider_handle).await;
+            let failed_open = stream.is_none()
+                || matches!(stream_info.as_ref(), Some((_, _, _, Some(custom))) if *custom != CustomVideoStreamType::Provisioning);
+            let provider_handle = if failed_open && !defer_provider_stream_until_grace_check {
+                // The managed owner releases the provider slot synchronously on drop;
+                // a failed open must not rely on a lossy cleanup message.
+                drop(streaming_strategy.provider_handle.take());
                 error!("Can't open stream {}", sanitize_sensitive_info(&request_url));
                 None
             } else {
@@ -1758,6 +1772,7 @@ async fn create_stream_response_details(
             };
 
             Ok(StreamDetails {
+                shared_subscriber_id: None,
                 stream,
                 stream_info,
                 provider_name: guard_provider_name.clone(),
@@ -1839,7 +1854,7 @@ where
             };
             let redirect_url =
                 if is_dash_request { replace_url_extension(&redirect_url, DASH_EXT).into() } else { redirect_url };
-            let redirect_url = get_redirect_alternative_url(app_state, &redirect_url, params.input).await;
+            let redirect_url = get_redirect_alternative_url(app_state, &redirect_url, params.input);
             let redirect_url = match resolve_redirect_location(Some(params.input), &redirect_url) {
                 Ok(url) => url,
                 Err(err) => {
@@ -1871,7 +1886,7 @@ where
                     );
                     return Some(StatusCode::BAD_REQUEST.into_response());
                 }
-                Some(url) => match app_state.active_provider.get_next_provider(&params.input.name).await {
+                Some(url) => match app_state.active_provider.get_next_provider(&params.input.name) {
                     Some(provider_cfg) => match get_stream_alternative_url(&url, params.input, &provider_cfg) {
                         Some(stream_url) => stream_url,
                         None => return Some(StatusCode::BAD_REQUEST.into_response()),
@@ -2068,7 +2083,7 @@ pub async fn force_provider_stream_response(
             sanitize_sensitive_info(&user_session.token),
             sanitize_sensitive_info(&fingerprint.addr.to_string())
         );
-        cleanup_forced_reopen_addrs(app_state, item_type, &cleanup_addrs).await;
+        cleanup_forced_reopen_addrs(app_state, &user_session.token, &cleanup_addrs).await;
     }
 
     // Provider-affine playback must stay on the same provider account across seeks/range reconnects.
@@ -2136,14 +2151,19 @@ pub async fn force_provider_stream_response(
             if let Some(provider_name) = stream_details.provider_name.as_ref() {
                 app_state
                     .active_provider
-                    .refresh_provider_reservation(provider_name, &user_session.token, ctx.session_reservation_ttl_secs)
+                    .refresh_adaptive_playback_lease(
+                        provider_name,
+                        &user_session.token,
+                        PlaybackKind::classify(item_type, extract_extension_from_url(user_session.stream_url.as_ref())),
+                        ctx.session_reservation_ttl_secs,
+                    )
                     .await;
             }
         }
         app_state.active_users.update_session_addr(&ctx.user.username, &user_session.token, &fingerprint.addr).await;
         stream_channel.shared = share_stream;
         let socket_bound = user_session.socket_bound;
-        let stream = create_active_client_stream(crate::api::model::ActiveClientStreamParams {
+        let stream = match create_active_client_stream(crate::api::model::ActiveClientStreamParams {
             stream_details,
             app_state,
             user: ctx.user,
@@ -2157,7 +2177,17 @@ pub async fn force_provider_stream_response(
             meter_uid: metering.meter_uid,
             meter_stream: metering.meter_stream,
         })
-        .await;
+        .await
+        {
+            Ok(stream) => stream,
+            Err(error) => {
+                app_state
+                    .active_users
+                    .release_unbound_session_reservation(&ctx.user.username, &user_session.token, None, false)
+                    .await;
+                return stream_admission_rejected_response(error, &ctx.user.username);
+            }
+        };
 
         let (status_code, header_map) = get_stream_response_with_headers(provider_response.map(|(h, s, _, _)| (h, s)));
         let mut response = axum::response::Response::builder().status(status_code);
@@ -2177,7 +2207,7 @@ pub async fn force_provider_stream_response(
         return response;
     }
 
-    app_state.connection_manager.release_provider_handle(stream_details.provider_handle).await;
+    app_state.connection_manager.release_managed_provider_handle(stream_details.provider_handle);
     app_state
         .active_users
         .release_unbound_session_reservation(&ctx.user.username, &user_session.token, None, false)
@@ -2469,8 +2499,37 @@ pub(crate) async fn stream_response(
                 is_stream_shared = false;
             }
         }
+        let shared_subscriber_id =
+            tuliprox_core::model::SharedSubscriberId::from_stream_uid(app_state.connection_manager.next_stream_uid());
+        let pending_shared_cleanup = if is_stream_shared {
+            match SharedStreamManager::reserve_subscriber_cleanup(
+                &app_state.connection_manager,
+                shared_subscriber_id,
+                fingerprint.addr,
+            )
+            .await
+            {
+                Ok(cleanup) => Some(cleanup),
+                Err(reason) => {
+                    app_state
+                        .active_users
+                        .release_unbound_session_reservation(
+                            &user.username,
+                            session_token,
+                            activation.placeholder_transition_version,
+                            activation.placeholder_transition_version.is_some(),
+                        )
+                        .await;
+                    return stream_admission_rejected_response(reason.into(), &user.username);
+                }
+            }
+        } else {
+            None
+        };
         let provider_handle = if is_stream_shared && !stream_details.has_deferred_provider_open() {
-            stream_details.provider_handle.take()
+            // The shared-stream manager is the new owner; transfer the raw handle without
+            // an intermediate await so the slot is never left without a release owner.
+            stream_details.provider_handle.take().and_then(|mut managed| managed.disarm())
         } else {
             None
         };
@@ -2483,7 +2542,10 @@ pub(crate) async fn stream_response(
             stream_channel.shared_joined_existing = None;
             stream_channel.shared_stream_id = None;
         }
-        let stream = create_active_client_stream(crate::api::model::ActiveClientStreamParams {
+        if is_stream_shared {
+            stream_details.shared_subscriber_id = Some(shared_subscriber_id);
+        }
+        let stream = match create_active_client_stream(crate::api::model::ActiveClientStreamParams {
             stream_details,
             app_state,
             user,
@@ -2497,12 +2559,30 @@ pub(crate) async fn stream_response(
             meter_uid: metering.meter_uid,
             meter_stream: metering.meter_stream,
         })
-        .await;
+        .await
+        {
+            Ok(stream) => stream,
+            Err(error) => {
+                app_state
+                    .active_users
+                    .release_unbound_session_reservation(
+                        &user.username,
+                        session_token,
+                        activation.placeholder_transition_version,
+                        activation.placeholder_transition_version.is_some(),
+                    )
+                    .await;
+                return stream_admission_rejected_response(error, &user.username);
+            }
+        };
         let stream_resp = if is_stream_shared {
             debug_if_enabled!(
                 "Streaming shared stream request from {}",
                 sanitize_sensitive_info(log_actual_request_url.as_ref())
             );
+            let Some(pending_shared_cleanup) = pending_shared_cleanup else {
+                return stream_admission_rejected_response(StreamAdmissionError::RegistrationRejected, &user.username);
+            };
             // Shared Stream response
             let shared_headers = provider_response.as_ref().map_or_else(Vec::new, |(h, _, _, _)| h.clone());
             if let Some((broadcast_stream, _shared_provider)) = SharedStreamManager::register_shared_stream(
@@ -2515,9 +2595,11 @@ pub(crate) async fn stream_response(
                 stream_url,
                 stream,
                 &fingerprint.addr,
+                shared_subscriber_id,
                 shared_headers,
                 stream_options.buffer_size,
                 provider_handle,
+                pending_shared_cleanup,
                 connection_priority_for_kind(user, connection_kind),
                 connection_kind,
             )
@@ -2620,7 +2702,12 @@ pub(crate) async fn stream_response(
                         if reservation_ttl_secs > 0 {
                             app_state
                                 .active_provider
-                                .refresh_provider_reservation(&provider, session_token, reservation_ttl_secs)
+                                .refresh_adaptive_playback_lease(
+                                    &provider,
+                                    session_token,
+                                    PlaybackKind::classify(item_type, playback_extension),
+                                    reservation_ttl_secs,
+                                )
                                 .await;
                         }
                     }
@@ -2635,7 +2722,7 @@ pub(crate) async fn stream_response(
 
         return stream_resp.into_response();
     }
-    app_state.connection_manager.release_provider_handle(stream_details.provider_handle).await;
+    app_state.connection_manager.release_managed_provider_handle(stream_details.provider_handle);
     app_state
         .active_users
         .release_unbound_session_reservation(
@@ -2751,9 +2838,14 @@ async fn detected_catchup_hls_response(params: DetectedCatchupHlsResponseParams<
     }
     app_state
         .active_provider
-        .refresh_provider_reservation(&provider, &created_session_token, get_catchup_session_ttl_secs(app_state))
+        .refresh_adaptive_playback_lease(
+            &provider,
+            &created_session_token,
+            PlaybackKind::Catchup,
+            get_catchup_session_ttl_secs(app_state),
+        )
         .await;
-    app_state.connection_manager.release_provider_handle(stream_details.provider_handle.take()).await;
+    app_state.connection_manager.release_managed_provider_handle(stream_details.provider_handle.take());
     app_state
         .active_users
         .release_unbound_session_reservation(&user.username, &created_session_token, None, false)
@@ -2779,7 +2871,7 @@ async fn cleanup_failed_detected_catchup_hls(
     username: &str,
     session_token: &str,
 ) {
-    app_state.connection_manager.release_provider_handle(stream_details.provider_handle.take()).await;
+    app_state.connection_manager.release_managed_provider_handle(stream_details.provider_handle.take());
     app_state.active_users.terminate_session(username, session_token).await;
     app_state.active_provider.clear_provider_reservation(session_token).await;
 }
@@ -2889,18 +2981,8 @@ pub(crate) fn get_hls_session_ttl_secs(app_state: &Arc<AppState>) -> u64 {
     get_stream_config_u64(app_state, |stream| stream.hls_session_ttl_secs, default_hls_session_ttl_secs())
 }
 
-async fn cleanup_forced_reopen_addrs(
-    app_state: &Arc<AppState>,
-    item_type: PlaylistItemType,
-    cleanup_addrs: &[SocketAddr],
-) {
-    let close_client_socket = !(item_type.is_live_adaptive() || item_type == PlaylistItemType::Catchup);
-    for addr in cleanup_addrs {
-        app_state.connection_manager.release_provider_connection(addr).await;
-        if close_client_socket {
-            let _ = app_state.connection_manager.close_connection_signal(addr);
-        }
-    }
+async fn cleanup_forced_reopen_addrs(app_state: &Arc<AppState>, session_owner: &str, cleanup_addrs: &[SocketAddr]) {
+    app_state.active_provider.release_playback_connections(session_owner, cleanup_addrs).await;
 }
 
 pub(crate) fn get_catchup_session_ttl_secs(app_state: &Arc<AppState>) -> u64 {
@@ -2950,7 +3032,9 @@ async fn try_shared_stream_response_if_any(
     session_token: &str,
     req_headers: &HeaderMap,
 ) -> Option<impl IntoResponse> {
-    if let Some((stream, provider)) = SharedStreamManager::subscribe_shared_stream(
+    let subscriber_id =
+        tuliprox_core::model::SharedSubscriberId::from_stream_uid(app_state.connection_manager.next_stream_uid());
+    let shared_subscription = SharedStreamManager::subscribe_shared_stream(
         SharedStreamCtx {
             app_config: &app_state.app_config,
             shared_stream_manager: &app_state.shared_stream_manager,
@@ -2959,71 +3043,79 @@ async fn try_shared_stream_response_if_any(
         },
         stream_url,
         &fingerprint.addr,
+        subscriber_id,
         connection_priority_for_kind(user, connection_kind),
         connection_kind,
     )
-    .await
-    {
-        debug_if_enabled!("Using shared stream {}", sanitize_sensitive_info(stream_url));
-        if let Some(headers) = app_state.shared_stream_manager.get_shared_state_headers(stream_url).await {
-            let (status_code, header_map) = get_stream_response_with_headers(Some((headers.clone(), StatusCode::OK)));
-            let mut grace_period_options = app_state.get_grace_options();
-            if connect_permission != UserConnectionPermission::GracePeriod {
-                grace_period_options.period_millis = 0;
-            }
-            let mut stream_details = StreamDetails::from_stream(stream, grace_period_options);
-
-            stream_details.provider_name = provider;
-            let socket_bound =
-                is_socket_bound_playback_session(stream_channel.item_type, extract_extension_from_url(stream_url));
-            if let Some(provider_name) = stream_details.provider_name.as_deref() {
-                let _ = app_state
-                    .active_users
-                    .create_user_session(crate::api::model::CreateUserSessionParams {
-                        user,
-                        session_token,
-                        virtual_id: stream_channel.virtual_id,
-                        provider: provider_name,
-                        stream_url,
-                        addr: &fingerprint.addr,
-                        connection_permission: connect_permission,
-                        connection_kind: Some(connection_kind),
-                        socket_bound,
-                    })
-                    .await;
-            }
-            stream_channel.shared = true;
-            stream_channel.shared_joined_existing = Some(true);
-            let meter_uid = app_state
-                .shared_stream_manager
-                .get_or_register_meter_uid(stream_url, || app_state.connection_manager.next_stream_uid())
-                .await;
-            stream_channel.shared_stream_id = Some(u64::from(meter_uid));
-            let metering = StreamMeteringConfig { meter_uid, meter_stream: false };
-            let stream = create_active_client_stream(crate::api::model::ActiveClientStreamParams {
-                stream_details,
-                app_state,
-                user,
-                connection_permission: connect_permission,
-                connection_kind,
-                fingerprint,
-                stream_channel,
-                socket_bound,
-                session_token: Some(session_token),
-                req_headers,
-                meter_uid: metering.meter_uid,
-                meter_stream: metering.meter_stream,
-            })
-            .await
-            .boxed();
-            let mut response = axum::response::Response::builder().status(status_code);
-            for (key, value) in &header_map {
-                response = response.header(key, value);
-            }
-            let mut response = response.body(axum::body::Body::from_stream(stream)).ok()?;
-            mark_response_as_uncompressed(&mut response);
-            return Some(response);
+    .await;
+    let (stream, provider) = match shared_subscription {
+        Ok(Some(subscription)) => subscription,
+        Ok(None) => return None,
+        Err(reason) => return Some(stream_admission_rejected_response(reason.into(), &user.username)),
+    };
+    debug_if_enabled!("Using shared stream {}", sanitize_sensitive_info(stream_url));
+    if let Some(headers) = app_state.shared_stream_manager.get_shared_state_headers(stream_url).await {
+        let (status_code, header_map) = get_stream_response_with_headers(Some((headers.clone(), StatusCode::OK)));
+        let mut grace_period_options = app_state.get_grace_options();
+        if connect_permission != UserConnectionPermission::GracePeriod {
+            grace_period_options.period_millis = 0;
         }
+        let mut stream_details = StreamDetails::from_stream(stream, grace_period_options);
+        stream_details.shared_subscriber_id = Some(subscriber_id);
+
+        stream_details.provider_name = provider;
+        let socket_bound =
+            is_socket_bound_playback_session(stream_channel.item_type, extract_extension_from_url(stream_url));
+        if let Some(provider_name) = stream_details.provider_name.as_deref() {
+            let _ = app_state
+                .active_users
+                .create_user_session(crate::api::model::CreateUserSessionParams {
+                    user,
+                    session_token,
+                    virtual_id: stream_channel.virtual_id,
+                    provider: provider_name,
+                    stream_url,
+                    addr: &fingerprint.addr,
+                    connection_permission: connect_permission,
+                    connection_kind: Some(connection_kind),
+                    socket_bound,
+                })
+                .await;
+        }
+        stream_channel.shared = true;
+        stream_channel.shared_joined_existing = Some(true);
+        let meter_uid = app_state
+            .shared_stream_manager
+            .get_or_register_meter_uid(stream_url, || app_state.connection_manager.next_stream_uid())
+            .await;
+        stream_channel.shared_stream_id = Some(u64::from(meter_uid));
+        let metering = StreamMeteringConfig { meter_uid, meter_stream: false };
+        let stream = match create_active_client_stream(crate::api::model::ActiveClientStreamParams {
+            stream_details,
+            app_state,
+            user,
+            connection_permission: connect_permission,
+            connection_kind,
+            fingerprint,
+            stream_channel,
+            socket_bound,
+            session_token: Some(session_token),
+            req_headers,
+            meter_uid: metering.meter_uid,
+            meter_stream: metering.meter_stream,
+        })
+        .await
+        {
+            Ok(stream) => stream.boxed(),
+            Err(error) => return Some(stream_admission_rejected_response(error, &user.username)),
+        };
+        let mut response = axum::response::Response::builder().status(status_code);
+        for (key, value) in &header_map {
+            response = response.header(key, value);
+        }
+        let mut response = response.body(axum::body::Body::from_stream(stream)).ok()?;
+        mark_response_as_uncompressed(&mut response);
+        return Some(response);
     }
     None
 }
@@ -3277,7 +3369,7 @@ pub(crate) async fn local_stream_response(
             .await;
     }
     let metering = prepare_stream_metering(app_state, &pli.url, false, true, false).await;
-    let stream = create_active_client_stream(crate::api::model::ActiveClientStreamParams {
+    let stream = match create_active_client_stream(crate::api::model::ActiveClientStreamParams {
         stream_details: StreamDetails::from_stream(stream, grace_period_options),
         app_state,
         user,
@@ -3291,7 +3383,11 @@ pub(crate) async fn local_stream_response(
         meter_uid: metering.meter_uid,
         meter_stream: metering.meter_stream,
     })
-    .await;
+    .await
+    {
+        Ok(stream) => stream,
+        Err(error) => return stream_admission_rejected_response(error, &user.username),
+    };
 
     let mut response = Response::new(axum::body::Body::from_stream(stream));
 
@@ -3840,8 +3936,22 @@ pub(crate) fn create_playback_session_fingerprint(
     create_session_fingerprint(fingerprint, username, virtual_id, socket_bound)
 }
 
-pub fn create_catchup_session_key(fingerprint: &Fingerprint, username: &str, virtual_id: u32) -> String {
-    concat_string!("catchup|", &fingerprint.key, "|", username, "|", &virtual_id.to_string(), "|session")
+pub fn create_catchup_session_key(
+    fingerprint: &Fingerprint,
+    username: &str,
+    virtual_id: u32,
+    archive_discriminator: &str,
+) -> String {
+    concat_string!(
+        "catchup|",
+        &fingerprint.key,
+        "|",
+        username,
+        "|",
+        &virtual_id.to_string(),
+        "|",
+        archive_discriminator.trim_matches('/')
+    )
 }
 
 pub fn create_m3u_catchup_session_key(

@@ -127,22 +127,52 @@ That logic lives in `ActiveUserManager` and uses:
 - `build_preserved_stream_expiry(...)`
 - `process_due_adaptive_expiry_entries(...)`
 
-### Provider reservation
+### Provider slot lease
 
-Provider reservation is a provider-slot affinity mechanism, not a user admission mechanism.
+A provider reservation is now a *slot lease* owned by a playback identity, not by a socket. It is a provider-slot
+affinity mechanism, not a user admission mechanism. One owner holds at most one lease, so repeated requests of the same
+playback reuse the slot instead of stacking a reservation per attempt.
 
-Current TTL mapping:
+A lease has three states:
+
+- `Starting`: claimed when a provider allocation is acquired. It pins the provider for its own playback and blocks
+  nobody else. It expires after a short startup deadline regardless of the configured TTL, so an abandoned start or a
+  manifest-retry loop never accumulates reservations.
+- `Active`: reached only when real media delivery is confirmed — the first provider media byte forwarded to a client as
+  an `OK`/`206` media response. Manifest, HEAD, key, map and error fetches never confirm a lease. Only an `Active` lease
+  with a configured reconnect window reserves capacity against other playbacks.
+- `Idle`: a confirmed, reconnect-capable playback that ended cleanly keeps its slot for the reconnect window so it can
+  reattach to the same provider.
+
+TTL mapping (the reconnect window):
 
 - HLS/DASH use `hls_session_ttl_secs`
 - Catchup uses `catchup_session_ttl_secs`
 - other item types use `0`
 
-This affects provider reuse between short request gaps, not whether the session should use session admission.
+Lease end is outcome-driven: provider failure, preemption, kick and timeout release capacity immediately; a clean finish
+of a reconnect-capable playback keeps the idle window.
 
 Important:
 
 - VOD/movie/series still have strict provider affinity on follow-up requests
-- they just do not currently get an extra post-request reservation TTL like HLS/Catchup do
+- they just do not currently get an extra post-request reconnect window like HLS/Catchup do
+- An HTTP 200 manifest response is not playback and does not confirm a lease; neither do HEAD, key, map or error-video
+  responses. Only an `OK`/`206` media response confirms media delivery, which is what previously let entry
+  reservations block unrelated clients behind the same reverse proxy
+
+### Multi-user socket isolation and allocation-based provider connections
+
+When multiple users connect through the same reverse proxy socket:
+
+- `ActiveUserManager` tracks user sessions per user key and stream UID. `SocketRegistration` records all registered
+  usernames for each `SocketAddr`, ensuring concurrent users on the same socket never overwrite or prematurely evict
+  each other's session state.
+- `ActiveProviderManager` indexes single connections by unique `AllocationId` rather than grouping them under a single
+  socket address key (`ClientConnectionId`). Secondary socket indexes exist only for whole-transport close and kick
+  signals.
+- Stream details and QoS fallbacks are updated directly by `stream_uid` (`update_stream_detail_by_uid`) rather than
+  relying on ambiguous socket lookups.
 
 ## Where session tokens come from
 

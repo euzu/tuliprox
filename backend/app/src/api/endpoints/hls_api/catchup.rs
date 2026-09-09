@@ -189,7 +189,7 @@ pub(super) async fn admit_recovered_archive_stream(
             .await,
         ));
     }
-    if app_state.active_provider.is_over_limit(&session.provider).await {
+    if app_state.active_provider.is_over_limit(&session.provider) {
         return Err(Box::new(
             hls_admission_failure_manifest_response(
                 app_state,

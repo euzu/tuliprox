@@ -1,8 +1,9 @@
 use crate::{
     uses_direct_body_idle_timeout, ActiveProviderManager, ActiveUserConnectionParams, ActiveUserManager, EventManager,
-    SharedStreamManager,
+    ManagedProviderHandle, SharedStreamManager,
 };
 use arc_swap::ArcSwapOption;
+use futures::future::BoxFuture;
 use log::{debug, warn};
 use shared::{
     model::{
@@ -14,7 +15,7 @@ use shared::{
 use std::{
     borrow::Cow,
     cmp::Reverse,
-    collections::{BinaryHeap, HashMap, VecDeque},
+    collections::{BinaryHeap, HashMap, HashSet, VecDeque},
     net::SocketAddr,
     str::FromStr,
     sync::{
@@ -26,7 +27,10 @@ use std::{
 };
 use tokio::sync::{mpsc, Notify};
 use tuliprox_core::{
-    model::{DisconnectQos, Fingerprint, ProviderHandle, StreamHistoryConfig, StreamHistoryRecord},
+    model::{
+        DisconnectQos, Fingerprint, PlaybackRequestOutcome, ProviderHandle, SharedSubscriberId, StreamHistoryConfig,
+        StreamHistoryRecord,
+    },
     utils::debug_if_enabled,
 };
 use tuliprox_repository::{recover_pending_files, StreamHistoryWriter};
@@ -37,6 +41,8 @@ pub const PROVIDER_END_NOT_SET: u8 = 0;
 pub const PROVIDER_END_CLOSED: u8 = 1; // Provider EOF
 pub const PROVIDER_END_ERROR: u8 = 2; // Provider Err
 const PREEMPT_REENTRY_BLOCK_SECS: u64 = 3;
+// Bounded wait for a mandatory cleanup admission right before a request registration.
+const CLEANUP_ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
 // Rebuild the expiry heap when it grows beyond this multiple of the live index size.
 const SOCKET_EXPIRY_QUEUE_REBUILD_FACTOR: usize = 2;
 // Avoid rebuilding the expiry heap unless it contains at least this many stale entries.
@@ -181,32 +187,31 @@ fn lock_backpressure_state<T>(state: &Mutex<BackpressureState<T>>) -> MutexGuard
 
 #[derive(Clone)]
 struct SocketActivityTracker {
-    pending: Arc<Mutex<HashMap<SocketAddr, SocketActivityEvent>>>,
+    pending: Arc<Mutex<HashSet<SocketActivityEvent>>>,
     notify: Arc<Notify>,
 }
 
 impl SocketActivityTracker {
-    fn new() -> Self { Self { pending: Arc::new(Mutex::new(HashMap::new())), notify: Arc::new(Notify::new()) } }
+    fn new() -> Self { Self { pending: Arc::new(Mutex::new(HashSet::new())), notify: Arc::new(Notify::new()) } }
 
     fn track(&self, event: SocketActivityEvent) {
-        let key = event.addr();
         let mut pending = lock_socket_activity_pending(self.pending.as_ref());
-        pending.insert(key, event);
+        pending.insert(event);
         drop(pending);
         self.notify.notify_one();
     }
 
     fn drain(&self) -> Vec<SocketActivityEvent> {
         let mut pending = lock_socket_activity_pending(self.pending.as_ref());
-        pending.drain().map(|(_, event)| event).collect()
+        pending.drain().collect()
     }
 
     async fn notified(&self) { self.notify.notified().await; }
 }
 
 fn lock_socket_activity_pending(
-    pending: &Mutex<HashMap<SocketAddr, SocketActivityEvent>>,
-) -> MutexGuard<'_, HashMap<SocketAddr, SocketActivityEvent>> {
+    pending: &Mutex<HashSet<SocketActivityEvent>>,
+) -> MutexGuard<'_, HashSet<SocketActivityEvent>> {
     pending.lock().unwrap_or_else(|poisoned| {
         warn!("Socket activity state was poisoned, continuing with recovered state");
         poisoned.into_inner()
@@ -223,7 +228,15 @@ struct CleanupWorkerDeps {
 }
 
 pub enum CleanupEvent {
+    ReleaseSharedSubscriber {
+        addr: SocketAddr,
+        subscriber_id: SharedSubscriberId,
+    },
     ReleaseStream {
+        request_id: Option<tuliprox_core::model::PlaybackRequestId>,
+        /// Playback owner (session token) captured at acquire, so the provider request
+        /// can be finished independently of whether the user claim still exists.
+        owner: Option<Arc<str>>,
         addr: SocketAddr,
         stream_uid: Option<u32>,
         provider_end_reason: u8,
@@ -238,6 +251,7 @@ pub enum CleanupEvent {
         handle: Option<ProviderHandle>,
     },
     ReleaseStreamAndProviderHandle {
+        request_id: Option<tuliprox_core::model::PlaybackRequestId>,
         addr: SocketAddr,
         stream_uid: Option<u32>,
         handle: Option<ProviderHandle>,
@@ -248,16 +262,21 @@ pub enum CleanupEvent {
     },
     UpdateDetailAndReleaseProvider {
         addr: SocketAddr,
+        stream_uid: Option<u32>,
         video_type: CustomVideoStreamType,
         handle: Option<ProviderHandle>,
-    },
-    UpdateDetailAndReleaseProviderConnection {
-        addr: SocketAddr,
-        video_type: CustomVideoStreamType,
     },
     AdaptiveSessionExpired {
         stream_info: Box<StreamInfo>,
     },
+    /// Confirms that real provider media reached the client for a playback lease.
+    /// Only a confirmed lease may reserve provider capacity against other playbacks.
+    ConfirmPlaybackLease {
+        owner: Arc<str>,
+        request_id: Option<tuliprox_core::model::PlaybackRequestId>,
+    },
+    /// Runs a deferred asynchronous cleanup task in the managed cleanup worker.
+    Defer(BoxFuture<'static, ()>),
 }
 
 async fn handle_release_connection(deps: &CleanupWorkerDeps, addr: SocketAddr) {
@@ -326,6 +345,7 @@ async fn release_connection_parts(
     notify_capacity(deps.capacity_notify.as_ref());
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_release_stream(
     deps: &CleanupWorkerDeps,
     addr: SocketAddr,
@@ -334,6 +354,8 @@ async fn handle_release_stream(
     reconnect_count: u8,
     provider_error_class: Option<&'static str>,
     provider_http_status: Option<u16>,
+    request_id: Option<tuliprox_core::model::PlaybackRequestId>,
+    owner: Option<Arc<str>>,
 ) {
     if let Some(stream_info) = release_stream_with_disconnect(
         deps,
@@ -343,6 +365,8 @@ async fn handle_release_stream(
         reconnect_count,
         provider_error_class,
         provider_http_status,
+        request_id,
+        owner,
     )
     .await
     {
@@ -371,6 +395,7 @@ async fn handle_release_stream_and_provider_handle(
     reconnect_count: u8,
     provider_error_class: Option<&'static str>,
     provider_http_status: Option<u16>,
+    request_id: Option<tuliprox_core::model::PlaybackRequestId>,
 ) {
     let provider_released = if let Some(handle) = handle {
         deps.provider_manager.release_handle(&handle).await;
@@ -386,6 +411,8 @@ async fn handle_release_stream_and_provider_handle(
         reconnect_count,
         provider_error_class,
         provider_http_status,
+        request_id,
+        None,
     )
     .await;
     if let Some(stream_info) = stream_released.as_ref() {
@@ -404,12 +431,18 @@ async fn handle_update_detail_and_release_provider(
     addr: SocketAddr,
     video_type: CustomVideoStreamType,
     handle: Option<ProviderHandle>,
+    stream_uid: Option<u32>,
 ) {
-    if let Some(stream_info) = deps.user_manager.update_stream_detail(&addr, video_type).await {
+    let stream_info = if let Some(uid) = stream_uid {
+        deps.user_manager.update_stream_detail_by_uid(uid, video_type).await
+    } else {
+        deps.user_manager.update_stream_detail(&addr, video_type).await
+    };
+    if let Some(stream_info) = stream_info {
         if matches!(video_type, CustomVideoStreamType::LowPriorityPreempted) {
             deps.user_manager
-                .block_user_for_stream(
-                    &addr,
+                .block_user_for_stream_uid(
+                    stream_info.uid,
                     shared::model::VirtualId::new(stream_info.channel.virtual_id),
                     PREEMPT_REENTRY_BLOCK_SECS,
                 )
@@ -421,28 +454,6 @@ async fn handle_update_detail_and_release_provider(
         deps.provider_manager.release_handle(&handle).await;
         notify_capacity(deps.capacity_notify.as_ref());
     }
-}
-
-async fn handle_update_detail_and_release_provider_connection(
-    deps: &CleanupWorkerDeps,
-    addr: SocketAddr,
-    video_type: CustomVideoStreamType,
-) {
-    if let Some(stream_info) = deps.user_manager.update_stream_detail(&addr, video_type).await {
-        if matches!(video_type, CustomVideoStreamType::LowPriorityPreempted) {
-            deps.user_manager
-                .block_user_for_stream(
-                    &addr,
-                    shared::model::VirtualId::new(stream_info.channel.virtual_id),
-                    PREEMPT_REENTRY_BLOCK_SECS,
-                )
-                .await;
-        }
-        deps.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info)));
-    }
-    deps.provider_manager.release_connection(&addr).await;
-    deps.shared_stream_manager.release_connection(&addr, false).await;
-    notify_capacity(deps.capacity_notify.as_ref());
 }
 
 async fn handle_adaptive_session_expired(deps: &CleanupWorkerDeps, stream_info: Box<StreamInfo>) {
@@ -465,6 +476,7 @@ async fn handle_adaptive_session_expired(deps: &CleanupWorkerDeps, stream_info: 
     notify_capacity(deps.capacity_notify.as_ref());
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn release_stream_with_disconnect(
     deps: &CleanupWorkerDeps,
     addr: SocketAddr,
@@ -473,35 +485,69 @@ async fn release_stream_with_disconnect(
     reconnect_count: u8,
     provider_error_class: Option<&'static str>,
     provider_http_status: Option<u16>,
+    request_id: Option<tuliprox_core::model::PlaybackRequestId>,
+    owner: Option<Arc<str>>,
 ) -> Option<StreamInfo> {
-    let stream_info = if let Some(stream_uid) = stream_uid {
-        deps.user_manager.release_stream_by_uid(&addr, stream_uid).await
+    let detach = if let Some(stream_uid) = stream_uid {
+        deps.user_manager.release_stream_request_by_uid(&addr, stream_uid).await
     } else {
-        deps.user_manager.release_stream(&addr).await
+        crate::StreamRequestDetach::NotFound
     };
-    let Some(stream_info) = stream_info else {
-        debug_if_enabled!(
-            "Stream release skipped: no active stream for {} uid={:?}",
-            sanitize_sensitive_info(&addr.to_string()),
-            stream_uid
-        );
-        return None;
-    };
-    let qos = deps.event_manager.read_meter_qos(stream_info.meter_uid).await;
-    let bytes_sent = qos.map(|qos| qos.bytes_total);
-    let first_byte_latency_ms = qos.and_then(|qos| qos.first_byte_latency_ms);
-    deps.event_manager.unregister_meter_client(stream_info.uid).await;
-    let reason = resolve_disconnect_reason(provider_end_reason, &stream_info);
-    let provider_reconnect_count = (reconnect_count > 0).then_some(reconnect_count);
-    emit_disconnect_record(
-        &deps.history_writer,
-        &stream_info,
-        reason,
-        &DisconnectQos { bytes_sent, first_byte_latency_ms, provider_reconnect_count },
-        provider_error_class,
-        provider_http_status,
-    );
-    Some(stream_info)
+    match detach {
+        crate::StreamRequestDetach::NotFound => {
+            debug_if_enabled!(
+                "Stream release skipped: no active stream for {} uid={:?}",
+                sanitize_sensitive_info(&addr.to_string()),
+                stream_uid
+            );
+            // The provider request must still be finished even when the user claim is
+            // already gone: the identity travels with the cleanup event.
+            if let (Some(owner), Some(request_id)) = (owner.as_deref(), request_id) {
+                let reason = resolve_disconnect_reason_from_provider_end(provider_end_reason);
+                deps.provider_manager
+                    .finish_identified_playback_request(owner, request_id, playback_outcome_for_reason(reason))
+                    .await;
+                notify_capacity(deps.capacity_notify.as_ref());
+            }
+            None
+        }
+        crate::StreamRequestDetach::Retained(stream_info) | crate::StreamRequestDetach::Preserved(stream_info) => {
+            let reason = resolve_disconnect_reason(provider_end_reason, &stream_info);
+            if let (Some(session_token), Some(request_id)) =
+                (owner.as_deref().or(stream_info.session_token.as_deref()), request_id)
+            {
+                deps.provider_manager
+                    .finish_identified_playback_request(session_token, request_id, playback_outcome_for_reason(reason))
+                    .await;
+            }
+            notify_capacity(deps.capacity_notify.as_ref());
+            None
+        }
+        crate::StreamRequestDetach::Removed(stream_info) => {
+            let qos = deps.event_manager.read_meter_qos(stream_info.meter_uid).await;
+            let bytes_sent = qos.map(|qos| qos.bytes_total);
+            let first_byte_latency_ms = qos.and_then(|qos| qos.first_byte_latency_ms);
+            deps.event_manager.unregister_meter_client(stream_info.uid).await;
+            let reason = resolve_disconnect_reason(provider_end_reason, &stream_info);
+            if let (Some(session_token), Some(request_id)) =
+                (owner.as_deref().or(stream_info.session_token.as_deref()), request_id)
+            {
+                deps.provider_manager
+                    .finish_identified_playback_request(session_token, request_id, playback_outcome_for_reason(reason))
+                    .await;
+            }
+            let provider_reconnect_count = (reconnect_count > 0).then_some(reconnect_count);
+            emit_disconnect_record(
+                &deps.history_writer,
+                &stream_info,
+                reason,
+                &DisconnectQos { bytes_sent, first_byte_latency_ms, provider_reconnect_count },
+                provider_error_class,
+                provider_http_status,
+            );
+            Some(stream_info)
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -510,7 +556,7 @@ struct SocketExpiryEntry {
     addr: SocketAddr,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 enum SocketActivityEvent {
     HttpActivity { addr: SocketAddr },
     DirectBodyActivity { addr: SocketAddr },
@@ -561,6 +607,142 @@ pub struct ConnectionParams<'a> {
 pub enum ConnectionHistoryMode {
     EmitConnect,
     RefreshOnly,
+}
+
+/// Guaranteed final cleanup for a registered request, transferred into the body.
+///
+/// The permit was reserved before the registration mutation, so the release is
+/// delivered even under cleanup-queue pressure. The body owns this and calls
+/// [`OwnedRequestCleanup::finish`] exactly once with the real provider outcome; an
+/// un-polled body drops it and gets a conservative release instead of a successful EOF.
+pub struct OwnedRequestCleanup {
+    addr: SocketAddr,
+    request_uid: u32,
+    /// Provider request identity captured at acquire, so an automatic rollback can
+    /// finish the provider lease even when the user claim was never fully registered.
+    provider_request_id: Option<tuliprox_core::model::PlaybackRequestId>,
+    /// Playback owner (session token) captured at acquire. The provider finish must not
+    /// depend on the user claim still existing, so the owner travels with the cleanup.
+    owner: Option<Arc<str>>,
+    permit: Option<tokio::sync::mpsc::OwnedPermit<CleanupEvent>>,
+    finished: bool,
+}
+
+impl OwnedRequestCleanup {
+    /// Releases the reserved cleanup right without emitting any release.
+    fn disarm(&mut self) {
+        self.finished = true;
+        self.permit = None;
+    }
+
+    /// Releases the request claim exactly once with the actual provider outcome.
+    #[allow(clippy::too_many_arguments)]
+    pub fn finish(
+        &mut self,
+        request_id: Option<tuliprox_core::model::PlaybackRequestId>,
+        provider_end_reason: u8,
+        reconnect_count: u8,
+        provider_error_class: Option<&'static str>,
+        provider_http_status: Option<u16>,
+    ) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        let Some(permit) = self.permit.take() else {
+            return;
+        };
+        permit.send(CleanupEvent::ReleaseStream {
+            request_id,
+            owner: self.owner.clone(),
+            addr: self.addr,
+            stream_uid: Some(self.request_uid),
+            provider_end_reason,
+            reconnect_count,
+            provider_error_class,
+            provider_http_status,
+        });
+    }
+}
+
+impl Drop for OwnedRequestCleanup {
+    fn drop(&mut self) {
+        // Conservative fallback for a body that is dropped without an explicit finish:
+        // never invent a successful EOF, but still finish the provider request with its
+        // captured identity so an abandoned start does not linger until the startup TTL.
+        self.finish(self.provider_request_id, PROVIDER_END_NOT_SET, 0, None, None);
+    }
+}
+
+/// Why a playback request was rejected before a body could be created. Carried on
+/// `RegisteredPlaybackRequest` so the caller can surface a non-success HTTP response
+/// instead of silently dropping the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionRejectionReason {
+    CleanupReceiverClosed,
+    CleanupAdmissionTimeout,
+    RegistrationFailed,
+}
+
+pub struct RegisteredPlaybackRequest {
+    pub request_uid: u32,
+    pub display_stream: Option<StreamInfo>,
+    cleanup: Option<OwnedRequestCleanup>,
+    rejection: Option<ConnectionRejectionReason>,
+}
+
+impl std::fmt::Debug for RegisteredPlaybackRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegisteredPlaybackRequest")
+            .field("request_uid", &self.request_uid)
+            .field("display_stream", &self.display_stream)
+            .field("rejection", &self.rejection)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RegisteredPlaybackRequest {
+    #[inline]
+    pub fn new(request_uid: u32, display_stream: Option<StreamInfo>) -> Self {
+        Self { request_uid, display_stream, cleanup: None, rejection: None }
+    }
+
+    #[inline]
+    fn rejected(request_uid: u32, reason: ConnectionRejectionReason) -> Self {
+        Self { request_uid, display_stream: None, cleanup: None, rejection: Some(reason) }
+    }
+
+    #[inline]
+    fn with_cleanup(
+        request_uid: u32,
+        display_stream: Option<StreamInfo>,
+        cleanup: Option<OwnedRequestCleanup>,
+    ) -> Self {
+        Self { request_uid, display_stream, cleanup, rejection: None }
+    }
+
+    /// Marks the request as taken over by a path without a body (compatibility API or
+    /// shared source), disabling rollback on drop.
+    #[inline]
+    pub fn commit(&mut self) {
+        if let Some(mut cleanup) = self.cleanup.take() {
+            cleanup.disarm();
+        }
+    }
+
+    /// Transfers the guaranteed cleanup right into the body. The body owns the returned
+    /// value and must finish it exactly once with the real provider outcome.
+    #[inline]
+    pub fn into_body_cleanup(&mut self) -> Option<OwnedRequestCleanup> { self.cleanup.take() }
+
+    #[inline]
+    pub fn display_uid(&self) -> Option<u32> { self.display_stream.as_ref().map(|s| s.uid) }
+
+    #[inline]
+    pub fn rejection_reason(&self) -> Option<ConnectionRejectionReason> { self.rejection }
+
+    #[inline]
+    pub fn into_display_stream(self) -> Option<StreamInfo> { self.display_stream }
 }
 
 impl ConnectionManager {
@@ -782,10 +964,28 @@ impl ConnectionManager {
         tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
                 match event {
+                    CleanupEvent::ReleaseSharedSubscriber { addr, subscriber_id } => {
+                        deps.shared_stream_manager.release_subscriber(subscriber_id).await;
+                        handle_release_stream(
+                            &deps,
+                            addr,
+                            Some(subscriber_id.stream_uid()),
+                            PROVIDER_END_NOT_SET,
+                            0,
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                        .await;
+                        notify_capacity(deps.capacity_notify.as_ref());
+                    }
                     CleanupEvent::ReleaseConnection { addr } => {
                         handle_release_connection(&deps, addr).await;
                     }
                     CleanupEvent::ReleaseStream {
+                        request_id,
+                        owner,
                         addr,
                         stream_uid,
                         provider_end_reason,
@@ -801,6 +1001,8 @@ impl ConnectionManager {
                             reconnect_count,
                             provider_error_class,
                             provider_http_status,
+                            request_id,
+                            owner,
                         )
                         .await;
                     }
@@ -808,6 +1010,7 @@ impl ConnectionManager {
                         handle_release_provider_handle(&deps, handle).await;
                     }
                     CleanupEvent::ReleaseStreamAndProviderHandle {
+                        request_id,
                         addr,
                         stream_uid,
                         handle,
@@ -825,17 +1028,25 @@ impl ConnectionManager {
                             reconnect_count,
                             provider_error_class,
                             provider_http_status,
+                            request_id,
                         )
                         .await;
                     }
-                    CleanupEvent::UpdateDetailAndReleaseProvider { addr, video_type, handle } => {
-                        handle_update_detail_and_release_provider(&deps, addr, video_type, handle).await;
-                    }
-                    CleanupEvent::UpdateDetailAndReleaseProviderConnection { addr, video_type } => {
-                        handle_update_detail_and_release_provider_connection(&deps, addr, video_type).await;
+                    CleanupEvent::UpdateDetailAndReleaseProvider { addr, stream_uid, video_type, handle } => {
+                        handle_update_detail_and_release_provider(&deps, addr, video_type, handle, stream_uid).await;
                     }
                     CleanupEvent::AdaptiveSessionExpired { stream_info } => {
                         handle_adaptive_session_expired(&deps, stream_info).await;
+                    }
+                    CleanupEvent::ConfirmPlaybackLease { owner, request_id } => {
+                        if let Some(request_id) = request_id {
+                            deps.provider_manager.confirm_identified_playback_activity(&owner, request_id).await;
+                        } else {
+                            deps.provider_manager.confirm_playback_activity(&owner).await;
+                        }
+                    }
+                    CleanupEvent::Defer(future) => {
+                        future.await;
                     }
                 }
             }
@@ -844,6 +1055,8 @@ impl ConnectionManager {
     }
 
     pub fn send_cleanup(&self, event: CleanupEvent) { self.cleanup_sender.enqueue(event); }
+
+    pub fn cleanup_tx(&self) -> mpsc::Sender<CleanupEvent> { self.cleanup_sender.tx.clone() }
 
     pub fn dropped_cleanup_events(&self) -> u64 {
         self.cleanup_sender.dropped_count() + self.user_manager.dropped_cleanup_events.load(Ordering::Relaxed)
@@ -884,6 +1097,10 @@ impl ConnectionManager {
 
     pub fn close_connection_signal(&self, addr: &SocketAddr) -> bool {
         self.close_connection_with_reason(addr, DisconnectReason::ClientClosed)
+    }
+
+    pub async fn block_stream_by_uid(&self, uid: u32, virtual_id: VirtualId, block_secs: u64) {
+        self.user_manager.block_user_for_stream_uid(uid, virtual_id, block_secs).await;
     }
 
     pub fn close_connection_with_reason(&self, addr: &SocketAddr, reason: DisconnectReason) -> bool {
@@ -994,6 +1211,15 @@ impl ConnectionManager {
         }
     }
 
+    /// Releases a managed provider owner by value: its drop performs the synchronous
+    /// slot release, then the capacity waiters are notified.
+    pub fn release_managed_provider_handle(&self, provider_handle: Option<ManagedProviderHandle>) {
+        if provider_handle.is_some() {
+            drop(provider_handle);
+            notify_capacity(self.capacity_notify.as_ref());
+        }
+    }
+
     pub fn next_stream_uid(&self) -> u32 {
         self.stream_uid_counter
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
@@ -1027,18 +1253,26 @@ impl ConnectionManager {
     /// Call once at graceful shutdown before dropping the `ConnectionManager`.
     pub async fn shutdown(&self) {
         let active_streams = self.user_manager.get_all_active_streams().await;
-        for stream_info in active_streams {
+        for stream_info in &active_streams {
             let qos = self.event_manager.read_meter_qos(stream_info.meter_uid).await;
             let bytes_sent = qos.map(|qos| qos.bytes_total);
             let first_byte_latency_ms = qos.and_then(|qos| qos.first_byte_latency_ms);
             emit_disconnect_record(
                 &self.history_writer,
-                &stream_info,
+                stream_info,
                 DisconnectReason::Shutdown,
                 &DisconnectQos { bytes_sent, first_byte_latency_ms, ..Default::default() },
                 None,
                 None,
             );
+        }
+        // Release every active connection synchronously so no claim or provider slot
+        // survives shutdown. The cleanup worker is not needed for this final drain.
+        let mut addrs: Vec<SocketAddr> = active_streams.iter().map(|stream| stream.addr).collect();
+        addrs.sort_unstable();
+        addrs.dedup();
+        for addr in &addrs {
+            release_connection_with_reason(self, addr, DisconnectReason::Shutdown, true).await;
         }
         if let Some(w) = self.history_writer.load_full() {
             w.shutdown().await;
@@ -1066,9 +1300,76 @@ impl ConnectionManager {
         history_mode: ConnectionHistoryMode,
     ) -> Option<StreamInfo> {
         let uid = self.next_stream_uid();
+        let mut registered = self.update_connection_with_uid(update, history_mode, uid, None).await;
+        // This compatibility API has no body to hand the claim to; the caller owns the
+        // registered stream, so disarm the rollback before returning its metadata.
+        registered.commit();
+        registered.into_display_stream()
+    }
+
+    pub async fn update_connection_with_uid(
+        &self,
+        update: ConnectionParams<'_>,
+        history_mode: ConnectionHistoryMode,
+        uid: u32,
+        provider_request_id: Option<tuliprox_core::model::PlaybackRequestId>,
+    ) -> RegisteredPlaybackRequest {
+        self.update_connection_with_uid_impl(update, history_mode, uid, provider_request_id, false).await
+    }
+
+    /// Registers a request whose enclosing shared-subscriber body already owns the
+    /// guaranteed terminal cleanup permit for this exact stream UID.
+    pub async fn update_connection_with_uid_using_shared_cleanup(
+        &self,
+        update: ConnectionParams<'_>,
+        history_mode: ConnectionHistoryMode,
+        uid: u32,
+        provider_request_id: Option<tuliprox_core::model::PlaybackRequestId>,
+    ) -> RegisteredPlaybackRequest {
+        self.update_connection_with_uid_impl(update, history_mode, uid, provider_request_id, true).await
+    }
+
+    async fn update_connection_with_uid_impl(
+        &self,
+        update: ConnectionParams<'_>,
+        history_mode: ConnectionHistoryMode,
+        uid: u32,
+        provider_request_id: Option<tuliprox_core::model::PlaybackRequestId>,
+        cleanup_owned_by_shared_subscriber: bool,
+    ) -> RegisteredPlaybackRequest {
         let username = update.username;
         let fingerprint = update.fingerprint;
         let track_direct_body_activity = uses_direct_body_idle_timeout(update.stream_channel);
+        // Admission: reserve a guaranteed cleanup right before any registration mutation,
+        // bounded so a saturated or stalled cleanup queue cannot hang request setup.
+        let rollback_permit = if cleanup_owned_by_shared_subscriber {
+            None
+        } else {
+            match tokio::time::timeout(CLEANUP_ADMISSION_TIMEOUT, self.cleanup_tx().reserve_owned()).await {
+                Ok(Ok(permit)) => Some(permit),
+                Ok(Err(_)) => {
+                    warn!("Cleanup receiver closed; rejecting connection registration for user {username}");
+                    return RegisteredPlaybackRequest::rejected(uid, ConnectionRejectionReason::CleanupReceiverClosed);
+                }
+                Err(_) => {
+                    warn!("Cleanup admission timed out; rejecting connection registration for user {username}");
+                    return RegisteredPlaybackRequest::rejected(
+                        uid,
+                        ConnectionRejectionReason::CleanupAdmissionTimeout,
+                    );
+                }
+            }
+        };
+        // The cleanup owner is armed before the first mutation, so a cancellation during
+        // `update_connection`, meter registration or any later await still releases the claim.
+        let mut cleanup = OwnedRequestCleanup {
+            addr: fingerprint.addr,
+            request_uid: uid,
+            provider_request_id,
+            owner: update.session_token.map(Arc::<str>::from),
+            permit: rollback_permit,
+            finished: false,
+        };
         if let Some(stream_info) = self
             .user_manager
             .update_connection(ActiveUserConnectionParams {
@@ -1101,11 +1402,12 @@ impl ConnectionManager {
             }
             self.event_manager
                 .send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info.clone())));
-            Some(stream_info)
+            RegisteredPlaybackRequest::with_cleanup(uid, Some(stream_info), Some(cleanup))
         } else {
+            // Registration failed: nothing was inserted, so the cleanup must not fire.
+            cleanup.disarm();
             warn!("Failed to register connection for user {username} at {}; disconnecting client", fingerprint.addr);
-            let _ = self.close_connection_signal(&fingerprint.addr);
-            None
+            RegisteredPlaybackRequest::rejected(uid, ConnectionRejectionReason::RegistrationFailed)
         }
     }
 
@@ -1115,6 +1417,12 @@ impl ConnectionManager {
 
     pub async fn update_stream_detail(&self, addr: &SocketAddr, video_type: CustomVideoStreamType) {
         if let Some(stream_info) = self.user_manager.update_stream_detail(addr, video_type).await {
+            self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info)));
+        }
+    }
+
+    pub async fn update_stream_detail_by_uid(&self, uid: u32, video_type: CustomVideoStreamType) {
+        if let Some(stream_info) = self.user_manager.update_stream_detail_by_uid(uid, video_type).await {
             self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info)));
         }
     }
@@ -1166,6 +1474,41 @@ fn resolve_disconnect_reason(provider_end_reason: u8, stream_info: &StreamInfo) 
         PROVIDER_END_CLOSED => DisconnectReason::ProviderClosed,
         PROVIDER_END_ERROR => DisconnectReason::ProviderError,
         _ => DisconnectReason::ClientClosed,
+    }
+}
+
+/// Resolves a disconnect reason from the provider-end signal alone, for the path where
+/// the user stream claim is already gone and no `StreamInfo` is available to consult.
+fn resolve_disconnect_reason_from_provider_end(provider_end_reason: u8) -> DisconnectReason {
+    match provider_end_reason {
+        PROVIDER_END_CLOSED => DisconnectReason::ProviderClosed,
+        PROVIDER_END_ERROR => DisconnectReason::ProviderError,
+        _ => DisconnectReason::ClientClosed,
+    }
+}
+
+/// Maps a disconnect reason onto the provider-lease outcome policy.
+///
+/// Only a clean client-side end keeps a reconnect-capable lease alive; provider
+/// failures, preemption, kicks and timeouts release capacity immediately.
+fn playback_outcome_for_reason(reason: DisconnectReason) -> PlaybackRequestOutcome {
+    match reason {
+        DisconnectReason::ClientClosed
+        | DisconnectReason::DayRollover
+        | DisconnectReason::Cleanup
+        | DisconnectReason::Unknown => PlaybackRequestOutcome::ClientClosed,
+        DisconnectReason::Timeout => PlaybackRequestOutcome::TimedOut,
+        DisconnectReason::SessionExpired => PlaybackRequestOutcome::SessionExpired,
+        DisconnectReason::Shutdown => PlaybackRequestOutcome::ServerShutdown,
+        DisconnectReason::ClientKicked => PlaybackRequestOutcome::Kicked,
+        DisconnectReason::Preempted => PlaybackRequestOutcome::Preempted,
+        DisconnectReason::Provisioning
+        | DisconnectReason::UserConnectionsExhausted
+        | DisconnectReason::ProviderConnectionsExhausted => PlaybackRequestOutcome::FailedBeforeMedia,
+        DisconnectReason::ProviderError
+        | DisconnectReason::ProviderClosed
+        | DisconnectReason::ServerError
+        | DisconnectReason::IntermediateFailures(_) => PlaybackRequestOutcome::ProviderFailed,
     }
 }
 
@@ -1540,7 +1883,8 @@ mod tests {
             history_writer: Arc::clone(&manager.history_writer),
         };
 
-        handle_update_detail_and_release_provider(&deps, addr, CustomVideoStreamType::LowPriorityPreempted, None).await;
+        handle_update_detail_and_release_provider(&deps, addr, CustomVideoStreamType::LowPriorityPreempted, None, None)
+            .await;
 
         assert!(
             manager
@@ -1606,7 +1950,8 @@ mod tests {
             history_writer: Arc::clone(&manager.history_writer),
         };
 
-        handle_update_detail_and_release_provider(&deps, addr, CustomVideoStreamType::LowPriorityPreempted, None).await;
+        handle_update_detail_and_release_provider(&deps, addr, CustomVideoStreamType::LowPriorityPreempted, None, None)
+            .await;
 
         assert!(
             manager
@@ -1755,5 +2100,351 @@ mod tests {
             resolve_disconnect_failure_stage(&info, DisconnectReason::ProviderError, &DisconnectQos::default(),),
             Some(FailureStage::Streaming)
         );
+    }
+
+    #[tokio::test]
+    async fn deferred_cleanup_executes_in_background_worker() {
+        let conn_manager = create_test_connection_manager();
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let notify = Arc::new(Notify::new());
+        let ran_clone = Arc::clone(&ran);
+        let notify_clone = Arc::clone(&notify);
+
+        conn_manager.send_cleanup(CleanupEvent::Defer(Box::pin(async move {
+            ran_clone.store(true, Ordering::SeqCst);
+            notify_clone.notify_one();
+        })));
+
+        tokio::time::timeout(Duration::from_secs(1), notify.notified()).await.expect("deferred task must execute");
+        assert!(ran.load(Ordering::SeqCst));
+    }
+
+    /// Dropping a just-registered request without handing it to a body must roll the
+    /// claim back, so a cancellation between registration and body construction cannot
+    /// leak a user claim.
+    #[tokio::test]
+    async fn registration_rollback_releases_claim_when_body_never_constructed() {
+        let manager = create_test_connection_manager();
+        let addr: SocketAddr = "127.0.0.1:56234".parse().unwrap();
+        let fingerprint = tuliprox_core::model::Fingerprint::new(format!("fp-{addr}"), addr.ip().to_string(), addr);
+        let channel = StreamChannel {
+            virtual_id: 410,
+            title: "channel-410".intern(),
+            ..make_stream_info("provider_1", "channel-410").channel
+        };
+
+        manager.add_connection(&addr).await;
+        let registered = manager
+            .update_connection_with_uid(
+                ConnectionParams {
+                    meter_uid: 0,
+                    username: "rollback-user",
+                    max_connections: 1,
+                    soft_connections: 0,
+                    connection_kind: crate::ConnectionKind::Normal,
+                    priority: 0,
+                    soft_priority: 0,
+                    fingerprint: &fingerprint,
+                    provider: "provider_1".intern(),
+                    stream_channel: &channel,
+                    user_agent: std::borrow::Cow::Borrowed("player/1.0"),
+                    session_token: None,
+                },
+                ConnectionHistoryMode::EmitConnect,
+                1,
+                None,
+            )
+            .await;
+        assert!(registered.display_stream.is_some(), "registration must succeed");
+
+        // Drop without committing: the rollback owner releases the claim.
+        drop(registered);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if manager.user_manager.active_streams().await.is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the rollback must release the claim");
+    }
+
+    /// The body cleanup transferred via `into_body_cleanup` releases the claim exactly
+    /// once with the real outcome, even under cleanup-queue pressure.
+    #[tokio::test]
+    async fn body_cleanup_finish_releases_claim_exactly_once() {
+        let manager = create_test_connection_manager();
+        let addr: SocketAddr = "127.0.0.1:56236".parse().unwrap();
+        let fingerprint = tuliprox_core::model::Fingerprint::new(format!("fp-{addr}"), addr.ip().to_string(), addr);
+        let channel = StreamChannel {
+            virtual_id: 412,
+            title: "channel-412".intern(),
+            ..make_stream_info("provider_1", "channel-412").channel
+        };
+
+        manager.add_connection(&addr).await;
+        let mut registered = manager
+            .update_connection_with_uid(
+                ConnectionParams {
+                    meter_uid: 0,
+                    username: "body-cleanup-user",
+                    max_connections: 1,
+                    soft_connections: 0,
+                    connection_kind: crate::ConnectionKind::Normal,
+                    priority: 0,
+                    soft_priority: 0,
+                    fingerprint: &fingerprint,
+                    provider: "provider_1".intern(),
+                    stream_channel: &channel,
+                    user_agent: std::borrow::Cow::Borrowed("player/1.0"),
+                    session_token: None,
+                },
+                ConnectionHistoryMode::EmitConnect,
+                1,
+                None,
+            )
+            .await;
+        assert!(registered.display_stream.is_some(), "registration must succeed");
+
+        let mut cleanup = registered.into_body_cleanup().expect("body cleanup present");
+        cleanup.finish(None, PROVIDER_END_CLOSED, 0, None, None);
+        cleanup.finish(None, PROVIDER_END_CLOSED, 0, None, None);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if manager.user_manager.active_streams().await.is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the body cleanup must release the claim exactly once");
+    }
+
+    /// A saturated cleanup queue must reject registration with an admission-timeout reason
+    /// (rather than hanging), so the caller can surface a defined non-success response.
+    #[tokio::test(start_paused = true)]
+    async fn cleanup_admission_timeout_rejects_registration_with_reason() {
+        let manager = create_test_connection_manager();
+        // Stall the cleanup worker on a never-resolving defer, then fill the channel so
+        // `reserve_owned()` blocks and the bounded admission deadline fires.
+        let pending = || CleanupEvent::Defer(Box::pin(std::future::pending::<()>()));
+        manager.send_cleanup(pending());
+        for _ in 0..CLEANUP_QUEUE_CAPACITY {
+            manager.send_cleanup(pending());
+        }
+
+        let addr: SocketAddr = "127.0.0.1:56242".parse().unwrap();
+        let fingerprint = tuliprox_core::model::Fingerprint::new(format!("fp-{addr}"), addr.ip().to_string(), addr);
+        let channel = StreamChannel {
+            virtual_id: 414,
+            title: "channel-414".intern(),
+            ..make_stream_info("provider_1", "channel-414").channel
+        };
+
+        manager.add_connection(&addr).await;
+        let manager_for_task = Arc::clone(&manager);
+        let registration = tokio::spawn(async move {
+            manager_for_task
+                .update_connection_with_uid(
+                    ConnectionParams {
+                        meter_uid: 0,
+                        username: "admission-timeout-user",
+                        max_connections: 1,
+                        soft_connections: 0,
+                        connection_kind: crate::ConnectionKind::Normal,
+                        priority: 0,
+                        soft_priority: 0,
+                        fingerprint: &fingerprint,
+                        provider: "provider_1".intern(),
+                        stream_channel: &channel,
+                        user_agent: std::borrow::Cow::Borrowed("player/1.0"),
+                        session_token: None,
+                    },
+                    ConnectionHistoryMode::EmitConnect,
+                    1,
+                    None,
+                )
+                .await
+        });
+
+        // Let the task reach the blocked cleanup reservation, then fire the deadline.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(CLEANUP_ADMISSION_TIMEOUT + Duration::from_secs(1)).await;
+        let registered = registration.await.expect("registration task must not panic");
+
+        assert!(registered.display_stream.is_none(), "saturated cleanup admission must be rejected");
+        assert_eq!(registered.rejection_reason(), Some(ConnectionRejectionReason::CleanupAdmissionTimeout));
+    }
+
+    /// A joined shared body already holds the terminal cleanup permit. Registration must
+    /// reuse that ownership instead of waiting for a second permit from the same full queue.
+    #[tokio::test]
+    async fn shared_admission_does_not_wait_for_second_permit_it_prevents() {
+        let manager = create_test_connection_manager();
+        let cleanup_tx = manager.cleanup_tx();
+        let available = cleanup_tx.capacity();
+        let mut permits = Vec::with_capacity(available);
+        for _ in 0..available {
+            permits.push(cleanup_tx.clone().try_reserve_owned().expect("cleanup permit"));
+        }
+
+        let addr: SocketAddr = "127.0.0.1:56243".parse().expect("test socket");
+        let fingerprint = tuliprox_core::model::Fingerprint::new(format!("fp-{addr}"), addr.ip().to_string(), addr);
+        let channel = StreamChannel {
+            virtual_id: 415,
+            title: "channel-415".intern(),
+            shared: true,
+            shared_joined_existing: Some(true),
+            ..make_stream_info("provider_1", "channel-415").channel
+        };
+
+        manager.add_connection(&addr).await;
+        let mut registered = tokio::time::timeout(
+            Duration::from_millis(100),
+            manager.update_connection_with_uid_using_shared_cleanup(
+                ConnectionParams {
+                    meter_uid: 0,
+                    username: "shared-admission-user",
+                    max_connections: 1,
+                    soft_connections: 0,
+                    connection_kind: crate::ConnectionKind::Normal,
+                    priority: 0,
+                    soft_priority: 0,
+                    fingerprint: &fingerprint,
+                    provider: "provider_1".intern(),
+                    stream_channel: &channel,
+                    user_agent: std::borrow::Cow::Borrowed("player/1.0"),
+                    session_token: None,
+                },
+                ConnectionHistoryMode::EmitConnect,
+                1,
+                None,
+            ),
+        )
+        .await
+        .expect("externally owned cleanup must not reserve another permit");
+
+        assert!(registered.display_stream.is_some(), "shared registration must succeed");
+        assert!(registered.into_body_cleanup().is_some(), "the body still tracks its terminal outcome");
+        let _ = manager.user_manager.release_stream_request_by_uid(&addr, 1).await;
+        drop(permits);
+    }
+
+    /// A cleanup whose user row is already gone must still finish the provider request,
+    /// because the provider identity travels with the cleanup owner independently.
+    #[tokio::test]
+    async fn cleanup_finishes_provider_request_when_user_row_is_gone() {
+        let manager = create_test_connection_manager();
+        let addr: SocketAddr = "127.0.0.1:56240".parse().unwrap();
+        let fingerprint = tuliprox_core::model::Fingerprint::new(format!("fp-{addr}"), addr.ip().to_string(), addr);
+        let channel = StreamChannel {
+            virtual_id: 413,
+            title: "channel-413".intern(),
+            ..make_stream_info("provider_1", "channel-413").channel
+        };
+        let input_name = "provider_1".intern();
+        let owner = "session-owner-g2";
+
+        // Acquire a provider slot with an identified lease.
+        let handle = manager
+            .provider_manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &addr,
+                false,
+                0,
+                crate::ConnectionKind::Normal,
+                Some(owner),
+            )
+            .await
+            .expect("acquire provider slot");
+        let request_id = handle.playback_request_id.expect("identified request id");
+        assert!(manager.provider_manager.provider_lease_usage(&input_name).total() > 0);
+
+        // Register a user claim carrying the same owner and provider request id.
+        manager.add_connection(&addr).await;
+        let mut registered = manager
+            .update_connection_with_uid(
+                ConnectionParams {
+                    meter_uid: 0,
+                    username: "g2-user",
+                    max_connections: 1,
+                    soft_connections: 0,
+                    connection_kind: crate::ConnectionKind::Normal,
+                    priority: 0,
+                    soft_priority: 0,
+                    fingerprint: &fingerprint,
+                    provider: "provider_1".intern(),
+                    stream_channel: &channel,
+                    user_agent: std::borrow::Cow::Borrowed("player/1.0"),
+                    session_token: Some(owner),
+                },
+                ConnectionHistoryMode::EmitConnect,
+                1,
+                Some(request_id),
+            )
+            .await;
+        assert!(registered.display_stream.is_some());
+
+        let cleanup = registered.into_body_cleanup().expect("cleanup present");
+
+        // Remove the user row first, so the cleanup worker hits the NotFound path.
+        let _ = manager.user_manager.release_stream_request_by_uid(&addr, 1).await;
+
+        drop(cleanup);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if manager.provider_manager.provider_lease_usage(&input_name).total() == 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("provider request must finish even without a user row");
+
+        manager.provider_manager.release_handle(&handle).await;
+    }
+
+    /// Shutdown releases every active stream so no claim or provider slot survives.
+    #[tokio::test]
+    async fn shutdown_releases_active_streams() {
+        let manager = create_test_connection_manager();
+        let addr: SocketAddr = "127.0.0.1:56235".parse().unwrap();
+        let fingerprint = tuliprox_core::model::Fingerprint::new(format!("fp-{addr}"), addr.ip().to_string(), addr);
+        let channel = StreamChannel {
+            virtual_id: 411,
+            title: "channel-411".intern(),
+            ..make_stream_info("provider_1", "channel-411").channel
+        };
+
+        manager.add_connection(&addr).await;
+        let stream_info = manager
+            .update_connection(ConnectionParams {
+                meter_uid: 0,
+                username: "shutdown-user",
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: crate::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint,
+                provider: "provider_1".intern(),
+                stream_channel: &channel,
+                user_agent: std::borrow::Cow::Borrowed("player/1.0"),
+                session_token: None,
+            })
+            .await;
+        assert!(stream_info.is_some(), "registration must succeed");
+        assert!(!manager.user_manager.active_streams().await.is_empty());
+
+        manager.shutdown().await;
+        assert!(manager.user_manager.active_streams().await.is_empty(), "shutdown must release active streams");
     }
 }

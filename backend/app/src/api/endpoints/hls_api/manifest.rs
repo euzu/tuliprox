@@ -644,6 +644,7 @@ pub(super) async fn try_reserve_hls_entry_origin_account_for_redirect(
     request_url: &str,
     user_session_token: &str,
     session_owner: &str,
+    playback_kind: PlaybackKind,
     reservation_ttl_secs: u64,
     connection_permission: UserConnectionPermission,
     connection_kind: crate::api::model::ConnectionKind,
@@ -651,13 +652,13 @@ pub(super) async fn try_reserve_hls_entry_origin_account_for_redirect(
 ) -> Option<HlsEntryOriginAccountReservation> {
     let provider_handle = app_state
         .active_provider
-        .acquire_connection_with_grace_for_session(
+        .acquire_connection_with_lease_for_session(
             &input.name,
             &fingerprint.addr,
             false,
             connection_priority_for_kind(user, connection_kind),
             connection_kind,
-            Some(session_owner),
+            Some(PlaybackLeaseRef::new(session_owner, playback_kind)),
         )
         .await?;
 
@@ -693,7 +694,7 @@ pub(super) async fn try_reserve_hls_entry_origin_account_for_redirect(
 
     app_state
         .active_provider
-        .refresh_provider_reservation(&provider_config.name, session_owner, reservation_ttl_secs)
+        .refresh_adaptive_playback_lease(&provider_config.name, session_owner, playback_kind, reservation_ttl_secs)
         .await;
 
     Some(HlsEntryOriginAccountReservation {
@@ -768,6 +769,7 @@ pub(super) async fn try_reserve_hls_virtual_entry_origin_account_for_redirect(
         hls_cache_origin.session_entry_url.as_str(),
         &session_token,
         session_owner,
+        PlaybackKind::LiveHls,
         reservation_ttl_secs,
         connection_admission.permission,
         connection_kind,

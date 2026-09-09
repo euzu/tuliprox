@@ -11,8 +11,14 @@ use crate::{
 };
 use log::debug;
 use shared::{model::InputType, utils::sanitize_sensitive_info, write_if_some};
-use std::{fmt, net::SocketAddr, ops::Deref, sync::Arc, time::Duration};
-use tokio::{sync::RwLock, time::Instant};
+use std::{
+    fmt,
+    net::SocketAddr,
+    ops::Deref,
+    sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
+    time::Duration,
+};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 /// Address of the client holding a provider connection.
@@ -73,11 +79,11 @@ impl ProviderAllocation {
         }
     }
 
-    pub async fn release(&self) {
+    pub fn release(&self) {
         match &self {
             ProviderAllocation::Exhausted => {}
             ProviderAllocation::Available(config) | ProviderAllocation::GracePeriod(config) => {
-                config.release().await;
+                config.release();
             }
         }
     }
@@ -90,6 +96,11 @@ impl ProviderAllocation {
 
 #[derive(Debug, Clone)]
 pub struct ProviderHandle {
+    pub playback_request_id: Option<super::PlaybackRequestId>,
+    /// Exact provider binding incarnation this handle was acquired under. A delayed
+    /// detach/clear must present this tag to release the slot; a bare generation or
+    /// owner lookup is not enough because a recreated lease can reuse generation `1`.
+    pub binding_tag: Option<super::ProviderBindingTag>,
     pub client_id: ClientConnectionId,
     pub allocation_id: AllocationId,
     pub allocation: ProviderAllocation,
@@ -104,7 +115,7 @@ impl ProviderHandle {
         allocation: ProviderAllocation,
         cancel_token: Option<CancellationToken>,
     ) -> Self {
-        Self { client_id, allocation_id, allocation, cancel_token }
+        Self { client_id, allocation_id, allocation, cancel_token, playback_request_id: None, binding_tag: None }
     }
 }
 
@@ -185,15 +196,39 @@ impl PartialEq for ProviderConfig {
 macro_rules! modify_connections {
     ($self:ident, $guard:ident, +1) => {{
         $guard.current_connections += 1;
-        $self.notify_connection_change($guard.current_connections);
+        let count = $guard.current_connections;
+        drop($guard);
+        $self.notify_connection_change(count);
     }};
     ($self:ident, $guard:ident, -1) => {{
         $guard.current_connections = $guard.current_connections.saturating_sub(1);
-        $self.notify_connection_change($guard.current_connections);
+        let count = $guard.current_connections;
+        drop($guard);
+        $self.notify_connection_change(count);
     }};
 }
 
 impl ProviderConfig {
+    fn read_connection(&self) -> RwLockReadGuard<'_, ProviderConfigConnection> {
+        match self.connection.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                log::warn!("Recovering poisoned provider connection read lock for {}", self.name);
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    fn write_connection(&self) -> RwLockWriteGuard<'_, ProviderConfigConnection> {
+        match self.connection.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                log::warn!("Recovering poisoned provider connection write lock for {}", self.name);
+                poisoned.into_inner()
+            }
+        }
+    }
+
     fn grace_is_active(connection: &ProviderConfigConnection, now: Instant, grace_period_timeout_secs: u64) -> bool {
         connection.grace_started_at.is_some_and(|started_at| {
             now.checked_duration_since(started_at).unwrap_or_default() <= Duration::from_secs(grace_period_timeout_secs)
@@ -280,21 +315,21 @@ impl ProviderConfig {
     }
 
     #[inline]
-    pub async fn is_exhausted(&self) -> bool {
+    pub fn is_exhausted(&self) -> bool {
         let max = self.max_connections;
         if max == 0 {
             return false;
         }
-        self.connection.read().await.current_connections >= max
+        self.read_connection().current_connections >= max
     }
 
     #[inline]
-    pub async fn is_over_limit(&self, grace_period_timeout_secs: u64) -> bool {
+    pub fn is_over_limit(&self, grace_period_timeout_secs: u64) -> bool {
         let max = self.max_connections;
         if max == 0 {
             return false;
         }
-        let mut guard = self.connection.write().await;
+        let mut guard = self.write_connection();
         if guard.current_connections < self.max_connections {
             guard.grace_started_at = None;
         }
@@ -315,12 +350,12 @@ impl ProviderConfig {
     //     !self.is_exhausted()
     // }
 
-    async fn try_allocate(&self, grace: bool, grace_period_timeout_secs: u64) -> ProviderConfigAllocation {
+    fn try_allocate(&self, grace: bool, grace_period_timeout_secs: u64) -> ProviderConfigAllocation {
         if is_input_expired(self.exp_date) {
             return ProviderConfigAllocation::Exhausted;
         }
 
-        let mut guard = self.connection.write().await;
+        let mut guard = self.write_connection();
         if self.max_connections == 0 {
             modify_connections!(self, guard, +1);
             return ProviderConfigAllocation::Available;
@@ -353,7 +388,7 @@ impl ProviderConfig {
 
     // is intended to use with redirects, to cycle through provider
     // do not increment and connection counter!
-    async fn get_next(&self, grace: bool, grace_period_timeout_secs: u64) -> bool {
+    fn get_next(&self, grace: bool, grace_period_timeout_secs: u64) -> bool {
         if is_input_expired(self.exp_date) {
             return false;
         }
@@ -361,7 +396,7 @@ impl ProviderConfig {
         if self.max_connections == 0 {
             return true;
         }
-        let mut guard = self.connection.write().await;
+        let mut guard = self.write_connection();
         let connections = guard.current_connections;
         if connections < self.max_connections {
             guard.grace_started_at = None;
@@ -382,8 +417,8 @@ impl ProviderConfig {
         true
     }
 
-    pub async fn release(&self) {
-        let mut guard = self.connection.write().await;
+    pub fn release(&self) {
+        let mut guard = self.write_connection();
         // Releasing while over capacity ends the single outstanding grace grant.
         // Unlimited providers do not use grace tracking.
         if self.max_connections > 0 && guard.current_connections > self.max_connections {
@@ -395,7 +430,7 @@ impl ProviderConfig {
     }
 
     #[inline]
-    pub async fn get_current_connections(&self) -> usize { self.connection.read().await.current_connections }
+    pub fn get_current_connections(&self) -> usize { self.read_connection().current_connections }
 
     #[inline]
     pub fn get_priority(&self) -> i16 { self.priority }
@@ -415,16 +450,16 @@ impl ProviderConfigWrapper {
 
     pub fn config(&self) -> Arc<ProviderConfig> { Arc::clone(&self.inner) }
 
-    pub async fn try_allocate(&self, grace: bool, grace_period_timeout_secs: u64) -> ProviderAllocation {
-        match self.inner.try_allocate(grace, grace_period_timeout_secs).await {
+    pub fn try_allocate(&self, grace: bool, grace_period_timeout_secs: u64) -> ProviderAllocation {
+        match self.inner.try_allocate(grace, grace_period_timeout_secs) {
             ProviderConfigAllocation::Available => ProviderAllocation::new_available(Arc::clone(&self.inner)),
             ProviderConfigAllocation::GracePeriod => ProviderAllocation::new_grace_period(Arc::clone(&self.inner)),
             ProviderConfigAllocation::Exhausted => ProviderAllocation::Exhausted,
         }
     }
 
-    pub async fn get_next(&self, grace: bool, grace_period_timeout_secs: u64) -> Option<Arc<ProviderConfig>> {
-        if self.inner.get_next(grace, grace_period_timeout_secs).await {
+    pub fn get_next(&self, grace: bool, grace_period_timeout_secs: u64) -> Option<Arc<ProviderConfig>> {
+        if self.inner.get_next(grace, grace_period_timeout_secs) {
             return Some(Arc::clone(&self.inner));
         }
         None
@@ -504,59 +539,76 @@ mod tests {
         assert!(provider.is_unlimited());
 
         // Drive connection count up so `release` executes its normal path.
-        assert!(matches!(provider.try_allocate(false, 0).await, ProviderConfigAllocation::Available));
-        assert!(matches!(provider.try_allocate(false, 0).await, ProviderConfigAllocation::Available));
-        assert_eq!(provider.get_current_connections().await, 2);
+        assert!(matches!(provider.try_allocate(false, 0), ProviderConfigAllocation::Available));
+        assert!(matches!(provider.try_allocate(false, 0), ProviderConfigAllocation::Available));
+        assert_eq!(provider.get_current_connections(), 2);
 
         {
-            let mut guard = provider.connection.write().await;
+            let mut guard = provider.write_connection();
             guard.grace_started_at = Some(Instant::now());
         }
 
-        provider.release().await;
+        provider.release();
 
-        let guard = provider.connection.read().await;
+        let guard = provider.read_connection();
         assert_eq!(guard.current_connections, 1, "release must still decrement connection count");
         assert!(guard.grace_started_at.is_some(), "release must not clear grace state for unlimited provider");
     }
 
     #[tokio::test]
     async fn concurrent_allocations_grant_only_one_grace_connection() {
-        let provider = build_test_config(1);
-        assert!(matches!(provider.try_allocate(false, 10).await, ProviderConfigAllocation::Available));
+        let provider = Arc::new(build_test_config(1));
+        assert!(matches!(provider.try_allocate(false, 10), ProviderConfigAllocation::Available));
 
-        let (first, second) = tokio::join!(provider.try_allocate(true, 10), provider.try_allocate(true, 10));
-        let grace_count = [first, second]
-            .into_iter()
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let first_provider = Arc::clone(&provider);
+        let first_barrier = Arc::clone(&barrier);
+        let first = std::thread::spawn(move || {
+            first_barrier.wait();
+            first_provider.try_allocate(true, 10)
+        });
+        let second_provider = Arc::clone(&provider);
+        let second_barrier = Arc::clone(&barrier);
+        let second = std::thread::spawn(move || {
+            second_barrier.wait();
+            second_provider.try_allocate(true, 10)
+        });
+        barrier.wait();
+        let allocations = [first.join().ok(), second.join().ok()];
+        assert!(allocations.iter().all(Option::is_some));
+        let grace_count = allocations
+            .iter()
+            .flatten()
             .filter(|allocation| matches!(allocation, ProviderConfigAllocation::GracePeriod))
             .count();
-        let exhausted_count = [first, second]
-            .into_iter()
+        let exhausted_count = allocations
+            .iter()
+            .flatten()
             .filter(|allocation| matches!(allocation, ProviderConfigAllocation::Exhausted))
             .count();
 
         assert_eq!(grace_count, 1);
         assert_eq!(exhausted_count, 1);
-        assert_eq!(provider.get_current_connections().await, 2);
+        assert_eq!(provider.get_current_connections(), 2);
     }
 
     #[tokio::test(start_paused = true)]
     async fn active_grace_at_limit_blocks_another_grant_until_timeout() {
         let provider = build_test_config(1);
         {
-            let mut guard = provider.connection.write().await;
+            let mut guard = provider.write_connection();
             guard.current_connections = 1;
             guard.grace_started_at = Some(Instant::now());
         }
 
-        assert!(matches!(provider.try_allocate(true, 10).await, ProviderConfigAllocation::Exhausted));
-        assert!(!provider.get_next(true, 10).await);
-        assert!(provider.connection.read().await.grace_started_at.is_some());
+        assert!(matches!(provider.try_allocate(true, 10), ProviderConfigAllocation::Exhausted));
+        assert!(!provider.get_next(true, 10));
+        assert!(provider.read_connection().grace_started_at.is_some());
 
         tokio::time::advance(Duration::from_secs(11)).await;
 
-        assert!(provider.get_next(true, 10).await);
-        assert!(provider.connection.read().await.grace_started_at.is_none());
-        assert!(matches!(provider.try_allocate(true, 10).await, ProviderConfigAllocation::GracePeriod));
+        assert!(provider.get_next(true, 10));
+        assert!(provider.read_connection().grace_started_at.is_none());
+        assert!(matches!(provider.try_allocate(true, 10), ProviderConfigAllocation::GracePeriod));
     }
 }

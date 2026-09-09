@@ -219,9 +219,14 @@ pub(super) async fn hls_cache_response_context(
     now_ms: u64,
 ) -> HlsCacheResponseContext {
     let qos_meter = app_state.hls_proxy.qos().meter_for_access_lease(&access_context.lease_id).await;
-    let log_identity = {
+    let (log_identity, session_owner, playback_request_id) = {
         let session = session.read().await;
-        HlsLogIdentity::from_session(&session)
+        let binding = session.origin_account_binding.as_ref().filter(|binding| binding.is_active());
+        (
+            HlsLogIdentity::from_session(&session),
+            binding.map(|binding| binding.session_owner.clone()),
+            binding.and_then(|binding| binding.playback_request_id),
+        )
     };
     HlsCacheResponseContext::new(
         access_context.lease_id.clone(),
@@ -230,13 +235,20 @@ pub(super) async fn hls_cache_response_context(
         Arc::clone(app_state.hls_proxy.metrics()),
         Arc::clone(app_state.hls_proxy.segment_repair()),
         qos_meter,
-        Some(HlsMediaActivityMarker::new(
-            Arc::clone(&app_state.hls_proxy),
-            Arc::clone(session),
-            access_context.proxy_session_id.clone(),
-            access_context.lease_id.clone(),
-            lease_identity,
-        )),
+        Some(
+            HlsMediaActivityMarker::new(
+                Arc::clone(&app_state.hls_proxy),
+                Arc::clone(session),
+                access_context.proxy_session_id.clone(),
+                access_context.lease_id.clone(),
+                lease_identity,
+            )
+            .with_active_provider(
+                Arc::clone(&app_state.active_provider),
+                session_owner,
+                playback_request_id,
+            ),
+        ),
         now_ms,
     )
 }
@@ -926,6 +938,7 @@ pub(super) async fn fetch_or_passthrough_transient_resource(
     serve_hls_transient_passthrough_result(endpoint, resource, policy, fetch_result).await
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) async fn serve_hls_transient_passthrough_result(
     endpoint: HlsResourceEndpointContext<'_>,
     resource: TransientResourceRef,
@@ -981,7 +994,22 @@ pub(super) async fn serve_hls_transient_passthrough_result(
                     );
                 }
             }
-            hls_transient_origin_response(
+            let media_marker = if matches!(resource.kind, TransientResourceKind::Segment | TransientResourceKind::Part)
+                && response.decoded.status.is_success()
+            {
+                hls_cache_response_context(
+                    endpoint.app_state,
+                    endpoint.session,
+                    endpoint.access_context,
+                    endpoint.lease_identity,
+                    endpoint.now_ms,
+                )
+                .await
+                .media_activity_marker
+            } else {
+                None
+            };
+            let response = hls_transient_origin_response(
                 response,
                 HlsTransientDirectResponseContext {
                     session: Arc::clone(endpoint.session),
@@ -993,7 +1021,12 @@ pub(super) async fn serve_hls_transient_passthrough_result(
                         HlsLogIdentity::from_session(&session)
                     },
                 },
-            )
+            );
+            if let Some(marker) = media_marker {
+                marker.confirm_media_response(response)
+            } else {
+                response
+            }
         }
         Err(err) => {
             if matches!(err, HlsOriginResourceFetchError::ProviderUnavailable(_)) {
@@ -1977,7 +2010,7 @@ pub(super) async fn fetch_and_cache_transient_origin_response(
         resource_kind: context.resource.kind,
         clients,
         policy: policy.clone(),
-        log_identity,
+        log_identity: log_identity.clone(),
     };
     let cache_fetch_request = HlsTransientOriginCacheFetchRequest {
         fetch: fetch_request,
@@ -1985,6 +2018,8 @@ pub(super) async fn fetch_and_cache_transient_origin_response(
             segment_cache: Arc::clone(context.app_state.hls_proxy.segment_cache()),
             segment_repair: Arc::clone(context.app_state.hls_proxy.segment_repair()),
             session: Arc::clone(context.session),
+            proxy_session_id: context.access_context.proxy_session_id.clone(),
+            log_identity: log_identity.clone(),
             access_lease_id: context.access_context.lease_id.clone(),
             resource: context.resource.clone(),
             resource_file: context.resource_file.clone(),
@@ -2334,9 +2369,10 @@ pub(in crate::api) async fn handle_hls_stream_request(
     let fallback_connection_kind = connection_kind.unwrap_or(crate::api::model::ConnectionKind::Normal);
     let (request_url, session_token, provider_handle, _selected_provider_config) = if let Some(session) = user_session {
         let pinned_provider = if session.provider.is_empty() { &input.name } else { &session.provider };
+        let pinned_kind = if archive_reference.is_some() { PlaybackKind::Catchup } else { PlaybackKind::LiveHls };
         let provider_handle = if let Some(handle) = app_state
             .active_provider
-            .acquire_exact_connection_with_grace_for_session(
+            .acquire_exact_connection_with_lease_for_session(
                 pinned_provider,
                 &fingerprint.addr,
                 false,
@@ -2345,7 +2381,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
                     session.connection_kind.or(connection_kind).unwrap_or(crate::api::model::ConnectionKind::Normal),
                 ),
                 session.connection_kind.or(connection_kind).unwrap_or(crate::api::model::ConnectionKind::Normal),
-                Some(session.token.as_str()),
+                Some(PlaybackLeaseRef::new(session.token.as_str(), pinned_kind)),
             )
             .await
         {
@@ -2398,7 +2434,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
                 let hls_session_ttl_secs = get_hls_session_ttl_secs(app_state);
                 app_state
                     .active_provider
-                    .refresh_provider_reservation(&cfg.name, &session_token, hls_session_ttl_secs)
+                    .refresh_adaptive_playback_lease(&cfg.name, &session_token, pinned_kind, hls_session_ttl_secs)
                     .await;
                 (stream_url, Some(session_token), provider_handle, Some(selected_provider_config))
             }
@@ -2423,6 +2459,9 @@ pub(in crate::api) async fn handle_hls_stream_request(
         };
         let session_owner = hls_session_owner.as_deref().unwrap_or(user_session_token.as_str());
         let hls_session_ttl_secs = get_hls_session_ttl_secs(app_state);
+        // Archive playback keeps its own reconnect window semantics, so the lease must
+        // be classified as catchup rather than plain live HLS.
+        let playback_kind = if archive_reference.is_some() { PlaybackKind::Catchup } else { PlaybackKind::LiveHls };
         let Some(reservation) = try_reserve_hls_entry_origin_account_for_redirect(
             app_state,
             fingerprint,
@@ -2432,6 +2471,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
             &url,
             &user_session_token,
             session_owner,
+            playback_kind,
             hls_session_ttl_secs,
             connection_permission,
             fallback_connection_kind,
@@ -2862,7 +2902,7 @@ pub(super) async fn hls_api_stream_resolved(
             .await;
         }
 
-        if app_state.active_provider.is_over_limit(&session.provider).await {
+        if app_state.active_provider.is_over_limit(&session.provider) {
             let stream_channel = resolve_stream_channel(
                 &app_state,
                 &target,

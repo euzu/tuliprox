@@ -796,19 +796,19 @@ async fn release_preacquired_origin_provider_handle(request: &OriginRefreshReque
     let Some(origin_io) = request.origin_io.as_ref() else {
         return;
     };
-    let Some(handle) = origin_io.take_preacquired_provider_handle().await else {
+    let Some(managed) = origin_io.take_preacquired_provider_handle().await else {
         return;
     };
     let binding = request.session.read().await.origin_account_binding.clone();
     if let Some(binding) = binding {
-        origin_io.ctx.connection_manager.release_provider_handle(Some(handle)).await;
         debug!(
             "HLS provider handle released after manifest refresh: provider={} reason=refresh-not-started",
             sanitize_sensitive_info(binding.account_name.as_ref())
         );
-    } else {
-        origin_io.ctx.connection_manager.release_provider_handle(Some(handle)).await;
     }
+    // Drop the managed owner synchronously: the provider slot is released without a
+    // lossy cleanup message.
+    drop(managed);
 }
 
 async fn touch_refresh_origin_account_binding(request: &OriginRefreshRequest, reservation_refreshed: bool) {

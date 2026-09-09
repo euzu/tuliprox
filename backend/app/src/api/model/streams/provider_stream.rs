@@ -1,7 +1,7 @@
 use crate::{
     api::model::{
         stream::{BoxedProviderStream, ProviderStreamResponse},
-        CleanupEvent, CustomVideoStream, ProvisioningStream, ThrottledStream, TimedClientStream, TransportStreamBuffer,
+        CustomVideoStream, ProvisioningStream, ThrottledStream, TimedClientStream, TransportStreamBuffer,
     },
     model::AppConfig,
 };
@@ -202,7 +202,7 @@ pub fn create_panel_api_provisioning_stream_with_stop(
 
 pub fn create_custom_video_stream_response(
     ctx: &ProviderStreamCtx,
-    addr: &SocketAddr,
+    _addr: &SocketAddr,
     video_response: CustomVideoStreamType,
 ) -> impl axum::response::IntoResponse + Send {
     let config = &ctx.app_config;
@@ -217,10 +217,6 @@ pub fn create_custom_video_stream_response(
         CustomVideoStreamType::Provisioning => create_panel_api_provisioning_stream(config, &[]),
         CustomVideoStreamType::HlsSessionOrLeaseExpired => create_hls_session_or_lease_expired_stream(config, &[]),
     } {
-        ctx.connection_manager.send_cleanup(CleanupEvent::UpdateDetailAndReleaseProviderConnection {
-            addr: *addr,
-            video_type: video_response,
-        });
         let mut builder = axum::response::Response::builder().status(status_code);
         for (key, value) in headers {
             builder = builder.header(key, value);

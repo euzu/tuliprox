@@ -1,4 +1,10 @@
-use crate::{provider_lineup_manager::ProviderLineupManager, EventManager, SharedStreamManager};
+#![allow(clippy::unused_async, clippy::unused_async_trait_impl)]
+
+use crate::{
+    provider_leases::{ProviderLeaseTable, ProviderLeaseUsage},
+    provider_lineup_manager::ProviderLineupManager,
+    EventManager, SharedStreamManager,
+};
 use log::error;
 use shared::utils::sanitize_sensitive_info;
 use std::{
@@ -7,16 +13,17 @@ use std::{
     net::SocketAddr,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, LazyLock, OnceLock,
+        Arc, LazyLock, OnceLock, RwLockReadGuard, RwLockWriteGuard,
     },
-    time::{Duration, Instant},
+    time::Instant,
 };
-use tokio::{sync::RwLock, time::Instant as TokioInstant};
+use tokio::time::Instant as TokioInstant;
 use tokio_util::sync::CancellationToken;
 use tuliprox_core::{
     model::{
-        AllocationId, AppConfig, ClientConnectionId, ConfigInput, GracePeriodOptions, ProviderAllocation,
-        ProviderConfig, ProviderHandle,
+        AllocationId, AppConfig, ConfigInput, GracePeriodOptions, PlaybackKind, PlaybackLeaseId, PlaybackRequestId,
+        PlaybackRequestOutcome, PlaybackSelectionReason, ProviderAllocation, ProviderBindingTag, ProviderConfig,
+        ProviderHandle, SharedSubscriberId,
     },
     utils::debug_if_enabled,
 };
@@ -52,22 +59,69 @@ fn is_better_preemption_candidate(current: Option<PreemptionCandidate>, candidat
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PriorityOwner {
-    Single(ClientConnectionId),
+    Single(AllocationId),
     Shared(SharedConnectionId),
+}
+
+/// Playback identity of one provider acquisition.
+///
+/// `owner` is a stable playback identity (usually the user session token), never a
+/// socket address and never a per-attempt random suffix in a shared family. Retries
+/// of one playback resolve to the same owner and therefore to one capacity slot,
+/// while two players behind a reverse proxy keep independent owners.
+#[derive(Debug, Clone, Copy)]
+pub struct PlaybackLeaseRef<'a> {
+    pub owner: &'a str,
+    pub kind: PlaybackKind,
+    pub request_id: PlaybackRequestId,
+}
+
+impl<'a> PlaybackLeaseRef<'a> {
+    pub fn new(owner: &'a str, kind: PlaybackKind) -> Self {
+        Self { owner, kind, request_id: PlaybackRequestId::next() }
+    }
+
+    /// Compatibility view of a bare session owner: one request, live TS semantics.
+    pub fn for_session_owner(owner: &'a str) -> Self { Self::new(owner, PlaybackKind::LiveTs) }
 }
 
 struct AcquireProviderParams<'a> {
     addr: &'a SocketAddr,
     priority: i8,
     kind: ConnectionKind,
-    session_owner: Option<&'a str>,
+    lease: Option<PlaybackLeaseRef<'a>>,
+}
+
+struct ProviderAllocationGuard(Option<ProviderAllocation>);
+
+impl ProviderAllocationGuard {
+    fn new(allocation: ProviderAllocation) -> Self { Self(Some(allocation)) }
+
+    fn allocation(&self) -> &ProviderAllocation { self.0.as_ref().unwrap_or(&ProviderAllocation::Exhausted) }
+
+    fn take(&mut self) -> ProviderAllocation { self.0.take().unwrap_or(ProviderAllocation::Exhausted) }
+}
+
+impl Drop for ProviderAllocationGuard {
+    fn drop(&mut self) {
+        if let Some(allocation) = self.0.take() {
+            allocation.release();
+        }
+    }
+}
+
+impl AcquireProviderParams<'_> {
+    #[inline]
+    fn session_owner(&self) -> Option<&str> { self.lease.map(|lease| lease.owner) }
 }
 
 #[derive(Debug, Clone)]
 struct SharedAllocation {
     allocation_id: AllocationId,
     allocation: ProviderAllocation,
-    connections: HashMap<ClientConnectionId, SharedSubscriber>,
+    /// Keyed by unique subscriber id, never by socket: two external clients behind one
+    /// reverse proxy must not collapse into a single entry.
+    connections: HashMap<SharedSubscriberId, SharedSubscriber>,
     priority: i8,
     kind: ConnectionKind,
     created_at: Instant,
@@ -77,6 +131,8 @@ struct SharedAllocation {
 
 #[derive(Debug, Clone)]
 struct ActiveConnectionInfo {
+    allocation_id: AllocationId,
+    client_addr: SocketAddr,
     allocation: ProviderAllocation,
     // Used to signal preemption to the consumer of this connection
     cancel_token: CancellationToken,
@@ -84,51 +140,135 @@ struct ActiveConnectionInfo {
     priority: i8,
     kind: ConnectionKind,
     session_owner: Option<Arc<str>>,
+    playback_request_id: Option<PlaybackRequestId>,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct SharedSubscriber {
     priority: i8,
     kind: ConnectionKind,
+    /// Transport metadata and socket-wide close target only; never an identity key.
+    addr: SocketAddr,
 }
-
-#[derive(Debug, Clone)]
-struct ProviderReservation {
-    expires_at: TokioInstant,
-}
-
-type ProviderReservations = HashMap<Arc<str>, HashMap<Arc<str>, ProviderReservation>>;
 
 #[derive(Debug, Clone, Default)]
 struct SharedConnections {
     by_key: HashMap<Arc<str>, SharedAllocation>,
-    key_by_addr: HashMap<ClientConnectionId, Arc<str>>,
+    key_by_subscriber: HashMap<SharedSubscriberId, Arc<str>>,
     shared_by_allocation_id: HashMap<AllocationId, Arc<str>>,
 }
 
 #[derive(Debug, Clone, Default)]
 struct Connections {
-    // Map Addr -> AllocationID -> Allocation Info
-    single: HashMap<ClientConnectionId, HashMap<AllocationId, ActiveConnectionInfo>>,
+    // Primary map keyed by AllocationId, never by socket address.
+    single: HashMap<AllocationId, ActiveConnectionInfo>,
+    // Secondary index for socket-wide transport close/kick actions.
+    single_by_addr: HashMap<SocketAddr, HashSet<AllocationId>>,
     shared: SharedConnections,
     // Index to quickly find connections by provider name for preemption
-    // ProviderName -> Set<(ClientConnectionId, AllocationId)>
-    by_provider: HashMap<Arc<str>, HashSet<(ClientConnectionId, AllocationId)>>,
+    // ProviderName -> Set<AllocationId>
+    by_provider: HashMap<Arc<str>, HashSet<AllocationId>>,
     // Priority index per provider alias for O(log n) victim lookup
     // ProviderName -> BTreeMap<PriorityKey, PriorityOwner>
     priority_index: HashMap<Arc<str>, BTreeMap<PriorityKey, PriorityOwner>>,
     soft_priority_index: HashMap<Arc<str>, BTreeMap<PriorityKey, PriorityOwner>>,
 }
 
+pub struct ManagedProviderHandle {
+    manager: Arc<ActiveProviderManager>,
+    handle: Option<ProviderHandle>,
+}
+
+impl std::fmt::Debug for ManagedProviderHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ManagedProviderHandle").field("handle", &self.handle).finish_non_exhaustive()
+    }
+}
+
+impl ManagedProviderHandle {
+    #[inline]
+    pub fn new(manager: Arc<ActiveProviderManager>, handle: ProviderHandle) -> Self {
+        Self { manager, handle: Some(handle) }
+    }
+
+    #[inline]
+    pub fn handle(&self) -> Option<&ProviderHandle> { self.handle.as_ref() }
+
+    #[inline]
+    pub fn take(&mut self) -> Option<ProviderHandle> { self.handle.take() }
+
+    #[inline]
+    pub fn disarm(&mut self) -> Option<ProviderHandle> { self.handle.take() }
+}
+
+impl Drop for ManagedProviderHandle {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            self.manager.release_handle_sync(&handle);
+        }
+    }
+}
+
 pub struct ActiveProviderManager {
+    // Serializes capacity transitions across counters, allocation indices and leases.
+    capacity_transition: std::sync::Mutex<()>,
     providers: ProviderLineupManager,
-    connections: RwLock<Connections>,
-    reservations: RwLock<ProviderReservations>,
+    connections: std::sync::RwLock<Connections>,
+    leases: std::sync::RwLock<ProviderLeaseTable>,
     next_allocation_id: AtomicU64,
     shared_stream_manager: OnceLock<Arc<SharedStreamManager>>,
 }
 
+#[allow(clippy::unused_async)]
 impl ActiveProviderManager {
+    fn lock_capacity_transition(&self) -> std::sync::MutexGuard<'_, ()> {
+        match self.capacity_transition.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                error!("Recovering poisoned active-provider capacity transition lock");
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    fn read_connections(&self) -> RwLockReadGuard<'_, Connections> {
+        match self.connections.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                error!("Recovering poisoned active-provider connection lock");
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    fn write_connections(&self) -> RwLockWriteGuard<'_, Connections> {
+        match self.connections.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                error!("Recovering poisoned active-provider connection lock");
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    fn write_leases(&self) -> RwLockWriteGuard<'_, ProviderLeaseTable> {
+        match self.leases.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                error!("Recovering poisoned provider-lease lock");
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn read_leases(&self) -> RwLockReadGuard<'_, ProviderLeaseTable> {
+        match self.leases.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
     fn upsert_priority_entry(
         connections: &mut Connections,
         provider_name: &Arc<str>,
@@ -159,13 +299,13 @@ impl ActiveProviderManager {
     }
 
     fn shared_effective_priority(
-        subscribers: &HashMap<ClientConnectionId, SharedSubscriber>,
+        subscribers: &HashMap<SharedSubscriberId, SharedSubscriber>,
         kind: ConnectionKind,
     ) -> Option<i8> {
         subscribers.values().filter(|subscriber| subscriber.kind == kind).map(|subscriber| subscriber.priority).min()
     }
 
-    fn shared_effective_kind(subscribers: &HashMap<ClientConnectionId, SharedSubscriber>) -> ConnectionKind {
+    fn shared_effective_kind(subscribers: &HashMap<SharedSubscriberId, SharedSubscriber>) -> ConnectionKind {
         if subscribers.values().all(|subscriber| subscriber.kind == ConnectionKind::Soft) {
             ConnectionKind::Soft
         } else {
@@ -177,9 +317,10 @@ impl ActiveProviderManager {
         let grace_period_options = Self::get_grace_options(cfg);
         let inputs = Self::get_config_inputs(cfg);
         Self {
+            capacity_transition: std::sync::Mutex::new(()),
             providers: ProviderLineupManager::new(inputs, grace_period_options, event_manager),
-            connections: RwLock::new(Connections::default()),
-            reservations: RwLock::new(HashMap::new()),
+            connections: std::sync::RwLock::new(Connections::default()),
+            leases: std::sync::RwLock::new(ProviderLeaseTable::default()),
             next_allocation_id: AtomicU64::new(1),
             shared_stream_manager: OnceLock::new(),
         }
@@ -203,16 +344,15 @@ impl ActiveProviderManager {
     }
 
     pub async fn reconcile_connections(&self) {
+        let _transition = self.lock_capacity_transition();
         let mut counts = HashMap::<Arc<str>, usize>::new();
         {
-            let connections = self.connections.read().await;
+            let connections = self.read_connections();
 
             // Single connections
-            for per_addr in connections.single.values() {
-                for info in per_addr.values() {
-                    if let Some(name) = info.allocation.get_provider_name() {
-                        *counts.entry(name).or_insert(0) += 1;
-                    }
+            for info in connections.single.values() {
+                if let Some(name) = info.allocation.get_provider_name() {
+                    *counts.entry(name).or_insert(0) += 1;
                 }
             }
 
@@ -224,92 +364,85 @@ impl ActiveProviderManager {
             }
         }
 
-        self.providers.reconcile_connections(counts).await;
+        self.providers.reconcile_connections(counts);
     }
 
-    fn prune_expired_reservations(reservations: &mut ProviderReservations) {
-        let now = TokioInstant::now();
-        reservations.retain(|_, provider_reservations| {
-            provider_reservations.retain(|_, reservation| reservation.expires_at > now);
-            !provider_reservations.is_empty()
-        });
-    }
+    fn prune_expired_leases(leases: &mut ProviderLeaseTable) { leases.prune(TokioInstant::now()); }
 
-    async fn has_foreign_reservation(&self, provider_name: &Arc<str>, session_owner: Option<&str>) -> bool {
+    fn has_foreign_reservation(&self, provider_name: &Arc<str>, session_owner: Option<&str>) -> bool {
         if !self.providers.reservation_blocks_other_sessions(provider_name) {
             return false;
         }
-        let mut reservations = self.reservations.write().await;
-        Self::prune_expired_reservations(&mut reservations);
-        reservations.get(provider_name).is_some_and(|provider_reservations| {
-            session_owner.map_or(!provider_reservations.is_empty(), |owner| {
-                provider_reservations.keys().any(|reserved_owner| reserved_owner.as_ref() != owner)
-            })
-        })
+        let mut leases = self.write_leases();
+        Self::prune_expired_leases(&mut leases);
+        leases.has_foreign_reserved_lease(provider_name, session_owner)
     }
 
-    async fn get_reserved_provider_for_owner(&self, input_name: &Arc<str>, session_owner: &str) -> Option<Arc<str>> {
-        let mut reservations = self.reservations.write().await;
-        Self::prune_expired_reservations(&mut reservations);
-        reservations.iter().find_map(|(provider_name, provider_reservations)| {
-            (provider_reservations.contains_key(session_owner)
-                && self.providers.is_provider_for_input(provider_name, input_name))
-            .then(|| provider_name.clone())
-        })
+    fn get_reserved_provider_for_owner(&self, input_name: &Arc<str>, session_owner: &str) -> Option<Arc<str>> {
+        let mut leases = self.write_leases();
+        Self::prune_expired_leases(&mut leases);
+        let provider_name = leases.provider_for_owner(session_owner)?;
+        self.providers.is_provider_for_input(&provider_name, input_name).then_some(provider_name)
     }
 
-    async fn active_reservation_owners(&self, provider_name: &Arc<str>) -> HashSet<Arc<str>> {
-        let connections = self.connections.read().await;
+    fn active_reservation_owners(&self, provider_name: &Arc<str>) -> HashSet<Arc<str>> {
+        let connections = self.read_connections();
         let mut owners = HashSet::new();
-        for per_addr in connections.single.values() {
-            for info in per_addr.values() {
+        if let Some(alloc_ids) = connections.by_provider.get(provider_name) {
+            for id in alloc_ids {
+                if let Some(info) = connections.single.get(id) {
+                    if let Some(owner) = info.session_owner.as_ref() {
+                        owners.insert(Arc::clone(owner));
+                    }
+                } else if let Some(key) = connections.shared.shared_by_allocation_id.get(id) {
+                    if let Some(shared) = connections.shared.by_key.get(key) {
+                        if let Some(owner) = shared.session_owner.as_ref() {
+                            owners.insert(Arc::clone(owner));
+                        }
+                    }
+                }
+            }
+        } else {
+            for info in connections.single.values() {
                 if info.allocation.get_provider_name().as_ref() == Some(provider_name) {
                     if let Some(owner) = info.session_owner.as_ref() {
                         owners.insert(Arc::clone(owner));
                     }
                 }
             }
-        }
-        for shared in connections.shared.by_key.values() {
-            if shared.allocation.get_provider_name().as_ref() == Some(provider_name) {
-                if let Some(owner) = shared.session_owner.as_ref() {
-                    owners.insert(Arc::clone(owner));
+            for shared in connections.shared.by_key.values() {
+                if shared.allocation.get_provider_name().as_ref() == Some(provider_name) {
+                    if let Some(owner) = shared.session_owner.as_ref() {
+                        owners.insert(Arc::clone(owner));
+                    }
                 }
             }
         }
         owners
     }
 
-    async fn reservation_capacity_usage(
+    fn reservation_capacity_usage(
         &self,
         provider_name: &Arc<str>,
         session_owner: Option<&str>,
     ) -> Option<(usize, usize, usize)> {
-        let (current_connections, max_connections) = self.providers.provider_capacity(provider_name).await?;
+        let (current_connections, max_connections) = self.providers.provider_capacity(provider_name)?;
         if max_connections == 0 {
             return Some((current_connections, max_connections, 0));
         }
 
-        let active_owners = self.active_reservation_owners(provider_name).await;
-        let mut reservations = self.reservations.write().await;
-        Self::prune_expired_reservations(&mut reservations);
-        let idle_foreign_reservations = reservations.get(provider_name).map_or(0, |provider_reservations| {
-            provider_reservations
-                .keys()
-                .filter(|reserved_owner| {
-                    let reserved_owner = reserved_owner.as_ref();
-                    session_owner != Some(reserved_owner) && !active_owners.contains(reserved_owner)
-                })
-                .count()
-        });
+        let counted_owners = self.active_reservation_owners(provider_name);
+        let mut leases = self.write_leases();
+        Self::prune_expired_leases(&mut leases);
+        let idle_foreign_reservations = leases.foreign_reserved_slots(provider_name, session_owner, &counted_owners);
 
         Some((current_connections, max_connections, idle_foreign_reservations))
     }
 
     /// Returns true when the next allocation would consume a slot kept for an idle reservation.
-    async fn reserved_capacity_blocks_next(&self, provider_name: &Arc<str>, session_owner: Option<&str>) -> bool {
+    fn reserved_capacity_blocks_next(&self, provider_name: &Arc<str>, session_owner: Option<&str>) -> bool {
         let Some((current_connections, max_connections, idle_foreign_reservations)) =
-            self.reservation_capacity_usage(provider_name, session_owner).await
+            self.reservation_capacity_usage(provider_name, session_owner)
         else {
             return true;
         };
@@ -319,9 +452,9 @@ impl ActiveProviderManager {
     }
 
     /// Returns true when an already-counted candidate allocation consumed a slot kept for an idle reservation.
-    async fn exceeds_reserved_capacity(&self, provider_name: &Arc<str>, session_owner: Option<&str>) -> bool {
+    fn exceeds_reserved_capacity(&self, provider_name: &Arc<str>, session_owner: Option<&str>) -> bool {
         let Some((current_connections, max_connections, idle_foreign_reservations)) =
-            self.reservation_capacity_usage(provider_name, session_owner).await
+            self.reservation_capacity_usage(provider_name, session_owner)
         else {
             return true;
         };
@@ -330,14 +463,50 @@ impl ActiveProviderManager {
             && current_connections.saturating_add(idle_foreign_reservations) > max_connections
     }
 
-    async fn reserved_provider_names_for_other(
+    /// Explains a reservation skip with the authoritative slot breakdown instead of
+    /// only the transport socket, so the decision can be audited from the logs.
+    fn log_reserved_capacity_skip(&self, provider_name: &Arc<str>, params: &AcquireProviderParams<'_>) {
+        if !log::log_enabled!(log::Level::Debug) {
+            return;
+        }
+        let Some((current_connections, max_connections, foreign_reserved)) =
+            self.reservation_capacity_usage(provider_name, params.session_owner())
+        else {
+            debug_if_enabled!(
+                "Skipping reserved provider {} (reason={}, capacity=unknown, peer_addr={}, request_id={}, playback_kind={})",
+                sanitize_sensitive_info(provider_name),
+                PlaybackSelectionReason::ReservedCapacity,
+                sanitize_sensitive_info(&params.addr.to_string()),
+                params.lease.map_or_else(String::new, |lease| lease.request_id.to_string()),
+                params.lease.map_or_else(|| "-".to_string(), |lease| lease.kind.to_string())
+            );
+            return;
+        };
+        let usage = self.provider_lease_usage(provider_name);
+        debug_if_enabled!(
+            "Skipping reserved provider {} (reason={}, current={}, max={}, foreign_reserved={}, active_slots={}, starting_slots={}, idle_slots={}, peer_addr={}, request_id={}, playback_kind={})",
+            sanitize_sensitive_info(provider_name),
+            PlaybackSelectionReason::ReservedCapacity,
+            current_connections,
+            max_connections,
+            foreign_reserved,
+            usage.active,
+            usage.starting,
+            usage.idle,
+            sanitize_sensitive_info(&params.addr.to_string()),
+            params.lease.map_or_else(String::new, |lease| lease.request_id.to_string()),
+            params.lease.map_or_else(|| "-".to_string(), |lease| lease.kind.to_string())
+        );
+    }
+
+    fn reserved_provider_names_for_other(
         &self,
         input_name: &Arc<str>,
         session_owner: Option<&str>,
     ) -> HashSet<Arc<str>> {
         let mut reserved = HashSet::new();
         for provider_name in self.providers.provider_names_for_input(input_name) {
-            if self.has_foreign_reservation(&provider_name, session_owner).await {
+            if self.has_foreign_reservation(&provider_name, session_owner) {
                 reserved.insert(provider_name);
             }
         }
@@ -345,74 +514,290 @@ impl ActiveProviderManager {
     }
 
     pub async fn refresh_provider_reservation(&self, provider_name: &Arc<str>, session_owner: &str, ttl_secs: u64) {
-        let mut reservations = self.reservations.write().await;
-        Self::prune_expired_reservations(&mut reservations);
-        reservations.retain(|_, provider_reservations| {
-            provider_reservations.remove(session_owner);
-            !provider_reservations.is_empty()
-        });
+        let _transition = self.lock_capacity_transition();
+        let granted_ttl = self.renewal_granted_ttl(provider_name, session_owner, ttl_secs);
+        let mut leases = self.write_leases();
+        Self::prune_expired_leases(&mut leases);
         if ttl_secs == 0 {
+            leases.release_owner(session_owner);
             return;
         }
-        reservations.entry(provider_name.clone()).or_default().insert(
-            Arc::from(session_owner),
-            ProviderReservation { expires_at: TokioInstant::now() + Duration::from_secs(ttl_secs) },
+        if leases.renew_current_owner(session_owner, provider_name, PlaybackKind::LiveHls, granted_ttl).is_none() {
+            let req_id = PlaybackRequestId::next();
+            let _ = leases.begin_owner(session_owner, provider_name, PlaybackKind::LiveHls, req_id);
+            leases.renew_identified_owner(session_owner, provider_name, PlaybackKind::LiveHls, req_id, granted_ttl);
+        }
+    }
+
+    /// Renews the lease of an adaptive (HLS/DASH/Catchup) playback.
+    ///
+    /// Adaptive playback consists of many short requests, so the lease must stay
+    /// reconnect-capable: between two segment requests the slot is kept as an idle
+    /// lease on the same provider instead of being released and reselected.
+    pub async fn refresh_adaptive_playback_lease(
+        &self,
+        provider_name: &Arc<str>,
+        session_owner: &str,
+        kind: PlaybackKind,
+        ttl_secs: u64,
+    ) {
+        let _transition = self.lock_capacity_transition();
+        let granted_ttl = self.renewal_granted_ttl(provider_name, session_owner, ttl_secs);
+        let mut leases = self.write_leases();
+        Self::prune_expired_leases(&mut leases);
+        leases.renew_current_owner(session_owner, provider_name, kind, granted_ttl);
+    }
+
+    /// Renews the lease of a playback. A zero TTL clears it.
+    pub async fn refresh_playback_lease(
+        &self,
+        provider_name: &Arc<str>,
+        lease_ref: &PlaybackLeaseRef<'_>,
+        ttl_secs: u64,
+    ) {
+        let _transition = self.lock_capacity_transition();
+        let granted_ttl = self.renewal_granted_ttl(provider_name, lease_ref.owner, ttl_secs);
+        let mut leases = self.write_leases();
+        Self::prune_expired_leases(&mut leases);
+        leases.renew_identified_owner(
+            lease_ref.owner,
+            provider_name,
+            lease_ref.kind,
+            lease_ref.request_id,
+            granted_ttl,
         );
     }
 
-    pub async fn clear_provider_reservation(&self, session_owner: &str) {
-        let mut reservations = self.reservations.write().await;
-        Self::prune_expired_reservations(&mut reservations);
-        reservations.retain(|_, provider_reservations| {
-            provider_reservations.remove(session_owner);
-            !provider_reservations.is_empty()
-        });
+    /// The reconnect window a renewal may actually grant for `owner`.
+    ///
+    /// A lease that currently holds no reservation right must not gain one through a
+    /// mere activity refresh: the grant is re-checked against provider capacity with
+    /// the same admission rule as a confirmation, so a previously denied reservation
+    /// cannot be silently restored by a later refresh.
+    fn renewal_granted_ttl(&self, provider_name: &Arc<str>, owner: &str, requested_ttl_secs: u64) -> u64 {
+        if requested_ttl_secs == 0 {
+            return 0;
+        }
+        let already_reserves = {
+            let mut leases = self.write_leases();
+            Self::prune_expired_leases(&mut leases);
+            leases.lease_of_owner(owner).is_some_and(|lease| lease.state.is_confirmed() && lease.idle_ttl_secs > 0)
+        };
+        if already_reserves || self.confirmation_reserve_allowed(provider_name, owner) {
+            requested_ttl_secs
+        } else {
+            0
+        }
     }
 
-    async fn acquire_exact_connection_inner(
+    pub async fn clear_provider_reservation(&self, session_owner: &str) {
+        let _transition = self.lock_capacity_transition();
+        let mut leases = self.write_leases();
+        leases.release_owner(session_owner);
+    }
+
+    pub async fn clear_identified_provider_reservation(
+        &self,
+        session_owner: &str,
+        provider_name: &Arc<str>,
+        binding_tag: Option<ProviderBindingTag>,
+    ) {
+        // A delayed clear without the exact binding tag has no delete right: it must
+        // not fall back to an owner-wide release and erase a successor lease.
+        let Some(binding_tag) = binding_tag else {
+            return;
+        };
+        let _transition = self.lock_capacity_transition();
+        let mut leases = self.write_leases();
+        leases.release_matching_owner(session_owner, provider_name, binding_tag);
+    }
+
+    /// Confirms real media activity for a playback lease. Only a confirmed lease may
+    /// outlive its request as a reconnect slot.
+    pub fn confirm_playback_activity_sync(&self, owner: &str) -> Option<PlaybackLeaseId> {
+        self.confirm_owner_sync(owner, None)
+    }
+
+    pub async fn confirm_playback_activity(&self, owner: &str) -> Option<PlaybackLeaseId> {
+        self.confirm_playback_activity_sync(owner)
+    }
+
+    /// Confirms real media activity for a specific request ID of a playback lease.
+    pub fn confirm_identified_playback_activity_sync(
+        &self,
+        owner: &str,
+        request_id: PlaybackRequestId,
+    ) -> Option<PlaybackLeaseId> {
+        self.confirm_owner_sync(owner, Some(request_id))
+    }
+
+    pub async fn confirm_identified_playback_activity(
+        &self,
+        owner: &str,
+        request_id: PlaybackRequestId,
+    ) -> Option<PlaybackLeaseId> {
+        self.confirm_identified_playback_activity_sync(owner, request_id)
+    }
+
+    /// Records media activity under the capacity transition. The confirmation only
+    /// grants a reservation right when the lease already backs a live allocation or a
+    /// free slot remains; otherwise the media bytes are recorded without a reservation
+    /// so a late cache confirmation cannot over-commit a provider at its limit.
+    fn confirm_owner_sync(&self, owner: &str, request_id: Option<PlaybackRequestId>) -> Option<PlaybackLeaseId> {
+        let _transition = self.lock_capacity_transition();
+        let (provider_name, wants_reservation) = {
+            let mut leases = self.write_leases();
+            Self::prune_expired_leases(&mut leases);
+            let provider_name = leases.provider_for_owner(owner)?;
+            let wants_reservation = leases.lease_of_owner(owner).is_some_and(|lease| lease.idle_ttl_secs > 0);
+            (provider_name, wants_reservation)
+        };
+        let reserve = !wants_reservation || self.confirmation_reserve_allowed(&provider_name, owner);
+        let mut leases = self.write_leases();
+        Self::prune_expired_leases(&mut leases);
+        match (request_id, reserve) {
+            (Some(request_id), true) => leases.confirm_identified_owner(owner, request_id),
+            (Some(request_id), false) => leases.confirm_identified_owner_without_reservation(owner, request_id),
+            (None, true) => leases.confirm_owner(owner),
+            (None, false) => leases.confirm_owner_without_reservation(owner),
+        }
+    }
+
+    /// True when confirming `session_owner`'s lease may reserve a provider slot: the
+    /// lease either already backs a live allocation, or a free slot remains below the
+    /// configured maximum after foreign reservations are counted.
+    fn confirmation_reserve_allowed(&self, provider_name: &Arc<str>, session_owner: &str) -> bool {
+        if self.active_reservation_owners(provider_name).contains(session_owner) {
+            return true;
+        }
+        let Some((current, max, foreign)) = self.reservation_capacity_usage(provider_name, Some(session_owner)) else {
+            return false;
+        };
+        max == 0 || current.saturating_add(foreign) < max
+    }
+
+    /// Ends a playback request and applies the outcome-specific lease policy.
+    ///
+    /// `idle_ttl_secs` overrides the reconnect window stored on the lease; `None`
+    /// keeps the window the endpoint configured when it renewed the lease.
+    pub async fn finish_playback_request(
+        &self,
+        owner: &str,
+        outcome: PlaybackRequestOutcome,
+        idle_ttl_secs: Option<u64>,
+    ) {
+        self.finish_playback_request_inner(owner, None, outcome, idle_ttl_secs).await;
+    }
+
+    pub async fn finish_identified_playback_request(
+        &self,
+        owner: &str,
+        request_id: PlaybackRequestId,
+        outcome: PlaybackRequestOutcome,
+    ) {
+        self.finish_playback_request_inner(owner, Some(request_id), outcome, None).await;
+    }
+
+    async fn finish_playback_request_inner(
+        &self,
+        owner: &str,
+        request_id: Option<PlaybackRequestId>,
+        outcome: PlaybackRequestOutcome,
+        idle_ttl_secs: Option<u64>,
+    ) {
+        let _transition = self.lock_capacity_transition();
+        // A delayed completion must not end a newer request of this playback.
+        // Only active connections from a DIFFERENT request ID (or shared streams) prevent lease finish.
+        let connections = self.read_connections();
+        let has_other_active_connection =
+            connections.single.values().any(|info| {
+                info.session_owner.as_deref() == Some(owner)
+                    && (request_id.is_none() || info.playback_request_id != request_id)
+            }) || connections.shared.by_key.values().any(|info| info.session_owner.as_deref() == Some(owner));
+        if has_other_active_connection {
+            if let Some(req_id) = request_id {
+                let mut leases = self.write_leases();
+                leases.detach_identified_request(owner, req_id);
+            }
+            return;
+        }
+        drop(connections);
+        let mut leases = self.write_leases();
+        if let Some(req_id) = request_id {
+            leases.finish_identified_owner(owner, req_id, outcome, idle_ttl_secs);
+        } else {
+            leases.finish_owner(owner, outcome, idle_ttl_secs);
+        }
+    }
+
+    /// Snapshot of the logical slots a provider holds, for logs and UI metrics.
+    pub fn provider_lease_usage(&self, provider_name: &Arc<str>) -> ProviderLeaseUsage {
+        let mut leases = self.write_leases();
+        Self::prune_expired_leases(&mut leases);
+        leases.usage(provider_name)
+    }
+
+    /// Removes every expired starting/idle lease. Runs from the session GC task.
+    pub fn prune_expired_leases_now(&self) {
+        let mut leases = self.write_leases();
+        Self::prune_expired_leases(&mut leases);
+    }
+
+    /// The provider lease's binding tag for an owner. The HLS layer captures this
+    /// from the acquired handle (via `ProviderHandle::binding_tag`) and passes it
+    /// back to [`Self::clear_identified_provider_reservation`] so a stale detach
+    /// cannot delete a successor lease on the same account.
+    pub fn binding_tag_for_owner(&self, owner: &str) -> Option<ProviderBindingTag> {
+        let mut leases = self.write_leases();
+        Self::prune_expired_leases(&mut leases);
+        leases.lease_of_owner(owner).map(|lease| ProviderBindingTag::new(lease.id, lease.binding_generation))
+    }
+
+    fn acquire_exact_connection_inner(
         &self,
         provider_name: &Arc<str>,
         allow_grace: bool,
         params: &AcquireProviderParams<'_>,
     ) -> Option<ProviderHandle> {
-        let allocation = self.providers.acquire_exact_connection_with_grace_override(provider_name, allow_grace).await;
-        if matches!(allocation, ProviderAllocation::Exhausted) {
+        let mut allocation = ProviderAllocationGuard::new(
+            self.providers.acquire_exact_connection_with_grace_override(provider_name, allow_grace),
+        );
+        if matches!(allocation.allocation(), ProviderAllocation::Exhausted) {
             return None;
         }
-        if self.exceeds_reserved_capacity(provider_name, params.session_owner).await {
-            allocation.release().await;
+        if self.exceeds_reserved_capacity(provider_name, params.session_owner()) {
             return None;
         }
-        self.register_allocation(allocation, params).await
+        Some(self.register_allocation(allocation.take(), params))
     }
 
-    async fn finalize_lineup_allocation(
+    fn finalize_lineup_allocation(
         &self,
         input_name: &Arc<str>,
         allow_grace: bool,
-        allocation: ProviderAllocation,
+        mut allocation: ProviderAllocationGuard,
         params: &AcquireProviderParams<'_>,
-    ) -> Option<ProviderHandle> {
-        if matches!(&allocation, ProviderAllocation::GracePeriod(_))
-            && self.evict_lower_priority_on_input(input_name, params.priority, params.kind, params.session_owner).await
+    ) -> ProviderHandle {
+        if matches!(allocation.allocation(), ProviderAllocation::GracePeriod(_))
+            && self.evict_lower_priority_on_input(input_name, params.priority, params.kind, params.session_owner())
         {
             let evicted_on_same =
-                !self.providers.is_over_limit(&allocation.get_provider_name().unwrap_or_default()).await;
+                !self.providers.is_over_limit(&allocation.allocation().get_provider_name().unwrap_or_default());
             if !evicted_on_same {
-                let new_alloc = self.providers.acquire_connection_with_grace_override(input_name, allow_grace).await;
-                if !matches!(new_alloc, ProviderAllocation::Exhausted) {
-                    if let Some(provider_name) = new_alloc.get_provider_name() {
-                        if !self.exceeds_reserved_capacity(&provider_name, params.session_owner).await {
-                            allocation.release().await;
-                            return self.register_allocation(new_alloc, params).await;
+                let mut new_alloc = ProviderAllocationGuard::new(
+                    self.providers.acquire_connection_with_grace_override(input_name, allow_grace),
+                );
+                if !matches!(new_alloc.allocation(), ProviderAllocation::Exhausted) {
+                    if let Some(provider_name) = new_alloc.allocation().get_provider_name() {
+                        if !self.exceeds_reserved_capacity(&provider_name, params.session_owner()) {
+                            return self.register_allocation(new_alloc.take(), params);
                         }
                     }
-                    new_alloc.release().await;
                 }
             }
         }
 
-        self.register_allocation(allocation, params).await
+        self.register_allocation(allocation.take(), params)
     }
 
     fn select_victim_from_index(
@@ -454,12 +839,10 @@ impl ActiveProviderManager {
         candidate: PreemptionCandidate,
     ) -> bool {
         match candidate.0 {
-            PriorityOwner::Single(addr) => {
-                connections.single.get(&addr).and_then(|per_addr| per_addr.get(&candidate.1)).is_some_and(|info| {
-                    info.kind == ConnectionKind::Normal
-                        && info.allocation.get_provider_name().as_ref() == Some(provider_name)
-                })
-            }
+            PriorityOwner::Single(alloc_id) => connections.single.get(&alloc_id).is_some_and(|info| {
+                info.kind == ConnectionKind::Normal
+                    && info.allocation.get_provider_name().as_ref() == Some(provider_name)
+            }),
             PriorityOwner::Shared(shared_id) => connections
                 .shared
                 .shared_by_allocation_id
@@ -533,9 +916,10 @@ impl ActiveProviderManager {
         allow_grace: bool,
         params: &AcquireProviderParams<'_>,
     ) -> Option<ProviderHandle> {
-        if let Some(owner) = params.session_owner {
-            if let Some(reserved_provider) = self.get_reserved_provider_for_owner(provider_or_input_name, owner).await {
-                return self.acquire_exact_connection_inner(&reserved_provider, allow_grace, params).await;
+        let _transition = self.lock_capacity_transition();
+        if let Some(owner) = params.session_owner() {
+            if let Some(reserved_provider) = self.get_reserved_provider_for_owner(provider_or_input_name, owner) {
+                return self.acquire_exact_connection_inner(&reserved_provider, allow_grace, params);
             }
         }
 
@@ -543,77 +927,93 @@ impl ActiveProviderManager {
         let attempts = candidate_count.max(1);
         let mut skipped_reserved = HashSet::new();
         for _ in 0..attempts {
-            let allocation = self
-                .providers
-                .acquire_connection_with_grace_override_excluding(
+            let allocation =
+                ProviderAllocationGuard::new(self.providers.acquire_connection_with_grace_override_excluding(
                     provider_or_input_name,
                     allow_grace,
                     &skipped_reserved,
-                )
-                .await;
-            if matches!(allocation, ProviderAllocation::Exhausted) {
+                ));
+            if matches!(allocation.allocation(), ProviderAllocation::Exhausted) {
                 break;
             }
-            if let Some(provider_name) = allocation.get_provider_name() {
-                if self.exceeds_reserved_capacity(&provider_name, params.session_owner).await {
-                    debug_if_enabled!(
-                        "Skipping reserved provider {} for {}",
-                        sanitize_sensitive_info(&provider_name),
-                        sanitize_sensitive_info(&params.addr.to_string())
-                    );
+            if let Some(provider_name) = allocation.allocation().get_provider_name() {
+                if self.exceeds_reserved_capacity(&provider_name, params.session_owner()) {
+                    self.log_reserved_capacity_skip(&provider_name, params);
                     skipped_reserved.insert(provider_name);
-                    allocation.release().await;
                     if skipped_reserved.len() >= attempts {
                         break;
                     }
                     continue;
                 }
             }
-            return self.finalize_lineup_allocation(provider_or_input_name, allow_grace, allocation, params).await;
+            return Some(self.finalize_lineup_allocation(provider_or_input_name, allow_grace, allocation, params));
         }
 
-        if let Some(preempted_alloc) = self
-            .try_preempt_connection(
-                provider_or_input_name,
-                params.priority,
-                allow_grace,
-                params.kind,
-                params.session_owner,
-            )
-            .await
-        {
-            return self.register_allocation(preempted_alloc, params).await;
+        if let Some(preempted_alloc) = self.try_preempt_connection(
+            provider_or_input_name,
+            params.priority,
+            allow_grace,
+            params.kind,
+            params.session_owner(),
+        ) {
+            return Some(self.register_allocation(preempted_alloc, params));
         }
 
         None
     }
 
-    async fn register_allocation(
+    fn register_allocation(
         &self,
         allocation: ProviderAllocation,
         params: &AcquireProviderParams<'_>,
-    ) -> Option<ProviderHandle> {
-        let AcquireProviderParams { addr, priority, kind, session_owner } = *params;
+    ) -> ProviderHandle {
+        let AcquireProviderParams { addr, priority, kind, lease } = *params;
+        let session_owner = lease.map(|lease| lease.owner);
         let provider_name = allocation.get_provider_name().unwrap_or_default();
         let allocation_id = self.next_allocation_id.fetch_add(1, Ordering::Relaxed);
         let cancel_token = CancellationToken::new();
         let now = Instant::now();
         let is_unlimited = allocation.is_unlimited_provider();
 
-        let mut connections = self.connections.write().await;
-        let per_addr = connections.single.entry(*addr).or_default();
+        // Claim the playback's capacity slot lease in its own lock scope so the
+        // connection and lease locks are never nested. The lease starts unconfirmed;
+        // it only reserves capacity against other playbacks once real media activity
+        // confirms it, which is what keeps abandoned manifest starts from blocking.
+        let binding_tag = if let Some(lease) = lease {
+            let mut leases = self.write_leases();
+            Self::prune_expired_leases(&mut leases);
+            let id = leases.begin_owner(lease.owner, &provider_name, lease.kind, lease.request_id);
+            let generation = leases.lease(id).map_or(1, |lease| lease.binding_generation);
+            debug_if_enabled!(
+                "Playback lease began: provider={} owner={} kind={} request_id={} lease_id={} generation={} state=starting",
+                sanitize_sensitive_info(&provider_name),
+                sanitize_sensitive_info(lease.owner),
+                lease.kind,
+                lease.request_id,
+                id,
+                generation
+            );
+            Some(ProviderBindingTag::new(id, generation))
+        } else {
+            None
+        };
 
-        per_addr.insert(
+        let mut connections = self.write_connections();
+        connections.single.insert(
             allocation_id,
             ActiveConnectionInfo {
+                allocation_id,
+                client_addr: *addr,
                 allocation: allocation.clone(),
                 cancel_token: cancel_token.clone(),
                 created_at: now,
                 priority,
                 kind,
                 session_owner: session_owner.map(Arc::from),
+                playback_request_id: lease.map(|lease| lease.request_id),
             },
         );
+        connections.single_by_addr.entry(*addr).or_default().insert(allocation_id);
 
         // Unlimited providers are not subject to preemption, so we deliberately
         // skip populating the by_provider / priority_index / soft_priority_index
@@ -623,39 +1023,45 @@ impl ActiveProviderManager {
         // even though it cannot be exhausted, contradicting the configured
         // `max_connections: 0` semantics.
         if !is_unlimited {
-            connections.by_provider.entry(provider_name.clone()).or_default().insert((*addr, allocation_id));
+            connections.by_provider.entry(provider_name.clone()).or_default().insert(allocation_id);
             Self::upsert_priority_entry(
                 &mut connections,
                 &provider_name,
                 (priority, Reverse(now), allocation_id),
-                PriorityOwner::Single(*addr),
+                PriorityOwner::Single(allocation_id),
                 kind,
             );
         }
 
         debug_if_enabled!(
-            "Added provider connection {provider_name:?} for {} (prio={}, kind={kind:?}, unlimited={is_unlimited})",
-            sanitize_sensitive_info(&addr.to_string()),
-            priority
+            "Added provider connection {provider_name:?} (reason={}, prio={priority}, kind={kind:?}, unlimited={is_unlimited}, allocation_id={allocation_id}, lease_id={}, request_id={}, playback_kind={}, peer_addr={})",
+            PlaybackSelectionReason::NewPriorityAllocation,
+            binding_tag.map_or_else(String::new, |tag| tag.lease_id.to_string()),
+            lease.map_or_else(String::new, |lease| lease.request_id.to_string()),
+            lease.map_or_else(|| "-".to_string(), |lease| lease.kind.to_string()),
+            sanitize_sensitive_info(&addr.to_string())
         );
-        Some(ProviderHandle::new(*addr, allocation_id, allocation, Some(cancel_token)))
+        let mut handle = ProviderHandle::new(*addr, allocation_id, allocation, Some(cancel_token));
+        handle.playback_request_id = lease.map(|lease| lease.request_id);
+        handle.binding_tag = binding_tag;
+        handle
     }
 
     #[allow(clippy::too_many_lines)]
     /// Evict a single lower-priority connection across the entire input lineup
     /// (all provider aliases). Used when a `GracePeriod` allocation was granted.
     /// Returns true if a victim was successfully evicted.
-    async fn evict_lower_priority_on_input(
+    fn evict_lower_priority_on_input(
         &self,
         input_name: &Arc<str>,
         new_priority: i8,
         kind_needed: ConnectionKind,
         session_owner: Option<&str>,
     ) -> bool {
-        let reserved_providers = self.reserved_provider_names_for_other(input_name, session_owner).await;
+        let reserved_providers = self.reserved_provider_names_for_other(input_name, session_owner);
 
         let victim = {
-            let connections = self.connections.read().await;
+            let connections = self.read_connections();
             self.select_preemption_candidate(&connections, input_name, new_priority, kind_needed, &reserved_providers)
         };
 
@@ -671,7 +1077,7 @@ impl ActiveProviderManager {
                 );
 
                 let released = {
-                    let mut connections = self.connections.write().await;
+                    let mut connections = self.write_connections();
                     let Some(key) = connections.shared.shared_by_allocation_id.get(&shared_id).cloned() else {
                         return false;
                     };
@@ -687,12 +1093,12 @@ impl ActiveProviderManager {
 
                     if let Some(shared) = connections.shared.by_key.remove(&key) {
                         connections.shared.shared_by_allocation_id.remove(&shared.allocation_id);
-                        for shared_addr in shared.connections.keys() {
-                            connections.shared.key_by_addr.remove(shared_addr);
+                        for subscriber_id in shared.connections.keys() {
+                            connections.shared.key_by_subscriber.remove(subscriber_id);
                         }
                         if let Some(name) = shared.allocation.get_provider_name() {
                             if let Some(list) = connections.by_provider.get_mut(&name) {
-                                list.retain(|(_, i)| *i != shared.allocation_id);
+                                list.remove(&shared.allocation_id);
                             }
                             Self::remove_priority_entry(
                                 &mut connections,
@@ -710,56 +1116,55 @@ impl ActiveProviderManager {
                     if let Some(token) = cancel_token {
                         token.cancel();
                     }
-                    allocation.release().await;
+                    allocation.release();
                     // Stop the shared stream broadcast task to match the released capacity.
                     // Without this, the broadcast keeps running and consuming a provider slot
                     // that was already freed by allocation.release().
                     if let Some(ssm) = self.shared_stream_manager.get() {
-                        ssm.teardown_preempted_stream(&stream_url).await;
+                        let ssm = Arc::clone(ssm);
+                        tokio::spawn(async move {
+                            ssm.teardown_preempted_stream(&stream_url, alloc_id).await;
+                        });
                     }
                 }
             }
-            PriorityOwner::Single(addr) => {
-                debug_if_enabled!(
-                    "Grace-evicting single connection from {} (prio={}) on input {} for higher priority request (prio={})",
-                    sanitize_sensitive_info(&addr.to_string()),
-                    v_prio,
-                    sanitize_sensitive_info(input_name),
-                    new_priority
-                );
-
+            PriorityOwner::Single(victim_alloc_id) => {
                 let removed_info = {
-                    let mut connections = self.connections.write().await;
-                    let mut removed_info = None;
-                    let mut removed_provider_name = None;
-                    let mut remove_addr_entry = false;
-                    if let Some(per_addr) = connections.single.get_mut(&addr) {
-                        if let Some(info) = per_addr.get(&alloc_id) {
-                            if info.priority != v_prio || info.created_at != victim_created_at {
-                                return false;
+                    let mut connections = self.write_connections();
+                    if let Some(info) = connections.single.get(&victim_alloc_id) {
+                        if info.priority != v_prio || info.created_at != victim_created_at {
+                            return false;
+                        }
+                    }
+                    if let Some(info) = connections.single.remove(&victim_alloc_id) {
+                        debug_if_enabled!(
+                            "Grace-evicting single connection from {} (prio={}) on input {} for higher priority request (prio={})",
+                            sanitize_sensitive_info(&info.client_addr.to_string()),
+                            v_prio,
+                            sanitize_sensitive_info(input_name),
+                            new_priority
+                        );
+                        if let Some(set) = connections.single_by_addr.get_mut(&info.client_addr) {
+                            set.remove(&victim_alloc_id);
+                            if set.is_empty() {
+                                connections.single_by_addr.remove(&info.client_addr);
                             }
                         }
-                        if let Some(info) = per_addr.remove(&alloc_id) {
-                            removed_provider_name = info.allocation.get_provider_name();
-                            remove_addr_entry = per_addr.is_empty();
-                            removed_info = Some(info);
+                        if let Some(name) = info.allocation.get_provider_name() {
+                            if let Some(list) = connections.by_provider.get_mut(&name) {
+                                list.remove(&victim_alloc_id);
+                            }
+                            Self::remove_priority_entry(
+                                &mut connections,
+                                &name,
+                                &(v_prio, Reverse(victim_created_at), victim_alloc_id),
+                                info.kind,
+                            );
                         }
+                        Some(info)
+                    } else {
+                        None
                     }
-                    if remove_addr_entry {
-                        connections.single.remove(&addr);
-                    }
-                    if let Some(ref name) = removed_provider_name {
-                        if let Some(list) = connections.by_provider.get_mut(name) {
-                            list.remove(&(addr, alloc_id));
-                        }
-                        Self::remove_priority_entry(
-                            &mut connections,
-                            name,
-                            &(v_prio, Reverse(victim_created_at), alloc_id),
-                            removed_info.as_ref().map_or(ConnectionKind::Normal, |info| info.kind),
-                        );
-                    }
-                    removed_info
                 };
 
                 let Some(info) = removed_info else {
@@ -767,7 +1172,7 @@ impl ActiveProviderManager {
                 };
                 // Preempted probes must stop immediately; they must not keep a custom stream alive.
                 info.cancel_token.cancel();
-                info.allocation.release().await;
+                info.allocation.release();
             }
         }
 
@@ -775,7 +1180,7 @@ impl ActiveProviderManager {
     }
 
     #[allow(clippy::too_many_lines)]
-    async fn try_preempt_connection(
+    fn try_preempt_connection(
         &self,
         input_name: &Arc<str>,
         new_priority: i8,
@@ -783,9 +1188,9 @@ impl ActiveProviderManager {
         kind_needed: ConnectionKind,
         session_owner: Option<&str>,
     ) -> Option<ProviderAllocation> {
-        let reserved_providers = self.reserved_provider_names_for_other(input_name, session_owner).await;
+        let reserved_providers = self.reserved_provider_names_for_other(input_name, session_owner);
         let victim = {
-            let connections = self.connections.read().await;
+            let connections = self.read_connections();
             self.select_preemption_candidate(&connections, input_name, new_priority, kind_needed, &reserved_providers)
         };
 
@@ -796,7 +1201,7 @@ impl ActiveProviderManager {
                         "Preempting shared connection (allocation_id={shared_id}, prio={v_prio}) for higher priority request (prio={new_priority})"
                     );
                     let released_shared_allocation = {
-                        let mut connections = self.connections.write().await;
+                        let mut connections = self.write_connections();
                         let key = connections.shared.shared_by_allocation_id.get(&shared_id).cloned()?;
 
                         // Revalidate the selected shared victim under WRITE lock.
@@ -809,13 +1214,13 @@ impl ActiveProviderManager {
                             None
                         } else if let Some(shared) = connections.shared.by_key.remove(&key) {
                             connections.shared.shared_by_allocation_id.remove(&shared.allocation_id);
-                            for shared_addr in shared.connections.keys() {
-                                connections.shared.key_by_addr.remove(shared_addr);
+                            for subscriber_id in shared.connections.keys() {
+                                connections.shared.key_by_subscriber.remove(subscriber_id);
                             }
 
                             if let Some(name) = shared.allocation.get_provider_name() {
                                 if let Some(list) = connections.by_provider.get_mut(&name) {
-                                    list.retain(|(_, i)| *i != shared.allocation_id);
+                                    list.remove(&shared.allocation_id);
                                 }
                                 Self::remove_priority_entry(
                                     &mut connections,
@@ -833,11 +1238,14 @@ impl ActiveProviderManager {
                     if let Some(token) = cancel_token {
                         token.cancel();
                     }
-                    allocation.release().await;
+                    allocation.release();
                     // Shared broadcast has to be torn down explicitly, otherwise the provider
                     // stream may continue after allocation counters were already released.
                     if let Some(ssm) = self.shared_stream_manager.get() {
-                        ssm.teardown_preempted_stream(&stream_url).await;
+                        let ssm = Arc::clone(ssm);
+                        tokio::spawn(async move {
+                            ssm.teardown_preempted_stream(&stream_url, alloc_id).await;
+                        });
                     } else {
                         error!(
                             "SharedStreamManager not initialised during preemption teardown for {}; \
@@ -846,49 +1254,40 @@ impl ActiveProviderManager {
                         );
                     }
                 }
-                PriorityOwner::Single(addr) => {
-                    debug_if_enabled!(
-                        "Preempting single connection from {} (prio={v_prio}) for higher priority request (prio={new_priority})",
-                        sanitize_sensitive_info(&addr.to_string())
-                    );
-
-                    // Atomically remove the victim single connection and take ownership of the token.
-                    // This guarantees only one concurrent preemptor can schedule delayed cancellation.
+                PriorityOwner::Single(victim_alloc_id) => {
                     let removed_info = {
-                        let mut connections = self.connections.write().await;
-
-                        let mut removed_info = None;
-                        let mut removed_provider_name = None;
-                        let mut remove_addr_entry = false;
-                        if let Some(per_addr) = connections.single.get_mut(&addr) {
-                            if let Some(info) = per_addr.get(&alloc_id) {
-                                // Revalidate victim selection under write lock.
-                                if info.priority != v_prio || info.created_at != victim_created_at {
-                                    return None;
+                        let mut connections = self.write_connections();
+                        if let Some(info) = connections.single.get(&victim_alloc_id) {
+                            if info.priority != v_prio || info.created_at != victim_created_at {
+                                return None;
+                            }
+                        }
+                        if let Some(info) = connections.single.remove(&victim_alloc_id) {
+                            debug_if_enabled!(
+                                "Preempting single connection from {} (prio={v_prio}) for higher priority request (prio={new_priority})",
+                                sanitize_sensitive_info(&info.client_addr.to_string())
+                            );
+                            if let Some(set) = connections.single_by_addr.get_mut(&info.client_addr) {
+                                set.remove(&victim_alloc_id);
+                                if set.is_empty() {
+                                    connections.single_by_addr.remove(&info.client_addr);
                                 }
                             }
-                            if let Some(info) = per_addr.remove(&alloc_id) {
-                                removed_provider_name = info.allocation.get_provider_name();
-                                remove_addr_entry = per_addr.is_empty();
-                                removed_info = Some(info);
+                            if let Some(name) = info.allocation.get_provider_name() {
+                                if let Some(list) = connections.by_provider.get_mut(&name) {
+                                    list.remove(&victim_alloc_id);
+                                }
+                                Self::remove_priority_entry(
+                                    &mut connections,
+                                    &name,
+                                    &(v_prio, Reverse(victim_created_at), victim_alloc_id),
+                                    info.kind,
+                                );
                             }
+                            Some(info)
+                        } else {
+                            None
                         }
-
-                        if remove_addr_entry {
-                            connections.single.remove(&addr);
-                        }
-                        if let Some(name) = removed_provider_name {
-                            if let Some(list) = connections.by_provider.get_mut(&name) {
-                                list.remove(&(addr, alloc_id));
-                            }
-                            Self::remove_priority_entry(
-                                &mut connections,
-                                &name,
-                                &(v_prio, Reverse(victim_created_at), alloc_id),
-                                removed_info.as_ref().map_or(ConnectionKind::Normal, |info| info.kind),
-                            );
-                        }
-                        removed_info
                     };
 
                     let Some(info) = removed_info else {
@@ -898,7 +1297,7 @@ impl ActiveProviderManager {
 
                     // Preempted probes must stop immediately; they must not keep a custom stream alive.
                     info.cancel_token.cancel();
-                    info.allocation.release().await;
+                    info.allocation.release();
                 }
             }
 
@@ -906,17 +1305,18 @@ impl ActiveProviderManager {
             let attempts = self.providers.provider_names_for_input(input_name).len().max(1);
             let mut excluded_providers = reserved_providers;
             for _ in 0..attempts {
-                let allocation = self
-                    .providers
-                    .acquire_connection_with_grace_override_excluding(input_name, allow_grace, &excluded_providers)
-                    .await;
+                let allocation = self.providers.acquire_connection_with_grace_override_excluding(
+                    input_name,
+                    allow_grace,
+                    &excluded_providers,
+                );
                 if matches!(allocation, ProviderAllocation::Exhausted) {
                     break;
                 }
                 if let Some(provider_name) = allocation.get_provider_name() {
-                    if self.exceeds_reserved_capacity(&provider_name, session_owner).await {
+                    if self.exceeds_reserved_capacity(&provider_name, session_owner) {
                         excluded_providers.insert(provider_name);
-                        allocation.release().await;
+                        allocation.release();
                         continue;
                     }
                 }
@@ -948,12 +1348,13 @@ impl ActiveProviderManager {
         kind: ConnectionKind,
         session_owner: Option<&str>,
     ) -> Option<ProviderHandle> {
+        let _transition = self.lock_capacity_transition();
+        let lease = session_owner.map(PlaybackLeaseRef::for_session_owner);
         self.acquire_exact_connection_inner(
             provider_name,
             allow_grace,
-            &AcquireProviderParams { addr, priority, kind, session_owner },
+            &AcquireProviderParams { addr, priority, kind, lease: lease.as_ref().copied() },
         )
-        .await
     }
 
     pub async fn force_exact_acquire_connection(
@@ -975,12 +1376,8 @@ impl ActiveProviderManager {
         priority: i8,
         kind: ConnectionKind,
     ) -> Option<ProviderHandle> {
-        self.acquire_connection_inner(
-            input_name,
-            true,
-            &AcquireProviderParams { addr, priority, kind, session_owner: None },
-        )
-        .await
+        self.acquire_connection_inner(input_name, true, &AcquireProviderParams { addr, priority, kind, lease: None })
+            .await
     }
 
     /// Acquire a provider connection while explicitly controlling provider-side grace allocations.
@@ -1004,12 +1401,47 @@ impl ActiveProviderManager {
         kind: ConnectionKind,
         session_owner: Option<&str>,
     ) -> Option<ProviderHandle> {
-        self.acquire_connection_inner(
+        self.acquire_connection_with_lease_for_session(
             input_name,
+            addr,
             allow_grace,
-            &AcquireProviderParams { addr, priority, kind, session_owner },
+            priority,
+            kind,
+            session_owner.map(PlaybackLeaseRef::for_session_owner),
         )
         .await
+    }
+
+    /// Lineup acquisition with an explicit playback lease identity.
+    pub async fn acquire_connection_with_lease_for_session(
+        &self,
+        input_name: &Arc<str>,
+        addr: &SocketAddr,
+        allow_grace: bool,
+        priority: i8,
+        kind: ConnectionKind,
+        lease: Option<PlaybackLeaseRef<'_>>,
+    ) -> Option<ProviderHandle> {
+        self.acquire_connection_inner(input_name, allow_grace, &AcquireProviderParams { addr, priority, kind, lease })
+            .await
+    }
+
+    /// Exact-provider acquisition with an explicit playback lease identity.
+    pub async fn acquire_exact_connection_with_lease_for_session(
+        &self,
+        provider_name: &Arc<str>,
+        addr: &SocketAddr,
+        allow_grace: bool,
+        priority: i8,
+        kind: ConnectionKind,
+        lease: Option<PlaybackLeaseRef<'_>>,
+    ) -> Option<ProviderHandle> {
+        let _transition = self.lock_capacity_transition();
+        self.acquire_exact_connection_inner(
+            provider_name,
+            allow_grace,
+            &AcquireProviderParams { addr, priority, kind, lease },
+        )
     }
 
     /// Acquire a provider connection for probe tasks with configurable priority.
@@ -1018,7 +1450,7 @@ impl ActiveProviderManager {
         self.acquire_connection_inner(
             input_name,
             false,
-            &AcquireProviderParams { addr: &DUMMY_ADDR, priority, kind: ConnectionKind::Normal, session_owner: None },
+            &AcquireProviderParams { addr: &DUMMY_ADDR, priority, kind: ConnectionKind::Normal, lease: None },
         )
         .await
     }
@@ -1030,14 +1462,14 @@ impl ActiveProviderManager {
         self.acquire_connection_inner(
             input_name,
             false,
-            &AcquireProviderParams { addr: &DUMMY_ADDR, priority, kind: ConnectionKind::Normal, session_owner: None },
+            &AcquireProviderParams { addr: &DUMMY_ADDR, priority, kind: ConnectionKind::Normal, lease: None },
         )
         .await
     }
 
     // This method is used for redirects to cycle through the provider
-    pub async fn get_next_provider(&self, provider_name: &Arc<str>) -> Option<Arc<ProviderConfig>> {
-        self.providers.get_next_provider(provider_name).await
+    pub fn get_next_provider(&self, provider_name: &Arc<str>) -> Option<Arc<ProviderConfig>> {
+        self.providers.get_next_provider(provider_name)
     }
 
     pub fn find_provider_config(&self, provider_name: &Arc<str>) -> Option<Arc<ProviderConfig>> {
@@ -1048,49 +1480,139 @@ impl ActiveProviderManager {
         self.providers.is_provider_for_input(provider_name.as_ref(), input_name.as_ref())
     }
 
-    pub async fn is_provider_reserved_for_other_session(
+    pub fn is_provider_reserved_for_other_session(
         &self,
         provider_name: &Arc<str>,
         session_owner: Option<&str>,
     ) -> bool {
-        self.reserved_capacity_blocks_next(provider_name, session_owner).await
+        self.reserved_capacity_blocks_next(provider_name, session_owner)
     }
 
-    pub async fn active_connections(&self) -> Option<HashMap<Arc<str>, usize>> {
-        self.providers.active_connections().await
+    pub fn active_connections(&self) -> Option<HashMap<Arc<str>, usize>> { self.providers.active_connections() }
+
+    pub fn is_over_limit(&self, provider_name: &Arc<str>) -> bool { self.providers.is_over_limit(provider_name) }
+
+    pub fn is_exhausted(&self, provider_name: &Arc<str>) -> bool { self.providers.is_exhausted(provider_name) }
+
+    /// Finds every shared subscription carried by one transport socket.
+    ///
+    /// This is an explicit socket-wide transport action (connection close, kick), not
+    /// the normal playback cleanup path. A single shared subscription is released
+    /// through `release_shared_subscriber`, which cannot touch other clients that
+    /// happen to arrive through the same reverse-proxy socket.
+    fn release_shared_by_addr(&self, addr: &SocketAddr) -> Vec<SharedSubscriberId> {
+        let connections = self.read_connections();
+        connections
+            .shared
+            .by_key
+            .values()
+            .flat_map(|shared| {
+                shared.connections.iter().filter_map(|(id, subscriber)| (subscriber.addr == *addr).then_some(*id))
+            })
+            .collect()
     }
 
-    pub async fn is_over_limit(&self, provider_name: &Arc<str>) -> bool {
-        self.providers.is_over_limit(provider_name).await
+    /// Releases exactly one shared subscription and rebalances the shared allocation.
+    ///
+    /// Returns the allocation to release when the last subscriber left.
+    fn release_shared_subscriber(&self, subscriber_id: SharedSubscriberId) -> Option<ProviderAllocation> {
+        let mut connections = self.write_connections();
+
+        let key = connections.shared.key_by_subscriber.remove(&subscriber_id)?;
+        let mut shared = connections.shared.by_key.remove(&key)?;
+        shared.connections.remove(&subscriber_id);
+
+        let shared_is_unlimited = shared.allocation.is_unlimited_provider();
+
+        if shared.connections.is_empty() {
+            connections.shared.shared_by_allocation_id.remove(&shared.allocation_id);
+            if !shared_is_unlimited {
+                if let Some(name) = shared.allocation.get_provider_name() {
+                    if let Some(list) = connections.by_provider.get_mut(&name) {
+                        list.remove(&shared.allocation_id);
+                    }
+                    Self::remove_priority_entry(
+                        &mut connections,
+                        &name,
+                        &(shared.priority, Reverse(shared.created_at), shared.allocation_id),
+                        shared.kind,
+                    );
+                }
+            }
+            return Some(shared.allocation);
+        }
+
+        // Recompute shared priority from remaining subscribers so preemption decisions
+        // reflect who is actually still watching the shared stream. Unlimited shared
+        // streams are not in the preemption index, so this rebalance is skipped.
+        if !shared_is_unlimited {
+            let old_priority = shared.priority;
+            let old_kind = shared.kind;
+            shared.kind = Self::shared_effective_kind(&shared.connections);
+            if let Some(new_priority) = Self::shared_effective_priority(&shared.connections, shared.kind) {
+                shared.priority = new_priority;
+                if (new_priority, shared.kind) != (old_priority, old_kind) {
+                    if let Some(name) = shared.allocation.get_provider_name() {
+                        Self::remove_priority_entry(
+                            &mut connections,
+                            &name,
+                            &(old_priority, Reverse(shared.created_at), shared.allocation_id),
+                            old_kind,
+                        );
+                        Self::upsert_priority_entry(
+                            &mut connections,
+                            &name,
+                            (new_priority, Reverse(shared.created_at), shared.allocation_id),
+                            PriorityOwner::Shared(shared.allocation_id),
+                            shared.kind,
+                        );
+                    }
+                }
+            }
+        }
+        connections.shared.by_key.insert(key, shared);
+        None
     }
 
-    pub async fn is_exhausted(&self, provider_name: &Arc<str>) -> bool {
-        self.providers.is_exhausted(provider_name).await
+    pub async fn release_shared_connection(&self, subscriber_id: SharedSubscriberId) {
+        let _transition = self.lock_capacity_transition();
+        self.release_shared_connection_inner(subscriber_id);
+    }
+
+    fn release_shared_connection_inner(&self, subscriber_id: SharedSubscriberId) {
+        if let Some(allocation) = self.release_shared_subscriber(subscriber_id) {
+            debug_if_enabled!(
+                "Released last shared connection for provider {} (subscriber={subscriber_id})",
+                allocation.get_provider_name().unwrap_or_default()
+            );
+            allocation.release();
+        }
     }
 
     #[allow(clippy::too_many_lines)]
     pub async fn release_connection(&self, addr: &SocketAddr) {
+        let _transition = self.lock_capacity_transition();
         // Single connection - all index updates in one lock scope
         let single_allocations = {
-            let mut connections = self.connections.write().await;
-            if let Some(allocations) = connections.single.remove(addr) {
-                // Remove from by_provider and priority_index while still holding the lock.
-                // Skip these index updates for unlimited providers: they were never
-                // added to the preemption indices by `register_allocation`, so there
-                // is nothing to remove and the keys/values won't be present.
-                for (id, info) in &allocations {
-                    if !info.allocation.is_unlimited_provider() {
-                        if let Some(name) = info.allocation.get_provider_name() {
-                            if let Some(list) = connections.by_provider.get_mut(&name) {
-                                list.remove(&(*addr, *id));
+            let mut connections = self.write_connections();
+            if let Some(alloc_ids) = connections.single_by_addr.remove(addr) {
+                let mut allocations = Vec::with_capacity(alloc_ids.len());
+                for id in alloc_ids {
+                    if let Some(info) = connections.single.remove(&id) {
+                        if !info.allocation.is_unlimited_provider() {
+                            if let Some(name) = info.allocation.get_provider_name() {
+                                if let Some(list) = connections.by_provider.get_mut(&name) {
+                                    list.remove(&id);
+                                }
+                                Self::remove_priority_entry(
+                                    &mut connections,
+                                    &name,
+                                    &(info.priority, Reverse(info.created_at), id),
+                                    info.kind,
+                                );
                             }
-                            Self::remove_priority_entry(
-                                &mut connections,
-                                &name,
-                                &(info.priority, Reverse(info.created_at), *id),
-                                info.kind,
-                            );
                         }
+                        allocations.push(info);
                     }
                 }
                 Some(allocations)
@@ -1100,131 +1622,54 @@ impl ActiveProviderManager {
         };
 
         if let Some(allocations) = single_allocations {
-            for (_, info) in allocations {
+            for info in allocations {
                 debug_if_enabled!(
                     "Released provider connection {:?} for {}",
                     info.allocation.get_provider_name().unwrap_or_default(),
                     sanitize_sensitive_info(&addr.to_string())
                 );
-                info.allocation.release().await;
+                info.allocation.release();
             }
-            return;
         }
 
-        // Shared connection
-        let shared_allocation = {
-            let mut connections = self.connections.write().await;
-
-            let key = match connections.shared.key_by_addr.get(addr) {
-                Some(k) => k.clone(),
-                None => return, // no shared connection
-            };
-
-            // Clone the SharedAllocation to avoid double mutable borrow
-            let mut shared = match connections.shared.by_key.get(&key) {
-                Some(s) => s.clone(),
-                None => return,
-            };
-
-            // Remove this address from the shared connection set
-            shared.connections.remove(addr);
-            // Always remove stale key-by-addr entry
-            connections.shared.key_by_addr.remove(addr);
-
-            let shared_is_unlimited = shared.allocation.is_unlimited_provider();
-
-            if shared.connections.is_empty() {
-                // If this was the last user of the shared allocation:
-                connections.shared.by_key.remove(&key);
-                connections.shared.shared_by_allocation_id.remove(&shared.allocation_id);
-                if !shared_is_unlimited {
-                    if let Some(name) = shared.allocation.get_provider_name() {
-                        if let Some(list) = connections.by_provider.get_mut(&name) {
-                            list.retain(|(_, i)| *i != shared.allocation_id);
-                        }
-                        Self::remove_priority_entry(
-                            &mut connections,
-                            &name,
-                            &(shared.priority, Reverse(shared.created_at), shared.allocation_id),
-                            shared.kind,
-                        );
-                    }
-                }
-                Some(shared.allocation)
-            } else {
-                // Recompute shared priority from remaining subscribers so preemption decisions
-                // reflect who is actually still watching the shared stream. Unlimited
-                // shared streams are not in the preemption index, so this rebalance
-                // must be skipped for them.
-                if !shared_is_unlimited {
-                    let old_priority = shared.priority;
-                    let old_kind = shared.kind;
-                    shared.kind = Self::shared_effective_kind(&shared.connections);
-                    if let Some(new_priority) = Self::shared_effective_priority(&shared.connections, shared.kind) {
-                        shared.priority = new_priority;
-                        if (new_priority, shared.kind) != (old_priority, old_kind) {
-                            if let Some(name) = shared.allocation.get_provider_name() {
-                                Self::remove_priority_entry(
-                                    &mut connections,
-                                    &name,
-                                    &(old_priority, Reverse(shared.created_at), shared.allocation_id),
-                                    old_kind,
-                                );
-                                Self::upsert_priority_entry(
-                                    &mut connections,
-                                    &name,
-                                    (new_priority, Reverse(shared.created_at), shared.allocation_id),
-                                    PriorityOwner::Shared(shared.allocation_id),
-                                    shared.kind,
-                                );
-                            }
-                        }
-                    }
-                }
-                connections.shared.by_key.insert(key, shared);
-                None
-            }
-        };
-
-        // release allocation
-        if let Some(allocation) = shared_allocation {
-            allocation.release().await;
-            debug_if_enabled!(
-                "Released last shared connection for provider {}, releasing allocation {}",
-                allocation.get_provider_name().unwrap_or_default(),
-                sanitize_sensitive_info(&addr.to_string())
-            );
+        // Shared connections carried by this transport socket. Resolve the subscriber
+        // ids first, then release each one precisely; two external clients behind one
+        // reverse proxy hold distinct subscriber ids and never overwrite each other.
+        for subscriber_id in self.release_shared_by_addr(addr) {
+            self.release_shared_connection_inner(subscriber_id);
         }
     }
 
-    pub async fn release_handle(&self, handle: &ProviderHandle) {
+    pub fn release_handle_sync(&self, handle: &ProviderHandle) {
+        let _transition = self.lock_capacity_transition();
         let mut released = None;
         let mut released_priority_key: Option<(Arc<str>, PriorityKey, ConnectionKind)> = None;
         {
-            let mut connections = self.connections.write().await;
+            let mut connections = self.write_connections();
 
-            // Try removing from Single
-            if let Some(per_addr) = connections.single.get_mut(&handle.client_id) {
-                if let Some(info) = per_addr.remove(&handle.allocation_id) {
-                    let pkey = (info.priority, Reverse(info.created_at), handle.allocation_id);
-                    released = Some(info.allocation);
-                    let released_kind = info.kind;
-                    if per_addr.is_empty() {
-                        connections.single.remove(&handle.client_id);
+            // Try removing from Single directly by allocation_id
+            if let Some(info) = connections.single.remove(&handle.allocation_id) {
+                let pkey = (info.priority, Reverse(info.created_at), handle.allocation_id);
+                released = Some(info.allocation);
+                let released_kind = info.kind;
+                if let Some(set) = connections.single_by_addr.get_mut(&info.client_addr) {
+                    set.remove(&handle.allocation_id);
+                    if set.is_empty() {
+                        connections.single_by_addr.remove(&info.client_addr);
                     }
+                }
 
-                    // Remove from by_provider index. Skip for unlimited providers:
-                    // they were never inserted by `register_allocation`, so the
-                    // keys/values are not present and a removal would be a no-op
-                    // at best and could race with concurrent unrelated operations
-                    // on the same HashSet entry at worst.
-                    if !released.as_ref().is_some_and(ProviderAllocation::is_unlimited_provider) {
-                        if let Some(name) = released.as_ref().and_then(ProviderAllocation::get_provider_name) {
-                            if let Some(list) = connections.by_provider.get_mut(&name) {
-                                list.remove(&(handle.client_id, handle.allocation_id));
-                            }
-                            released_priority_key = Some((name, pkey, released_kind));
+                // Remove from by_provider index. Skip for unlimited providers:
+                // they were never inserted by `register_allocation`, so the
+                // keys/values are not present and a removal would be a no-op
+                // at best and could race with concurrent unrelated operations
+                // on the same HashSet entry at worst.
+                if !released.as_ref().is_some_and(ProviderAllocation::is_unlimited_provider) {
+                    if let Some(name) = released.as_ref().and_then(ProviderAllocation::get_provider_name) {
+                        if let Some(list) = connections.by_provider.get_mut(&name) {
+                            list.remove(&handle.allocation_id);
                         }
+                        released_priority_key = Some((name, pkey, released_kind));
                     }
                 }
             }
@@ -1234,17 +1679,18 @@ impl ActiveProviderManager {
                 if let Some(key) = connections.shared.shared_by_allocation_id.remove(&handle.allocation_id) {
                     if let Some(shared) = connections.shared.by_key.remove(&key) {
                         let pkey = (shared.priority, Reverse(shared.created_at), handle.allocation_id);
-                        released = Some(shared.allocation.clone());
+                        let shared_kind = shared.kind;
                         let shared_is_unlimited = shared.allocation.is_unlimited_provider();
-                        for addr in shared.connections.keys() {
-                            connections.shared.key_by_addr.remove(addr);
+                        released = Some(shared.allocation);
+                        for subscriber_id in shared.connections.keys() {
+                            connections.shared.key_by_subscriber.remove(subscriber_id);
                         }
                         if !shared_is_unlimited {
                             if let Some(name) = released.as_ref().and_then(ProviderAllocation::get_provider_name) {
                                 if let Some(list) = connections.by_provider.get_mut(&name) {
-                                    list.retain(|(_, i)| *i != handle.allocation_id);
+                                    list.remove(&handle.allocation_id);
                                 }
-                                released_priority_key = Some((name, pkey, shared.kind));
+                                released_priority_key = Some((name, pkey, shared_kind));
                             }
                         }
                     }
@@ -1257,54 +1703,117 @@ impl ActiveProviderManager {
             }
         }
 
+        // Releasing the physical provider allocation never concludes the playback
+        // request: the request end is applied separately via `finish_*` with the
+        // actual outcome, so a generic handle drop cannot invent a clean end.
         if let Some(allocation) = released {
-            allocation.release().await;
+            allocation.release();
         }
     }
 
-    pub async fn reclassify_connection(&self, addr: &SocketAddr, kind: ConnectionKind, priority: i8) -> bool {
-        let mut connections = self.connections.write().await;
+    pub async fn release_handle(&self, handle: &ProviderHandle) { self.release_handle_sync(handle); }
 
-        if let Some(per_addr) = connections.single.get_mut(addr) {
-            let mut index_updates = Vec::new();
-            for (allocation_id, info) in per_addr.iter_mut() {
+    /// Stops only stale requests of this playback, even on a multiplexed proxy socket.
+    pub async fn release_playback_connections(&self, owner: &str, addrs: &[SocketAddr]) {
+        let handles = {
+            let connections = self.read_connections();
+            let mut handles = Vec::new();
+            for addr in addrs {
+                if let Some(alloc_ids) = connections.single_by_addr.get(addr) {
+                    for id in alloc_ids {
+                        if let Some(info) = connections.single.get(id) {
+                            if info.session_owner.as_deref() == Some(owner) {
+                                handles.push(ProviderHandle {
+                                    playback_request_id: info.playback_request_id,
+                                    binding_tag: None,
+                                    client_id: info.client_addr,
+                                    allocation_id: info.allocation_id,
+                                    allocation: info.allocation.clone(),
+                                    cancel_token: Some(info.cancel_token.clone()),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            handles
+        };
+        for handle in handles {
+            if let Some(token) = &handle.cancel_token {
+                token.cancel();
+            }
+            self.release_handle(&handle).await;
+        }
+    }
+
+    pub fn reclassify_connection(&self, addr: &SocketAddr, kind: ConnectionKind, priority: i8) -> bool {
+        self.reclassify_connection_for_owner(addr, None, kind, priority)
+    }
+
+    pub fn reclassify_connection_for_owner(
+        &self,
+        addr: &SocketAddr,
+        owner: Option<&str>,
+        kind: ConnectionKind,
+        priority: i8,
+    ) -> bool {
+        let mut connections = self.write_connections();
+
+        let Some(alloc_ids) = connections.single_by_addr.get(addr).cloned() else {
+            return false;
+        };
+        let mut index_updates = Vec::new();
+        for allocation_id in alloc_ids {
+            if let Some(info) = connections.single.get_mut(&allocation_id) {
+                if info.session_owner.as_deref() != owner {
+                    continue;
+                }
                 if let Some(provider_name) = info.allocation.get_provider_name() {
-                    let old_key = (info.priority, Reverse(info.created_at), *allocation_id);
-                    let owner = PriorityOwner::Single(*addr);
+                    let old_key = (info.priority, Reverse(info.created_at), allocation_id);
+                    let p_owner = PriorityOwner::Single(allocation_id);
                     let old_kind = info.kind;
                     info.kind = kind;
                     info.priority = priority;
-                    let new_key = (info.priority, Reverse(info.created_at), *allocation_id);
+                    let new_key = (info.priority, Reverse(info.created_at), allocation_id);
                     // Skip preemption-index updates for unlimited providers: they
                     // are intentionally absent from `by_provider` / `priority_index`
                     // / `soft_priority_index`, so the old entry was never inserted.
                     // Performing the upsert here would re-introduce them into the
                     // preemption index and contradict `max_connections: 0`.
                     if !info.allocation.is_unlimited_provider() {
-                        index_updates.push((provider_name, old_key, old_kind, new_key, owner, info.kind));
+                        index_updates.push((provider_name, old_key, old_kind, new_key, p_owner, info.kind));
                     }
                 }
             }
-            for (provider_name, old_key, old_kind, new_key, owner, new_kind) in index_updates {
-                Self::remove_priority_entry(&mut connections, &provider_name, &old_key, old_kind);
-                Self::upsert_priority_entry(&mut connections, &provider_name, new_key, owner, new_kind);
-            }
-            return true;
         }
+        for (provider_name, old_key, old_kind, new_key, p_owner, new_kind) in index_updates {
+            Self::remove_priority_entry(&mut connections, &provider_name, &old_key, old_kind);
+            Self::upsert_priority_entry(&mut connections, &provider_name, new_key, p_owner, new_kind);
+        }
+        true
+    }
 
-        let Some(shared_key) = connections.shared.key_by_addr.get(addr).cloned() else {
+    pub fn reclassify_shared_connection(
+        &self,
+        subscriber_id: SharedSubscriberId,
+        kind: ConnectionKind,
+        priority: i8,
+    ) -> bool {
+        let mut connections = self.write_connections();
+        let shared_key = connections.shared.key_by_subscriber.get(&subscriber_id).cloned();
+        let Some(shared_key) = shared_key else {
             return false;
         };
         let Some(shared_allocation) = connections.shared.by_key.get_mut(&shared_key) else {
-            return false;
-        };
-        let Some(subscriber) = shared_allocation.connections.get_mut(addr) else {
             return false;
         };
         let shared_is_unlimited = shared_allocation.allocation.is_unlimited_provider();
 
         let old_priority = shared_allocation.priority;
         let old_kind = shared_allocation.kind;
+        let Some(subscriber) = shared_allocation.connections.get_mut(&subscriber_id) else {
+            return false;
+        };
         subscriber.kind = kind;
         subscriber.priority = priority;
         shared_allocation.kind = Self::shared_effective_kind(&shared_allocation.connections);
@@ -1345,134 +1854,77 @@ impl ActiveProviderManager {
         true
     }
 
-    #[allow(clippy::too_many_lines)]
-    pub async fn make_shared_connection(&self, addr: &SocketAddr, key: &str) {
-        let extras = {
-            let mut connections = self.connections.write().await;
-            let mut extras = Vec::new();
-            let shared_key: Arc<str> = Arc::from(key);
-
-            // Find the allocation to promote (must be single)
-            // Logic change: we must find the specific allocation if multiple exist, but usually per client only 1 active?
-            // Existing logic assumes one.
-            let handle = if let Some(m) = connections.single.get_mut(addr) {
-                if m.is_empty() {
-                    None
-                } else {
-                    let mut iter = m.drain();
-                    if let Some((id, info)) = iter.next() {
-                        // Collect others as extras to release
-                        let extra_entries: Vec<_> = iter.collect();
-
-                        // Cleanup indices. Skip for unlimited providers: their
-                        // entries were never inserted into `by_provider` /
-                        // `priority_index` / `soft_priority_index`, so the
-                        // removal would be a no-op.
-                        if !info.allocation.is_unlimited_provider() {
-                            if let Some(name) = info.allocation.get_provider_name() {
-                                if let Some(list) = connections.by_provider.get_mut(&name) {
-                                    list.remove(&(*addr, id));
-                                }
-                                Self::remove_priority_entry(
-                                    &mut connections,
-                                    &name,
-                                    &(info.priority, Reverse(info.created_at), id),
-                                    info.kind,
-                                );
-                            }
-                        }
-                        // Remove extras from provider-specific indexes.
-                        for (extra_id, extra_info) in &extra_entries {
-                            if !extra_info.allocation.is_unlimited_provider() {
-                                if let Some(extra_provider_name) = extra_info.allocation.get_provider_name() {
-                                    if let Some(list) = connections.by_provider.get_mut(&extra_provider_name) {
-                                        list.remove(&(*addr, *extra_id));
-                                    }
-                                    Self::remove_priority_entry(
-                                        &mut connections,
-                                        &extra_provider_name,
-                                        &(extra_info.priority, Reverse(extra_info.created_at), *extra_id),
-                                        extra_info.kind,
-                                    );
-                                }
-                            }
-                        }
-
-                        for (_, extra_info) in extra_entries {
-                            extra_info.cancel_token.cancel();
-                            extras.push(extra_info.allocation);
-                        }
-
-                        connections.single.remove(addr); // Map is drained/empty now
-
-                        Some((
-                            ProviderHandle::new(*addr, id, info.allocation, Some(info.cancel_token)),
-                            info.priority,
-                            info.kind,
-                            info.created_at,
-                            info.session_owner,
-                        ))
-                    } else {
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-
-            if let Some(handle) = &handle {
-                let provider_name = handle.0.allocation.get_provider_name().unwrap_or_default();
-                debug_if_enabled!(
-                    "Shared connection: promoted addr {addr} provider={} key={}",
-                    sanitize_sensitive_info(&provider_name),
-                    sanitize_sensitive_info(key)
-                );
-
-                connections.shared.by_key.insert(
-                    Arc::clone(&shared_key),
-                    SharedAllocation {
-                        allocation_id: handle.0.allocation_id,
-                        allocation: handle.0.allocation.clone(),
-                        connections: HashMap::from([(*addr, SharedSubscriber { priority: handle.1, kind: handle.2 })]),
-                        priority: handle.1,
-                        kind: handle.2,
-                        created_at: handle.3,
-                        cancel_token: handle.0.cancel_token.clone(),
-                        session_owner: handle.4.clone(),
-                    },
-                );
-                connections.shared.key_by_addr.insert(*addr, Arc::clone(&shared_key));
-                connections.shared.shared_by_allocation_id.insert(handle.0.allocation_id, shared_key);
-
-                // Insert new shared entry into priority_index. Skip for
-                // unlimited providers: they are not subject to preemption, so
-                // they must not appear in the priority index.
-                if !handle.0.allocation.is_unlimited_provider() {
-                    Self::upsert_priority_entry(
-                        &mut connections,
-                        &provider_name,
-                        (handle.1, Reverse(handle.3), handle.0.allocation_id),
-                        PriorityOwner::Shared(handle.0.allocation_id),
-                        handle.2,
-                    );
-                }
-            }
-            extras
-        };
-
-        for allocation in extras {
-            allocation.release().await;
+    /// Promotes exactly the allocation owned by this handle into a shared origin.
+    pub async fn make_shared_connection(
+        &self,
+        handle: &ProviderHandle,
+        key: &str,
+        subscriber_id: SharedSubscriberId,
+    ) -> bool {
+        let _transition = self.lock_capacity_transition();
+        let mut connections = self.write_connections();
+        if connections.shared.by_key.contains_key(key) {
+            return false;
         }
+        let Some(info) = connections.single.remove(&handle.allocation_id) else {
+            return false;
+        };
+        if let Some(set) = connections.single_by_addr.get_mut(&info.client_addr) {
+            set.remove(&handle.allocation_id);
+            if set.is_empty() {
+                connections.single_by_addr.remove(&info.client_addr);
+            }
+        }
+        let provider_name = info.allocation.get_provider_name().unwrap_or_default();
+        if !info.allocation.is_unlimited_provider() {
+            if let Some(list) = connections.by_provider.get_mut(&provider_name) {
+                list.remove(&handle.allocation_id);
+            }
+            Self::remove_priority_entry(
+                &mut connections,
+                &provider_name,
+                &(info.priority, Reverse(info.created_at), handle.allocation_id),
+                info.kind,
+            );
+            Self::upsert_priority_entry(
+                &mut connections,
+                &provider_name,
+                (info.priority, Reverse(info.created_at), handle.allocation_id),
+                PriorityOwner::Shared(handle.allocation_id),
+                info.kind,
+            );
+        }
+        let shared_key: Arc<str> = Arc::from(key);
+        connections.shared.by_key.insert(
+            Arc::clone(&shared_key),
+            SharedAllocation {
+                allocation_id: handle.allocation_id,
+                allocation: info.allocation,
+                connections: HashMap::from([(
+                    subscriber_id,
+                    SharedSubscriber { priority: info.priority, kind: info.kind, addr: handle.client_id },
+                )]),
+                priority: info.priority,
+                kind: info.kind,
+                created_at: info.created_at,
+                cancel_token: Some(info.cancel_token),
+                session_owner: info.session_owner,
+            },
+        );
+        connections.shared.key_by_subscriber.insert(subscriber_id, Arc::clone(&shared_key));
+        connections.shared.shared_by_allocation_id.insert(handle.allocation_id, shared_key);
+        true
     }
 
-    pub async fn add_shared_connection(
+    pub fn add_shared_connection(
         &self,
         addr: &SocketAddr,
+        subscriber_id: SharedSubscriberId,
         key: &str,
         priority: i8,
         kind: ConnectionKind,
     ) -> Result<(), String> {
-        let mut connections = self.connections.write().await;
+        let mut connections = self.write_connections();
 
         // Extract metadata before taking a second mutable borrow on `connections`.
         let metadata = connections.shared.by_key.get(key).map(|s| {
@@ -1508,7 +1960,7 @@ impl ActiveProviderManager {
             return Err(err);
         };
 
-        shared_allocation.connections.insert(*addr, SharedSubscriber { priority, kind });
+        shared_allocation.connections.insert(subscriber_id, SharedSubscriber { priority, kind, addr: *addr });
         let new_kind = Self::shared_effective_kind(&shared_allocation.connections);
         let new_priority = Self::shared_effective_priority(&shared_allocation.connections, new_kind);
         shared_allocation.kind = new_kind;
@@ -1537,16 +1989,16 @@ impl ActiveProviderManager {
             );
         }
 
-        connections.shared.key_by_addr.insert(*addr, Arc::from(key));
+        connections.shared.key_by_subscriber.insert(subscriber_id, Arc::from(key));
         Ok(())
     }
 
-    pub async fn get_provider_connections_count(&self) -> usize { self.providers.active_connection_count().await }
+    pub fn get_provider_connections_count(&self) -> usize { self.providers.active_connection_count() }
 
-    pub async fn provider_capacities_for_input(&self, input_name: &Arc<str>) -> Vec<(Arc<str>, usize, usize)> {
+    pub fn provider_capacities_for_input(&self, input_name: &Arc<str>) -> Vec<(Arc<str>, usize, usize)> {
         let mut result = Vec::new();
         for provider_name in self.providers.provider_names_for_input(input_name) {
-            if let Some((current, max)) = self.providers.provider_capacity(&provider_name).await {
+            if let Some((current, max)) = self.providers.provider_capacity(&provider_name) {
                 result.push((provider_name, current, max));
             }
         }
@@ -1556,7 +2008,7 @@ impl ActiveProviderManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActiveProviderManager, ConnectionKind};
+    use super::{ActiveProviderManager, ConnectionKind, PlaybackLeaseRef};
     use crate::EventManager;
     use arc_swap::{ArcSwap, ArcSwapOption};
     use shared::{
@@ -1572,7 +2024,8 @@ mod tests {
     };
     use tuliprox_core::{
         model::{
-            AppConfig, Config, ConfigInput, ConfigInputAlias, MediaToolCapabilities, ProviderAllocation, SourcesConfig,
+            AppConfig, Config, ConfigInput, ConfigInputAlias, MediaToolCapabilities, PlaybackKind,
+            PlaybackRequestOutcome, ProviderAllocation, SharedSubscriberId, SourcesConfig,
         },
         utils::FileLockManager,
     };
@@ -1662,6 +2115,272 @@ mod tests {
 
     fn create_test_app_config_single_unlimited_provider_pool() -> AppConfig { build_test_app_config(None, 0) }
 
+    /// Pool where the higher-priority provider (A) and its lower-priority alias (B)
+    /// each carry their own capacity, mirroring the reported A=2 / B=3 setup.
+    fn create_test_app_config_with_pool(primary_max: u16, alias_max: u16) -> AppConfig {
+        build_test_app_config(
+            Some(vec![ConfigInputAlias {
+                id: 2,
+                name: "provider_2".intern(),
+                url: "http://provider-2.example".to_string(),
+                username: Some("user2".to_string()),
+                password: Some("pass2".to_string()),
+                priority: 1,
+                max_connections: alias_max,
+                exp_date: None,
+                enabled: true,
+                stalker: None,
+            }]),
+            primary_max,
+        )
+    }
+
+    #[tokio::test]
+    async fn confirmed_playbacks_fill_higher_priority_provider_before_alias() {
+        let app_cfg = create_test_app_config_with_pool(2, 3);
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+        let input_name = "provider_1".intern();
+
+        let mut selected = Vec::new();
+        for index in 0..5 {
+            let owner = format!("playback-{index}");
+            let addr = SocketAddr::from(([172, 18, 0, 9], 50_000 + index));
+            let handle = manager
+                .acquire_connection_with_grace_for_session(
+                    &input_name,
+                    &addr,
+                    false,
+                    default_user_priority(),
+                    ConnectionKind::Normal,
+                    Some(&owner),
+                )
+                .await
+                .expect("pool has capacity for five confirmed playbacks");
+            let provider = handle.allocation.get_provider_name().expect("provider name");
+            // Only real media activity confirms a playback and lets it reserve capacity.
+            manager.confirm_playback_activity(&owner).await;
+            selected.push(provider.to_string());
+        }
+
+        assert_eq!(selected, ["provider_1", "provider_1", "provider_2", "provider_2", "provider_2"]);
+    }
+
+    #[tokio::test]
+    async fn concurrent_proxy_requests_fill_exact_pool_capacity() -> Result<(), Box<dyn std::error::Error>> {
+        let manager = Arc::new(ActiveProviderManager::new(
+            &create_test_app_config_with_pool(2, 3),
+            &Arc::new(EventManager::new()),
+        ));
+        let addr = SocketAddr::from(([127, 0, 0, 1], 50001));
+        let mut tasks = tokio::task::JoinSet::new();
+        for attempt in 0..32 {
+            let manager = Arc::clone(&manager);
+            tasks.spawn(async move {
+                manager
+                    .acquire_connection_with_grace_for_session(
+                        &Arc::from("provider_1"),
+                        &addr,
+                        false,
+                        0,
+                        ConnectionKind::Normal,
+                        Some(&format!("playback-{attempt}")),
+                    )
+                    .await
+            });
+        }
+        let mut handles = Vec::new();
+        while let Some(result) = tasks.join_next().await {
+            if let Some(handle) = result? {
+                handles.push(handle);
+            }
+        }
+        assert_eq!(handles.len(), 5);
+        assert_eq!(
+            handles.iter().filter(|h| h.allocation.get_provider_name().as_deref() == Some("provider_1")).count(),
+            2
+        );
+        assert_eq!(
+            handles.iter().filter(|h| h.allocation.get_provider_name().as_deref() == Some("provider_2")).count(),
+            3
+        );
+        for handle in handles {
+            manager.release_handle(&handle).await;
+        }
+        assert_eq!(manager.get_provider_connections_count(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn forced_reopen_and_late_cleanup_preserve_other_proxy_requests() -> Result<(), Box<dyn std::error::Error>> {
+        let manager =
+            ActiveProviderManager::new(&create_test_app_config_with_pool(2, 3), &Arc::new(EventManager::new()));
+        let addr = SocketAddr::from(([127, 0, 0, 1], 50002));
+        let input = Arc::from("provider_1");
+        let first = manager
+            .acquire_connection_with_grace_for_session(&input, &addr, false, 0, ConnectionKind::Normal, Some("first"))
+            .await
+            .ok_or("first allocation missing")?;
+        let other = manager
+            .acquire_connection_with_grace_for_session(&input, &addr, false, 0, ConnectionKind::Normal, Some("other"))
+            .await
+            .ok_or("other allocation missing")?;
+        manager.release_playback_connections("first", &[addr]).await;
+        assert!(first.cancel_token.as_ref().is_some_and(|token| token.is_cancelled()));
+        assert!(!other.cancel_token.as_ref().is_some_and(|token| token.is_cancelled()));
+        assert_eq!(manager.get_provider_connections_count(), 1);
+        let replacement = manager
+            .acquire_connection_with_grace_for_session(&input, &addr, false, 0, ConnectionKind::Normal, Some("first"))
+            .await
+            .ok_or("replacement missing")?;
+        manager.refresh_adaptive_playback_lease(&input, "first", tuliprox_core::model::PlaybackKind::LiveHls, 15).await;
+        manager.confirm_playback_activity("first").await;
+        manager.finish_playback_request("first", PlaybackRequestOutcome::ProviderFailed, None).await;
+        assert_eq!(manager.provider_lease_usage(&input).active, 1);
+        manager.release_handle(&replacement).await;
+        manager.release_handle(&other).await;
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn manifest_retries_without_media_do_not_reserve_capacity() {
+        let app_cfg = create_test_app_config_with_pool(2, 3);
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+        let input_name = "provider_1".intern();
+        let owner = "hls-cache:shared-session";
+        let addr = SocketAddr::from(([172, 18, 0, 9], 51_000));
+
+        // Five manifest responses without a single media segment, all on one owner.
+        for _ in 0..5 {
+            let handle = manager
+                .acquire_connection_with_grace_for_session(
+                    &input_name,
+                    &addr,
+                    false,
+                    default_user_priority(),
+                    ConnectionKind::Normal,
+                    Some(owner),
+                )
+                .await
+                .expect("manifest start allocates on the preferred provider");
+            assert_eq!(handle.allocation.get_provider_name().as_deref(), Some("provider_1"));
+            manager.refresh_provider_reservation(&input_name, owner, 15).await;
+            manager.release_connection(&addr).await;
+        }
+
+        // Unconfirmed leases never reserve capacity, so an unrelated client is served
+        // by the higher-priority provider even though its own counters read zero.
+        let other = manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &SocketAddr::from(([172, 18, 0, 9], 51_001)),
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+                Some("other-client"),
+            )
+            .await
+            .expect("unrelated client must still get the preferred provider");
+        assert_eq!(other.allocation.get_provider_name().as_deref(), Some("provider_1"));
+
+        // The abandoned starts stop holding anything once their startup deadline passes.
+        tokio::time::advance(Duration::from_secs(6)).await;
+        manager.prune_expired_leases_now();
+        assert!(!manager.is_provider_reserved_for_other_session(&input_name, Some("other-client")));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reservations_do_not_survive_after_counters_reach_zero() {
+        let app_cfg = create_test_app_config_with_pool(2, 3);
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+        let input_name = "provider_1".intern();
+        let owner = "finished-playback";
+        let addr = SocketAddr::from(([172, 18, 0, 9], 52_000));
+
+        let handle = manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &addr,
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+                Some(owner),
+            )
+            .await
+            .expect("first playback acquires the preferred provider");
+        assert_eq!(handle.allocation.get_provider_name().as_deref(), Some("provider_1"));
+        manager.refresh_provider_reservation(&input_name, owner, 15).await;
+        manager.confirm_playback_activity(owner).await;
+        manager.release_connection(&addr).await;
+
+        // Live TS is not reconnect capable: the confirmed lease is dropped on release,
+        // so the provider is immediately free again for the next higher-priority client.
+        manager.finish_playback_request(owner, PlaybackRequestOutcome::Completed, None).await;
+        let next = manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &SocketAddr::from(([172, 18, 0, 9], 52_001)),
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+                Some("next-client"),
+            )
+            .await
+            .expect("freed capacity must be selectable again");
+        assert_eq!(next.allocation.get_provider_name().as_deref(), Some("provider_1"));
+    }
+
+    #[tokio::test]
+    async fn two_playbacks_sharing_one_proxy_socket_keep_separate_slots() {
+        let app_cfg = create_test_app_config_with_pool(2, 3);
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+        let input_name = "provider_1".intern();
+        // Both external clients arrive through the same reverse-proxy peer socket.
+        let proxy_addr = SocketAddr::from(([172, 18, 0, 9], 53_000));
+
+        let first = manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &proxy_addr,
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+                Some("device-one"),
+            )
+            .await
+            .expect("first device behind the proxy acquires a slot");
+        let second = manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &proxy_addr,
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+                Some("device-two"),
+            )
+            .await
+            .expect("second device behind the proxy acquires its own slot");
+        assert_ne!(first.allocation_id, second.allocation_id);
+        manager.confirm_playback_activity("device-one").await;
+        manager.confirm_playback_activity("device-two").await;
+
+        // Releasing one playback must free exactly its own allocation and leave the
+        // other device's slot on the same transport untouched.
+        manager.release_handle(&first).await;
+        manager.finish_playback_request("device-one", PlaybackRequestOutcome::Completed, None).await;
+        let remaining = manager.provider_capacities_for_input(&input_name);
+        let primary = remaining.iter().find(|(name, _, _)| name.as_ref() == "provider_1").expect("primary pool entry");
+        assert_eq!(primary.1, 1, "exactly one slot must remain in use on the shared socket");
+        assert!(manager.read_leases().lease_of_owner("device-one").is_none());
+        assert!(manager.read_leases().lease_of_owner("device-two").is_some());
+
+        manager.release_handle(&second).await;
+        manager.finish_playback_request("device-two", PlaybackRequestOutcome::Completed, None).await;
+    }
+
     #[tokio::test]
     async fn unlimited_provider_connection_is_not_in_priority_index() {
         let app_cfg = create_test_app_config_single_unlimited_provider_pool();
@@ -1687,7 +2406,7 @@ mod tests {
             .expect("acquire #3 on unlimited provider");
 
         {
-            let connections = manager.connections.read().await;
+            let connections = manager.read_connections();
             let priority_tree = connections.priority_index.get(&input_name);
             assert!(
                 priority_tree.is_none_or(std::collections::BTreeMap::is_empty),
@@ -1735,7 +2454,7 @@ mod tests {
         // provider's connection, because the connection is intentionally absent from the
         // preemption indices.
         let candidate = {
-            let connections = manager.connections.read().await;
+            let connections = manager.read_connections();
             manager.select_preemption_candidate(&connections, &input_name, 0, ConnectionKind::Normal, &HashSet::new())
         };
         assert!(
@@ -1812,7 +2531,7 @@ mod tests {
             .expect("client2 live allocation");
         let busy_provider = live_alloc.allocation.get_provider_name().expect("provider name expected");
         assert_eq!(busy_provider.as_ref(), input_name.as_ref());
-        assert!(manager.is_exhausted(&busy_provider).await);
+        assert!(manager.is_exhausted(&busy_provider));
 
         // Step 4: Client1 restarts same movie.
         // This emulates force-session fallback path by acquiring without provider grace.
@@ -1925,6 +2644,7 @@ mod tests {
         let addr_2: SocketAddr = "127.0.0.1:43102".parse().unwrap();
 
         manager.refresh_provider_reservation(&input_name, owner_1, 15).await;
+        manager.confirm_playback_activity(owner_1).await;
 
         let first = manager
             .acquire_connection_with_grace_for_session(
@@ -1970,6 +2690,104 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn denied_confirmation_followed_by_refresh_cannot_reserve_foreign_slot() {
+        let app_cfg = create_test_app_config_single_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+        let input_name = "provider_1".intern();
+        let owner_x = "session-owner-x";
+        let owner_y = "session-owner-y";
+        let owner_z = "session-owner-z";
+        let addr_y: SocketAddr = "127.0.0.1:43310".parse().unwrap();
+        let addr_z: SocketAddr = "127.0.0.1:43311".parse().unwrap();
+
+        // Y holds the only provider slot.
+        let y = manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &addr_y,
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+                Some(owner_y),
+            )
+            .await
+            .expect("y acquires the single slot");
+
+        // X starts a lease and confirms media while Y holds the slot, so its
+        // reservation right is denied. A later refresh must not restore it.
+        manager.refresh_provider_reservation(&input_name, owner_x, 15).await;
+        manager.confirm_playback_activity(owner_x).await;
+        manager.refresh_provider_reservation(&input_name, owner_x, 15).await;
+
+        manager.release_handle(&y).await;
+
+        // If X's refresh had re-granted the denied reservation, Z would be blocked here.
+        let z = manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &addr_z,
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+                Some(owner_z),
+            )
+            .await;
+        assert!(z.is_some(), "a denied reservation must not be restored by a later refresh");
+        if let Some(z) = z {
+            manager.release_handle(&z).await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn untagged_clear_cannot_delete_successor_reservation() {
+        let app_cfg = create_test_app_config_single_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+        let input_name = "provider_1".intern();
+        let owner = "session-owner";
+        let addr: SocketAddr = "127.0.0.1:43320".parse().unwrap();
+
+        // First incarnation acquires, then is removed entirely.
+        let first = manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &addr,
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+                Some(owner),
+            )
+            .await
+            .expect("first acquire");
+        manager.release_handle(&first).await;
+        manager.clear_provider_reservation(owner).await;
+
+        // Second incarnation acquires a fresh lease on the same account.
+        let second = manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &addr,
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+                Some(owner),
+            )
+            .await
+            .expect("second acquire");
+
+        // An untagged clear has no delete right and must not remove the successor.
+        manager.clear_identified_provider_reservation(owner, &input_name, None).await;
+        assert!(
+            manager.binding_tag_for_owner(owner).is_some(),
+            "an untagged clear must not delete the successor reservation"
+        );
+
+        manager.release_handle(&second).await;
+        manager.clear_provider_reservation(owner).await;
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn session_reservations_preserve_capacity_and_priority_order() {
         let app_cfg = create_test_app_config_with_capacity_ordered_pool();
         let event_manager = Arc::new(EventManager::new());
@@ -1992,6 +2810,7 @@ mod tests {
                 .expect("preferred provider should retain free capacity for another session");
             assert_eq!(allocation.allocation.get_provider_name().as_deref(), Some("provider_1"));
             manager.refresh_provider_reservation(&input_name, &owner, 15).await;
+            manager.confirm_playback_activity(&owner).await;
         }
 
         let fallback_addr = SocketAddr::from(([127, 0, 0, 1], 43203));
@@ -2102,6 +2921,7 @@ mod tests {
         let owner_channel_2 = "client|ua|user|200";
 
         manager.refresh_provider_reservation(&input_name, owner_channel_1, 15).await;
+        manager.confirm_playback_activity(owner_channel_1).await;
 
         let blocked = manager
             .acquire_connection_with_grace_for_session(
@@ -2163,6 +2983,7 @@ mod tests {
         };
         assert_eq!(first.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
         manager.refresh_provider_reservation(&input_name, owner_channel_1, 15).await;
+        manager.confirm_playback_activity(owner_channel_1).await;
         manager.release_connection(&first_addr).await;
 
         let second = manager
@@ -2181,17 +3002,18 @@ mod tests {
         };
         assert_eq!(second.allocation.get_provider_name().as_deref(), Some(provider_2.as_ref()));
         manager.refresh_provider_reservation(&provider_2, owner_channel_2, 15).await;
+        manager.confirm_playback_activity(owner_channel_2).await;
 
-        let reservations = manager.reservations.read().await;
-        assert!(reservations.get(&input_name).is_some_and(|entries| entries.contains_key(owner_channel_1)));
-        assert!(reservations.get(&provider_2).is_some_and(|entries| entries.contains_key(owner_channel_2)));
-        drop(reservations);
+        let leases = manager.read_leases();
+        assert_eq!(leases.provider_for_owner(owner_channel_1).as_deref(), Some(input_name.as_ref()));
+        assert_eq!(leases.provider_for_owner(owner_channel_2).as_deref(), Some(provider_2.as_ref()));
+        drop(leases);
 
         manager.clear_provider_reservation(owner_channel_2).await;
-        let reservations = manager.reservations.read().await;
-        assert!(reservations.get(&input_name).is_some_and(|entries| entries.contains_key(owner_channel_1)));
-        assert!(!reservations.values().any(|entries| entries.contains_key(owner_channel_2)));
-        drop(reservations);
+        let leases = manager.read_leases();
+        assert_eq!(leases.provider_for_owner(owner_channel_1).as_deref(), Some(input_name.as_ref()));
+        assert!(leases.lease_of_owner(owner_channel_2).is_none());
+        drop(leases);
 
         manager.release_connection(&second_addr).await;
     }
@@ -2208,6 +3030,7 @@ mod tests {
         let addr_2: SocketAddr = "127.0.0.1:43132".parse().unwrap();
 
         manager.refresh_provider_reservation(&input_name, owner_1, 15).await;
+        manager.confirm_playback_activity(owner_1).await;
 
         let blocked = manager
             .acquire_connection_with_grace_for_session(
@@ -2256,7 +3079,7 @@ mod tests {
         assert_eq!(low_alloc.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
 
         // Provider is now exhausted
-        assert!(manager.is_exhausted(&input_name).await);
+        assert!(manager.is_exhausted(&input_name));
 
         // High-priority user arrives (priority -1 = higher importance), should preempt low-priority user
         let high_alloc = manager
@@ -2287,7 +3110,7 @@ mod tests {
         assert_eq!(alloc1.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
 
         // Provider is now exhausted
-        assert!(manager.is_exhausted(&input_name).await);
+        assert!(manager.is_exhausted(&input_name));
 
         // User 2 arrives with the same priority 0 — should NOT preempt user 1
         let alloc2 = manager
@@ -2323,7 +3146,7 @@ mod tests {
         assert_eq!(alloc1.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
 
         // Provider is now exhausted
-        assert!(manager.is_exhausted(&input_name).await);
+        assert!(manager.is_exhausted(&input_name));
 
         // Low-priority user arrives (priority 10) — should NOT preempt high-priority user
         let alloc2 =
@@ -2354,7 +3177,7 @@ mod tests {
         let low_token = low_alloc.cancel_token.clone().expect("must have cancel token");
 
         // Provider is now exhausted
-        assert!(manager.is_exhausted(&input_name).await);
+        assert!(manager.is_exhausted(&input_name));
 
         // High-priority user arrives WITH grace allowed (default streaming path)
         // This should get a GracePeriod allocation and then evict the low-prio user
@@ -2368,7 +3191,7 @@ mod tests {
         assert!(low_token.is_cancelled(), "low-prio user should be cancelled after eviction");
 
         // Provider should not be over limit (eviction freed a slot)
-        assert!(!manager.is_over_limit(&input_name).await, "provider should not be over limit after eviction");
+        assert!(!manager.is_over_limit(&input_name), "provider should not be over limit after eviction");
 
         manager.release_connection(&high_prio_addr).await;
     }
@@ -2392,7 +3215,7 @@ mod tests {
         let token1 = alloc1.cancel_token.clone().expect("must have cancel token");
 
         // Provider is now exhausted
-        assert!(manager.is_exhausted(&input_name).await);
+        assert!(manager.is_exhausted(&input_name));
 
         // User 2 arrives with the same priority and should be granted grace instead of being rejected.
         let alloc2 = manager
@@ -2404,7 +3227,7 @@ mod tests {
 
         // User 1 should NOT be cancelled, and the provider should be temporarily over limit.
         assert!(!token1.is_cancelled(), "same-prio user should not be evicted");
-        assert!(manager.is_over_limit(&input_name).await, "provider should be temporarily over limit during grace");
+        assert!(manager.is_over_limit(&input_name), "provider should be temporarily over limit during grace");
 
         manager.release_connection(&user_1_addr).await;
         manager.release_connection(&user_2_addr).await;
@@ -2451,21 +3274,18 @@ mod tests {
         assert_eq!(new_alloc.allocation.get_provider_name().as_deref(), Some("provider_1"));
 
         {
-            let mut connections = manager.connections.write().await;
+            let mut connections = manager.write_connections();
             let old_created_at = connections
                 .single
-                .get(&old_low_addr)
-                .and_then(|per_addr| per_addr.get(&old_alloc.allocation_id))
+                .get(&old_alloc.allocation_id)
                 .map(|info| info.created_at)
                 .expect("old allocation should still be registered");
 
             let (new_created_at, new_priority) = {
-                let per_addr = connections
+                let info = connections
                     .single
-                    .get_mut(&new_low_addr)
-                    .expect("new allocation address should still be registered");
-                let info =
-                    per_addr.get_mut(&new_alloc.allocation_id).expect("new allocation should still be registered");
+                    .get_mut(&new_alloc.allocation_id)
+                    .expect("new allocation should still be registered");
                 let original_created_at = info.created_at;
                 info.created_at = old_created_at;
                 (original_created_at, info.priority)
@@ -2480,7 +3300,7 @@ mod tests {
             tree.insert((new_priority, std::cmp::Reverse(old_created_at), new_alloc.allocation_id), owner);
         }
 
-        assert!(manager.is_exhausted(&input_name).await);
+        assert!(manager.is_exhausted(&input_name));
 
         // Higher-priority request should now select the first-inserted victim because
         // priority and created_at are exactly tied across provider aliases.
@@ -2496,6 +3316,56 @@ mod tests {
         manager.release_connection(&high_prio_addr).await;
         manager.release_connection(&old_low_addr).await;
         manager.release_connection(&new_low_addr).await;
+    }
+
+    #[tokio::test]
+    async fn shared_promotion_and_release_preserve_other_allocations_on_same_socket(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let app_cfg = build_test_app_config(None, 3);
+        let events = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &events);
+        let addr = "127.0.0.1:48500".parse()?;
+        let input = "provider_1".intern();
+        let unrelated = manager
+            .acquire_connection(&input, &addr, 0, ConnectionKind::Normal)
+            .await
+            .ok_or("unrelated allocation missing")?;
+        let origin = manager
+            .acquire_connection(&input, &addr, 5, ConnectionKind::Normal)
+            .await
+            .ok_or("origin allocation missing")?;
+        let first = SharedSubscriberId::from_stream_uid(1);
+        let second = SharedSubscriberId::from_stream_uid(2);
+        let key = "https://example.invalid/shared.ts";
+        assert!(manager.make_shared_connection(&origin, key, first).await);
+        assert_eq!(manager.get_provider_connections_count(), 2);
+        assert!(manager.read_connections().single.contains_key(&unrelated.allocation_id));
+        assert!(manager
+            .connections
+            .read()
+            .unwrap()
+            .single_by_addr
+            .get(&addr)
+            .is_some_and(|allocs| allocs.contains(&unrelated.allocation_id)));
+        assert!(!unrelated.cancel_token.as_ref().is_some_and(tokio_util::sync::CancellationToken::is_cancelled));
+        manager.add_shared_connection(&addr, second, key, 9, ConnectionKind::Soft)?;
+        assert!(manager.reclassify_shared_connection(second, ConnectionKind::Normal, 1));
+        {
+            let connections = manager.read_connections();
+            let shared = connections.shared.by_key.get(key).ok_or("shared origin missing")?;
+            assert_eq!(shared.connections.get(&first).map(|subscriber| subscriber.priority), Some(5));
+            assert_eq!(shared.priority, 1);
+        }
+        manager.release_shared_connection(second).await;
+        manager.release_shared_connection(second).await;
+        assert_eq!(manager.get_provider_connections_count(), 2);
+        assert_eq!(manager.read_connections().shared.by_key.get(key).map(|shared| shared.priority), Some(5));
+        manager.release_shared_connection(first).await;
+        manager.release_handle(&origin).await;
+        assert_eq!(manager.get_provider_connections_count(), 1);
+        manager.release_handle(&unrelated).await;
+        assert_eq!(manager.get_provider_connections_count(), 0);
+        Ok(())
     }
 
     #[tokio::test]
@@ -2515,16 +3385,22 @@ mod tests {
             .await
             .expect("A should get initial connection");
         let shared_token = alloc_a.cancel_token.clone().expect("shared allocation should have cancel token");
-        manager.make_shared_connection(&addr_a, stream_key).await;
+        assert!(manager.make_shared_connection(&alloc_a, stream_key, SharedSubscriberId::from_stream_uid(1)).await);
 
         // B joins the same shared stream with lower importance (priority 1).
-        let join_result = manager.add_shared_connection(&addr_b, stream_key, 1, ConnectionKind::Normal).await;
+        let join_result = manager.add_shared_connection(
+            &addr_b,
+            SharedSubscriberId::from_stream_uid(2),
+            stream_key,
+            1,
+            ConnectionKind::Normal,
+        );
         assert!(join_result.is_ok(), "B should join existing shared stream, got: {join_result:?}");
 
         // A leaves shared stream. Shared allocation should now inherit B's lower priority.
         manager.release_connection(&addr_a).await;
         {
-            let connections = manager.connections.read().await;
+            let connections = manager.read_connections();
             let shared = connections.shared.by_key.get(stream_key).expect("shared entry should remain for B");
             assert_eq!(shared.priority, 1, "shared priority must downgrade to remaining subscriber priority");
         }
@@ -2536,7 +3412,7 @@ mod tests {
             .expect("A should preempt lower-priority shared stream");
         assert_eq!(alloc_a2.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
         assert!(shared_token.is_cancelled(), "shared stream should be cancelled when preempted");
-        assert!(!manager.is_over_limit(&input_name).await, "provider should not remain over limit after preemption");
+        assert!(!manager.is_over_limit(&input_name), "provider should not remain over limit after preemption");
 
         manager.release_connection(&addr_a).await;
         manager.release_connection(&addr_b).await;
@@ -2559,11 +3435,18 @@ mod tests {
             .await
             .expect("low-priority shared stream should get initial connection");
         let shared_token = shared_alloc.cancel_token.clone().expect("shared allocation should have cancel token");
-        manager.make_shared_connection(&addr_a, stream_key).await;
+        assert!(
+            manager.make_shared_connection(&shared_alloc, stream_key, SharedSubscriberId::from_stream_uid(1)).await
+        );
 
         manager
-            .add_shared_connection(&addr_b, stream_key, 6, ConnectionKind::Normal)
-            .await
+            .add_shared_connection(
+                &addr_b,
+                SharedSubscriberId::from_stream_uid(2),
+                stream_key,
+                6,
+                ConnectionKind::Normal,
+            )
             .expect("second subscriber should join shared stream");
 
         let high_alloc = manager
@@ -2574,7 +3457,7 @@ mod tests {
         assert!(shared_token.is_cancelled(), "shared stream should be cancelled when preempted");
 
         {
-            let connections = manager.connections.read().await;
+            let connections = manager.read_connections();
             assert!(
                 !connections.shared.by_key.contains_key(stream_key),
                 "preempted shared stream must be removed even with multiple subscribers"
@@ -2603,7 +3486,7 @@ mod tests {
 
         // Check index has 1 entry
         {
-            let connections = manager.connections.read().await;
+            let connections = manager.read_connections();
             let tree = connections.priority_index.get(&input_name).expect("index for provider_1");
             assert_eq!(tree.len(), 1, "index should have 1 entry after first allocation");
         }
@@ -2616,7 +3499,7 @@ mod tests {
 
         // Check index: should have 1 entry (alloc_a evicted, alloc_b added)
         {
-            let connections = manager.connections.read().await;
+            let connections = manager.read_connections();
             let tree = connections.priority_index.get(&input_name).expect("index for provider_1");
             assert_eq!(tree.len(), 1, "index should have 1 entry after eviction + new allocation");
             // The remaining entry should be alloc_b
@@ -2629,7 +3512,7 @@ mod tests {
 
         // Check index: should be empty
         {
-            let connections = manager.connections.read().await;
+            let connections = manager.read_connections();
             let tree = connections.priority_index.get(&input_name);
             let is_empty = tree.is_none_or(std::collections::BTreeMap::is_empty);
             assert!(is_empty, "index should be empty after releasing all connections");
@@ -2662,7 +3545,7 @@ mod tests {
 
         tokio::task::yield_now().await;
         assert!(soft_token.is_cancelled(), "soft allocation should be preempted by normal traffic");
-        assert_eq!(manager.get_provider_connections_count().await, 1);
+        assert_eq!(manager.get_provider_connections_count(), 1);
 
         manager.release_handle(&normal_alloc).await;
     }
@@ -2690,7 +3573,7 @@ mod tests {
 
         tokio::task::yield_now().await;
         assert!(low_soft_token.is_cancelled(), "lower-priority soft allocation should be preempted");
-        assert_eq!(manager.get_provider_connections_count().await, 1);
+        assert_eq!(manager.get_provider_connections_count(), 1);
 
         manager.release_handle(&high_soft_alloc).await;
     }
@@ -2712,7 +3595,7 @@ mod tests {
         let promoted_token = promoted_alloc.cancel_token.clone().expect("soft allocations expose a cancel token");
 
         assert!(
-            manager.reclassify_connection(&promoted_addr, ConnectionKind::Normal, default_user_priority()).await,
+            manager.reclassify_connection(&promoted_addr, ConnectionKind::Normal, default_user_priority()),
             "soft allocation should be promotable to normal"
         );
 
@@ -2727,8 +3610,474 @@ mod tests {
             .await;
         assert!(challenger.is_none(), "same-priority normal traffic should not preempt a promoted normal connection");
         assert!(!promoted_token.is_cancelled(), "promoted connection should remain active");
-        assert_eq!(manager.get_provider_connections_count().await, 1);
+        assert_eq!(manager.get_provider_connections_count(), 1);
 
         manager.release_handle(&promoted_alloc).await;
+    }
+
+    #[tokio::test]
+    async fn test_reclassify_connection_for_owner_preserves_other_owner_on_same_socket() {
+        let app_cfg = build_test_app_config(None, 2);
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+
+        let input_name = "provider_1".intern();
+        let shared_addr: SocketAddr = "127.0.0.1:49020".parse().unwrap();
+
+        let alloc_1 = manager
+            .acquire_connection_with_lease_for_session(
+                &input_name,
+                &shared_addr,
+                false,
+                -10,
+                ConnectionKind::Soft,
+                Some(PlaybackLeaseRef::new("owner-1", PlaybackKind::LiveTs)),
+            )
+            .await
+            .expect("first soft allocation");
+
+        let alloc_2 = manager
+            .acquire_connection_with_lease_for_session(
+                &input_name,
+                &shared_addr,
+                false,
+                -10,
+                ConnectionKind::Soft,
+                Some(PlaybackLeaseRef::new("owner-2", PlaybackKind::LiveTs)),
+            )
+            .await
+            .expect("second soft allocation");
+
+        assert!(manager.reclassify_connection_for_owner(&shared_addr, Some("owner-1"), ConnectionKind::Normal, 0));
+
+        {
+            let connections = manager.read_connections();
+            let info_1 = connections.single.get(&alloc_1.allocation_id).expect("alloc_1 exists");
+            assert_eq!(info_1.kind, ConnectionKind::Normal);
+            assert_eq!(info_1.priority, 0);
+
+            let info_2 = connections.single.get(&alloc_2.allocation_id).expect("alloc_2 exists");
+            assert_eq!(info_2.kind, ConnectionKind::Soft);
+            assert_eq!(info_2.priority, -10);
+        }
+
+        manager.release_handle(&alloc_1).await;
+        manager.release_handle(&alloc_2).await;
+    }
+
+    /// A=2 / B=3 pool: five confirmed playbacks exhaust the pool and a sixth start is
+    /// rejected; releasing one confirmed playback frees exactly one slot again.
+    #[tokio::test]
+    async fn sixth_playback_rejected_after_pool_exhausted_by_confirmed_leases() {
+        let app_cfg = create_test_app_config_with_pool(2, 3);
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+        let input_name = "provider_1".intern();
+
+        let mut acquired = Vec::new();
+        for index in 0..5u16 {
+            let owner = format!("playback-{index}");
+            let addr = SocketAddr::from(([172, 18, 0, 9], 60_000 + index));
+            let handle = manager
+                .acquire_connection_with_grace_for_session(
+                    &input_name,
+                    &addr,
+                    false,
+                    default_user_priority(),
+                    ConnectionKind::Normal,
+                    Some(&owner),
+                )
+                .await
+                .expect("pool has capacity for five playbacks");
+            manager.confirm_playback_activity(&owner).await;
+            acquired.push((handle, owner));
+        }
+
+        let sixth = manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &SocketAddr::from(([172, 18, 0, 9], 60_005)),
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+                Some("playback-5"),
+            )
+            .await;
+        assert!(sixth.is_none(), "sixth start must be rejected once the pool is exhausted");
+
+        manager.release_handle(&acquired[0].0).await;
+        let replacement = manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &SocketAddr::from(([172, 18, 0, 9], 60_006)),
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+                Some("playback-6"),
+            )
+            .await;
+        assert!(replacement.is_some(), "freed capacity must be selectable again");
+        manager.release_handle(&replacement.expect("replacement handle")).await;
+        for (handle, _owner) in &acquired[1..] {
+            manager.release_handle(handle).await;
+        }
+        assert_eq!(manager.get_provider_connections_count(), 0);
+    }
+
+    /// Confirmed reconnect-capable lease, physical handle release first, then the real
+    /// provider-error outcome: the error must reach the lease and leave no idle reserve.
+    #[tokio::test(start_paused = true)]
+    async fn provider_error_cleanup_after_physical_release_does_not_keep_idle_lease() {
+        let app_cfg = create_test_app_config_with_pool(2, 3);
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+        let input_name = "provider_1".intern();
+        let owner = "r5-error-owner";
+        let addr = SocketAddr::from(([172, 18, 0, 9], 55_000));
+        let handle = manager
+            .acquire_connection_with_lease_for_session(
+                &input_name,
+                &addr,
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+                Some(PlaybackLeaseRef::new(owner, PlaybackKind::LiveHls)),
+            )
+            .await
+            .expect("acquire a reconnect-capable slot");
+        let request_id = handle.playback_request_id.expect("identified request id");
+        manager.refresh_adaptive_playback_lease(&input_name, owner, PlaybackKind::LiveHls, 15).await;
+        manager.confirm_playback_activity(owner).await;
+
+        // Physical release must not conclude the request; the outcome is decided later.
+        manager.release_handle(&handle).await;
+        assert_eq!(
+            manager.provider_lease_usage(&input_name).active,
+            1,
+            "physical release must not finish a confirmed lease"
+        );
+
+        manager.finish_identified_playback_request(owner, request_id, PlaybackRequestOutcome::ProviderFailed).await;
+        assert_eq!(
+            manager.provider_lease_usage(&input_name).total(),
+            0,
+            "provider error must not keep an idle reconnect lease"
+        );
+    }
+
+    /// Counterexample: the same sequence with a clean end keeps the configured idle window.
+    #[tokio::test(start_paused = true)]
+    async fn clean_cleanup_after_physical_release_keeps_configured_idle_window() {
+        let app_cfg = create_test_app_config_with_pool(2, 3);
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+        let input_name = "provider_1".intern();
+        let owner = "r5-clean-owner";
+        let addr = SocketAddr::from(([172, 18, 0, 9], 55_001));
+
+        let handle = manager
+            .acquire_connection_with_lease_for_session(
+                &input_name,
+                &addr,
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+                Some(PlaybackLeaseRef::new(owner, PlaybackKind::LiveHls)),
+            )
+            .await
+            .expect("acquire a reconnect-capable slot");
+        let request_id = handle.playback_request_id.expect("identified request id");
+        manager.refresh_adaptive_playback_lease(&input_name, owner, PlaybackKind::LiveHls, 15).await;
+        manager.confirm_playback_activity(owner).await;
+
+        manager.release_handle(&handle).await;
+        manager.finish_identified_playback_request(owner, request_id, PlaybackRequestOutcome::Completed).await;
+        let usage = manager.provider_lease_usage(&input_name);
+        assert_eq!(usage.active, 0, "clean end must move the lease out of active");
+        assert_eq!(usage.idle, 1, "clean end must keep the configured reconnect window");
+    }
+
+    /// max=1: X fetch → physical release → Y acquire → X first byte within the startup
+    /// deadline. X's late confirmation records media but must not over-commit Y's slot.
+    #[tokio::test(start_paused = true)]
+    async fn late_first_byte_cannot_reserve_slot_taken_by_other_playback() {
+        let app_cfg = create_test_app_config_single_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+        let input_name = "provider_1".intern();
+
+        let x_handle = manager
+            .acquire_connection_with_lease_for_session(
+                &input_name,
+                &SocketAddr::from(([172, 18, 0, 9], 40_000)),
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+                Some(PlaybackLeaseRef::new("x", PlaybackKind::LiveHls)),
+            )
+            .await
+            .expect("x acquires the only slot");
+        manager.refresh_adaptive_playback_lease(&input_name, "x", PlaybackKind::LiveHls, 15).await;
+        manager.release_handle(&x_handle).await;
+
+        let y_handle = manager
+            .acquire_connection_with_lease_for_session(
+                &input_name,
+                &SocketAddr::from(([172, 18, 0, 9], 40_001)),
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+                Some(PlaybackLeaseRef::new("y", PlaybackKind::LiveHls)),
+            )
+            .await
+            .expect("y acquires the now-free slot");
+
+        manager.confirm_playback_activity("x").await;
+        assert_eq!(manager.get_provider_connections_count(), 1, "y still holds the only slot");
+        assert!(
+            !manager.is_provider_reserved_for_other_session(&input_name, Some("y")),
+            "x's late confirmation must not over-commit the provider"
+        );
+
+        manager.confirm_playback_activity("y").await;
+        manager.release_handle(&y_handle).await;
+        manager.finish_playback_request("y", PlaybackRequestOutcome::Completed, None).await;
+    }
+
+    /// Counterexample: the same X fetch → release → first-byte sequence without a
+    /// competing Y keeps the free slot as a real reservation.
+    #[tokio::test(start_paused = true)]
+    async fn first_byte_reserves_when_slot_still_free() {
+        let app_cfg = create_test_app_config_single_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+        let input_name = "provider_1".intern();
+
+        let x_handle = manager
+            .acquire_connection_with_lease_for_session(
+                &input_name,
+                &SocketAddr::from(([172, 18, 0, 9], 40_002)),
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+                Some(PlaybackLeaseRef::new("x", PlaybackKind::LiveHls)),
+            )
+            .await
+            .expect("x acquires the only slot");
+        manager.refresh_adaptive_playback_lease(&input_name, "x", PlaybackKind::LiveHls, 15).await;
+        manager.release_handle(&x_handle).await;
+
+        // No competing playback took the slot, so X's first byte reserves it.
+        manager.confirm_playback_activity("x").await;
+        assert!(
+            manager.is_provider_reserved_for_other_session(&input_name, Some("other")),
+            "a free slot must be reservable by the confirming playback"
+        );
+
+        manager.finish_playback_request("x", PlaybackRequestOutcome::Completed, None).await;
+    }
+
+    /// The RAII owner releases the allocation synchronously even when dropped outside
+    /// a tokio runtime, so a body/context drop can never leak a provider slot.
+    #[test]
+    fn managed_handle_drop_outside_runtime_releases_allocation() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let (manager, managed) = rt.block_on(async {
+            let app_cfg = create_test_app_config_single_provider_pool();
+            let event_manager = Arc::new(EventManager::new());
+            let manager = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
+            let input_name = "provider_1".intern();
+
+            let handle = manager
+                .acquire_connection_with_grace_for_session(
+                    &input_name,
+                    &SocketAddr::from(([127, 0, 0, 1], 45_000)),
+                    false,
+                    0,
+                    ConnectionKind::Normal,
+                    Some("managed-owner"),
+                )
+                .await
+                .expect("allocation should succeed");
+            assert_eq!(manager.get_provider_connections_count(), 1);
+
+            let managed = super::ManagedProviderHandle::new(Arc::clone(&manager), handle);
+            (manager, managed)
+        });
+
+        drop(managed);
+        assert_eq!(manager.get_provider_connections_count(), 0);
+    }
+
+    fn latency_percentile(sorted: &[u64], p: f64) -> u64 {
+        if sorted.is_empty() {
+            return 0;
+        }
+        let index = ((sorted.len() as f64 - 1.0) * p).round() as usize;
+        sorted[index.min(sorted.len() - 1)]
+    }
+
+    fn resident_set_kib() -> u64 {
+        let Ok(content) = std::fs::read_to_string("/proc/self/status") else {
+            return 0;
+        };
+        for line in content.lines() {
+            if let Some(rest) = line.strip_prefix("VmRSS:") {
+                return rest.split_whitespace().next().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+            }
+        }
+        0
+    }
+
+    struct LeaseWorkloadStats {
+        ops: u64,
+        elapsed_secs: f64,
+        acquire_p50: u64,
+        acquire_p95: u64,
+        acquire_p99: u64,
+        confirm_p50: u64,
+        confirm_p95: u64,
+        confirm_p99: u64,
+        release_p50: u64,
+        release_p95: u64,
+        release_p99: u64,
+    }
+
+    async fn measure_lease_workload(
+        manager: &Arc<ActiveProviderManager>,
+        input_name: &Arc<str>,
+        concurrency: usize,
+        rounds_per_task: usize,
+    ) -> LeaseWorkloadStats {
+        let samples = Arc::new(std::sync::Mutex::new(Vec::<(u64, u64, u64)>::new()));
+        let started = std::time::Instant::now();
+        let mut tasks = tokio::task::JoinSet::new();
+        for task_index in 0..concurrency {
+            let manager = Arc::clone(manager);
+            let input_name = Arc::clone(input_name);
+            let samples = Arc::clone(&samples);
+            tasks.spawn(async move {
+                for round in 0..rounds_per_task {
+                    let owner = format!("bench-{task_index}-{round}");
+                    let addr = SocketAddr::from(([127, 0, 0, 1], 40_000 + (task_index as u16)));
+                    let acquire_at = std::time::Instant::now();
+                    let Some(handle) = manager
+                        .acquire_connection_with_grace_for_session(
+                            &input_name,
+                            &addr,
+                            false,
+                            0,
+                            ConnectionKind::Normal,
+                            Some(&owner),
+                        )
+                        .await
+                    else {
+                        continue;
+                    };
+                    let acquire_us = acquire_at.elapsed().as_micros() as u64;
+
+                    let confirm_at = std::time::Instant::now();
+                    manager.confirm_playback_activity(&owner).await;
+                    let confirm_us = confirm_at.elapsed().as_micros() as u64;
+
+                    let release_at = std::time::Instant::now();
+                    manager.release_handle(&handle).await;
+                    let release_us = release_at.elapsed().as_micros() as u64;
+
+                    // A physical release never concludes the request; model the real
+                    // lifecycle by finishing with a clean outcome so the lease returns
+                    // to baseline (LiveTs is not reconnect-capable, so it is removed).
+                    manager.finish_playback_request(&owner, PlaybackRequestOutcome::Completed, None).await;
+
+                    samples.lock().unwrap().push((acquire_us, confirm_us, release_us));
+                }
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            result.expect("benchmark task must not fail");
+        }
+
+        let elapsed_secs = started.elapsed().as_secs_f64();
+        let samples = Arc::try_unwrap(samples).expect("samples unique").into_inner().unwrap();
+        let mut acquire = Vec::with_capacity(samples.len());
+        let mut confirm = Vec::with_capacity(samples.len());
+        let mut release = Vec::with_capacity(samples.len());
+        for (a, c, r) in samples {
+            acquire.push(a);
+            confirm.push(c);
+            release.push(r);
+        }
+        acquire.sort_unstable();
+        confirm.sort_unstable();
+        release.sort_unstable();
+        let ops = acquire.len() as u64;
+        LeaseWorkloadStats {
+            ops,
+            elapsed_secs,
+            acquire_p50: latency_percentile(&acquire, 0.50),
+            acquire_p95: latency_percentile(&acquire, 0.95),
+            acquire_p99: latency_percentile(&acquire, 0.99),
+            confirm_p50: latency_percentile(&confirm, 0.50),
+            confirm_p95: latency_percentile(&confirm, 0.95),
+            confirm_p99: latency_percentile(&confirm, 0.99),
+            release_p50: latency_percentile(&release, 0.50),
+            release_p95: latency_percentile(&release, 0.95),
+            release_p99: latency_percentile(&release, 0.99),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "manager microbenchmark: cargo +stable test -p tuliprox-session --release -- --ignored --nocapture bench_provider_lease_microbenchmark"]
+    async fn bench_provider_lease_microbenchmark() {
+        let manager = Arc::new(ActiveProviderManager::new(
+            &create_test_app_config_single_unlimited_provider_pool(),
+            &Arc::new(EventManager::new()),
+        ));
+        let input_name: Arc<str> = "provider_1".intern();
+
+        // Warm-up before measurement so allocator and lock caches are exercised.
+        for index in 0..64u16 {
+            let addr = SocketAddr::from(([127, 0, 0, 1], 40_000 + index));
+            let Some(handle) = manager
+                .acquire_connection_with_grace_for_session(&input_name, &addr, false, 0, ConnectionKind::Normal, None)
+                .await
+            else {
+                continue;
+            };
+            manager.release_handle(&handle).await;
+        }
+
+        let baseline_rss_kib = resident_set_kib();
+        eprintln!("provider lease manager microbenchmark (unlimited provider, in-process, no HTTP bodies)");
+        for concurrency in [1usize, 5, 50, 200] {
+            let stats = measure_lease_workload(&manager, &input_name, concurrency, 10).await;
+            assert_eq!(
+                stats.ops,
+                (concurrency * 10) as u64,
+                "unexpected acquire failures at concurrency {concurrency}"
+            );
+            let throughput = stats.ops as f64 / stats.elapsed_secs.max(f64::EPSILON);
+            let rss_delta_kib = resident_set_kib().saturating_sub(baseline_rss_kib);
+            eprintln!(
+                "concurrency={concurrency:>3} ops={:>5} throughput={:>9.1} ops/s | acquire p50/p95/p99={}/{}/{}us | confirm p50/p95/p99={}/{}/{}us | release p50/p95/p99={}/{}/{}us | rss_delta={}KiB",
+                stats.ops,
+                throughput,
+                stats.acquire_p50,
+                stats.acquire_p95,
+                stats.acquire_p99,
+                stats.confirm_p50,
+                stats.confirm_p95,
+                stats.confirm_p99,
+                stats.release_p50,
+                stats.release_p95,
+                stats.release_p99,
+                rss_delta_kib,
+            );
+        }
+
+        // Soak-style churn: every connection and lease must return to baseline.
+        assert_eq!(manager.get_provider_connections_count(), 0);
+        let usage = manager.provider_lease_usage(&input_name);
+        assert_eq!(usage.total(), 0, "lease table must return to baseline after churn");
     }
 }

@@ -3677,6 +3677,7 @@ pub fn create_panel_api_provisioning_stream_details(
         );
         let (stream, stream_info) = create_provider_connections_exhausted_stream(&app_state.app_config, &[]);
         return StreamDetails {
+            shared_subscriber_id: None,
             stream,
             stream_info,
             provider_name,
@@ -3706,6 +3707,7 @@ pub fn create_panel_api_provisioning_stream_details(
     });
 
     StreamDetails {
+        shared_subscriber_id: None,
         stream,
         stream_info,
         provider_name,

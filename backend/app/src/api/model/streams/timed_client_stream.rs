@@ -5,11 +5,7 @@ use crate::{
 };
 use bytes::Bytes;
 use futures::Stream;
-use shared::{
-    defaults::default_kick_secs,
-    model::{DisconnectReason, VirtualId},
-    utils::sanitize_sensitive_info,
-};
+use shared::{defaults::default_kick_secs, model::VirtualId, utils::sanitize_sensitive_info};
 use std::{future::Future, net::SocketAddr, pin::Pin, sync::Arc, task::Poll, time::Duration};
 use tokio::time::{sleep_until, Instant, Sleep};
 
@@ -19,6 +15,7 @@ enum TimeoutAction {
         connection_manager: Arc<ConnectionManager>,
         addr: SocketAddr,
         virtual_id: VirtualId,
+        stream_uid: Option<u32>,
     },
     Stop,
 }
@@ -41,6 +38,7 @@ impl TimedClientStream {
         duration: u32,
         addr: SocketAddr,
         virtual_id: VirtualId,
+        stream_uid: Option<u32>,
     ) -> Self {
         let deadline = Box::pin(sleep_until(Instant::now() + Duration::from_secs(u64::from(duration))));
         Self {
@@ -51,6 +49,7 @@ impl TimedClientStream {
                 connection_manager: Arc::clone(connection_manager),
                 addr,
                 virtual_id,
+                stream_uid,
             },
         }
     }
@@ -69,20 +68,22 @@ impl Stream for TimedClientStream {
         // wakes this task exactly when the deadline fires — even if the upstream
         // provider is stalled and emitting no data.
         if self.deadline.as_mut().poll(cx).is_ready() {
-            if let TimeoutAction::Kick { app_config, connection_manager, addr, virtual_id } = &self.timeout_action {
+            if let TimeoutAction::Kick { app_config, connection_manager, addr, virtual_id, stream_uid } =
+                &self.timeout_action
+            {
                 let kick_secs =
                     app_config.config.load().web_ui.as_ref().map_or_else(default_kick_secs, |wc| wc.kick_secs);
                 let connection_manager = Arc::clone(connection_manager);
-                let addr = *addr;
+                let stream_uid = *stream_uid;
                 let virtual_id = *virtual_id;
                 debug_if_enabled!(
                     "TimedClient stream exceeds time limit. Closing stream with virtual_id {virtual_id} for addr: {}",
                     sanitize_sensitive_info(&addr.to_string())
                 );
                 tokio::spawn(async move {
-                    let _ = connection_manager
-                        .close_connection_with_reason_and_block(&addr, virtual_id, kick_secs, DisconnectReason::Timeout)
-                        .await;
+                    if let Some(uid) = stream_uid {
+                        connection_manager.block_stream_by_uid(uid, virtual_id, kick_secs).await;
+                    }
                 });
             }
             return Poll::Ready(None);

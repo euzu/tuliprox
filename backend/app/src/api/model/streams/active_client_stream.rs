@@ -4,8 +4,8 @@ use crate::{
             connection_manager::{PROVIDER_END_CLOSED, PROVIDER_END_ERROR, PROVIDER_END_NOT_SET},
             create_provider_stream, uses_direct_body_idle_timeout, AppState, BoxedProviderStream, CleanupEvent,
             ConnectionManager, CustomVideoStreamType, EventManager, MeteringStream, PendingProviderWakeSource,
-            ProviderHandle, ProviderStreamFactoryOptions, StreamDetails, StreamError, StreamMeterHandle,
-            TimedClientStream, TransportStreamBuffer,
+            ProviderStreamFactoryOptions, StreamDetails, StreamError, StreamMeterHandle, TimedClientStream,
+            TransportStreamBuffer,
         },
         panel_api::{can_provision_on_exhausted, find_input_by_provider_name, run_panel_api_provisioning_probe},
     },
@@ -32,7 +32,7 @@ use std::{
 };
 use tokio::sync::Notify;
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
-use tuliprox_session::stream_options::get_stream_options;
+use tuliprox_session::{stream_options::get_stream_options, ConnectionRejectionReason};
 
 const DIRECT_BODY_IDLE_TIMEOUT_SECS: u64 = 90;
 const BODY_IDLE_TIMEOUT_ERROR_CLASS: &str = "body_idle_timeout";
@@ -209,7 +209,7 @@ impl DirectBodyIdleTimeout {
 struct ActiveClientStreamState {
     inner: Option<BoxedProviderStream>,
     send_custom_stream_flag: Option<Arc<AtomicU8>>,
-    provider_handle: Option<ProviderHandle>,
+    provider_handle: Option<tuliprox_session::ManagedProviderHandle>,
     deferred_provider_open: Option<DeferredProviderOpenState>,
     timed_stream_context: Option<TimedStreamContext>,
     preempt_cancelled: Option<Pin<Box<WaitForCancellationFutureOwned>>>,
@@ -241,6 +241,16 @@ struct ActiveClientStreamState {
     provider_http_status: Option<u16>,
     /// Count of successful provider reconnections during this session (grace period / deferred open).
     provider_reconnect_count: AtomicU8,
+    /// Playback lease owner (session token) whose provider slot is confirmed once real
+    /// media bytes reach the client. `None` when this stream has no provider lease.
+    lease_owner: Option<Arc<str>>,
+    /// Guards against emitting the confirmation more than once per stream.
+    lease_confirmed: bool,
+    lease_request_id: Option<tuliprox_core::model::PlaybackRequestId>,
+    /// Guaranteed final cleanup for the registered request claim. The body owns this and
+    /// finishes it exactly once with the real provider outcome, so a full cleanup queue can
+    /// never leak the user request or provider lease.
+    request_cleanup: Option<tuliprox_session::OwnedRequestCleanup>,
 }
 
 impl ActiveClientStreamState {
@@ -269,6 +279,7 @@ impl ActiveClientStreamState {
                 ctx.duration_secs,
                 self.fingerprint.addr,
                 ctx.virtual_id,
+                self.stream_uid,
             )
             .boxed()
         } else {
@@ -293,43 +304,63 @@ impl ActiveClientStreamState {
             return;
         }
         self.user_stream_released = true;
-        self.connection_manager.send_cleanup(CleanupEvent::ReleaseStream {
-            addr: self.fingerprint.addr,
-            stream_uid: self.stream_uid,
-            provider_end_reason: self.provider_end_reason.load(Ordering::Relaxed),
-            reconnect_count: self.provider_reconnect_count.load(Ordering::Relaxed),
-            provider_error_class: self.provider_error_class,
-            provider_http_status: self.provider_http_status,
+        if let Some(cleanup) = self.request_cleanup.as_mut() {
+            cleanup.finish(
+                self.lease_request_id,
+                self.provider_end_reason.load(Ordering::Relaxed),
+                self.provider_reconnect_count.load(Ordering::Relaxed),
+                self.provider_error_class,
+                self.provider_http_status,
+            );
+        }
+    }
+
+    /// Confirms the playback lease exactly once, when the first real provider media
+    /// bytes reach the client. Only a confirmed lease may reserve provider capacity
+    /// against other playbacks, so an abandoned or custom-video-only start does not
+    /// block unrelated clients behind the same reverse proxy.
+    fn confirm_lease_once(&mut self) {
+        if self.lease_confirmed {
+            return;
+        }
+        let Some(owner) = self.lease_owner.take() else {
+            return;
+        };
+        self.lease_confirmed = true;
+        let request_id = self.lease_request_id.or_else(|| {
+            self.provider_handle.as_ref().and_then(|managed| managed.handle()).and_then(|h| h.playback_request_id)
         });
+        // Confirm synchronously through the broker: a first-byte confirmation is a
+        // mandatory capacity transition and must not be dropped by queue pressure.
+        let provider_manager = &self.connection_manager.provider_manager;
+        if let Some(request_id) = request_id {
+            provider_manager.confirm_identified_playback_activity_sync(&owner, request_id);
+        } else {
+            provider_manager.confirm_playback_activity_sync(&owner);
+        }
     }
 
     fn release_stream_and_provider_handle_once(&mut self) {
         self.stop_grace_task();
-        let addr = self.fingerprint.addr;
-        let handle = self.provider_handle.take();
-        // `provider_handle_released` mirrors `user_stream_released` for the provider slot.
-        // When preemption already released the handle, `provider_handle` is None and the
-        // flag is true; sending None is a no-op, but the explicit guard keeps the invariant
-        // visible and safe against future call-site additions.
-        let handle_for_cleanup = if self.provider_handle_released { None } else { handle };
-        if self.user_stream_released {
-            if !self.provider_handle_released {
-                self.provider_handle_released = true;
-                self.connection_manager
-                    .send_cleanup(CleanupEvent::ReleaseProviderHandle { handle: handle_for_cleanup });
-            }
-        } else {
-            self.user_stream_released = true;
+        // The provider slot is owned by a managed handle and released synchronously on
+        // drop. The stream claim is released through the reserved cleanup right, never a
+        // lossy cleanup message, with the actual provider outcome.
+        if !self.provider_handle_released {
             self.provider_handle_released = true;
-            self.connection_manager.send_cleanup(CleanupEvent::ReleaseStreamAndProviderHandle {
-                addr,
-                stream_uid: self.stream_uid,
-                handle: handle_for_cleanup,
-                provider_end_reason: self.provider_end_reason.load(Ordering::Relaxed),
-                reconnect_count: self.provider_reconnect_count.load(Ordering::Relaxed),
-                provider_error_class: self.provider_error_class,
-                provider_http_status: self.provider_http_status,
-            });
+            drop(self.provider_handle.take());
+        }
+        if self.user_stream_released {
+            return;
+        }
+        self.user_stream_released = true;
+        if let Some(cleanup) = self.request_cleanup.as_mut() {
+            cleanup.finish(
+                self.lease_request_id,
+                self.provider_end_reason.load(Ordering::Relaxed),
+                self.provider_reconnect_count.load(Ordering::Relaxed),
+                self.provider_error_class,
+                self.provider_http_status,
+            );
         }
     }
 
@@ -391,8 +422,11 @@ impl ActiveClientStreamState {
 
         let mut serve_preempted_custom = false;
         if self.provider_handle.is_some() {
-            let handle = self.provider_handle.take();
+            let managed = self.provider_handle.take();
             self.provider_handle_released = true;
+            // Synchronous provider-slot release; the custom-video detail update is a
+            // separate, best-effort UI effect.
+            drop(managed);
             if self.custom_video.low_priority_preempted.is_some() {
                 serve_preempted_custom = true;
                 if let Some(flag) = &self.send_custom_stream_flag {
@@ -422,12 +456,12 @@ impl ActiveClientStreamState {
             if serve_preempted_custom {
                 self.connection_manager.send_cleanup(CleanupEvent::UpdateDetailAndReleaseProvider {
                     addr,
+                    stream_uid: self.stream_uid,
                     video_type: CustomVideoStreamType::LowPriorityPreempted,
-                    handle,
+                    handle: None,
                 });
             } else {
                 self.release_user_stream();
-                self.connection_manager.send_cleanup(CleanupEvent::ReleaseProviderHandle { handle });
             }
         }
         serve_preempted_custom
@@ -439,8 +473,11 @@ impl ActiveClientStreamState {
         self.stop_grace_task();
 
         if self.provider_handle.is_some() {
-            let handle = self.provider_handle.take();
+            let managed = self.provider_handle.take();
             self.provider_handle_released = true;
+            // Synchronous provider-slot release; the custom-video detail update is a
+            // separate, best-effort UI effect.
+            drop(managed);
 
             if mode == StreamMode::ChannelUnavailable {
                 if let Some(flag) = &self.send_custom_stream_flag {
@@ -477,8 +514,9 @@ impl ActiveClientStreamState {
             );
             self.connection_manager.send_cleanup(CleanupEvent::UpdateDetailAndReleaseProvider {
                 addr,
+                stream_uid: self.stream_uid,
                 video_type,
-                handle,
+                handle: None,
             });
         }
     }
@@ -531,6 +569,7 @@ fn wrap_timed_client_stream_if_needed(
     stream: BoxedProviderStream,
     addr: SocketAddr,
     virtual_id: VirtualId,
+    stream_uid: Option<u32>,
 ) -> BoxedProviderStream {
     let config = app_state.app_config.config.load();
     match config.sleep_timer_mins {
@@ -545,6 +584,7 @@ fn wrap_timed_client_stream_if_needed(
                     secs,
                     addr,
                     virtual_id,
+                    stream_uid,
                 )
                 .boxed()
             } else {
@@ -727,6 +767,9 @@ impl Stream for ActiveClientStream {
 
                     match self.state.inner.as_mut().map(|inner| Pin::new(inner).poll_next(cx)) {
                         Some(Poll::Ready(Some(Ok(bytes)))) => {
+                            if !bytes.is_empty() {
+                                self.state.confirm_lease_once();
+                            }
                             self.state.mark_direct_body_progress();
                             return Poll::Ready(Some(Ok(bytes)));
                         }
@@ -830,8 +873,29 @@ impl Drop for ActiveClientStream {
     fn drop(&mut self) { self.state.release_stream_and_provider_handle_once(); }
 }
 
+/// Terminal failure while admitting a playback request. Carried to the response layer so a
+/// rejected request surfaces as a non-success HTTP response instead of an empty provider body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StreamAdmissionError {
+    CleanupReceiverClosed,
+    CleanupAdmissionTimeout,
+    RegistrationRejected,
+}
+
+impl From<ConnectionRejectionReason> for StreamAdmissionError {
+    fn from(reason: ConnectionRejectionReason) -> Self {
+        match reason {
+            ConnectionRejectionReason::CleanupReceiverClosed => Self::CleanupReceiverClosed,
+            ConnectionRejectionReason::CleanupAdmissionTimeout => Self::CleanupAdmissionTimeout,
+            ConnectionRejectionReason::RegistrationFailed => Self::RegistrationRejected,
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
-pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParams<'_>) -> BoxedProviderStream {
+pub(crate) async fn create_active_client_stream(
+    request: ActiveClientStreamParams<'_>,
+) -> Result<BoxedProviderStream, StreamAdmissionError> {
     let ActiveClientStreamParams {
         mut stream_details,
         app_state,
@@ -862,26 +926,69 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
     } else {
         DirectBodyIdleTimeout::disabled()
     };
-    let registered_stream = app_state
-        .connection_manager
-        .update_connection(crate::api::model::ConnectionParams {
-            meter_uid,
-            username,
-            max_connections: user.max_connections,
-            soft_connections: user.soft_connections,
-            connection_kind,
-            priority: user.priority,
-            soft_priority: user.soft_priority,
-            fingerprint,
-            provider: provider_name,
-            stream_channel: &stream_channel,
-            user_agent,
-            session_token,
-        })
-        .await;
-    let stream_uid = registered_stream.as_ref().map(|stream| stream.uid);
+    // A shared response already owns a guaranteed ReleaseSharedSubscriber permit
+    // before this registration starts. That terminal event also removes this exact user request, so reserving
+    // another permit from the same bounded queue would create a circular admission
+    // dependency under saturation.
+    let cleanup_owned_by_shared_subscriber = stream_channel.shared && stream_details.shared_subscriber_id.is_some();
+    let request_uid = stream_details.shared_subscriber_id.map_or_else(
+        || app_state.connection_manager.next_stream_uid(),
+        tuliprox_core::model::SharedSubscriberId::stream_uid,
+    );
+    let provider_request_id = stream_details
+        .provider_handle
+        .as_ref()
+        .and_then(|managed| managed.handle())
+        .and_then(|handle| handle.playback_request_id);
+    let connection = crate::api::model::ConnectionParams {
+        meter_uid,
+        username,
+        max_connections: user.max_connections,
+        soft_connections: user.soft_connections,
+        connection_kind,
+        priority: user.priority,
+        soft_priority: user.soft_priority,
+        fingerprint,
+        provider: provider_name,
+        stream_channel: &stream_channel,
+        user_agent,
+        session_token,
+    };
+    let mut registered_request = if cleanup_owned_by_shared_subscriber {
+        app_state
+            .connection_manager
+            .update_connection_with_uid_using_shared_cleanup(
+                connection,
+                tuliprox_session::ConnectionHistoryMode::EmitConnect,
+                request_uid,
+                provider_request_id,
+            )
+            .await
+    } else {
+        app_state
+            .connection_manager
+            .update_connection_with_uid(
+                connection,
+                tuliprox_session::ConnectionHistoryMode::EmitConnect,
+                request_uid,
+                provider_request_id,
+            )
+            .await
+    };
+    let request_uid = registered_request.request_uid;
+    let display_stream_uid = registered_request.display_uid();
+    let stream_uid = Some(request_uid);
+    if registered_request.display_stream.is_none() {
+        // Admission was rejected (closed cleanup receiver, bounded timeout, or failed
+        // registration). No provider bytes may be delivered; the acquired provider
+        // handle and any open provider stream are released when `request` (and its
+        // `stream_details`) is dropped on return.
+        let reason = registered_request.rejection_reason().unwrap_or(ConnectionRejectionReason::RegistrationFailed);
+        error!("Stream admission rejected for user {username}: {reason:?}; dropping provider handle");
+        return Err(reason.into());
+    }
     if let Some((_, _, _m_, Some(cvt))) = stream_details.stream_info.as_ref() {
-        app_state.connection_manager.update_stream_detail(&fingerprint.addr, *cvt).await;
+        app_state.connection_manager.update_stream_detail_by_uid(request_uid, *cvt).await;
     }
 
     let meter = if meter_stream && meter_uid != 0 {
@@ -901,7 +1008,9 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
             } else {
                 stream
             };
-            return wrap_timed_client_stream_if_needed(app_state, stream, fingerprint.addr, VirtualId::new(virtual_id));
+            // The shared source owns the claim from here; disarm the registration rollback.
+            registered_request.commit();
+            return Ok(stream);
         }
     }
 
@@ -928,16 +1037,29 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
 
     let waker = Arc::new(AtomicWaker::new());
     let owned_session_token: Option<String> = session_token.map(str::to_string);
+    // A provider-backed playback confirms its lease owner once media flows. Local
+    // media and streams without a provider handle carry no lease to confirm.
+    let lease_owner: Option<Arc<str>> = session_token
+        .filter(|_| stream_details.provider_handle.is_some() || stream_details.has_deferred_provider_open())
+        .map(Arc::<str>::from);
     let owned_grace_ctx = stream_details.grace_resolution_context.clone();
-    let mut provider_handle_preserved = stream_details.provider_handle.clone();
-    // Compute deferred provider open before moving stream_details into the grace task.
+    let lease_request_id = stream_details
+        .provider_handle
+        .as_ref()
+        .and_then(|managed| managed.handle())
+        .and_then(|handle| handle.playback_request_id);
+    // Compute deferred-open metadata before taking the handle: the grace snapshot only
+    // needs the provider identity, while the body owns the actual release.
+    let has_deferred_open = stream_details.has_deferred_provider_open();
     let deferred_provider_open =
         create_deferred_provider_open_future(app_state, &stream_details, fingerprint, &stream_channel, req_headers);
     let timed_stream_context = deferred_provider_open
         .as_ref()
         .and_then(|_| create_timed_stream_context(app_state, VirtualId::new(virtual_id)));
+    // The body owns the provider slot from here on; the managed owner releases it
+    // synchronously on drop, never through a lossy cleanup message.
+    let mut provider_handle_preserved = stream_details.provider_handle.take();
     let stream_taken = stream_details.stream.take();
-    let has_deferred_open = stream_details.has_deferred_provider_open();
     let grace_waker =
         if grant_user_grace_period || stream_details.provider_grace_active { Some(Arc::clone(&waker)) } else { None };
     let (grace_stop_flag, grace_task_handle) = stream_grace_period(GracePeriodParams {
@@ -982,8 +1104,7 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
     let stream: Option<BoxedProviderStream> = match stream_taken {
         None => {
             if !has_deferred_open {
-                let provider_handle = provider_handle_preserved.take();
-                app_state.connection_manager.release_provider_handle(provider_handle).await;
+                drop(provider_handle_preserved.take());
             }
             None
         }
@@ -993,12 +1114,19 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
             } else {
                 stream
             };
-            Some(wrap_timed_client_stream_if_needed(app_state, stream, fingerprint.addr, VirtualId::new(virtual_id)))
+            Some(wrap_timed_client_stream_if_needed(
+                app_state,
+                stream,
+                fingerprint.addr,
+                VirtualId::new(virtual_id),
+                display_stream_uid,
+            ))
         }
     };
 
     let preempt_cancelled = provider_handle_preserved
         .as_ref()
+        .and_then(|managed| managed.handle())
         .and_then(|h| h.cancel_token.as_ref())
         .map(|token| Box::pin(token.clone().cancelled_owned()));
 
@@ -1036,9 +1164,13 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
         provider_error_class: None,
         provider_http_status: None,
         provider_reconnect_count: AtomicU8::new(0),
+        lease_owner,
+        lease_confirmed: false,
+        lease_request_id,
+        request_cleanup: registered_request.into_body_cleanup(),
     };
 
-    ActiveClientStream { state }.boxed()
+    Ok(ActiveClientStream { state }.boxed())
 }
 
 fn resolve_grace_period_provisioning(
@@ -1142,7 +1274,7 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                         None => true,
                     };
                     let provider_ok = match &provider_grace_check {
-                        Some(provider_name) => !provider_manager.is_over_limit(provider_name).await,
+                        Some(provider_name) => !provider_manager.is_over_limit(provider_name),
                         None => true,
                     };
                     if user_ok && provider_ok {
@@ -1208,10 +1340,9 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                                             CustomVideoStreamType::UserConnectionsExhausted,
                                         )
                                         .await;
-                                    connection_manager
-                                        .shared_stream_manager
-                                        .release_connection(&fingerprint.addr, true)
-                                        .await;
+                                    if let Some(id) = stream_details.shared_subscriber_id {
+                                        connection_manager.shared_stream_manager.release_subscriber(id).await;
+                                    }
                                     info!("User connections exhausted for active clients: {username}");
                                     updated = true;
                                 }
@@ -1225,7 +1356,9 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                                     CustomVideoStreamType::UserConnectionsExhausted,
                                 )
                                 .await;
-                            connection_manager.shared_stream_manager.release_connection(&fingerprint.addr, true).await;
+                            if let Some(id) = stream_details.shared_subscriber_id {
+                                connection_manager.shared_stream_manager.release_subscriber(id).await;
+                            }
                             info!("User connections exhausted for active clients: {username}");
                             updated = true;
                         }
@@ -1234,7 +1367,7 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
 
                 if !updated {
                     if let Some(provider_name) = provider_grace_check {
-                        if provider_manager.is_over_limit(&provider_name).await {
+                        if provider_manager.is_over_limit(&provider_name) {
                             if let Some(provisioning_info) = provisioning_info {
                                 stream_strategy_flag_copy.store(StreamMode::Provisioning as u8, Ordering::Release);
                                 connection_manager
@@ -1269,10 +1402,9 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                                     )
                                     .await;
                                 // Release the shared stream subscription to stop the subscriber loop
-                                connection_manager
-                                    .shared_stream_manager
-                                    .release_connection(&fingerprint.addr, true)
-                                    .await;
+                                if let Some(id) = stream_details.shared_subscriber_id {
+                                    connection_manager.shared_stream_manager.release_subscriber(id).await;
+                                }
                                 info!("Provider connections exhausted for active clients: {provider_name}");
                             }
                             updated = true;
@@ -1730,7 +1862,12 @@ mod tests {
         if provider_handle.is_some() {
             stream_details.provider_name = Some("provider_1".intern());
         }
-        stream_details.provider_handle = provider_handle;
+        stream_details.provider_handle = provider_handle.map(|handle| {
+            tuliprox_session::ManagedProviderHandle::new(
+                Arc::clone(&app_state.connection_manager.provider_manager),
+                handle,
+            )
+        });
         let virtual_id = stream_channel.virtual_id;
 
         let stream = create_active_client_stream(ActiveClientStreamParams {
@@ -1747,7 +1884,8 @@ mod tests {
             meter_uid: 0,
             meter_stream: false,
         })
-        .await;
+        .await
+        .expect("direct test stream admission should succeed");
         let uid = app_state
             .active_users
             .active_streams()
@@ -1791,7 +1929,7 @@ mod tests {
         TestLifecycleSnapshot {
             active_counts,
             stream_uids,
-            provider_connections: app_state.active_provider.get_provider_connections_count().await,
+            provider_connections: app_state.active_provider.get_provider_connections_count(),
         }
     }
 
@@ -1835,9 +1973,10 @@ mod tests {
 
     fn create_deferred_provider_grace_details(
         provider_name: &Arc<str>,
-        provider_handle: crate::api::model::ProviderHandle,
+        provider_handle: tuliprox_session::ManagedProviderHandle,
     ) -> StreamDetails {
         StreamDetails {
+            shared_subscriber_id: None,
             stream: None,
             stream_info: None,
             provider_name: Some(Arc::clone(provider_name)),
@@ -1872,8 +2011,21 @@ mod tests {
             )
             .await
             .expect("deferred client should receive provider grace allocation");
-        let stream_details = create_deferred_provider_grace_details(provider_name, deferred_handle);
-        let deferred_provider_handle = stream_details.provider_handle.clone();
+        let mut stream_details = create_deferred_provider_grace_details(
+            provider_name,
+            tuliprox_session::ManagedProviderHandle::new(
+                Arc::clone(&app_state.connection_manager.provider_manager),
+                deferred_handle,
+            ),
+        );
+        // The grace-resolution task only reads Copy fields of `stream_details` and never
+        // takes ownership of the handle, so disarm it back into the raw handle the caller
+        // releases explicitly after the grace task completes.
+        let deferred_provider_handle = stream_details
+            .provider_handle
+            .take()
+            .and_then(|mut managed| managed.disarm())
+            .expect("deferred provider handle must be retained during grace");
         let test_user = create_test_user("grace-user");
         let test_fingerprint = create_test_fingerprint(deferred_addr);
         let pending_provider_version = if let Some(token) = session_token {
@@ -1902,7 +2054,7 @@ mod tests {
         (
             flag.expect("provider grace should install a mode flag"),
             task.expect("provider grace should spawn a grace-resolution task"),
-            deferred_provider_handle.expect("deferred provider handle must be retained during grace"),
+            deferred_provider_handle,
         )
     }
 
@@ -1944,6 +2096,10 @@ mod tests {
             provider_error_class: None,
             provider_http_status: None,
             provider_reconnect_count: AtomicU8::new(0),
+            lease_owner: None,
+            lease_confirmed: false,
+            lease_request_id: None,
+            request_cleanup: None,
         };
 
         let stream = ActiveClientStream { state };
@@ -2228,7 +2384,13 @@ mod tests {
             )
             .await
             .expect("deferred provider allocation");
-        let stream_details = create_deferred_provider_grace_details(&provider_name, provider_handle.clone());
+        let stream_details = create_deferred_provider_grace_details(
+            &provider_name,
+            tuliprox_session::ManagedProviderHandle::new(
+                Arc::clone(&app_state.connection_manager.provider_manager),
+                provider_handle.clone(),
+            ),
+        );
         assert_eq!(stream_details.content_representation, ProviderContentRepresentationMode::PreserveOrigin);
         let fingerprint = create_test_fingerprint(addr);
         let mut stream_channel = create_test_stream_channel(1, "http://provider-1.example/live/1");
@@ -2285,7 +2447,13 @@ mod tests {
             )
             .await
             .expect("deferred client should receive provider grace allocation");
-        let stream_details = create_deferred_provider_grace_details(&provider_name, deferred_handle.clone());
+        let stream_details = create_deferred_provider_grace_details(
+            &provider_name,
+            tuliprox_session::ManagedProviderHandle::new(
+                Arc::clone(&app_state.connection_manager.provider_manager),
+                deferred_handle.clone(),
+            ),
+        );
         let test_user = create_test_user("grace-user");
         let test_fingerprint = create_test_fingerprint(deferred_addr);
         let stream = create_active_client_stream(ActiveClientStreamParams {
@@ -2302,7 +2470,8 @@ mod tests {
             meter_uid: 0,
             meter_stream: false,
         })
-        .await;
+        .await
+        .expect("deferred test stream admission should succeed");
         pin_mut!(stream);
 
         assert!(
@@ -2360,7 +2529,13 @@ mod tests {
             )
             .await
             .expect("deferred shared client should receive provider grace allocation");
-        let stream_details = create_deferred_provider_grace_details(&provider_name, deferred_handle.clone());
+        let stream_details = create_deferred_provider_grace_details(
+            &provider_name,
+            tuliprox_session::ManagedProviderHandle::new(
+                Arc::clone(&app_state.connection_manager.provider_manager),
+                deferred_handle.clone(),
+            ),
+        );
         let test_user = create_test_user("grace-user");
         let test_fingerprint = create_test_fingerprint(deferred_addr);
         let stream = create_active_client_stream(ActiveClientStreamParams {
@@ -2377,7 +2552,8 @@ mod tests {
             meter_uid: 0,
             meter_stream: false,
         })
-        .await;
+        .await
+        .expect("shared deferred test stream admission should succeed");
         pin_mut!(stream);
 
         assert!(
@@ -2450,6 +2626,10 @@ mod tests {
             provider_error_class: None,
             provider_http_status: None,
             provider_reconnect_count: AtomicU8::new(0),
+            lease_owner: None,
+            lease_confirmed: false,
+            lease_request_id: None,
+            request_cleanup: None,
         };
         let stream = ActiveClientStream { state };
         pin_mut!(stream);
@@ -2749,6 +2929,7 @@ mod tests {
             .expect("pending version must be created for tok-second");
 
         let stream_details = StreamDetails {
+            shared_subscriber_id: None,
             stream: None,
             stream_info: None,
             provider_name: Some(provider_name),
@@ -2862,7 +3043,8 @@ mod tests {
             meter_uid: 55,
             meter_stream: true,
         })
-        .await;
+        .await
+        .expect("metered test stream admission should succeed");
         pin_mut!(stream);
 
         let first_chunk = stream.next().await;

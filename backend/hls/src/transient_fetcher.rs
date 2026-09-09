@@ -1,5 +1,5 @@
 use super::{
-    build_hls_origin_resource_headers_with_client_range, finish_hls_origin_account_io, hls_client_body_send_deadline,
+    build_hls_origin_resource_headers_with_client_range, hls_client_body_send_deadline,
     refresh_hls_client_body_send_deadline,
     resource_fetch::{log_hls_resource_body_failure, HlsResourceFetchLogContext},
     run_hls_origin_resource_retry_loop_with_attempt_prepare,
@@ -328,6 +328,8 @@ pub struct HlsTransientCacheCommitContext {
     pub segment_cache: Arc<HlsSegmentCache>,
     pub segment_repair: Arc<HlsSegmentRepairManager>,
     pub session: HlsSessionHandle,
+    pub proxy_session_id: ProxySessionId,
+    pub log_identity: super::HlsLogIdentity,
     pub access_lease_id: HlsAccessLeaseId,
     pub resource: TransientResourceRef,
     pub resource_file: TransientResourceFile,
@@ -389,10 +391,8 @@ async fn commit_hls_transient_origin_response_attempt(
         .map(str::to_string)
         .or_else(|| context.resource.content_type_hint.clone())
         .unwrap_or_else(|| "application/octet-stream".to_string());
-    let (proxy_session_id, log_identity) = {
-        let session = context.session.read().await;
-        (session.proxy_session_id.clone(), super::HlsLogIdentity::from_session(&session))
-    };
+    let proxy_session_id = context.proxy_session_id.clone();
+    let log_identity = context.log_identity.clone();
     let repair_context = HlsSegmentRepairObjectContext {
         source: HlsSegmentRepairSource::Transient,
         log_identity,
@@ -592,7 +592,7 @@ fn hls_transient_direct_body(
             Box::pin(sleep(hls_client_body_send_deadline())),
             false,
         ),
-        move |(mut stream, guard, origin_io_guard, mut finalizer, mut send_deadline, finished)| {
+        move |(mut stream, guard, mut origin_io_guard, mut finalizer, mut send_deadline, finished)| {
             let log_identity = log_identity.clone();
             let resource_id = resource_id.clone();
             async move {
@@ -630,6 +630,9 @@ fn hls_transient_direct_body(
                     }
                     Ok(None) => {
                         finalizer.finish(HlsTransientDirectStreamOutcome::CleanEof).await;
+                        if let Some(guard) = origin_io_guard.take() {
+                            guard.finish_clean().await;
+                        }
                         None
                     }
                     Err(_) => {
@@ -772,58 +775,65 @@ impl Drop for HlsTransientReadGuard {
 
 pub struct HlsTransientOriginIoGuard {
     session: HlsSessionHandle,
+    active_origin_work_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     origin_io: HlsOriginIoContext,
     lease_guard: Option<HlsOriginAccountIoLeaseGuard>,
     started_generation: u64,
+    origin_work_finished: bool,
 }
 
 impl HlsTransientOriginIoGuard {
     pub fn new(
         session: HlsSessionHandle,
+        active_origin_work_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         origin_io: HlsOriginIoContext,
         lease_guard: HlsOriginAccountIoLeaseGuard,
         started_generation: u64,
     ) -> Self {
-        Self { session, origin_io, lease_guard: Some(lease_guard), started_generation }
+        Self {
+            session,
+            active_origin_work_count,
+            origin_io,
+            lease_guard: Some(lease_guard),
+            started_generation,
+            origin_work_finished: false,
+        }
+    }
+
+    pub async fn finish_clean(mut self) {
+        let generation_valid = {
+            let mut session = self.session.write().await;
+            let valid = session.finish_origin_work(self.started_generation);
+            self.origin_work_finished = true;
+            valid
+        };
+        let refresh_reservation = if generation_valid {
+            self.session
+                .read()
+                .await
+                .should_refresh_origin_reservation(chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default())
+        } else {
+            false
+        };
+        if let Some(lease_guard) = self.lease_guard.take() {
+            crate::origin::finish_hls_origin_account_io(
+                &self.origin_io,
+                &self.session,
+                lease_guard,
+                refresh_reservation,
+            )
+            .await;
+        }
     }
 }
 
 impl Drop for HlsTransientOriginIoGuard {
     fn drop(&mut self) {
-        let Some(lease_guard) = self.lease_guard.take() else {
+        if self.origin_work_finished {
             return;
-        };
-        let session = Arc::clone(&self.session);
-        let origin_io = self.origin_io.clone();
-        let started_generation = self.started_generation;
-        // Decrement the origin work count synchronously when the lock is free so an
-        // immediate retry is not rejected by the admission check (active_origin_work_count > 0)
-        // while the spawned cleanup is still pending
-        let pre_finished = session.try_write().map(|mut guard| guard.finish_origin_work(started_generation)).ok();
-        tokio::spawn(async move {
-            let generation_valid = if let Some(valid) = pre_finished {
-                valid
-            } else {
-                let mut session = session.write().await;
-                session.finish_origin_work(started_generation)
-            };
-            let refresh_reservation = if generation_valid {
-                session.read().await.should_refresh_origin_reservation(
-                    chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default(),
-                )
-            } else {
-                false
-            };
-            finish_hls_origin_account_io(&origin_io, &session, lease_guard, refresh_reservation).await;
-            let mut session = session.write().await;
-            if let Some(binding) = session.origin_account_binding.as_mut() {
-                let now_ms = chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default();
-                binding.last_origin_io_at_ms = Some(now_ms);
-                if refresh_reservation {
-                    binding.last_reservation_refresh_at_ms = Some(now_ms);
-                }
-            }
-        });
+        }
+        self.origin_work_finished = true;
+        self.active_origin_work_count.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
 
@@ -846,6 +856,7 @@ mod tests {
         HlsTransientOriginIoGuard, HlsTransientResourceLeaseContext,
     };
     use crate::{
+        origin::{HlsOriginAccountBinding, HlsOriginAccountIoLease, HlsOriginAccountIoLeaseGuard, HlsOriginIoContext},
         HlsAccessLeaseId, HlsOriginResourceClients, HlsOriginResourceFetchError, HlsPublishedTransientResourceIds,
         HlsSegmentCache, HlsSegmentFailureObject, HlsSegmentRepairManager, HlsSession, HlsSessionHandle, HlsSessionKey,
         HlsSessionStore, ProxySessionId, SegmentFetchPolicy, TransientObjectCacheKey, TransientObjectCacheStatus,
@@ -1485,6 +1496,8 @@ mod tests {
                     segment_cache: Arc::clone(&self.segment_cache),
                     segment_repair: Arc::clone(&self.segment_repair),
                     session: Arc::clone(&self.session),
+                    proxy_session_id: ProxySessionId(String::from("test-proxy-session")),
+                    log_identity: self.log_identity.clone(),
                     access_lease_id: HlsAccessLeaseId("transient-content-coding-test".to_string()),
                     resource: self.resource.clone(),
                     resource_file: self.resource_file.clone(),
@@ -2103,5 +2116,107 @@ mod tests {
         let request = requests[0].to_ascii_lowercase();
         assert!(request.contains("accept-encoding: identity"));
         assert!(!request.contains("\r\nrange:"));
+    }
+
+    #[tokio::test]
+    async fn transient_origin_io_guard_finish_clean_decrements_work_once() {
+        let mut session = HlsSession::new(HlsSessionKey::new(1, "clean-finish"), b"secret", 1_000);
+        let binding =
+            HlsOriginAccountBinding::new(Arc::from("input"), Arc::from("account"), &session.proxy_session_id, 1_000);
+        session.origin_account_io_lease =
+            Some(std::sync::Arc::new(HlsOriginAccountIoLease::active_for_test(&binding, 2)));
+        session.origin_account_binding = Some(binding.clone());
+        session.activity.active_origin_work_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(2));
+        let started_gen = session.activity.origin_work_generation;
+        let session = Arc::new(tokio::sync::RwLock::new(session));
+        let ctx = crate::hls_ctx::HlsCtx::for_test(tuliprox_core::model::Config::default());
+
+        let lease_guard = HlsOriginAccountIoLeaseGuard::new(
+            binding.clone(),
+            Arc::clone(session.try_read().unwrap().origin_account_io_lease.as_ref().unwrap()),
+        );
+        let origin_io = HlsOriginIoContext {
+            ctx: ctx.clone(),
+            client_addr: "127.0.0.1:8080".parse().unwrap(),
+            allow_grace: false,
+            priority: 0,
+            connection_kind: tuliprox_session::ConnectionKind::Normal,
+            reservation_ttl_secs: 60,
+            preacquired_provider_handle: None,
+            started_generation: Some(started_gen),
+        };
+
+        let guard = HlsTransientOriginIoGuard::new(
+            Arc::clone(&session),
+            Arc::clone(&session.try_read().unwrap().activity.active_origin_work_count),
+            origin_io,
+            lease_guard,
+            started_gen,
+        );
+
+        guard.finish_clean().await;
+        assert_eq!(
+            session.read().await.activity.active_origin_work_count.load(std::sync::atomic::Ordering::Acquire),
+            1,
+            "finish_clean and subsequent drop must decrement active_origin_work_count exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn transient_origin_io_guard_drop_under_lock_contention_decrements_work() {
+        let mut session = HlsSession::new(HlsSessionKey::new(1, "contention-drop"), b"secret", 1_000);
+        let binding =
+            HlsOriginAccountBinding::new(Arc::from("input"), Arc::from("account"), &session.proxy_session_id, 1_000);
+        session.origin_account_io_lease =
+            Some(std::sync::Arc::new(HlsOriginAccountIoLease::active_for_test(&binding, 2)));
+        session.origin_account_binding = Some(binding.clone());
+        session.activity.active_origin_work_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(2));
+        let started_gen = session.activity.origin_work_generation;
+        let session = Arc::new(tokio::sync::RwLock::new(session));
+        let ctx = crate::hls_ctx::HlsCtx::for_test(tuliprox_core::model::Config::default());
+
+        let lease_guard = HlsOriginAccountIoLeaseGuard::new(
+            binding.clone(),
+            Arc::clone(session.try_read().unwrap().origin_account_io_lease.as_ref().unwrap()),
+        );
+        let origin_io = HlsOriginIoContext {
+            ctx: ctx.clone(),
+            client_addr: "127.0.0.1:8080".parse().unwrap(),
+            allow_grace: false,
+            priority: 0,
+            connection_kind: tuliprox_session::ConnectionKind::Normal,
+            reservation_ttl_secs: 60,
+            preacquired_provider_handle: None,
+            started_generation: Some(started_gen),
+        };
+
+        let guard = HlsTransientOriginIoGuard::new(
+            Arc::clone(&session),
+            Arc::clone(&session.try_read().unwrap().activity.active_origin_work_count),
+            origin_io,
+            lease_guard,
+            started_gen,
+        );
+
+        let lock = session.read().await;
+        drop(guard);
+        assert_eq!(
+            lock.activity.active_origin_work_count.load(std::sync::atomic::Ordering::Acquire),
+            1,
+            "drop MUST synchronously decrement active_origin_work_count"
+        );
+        drop(lock);
+
+        for _ in 0..100 {
+            if session.read().await.activity.active_origin_work_count.load(std::sync::atomic::Ordering::Acquire) == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            session.read().await.activity.active_origin_work_count.load(std::sync::atomic::Ordering::Acquire),
+            1,
+            "deferred cleanup must decrement active_origin_work_count under contention"
+        );
     }
 }

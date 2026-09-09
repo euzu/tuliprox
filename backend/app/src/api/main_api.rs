@@ -301,7 +301,7 @@ async fn ready(
     use crate::model::readiness::build_provider_slots;
     use shared::model::provider_saturation::is_exhausted;
     let sources = app_state.app_config.sources.load();
-    let Some(connections) = app_state.active_provider.active_connections().await else {
+    let Some(connections) = app_state.active_provider.active_connections() else {
         // No live connections yet: either the lineups are still warming up, or
         // there is no enabled input that could ever carry one.
         let status = if sources.inputs.iter().any(|input| input.enabled) { "initializing" } else { "exhausted" };

@@ -283,7 +283,8 @@ mod tests {
             meter_uid: 0,
             meter_stream: false,
         })
-        .await;
+        .await
+        .expect("test stream admission should succeed");
         Response::new(Body::from_stream(stream))
     }
 
@@ -349,7 +350,7 @@ mod tests {
         })
         .await
         .expect("socket disconnect should release registry state and drop the upstream");
-        assert_eq!(app_state.active_provider.active_connections().await.unwrap_or_default().values().sum::<usize>(), 0);
+        assert_eq!(app_state.active_provider.active_connections().unwrap_or_default().values().sum::<usize>(), 0);
 
         server_cancel.cancel();
         tokio::time::timeout(Duration::from_secs(1), server)
