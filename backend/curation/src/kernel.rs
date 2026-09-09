@@ -17,10 +17,95 @@ use strsim::normalized_levenshtein;
 static TRAILING_TITLE_YEAR: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\(?(\d{4})\)?$").expect("curation title-year regex must compile"));
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CurationMediaKind {
+/// Media kind understood by the source-neutral curation kernel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum CurationMediaKind {
     Movie,
     Series,
+}
+
+/// Stable selector identity within one target curation run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CurationSelectorKey(pub usize);
+
+/// Stable reason for a selector that returned only a partial snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurationIncompleteReason {
+    Interrupted,
+    PaginationTruncated,
+}
+
+/// Stable reason for a selector that could not produce a snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurationUnavailableReason {
+    Configuration,
+    Source,
+}
+
+/// One exact target subject selected by one source selector.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurationMembership {
+    pub selector_key: CurationSelectorKey,
+    pub subject_uuid: UUIDType,
+    pub media_kind: CurationMediaKind,
+    pub rank: Option<u32>,
+    pub title_tiebreak: String,
+    pub candidate_order: usize,
+}
+
+/// Outcome of evaluating one required selector.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectorOutcome {
+    Complete {
+        key: CurationSelectorKey,
+        reference_count: usize,
+        memberships: Vec<CurationMembership>,
+    },
+    Incomplete {
+        key: CurationSelectorKey,
+        reason: CurationIncompleteReason,
+    },
+    Unavailable {
+        key: CurationSelectorKey,
+        reason: CurationUnavailableReason,
+    },
+}
+
+impl SelectorOutcome {
+    pub const fn key(&self) -> CurationSelectorKey {
+        match self {
+            Self::Complete { key, .. } | Self::Incomplete { key, .. } | Self::Unavailable { key, .. } => *key,
+        }
+    }
+}
+
+/// Complete selector summary without duplicating membership storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CurationSelectorSummary {
+    pub key: CurationSelectorKey,
+    pub reference_count: usize,
+    pub membership_count: usize,
+}
+
+/// Trusted result produced only when every required selector completed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurationEvaluation {
+    pub selectors: Vec<CurationSelectorSummary>,
+    pub memberships: Vec<CurationMembership>,
+}
+
+/// Diagnostic selector outcomes for a run that cannot be published.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurationFailure {
+    pub selector_outcomes: Vec<SelectorOutcome>,
+}
+
+/// Target-facing curation run outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CurationRunOutcome {
+    NotConfigured,
+    Complete(CurationEvaluation),
+    Failed(CurationFailure),
 }
 
 impl CurationMediaKind {
@@ -247,11 +332,11 @@ fn find_best_match_for_item<'playlist, 'reference>(
     find_best_fuzzy_match_for_item(candidate, references, specification, threshold)
 }
 
-pub(crate) fn curate_category(
-    references: &[CuratedMediaReference],
-    playlist: &[PlaylistGroup],
+fn find_matches<'playlist, 'reference>(
+    references: &'reference [CuratedMediaReference],
+    playlist: &'playlist [PlaylistGroup],
     specification: &CurationCategorySpec<'_>,
-) -> Vec<PlaylistGroup> {
+) -> Vec<MatchResult<'playlist, 'reference>> {
     let reference_count =
         references.iter().filter(|reference| specification.media_scope.includes_reference(reference.kind)).count();
     debug!(
@@ -281,7 +366,52 @@ pub(crate) fn curate_category(
             }
         }
     }
+    matches
+}
 
+fn sort_matches(matches: &mut [MatchResult<'_, '_>]) {
+    matches.sort_by(|left, right| {
+        (left.reference.rank.unwrap_or(9999), left.reference.title.to_lowercase())
+            .cmp(&(right.reference.rank.unwrap_or(9999), right.reference.title.to_lowercase()))
+    });
+}
+
+pub(crate) fn evaluate_selector(
+    key: CurationSelectorKey,
+    references: &[CuratedMediaReference],
+    playlist: &[PlaylistGroup],
+    specification: &CurationCategorySpec<'_>,
+) -> SelectorOutcome {
+    let reference_count =
+        references.iter().filter(|reference| specification.media_scope.includes_reference(reference.kind)).count();
+    let mut matches = find_matches(references, playlist, specification);
+    sort_matches(&mut matches);
+    let memberships = matches
+        .into_iter()
+        .enumerate()
+        .map(|(candidate_order, matched)| CurationMembership {
+            selector_key: key,
+            subject_uuid: if matched.playlist_item.header.uuid == UUIDType::default() {
+                matched.playlist_item.get_uuid()
+            } else {
+                matched.playlist_item.header.uuid
+            },
+            media_kind: CurationMediaKind::from_playlist_item_type(matched.playlist_item.header.item_type)
+                .expect("curation matches contain only movie or series roots"),
+            rank: matched.reference.rank,
+            title_tiebreak: matched.reference.title.to_lowercase(),
+            candidate_order,
+        })
+        .collect();
+    SelectorOutcome::Complete { key, reference_count, memberships }
+}
+
+pub(crate) fn curate_category(
+    references: &[CuratedMediaReference],
+    playlist: &[PlaylistGroup],
+    specification: &CurationCategorySpec<'_>,
+) -> Vec<PlaylistGroup> {
+    let matches = find_matches(references, playlist, specification);
     let series_children = series_children_by_parent_code(playlist);
     create_category_from_matches(matches, specification, &series_children)
 }
@@ -295,10 +425,7 @@ fn create_category_from_matches(
         return Vec::new();
     }
 
-    matches.sort_by(|left, right| {
-        (left.reference.rank.unwrap_or(9999), left.reference.title.to_lowercase())
-            .cmp(&(right.reference.rank.unwrap_or(9999), right.reference.title.to_lowercase()))
-    });
+    sort_matches(&mut matches);
 
     let group_title = specification.name.intern();
     let mut matched_items_by_cluster: IndexMap<XtreamCluster, Vec<PlaylistItem>> = IndexMap::new();
@@ -502,6 +629,73 @@ mod tests {
         let titles = categories[0].channels.iter().map(|item| item.header.title.as_ref()).collect::<Vec<_>>();
 
         assert_eq!(titles, ["Alpha", "zebra", "Gamma"]);
+    }
+
+    #[test]
+    fn selector_outcomes_distinguish_remote_empty_no_local_match_and_matches() {
+        let playlist = vec![PlaylistGroup {
+            id: 1,
+            title: "Movies".intern(),
+            channels: vec![video_item("Matched", Some(7))],
+            xtream_cluster: XtreamCluster::Video,
+        }];
+        let key = CurationSelectorKey(3);
+        let specification = specification("Ignored by membership evaluation", true);
+
+        let SelectorOutcome::Complete { reference_count, memberships, .. } =
+            evaluate_selector(key, &[], &playlist, &specification)
+        else {
+            panic!("an empty source is complete")
+        };
+        assert_eq!(reference_count, 0);
+        assert!(memberships.is_empty());
+
+        let no_match = vec![reference(CurationMediaKind::Movie, "Missing", None, Some(8), Some(1))];
+        let SelectorOutcome::Complete { reference_count, memberships, .. } =
+            evaluate_selector(key, &no_match, &playlist, &specification)
+        else {
+            panic!("a complete source with no local match is complete")
+        };
+        assert_eq!(reference_count, 1);
+        assert!(memberships.is_empty());
+
+        let matched = vec![reference(CurationMediaKind::Movie, "Matched", None, Some(7), Some(1))];
+        let SelectorOutcome::Complete { reference_count, memberships, .. } =
+            evaluate_selector(key, &matched, &playlist, &specification)
+        else {
+            panic!("matching source is complete")
+        };
+        assert_eq!(reference_count, 1);
+        assert_eq!(memberships.len(), 1);
+        assert_eq!(memberships[0].selector_key, key);
+        assert_eq!(memberships[0].media_kind, CurationMediaKind::Movie);
+    }
+
+    #[test]
+    fn membership_identity_keeps_distinct_exact_alias_subjects() {
+        let mut base = video_item("Same", Some(7));
+        base.header.uuid = hash_string("base-subject");
+        let mut favourite = video_item("Same", Some(7));
+        favourite.header.uuid = hash_string("favourite-subject");
+        let playlist = vec![PlaylistGroup {
+            id: 1,
+            title: "Movies".intern(),
+            channels: vec![base, favourite],
+            xtream_cluster: XtreamCluster::Video,
+        }];
+        let references = vec![reference(CurationMediaKind::Movie, "Same", None, Some(7), Some(1))];
+
+        let SelectorOutcome::Complete { memberships, .. } = evaluate_selector(
+            CurationSelectorKey(0),
+            &references,
+            &playlist,
+            &specification("Membership", true),
+        ) else {
+            panic!("selector should complete")
+        };
+
+        assert_eq!(memberships.len(), 2);
+        assert_ne!(memberships[0].subject_uuid, memberships[1].subject_uuid);
     }
 
     #[test]

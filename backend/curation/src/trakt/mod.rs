@@ -3,10 +3,12 @@ mod errors;
 mod model;
 
 use crate::kernel::{
-    curate_category, CuratedMediaReference, CurationCategorySpec, CurationMatchPolicy, CurationMediaScope,
-    ProjectionIdentityStrategy,
+    curate_category, evaluate_selector, CuratedMediaReference, CurationCategorySpec, CurationEvaluation,
+    CurationFailure, CurationIncompleteReason, CurationMatchPolicy, CurationMediaScope, CurationRunOutcome,
+    CurationSelectorKey, CurationSelectorSummary, CurationUnavailableReason, ProjectionIdentityStrategy,
+    SelectorOutcome,
 };
-use client::TraktClient;
+use client::{TraktClient, TraktFetchFailureKind};
 use log::{debug, info, warn};
 use model::TraktListItem;
 use shared::model::{PlaylistGroup, TraktContentType};
@@ -16,7 +18,115 @@ use tuliprox_core::model::{TraktChartConfig, TraktConfig, TraktListConfig};
 // deliberately supplied by the adapter rather than treated as canonical media identity.
 const LEGACY_TRAKT_CATEGORY_NAMESPACE: &str = "trakt-category";
 
-/// Curate virtual playlist categories from the configured Trakt lists and charts.
+/// Evaluate every configured Trakt selector into exact target memberships.
+///
+/// No partial selector result is admitted into [`CurationRunOutcome::Complete`].
+pub async fn evaluate_trakt_curation(
+    http_client: &reqwest::Client,
+    playlist: &[PlaylistGroup],
+    target_name: &str,
+    trakt_config: &TraktConfig,
+) -> CurationRunOutcome {
+    if !trakt_config.enabled || (trakt_config.lists.is_empty() && trakt_config.charts.is_empty()) {
+        return CurationRunOutcome::NotConfigured;
+    }
+
+    let selector_count = trakt_config.lists.len() + trakt_config.charts.len();
+    let processor = match TraktCategoriesProcessor::new(http_client, trakt_config) {
+        Ok(processor) => processor,
+        Err(error) => {
+            warn!("Trakt curation is unavailable for target '{target_name}': {}", error.message());
+            return CurationRunOutcome::Failed(CurationFailure {
+                selector_outcomes: (0..selector_count)
+                    .map(|ordinal| SelectorOutcome::Unavailable {
+                        key: selector_key(ordinal),
+                        reason: CurationUnavailableReason::Configuration,
+                    })
+                    .collect(),
+            });
+        }
+    };
+
+    info!(
+        "Evaluating {} Trakt lists and {} Trakt charts for target {target_name}",
+        trakt_config.lists.len(),
+        trakt_config.charts.len()
+    );
+    let mut selector_outcomes = Vec::with_capacity(selector_count);
+
+    for (ordinal, list_config) in trakt_config.lists.iter().enumerate() {
+        let key = selector_key(ordinal);
+        let source_label = format!("{}:{}", list_config.user, list_config.list_slug);
+        let outcome = match processor.client.get_list_items(list_config).await {
+            Ok(items) => {
+                debug!("Evaluating Trakt list {source_label} with {} items", items.len());
+                let references = translate_items(items);
+                evaluate_selector(key, &references, playlist, &list_category_spec(list_config))
+            }
+            Err(error) => {
+                warn!("Failed to fetch Trakt list {source_label}: {}", error.message());
+                failed_selector_outcome(key, error.kind)
+            }
+        };
+        selector_outcomes.push(outcome);
+    }
+
+    for (chart_index, chart_config) in trakt_config.charts.iter().enumerate() {
+        let ordinal = trakt_config.lists.len() + chart_index;
+        let key = selector_key(ordinal);
+        let source_label = format!("{}:{}", chart_config.kind, chart_config.chart);
+        let outcome = match processor.client.get_chart_items(chart_config).await {
+            Ok(items) => {
+                debug!("Evaluating Trakt chart {source_label} with {} items", items.len());
+                let references = translate_items(items);
+                evaluate_selector(key, &references, playlist, &chart_category_spec(chart_config))
+            }
+            Err(error) => {
+                warn!("Failed to fetch Trakt chart {source_label}: {}", error.message());
+                failed_selector_outcome(key, error.kind)
+            }
+        };
+        selector_outcomes.push(outcome);
+    }
+
+    complete_evaluation(selector_outcomes)
+}
+
+const fn selector_key(ordinal: usize) -> CurationSelectorKey { CurationSelectorKey(ordinal) }
+
+fn failed_selector_outcome(key: CurationSelectorKey, failure: TraktFetchFailureKind) -> SelectorOutcome {
+    match failure {
+        TraktFetchFailureKind::Incomplete => {
+            SelectorOutcome::Incomplete { key, reason: CurationIncompleteReason::Interrupted }
+        }
+        TraktFetchFailureKind::Unavailable => {
+            SelectorOutcome::Unavailable { key, reason: CurationUnavailableReason::Source }
+        }
+    }
+}
+
+fn complete_evaluation(selector_outcomes: Vec<SelectorOutcome>) -> CurationRunOutcome {
+    if selector_outcomes.iter().any(|outcome| !matches!(outcome, SelectorOutcome::Complete { .. })) {
+        return CurationRunOutcome::Failed(CurationFailure { selector_outcomes });
+    }
+
+    let mut selectors = Vec::with_capacity(selector_outcomes.len());
+    let mut memberships = Vec::new();
+    for outcome in selector_outcomes {
+        let SelectorOutcome::Complete { key, reference_count, memberships: mut selector_memberships } = outcome else {
+            unreachable!("all selector outcomes were checked as complete")
+        };
+        selectors.push(CurationSelectorSummary {
+            key,
+            reference_count,
+            membership_count: selector_memberships.len(),
+        });
+        memberships.append(&mut selector_memberships);
+    }
+    CurationRunOutcome::Complete(CurationEvaluation { selectors, memberships })
+}
+
+/// Compatibility projector used until target processing consumes neutral memberships.
 ///
 /// Disabled or source-less configuration is a no-op. Individual list/chart
 /// failures are logged and isolated so successful sources still contribute.
@@ -199,6 +309,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_credentials_make_every_required_selector_unavailable_without_a_request() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let (base_url, server) = spawn_counting_trakt_server(Arc::clone(&requests)).await;
+        let config = trakt_config(
+            "",
+            base_url,
+            true,
+            vec![remote_list_config("List")],
+            vec![remote_chart_config("Chart")],
+        );
+
+        let outcome = evaluate_trakt_curation(&reqwest::Client::new(), &[], "test-target", &config).await;
+
+        let CurationRunOutcome::Failed(failure) = outcome else { panic!("missing credentials must fail the run") };
+        assert_eq!(failure.selector_outcomes.len(), 2);
+        assert!(failure.selector_outcomes.iter().all(|outcome| matches!(
+            outcome,
+            SelectorOutcome::Unavailable { reason: CurationUnavailableReason::Configuration, .. }
+        )));
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn disabled_or_source_less_configuration_makes_no_request() {
         let requests = Arc::new(AtomicUsize::new(0));
         let (base_url, server) = spawn_counting_trakt_server(Arc::clone(&requests)).await;
@@ -224,6 +358,51 @@ mod tests {
         assert!(categories.is_empty());
         assert_eq!(requests.load(Ordering::SeqCst), 1);
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn complete_remote_empty_remains_distinct_from_not_configured() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let (base_url, server) = spawn_counting_trakt_server(Arc::clone(&requests)).await;
+        let config = trakt_config("test-client-id", base_url, true, vec![remote_list_config("Empty")], Vec::new());
+
+        let outcome = evaluate_trakt_curation(&reqwest::Client::new(), &[], "test-target", &config).await;
+
+        let CurationRunOutcome::Complete(evaluation) = outcome else { panic!("empty response must complete") };
+        assert_eq!(evaluation.selectors.len(), 1);
+        assert_eq!(evaluation.selectors[0].reference_count, 0);
+        assert_eq!(evaluation.selectors[0].membership_count, 0);
+        assert!(evaluation.memberships.is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn one_failed_selector_makes_the_typed_run_incomplete() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (base_url, server) = spawn_partial_success_trakt_server(Arc::clone(&requests)).await;
+        let config = trakt_config(
+            "test-client-id",
+            base_url,
+            true,
+            vec![remote_list_config("Unavailable List")],
+            vec![remote_chart_config("Available Chart")],
+        );
+        let playlist = vec![PlaylistGroup {
+            id: 1,
+            title: "Original".intern(),
+            channels: vec![video_item("Movie 1", Some(11))],
+            xtream_cluster: XtreamCluster::Video,
+        }];
+
+        let outcome = evaluate_trakt_curation(&reqwest::Client::new(), &playlist, "test-target", &config).await;
+
+        let CurationRunOutcome::Failed(failure) = outcome else { panic!("partial success must fail the run") };
+        assert!(matches!(failure.selector_outcomes[0], SelectorOutcome::Unavailable { .. }));
+        assert!(matches!(
+            &failure.selector_outcomes[1],
+            SelectorOutcome::Complete { memberships, .. } if memberships.len() == 1
+        ));
+        server.await.expect("test server should finish");
     }
 
     #[tokio::test]

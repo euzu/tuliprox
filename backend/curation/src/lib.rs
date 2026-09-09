@@ -11,4 +11,8 @@
 mod kernel;
 mod trakt;
 
-pub use trakt::curate_trakt_categories;
+pub use kernel::{
+    CurationEvaluation, CurationFailure, CurationIncompleteReason, CurationMediaKind, CurationMembership,
+    CurationRunOutcome, CurationSelectorKey, CurationSelectorSummary, CurationUnavailableReason, SelectorOutcome,
+};
+pub use trakt::{curate_trakt_categories, evaluate_trakt_curation};
