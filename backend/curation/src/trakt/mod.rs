@@ -212,6 +212,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn successful_remote_empty_is_a_configured_empty_category_result() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let (base_url, server) = spawn_counting_trakt_server(Arc::clone(&requests)).await;
+        let config = trakt_config("test-client-id", base_url, true, vec![remote_list_config("Empty")], Vec::new());
+
+        let categories = curate_trakt_categories(&reqwest::Client::new(), &[], "test-target", &config)
+            .await
+            .expect("configured source should produce a result");
+
+        assert!(categories.is_empty());
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn failed_list_does_not_suppress_successful_chart() {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let (base_url, server) = spawn_partial_success_trakt_server(Arc::clone(&requests)).await;

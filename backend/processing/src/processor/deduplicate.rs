@@ -141,6 +141,24 @@ mod tests {
     }
 
     #[test]
+    fn post_merge_dedup_can_choose_a_generated_curation_alias_over_its_base_row() {
+        let mut playlist =
+            vec![make_group("Base", vec![make_item("Movie HD")]), make_group("Trending", vec![make_item("Movie 4K")])];
+        let config = DeduplicateConfig {
+            match_by: DeduplicateMatchBy::Caption,
+            keep: DeduplicateKeep::BestQuality,
+            match_as_ascii: false,
+        };
+
+        let removed = deduplicate_playlist(config, &mut playlist);
+
+        assert_eq!(removed, 1);
+        assert_eq!(playlist.len(), 1);
+        assert_eq!(playlist[0].title.as_ref(), "Trending");
+        assert_eq!(playlist[0].channels[0].header.title.as_ref(), "Movie 4K");
+    }
+
+    #[test]
     fn dedup_keep_first_preserves_playlist_order_winner() {
         let mut playlist = vec![make_group("G", vec![make_item("News HD"), make_item("News [FHD]")])];
         let config = DeduplicateConfig {
