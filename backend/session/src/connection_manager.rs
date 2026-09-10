@@ -26,6 +26,7 @@ use std::{
     time::Duration,
 };
 use tokio::sync::{mpsc, Notify, RwLock, RwLockReadGuard};
+use tokio_util::sync::CancellationToken;
 use tuliprox_core::{
     model::{
         DisconnectQos, Fingerprint, PlaybackRequestOutcome, ProviderHandle, SharedSubscriberId, StreamHistoryConfig,
@@ -37,6 +38,9 @@ use tuliprox_repository::{recover_pending_files, StreamHistoryWriter};
 
 // Maximum number of deferred cleanup actions buffered before producers must wait/drop.
 const CLEANUP_QUEUE_CAPACITY: usize = 4096;
+// Reserved lane for control work (HLS origin I/O, shutdown) so a saturated body-cleanup
+// queue cannot starve the control path that releases provider handles.
+const CONTROL_CLEANUP_CAPACITY: usize = 64;
 pub const PROVIDER_END_NOT_SET: u8 = 0;
 pub const PROVIDER_END_CLOSED: u8 = 1; // Provider EOF
 pub const PROVIDER_END_ERROR: u8 = 2; // Provider Err
@@ -52,7 +56,9 @@ fn notify_capacity(capacity_notify: &Notify) { capacity_notify.notify_waiters();
 /// Proof that a shared-stream response owns the guaranteed terminal cleanup permit for
 /// its subscriber. The constructor is crate-private, so callers outside this crate cannot
 /// fabricate the claim; it is only produced when a cleanup permit is actually reserved.
-#[derive(Debug, Clone, Copy)]
+/// Each registration consumes one capability, so a stale capability cannot be duplicated
+/// and reused after its owner has released.
+#[derive(Debug)]
 pub struct SharedCleanupCapability {
     subscriber_id: SharedSubscriberId,
 }
@@ -606,12 +612,15 @@ pub struct ConnectionManager {
     event_manager: Arc<EventManager>,
     close_socket_signal_tx: tokio::sync::broadcast::Sender<CloseConnectionSignal>,
     cleanup_sender: BackpressureSender<CleanupEvent>,
+    control_cleanup_tx: mpsc::Sender<CleanupEvent>,
     socket_activity_tracker: SocketActivityTracker,
     capacity_notify: Arc<Notify>,
     stream_uid_counter: AtomicU32,
     history_writer: Arc<ArcSwapOption<StreamHistoryWriter>>,
     is_shutting_down: AtomicBool,
     admission_gate: RwLock<()>,
+    shutdown_token: CancellationToken,
+    worker_handles: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 pub struct ConnectionParams<'a> {
@@ -815,11 +824,13 @@ impl ConnectionManager {
         let history_writer = Arc::new(ArcSwapOption::new(build_history_writer(history_config)));
         let (close_socket_signal_tx, _) = tokio::sync::broadcast::channel(256);
         let (cleanup_tx, cleanup_rx) = mpsc::channel(cleanup_capacity);
+        let (control_cleanup_tx, control_cleanup_rx) = mpsc::channel(CONTROL_CLEANUP_CAPACITY);
         user_manager.set_cleanup_sender(cleanup_tx.clone());
         user_manager.set_provider_manager(Arc::clone(provider_manager));
         let socket_cleanup_tx = cleanup_tx.clone();
         let socket_activity_tracker = SocketActivityTracker::new();
         let capacity_notify = Arc::new(Notify::new());
+        let shutdown_token = CancellationToken::new();
         let mgr = Self {
             user_manager: Arc::clone(user_manager),
             provider_manager: Arc::clone(provider_manager),
@@ -827,24 +838,38 @@ impl ConnectionManager {
             event_manager: Arc::clone(event_manager),
             close_socket_signal_tx,
             cleanup_sender: BackpressureSender::new(cleanup_tx, "cleanup", cleanup_capacity),
+            control_cleanup_tx: control_cleanup_tx.clone(),
             socket_activity_tracker: socket_activity_tracker.clone(),
             capacity_notify: Arc::clone(&capacity_notify),
             stream_uid_counter: AtomicU32::new(1),
             history_writer: Arc::clone(&history_writer),
             is_shutting_down: AtomicBool::new(false),
             admission_gate: RwLock::new(()),
+            shutdown_token: shutdown_token.clone(),
+            worker_handles: std::sync::Mutex::new(Vec::new()),
         };
 
-        Self::spawn_cleanup_worker(
+        let cleanup_handle = Self::spawn_cleanup_worker(
             cleanup_rx,
+            control_cleanup_rx,
             Arc::clone(user_manager),
             Arc::clone(provider_manager),
             Arc::clone(shared_stream_manager),
             Arc::clone(event_manager),
             Arc::clone(&capacity_notify),
             history_writer,
+            shutdown_token.clone(),
         );
-        Self::spawn_socket_activity_worker(socket_activity_tracker, Arc::clone(user_manager), socket_cleanup_tx);
+        let socket_handle = Self::spawn_socket_activity_worker(
+            socket_activity_tracker,
+            Arc::clone(user_manager),
+            socket_cleanup_tx,
+            shutdown_token,
+        );
+        mgr.worker_handles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend([cleanup_handle, socket_handle]);
 
         mgr
     }
@@ -869,7 +894,8 @@ impl ConnectionManager {
         activity_tracker: SocketActivityTracker,
         user_manager: Arc<ActiveUserManager>,
         cleanup_tx: mpsc::Sender<CleanupEvent>,
-    ) {
+        shutdown_token: CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut expiry_queue: BinaryHeap<Reverse<SocketExpiryEntry>> = BinaryHeap::new();
             let mut expiry_index: HashMap<SocketAddr, u64> = HashMap::new();
@@ -900,14 +926,18 @@ impl ConnectionManager {
 
                     tokio::select! {
                         biased;
+                        () = shutdown_token.cancelled() => break,
                         () = activity_tracker.notified() => {}
                         () = tokio::time::sleep(Duration::from_secs(expires_at.saturating_sub(now))) => {}
                     }
                 } else {
-                    activity_tracker.notified().await;
+                    tokio::select! {
+                        () = shutdown_token.cancelled() => break,
+                        () = activity_tracker.notified() => {}
+                    }
                 }
             }
-        });
+        })
     }
 
     async fn drain_pending_socket_activity(
@@ -1007,15 +1037,18 @@ impl ConnectionManager {
             .collect();
     }
 
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn spawn_cleanup_worker(
         mut rx: mpsc::Receiver<CleanupEvent>,
+        mut control_rx: mpsc::Receiver<CleanupEvent>,
         user_manager: Arc<ActiveUserManager>,
         provider_manager: Arc<ActiveProviderManager>,
         shared_stream_manager: Arc<SharedStreamManager>,
         event_manager: Arc<EventManager>,
         capacity_notify: Arc<Notify>,
         history_writer: Arc<ArcSwapOption<StreamHistoryWriter>>,
-    ) {
+        shutdown_token: CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
         let deps = CleanupWorkerDeps {
             user_manager,
             provider_manager,
@@ -1025,7 +1058,14 @@ impl ConnectionManager {
             history_writer,
         };
         tokio::spawn(async move {
-            while let Some(event) = rx.recv().await {
+            loop {
+                let event = tokio::select! {
+                    biased;
+                    () = shutdown_token.cancelled() => break,
+                    control_event = control_rx.recv() => control_event,
+                    event = rx.recv() => event,
+                };
+                let Some(event) = event else { break };
                 match event {
                     CleanupEvent::ReleaseSharedSubscriber { addr, subscriber_id, request_id, owner } => {
                         deps.shared_stream_manager.release_subscriber(subscriber_id).await;
@@ -1114,12 +1154,16 @@ impl ConnectionManager {
                 }
             }
             debug!("Cleanup worker exiting");
-        });
+        })
     }
 
     pub fn send_cleanup(&self, event: CleanupEvent) { self.cleanup_sender.enqueue(event); }
 
     pub fn cleanup_tx(&self) -> mpsc::Sender<CleanupEvent> { self.cleanup_sender.tx.clone() }
+
+    /// Reserved control lane for cleanup permits that must never be starved by a
+    /// saturated body-cleanup queue (HLS origin I/O, shutdown).
+    pub fn control_cleanup_tx(&self) -> mpsc::Sender<CleanupEvent> { self.control_cleanup_tx.clone() }
 
     pub fn dropped_cleanup_events(&self) -> u64 {
         self.cleanup_sender.dropped_count() + self.user_manager.dropped_cleanup_events.load(Ordering::Relaxed)
@@ -1350,6 +1394,15 @@ impl ConnectionManager {
         self.provider_manager.shutdown();
         if let Some(w) = self.history_writer.load_full() {
             w.shutdown().await;
+        }
+        // Stop and join the cleanup and socket workers so no background task outlives
+        // the manager. Active claims were released directly above; later guard drops are
+        // idempotent against the emptied indices.
+        self.shutdown_token.cancel();
+        let handles =
+            std::mem::take(&mut *self.worker_handles.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+        for handle in handles {
+            let _ = handle.await;
         }
     }
 
@@ -2374,6 +2427,56 @@ mod tests {
 
         assert!(registered.display_stream.is_none(), "saturated cleanup admission must be rejected");
         assert_eq!(registered.rejection_reason(), Some(ConnectionRejectionReason::CleanupAdmissionTimeout));
+    }
+
+    #[tokio::test]
+    async fn control_cleanup_lane_precedes_a_ready_body_cleanup_backlog() {
+        let manager = create_test_connection_manager();
+        let release_blocker = Arc::new(Notify::new());
+        let (blocker_started_tx, blocker_started_rx) = tokio::sync::oneshot::channel();
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        manager.send_cleanup(CleanupEvent::Defer(Box::pin({
+            let release_blocker = Arc::clone(&release_blocker);
+            let order = Arc::clone(&order);
+            async move {
+                let _ = blocker_started_tx.send(());
+                release_blocker.notified().await;
+                order.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push('B');
+            }
+        })));
+        blocker_started_rx.await.expect("cleanup blocker must start");
+
+        manager.send_cleanup(CleanupEvent::Defer(Box::pin({
+            let order = Arc::clone(&order);
+            async move { order.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push('N') }
+        })));
+        manager
+            .control_cleanup_tx()
+            .send(CleanupEvent::Defer(Box::pin({
+                let order = Arc::clone(&order);
+                async move { order.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push('C') }
+            })))
+            .await
+            .expect("control cleanup receiver must be open");
+
+        release_blocker.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if order.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len() == 3 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both queued cleanup events must run");
+
+        assert_eq!(
+            *order.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec!['B', 'C', 'N'],
+            "a ready control cleanup must not be starved by the body cleanup backlog"
+        );
     }
 
     /// A joined shared body already holds the terminal cleanup permit. Registration must

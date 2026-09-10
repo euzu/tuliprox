@@ -92,7 +92,7 @@ pub struct StreamDetails {
 impl Clone for StreamDetails {
     fn clone(&self) -> Self {
         Self {
-            shared_subscriber_id: self.shared_subscriber_id,
+            shared_subscriber_id: None,
             stream: None,
             stream_info: self.stream_info.clone(),
             provider_name: self.provider_name.clone(),

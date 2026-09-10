@@ -189,6 +189,52 @@ When multiple users connect through the same reverse proxy socket:
 - Stream details and QoS fallbacks are updated directly by `stream_uid` (`update_stream_detail_by_uid`) rather than
   relying on ambiguous socket lookups.
 
+### Request ownership and binding generations
+
+The runtime uses separate identities for separate ownership scopes:
+
+| Identity | Scope |
+| :--- | :--- |
+| session token | one logical user playback |
+| `PlaybackLeaseId` | one logical provider-capacity lease |
+| `PlaybackRequestId` | one provider request attached to that lease |
+| `ProviderBindingTag` | one generation of the owner's provider-account binding |
+| `SharedSubscriberId` | one viewer attached to a shared MPEG-TS origin |
+
+Parallel range, segment and reconnect requests may belong to the same logical stream while retaining independent request
+claims. Completing one request removes only that claim. The logical stream and provider lease remain until their own
+terminal conditions are met.
+
+A provider binding increments its generation when the same playback moves to a different provider or reactivates an
+idle lease. Cleanup created for an older generation cannot clear the successor binding. This protects new playback from
+delayed body drops, provider errors and asynchronous HLS cleanup belonging to the preceding request.
+
+### Cleanup ownership and overload behavior
+
+Connection registration reserves a cleanup permit before publishing mutable user or provider state. Ownership then
+moves into the response body or shared-subscriber body. Dropping an unpolled body, cancelling an await, reaching EOF or
+reporting an error all converge on request-specific, idempotent cleanup.
+
+The regular cleanup queue is bounded by `reverse_proxy.stream.cleanup_queue_capacity`. Admission waits for a bounded
+interval when all permits are held and then rejects the request instead of registering a stream without guaranteed
+cleanup. HLS origin I/O uses a separate bounded control lane that is preferred over ordinary body cleanup, preventing a
+saturated subscriber workload from starving release of an origin provider handle.
+
+Graceful shutdown first closes the admission gate, then removes shared origins and active user claims, releases provider
+leases, flushes stream history and cancels and joins the owned background workers. Cleanup emitted by a later body drop
+is harmless because the terminal indices have already been emptied.
+
+### Shared MPEG-TS subscriber isolation
+
+A shared origin is keyed by stream URL, but its viewers are keyed by `SharedSubscriberId`, never by `SocketAddr`. This
+allows several users behind one reverse proxy connection to consume independent response bodies without replacing one
+another.
+
+Each subscriber has both a chunk limit and a byte semaphore for queued payload. Burst replay and live delivery use a
+progress deadline that is renewed only after a successful send. Timeout, cancellation and a closed receiver are distinct
+terminal outcomes; an incomplete replay never advances directly to the live tail. A pending-join guard also prevents
+the last existing subscriber from tearing down an origin while another subscriber is committing.
+
 ## Where session tokens come from
 
 ### TS live, VOD, series
@@ -323,11 +369,13 @@ Main entry point:
 
 - `ActiveUserManager::update_connection(...)`
 
-This creates or reuses the tracked logical stream entry.
+This creates or reuses the tracked logical stream entry and attaches a request claim.
 
 Important behavior:
 
 - same `session_token` reuses the logical stream
+- every response receives its own request UID even when it reuses that stream
+- ending one response detaches only its request claim; the stream is removed when its final claim ends
 - stream metrics and duration stay tied to the logical session
 - for non-socket-bound sessions, the session remembers multiple active addresses
 
@@ -386,6 +434,10 @@ For non-socket-bound sessions:
 
 This is the key behavior that keeps VOD and local playback stable across multiple sockets.
 
+Queued provider cleanup carries the `PlaybackRequestId` and owner captured during acquire, while provider handles retain
+their `ProviderBindingTag`. The lease table validates both against the current binding, so cleanup does not need to
+rediscover ownership from a possibly reused socket address.
+
 ## URL persistence rules
 
 Session URL handling is intentionally different by stream type.
@@ -410,14 +462,16 @@ For live playback, following the redirected provider URL is still acceptable and
 
 Read these files together before changing session logic:
 
-- `backend/app/src/api/api_utils.rs`
-- `backend/app/src/api/endpoints/m3u_api.rs`
-- `backend/app/src/api/endpoints/xtream_api.rs`
-- `backend/app/src/api/endpoints/hls_api.rs`
-- `backend/app/src/api/model/active_user_manager.rs`
-- `backend/app/src/api/model/active_provider_manager.rs`
-- `backend/app/src/api/model/metadata_update_manager.rs`
-- `shared/src/model/playlist.rs`
+- `backend/core/src/model/playback.rs`
+- `backend/session/src/provider_leases.rs`
+- `backend/session/src/active_user_manager/mod.rs`
+- `backend/session/src/active_provider_manager.rs`
+- `backend/session/src/connection_manager.rs`
+- `backend/session/src/streams/shared_stream_manager.rs`
+- `backend/app/src/api/api_utils/mod.rs`
+- `backend/app/src/api/model/streams/active_client_stream.rs`
+- `backend/app/src/api/endpoints/hls_api/session.rs`
+- `backend/hls/src/origin.rs`
 
 ## Tests that should stay green
 
@@ -432,6 +486,12 @@ These tests cover the most fragile parts of the current logic:
 - `recently_evicted_vod_uses_session_reentry_guard`
 - `update_session_addr_prunes_previous_registration_for_socket_bound_session`
 - `test_adaptive_session_release_connection_preserves_logical_stream_and_start_time`
+- `stale_direct_cleanup_after_rebind_preserves_successor_request`
+- `subscribers_on_same_socket_do_not_replace_each_other`
+- `send_client_chunk_respects_byte_budget`
+- `control_cleanup_lane_precedes_a_ready_body_cleanup_backlog`
+- `shutdown_with_all_cleanup_permits_held_completes`
+- `http_provider_lease_downstream_smoke_test`
 
 If you change session code and one of these assumptions no longer holds, update the documentation and the tests in the same change.
 

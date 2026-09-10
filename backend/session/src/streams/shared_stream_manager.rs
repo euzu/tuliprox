@@ -13,7 +13,10 @@ use std::{
     future::Future,
     net::SocketAddr,
     pin::Pin,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     task::{Context, Poll},
 };
 use tokio::{
@@ -72,6 +75,34 @@ impl Drop for PendingSharedMeterRegistration {
 struct SharedMeterEntry {
     uid: u32,
     owner: Option<AllocationId>,
+}
+
+/// RAII guard for a join that committed its registry entry but has not yet registered
+/// its subscriber. It decrements the origin's pending-join counter exactly once, either
+/// on successful registration (`commit`) or when the join future is dropped.
+struct PendingJoinGuard {
+    state: Arc<SharedStreamState>,
+    armed: bool,
+}
+
+impl PendingJoinGuard {
+    fn new(state: &Arc<SharedStreamState>) -> Self {
+        state.increment_pending_joins();
+        Self { state: Arc::clone(state), armed: true }
+    }
+
+    fn commit(mut self) {
+        self.armed = false;
+        self.state.decrement_pending_joins();
+    }
+}
+
+impl Drop for PendingJoinGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.state.decrement_pending_joins();
+        }
+    }
 }
 
 impl PendingSharedSubscriberCleanup {
@@ -389,9 +420,13 @@ pub struct SharedStreamState {
     stop_token: CancellationToken,
     burst_buffer: Arc<Mutex<BurstBuffer>>,
     live_notification: Arc<Notify>,
-    task_handles: RwLock<Vec<tokio::task::JoinHandle<()>>>,
+    task_handles: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     subscriber_idle_timeout_secs: u64,
     subscriber_max_duration: Option<Duration>,
+    /// Number of joins that committed their registry entry but have not yet registered
+    /// their subscriber in `subscribers`. Teardown must not remove an origin while this is
+    /// non-zero, otherwise a join in flight would land on a stopped state.
+    pending_joins: AtomicUsize,
 }
 
 impl SharedStreamState {
@@ -415,9 +450,10 @@ impl SharedStreamState {
             stop_token: CancellationToken::new(),
             burst_buffer: Arc::new(Mutex::new(BurstBuffer::new(burst_buffer_size_in_bytes))),
             live_notification: Arc::new(Notify::new()),
-            task_handles: RwLock::new(Vec::new()),
+            task_handles: std::sync::Mutex::new(Vec::new()),
             subscriber_idle_timeout_secs: DEFAULT_SUBSCRIBER_IDLE_TIMEOUT_SECS,
             subscriber_max_duration: None,
+            pending_joins: AtomicUsize::new(0),
         }
     }
 
@@ -426,6 +462,16 @@ impl SharedStreamState {
             self.subscriber_idle_timeout_secs = secs;
         }
         self
+    }
+
+    fn increment_pending_joins(&self) { self.pending_joins.fetch_add(1, Ordering::AcqRel); }
+
+    fn decrement_pending_joins(&self) { self.pending_joins.fetch_sub(1, Ordering::AcqRel); }
+
+    fn has_pending_joins(&self) -> bool { self.pending_joins.load(Ordering::Acquire) > 0 }
+
+    fn lock_task_handles(&self) -> std::sync::MutexGuard<'_, Vec<tokio::task::JoinHandle<()>>> {
+        self.task_handles.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     async fn register_subscriber(&self, id: SubscriberId, addr: &SocketAddr, cancel_token: CancellationToken) {
@@ -445,6 +491,7 @@ impl SharedStreamState {
         subscriber_id: SubscriberId,
         connection_manager: Arc<ConnectionManager>,
         mut pending_cleanup: PendingSharedSubscriberCleanup,
+        pending_join: PendingJoinGuard,
     ) -> (BoxedProviderStream, Option<Arc<str>>, SharedCleanupCapability) {
         let (client_tx, client_rx) = mpsc::channel::<BudgetedChunk>(self.buf_size);
         let cancel_token = CancellationToken::new();
@@ -452,11 +499,12 @@ impl SharedStreamState {
         let byte_budget = Arc::new(Semaphore::new(queue_byte_budget));
 
         {
-            let mut handles = self.task_handles.write().await;
+            let mut handles = self.lock_task_handles();
             handles.retain(|h| !h.is_finished());
         }
 
         self.register_subscriber(subscriber_id, addr, cancel_token.clone()).await;
+        pending_join.commit();
         let (start_tx, start_rx) = oneshot::channel();
         let cleanup_manager = Arc::clone(&connection_manager);
 
@@ -495,6 +543,9 @@ impl SharedStreamState {
                 Ok(sent_burst_chunks) => {
                     drop(snapshot);
                     if sent_burst_chunks > 0 {
+                        // The replay renewed its own internal progress time; carry that
+                        // forward so the first live send does not immediately expire.
+                        last_active = Instant::now();
                         debug_if_enabled!(
                             "Shared stream subscriber {} replayed {sent_burst_chunks} burst chunks after {} ms",
                             sanitize_sensitive_info(&address.to_string()),
@@ -682,7 +733,7 @@ impl SharedStreamState {
             });
         });
 
-        self.task_handles.write().await.push(handle);
+        self.lock_task_handles().push(handle);
 
         let provider = self.provider_guard.as_ref().and_then(|h| h.allocation.get_provider_name());
         let (permit, request_id, owner) = pending_cleanup.take_cleanup();
@@ -857,9 +908,9 @@ impl SharedStreamState {
         });
 
         // Keep the broadcast handle so shutdown can join it instead of leaving a detached task.
-        if let Ok(mut handles) = self.task_handles.try_write() {
-            handles.push(broadcast_handle);
-        }
+        // Registration is guaranteed: a short-lived synchronous lock avoids the try_write
+        // failure that would otherwise drop the handle under contention.
+        self.lock_task_handles().push(broadcast_handle);
     }
 }
 
@@ -1070,7 +1121,7 @@ impl SharedStreamManager {
                     if let Some(subscriber) = subscribers.remove(&subscriber_id) {
                         subscriber.cancel_token.cancel();
                     }
-                    if subscribers.is_empty() {
+                    if subscribers.is_empty() && !state.has_pending_joins() {
                         register.by_key.remove(&url);
                         drop(subscribers);
                         Some((url, state))
@@ -1102,7 +1153,7 @@ impl SharedStreamManager {
             // Join the broadcast and forwarder tasks for this origin so teardown is
             // complete before the manager (and its runtime) is dropped. Cancellation has
             // already fired, so these tasks only finish their terminal cleanup.
-            let handles = std::mem::take(&mut *state.task_handles.write().await);
+            let handles = std::mem::take(&mut *state.lock_task_handles());
             for handle in handles {
                 let _ = handle.await;
             }
@@ -1140,7 +1191,7 @@ impl SharedStreamManager {
         // Keep the global registry lock only for the lookup and the key_by_subscriber
         // commit. The origin's own subscriber/task locks are taken during subscribe, so a
         // slow origin must not block joins on other URLs.
-        let state = {
+        let (state, pending_join) = {
             let mut register = self.shared_streams.write().await;
             let Some((key, state)) =
                 register.by_key.get_key_value(stream_url).map(|(key, state)| (Arc::clone(key), Arc::clone(state)))
@@ -1160,9 +1211,12 @@ impl SharedStreamManager {
                 return Ok(None);
             }
             register.key_by_subscriber.insert(subscriber_id, key);
-            state
+            let pending_join = PendingJoinGuard::new(&state);
+            (state, pending_join)
         };
-        Ok(Some(state.subscribe(addr, subscriber_id, Arc::clone(&connection_manager), pending_cleanup).await))
+        Ok(Some(
+            state.subscribe(addr, subscriber_id, Arc::clone(&connection_manager), pending_cleanup, pending_join).await,
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1203,9 +1257,11 @@ impl SharedStreamManager {
                 return None;
             }
             register.key_by_subscriber.insert(subscriber_id, key);
+            let pending_join = PendingJoinGuard::new(&existing);
             drop(register);
-            let response =
-                existing.subscribe(addr, subscriber_id, Arc::clone(ctx.connection_manager), pending_cleanup).await;
+            let response = existing
+                .subscribe(addr, subscriber_id, Arc::clone(ctx.connection_manager), pending_cleanup, pending_join)
+                .await;
             return Some(response);
         }
         let handle = provider_handle.as_ref().and_then(|managed| managed.handle())?;
@@ -1234,9 +1290,11 @@ impl SharedStreamManager {
         register.by_key.insert(Arc::clone(&stream_key), Arc::clone(&shared_state));
         register.key_by_subscriber.insert(subscriber_id, stream_key);
         ctx.shared_stream_manager.adopt_meter_uid(stream_url, allocation_id);
+        let pending_join = PendingJoinGuard::new(&shared_state);
         drop(register);
-        let subscribed_stream =
-            shared_state.subscribe(addr, subscriber_id, Arc::clone(ctx.connection_manager), pending_cleanup).await;
+        let subscribed_stream = shared_state
+            .subscribe(addr, subscriber_id, Arc::clone(ctx.connection_manager), pending_cleanup, pending_join)
+            .await;
         debug_if_enabled!(
             "Shared stream startup register+subscribe completed for {} in {} ms",
             sanitize_sensitive_info(stream_url),
@@ -1651,7 +1709,7 @@ mod tests {
         tokio::time::advance(SHARED_CLEANUP_ADMISSION_TIMEOUT + Duration::from_millis(1)).await;
         assert!(subscribe.await?.is_err(), "saturated cleanup admission must reject the subscriber");
         assert!(state.subscribers.read().await.is_empty(), "rejected admission must not register a subscriber");
-        assert!(state.task_handles.read().await.is_empty(), "rejected admission must not spawn a forwarding task");
+        assert!(state.lock_task_handles().is_empty(), "rejected admission must not spawn a forwarding task");
 
         drop(permits);
         Ok(())
@@ -1928,8 +1986,9 @@ mod tests {
         else {
             panic!("shared subscriber admission failed");
         };
-        let (mut stream, _provider, _capability) =
-            state.subscribe(&addr, subscriber_id, connection_manager, pending_cleanup).await;
+        let (mut stream, _provider, _capability) = state
+            .subscribe(&addr, subscriber_id, connection_manager, pending_cleanup, super::PendingJoinGuard::new(&state))
+            .await;
 
         state.preempted_token.cancel();
         drop(state);
@@ -2464,6 +2523,40 @@ mod tests {
         assert!(res.is_none());
         assert_eq!(connections.cleanup_tx().capacity(), initial_capacity);
         assert!(manager.get_shared_state(url).await.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pending_join_keeps_origin_alive_when_last_subscriber_leaves() -> Result<(), Box<dyn std::error::Error>> {
+        let app_cfg = Arc::new(create_test_app_config());
+        let events = Arc::new(EventManager::new());
+        let (_providers, _users, manager, connections) = create_test_connection_manager(&app_cfg, &events);
+        let addr = "127.0.0.1:41019".parse()?;
+        let first_id = SharedSubscriberId::from_stream_uid(connections.next_stream_uid());
+        let url = "https://example.invalid/live/pending_join.ts";
+
+        let state = Arc::new(SharedStreamState::new(Vec::new(), CHANNEL_SIZE, None, 1024, None));
+        state.register_subscriber(first_id, &addr, CancellationToken::new()).await;
+        {
+            let mut reg = manager.shared_streams.write().await;
+            reg.by_key.insert(Arc::from(url), Arc::clone(&state));
+            reg.key_by_subscriber.insert(first_id, Arc::from(url));
+        }
+
+        // Simulate a join that committed its registry entry but has not yet registered
+        // its subscriber in the origin.
+        let pending_join = super::PendingJoinGuard::new(&state);
+        assert!(state.has_pending_joins());
+
+        // The last (and only) subscriber leaves; the origin must not be torn down because
+        // the pending join is about to land on it.
+        manager.release_subscriber(first_id).await;
+        assert!(manager.get_shared_state(url).await.is_some(), "origin must survive a pending join");
+
+        // The join completes; the origin has no subscribers and no pending joins.
+        pending_join.commit();
+        assert!(!state.has_pending_joins());
+        assert!(state.subscribers.read().await.is_empty(), "origin has no subscribers after release");
         Ok(())
     }
 

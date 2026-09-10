@@ -957,6 +957,18 @@
   carrying the reason, current and maximum connections, foreign reserved slots, and the active/starting/idle slot split,
   so a fallback decision can be audited without inferring it from a socket address.
 
+  Playback cleanup is now request-specific. Parallel segment, range and reconnect requests carry independent request
+  identities, while a provider-binding generation prevents delayed cleanup from releasing a newer successor binding.
+  Provider allocations are owned by drop guards until they are explicitly transferred, closing cancellation gaps during
+  provider open, grace handling and HLS origin refresh.
+
+  Shared MPEG-TS subscribers now have identities independent of their transport socket, so clients sharing one reverse
+  proxy connection cannot replace or cancel one another. Subscriber queues enforce byte and chunk budgets, slow clients
+  have progress deadlines, and incomplete burst replay ends only the affected subscriber instead of skipping into live
+  delivery. Cleanup admission is bounded by the new `reverse_proxy.stream.cleanup_queue_capacity` setting (default
+  `4096`); mandatory HLS cleanup uses a reserved control lane. Graceful shutdown closes admission, releases active
+  claims and provider leases, and waits for owned streaming and cleanup workers to finish.
+
 - **Empty playlist updates no longer replace previously published input or target data.** A completely empty refresh is
   treated as a failed update and keeps the last usable playlist and its virtual-ID mapping intact. This prevents
   transient provider/download failures from making channels disappear or assigning different IDs when service

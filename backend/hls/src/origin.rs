@@ -797,7 +797,7 @@ async fn reserve_cleanup_permit(
     origin_io: &HlsOriginIoContext,
     deadline: Option<Instant>,
 ) -> Result<tokio::sync::mpsc::OwnedPermit<CleanupEvent>, HlsBoundAccountAcquireErrorKind> {
-    let reserve = origin_io.ctx.connection_manager.cleanup_tx().reserve_owned();
+    let reserve = origin_io.ctx.connection_manager.control_cleanup_tx().reserve_owned();
     match deadline {
         Some(deadline) => timeout(deadline.saturating_duration_since(Instant::now()), reserve)
             .await
@@ -1577,12 +1577,12 @@ mod tests {
         session.origin_account_binding = Some(binding.clone());
         let session = Arc::new(tokio::sync::RwLock::new(session));
 
-        // Saturate the cleanup permit queue so `reserve_cleanup_permit` blocks until
+        // Saturate the control cleanup lane so `reserve_cleanup_permit` blocks until
         // the bounded deadline fires.
         let mut held_permits = Vec::new();
         while let Ok(permit) = tokio::time::timeout(
             std::time::Duration::from_millis(1),
-            ctx.connection_manager.cleanup_tx().reserve_owned(),
+            ctx.connection_manager.control_cleanup_tx().reserve_owned(),
         )
         .await
         {

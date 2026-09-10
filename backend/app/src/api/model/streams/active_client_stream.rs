@@ -143,6 +143,7 @@ struct GracePeriodParams {
     // Whether the session is `socket_bound`. Used to construct the correct
     // `EvictionReentryGuard`.
     socket_bound: bool,
+    shared_subscriber_id: Option<tuliprox_core::model::SharedSubscriberId>,
 }
 
 enum DeferredProviderOpenOutcome {
@@ -930,9 +931,13 @@ pub(crate) async fn create_active_client_stream(
     // before this registration starts. That terminal event also removes this exact user request, so reserving
     // another permit from the same bounded queue would create a circular admission
     // dependency under saturation.
-    let request_uid = stream_details
-        .shared_subscriber_id
-        .map_or_else(|| app_state.connection_manager.next_stream_uid(), |capability| capability.stream_uid());
+    let shared_cleanup_capability = stream_details.shared_subscriber_id.take();
+    let shared_subscriber_id =
+        shared_cleanup_capability.as_ref().map(tuliprox_session::SharedCleanupCapability::subscriber_id);
+    let request_uid = shared_subscriber_id.map_or_else(
+        || app_state.connection_manager.next_stream_uid(),
+        tuliprox_core::model::SharedSubscriberId::stream_uid,
+    );
     let provider_request_id = stream_details
         .provider_handle
         .as_ref()
@@ -952,28 +957,27 @@ pub(crate) async fn create_active_client_stream(
         user_agent,
         session_token,
     };
-    let mut registered_request =
-        if let Some(capability) = stream_details.shared_subscriber_id.filter(|_| stream_channel.shared) {
-            app_state
-                .connection_manager
-                .update_connection_with_uid_using_shared_cleanup(
-                    connection,
-                    tuliprox_session::ConnectionHistoryMode::EmitConnect,
-                    capability,
-                    provider_request_id,
-                )
-                .await
-        } else {
-            app_state
-                .connection_manager
-                .update_connection_with_uid(
-                    connection,
-                    tuliprox_session::ConnectionHistoryMode::EmitConnect,
-                    request_uid,
-                    provider_request_id,
-                )
-                .await
-        };
+    let mut registered_request = if let Some(capability) = shared_cleanup_capability.filter(|_| stream_channel.shared) {
+        app_state
+            .connection_manager
+            .update_connection_with_uid_using_shared_cleanup(
+                connection,
+                tuliprox_session::ConnectionHistoryMode::EmitConnect,
+                capability,
+                provider_request_id,
+            )
+            .await
+    } else {
+        app_state
+            .connection_manager
+            .update_connection_with_uid(
+                connection,
+                tuliprox_session::ConnectionHistoryMode::EmitConnect,
+                request_uid,
+                provider_request_id,
+            )
+            .await
+    };
     let request_uid = registered_request.request_uid;
     let display_stream_uid = registered_request.display_uid();
     let stream_uid = Some(request_uid);
@@ -1078,6 +1082,7 @@ pub(crate) async fn create_active_client_stream(
         grace_resolution_context: owned_grace_ctx,
         grace_kind: Some(connection_kind),
         socket_bound,
+        shared_subscriber_id,
     });
 
     let cfg = &app_state.app_config;
@@ -1208,6 +1213,7 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
         grace_resolution_context,
         grace_kind,
         socket_bound,
+        shared_subscriber_id,
         ..
     } = request;
     let grace_period = stream_details.grace_period;
@@ -1339,11 +1345,8 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                                             CustomVideoStreamType::UserConnectionsExhausted,
                                         )
                                         .await;
-                                    if let Some(id) = stream_details.shared_subscriber_id {
-                                        connection_manager
-                                            .shared_stream_manager
-                                            .release_subscriber(id.subscriber_id())
-                                            .await;
+                                    if let Some(id) = shared_subscriber_id {
+                                        connection_manager.shared_stream_manager.release_subscriber(id).await;
                                     }
                                     info!("User connections exhausted for active clients: {username}");
                                     updated = true;
@@ -1358,8 +1361,8 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                                     CustomVideoStreamType::UserConnectionsExhausted,
                                 )
                                 .await;
-                            if let Some(id) = stream_details.shared_subscriber_id {
-                                connection_manager.shared_stream_manager.release_subscriber(id.subscriber_id()).await;
+                            if let Some(id) = shared_subscriber_id {
+                                connection_manager.shared_stream_manager.release_subscriber(id).await;
                             }
                             info!("User connections exhausted for active clients: {username}");
                             updated = true;
@@ -1404,11 +1407,8 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                                     )
                                     .await;
                                 // Release the shared stream subscription to stop the subscriber loop
-                                if let Some(id) = stream_details.shared_subscriber_id {
-                                    connection_manager
-                                        .shared_stream_manager
-                                        .release_subscriber(id.subscriber_id())
-                                        .await;
+                                if let Some(id) = shared_subscriber_id {
+                                    connection_manager.shared_stream_manager.release_subscriber(id).await;
                                 }
                                 info!("Provider connections exhausted for active clients: {provider_name}");
                             }
@@ -2053,6 +2053,7 @@ mod tests {
             grace_resolution_context: None,
             grace_kind: None,
             socket_bound: false,
+            shared_subscriber_id: None,
         });
         (
             flag.expect("provider grace should install a mode flag"),
@@ -2952,6 +2953,7 @@ mod tests {
             grace_resolution_context: Some(grace_context),
             grace_kind: Some(crate::api::model::ConnectionKind::Soft),
             socket_bound: false,
+            shared_subscriber_id: None,
         });
 
         // Grace should be pending initially.
