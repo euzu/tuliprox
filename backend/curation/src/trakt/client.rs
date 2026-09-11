@@ -1,50 +1,60 @@
-use super::errors::handle_trakt_api_error;
-use crate::model::{TraktApiConfig, TraktChartConfig, TraktListConfig, TraktListItem, TraktMovie, TraktShow};
+use super::{
+    errors::handle_trakt_api_error,
+    model::{TraktListItem, TraktMovie, TraktShow, TraktTrendingMovieItem, TraktTrendingShowItem},
+};
 use log::{debug, info};
 use reqwest::header::{HeaderMap, HeaderValue};
-use serde::Deserialize;
 use shared::{
-    defaults::{DEFAULT_USER_AGENT, TRAKT_API_KEY},
+    defaults::DEFAULT_USER_AGENT,
     error::TuliproxError,
+    model::{TraktChartKind, TraktChartType},
     utils::trim_last_slash,
 };
+use tuliprox_core::model::{TraktApiConfig, TraktChartConfig, TraktListConfig};
 
 const TRAKT_PAGE_LIMIT: u32 = 100;
 const TRAKT_MAX_PAGES: u32 = 100;
 
-pub struct TraktClient {
+pub(super) struct TraktClient {
     client: reqwest::Client,
     api_config: TraktApiConfig,
-    // Pre-computed headers to avoid recreating them each time
     headers: HeaderMap,
 }
 
 impl TraktClient {
-    pub fn new(client: reqwest::Client, api_config: TraktApiConfig) -> Self {
-        let headers = Self::create_headers(&api_config);
-        Self { client, api_config, headers }
+    pub(super) fn new(client: reqwest::Client, mut api_config: TraktApiConfig) -> Result<Self, TuliproxError> {
+        api_config.api_key = api_config.api_key.trim().to_string();
+        let headers = Self::create_headers(&api_config)?;
+        Ok(Self { client, api_config, headers })
     }
 
-    fn create_headers(api_config: &TraktApiConfig) -> HeaderMap {
-        let mut headers = HeaderMap::new();
+    fn create_headers(api_config: &TraktApiConfig) -> Result<HeaderMap, TuliproxError> {
+        if api_config.api_key.is_empty() {
+            return Err(TuliproxError::Config(
+                "Trakt Client ID is missing; configure trakt.api.api_key before enabling Trakt lists or charts",
+            ));
+        }
+        let mut client_id = HeaderValue::from_str(api_config.api_key.as_str()).map_err(|_| {
+            TuliproxError::Config(
+                "Trakt Client ID contains characters that cannot be used in an HTTP header; update trakt.api.api_key",
+            )
+        })?;
+        client_id.set_sensitive(true);
 
+        let mut headers = HeaderMap::new();
         headers.insert(reqwest::header::CONTENT_TYPE, HeaderValue::from_static(mime::APPLICATION_JSON.as_ref()));
         headers.insert(
             reqwest::header::USER_AGENT,
             HeaderValue::from_str(api_config.user_agent.as_str())
                 .unwrap_or_else(|_| HeaderValue::from_static(DEFAULT_USER_AGENT)),
         );
-        headers.insert(
-            "trakt-api-key",
-            HeaderValue::from_str(api_config.api_key.as_str())
-                .unwrap_or_else(|_| HeaderValue::from_static(TRAKT_API_KEY)),
-        );
+        headers.insert("trakt-api-key", client_id);
         headers.insert(
             "trakt-api-version",
             HeaderValue::from_str(api_config.version.as_str()).unwrap_or_else(|_| HeaderValue::from_static("2")),
         );
 
-        headers
+        Ok(headers)
     }
 
     fn build_list_url(&self, user: &str, list_slug: &str) -> String {
@@ -55,7 +65,10 @@ impl TraktClient {
         format!("{}/{}/{}", trim_last_slash(&self.api_config.url), chart_config.kind, chart_config.chart)
     }
 
-    pub async fn get_chart_items(&self, chart_config: &TraktChartConfig) -> Result<Vec<TraktListItem>, TuliproxError> {
+    pub(super) async fn get_chart_items(
+        &self,
+        chart_config: &TraktChartConfig,
+    ) -> Result<Vec<TraktListItem>, TuliproxError> {
         let id_label = format!("{}:{}", chart_config.kind, chart_config.chart);
         self.paginate_items(
             "chart",
@@ -65,15 +78,15 @@ impl TraktClient {
         .await
     }
 
-    pub async fn get_list_items(&self, list_config: &TraktListConfig) -> Result<Vec<TraktListItem>, TuliproxError> {
+    pub(super) async fn get_list_items(
+        &self,
+        list_config: &TraktListConfig,
+    ) -> Result<Vec<TraktListItem>, TuliproxError> {
         let id_label = format!("{}:{}", list_config.user, list_config.list_slug);
         self.paginate_items("list", id_label, |page| async move { self.get_list_items_page(list_config, page).await })
             .await
     }
 
-    /// Shared body of `get_chart_items` and `get_list_items`.
-    /// Walks Trakt's paginated response one page at a time via `fetch_page`,
-    /// logging per-page progress with `kind_label` and `id_label` for context.
     async fn paginate_items<F, Fut>(
         &self,
         kind_label: &'static str,
@@ -122,13 +135,12 @@ impl TraktClient {
     ) -> Result<TraktListItemsPage, TuliproxError> {
         let url = self.build_list_url(&list_config.user, &list_config.list_slug);
         let request_url = format!("{url}?page={page}&limit={TRAKT_PAGE_LIMIT}");
+        let list_id = format!("{}:{}", list_config.user, list_config.list_slug);
         let (response_text, page_count, item_count) =
-            self.fetch_trakt_page(request_url, "list", (&list_config.user, &list_config.list_slug), page).await?;
-        let mut items: Vec<TraktListItem> =
-            serde_json::from_str(&response_text).map_err(|error: serde_json::Error| {
-                TuliproxError::Config(format!("Failed to parse Trakt response: {error}"))
-            })?;
-        items.iter_mut().for_each(TraktListItem::prepare);
+            self.fetch_trakt_page(request_url, "list", &list_id, page).await?;
+        let items: Vec<TraktListItem> = serde_json::from_str(&response_text).map_err(|error: serde_json::Error| {
+            TuliproxError::Config(format!("Failed to parse Trakt response: {error}"))
+        })?;
 
         Ok(TraktListItemsPage { items, page_count, item_count })
     }
@@ -142,29 +154,26 @@ impl TraktClient {
         let request_url = format!("{url}?page={page}&limit={TRAKT_PAGE_LIMIT}");
         let chart_id = format!("{}:{}", chart_config.kind, chart_config.chart);
         let (response_text, page_count, item_count) =
-            self.fetch_trakt_page(request_url, "chart", ("charts", &chart_id), page).await?;
+            self.fetch_trakt_page(request_url, "chart", &chart_id, page).await?;
         let items = parse_chart_items(&response_text, chart_config, page)
             .map_err(|error| TuliproxError::Config(format!("Failed to parse Trakt chart response: {error}")))?;
 
         Ok(TraktListItemsPage { items, page_count, item_count })
     }
 
-    /// Shared body of `get_list_items_page` / `get_chart_items_page`.
-    /// Issues the GET, validates the status, parses the pagination headers, and
-    /// returns the raw response body. Per-type item parsing stays with the caller.
     async fn fetch_trakt_page(
         &self,
         request_url: String,
-        error_label: &str,
-        error_id: (&str, &str),
+        resource_kind: &str,
+        resource_id: &str,
         page: u32,
     ) -> Result<(String, u32, Option<u32>), TuliproxError> {
         let response = self.client.get(&request_url).headers(self.headers.clone()).send().await.map_err(|err| {
-            TuliproxError::Config(format!("Failed to fetch Trakt {error_label} {request_url}: {err}"))
+            TuliproxError::Config(format!("Failed to fetch Trakt {resource_kind} {request_url}: {err}"))
         })?;
 
         if !response.status().is_success() {
-            handle_trakt_api_error(response.status(), error_id.0, error_id.1)?;
+            handle_trakt_api_error(response.status(), resource_kind, resource_id)?;
         }
 
         let page_count = parse_trakt_pagination_header(response.headers(), "x-pagination-page-count").unwrap_or(page);
@@ -190,7 +199,7 @@ fn parse_chart_items(
 ) -> Result<Vec<TraktListItem>, serde_json::Error> {
     let rank_base = page.saturating_sub(1).saturating_mul(TRAKT_PAGE_LIMIT);
     match (chart_config.kind, chart_config.chart) {
-        (shared::model::TraktChartKind::Movies, shared::model::TraktChartType::Popular) => {
+        (TraktChartKind::Movies, TraktChartType::Popular) => {
             let items = serde_json::from_str::<Vec<TraktMovie>>(response_text)?;
             Ok(items
                 .into_iter()
@@ -198,7 +207,7 @@ fn parse_chart_items(
                 .map(|(index, movie)| TraktListItem::from_movie_chart(movie, chart_rank(rank_base, index)))
                 .collect())
         }
-        (shared::model::TraktChartKind::Movies, shared::model::TraktChartType::Trending) => {
+        (TraktChartKind::Movies, TraktChartType::Trending) => {
             let items = serde_json::from_str::<Vec<TraktTrendingMovieItem>>(response_text)?;
             Ok(items
                 .into_iter()
@@ -206,7 +215,7 @@ fn parse_chart_items(
                 .map(|(index, item)| TraktListItem::from_movie_chart(item.movie, chart_rank(rank_base, index)))
                 .collect())
         }
-        (shared::model::TraktChartKind::Shows, shared::model::TraktChartType::Popular) => {
+        (TraktChartKind::Shows, TraktChartType::Popular) => {
             let items = serde_json::from_str::<Vec<TraktShow>>(response_text)?;
             Ok(items
                 .into_iter()
@@ -214,7 +223,7 @@ fn parse_chart_items(
                 .map(|(index, show)| TraktListItem::from_show_chart(show, chart_rank(rank_base, index)))
                 .collect())
         }
-        (shared::model::TraktChartKind::Shows, shared::model::TraktChartType::Trending) => {
+        (TraktChartKind::Shows, TraktChartType::Trending) => {
             let items = serde_json::from_str::<Vec<TraktTrendingShowItem>>(response_text)?;
             Ok(items
                 .into_iter()
@@ -229,16 +238,6 @@ fn chart_rank(rank_base: u32, index: usize) -> u32 {
     rank_base.saturating_add(u32::try_from(index).unwrap_or(u32::MAX)).saturating_add(1)
 }
 
-#[derive(Deserialize)]
-struct TraktTrendingMovieItem {
-    movie: TraktMovie,
-}
-
-#[derive(Deserialize)]
-struct TraktTrendingShowItem {
-    show: TraktShow,
-}
-
 fn parse_trakt_pagination_header(headers: &HeaderMap, name: &'static str) -> Option<u32> {
     headers.get(name).and_then(|value| value.to_str().ok()).and_then(|value| value.parse::<u32>().ok())
 }
@@ -246,7 +245,8 @@ fn parse_trakt_pagination_header(headers: &HeaderMap, name: &'static str) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::model::{TraktChartKind, TraktChartType, TraktContentType};
+    use reqwest::StatusCode;
+    use shared::model::TraktContentType;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
@@ -256,19 +256,75 @@ mod tests {
         net::TcpListener,
     };
 
+    #[test]
+    fn trakt_client_rejects_blank_client_id_before_use() {
+        for client_id in ["", " \t\r\n "] {
+            let result =
+                TraktClient::new(reqwest::Client::new(), api_config("http://127.0.0.1:9".to_string(), client_id));
+            let Err(error) = result else { panic!("blank Client ID should be rejected") };
+
+            assert!(error.message().contains("Trakt Client ID is missing"));
+            assert!(error.message().contains("trakt.api.api_key"));
+        }
+    }
+
+    #[test]
+    fn trakt_client_rejects_invalid_client_id_without_echoing_it() {
+        let invalid_client_id = "sensitive-client-id\ninjected-header";
+        let result =
+            TraktClient::new(reqwest::Client::new(), api_config("http://127.0.0.1:9".to_string(), invalid_client_id));
+        let Err(error) = result else { panic!("header-invalid Client ID should be rejected") };
+
+        assert!(error.message().contains("Trakt Client ID"));
+        assert!(error.message().contains("trakt.api.api_key"));
+        assert!(!error.message().contains("sensitive-client-id"));
+        assert!(!error.message().contains("injected-header"));
+    }
+
+    #[tokio::test]
+    async fn valid_client_id_is_trimmed_and_sent_in_trakt_api_key_header() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let base_url = spawn_single_response_trakt_server("[]", Arc::clone(&requests)).await;
+        let client = TraktClient::new(reqwest::Client::new(), api_config(base_url, "  user-supplied-client-id  "))
+            .expect("valid Client ID should construct a Trakt client");
+
+        client
+            .get_chart_items(&chart_config(TraktChartKind::Movies, TraktChartType::Popular))
+            .await
+            .expect("chart request should succeed");
+
+        assert!(client.headers.get("trakt-api-key").expect("Client ID header").is_sensitive());
+        let requests = requests.lock().expect("requests");
+        assert_eq!(request_header(&requests[0], "trakt-api-key"), Some("user-supplied-client-id"));
+    }
+
+    #[tokio::test]
+    async fn unsuccessful_status_is_translated_before_plain_text_body_parsing() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let base_url = spawn_status_response_trakt_server(
+            StatusCode::FORBIDDEN,
+            "remote response body must not be logged",
+            Arc::clone(&requests),
+        )
+        .await;
+        let client = client(base_url);
+
+        let error = client
+            .get_chart_items(&chart_config(TraktChartKind::Movies, TraktChartType::Trending))
+            .await
+            .expect_err("403 should fail");
+
+        assert!(error.message().contains("Trakt denied the request"));
+        assert!(!error.message().contains("remote response body"));
+        assert_eq!(requests.lock().expect("requests").len(), 1);
+    }
+
     #[tokio::test]
     async fn get_list_items_follows_trakt_pagination_headers() {
         let requests = Arc::new(AtomicUsize::new(0));
         let base_url = spawn_paged_trakt_server(Arc::clone(&requests)).await;
-        let client = TraktClient::new(
-            reqwest::Client::new(),
-            TraktApiConfig {
-                api_key: "test-key".to_string(),
-                version: "2".to_string(),
-                url: base_url,
-                user_agent: "tuliprox-test".to_string(),
-            },
-        );
+        let client = TraktClient::new(reqwest::Client::new(), api_config(base_url, "test-key"))
+            .expect("valid Client ID should construct a Trakt client");
         let list_config = TraktListConfig {
             user: "user".to_string(),
             list_slug: "list".to_string(),
@@ -281,8 +337,7 @@ mod tests {
         let items = client.get_list_items(&list_config).await.expect("paged list should load");
 
         assert_eq!(items.len(), 2);
-        assert_eq!(items[0].content_type, TraktContentType::Vod);
-        assert_eq!(items[1].content_type, TraktContentType::Vod);
+        assert!(items.iter().all(|item| item.item_type == "movie"));
         assert_eq!(requests.load(Ordering::SeqCst), 2);
     }
 
@@ -301,7 +356,6 @@ mod tests {
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].rank, Some(1));
-        assert_eq!(items[0].content_type, TraktContentType::Vod);
         assert_eq!(items[0].movie.as_ref().expect("movie").ids.tmdb, Some(11));
         assert!(requests.lock().expect("requests")[0].contains("GET /movies/trending?page=1&limit=100 "));
     }
@@ -321,7 +375,6 @@ mod tests {
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].rank, Some(1));
-        assert_eq!(items[0].content_type, TraktContentType::Series);
         assert_eq!(items[0].show.as_ref().expect("show").ids.tmdb, Some(22));
         assert!(requests.lock().expect("requests")[0].contains("GET /shows/popular?page=1&limit=100 "));
     }
@@ -359,6 +412,14 @@ mod tests {
     }
 
     async fn spawn_single_response_trakt_server(body: &'static str, requests: Arc<Mutex<Vec<String>>>) -> String {
+        spawn_status_response_trakt_server(StatusCode::OK, body, requests).await
+    }
+
+    async fn spawn_status_response_trakt_server(
+        status: StatusCode,
+        body: &'static str,
+        requests: Arc<Mutex<Vec<String>>>,
+    ) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind test server");
         let addr = listener.local_addr().expect("local addr");
         tokio::spawn(async move {
@@ -377,8 +438,11 @@ mod tests {
             }
             requests.lock().expect("requests").push(String::from_utf8_lossy(&request_bytes).to_string());
             let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                body.len(), body
+                "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or("Unknown"),
+                body.len(),
+                body
             );
             stream.write_all(response.as_bytes()).await.expect("write response");
         });
@@ -386,15 +450,24 @@ mod tests {
     }
 
     fn client(base_url: String) -> TraktClient {
-        TraktClient::new(
-            reqwest::Client::new(),
-            TraktApiConfig {
-                api_key: "test-key".to_string(),
-                version: "2".to_string(),
-                url: base_url,
-                user_agent: "tuliprox-test".to_string(),
-            },
-        )
+        TraktClient::new(reqwest::Client::new(), api_config(base_url, "test-key"))
+            .expect("valid Client ID should construct a Trakt client")
+    }
+
+    fn api_config(base_url: String, client_id: &str) -> TraktApiConfig {
+        TraktApiConfig {
+            api_key: client_id.to_string(),
+            version: "2".to_string(),
+            url: base_url,
+            user_agent: "tuliprox-test".to_string(),
+        }
+    }
+
+    fn request_header<'a>(request: &'a str, name: &str) -> Option<&'a str> {
+        request.lines().find_map(|line| {
+            let (header_name, value) = line.split_once(':')?;
+            header_name.eq_ignore_ascii_case(name).then(|| value.trim())
+        })
     }
 
     fn chart_config(kind: TraktChartKind, chart: TraktChartType) -> TraktChartConfig {

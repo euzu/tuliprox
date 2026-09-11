@@ -3947,9 +3947,9 @@ pub(crate) fn create_playback_session_fingerprint(
     extension: Option<&str>,
 ) -> String {
     // This scopes the session identity, not the session address-tracking policy.
-    // Adaptive playlist starts need a per-initial-socket token so two players behind
-    // the same IP/UA can watch the same HLS/DASH stream independently. The created
-    // UserSession itself can still be non-socket-bound.
+    // Adaptive and seekable playback use the stable client fingerprint so follow-up
+    // requests on new sockets reuse the same logical session. Plain live playback
+    // remains socket-bound so a separate connection creates a separate session.
     let session_bound = is_session_based_playback(item_type, extension);
     let socket_bound = !session_bound && is_socket_bound_playback_session(item_type, extension);
     create_session_fingerprint(fingerprint, username, virtual_id, socket_bound)

@@ -969,6 +969,12 @@
   `4096`); mandatory HLS cleanup uses a reserved control lane. Graceful shutdown closes admission, releases active
   claims and provider leases, and waits for owned streaming and cleanup workers to finish.
 
+- **Trakt curation now requires an explicitly configured Client ID.** Tuliprox no longer bundles or falls back to a
+  shared Client ID. Blank or header-invalid `trakt.api.api_key` values now produce one target-scoped warning and skip
+  only optional Trakt curation without making an HTTP request; other target processing continues. Trakt `401`, `403`,
+  `404`, and `429` responses now have actionable, resource-aware messages, while independently successful lists and
+  charts remain available.
+
 - **Empty playlist updates no longer replace previously published input or target data.** A completely empty refresh is
   treated as a failed update and keeps the last usable playlist and its virtual-ID mapping intact. This prevents
   transient provider/download failures from making channels disappear or assigning different IDs when service
@@ -1393,6 +1399,11 @@
   - The rules use OR semantics: any matching CIDR or country allows the request.
 
 ## 🛠 Maintenance
+
+- **Playlist curation now has a dedicated capability boundary**: matching, ordering, and virtual-category projection
+  live in the source-neutral `tuliprox-curation` crate, while Trakt HTTP/JSON handling translates records at the edge.
+  Existing `output[].trakt` configuration, category identity, matching behavior, and partial-success semantics remain
+  unchanged.
 
 - **`AdmissionRequest` bundles the request-scoped admission arguments**: five functions each threaded the same ten
   positional parameters, three of them consecutive bare `bool`s (`use_session_admission`, then
@@ -2007,7 +2018,7 @@ and assigns it to the variable `station_prefix`.
             resolve_vod: false
             trakt:
               api:
-                key: <my private trakt api key>
+                key: <my Trakt Client ID>
                 version: 2
               lists:
                 - user: "linaspurinis"

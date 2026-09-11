@@ -387,7 +387,7 @@ pub(crate) async fn finalize_prepared_target<E: EventSink + Clone + 'static, M: 
         (Ok(()), errors)
     } else {
         // Process Trakt categories
-        if trakt_playlist(&ctx.client, target, &mut errors, &mut new_playlist).await {
+        if trakt_playlist(&ctx.client, target, &mut new_playlist).await {
             step.tick("trakt categories");
             log_memory_snapshot(format!("target '{}' after_trakt", target.name).as_str());
         }
@@ -767,23 +767,18 @@ pub fn process_favourites(playlist: &mut Vec<PlaylistGroup>, favourites_cfg: Opt
 pub(crate) async fn trakt_playlist(
     client: &reqwest::Client,
     target: &ConfigTarget,
-    errors: &mut Vec<TuliproxError>,
     playlist: &mut Vec<PlaylistGroup>,
 ) -> bool {
-    match process_trakt_categories_for_target(client, playlist, target).await {
-        Ok(Some(trakt_categories)) => {
-            if !trakt_categories.is_empty() {
-                info!("Adding {} Trakt categories to playlist", trakt_categories.len());
-                playlist.extend(trakt_categories);
-            }
-        }
-        Ok(None) => {
-            return false;
-        }
-        Err(trakt_errors) => {
-            warn!("Trakt processing failed with {} errors", trakt_errors.len());
-            errors.extend(trakt_errors);
-        }
+    let Some(trakt_config) = target.get_xtream_output().and_then(|output| output.trakt.as_ref()) else {
+        trace!("No Trakt configuration found for target {}", target.name);
+        return false;
+    };
+    let Some(trakt_categories) = curate_trakt_categories(client, playlist, &target.name, trakt_config).await else {
+        return false;
+    };
+    if !trakt_categories.is_empty() {
+        info!("Adding {} Trakt categories to playlist", trakt_categories.len());
+        playlist.extend(trakt_categories);
     }
     true
 }

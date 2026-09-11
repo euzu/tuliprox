@@ -1483,6 +1483,17 @@ match {
     }
 }
 
+#[tokio::test]
+async fn trakt_finalization_stage_is_a_noop_without_xtream_configuration() {
+    let target = ConfigTarget::from(&ConfigTargetDto::default());
+    let mut playlist = Vec::new();
+
+    let applied = trakt_playlist(&reqwest::Client::new(), &target, &mut playlist).await;
+
+    assert!(!applied);
+    assert!(playlist.is_empty());
+}
+
 #[cfg(test)]
 mod disk_epg_wireup_tests {
     use super::spill_epg_to_disk;
