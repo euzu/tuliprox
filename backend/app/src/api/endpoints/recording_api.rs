@@ -8,7 +8,8 @@ use crate::{
             mutate,
             recording_rule_service::{DeleteFuture, RuleServiceError},
             recording_service::{
-                CreateRecordingInput, EditRecordingPatch, RecordingService, RecordingSourceInput, ServiceError,
+                CreateRecordingInput, EditRecordingPatch, IdempotencyRequest, RecordingService, RecordingSourceInput,
+                ServiceError,
             },
             AppState, RecordingQueue, RecordingTask,
         },
@@ -17,7 +18,7 @@ use crate::{
 };
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, patch, post},
     Json, Router,
@@ -63,8 +64,28 @@ fn service_error_status(err: &ServiceError) -> StatusCode {
         ServiceError::Disabled => StatusCode::NOT_IMPLEMENTED,
         ServiceError::Forbidden | ServiceError::SharedCreationNotAdministrator => StatusCode::FORBIDDEN,
         ServiceError::UnknownRecording => StatusCode::NOT_FOUND,
+        ServiceError::IdempotencyConflict => StatusCode::CONFLICT,
+        // A replay is the original success, answered again.
+        ServiceError::IdempotentReplay { .. } => StatusCode::NO_CONTENT,
         ServiceError::PersistenceFailed | ServiceError::IoError(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
+}
+
+/// The `Idempotency-Key` header, with a digest of the body it arrived with.
+///
+/// The digest is what makes a replay distinguishable from a different
+/// request wearing the same key. It is taken over the canonical JSON of the
+/// request, so field order in the original submission cannot change it.
+fn idempotency_from_headers(headers: &HeaderMap, body: &CreateRecordingRequest) -> Option<IdempotencyRequest> {
+    let key = headers.get("Idempotency-Key")?.to_str().ok()?.trim();
+    if key.is_empty() {
+        return None;
+    }
+    let canonical = serde_json::to_string(body).unwrap_or_default();
+    Some(IdempotencyRequest {
+        key: key.to_string(),
+        fingerprint: blake3::hash(canonical.as_bytes()).to_hex().to_string(),
+    })
 }
 
 /// POST /api/v1/recording/requests
@@ -76,8 +97,10 @@ fn service_error_status(err: &ServiceError) -> StatusCode {
 pub async fn create_recording_request(
     State(app_state): State<Arc<AppState>>,
     AuthClaims(claims): AuthClaims,
+    headers: HeaderMap,
     Json(body): Json<CreateRecordingRequest>,
 ) -> impl IntoResponse {
+    let idempotency = idempotency_from_headers(&headers, &body);
     let mut source = body.source.clone();
     let Some(resolved_source) = resolve_recording_source(
         &app_state,
@@ -115,11 +138,14 @@ pub async fn create_recording_request(
         provenance: RecordingProvenance::default(),
         epg: body.epg,
     };
-    match service.create_recording(&claims, &input).await {
+    match service.create_recording_idempotent(&claims, &input, idempotency).await {
         Ok(_) => {
             let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
             StatusCode::NO_CONTENT.into_response()
         }
+        // The recording already exists from the first attempt; nothing new
+        // to announce, and the caller gets the same answer it got then.
+        Err(ServiceError::IdempotentReplay { .. }) => StatusCode::NO_CONTENT.into_response(),
         Err(err) => service_error_response(&err),
     }
 }
@@ -517,6 +543,7 @@ pub async fn get_recording_health(
         notification_outbox_depth: health.notification_outbox_depth(),
         notification_dead_lettered: health.notification_dead_lettered(),
         queue_revision: app_state.recordings.revision.load(std::sync::atomic::Ordering::SeqCst),
+        recovery: app_state.recordings.recovery_health().await.map(Into::into),
     })
     .into_response()
 }
@@ -532,6 +559,67 @@ pub struct RecordingHealthResponse {
     pub notification_outbox_depth: i64,
     pub notification_dead_lettered: i64,
     pub queue_revision: u64,
+    /// Absent when the queue is not repository backed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<RecordingRecoveryHealthResponse>,
+}
+
+/// The recovery contract, rendered for an operator tool.
+///
+/// Mapped rather than serialized directly: `tuliprox-btree` carries no
+/// application concerns, so its health type deliberately has no `Serialize`.
+/// Every field here is already redacted at the source — no paths, no values,
+/// no secrets.
+#[derive(Debug, Clone, Serialize)]
+pub struct RecordingRecoveryHealthResponse {
+    pub state: String,
+    pub current_revision: u64,
+    pub database_revision: u64,
+    pub recovery_lag: u64,
+    pub last_verified_checkpoint_revision: u64,
+    pub journal_bytes: u64,
+    pub last_error: Option<String>,
+    pub storage_placement: String,
+}
+
+impl From<tuliprox_repository::recording_repository::RecoveryHealth> for RecordingRecoveryHealthResponse {
+    fn from(health: tuliprox_repository::recording_repository::RecoveryHealth) -> Self {
+        use tuliprox_repository::recording_repository::{
+            RecoveryErrorClass, RecoveryRepositoryState, RecoveryStoragePlacement,
+        };
+        Self {
+            state: match health.state {
+                RecoveryRepositoryState::Healthy => "healthy",
+                RecoveryRepositoryState::RepairRequired => "repair_required",
+                RecoveryRepositoryState::Rebuilding => "rebuilding",
+            }
+            .to_string(),
+            current_revision: health.current_revision,
+            database_revision: health.database_revision,
+            recovery_lag: health.recovery_lag,
+            last_verified_checkpoint_revision: health.last_verified_checkpoint_revision,
+            journal_bytes: health.journal_bytes,
+            last_error: health.last_error.map(|class| {
+                match class {
+                    RecoveryErrorClass::Io => "io",
+                    RecoveryErrorClass::Corruption => "corruption",
+                    RecoveryErrorClass::SchemaMismatch => "schema_mismatch",
+                    RecoveryErrorClass::MigrationFailed => "migration_failed",
+                    RecoveryErrorClass::ForkedHistory => "forked_history",
+                    RecoveryErrorClass::DatabaseAhead => "database_ahead",
+                    RecoveryErrorClass::UncertainWrite => "uncertain_write",
+                    RecoveryErrorClass::PublishFailed => "publish_failed",
+                }
+                .to_string()
+            }),
+            storage_placement: match health.storage_placement {
+                RecoveryStoragePlacement::SameFilesystem => "same_filesystem",
+                RecoveryStoragePlacement::DistinctFilesystem => "distinct_filesystem",
+                RecoveryStoragePlacement::Unknown => "unknown",
+            }
+            .to_string(),
+        }
+    }
 }
 
 fn rule_error_response(err: &crate::api::model::recording_rule_service::RuleServiceError) -> axum::response::Response {

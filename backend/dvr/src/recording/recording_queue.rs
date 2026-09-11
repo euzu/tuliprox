@@ -36,7 +36,9 @@ use std::{
 use tokio::sync::{Mutex, Notify, RwLock};
 use tuliprox_core::model::RecordingConfig;
 use tuliprox_repository::recording_repository::RecordingRepository;
-pub use tuliprox_repository::recording_repository::{PersistedRecordingTask, RecordingPartition};
+pub use tuliprox_repository::recording_repository::{
+    IdempotencyOutcome, PersistedIdempotency, PersistedRecordingTask, RecordingPartition,
+};
 
 fn poisoned_repository() -> std::io::Error {
     std::io::Error::other("recording repository lock was poisoned by a panicking writer")
@@ -178,6 +180,26 @@ where
     }
 }
 
+/// [`mutate`], recording an accepted idempotency key in the same commit.
+///
+/// The key has to land with the recording it describes. Writing it
+/// afterwards would leave a window in which the recording exists and the
+/// record that suppresses its retry does not.
+pub async fn mutate_with_idempotency<F, R>(
+    this: &RecordingQueue,
+    idempotency: PersistedIdempotency,
+    op: F,
+) -> Result<R, QueueMutationError>
+where
+    F: FnOnce(&mut PersistedRecordingQueue) -> Result<R, QueueMutationError>,
+{
+    let _mutation = this.mutation_guard.lock().await;
+    match mutate_optional_locked_with(this, Some(idempotency), |candidate| op(candidate).map(Some)).await? {
+        Some(result) => Ok(result),
+        None => Err(QueueMutationError::MutationSkipped),
+    }
+}
+
 pub async fn mutate_optional<F, R>(this: &RecordingQueue, op: F) -> Result<Option<R>, QueueMutationError>
 where
     F: FnOnce(&mut PersistedRecordingQueue) -> Result<Option<R>, QueueMutationError>,
@@ -187,6 +209,17 @@ where
 }
 
 async fn mutate_optional_locked<F, R>(this: &RecordingQueue, op: F) -> Result<Option<R>, QueueMutationError>
+where
+    F: FnOnce(&mut PersistedRecordingQueue) -> Result<Option<R>, QueueMutationError>,
+{
+    mutate_optional_locked_with(this, None, op).await
+}
+
+async fn mutate_optional_locked_with<F, R>(
+    this: &RecordingQueue,
+    idempotency: Option<PersistedIdempotency>,
+    op: F,
+) -> Result<Option<R>, QueueMutationError>
 where
     F: FnOnce(&mut PersistedRecordingQueue) -> Result<Option<R>, QueueMutationError>,
 {
@@ -247,7 +280,7 @@ where
     }
 
     // 5. Persist only after the complete candidate has been validated.
-    this.persist_records(next_revision, records).await?;
+    this.persist_records(next_revision, records, idempotency).await?;
 
     // 6. Commit. Swap the validated in-memory state from the persisted
     // candidate.
@@ -1012,7 +1045,7 @@ impl RecordingQueue {
     pub async fn persist_to_disk(&self) -> std::io::Result<()> {
         let revision = self.revision.load(Ordering::SeqCst);
         let records = self.snapshot_current(QueueRevision(revision)).await.to_records();
-        let result = self.commit_records(revision, records).await;
+        let result = self.commit_records(revision, records, None).await;
         // Callers discard the result; log here so persistence failures are never silent
         if let Err(err) = &result {
             error!("Failed to persist recording queue: {err}");
@@ -1024,13 +1057,19 @@ impl RecordingQueue {
     ///
     /// The repository fsyncs both its journal and its B+Tree, so it must not
     /// run on a runtime worker thread.
-    async fn commit_records(&self, revision: u64, records: Vec<PersistedRecordingTask>) -> std::io::Result<()> {
+    async fn commit_records(
+        &self,
+        revision: u64,
+        records: Vec<PersistedRecordingTask>,
+        idempotency: Option<PersistedIdempotency>,
+    ) -> std::io::Result<()> {
         let Some(repository) = self.repository.clone() else {
             return Ok(());
         };
+        let now = chrono::Utc::now().timestamp();
         tokio::task::spawn_blocking(move || {
             let mut guard = repository.lock().map_err(|_| poisoned_repository())?;
-            guard.commit(revision, &records)
+            guard.commit_with_idempotency(revision, &records, idempotency, now)
         })
         .await
         .map_err(std::io::Error::other)?
@@ -1040,8 +1079,9 @@ impl RecordingQueue {
         &self,
         revision: u64,
         records: Vec<PersistedRecordingTask>,
+        idempotency: Option<PersistedIdempotency>,
     ) -> Result<(), QueueMutationError> {
-        self.commit_records(revision, records).await.map_err(QueueMutationError::from_io)
+        self.commit_records(revision, records, idempotency).await.map_err(QueueMutationError::from_io)
     }
 
     /// Load the canonical recording state from the repository.
@@ -1049,6 +1089,37 @@ impl RecordingQueue {
     /// An empty repository is a fresh install. A record that cannot be
     /// converted back to its in-memory form is an error the caller must
     /// propagate: the repository is never reset or rebuilt from memory.
+    /// The recovery contract for an operator tool.
+    ///
+    /// Read-only: it reports, and never opens the B+Tree for mutation.
+    /// `None` when the queue is not repository backed.
+    pub async fn recovery_health(&self) -> Option<tuliprox_repository::recording_repository::RecoveryHealth> {
+        let repository = self.repository.clone()?;
+        tokio::task::spawn_blocking(move || repository.lock().ok().map(|guard| guard.health())).await.ok().flatten()
+    }
+
+    /// Whether a request carrying this idempotency key has already been
+    /// accepted. Without a repository there is nothing to remember, so every
+    /// request is fresh.
+    pub async fn lookup_idempotency(
+        &self,
+        principal: &str,
+        key: &str,
+        request_fingerprint: &str,
+    ) -> std::io::Result<IdempotencyOutcome> {
+        let Some(repository) = self.repository.clone() else {
+            return Ok(IdempotencyOutcome::Fresh);
+        };
+        let (principal, key, fingerprint) = (principal.to_owned(), key.to_owned(), request_fingerprint.to_owned());
+        let now = Utc::now().timestamp();
+        tokio::task::spawn_blocking(move || {
+            let mut guard = repository.lock().map_err(|_| poisoned_repository())?;
+            guard.lookup_idempotency(&principal, &key, &fingerprint, now)
+        })
+        .await
+        .map_err(std::io::Error::other)?
+    }
+
     pub async fn load_from_disk(&self) -> std::io::Result<()> {
         let Some(repository) = self.repository.clone() else {
             return Ok(());
@@ -2650,7 +2721,7 @@ mod tests {
         persisted.url = "not a url".to_string();
 
         let queue = RecordingQueue::new_persistent(&state_dir, &state_dir).expect("open recording repository");
-        queue.commit_records(1, vec![persisted]).await.expect("commit unparseable record");
+        queue.commit_records(1, vec![persisted], None).await.expect("commit unparseable record");
 
         let result = queue.load_from_disk().await;
 

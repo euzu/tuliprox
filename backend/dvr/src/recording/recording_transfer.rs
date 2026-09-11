@@ -186,6 +186,18 @@ fn publish_recording_change(event_manager: &Arc<EventManager>) {
     let _ = event_manager.send_event(EventMessage::RecordingChanged);
 }
 
+/// Announce that a running recording has grown.
+///
+/// A separate event from [`publish_recording_change`]: a capture can produce
+/// hundreds of these a second, and a session throttles them. A state
+/// transition must never be throttled, so it does not come through here.
+fn publish_recording_progress(event_manager: &Arc<EventManager>) {
+    if !event_manager.has_event_receivers() {
+        return;
+    }
+    let _ = event_manager.send_event(EventMessage::RecordingProgress);
+}
+
 fn broadcast_worker_mutation(
     event_manager: &Arc<EventManager>,
     result: Result<bool, QueueMutationError>,
@@ -230,7 +242,7 @@ async fn refresh_recording_progress(
     })
     .await;
     if changed {
-        publish_recording_change(event_manager);
+        publish_recording_progress(event_manager);
     }
 }
 

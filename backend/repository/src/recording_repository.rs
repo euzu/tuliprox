@@ -23,8 +23,8 @@ use std::{
     path::{Path, PathBuf},
 };
 use tuliprox_btree::{
-    BPlusTreeRecoveryJournal, CheckpointOutcome, RecoveryBatch, RecoveryHealth, RecoveryOpenReport, RecoveryOperation,
-    RecoveryPaths, RecoveryPolicy, RecoverySchema, RecoveryVerificationReport,
+    BPlusTreeRecoveryJournal, CheckpointOutcome, RecoveryBatch, RecoveryOpenReport, RecoveryOperation, RecoveryPaths,
+    RecoveryPolicy, RecoverySchema, RecoveryVerificationReport,
 };
 
 /// Name of the operational database inside the storage directory.
@@ -177,6 +177,47 @@ pub struct RecordingDbMetadata {
     pub queue_revision: u64,
 }
 
+/// How long an accepted idempotency key is honoured, from first acceptance.
+pub const IDEMPOTENCY_TTL_SECS: i64 = 24 * 60 * 60;
+
+/// One accepted request, remembered so a retry of it does not create a
+/// second recording.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PersistedIdempotency {
+    pub principal: String,
+    pub key: String,
+    /// Digest of the request body. A replay carrying the same key but a
+    /// different body is a caller bug, and answering it with the first
+    /// request's result would hide that.
+    pub request_fingerprint: String,
+    /// What the original accepted request produced.
+    pub recording_id: String,
+    /// Unix seconds at first acceptance. Retention runs from here, not from
+    /// the most recent replay, so a client retrying forever cannot pin a
+    /// record open forever.
+    pub accepted_at: i64,
+}
+
+impl PersistedIdempotency {
+    fn is_expired_at(&self, now: i64) -> bool { now.saturating_sub(self.accepted_at) >= IDEMPOTENCY_TTL_SECS }
+}
+
+/// What a caller should do with a request carrying an idempotency key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IdempotencyOutcome {
+    /// No live record: run the request.
+    Fresh,
+    /// Same principal, key and body as an accepted request.
+    Replay { recording_id: String },
+    /// Same principal and key, different body.
+    Conflict,
+}
+
+/// Re-exported so callers can report recovery health without taking a
+/// dependency on the B+Tree crate. The dependency direction is
+/// `dvr -> repository -> btree`.
+pub use tuliprox_btree::{RecoveryErrorClass, RecoveryHealth, RecoveryRepositoryState, RecoveryStoragePlacement};
+
 /// Keys of the recording database.
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(tag = "key", rename_all = "snake_case")]
@@ -189,6 +230,11 @@ pub enum RecordingDbKey {
     LibraryEntry {
         id: String,
     },
+    Idempotency {
+        principal: String,
+        /// Named `token` rather than `key`: the enum's internal tag is `key`.
+        token: String,
+    },
 }
 
 /// Values of the recording database.
@@ -198,6 +244,7 @@ pub enum RecordingDbValue {
     Metadata(RecordingDbMetadata),
     Materialization(Box<PersistedMaterialization>),
     LibraryEntry(Box<PersistedLibraryEntry>),
+    Idempotency(Box<PersistedIdempotency>),
 }
 
 fn invalid(message: impl Into<String>) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, message.into()) }
@@ -208,7 +255,8 @@ fn check_pairing(key: &RecordingDbKey, value: &RecordingDbValue) -> io::Result<(
     match (key, value) {
         (RecordingDbKey::Metadata, RecordingDbValue::Metadata(_))
         | (RecordingDbKey::Materialization { .. }, RecordingDbValue::Materialization(_))
-        | (RecordingDbKey::LibraryEntry { .. }, RecordingDbValue::LibraryEntry(_)) => Ok(()),
+        | (RecordingDbKey::LibraryEntry { .. }, RecordingDbValue::LibraryEntry(_))
+        | (RecordingDbKey::Idempotency { .. }, RecordingDbValue::Idempotency(_)) => Ok(()),
         _ => Err(invalid("recording record key and value describe different record kinds")),
     }
 }
@@ -261,6 +309,7 @@ struct StoredRecords {
     queue_revision: u64,
     materializations: BTreeMap<String, PersistedMaterialization>,
     entries: BTreeMap<String, PersistedLibraryEntry>,
+    idempotency: BTreeMap<(String, String), PersistedIdempotency>,
 }
 
 impl StoredRecords {
@@ -448,10 +497,72 @@ impl RecordingRepository {
     /// survive the loss of the database volume; the caller decides, and
     /// [`RecordingRepository::health`] reports what was chosen.
     pub fn open(storage_dir: &Path, recovery_root: &Path) -> io::Result<(Self, RecoveryOpenReport)> {
+        Self::open_at(storage_dir, recovery_root, chrono::Utc::now().timestamp())
+    }
+
+    /// [`open`](Self::open) against a supplied clock.
+    ///
+    /// Opening is one of the three moments idempotency retention runs, and a
+    /// test cannot exercise that against wall-clock time.
+    pub fn open_at(storage_dir: &Path, recovery_root: &Path, now: i64) -> io::Result<(Self, RecoveryOpenReport)> {
         let paths =
             RecoveryPaths { database: storage_dir.join(DATABASE_FILE), directory: recovery_root.join(RECOVERY_DIR) };
         let (journal, report) = Journal::open(paths, RecordingRecoverySchema, RecoveryPolicy::default())?;
-        Ok((Self { journal }, report))
+        let mut repository = Self { journal };
+        // A process that died with live keys would otherwise keep them until
+        // the next create, and a server that never records again would keep
+        // them forever.
+        let _ = repository.purge_expired_idempotency(now)?;
+        Ok((repository, report))
+    }
+
+    /// Delete every idempotency key whose 24 hours have elapsed.
+    ///
+    /// Returns how many were removed, so a caller can log or assert on it.
+    pub fn purge_expired_idempotency(&mut self, now: i64) -> io::Result<usize> {
+        let stored = self.read_records()?;
+        let operations: Vec<_> = stored
+            .idempotency
+            .iter()
+            .filter(|(_, record)| record.is_expired_at(now))
+            .map(|((principal, key), _)| {
+                RecoveryOperation::Delete(RecordingDbKey::Idempotency {
+                    principal: principal.clone(),
+                    token: key.clone(),
+                })
+            })
+            .collect();
+        let removed = operations.len();
+        if removed > 0 {
+            let _ = self.journal.apply_batch(RecoveryBatch::new(operations))?;
+        }
+        Ok(removed)
+    }
+
+    /// Whether a request carrying this key has already been accepted.
+    ///
+    /// An expired record reads as `Fresh`: the key is past its retention, so
+    /// the request is treated as new rather than as a conflict against
+    /// something the server has stopped promising to remember.
+    pub fn lookup_idempotency(
+        &mut self,
+        principal: &str,
+        key: &str,
+        request_fingerprint: &str,
+        now: i64,
+    ) -> io::Result<IdempotencyOutcome> {
+        let stored = self.read_records()?;
+        let Some(record) = stored.idempotency.get(&(principal.to_owned(), key.to_owned())) else {
+            return Ok(IdempotencyOutcome::Fresh);
+        };
+        if record.is_expired_at(now) {
+            return Ok(IdempotencyOutcome::Fresh);
+        }
+        if record.request_fingerprint == request_fingerprint {
+            Ok(IdempotencyOutcome::Replay { recording_id: record.recording_id.clone() })
+        } else {
+            Ok(IdempotencyOutcome::Conflict)
+        }
     }
 
     /// Reads every committed library entry joined to the file it references,
@@ -492,6 +603,12 @@ impl RecordingRepository {
                     }
                     let _ = stored.entries.insert(id, *entry);
                 }
+                (RecordingDbKey::Idempotency { principal, token }, RecordingDbValue::Idempotency(record)) => {
+                    if principal != record.principal || token != record.key {
+                        return Err(invalid("idempotency record is filed under a different key than it carries"));
+                    }
+                    let _ = stored.idempotency.insert((principal, token), *record);
+                }
                 _ => return Err(invalid("recording record key and value describe different record kinds")),
             }
         }
@@ -510,6 +627,25 @@ impl RecordingRepository {
     /// difference. Committing the diff rather than the whole set keeps the
     /// recovery journal proportional to what actually changed.
     pub fn commit(&mut self, queue_revision: u64, tasks: &[PersistedRecordingTask]) -> io::Result<()> {
+        self.commit_with_idempotency(queue_revision, tasks, None, chrono::Utc::now().timestamp())
+    }
+
+    /// `commit`, plus an accepted idempotency record.
+    ///
+    /// The record rides in the same batch as the recording it describes. A
+    /// separate write would leave a window where the recording exists and
+    /// the key that would suppress a retry does not — which is the precise
+    /// case idempotency is for.
+    ///
+    /// Expired keys are purged here too, so the create path is one of the
+    /// three places retention runs and the set cannot grow without bound.
+    pub fn commit_with_idempotency(
+        &mut self,
+        queue_revision: u64,
+        tasks: &[PersistedRecordingTask],
+        idempotency: Option<PersistedIdempotency>,
+        now: i64,
+    ) -> io::Result<()> {
         let mut incoming = StoredRecords::default();
         for task in tasks {
             let (materialization, entry) = split(task);
@@ -554,6 +690,20 @@ impl RecordingRepository {
                 RecordingDbValue::LibraryEntry(Box::new(entry.clone())),
             ));
         }
+        for ((principal, key), record) in &existing.idempotency {
+            if record.is_expired_at(now) {
+                operations.push(RecoveryOperation::Delete(RecordingDbKey::Idempotency {
+                    principal: principal.clone(),
+                    token: key.clone(),
+                }));
+            }
+        }
+        if let Some(record) = idempotency {
+            operations.push(RecoveryOperation::Upsert(
+                RecordingDbKey::Idempotency { principal: record.principal.clone(), token: record.key.clone() },
+                RecordingDbValue::Idempotency(Box::new(record)),
+            ));
+        }
         if existing.queue_revision != queue_revision || operations.is_empty() {
             operations.push(RecoveryOperation::Upsert(
                 RecordingDbKey::Metadata,
@@ -573,7 +723,13 @@ impl RecordingRepository {
         self.journal.verify()
     }
 
-    pub fn checkpoint_if_needed(&mut self) -> io::Result<CheckpointOutcome> { self.journal.checkpoint_if_needed() }
+    pub fn checkpoint_if_needed(&mut self) -> io::Result<CheckpointOutcome> {
+        // Compaction is the natural moment to drop dead keys: rewriting the
+        // checkpoint with them in it would carry them into the new
+        // generation.
+        let _ = self.purge_expired_idempotency(chrono::Utc::now().timestamp())?;
+        self.journal.checkpoint_if_needed()
+    }
 
     pub fn health(&self) -> RecoveryHealth { self.journal.health() }
 }
@@ -581,8 +737,8 @@ impl RecordingRepository {
 #[cfg(test)]
 mod tests {
     use super::{
-        LibraryPrincipal, PersistedRecordingTask, RecordingDbKey, RecordingDbValue, RecordingPartition,
-        RecordingRepository, RecordingVisibility,
+        IdempotencyOutcome, LibraryPrincipal, PersistedIdempotency, PersistedRecordingTask, RecordingDbKey,
+        RecordingDbValue, RecordingPartition, RecordingRepository, RecordingVisibility, IDEMPOTENCY_TTL_SECS,
     };
     use shared::model::{
         recording::{RecordingOwner, RecordingSource},
@@ -1089,6 +1245,157 @@ mod tests {
         for field in
             ["\"id\"", "\"principal\"", "\"materialization_id\"", "\"quota_bytes\"", "\"state\"", "\"partition\""]
         {
+            assert!(encoded.contains(field), "{field} is missing from {encoded}");
+        }
+        Ok(())
+    }
+
+    fn idempotency_record(key: &str, fingerprint: &str, accepted_at: i64) -> PersistedIdempotency {
+        PersistedIdempotency {
+            principal: "web:alice".to_string(),
+            key: key.to_string(),
+            request_fingerprint: fingerprint.to_string(),
+            recording_id: "a".to_string(),
+            accepted_at,
+        }
+    }
+
+    #[test]
+    fn replaying_an_accepted_request_returns_what_it_produced() -> io::Result<()> {
+        let fixture = Fixture::new()?;
+        let mut repository = fixture.open()?;
+        repository.commit_with_idempotency(1, &[task("a")], Some(idempotency_record("k1", "fp", 1_000)), 1_000)?;
+
+        let outcome = repository.lookup_idempotency("web:alice", "k1", "fp", 1_000)?;
+
+        assert_eq!(outcome, IdempotencyOutcome::Replay { recording_id: "a".to_string() });
+        Ok(())
+    }
+
+    #[test]
+    fn the_same_key_with_a_different_body_is_a_conflict() -> io::Result<()> {
+        // Answering this with the first request's result would hide a caller
+        // bug: two different requests would silently become one recording.
+        let fixture = Fixture::new()?;
+        let mut repository = fixture.open()?;
+        repository.commit_with_idempotency(1, &[task("a")], Some(idempotency_record("k1", "fp", 1_000)), 1_000)?;
+
+        assert_eq!(repository.lookup_idempotency("web:alice", "k1", "different", 1_000)?, IdempotencyOutcome::Conflict);
+        Ok(())
+    }
+
+    #[test]
+    fn another_principals_identical_key_is_not_a_replay() -> io::Result<()> {
+        // Keys are chosen by clients and collide across users constantly.
+        let fixture = Fixture::new()?;
+        let mut repository = fixture.open()?;
+        repository.commit_with_idempotency(1, &[task("a")], Some(idempotency_record("k1", "fp", 1_000)), 1_000)?;
+
+        assert_eq!(repository.lookup_idempotency("web:bob", "k1", "fp", 1_000)?, IdempotencyOutcome::Fresh);
+        Ok(())
+    }
+
+    #[test]
+    fn an_accepted_key_survives_a_restart() -> io::Result<()> {
+        // The point of persisting it: a client retrying across a server
+        // restart must not get a second recording.
+        let fixture = Fixture::new()?;
+        {
+            let mut repository = fixture.open()?;
+            repository.commit_with_idempotency(1, &[task("a")], Some(idempotency_record("k1", "fp", 1_000)), 1_000)?;
+        }
+
+        let (mut reopened, _) = RecordingRepository::open_at(&fixture.storage, &fixture.recovery, 1_000)?;
+
+        assert_eq!(
+            reopened.lookup_idempotency("web:alice", "k1", "fp", 1_000)?,
+            IdempotencyOutcome::Replay { recording_id: "a".to_string() }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reopening_sweeps_keys_that_expired_while_the_server_was_down() -> io::Result<()> {
+        // The other two sweep points need the server to be doing something.
+        // This one covers a process that died and came back later.
+        let fixture = Fixture::new()?;
+        {
+            let mut repository = fixture.open()?;
+            repository.commit_with_idempotency(1, &[task("a")], Some(idempotency_record("k1", "fp", 0)), 0)?;
+        }
+
+        let (mut reopened, _) =
+            RecordingRepository::open_at(&fixture.storage, &fixture.recovery, IDEMPOTENCY_TTL_SECS)?;
+
+        assert!(reopened.read_records()?.idempotency.is_empty(), "the dead key did not survive the restart");
+        Ok(())
+    }
+
+    #[test]
+    fn a_key_past_its_day_reads_as_fresh_rather_than_conflicting() -> io::Result<()> {
+        // Retention has expired, so the server has stopped promising to
+        // remember it. Reporting a conflict would refuse a request it can no
+        // longer explain.
+        let fixture = Fixture::new()?;
+        let mut repository = fixture.open()?;
+        repository.commit_with_idempotency(1, &[task("a")], Some(idempotency_record("k1", "fp", 0)), 0)?;
+
+        let just_past = IDEMPOTENCY_TTL_SECS;
+
+        assert_eq!(repository.lookup_idempotency("web:alice", "k1", "fp", just_past)?, IdempotencyOutcome::Fresh);
+        assert_eq!(
+            repository.lookup_idempotency("web:alice", "k1", "fp", IDEMPOTENCY_TTL_SECS - 1)?,
+            IdempotencyOutcome::Replay { recording_id: "a".to_string() },
+            "and it is still honoured right up to the boundary"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn expired_keys_are_deleted_and_not_merely_ignored() -> io::Result<()> {
+        // Ignoring them would let the set grow for the life of the server.
+        let fixture = Fixture::new()?;
+        let mut repository = fixture.open()?;
+        repository.commit_with_idempotency(1, &[task("a")], Some(idempotency_record("k1", "fp", 0)), 0)?;
+        assert_eq!(repository.read_records()?.idempotency.len(), 1);
+
+        let removed = repository.purge_expired_idempotency(IDEMPOTENCY_TTL_SECS)?;
+
+        assert_eq!(removed, 1);
+        assert!(repository.read_records()?.idempotency.is_empty(), "the record is gone from storage");
+        Ok(())
+    }
+
+    #[test]
+    fn a_later_create_sweeps_keys_that_expired_while_nothing_happened() -> io::Result<()> {
+        // Creating is one of the three moments retention runs, so a busy
+        // server never needs the other two.
+        let fixture = Fixture::new()?;
+        let mut repository = fixture.open()?;
+        repository.commit_with_idempotency(1, &[task("a")], Some(idempotency_record("old", "fp", 0)), 0)?;
+
+        repository.commit_with_idempotency(
+            2,
+            &[task("a")],
+            Some(idempotency_record("new", "fp2", IDEMPOTENCY_TTL_SECS)),
+            IDEMPOTENCY_TTL_SECS,
+        )?;
+
+        let keys: Vec<_> = repository.read_records()?.idempotency.into_keys().map(|(_, key)| key).collect();
+        assert_eq!(keys, vec!["new".to_string()], "the expired key went with the commit");
+        Ok(())
+    }
+
+    #[test]
+    fn an_idempotency_record_carries_no_request_detail() -> io::Result<()> {
+        // It stores a digest, not the body: the record is bookkeeping and
+        // must not become a second copy of what the user asked for.
+        let encoded = serde_json::to_string(&RecordingDbValue::Idempotency(Box::new(idempotency_record(
+            "k1",
+            "fingerprint-value",
+            1_000,
+        ))))?;
+        for field in ["\"principal\"", "\"key\"", "\"request_fingerprint\"", "\"recording_id\"", "\"accepted_at\""] {
             assert!(encoded.contains(field), "{field} is missing from {encoded}");
         }
         Ok(())

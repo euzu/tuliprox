@@ -30,6 +30,9 @@ pub enum EventMessage {
     SystemInfoUpdate(SystemInfo),
     LibraryScanProgress(LibraryScanProgressEvent),
     RecordingChanged,
+    /// Bytes moved, nothing else. Separate from `RecordingChanged` so a
+    /// session can rate limit it without also delaying a state transition.
+    RecordingProgress,
     RecordingRulesChanged,
     InputMetadataUpdatesCompleted(Arc<str>),
     InputMetadataUpdatesStarted(Arc<str>),

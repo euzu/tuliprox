@@ -5,8 +5,8 @@ use crate::{
     recording::{
         recording_disk, recording_path,
         recording_queue::{
-            mutate, PersistedRecordingQueue, PersistedRecordingTask, QueueMutationError, RecordingQueue, RecordingTask,
-            RecordingTaskState,
+            mutate, mutate_with_idempotency, IdempotencyOutcome, PersistedIdempotency, PersistedRecordingQueue,
+            PersistedRecordingTask, QueueMutationError, RecordingQueue, RecordingTask, RecordingTaskState,
         },
     },
     recording_deletion::{
@@ -122,6 +122,18 @@ pub enum ServiceError {
     /// `InvalidSource` because the caller's identifiers may be
     /// perfectly valid — nothing on the server can execute them.
     Disabled,
+    /// This exact request was already accepted under this idempotency key.
+    /// Not a failure: the caller gets the original outcome.
+    IdempotentReplay { recording_id: String },
+    /// Same idempotency key, different request body.
+    IdempotencyConflict,
+}
+
+/// An `Idempotency-Key` and a digest of the body it arrived with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IdempotencyRequest {
+    pub key: String,
+    pub fingerprint: String,
 }
 
 impl std::fmt::Display for ServiceError {
@@ -150,6 +162,8 @@ impl ServiceError {
             Self::InvalidPath => "recording_invalid_path",
             Self::DiskFull => "recording_disk_full",
             Self::Disabled => "recording_disabled",
+            Self::IdempotentReplay { .. } => "recording_idempotent_replay",
+            Self::IdempotencyConflict => "recording_idempotency_conflict",
         }
     }
 }
@@ -288,8 +302,39 @@ impl RecordingService {
         claims: &shared::model::Claims,
         input: &CreateRecordingInput,
     ) -> Result<RecordingTaskView, ServiceError> {
+        self.create_recording_idempotent(claims, input, None).await
+    }
+
+    /// `create_recording`, honouring an `Idempotency-Key`.
+    ///
+    /// A replay of an accepted request is answered from the stored record
+    /// rather than run again; the same key with a different body is a
+    /// conflict, because answering it with the first request's result would
+    /// hide a caller bug.
+    pub async fn create_recording_idempotent(
+        &self,
+        claims: &shared::model::Claims,
+        input: &CreateRecordingInput,
+        idempotency: Option<IdempotencyRequest>,
+    ) -> Result<RecordingTaskView, ServiceError> {
         input.validate()?;
         let owner_id = Self::subject_id(claims)?;
+        // Before any work: a replay must not resolve sources, reserve a path
+        // or touch quota.
+        if let Some(request) = idempotency.as_ref() {
+            match self
+                .recordings
+                .lookup_idempotency(owner_id.0.as_str(), &request.key, &request.fingerprint)
+                .await
+                .map_err(|err| ServiceError::IoError(err.to_string()))?
+            {
+                IdempotencyOutcome::Fresh => {}
+                IdempotencyOutcome::Replay { recording_id } => {
+                    return Err(ServiceError::IdempotentReplay { recording_id })
+                }
+                IdempotencyOutcome::Conflict => return Err(ServiceError::IdempotencyConflict),
+            }
+        }
         if !crate::recording::recording_supervisor::recording_enabled(&self.app_config) {
             return Err(ServiceError::Disabled);
         }
@@ -356,8 +401,15 @@ impl RecordingService {
         // measured, and an unmeasurable disk is not grounds to refuse.
         let disk_safety_bytes = recording_cfg.disk.as_ref().and_then(|disk| disk.safety_bytes).unwrap_or(0);
         let free_bytes = recording_disk::free_bytes_for(std::path::Path::new(&recording_cfg.directory));
+        let idempotency_record = idempotency.as_ref().map(|request| PersistedIdempotency {
+            principal: owner_id.0.clone(),
+            key: request.key.clone(),
+            request_fingerprint: request.fingerprint.clone(),
+            recording_id: view_task.uuid.clone(),
+            accepted_at: chrono::Utc::now().timestamp(),
+        });
 
-        mutate(&self.recordings, |candidate| {
+        let admit = |candidate: &mut PersistedRecordingQueue| -> Result<(), QueueMutationError> {
             reserve_recording_relative_path(candidate, &mut persisted)?;
             if candidate_has_duplicate_recording(candidate, &view_task) {
                 return Err(QueueMutationError::Duplicate);
@@ -381,10 +433,14 @@ impl RecordingService {
                     return Err(QueueMutationError::DiskFull);
                 }
             }
-            candidate.scheduled.push(persisted);
+            candidate.scheduled.push(persisted.clone());
             Ok(())
-        })
-        .await
+        };
+
+        match idempotency_record {
+            Some(record) => mutate_with_idempotency(&self.recordings, record, admit).await,
+            None => mutate(&self.recordings, admit).await,
+        }
         .map_err(|e| map_queue_error(&e))?;
 
         Ok(RecordingTaskView {

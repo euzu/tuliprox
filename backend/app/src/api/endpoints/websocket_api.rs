@@ -126,7 +126,7 @@ fn websocket_requires_system_read(auth_required: bool, mem: &ProtocolHandlerMemo
 
 fn websocket_can_receive_runtime_events(mem: &ProtocolHandlerMemory, event: &EventMessage) -> bool {
     match event {
-        EventMessage::RecordingChanged | EventMessage::RecordingRulesChanged => {
+        EventMessage::RecordingChanged | EventMessage::RecordingProgress | EventMessage::RecordingRulesChanged => {
             mem.permissions.contains(Permission::RecordingRead)
         }
         EventMessage::PlaylistUpdateProgress(_) | EventMessage::PlaylistUpdate(_) => {
@@ -418,11 +418,42 @@ async fn send_recording_snapshot_event(
     Ok(())
 }
 
+/// The shortest gap between two progress-only recording snapshots on one
+/// session.
+const RECORDING_PROGRESS_MIN_GAP: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// When this session last sent a progress-only recording snapshot.
+///
+/// A running capture reports growth many times a second and each report
+/// costs a full per-session filtered snapshot. Throttling is safe because
+/// the snapshot is rebuilt from current state at send time, so a skipped
+/// progress event is superseded rather than lost. State transitions arrive
+/// as `RecordingChanged` and are never throttled.
+#[derive(Debug, Default)]
+struct RecordingProgressThrottle {
+    last_sent: Option<std::time::Instant>,
+}
+
+impl RecordingProgressThrottle {
+    fn should_send(&mut self, now: std::time::Instant) -> bool {
+        let due = self.last_sent.is_none_or(|last| now.duration_since(last) >= RECORDING_PROGRESS_MIN_GAP);
+        if due {
+            self.last_sent = Some(now);
+        }
+        due
+    }
+
+    /// A state change also resets the clock: the client has just been given
+    /// current bytes, so the next progress tick can wait its full second.
+    fn note_full_snapshot(&mut self, now: std::time::Instant) { self.last_sent = Some(now); }
+}
+
 async fn handle_event_message(
     app_state: &Arc<AppState>,
     socket: &mut WebSocket,
     event: EventMessage,
     handler: &ProtocolHandler,
+    progress_throttle: &mut RecordingProgressThrottle,
 ) -> Result<(), WebSocketApiError> {
     match handler {
         ProtocolHandler::Version(_) => {}
@@ -491,7 +522,13 @@ async fn handle_event_message(
                     EventMessage::RecordingChanged => {
                         // Re-fetch the per-session filtered snapshot so the
                         // visibility contract is enforced by `recording_ws`.
+                        progress_throttle.note_full_snapshot(std::time::Instant::now());
                         send_recording_snapshot_event(app_state, socket, mem).await?;
+                    }
+                    EventMessage::RecordingProgress => {
+                        if progress_throttle.should_send(std::time::Instant::now()) {
+                            send_recording_snapshot_event(app_state, socket, mem).await?;
+                        }
                     }
                     EventMessage::RecordingRulesChanged => {
                         // The rule repository is per-process; the
@@ -527,6 +564,7 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<AppState>, auth_req
     let mut event_rx = app_state.event_manager.get_event_channel();
     let mut meter_event_rx = app_state.event_manager.get_meter_channel();
     let mut handler = ProtocolHandler::Version(PROTOCOL_VERSION);
+    let mut progress_throttle = RecordingProgressThrottle::default();
 
     loop {
         tokio::select! {
@@ -544,7 +582,7 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<AppState>, auth_req
             event_result = event_rx.recv() => {
                 match event_result {
                     Ok(event) => {
-                        if let Err(e) = handle_event_message(&app_state, &mut socket, event, &handler).await {
+                        if let Err(e) = handle_event_message(&app_state, &mut socket, event, &handler, &mut progress_throttle).await {
                             trace!("Failed to send ws event: {e}");
                             break;
                         }
@@ -628,7 +666,8 @@ async fn handle_user_action(app_state: &Arc<AppState>, cmd: UserCommand) -> bool
 mod tests {
     use super::{
         main_event_receive_error_action, set_no_auth_websocket_identity, set_websocket_auth,
-        websocket_can_receive_runtime_events, websocket_claims, MainEventReceiveErrorAction,
+        websocket_can_receive_runtime_events, websocket_claims, MainEventReceiveErrorAction, RecordingProgressThrottle,
+        RECORDING_PROGRESS_MIN_GAP,
     };
     use crate::api::model::EventMessage;
     use shared::model::{
@@ -821,7 +860,58 @@ mod tests {
         mem.role = UserRole::User;
 
         assert!(websocket_can_receive_runtime_events(&mem, &EventMessage::RecordingChanged));
+        assert!(websocket_can_receive_runtime_events(&mem, &EventMessage::RecordingProgress));
         assert!(websocket_can_receive_runtime_events(&mem, &EventMessage::RecordingRulesChanged));
+    }
+
+    #[test]
+    fn a_second_of_progress_reports_produces_one_snapshot() {
+        // A running capture reports growth many times a second and each
+        // report costs a full per-session filtered snapshot. Throttling is
+        // safe because the snapshot is rebuilt at send time, so a skipped
+        // report is superseded rather than lost.
+        let mut throttle = RecordingProgressThrottle::default();
+        let start = std::time::Instant::now();
+
+        let sent = (0..100)
+            .filter(|tick| {
+                // 100 reports spread across a single second.
+                throttle.should_send(start + std::time::Duration::from_millis(tick * 10))
+            })
+            .count();
+
+        assert_eq!(sent, 1, "a hundred progress reports in one second are worth one snapshot");
+    }
+
+    #[test]
+    fn progress_resumes_once_the_second_has_passed() {
+        // Throttling must not silence progress altogether.
+        let mut throttle = RecordingProgressThrottle::default();
+        let start = std::time::Instant::now();
+
+        assert!(throttle.should_send(start), "the first report is always worth sending");
+        assert!(!throttle.should_send(start + std::time::Duration::from_millis(999)));
+        assert!(throttle.should_send(start + RECORDING_PROGRESS_MIN_GAP));
+    }
+
+    #[test]
+    fn a_state_change_is_never_held_back_by_the_progress_timer() {
+        // Terminal states, command results and quota changes arrive as
+        // `RecordingChanged`; delaying one by up to a second would make a
+        // finished recording look like it was still running.
+        let mut throttle = RecordingProgressThrottle::default();
+        let start = std::time::Instant::now();
+        assert!(throttle.should_send(start), "consume the progress allowance");
+
+        // `RecordingChanged` does not consult the throttle at all; it only
+        // reports that a full snapshot just went out.
+        throttle.note_full_snapshot(start + std::time::Duration::from_millis(10));
+
+        assert!(
+            !throttle.should_send(start + std::time::Duration::from_millis(500)),
+            "and the next progress tick waits a full second from that snapshot"
+        );
+        assert!(throttle.should_send(start + std::time::Duration::from_millis(10) + RECORDING_PROGRESS_MIN_GAP));
     }
 
     #[test]
