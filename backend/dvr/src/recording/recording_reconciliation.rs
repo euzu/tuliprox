@@ -1,8 +1,7 @@
 //! Cross-store rule reconciliation.
 //!
 //! The scheduler persists two stores that can drift:
-//! - The queue (`downloads_state.json`) holds the materialized
-//!   recording tasks.
+//! - The recording repository holds the materialized recording tasks.
 //! - The rule repository (`recording_rules.json`) holds the rules
 //!   and the bounded tombstones.
 //!

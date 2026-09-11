@@ -817,11 +817,9 @@
       "RESERVE_SLOTS_FOR_USERS": "Keeps this many provider slots free for normal user streaming before background downloads are allowed to consume them.\n\nSet to 0 to disable reserved headroom.",
       "WEB_SEARCH": "Template URL for external web search (e.g. IMDb). {} is replaced by the title."
     },
-    "VIDEO_DOWNLOAD_CONFIG": {
-      "DIRECTORY": "The destination directory for downloaded video files.",
-      "EPISODE_PATTERN": "Regex with 'episode' capture group to clean up series filenames.\nExample:\n```\nepisode_pattern: '.*(?P<episode>[Ss]\\\\d{1,2}.*?[Ee]\\\\d{1,2}).*'\n```",
-      "ORGANIZE_INTO_DIRECTORIES": "If enabled, creates subdirectories per movie or series during download."
-    },
+    "DIRECTORY": "The destination directory for recorded video files.",
+    "EPISODE_PATTERN": "Regex with 'episode' capture group to clean up series filenames.\nExample:\n```\nepisode_pattern: '.*(?P<episode>[Ss]\\\\d{1,2}.*?[Ee]\\\\d{1,2}).*'\n```",
+    "ORGANIZE_INTO_DIRECTORIES": "If enabled, creates subdirectories per movie or series while recording.",
     "WEBUI_CONFIG": {
       "CONTENT_SECURITY_POLICY_CUSTOM_ATTRIBUTES": "Custom CSP (Content Security Policy) directives applied to the Web UI."
     },

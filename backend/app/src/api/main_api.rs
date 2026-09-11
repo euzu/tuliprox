@@ -77,7 +77,7 @@ async fn load_persisted_recording_state(recordings: &RecordingQueue) -> Result<(
         .map_err(|err| TuliproxError::Io(format!("Failed to load persisted recordings: {err}")))
 }
 
-async fn resume_downloads_after_bind(app_state: &Arc<AppState>, download_cfg: &crate::model::RecordingConfig) {
+async fn resume_recordings_after_bind(app_state: &Arc<AppState>, recording_cfg: &crate::model::RecordingConfig) {
     spawn_recording_services(&app_state.recording_ctx(), &app_state.cancel_tokens.load().recordings);
     // Reconcile the DVR state the previous process left behind *before*
     // the rule scheduler can plan against it, then start the retention
@@ -87,10 +87,10 @@ async fn resume_downloads_after_bind(app_state: &Arc<AppState>, download_cfg: &c
     // transient provider error is never retried.
     // Cloned out of the `ArcSwap` guard first: the guard must not be held
     // across the await below.
-    let downloads_cancel = app_state.cancel_tokens.load().recordings.clone();
-    start_recording_supervisors(&app_state.recording_ctx(), &downloads_cancel).await;
-    spawn_recording_rule_scheduler(&app_state.recording_ctx(), &downloads_cancel);
-    if let Err(err) = resume_recording_worker_if_needed(&app_state.recording_ctx(), download_cfg).await {
+    let recordings_cancel = app_state.cancel_tokens.load().recordings.clone();
+    start_recording_supervisors(&app_state.recording_ctx(), &recordings_cancel).await;
+    spawn_recording_rule_scheduler(&app_state.recording_ctx(), &recordings_cancel);
+    if let Err(err) = resume_recording_worker_if_needed(&app_state.recording_ctx(), recording_cfg).await {
         error!("Failed to resume persisted recordings during startup; continuing with recordings paused: {err}");
     }
 }
@@ -731,8 +731,8 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
         .await
         .map_err(|err| TuliproxError::Server(format!("Failed to bind to {host}:{port}, {err}")))?;
 
-    if let Some(download_cfg) = cfg.recording() {
-        resume_downloads_after_bind(&app_state, download_cfg).await;
+    if let Some(recording_cfg) = cfg.recording() {
+        resume_recordings_after_bind(&app_state, recording_cfg).await;
     }
 
     let server_cancel_token = CancellationToken::new();

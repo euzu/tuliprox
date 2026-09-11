@@ -1,9 +1,8 @@
 //! Transport-neutral HTTP execution primitives.
 //!
 //! Moved out of the Axum endpoint layer so the recording subsystem can
-//! drive resumable VOD/Series downloads through the same code path
-//! that the legacy `/file/download` handler did, without the endpoint
-//! module having to expose it.
+//! drive resumable VOD/Series transfers without the endpoint module
+//! having to expose them.
 //!
 //! Everything in this module is pure HTTP semantics: Range request
 //! construction, `Content-Range` parsing, retryability classification,
