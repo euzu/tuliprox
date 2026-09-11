@@ -264,7 +264,7 @@ runtime no longer carries. The charge drops to zero only when `finalize_deletion
 task from the queue.
 
 A task is counted exactly once. Private pools key on `RecordingOwner::User(uid)`; shared pools key
-on `RecordingVisibility::Shared`; `LegacyAdmin` recordings count toward the shared pool. Per-user
+on `RecordingVisibility::Shared`. Per-user
 overrides beat the configured default; an absent limit is unlimited.
 
 ### 5.1 Active overrun policy
@@ -347,13 +347,13 @@ behaviour they cover is asserted portably by the no-clobber tests.
 
 ## 8. Authorization matrix
 
-| Operation                    | Private recording                 | Shared recording                 | `LegacyAdmin`                   | Orphan       |
-|------------------------------|-----------------------------------|----------------------------------|---------------------------------|--------------|
-| Read / Playback / Download   | owner with `recording.read`       | anyone with `recording.read`     | admin only                      | admin only   |
-| Create private               | user with `recording.create`      | n/a                              | admin only                      | n/a          |
-| Create shared                | rejected (admin only)             | admin + `recording.create`       | admin only                      | n/a          |
-| Edit / Cancel                | owner + `recording.manage`        | admin + `recording.manage`       | admin only                      | n/a          |
-| Delete                       | owner + `recording.delete`        | admin + `recording.delete`       | admin only                      | n/a          |
+| Operation                    | Private recording                 | Shared recording                 | Orphan       |
+|------------------------------|-----------------------------------|----------------------------------|--------------|
+| Read / Playback / Download   | owner with `recording.read`       | anyone with `recording.read`     | admin only   |
+| Create private               | user with `recording.create`      | n/a                              | n/a          |
+| Create shared                | rejected (admin only)             | admin + `recording.create`       | n/a          |
+| Edit / Cancel                | owner + `recording.manage`        | admin + `recording.manage`       | n/a          |
+| Delete                       | owner + `recording.delete`        | admin + `recording.delete`       | n/a          |
 | Manage recurring rule        | owner + `recording.manage`        | admin + `recording.manage`       | admin only                      | n/a          |
 | `SystemRetentionDelete`      | ownership bypassed; state-gated   | ownership bypassed; state-gated  | ownership bypassed; state-gated | n/a          |
 | Orphan catalog               | n/a                               | n/a                              | n/a                             | admin only   |
@@ -401,39 +401,53 @@ Operators do **not** need to manually invalidate tokens on a schema bump. Existi
 `web_user_ids.json` are preserved; only the `subject_id` mapping for current usernames is
 recomputed if missing.
 
-## 11. Deprecated `/file/record` behavior
+## 11. The removed `/file/record` route
 
-The legacy `POST /file/record` route is **deprecated** and delegates to
-`RecordingService::create_recording` for administrators only. Non-administrators receive a 403 —
-the deprecated route does not bypass the new policy.
+`POST /file/record` and the whole `/api/v1/file/download/*` family are
+**gone**. There is no deprecated alias and no compatibility shim: a caller
+still using them gets a `404`.
 
-The migration:
-
-- **Frontend code**: switch from `downloads_service::queue_recording` to
-  `recording_service::RecordingService::create_task`. The new client submits
-  `RecordingSourceInput` (target_id + virtual_id + input_name) and `CreateRecordingTaskRequest`,
-  never a free-form URL.
-- **Operator code**: the legacy route is documented as deprecated and will be removed in the
-  next major release. New automations should use `/api/v1/recording/tasks` (and
-  `/api/v1/recording/rules` for recurring rules).
+Automations must use the recording routes below. They submit server-owned
+source ids (`target_id` + `virtual_id` + `input_name`), never a free-form URL
+or filename, so a caller cannot direct a recording at arbitrary storage.
 
 ## 12. Scoped REST and WebSocket APIs
 
-The recording surface is exposed under `/api/v1/recording`:
+Recording REST is **commands only**. Every successful command answers
+`204 No Content`; there is no list, task, status or quota endpoint to poll.
+List, progress, quota and availability all reach a client on the WebSocket
+snapshot, so a recording has one description rather than two that can
+disagree.
 
 ```text
-GET    /api/v1/recording/tasks
-POST   /api/v1/recording/tasks
-PATCH  /api/v1/recording/tasks/{id}
-POST   /api/v1/recording/tasks/{id}/cancel
-DELETE /api/v1/recording/tasks/{id}
+POST   /api/v1/recording/requests
+PATCH  /api/v1/recording/requests/{id}
+POST   /api/v1/recording/requests/{id}/cancel
+DELETE /api/v1/recording/requests/{id}
+POST   /api/v1/recording/materializations/{id}/pause
+POST   /api/v1/recording/materializations/{id}/resume
+POST   /api/v1/recording/materializations/{id}/retry
+DELETE /api/v1/recording/materializations/{id}
 POST   /api/v1/recording/conflicts/preview
-GET    /api/v1/recording/quota
+GET    /api/v1/recording/availability
+GET    /api/v1/recording/health
 GET    /api/v1/recording/rules
 POST   /api/v1/recording/rules
 PATCH  /api/v1/recording/rules/{id}
 DELETE /api/v1/recording/rules/{id}?future=retain|cancel
 ```
+
+A `requests/{id}` route addresses the caller's own library entry. The four
+`materializations/{id}` routes act on the shared physical file, are
+administrator-only, and reject Live captures — a broadcast cannot be paused,
+resumed or retried. Deleting a materialization is refused while any entry
+still references it.
+
+`POST /api/v1/recording/requests` accepts an optional `Idempotency-Key`.
+The same principal, key and body returns the original `204` without creating
+a second recording; the same key with a different body returns `409`. The
+record is kept for 24 hours from first acceptance and survives a restart, so
+a client retrying across one cannot duplicate its recording.
 
 The `tasks` payload is a per-session filtered snapshot. The WebSocket protocol carries
 `RecordingSnapshotRequest` and `RecordingSnapshotResponse { revision, tasks }`; there is no
@@ -453,8 +467,7 @@ The cancel-recording-task endpoint emits **both** events because cancelling futu
 recordings mutates the queue as well as the rule store.
 
 Filtering is server-side: private events go only to the owner session, shared events go to anyone
-with `recording.read`, `LegacyAdmin` events go only to administrator sessions. Generic download
-events (`DownloadsResponse`, `DownloadsDeltaResponse`) contain no recording tasks.
+with `recording.read`. A session is never sent another user's recording.
 
 ## 13. Conflict-preview advisory semantics
 
@@ -580,7 +593,6 @@ because a messaging provider is down.
 The routing decision:
 
 - `Shared` → deliver to global channels.
-- `Private` + `LegacyAdmin` owner → deliver.
 - `Private` + administrator owner → deliver.
 - `Private` + regular user owner → suppress.
 
@@ -601,9 +613,9 @@ Missing messaging configuration is a no-op; the adapter logs the dispatch decisi
    `X-Token-Refresh: required` 401. Users sign in again to receive the current claims.
 7. **Verify the recording root and free space** with `statvfs` (Linux) /
    `GetDiskFreeSpaceExW` (Windows). Confirm the `safety_bytes` is at least 1 GiB.
-8. **Verify legacy recordings and paths**. The pre-Phase-1 `file_dir` / `file_path` fields
-   normalize to private `LegacyAdmin` recordings. Confirm the existing media files are within
-   the configured recording root or the legacy download root before enabling retention.
+8. **Expect no recordings to carry over.** There is no migration: a pre-existing
+   `recordings_state.json` is ignored and the library starts empty. Existing media files are left
+   where they are and are not adopted into the new library.
 9. **Test one private and one shared recording** end-to-end before enabling the retention
    worker in production.
 10. **Enable retention / quotas gradually**. Start with `delete_after_days` only; add
@@ -621,7 +633,7 @@ The acceptance scenarios the operator should verify before declaring the migrati
    pre-existing `recordings_state.json` is ignored and the queue starts empty.
 2. Invalid recording kind / metadata combinations fail with `recording_invalid_state` or
    `recording_invalid_source`.
-3. Queue persistence failure leaves the state and revision unchanged and emits no delta.
+3. Queue persistence failure leaves the state and revision unchanged and publishes nothing.
 4. WebSocket revision gaps trigger a filtered resnapshot.
 5. A private recording is invisible to a second user in tasks, deltas, catalog, playback,
    conflicts, quota, and logs.

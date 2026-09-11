@@ -93,13 +93,31 @@ else
   fi
 fi
 
+section "Recovery health (reported by the server)"
+# The authoritative view: the server reads it from the repository through a
+# read-only accessor. The on-disk section below is what an operator can check
+# with the server down, and cannot see revisions or lag.
+if [[ -z "${TOKEN}" ]]; then
+  echo "skipped: needs an administrator token (--token)"
+elif command -v jq >/dev/null 2>&1; then
+  fetch /api/v1/recording/health \
+    | jq '.recovery // "not repository backed"' \
+    || echo "unavailable"
+  echo
+  echo "state repair_required  → mutations are blocked until a clean reopen."
+  echo "recovery_lag > 0       → the journal is ahead; the next open rebuilds."
+  echo "storage_placement same_filesystem → history dies with the volume."
+else
+  echo "skipped: needs jq to extract the recovery block"
+fi
+
 section "Effective recording configuration"
 if [[ -z "${TOKEN}" ]]; then
   echo "skipped: needs a token (--token)"
 elif command -v jq >/dev/null 2>&1; then
   # The DVR block only; the rest of the config may contain credentials.
   fetch /api/v1/config \
-    | jq '.config.video.download.recording // "no recording block configured (defaults apply)"' \
+    | jq '.config.video.recording // "no recording block configured (defaults apply)"' \
     || echo "unavailable"
 else
   echo "skipped: needs jq to extract the recording block without dumping"
@@ -107,11 +125,11 @@ else
 fi
 
 section "Recording quota"
-if [[ -z "${TOKEN}" ]]; then
-  echo "skipped: needs a token (--token)"
-else
-  fetch /api/v1/recording/quota | pretty || echo "unavailable"
-fi
+# Quota has no REST route: it is part of the per-session recording snapshot
+# delivered over the WebSocket, so there is no list or status endpoint to
+# poll. The health section below carries the server-wide numbers.
+echo "not a REST endpoint: quota reaches a client on the recording WebSocket"
+echo "snapshot. Use the health section above for server-wide figures."
 
 section "On-disk state"
 recordings_db="${STORAGE_DIR}/recordings.db"

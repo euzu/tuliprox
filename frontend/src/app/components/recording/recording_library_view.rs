@@ -111,14 +111,14 @@ fn render_progress(task: &RecordingTaskDto) -> Html {
     let text = format_progress(task);
     let bar = task.total_bytes.filter(|total| *total > 0).map(|total| {
         html! {
-            <progress class="tp__downloads-table__progress-bar"
+            <progress class="tp__recording-table__progress-bar"
                 aria-label={text.clone()}
                 max={total.to_string()}
                 value={task.transferred_bytes.to_string()} />
         }
     });
     html! {
-        <span class="tp__table__nowrap tp__downloads-table__progress">
+        <span class="tp__table__nowrap tp__recording-table__progress">
             { bar }
             <span>{ text }</span>
         </span>
@@ -234,6 +234,15 @@ async fn run_control(control: TaskControl, id: &str) -> Result<(), crate::servic
     }
 }
 
+/// Whether an arriving snapshot should replace what is rendered.
+///
+/// Revisions are global, so gaps are normal and carry no meaning. Going
+/// backwards does: that is a reordered delivery, and applying it would
+/// regress the list to a state the server has already moved past. `None`
+/// means nothing has been rendered yet, or a reconnect has just discarded
+/// what was.
+fn should_apply_snapshot(seen: Option<u64>, incoming: u64) -> bool { !seen.is_some_and(|last| incoming <= last) }
+
 #[function_component(RecordingLibraryView)]
 pub fn recording_library_view() -> Html {
     let translate = use_translation();
@@ -269,12 +278,8 @@ pub fn recording_library_view() -> Html {
             request_snapshot_effect.emit(());
             let sub_id = services.event.subscribe(move |msg| match msg {
                 crate::model::EventMessage::RecordingSnapshot { revision, tasks, .. } => {
-                    // Revisions are global, so gaps are normal and expected.
-                    // Going backwards is not: that is a reordered delivery,
-                    // and applying it would regress the list to a state the
-                    // server has already moved past.
                     let mut seen = seen_revision.borrow_mut();
-                    if seen.is_some_and(|last| revision <= last) {
+                    if !should_apply_snapshot(*seen, revision) {
                         return;
                     }
                     *seen = Some(revision);
@@ -381,7 +386,7 @@ pub fn recording_library_view() -> Html {
                     let retry_handle = handle_retry.clone();
                     let remove_handle = handle_remove.clone();
                     html! {
-                        <div class="tp__downloads-table__actions">
+                        <div class="tp__recording-table__actions">
                             if actions.pause {
                                 <IconButton name="Pause" icon="Pause" onclick={Callback::from(move |_| pause_handle.emit(pause_id.clone()))} />
                             }
@@ -451,17 +456,17 @@ pub fn recording_library_view() -> Html {
     };
 
     html! {
-        <div class="tp__downloads-view tp__list-view">
-            <div class="tp__downloads-view__body tp__list-view__body">
-                <div class="tp__downloads-list tp__list-list">
-                    <div class="tp__downloads-list__header tp__list-list__header">
+        <div class="tp__recording-view tp__list-view">
+            <div class="tp__recording-view__body tp__list-view__body">
+                <div class="tp__recording-list tp__list-list">
+                    <div class="tp__recording-list__header tp__list-list__header">
                         <h1>{translate.t("LABEL.RECORDING_LIBRARY")}</h1>
-                        <div class="tp__downloads-list__header-toolbar tp__radio-button-group ">
+                        <div class="tp__recording-list__header-toolbar tp__radio-button-group ">
                             {render_filter_button(RecordingTab::Current, "Record", translate.t("LABEL.RECORDING_CURRENT"))}
                             {render_filter_button(RecordingTab::Completed, "TaskDone", translate.t("LABEL.RECORDING_COMPLETED"))}
                         </div>
                     </div>
-                    <div class="tp__downloads-list__body tp__list-list__body">
+                    <div class="tp__recording-list__body tp__list-list__body">
                         if *initial_loaded {
                             <Table::<RecordingTaskDto> definition={table_definition} />
                         } else {
@@ -539,6 +544,42 @@ mod tests {
             task("vod", RecordingKind::Vod, TransferStatusDto::Running),
             task("series", RecordingKind::Series, TransferStatusDto::Completed),
         ])
+    }
+
+    #[test]
+    fn a_newer_snapshot_replaces_what_is_rendered() {
+        assert!(should_apply_snapshot(Some(7), 8));
+    }
+
+    #[test]
+    fn a_revision_gap_is_normal_and_applied() {
+        // The revision is global across every recording on the server, so a
+        // session sees only the subset that touched it. Treating a gap as
+        // loss would make the list stop updating.
+        assert!(should_apply_snapshot(Some(7), 900));
+    }
+
+    #[test]
+    fn an_older_or_repeated_snapshot_is_ignored() {
+        // Reordered delivery. Applying it would regress the list to a state
+        // the server has already moved past.
+        assert!(!should_apply_snapshot(Some(7), 6));
+        assert!(!should_apply_snapshot(Some(7), 7), "the same revision has nothing new to say");
+    }
+
+    #[test]
+    fn the_first_snapshot_is_always_applied() {
+        assert!(should_apply_snapshot(None, 0), "revision zero is still the first thing to render");
+        assert!(should_apply_snapshot(None, 42));
+    }
+
+    #[test]
+    fn a_reconnect_can_replace_state_the_server_never_renumbered() {
+        // On reconnect the view clears what it has seen. Without that, a
+        // client that missed changes while offline would refuse the fresh
+        // snapshot because its revision had not advanced past the stale one.
+        let after_reconnect = None;
+        assert!(should_apply_snapshot(after_reconnect, 7), "the same revision is accepted again after a reconnect");
     }
 
     #[test]

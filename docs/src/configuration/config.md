@@ -718,7 +718,7 @@ path only after ffmpeg exits successfully and the final path is still free.
 
 > **See also:** the full [DVR Operator Reference](../operator/dvr.md) — configuration reference, directory layout,
 > filename placeholders, lifecycle / restart, quota charge-by-state, disk admission, safe deletion, authorization
-> matrix, identity-registry bootstrap, token refresh, deprecated `/file/record`, REST + WebSocket surface, conflict
+> matrix, identity-registry bootstrap, token refresh, the removed `/file/record`, REST + WebSocket surface, conflict
 > preview, recurring-rule matching + DST + reconciliation, at-most-once notification protocol, migration checklist,
 > and the 32-scenario acceptance sweep.
 
@@ -747,7 +747,6 @@ The DVR layer runs an additional authorization pass on top of `recording.read`, 
 |------------|------------------------|-------------------------|--------------|-------------------------------------------|
 | `private`  | read + write + delete  | read + write + delete   | —            | Foreign reads return 404                  |
 | `shared`   | —                      | read + write + delete   | read         | Only admins create shared recordings      |
-| `legacy`   | — (orphan)             | read + write + delete   | —            | Created by the deprecated `/file/record`  |
 
 #### 6.1.3 Identity bootstrap
 
@@ -768,12 +767,12 @@ When the JWT schema version is bumped (a new field is added), existing tokens ar
 toastr surfaces a stable, translatable message. Operators upgrading across a schema-bump release do not need
 to do anything manually.
 
-#### 6.1.5 Deprecated `/file/record`
+#### 6.1.5 The removed `/file/record`
 
-`POST /api/v1/file/record` is the legacy recording endpoint. It is still functional and admin-gated, but
-returns a `recording_forbidden` error for non-admin principals and is **scheduled for removal in the next
-major version**. New code should use `POST /api/v1/recording/tasks` with a `CreateRecordingTaskBody` payload
-(see [REST API cookbook](../rest-api-cookbook.md#downloads-and-recordings)).
+`POST /api/v1/file/record` and the `/api/v1/file/download/*` family have been
+**removed**. There is no deprecated alias and no compatibility shim; a caller still using them gets a
+`404`. Use `POST /api/v1/recording/requests`, which answers `204 No Content`
+(see [REST API cookbook](../rest-api-cookbook.md#recordings)).
 
 > **Note:** The named capture group `(?P<episode>...)` is **mandatory** for this to function correctly.
 >
