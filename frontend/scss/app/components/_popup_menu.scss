@@ -8,6 +8,7 @@
   max-width: min(24rem, calc(100vw - 1rem));
   max-height: 70vh;
   max-height: min(70vh, calc(100vh - 1rem));
+  box-sizing: border-box;
   padding: var(--padding-mini);
   border: 1px solid var(--border-color);
   border-radius: var(--border-radius);
@@ -18,6 +19,11 @@
   z-index: var(--z-index-menu);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
+
+  &--match-anchor {
+    width: var(--popup-anchor-width);
+    max-width: calc(100vw - 1rem);
+  }
 
   ul {
     margin: 0;

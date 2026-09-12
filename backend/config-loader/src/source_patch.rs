@@ -4,7 +4,7 @@ use shared::{
     model::{ConfigInputAliasDto, SourcesConfigDto},
     utils::is_nullish,
 };
-use std::{collections::HashMap, fmt::Write, ops::Range};
+use std::{collections::HashMap, ops::Range};
 
 #[derive(Debug, Clone)]
 pub struct TextEdit {
@@ -119,40 +119,84 @@ pub fn line_end_offset(text: &str, byte_pos: usize) -> usize {
     }
 }
 
-/// Returns true when the mapping owning `byte_range` is written in flow style (`{...}`).
+/// Opening byte offset when the scalar owning `byte_range` is inside a flow mapping (`{...}`).
 ///
-/// Scanning starts at the beginning of the line holding the value and walks backwards over
-/// preceding lines while they belong to the same flow scope, so a value on a continuation line
-/// of a multi-line flow mapping is still detected.
-fn is_flow_style_mapping_at(text: &str, byte_range: &Range<usize>) -> bool {
-    let mut depth = 0i32;
-    for ch in text[..byte_range.start.min(text.len())].chars().rev() {
-        match ch {
-            '}' | ']' => depth += 1,
-            '{' | '[' if depth == 0 => return true,
-            '{' | '[' => depth -= 1,
-            '\n' if depth == 0 => break,
+/// The lightweight scanner ignores quoted values and comments while tracking nested flow
+/// collections. Opening delimiters are only recognized at YAML token boundaries so braces in
+/// plain values such as environment placeholders do not create false flow scopes.
+fn flow_mapping_start_at(text: &str, byte_range: &Range<usize>) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let limit = byte_range.start.min(bytes.len());
+    let mut flow_stack = Vec::<(u8, usize)>::new();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut in_comment = false;
+    let mut index = 0;
+
+    while index < limit {
+        let byte = bytes[index];
+        if in_comment {
+            if byte == b'\n' {
+                in_comment = false;
+            }
+            index += 1;
+            continue;
+        }
+        if in_single_quote {
+            if byte == b'\'' {
+                if index + 1 < limit && bytes[index + 1] == b'\'' {
+                    index += 2;
+                    continue;
+                }
+                in_single_quote = false;
+            }
+            index += 1;
+            continue;
+        }
+        if in_double_quote {
+            if byte == b'\\' {
+                index = (index + 2).min(limit);
+                continue;
+            }
+            if byte == b'"' {
+                in_double_quote = false;
+            }
+            index += 1;
+            continue;
+        }
+
+        match byte {
+            b'\'' => in_single_quote = true,
+            b'"' => in_double_quote = true,
+            b'#' if index == 0
+                || bytes[index - 1].is_ascii_whitespace()
+                || matches!(bytes[index - 1], b',' | b'{' | b'[') =>
+            {
+                in_comment = true;
+            }
+            b'{' | b'['
+                if index == 0
+                    || bytes[index - 1].is_ascii_whitespace()
+                    || matches!(bytes[index - 1], b'-' | b':' | b',' | b'{' | b'[') =>
+            {
+                flow_stack.push((byte, index));
+            }
+            b'}' if flow_stack.last().is_some_and(|(delimiter, _)| *delimiter == b'{') => {
+                flow_stack.pop();
+            }
+            b']' if flow_stack.last().is_some_and(|(delimiter, _)| *delimiter == b'[') => {
+                flow_stack.pop();
+            }
             _ => {}
         }
+        index += 1;
     }
-    false
+
+    flow_stack.last().filter(|(delimiter, _)| *delimiter == b'{').map(|(_, start)| *start)
 }
 
-/// Rejects inserting a new key into a flow-style mapping.
-///
-/// Replacing an existing scalar inside a flow mapping is safe because its span is explicit,
-/// but inserting a whole `key: value` line is not representable there.
-pub fn ensure_block_style_for_insertion(
-    text: &str,
-    anchor: &Range<usize>,
-    field_name: &str,
-) -> Result<(), TuliproxError> {
-    if is_flow_style_mapping_at(text, anchor) {
-        return Err(TuliproxError::Config(format!(
-            "cannot insert optional field '{field_name}' into a flow-style YAML mapping; edit the account in block style"
-        )));
-    }
-    Ok(())
+fn is_flow_style_mapping_at(text: &str, byte_range: &Range<usize>) -> bool {
+    flow_mapping_start_at(text, byte_range).is_some()
 }
 
 /// Byte offset of the end of the line holding `byte_pos`, excluding its line break.
@@ -198,17 +242,19 @@ pub fn sibling_key_indent(text: &str, byte_pos: usize) -> usize {
     indent
 }
 
-/// Builds an edit that inserts `key: value` on its own line directly below the anchor line.
+/// Builds an edit that inserts `key: value` next to an existing scalar in the same mapping.
 ///
-/// The anchor range must point at an existing sibling scalar in the same mapping; its line
-/// indentation and the document's newline style are reused so no existing byte changes.
+/// Block mappings receive a sibling line below the anchor. Flow mappings receive the new entry
+/// immediately after the anchor value, before its existing separator or closing brace.
 pub fn build_field_insertion_edit(
     text: &str,
     anchor: &Range<usize>,
     key: &str,
     value: &str,
 ) -> Result<TextEdit, TuliproxError> {
-    ensure_block_style_for_insertion(text, anchor, key)?;
+    if is_flow_style_mapping_at(text, anchor) {
+        return Ok(TextEdit { range: anchor.end..anchor.end, replacement: format!(", {key}: {value}") });
+    }
     let insert_at = line_content_end(text, anchor.end);
     let indent = sibling_key_indent(text, anchor.start);
     let newline = detect_newline(text);
@@ -320,17 +366,30 @@ fn ensure_unique_alias_names(input: &serde_saphyr::Spanned<PatchInput>, input_na
     Ok(())
 }
 
+fn alias_item_line_start(text: &str, alias: &serde_saphyr::Spanned<PatchAlias>) -> Result<usize, TuliproxError> {
+    let alias_range = span_byte_range(alias)?;
+    let name_range = span_byte_range(&alias.value.name)?;
+    // A projected multiline flow map starts at its first child, not necessarily
+    // at the '{'. Use the owning map's opener to retain the sequence item's '-'.
+    let mapping_start = flow_mapping_start_at(text, &name_range).unwrap_or(alias_range.start);
+    let line_start = text[..mapping_start].rfind('\n').map_or(0, |pos| pos + 1);
+    if !text[line_start..mapping_start].trim_start().starts_with('-') && line_start > 0 {
+        let previous_start = text[..line_start - 1].rfind('\n').map_or(0, |pos| pos + 1);
+        if text[previous_start..line_start].trim() == "-" {
+            return Ok(previous_start);
+        }
+    }
+    Ok(line_start)
+}
+
 pub fn alias_item_block_range(
     text: &str,
     alias_span: &serde_saphyr::Spanned<PatchAlias>,
 ) -> Result<Range<usize>, TuliproxError> {
-    let alias_range = span_byte_range(alias_span)?;
     let name_range = span_byte_range(&alias_span.value.name)?;
-    let line_start = text[..alias_range.start].rfind('\n').map_or(0, |p| p + 1);
-    let dash_pos = text[line_start..alias_range.start].find('-').map_or(line_start, |p| line_start + p);
-    let block_start = text[..dash_pos].rfind('\n').map_or(0, |p| p + 1);
+    let block_start = alias_item_line_start(text, alias_span)?;
 
-    let comment_start = find_owned_comment_start(text, block_start, line_start);
+    let comment_start = find_owned_comment_start(text, block_start, block_start);
 
     let block_end;
     let item_indent = text[block_start..].chars().take_while(|c| *c == ' ').count();
@@ -353,13 +412,21 @@ pub fn alias_item_block_range(
             continue;
         }
         let next_indent = next_line.chars().take_while(|c| *c == ' ').count();
-        if next_indent < item_indent || (next_indent == item_indent && stripped.starts_with('-')) {
+        // Indentless block sequences put their '-' at the same column as the
+        // parent's next key. That key ends the item just like a following '-'.
+        // A closing line of a multiline flow mapping still belongs to the item.
+        if (next_indent < item_indent || (next_indent == item_indent && !stripped.starts_with('#')))
+            && !is_flow_style_mapping_at(text, &(next_line_start..next_line_start))
+        {
             block_end = next_line_start;
             break;
         }
-        if next_indent == item_indent && stripped.starts_with('#') {
+        if next_indent == item_indent
+            && stripped.starts_with('#')
+            && !is_flow_style_mapping_at(text, &(next_line_start..next_line_start))
+        {
             let mut lookahead = next_line_end;
-            let mut comments_belong_to_next_item = false;
+            let mut comments_belong_to_next_node = false;
             while lookahead < text.len() {
                 let lookahead_end = match text[lookahead..].find('\n') {
                     Some(off) => lookahead + off + 1,
@@ -372,13 +439,10 @@ pub fn alias_item_block_range(
                     lookahead = lookahead_end;
                     continue;
                 }
-                if candidate_indent == item_indent && candidate_stripped.starts_with('-') {
-                    comments_belong_to_next_item = true;
-                    break;
-                }
+                comments_belong_to_next_node = candidate_indent <= item_indent && !candidate_stripped.is_empty();
                 break;
             }
-            if comments_belong_to_next_item {
+            if comments_belong_to_next_node {
                 block_end = next_line_start;
                 break;
             }
@@ -418,32 +482,43 @@ pub fn serialize_alias_block(
     indent: usize,
     newline: &str,
 ) -> Result<String, TuliproxError> {
+    serialize_alias_item(alias, indent, newline, AliasMappingStyle::Block)
+}
+
+#[derive(Clone, Copy)]
+enum AliasMappingStyle {
+    Block,
+    Flow,
+}
+
+fn alias_mapping_style(text: &str, alias: &PatchAlias) -> Result<AliasMappingStyle, TuliproxError> {
+    let name = span_byte_range(&alias.name)?;
+    Ok(if is_flow_style_mapping_at(text, &name) { AliasMappingStyle::Flow } else { AliasMappingStyle::Block })
+}
+
+fn serialize_alias_item(
+    alias: &ConfigInputAliasDto,
+    indent: usize,
+    newline: &str,
+    style: AliasMappingStyle,
+) -> Result<String, TuliproxError> {
+    // Use the same DTO serializer as a regular config save, excluding the
+    // computed ID. Only the existing item's explicit flow style overrides it.
+    let mut alias = alias.clone();
+    alias.id = 0;
+    let serialized = match style {
+        AliasMappingStyle::Block => serialize_yaml_scalar(&[alias])?,
+        AliasMappingStyle::Flow => serialize_yaml_scalar(&[serde_saphyr::FlowMap(alias)])?,
+    };
     let pad = " ".repeat(indent);
-    let mut out = String::new();
-    let _ = writeln!(out, "{pad}- name: {}", serialize_yaml_scalar(&alias.name.as_ref())?);
-    let _ = writeln!(out, "{pad}  url: {}", serialize_yaml_scalar(&alias.url)?);
-    if let Some(username) = &alias.username {
-        let _ = writeln!(out, "{pad}  username: {}", serialize_yaml_scalar(username)?);
+    Ok(serialized.lines().map(|line| format!("{pad}{line}")).collect::<Vec<_>>().join(newline))
+}
+
+fn append_alias_text(output: &mut String, item: &str, newline: &str) {
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push_str(newline);
     }
-    if let Some(password) = &alias.password {
-        let _ = writeln!(out, "{pad}  password: {}", serialize_yaml_scalar(password)?);
-    }
-    if alias.max_connections != 0 {
-        let _ = writeln!(out, "{pad}  max_connections: {}", serialize_yaml_scalar(&alias.max_connections)?);
-    }
-    if let Some(exp_date) = alias.exp_date {
-        let _ = writeln!(out, "{pad}  exp_date: {}", serialize_yaml_scalar(&exp_date)?);
-    }
-    if !alias.enabled {
-        let _ = writeln!(out, "{pad}  enabled: false");
-    }
-    if out.ends_with('\n') {
-        out.truncate(out.len() - 1);
-    }
-    if newline == "\r\n" {
-        out = out.replace('\n', "\r\n");
-    }
-    Ok(out)
+    output.push_str(item);
 }
 
 pub fn build_alias_addition_edit(
@@ -457,13 +532,40 @@ pub fn build_alias_addition_edit(
 
     if let Some(aliases_spanned) = &input.value.aliases {
         let aliases = &aliases_spanned.value;
+        if aliases.iter().any(|existing| existing.value.name.value == alias.name.as_ref()) {
+            return Err(TuliproxError::Config(format!(
+                "source.yml patch: alias '{}' already exists under input '{input_name}'",
+                alias.name
+            )));
+        }
         if aliases.is_empty() {
             let aliases_range = span_byte_range(aliases_spanned)?;
-            let line_end = line_end_offset(text, aliases_range.end);
-            let indent = line_indent_at(text, aliases_range.start) + 2;
-            let block = serialize_alias_block(alias, indent, newline)?;
-            let insertion = format!("{newline}{block}{newline}");
-            return Ok(TextEdit { range: line_end..line_end, replacement: insertion });
+            let line_start = text[..aliases_range.start].rfind('\n').map_or(0, |pos| pos + 1);
+            let line_end = line_content_end(text, aliases_range.end);
+            let line = &text[line_start..line_end];
+            let field_indent = line.chars().take_while(|ch| *ch == ' ' || *ch == '\t').count();
+            let value = line[field_indent..]
+                .strip_prefix("aliases:")
+                .map(str::trim_start)
+                .ok_or_else(|| TuliproxError::Config("source.yml patch: empty aliases field not found".to_string()))?;
+            let closing_bracket = value.find(']').ok_or_else(|| {
+                TuliproxError::Config("source.yml patch: unsupported empty aliases sequence layout".to_string())
+            })?;
+            if !value.starts_with('[') || !value[1..closing_bracket].trim().is_empty() {
+                return Err(TuliproxError::Config(
+                    "source.yml patch: unsupported empty aliases sequence layout".to_string(),
+                ));
+            }
+            let trailing = value[closing_bracket + 1..].trim_start();
+            if !trailing.is_empty() && !trailing.starts_with('#') {
+                return Err(TuliproxError::Config(
+                    "source.yml patch: unsupported content after empty aliases sequence".to_string(),
+                ));
+            }
+            let block = serialize_alias_block(alias, field_indent + 2, newline)?;
+            let comment = if trailing.is_empty() { String::new() } else { format!(" {trailing}") };
+            let replacement = format!("{:field_indent$}aliases:{comment}{newline}{block}", "");
+            return Ok(TextEdit { range: line_start..line_end, replacement });
         }
         let Some(last_alias) = aliases.last() else {
             return Err(TuliproxError::Config(format!(
@@ -471,20 +573,20 @@ pub fn build_alias_addition_edit(
             )));
         };
         let last_block = alias_item_block_range(text, last_alias)?;
-        let item_indent = text[last_block.start..].chars().take_while(|c| *c == ' ').count();
-        let block = serialize_alias_block(alias, item_indent, newline)?;
-        let insertion = format!("{block}{newline}");
+        let item_indent = line_indent_at(text, alias_item_line_start(text, last_alias)?);
+        let style = alias_mapping_style(text, &last_alias.value)?;
+        let block = serialize_alias_item(alias, item_indent, newline, style)?;
+        let separator = if text[..last_block.end].ends_with('\n') { "" } else { newline };
+        let insertion = format!("{separator}{block}{newline}");
         return Ok(TextEdit { range: last_block.end..last_block.end, replacement: insertion });
     }
 
     let input_span_range = span_byte_range(&input.value.name)?;
-    let input_indent = line_indent_at(text, input_span_range.start);
-    let aliases_indent = input_indent;
-    let item_indent = aliases_indent + 2;
+    let field_indent = sibling_key_indent(text, input_span_range.start);
+    let item_indent = field_indent + 2;
 
     // `aliases: null` (or an empty `aliases:`) deserializes to `None` but still occupies a line.
     // Replacing that line in place is what turns the null marker into a real block sequence.
-    let field_indent = sibling_key_indent(text, input_span_range.start);
     if let Some(null_line) = find_null_aliases_line(text, input_span_range.end, field_indent) {
         let block = serialize_alias_block(alias, field_indent + 2, newline)?;
         let pad = " ".repeat(field_indent);
@@ -492,42 +594,30 @@ pub fn build_alias_addition_edit(
         return Ok(TextEdit { range: null_line, replacement });
     }
 
-    let mut last_field_end: Option<usize> = None;
-    if let Some(f) = &input.value.panel_api {
-        last_field_end = Some(span_byte_range(f)?.end);
+    // Anchor the new sibling only to scalar input fields. A span from the reduced
+    // `PatchPanelApi` projection does not describe the complete nested mapping and can point
+    // into its first child instead of behind the `panel_api` block.
+    let mut anchor_end = input_span_range.end;
+    if let Some(field) = &input.value.max_connections {
+        anchor_end = anchor_end.max(span_byte_range(field)?.end);
     }
-    if last_field_end.is_none() {
-        if let Some(f) = &input.value.max_connections {
-            last_field_end = Some(span_byte_range(f)?.end);
-        }
+    if let Some(field) = &input.value.exp_date {
+        anchor_end = anchor_end.max(span_byte_range(field)?.end);
     }
-    if last_field_end.is_none() {
-        if let Some(f) = &input.value.exp_date {
-            last_field_end = Some(span_byte_range(f)?.end);
-        }
+    if let Some(field) = &input.value.password {
+        anchor_end = anchor_end.max(span_byte_range(field)?.end);
     }
-    if last_field_end.is_none() {
-        if let Some(f) = &input.value.password {
-            last_field_end = Some(span_byte_range(f)?.end);
-        }
+    if let Some(field) = &input.value.username {
+        anchor_end = anchor_end.max(span_byte_range(field)?.end);
     }
-    if last_field_end.is_none() {
-        if let Some(f) = &input.value.username {
-            last_field_end = Some(span_byte_range(f)?.end);
-        }
-    }
-    if last_field_end.is_none() {
-        if let Some(f) = &input.value.url {
-            last_field_end = Some(span_byte_range(f)?.end);
-        }
+    if let Some(field) = &input.value.url {
+        anchor_end = anchor_end.max(span_byte_range(field)?.end);
     }
 
-    let anchor_end = last_field_end.unwrap_or(input_span_range.end);
-    let line_end = line_end_offset(text, anchor_end);
+    let insert_at = line_content_end(text, anchor_end);
     let block = serialize_alias_block(alias, item_indent, newline)?;
-    let insertion =
-        format!("{newline}{:aliases_indent$}aliases:{newline}{block}{newline}", "", aliases_indent = aliases_indent);
-    Ok(TextEdit { range: line_end..line_end, replacement: insertion })
+    let insertion = format!("{newline}{:field_indent$}aliases:{newline}{block}", "", field_indent = field_indent);
+    Ok(TextEdit { range: insert_at..insert_at, replacement: insertion })
 }
 
 /// Scans forward from `start` for an `aliases:` line at `key_indent` whose value is empty or
@@ -622,7 +712,7 @@ pub fn build_alias_sort_edit(
                 "source.yml patch: alias '{name}' not found during sort for input '{input_name}'"
             ))
         })?;
-        reordered_text.push_str(&text[range.clone()]);
+        append_alias_text(&mut reordered_text, &text[range.clone()], detect_newline(text));
     }
 
     Ok(Some(TextEdit { range: first_block_start..last_block_end, replacement: reordered_text }))
@@ -662,17 +752,19 @@ pub fn build_alias_sequence_edit(
         .map(|range| range.end)
         .max()
         .ok_or_else(|| TuliproxError::Config("source.yml patch: alias sequence has no end".to_string()))?;
-    let first_name_start =
-        aliases.first().map(|alias| span_byte_range(&alias.value.name)).transpose()?.map_or(start, |range| range.start);
-    let item_indent = line_indent_at(text, first_name_start);
+    let last_alias = aliases
+        .last()
+        .ok_or_else(|| TuliproxError::Config("source.yml patch: alias sequence has no last item".to_string()))?;
+    let item_indent = line_indent_at(text, alias_item_line_start(text, last_alias)?);
+    let style = alias_mapping_style(text, &last_alias.value)?;
     let newline = detect_newline(text);
     let mut replacement = String::new();
 
     for alias in expected_aliases {
         if let Some(range) = blocks.get(alias.name.as_ref()) {
-            replacement.push_str(&text[range.clone()]);
+            append_alias_text(&mut replacement, &text[range.clone()], newline);
         } else {
-            replacement.push_str(&serialize_alias_block(alias, item_indent, newline)?);
+            append_alias_text(&mut replacement, &serialize_alias_item(alias, item_indent, newline, style)?, newline);
             replacement.push_str(newline);
         }
     }
@@ -683,6 +775,157 @@ pub fn build_alias_sequence_edit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write as _;
+
+    fn alias_layout_fixture(indent: usize, style: &str, newline: &str) -> String {
+        let mut text =
+            String::from("inputs:\n- name: provider\n  type: xtream\n  url: provider://example\n  aliases:\n");
+        for (index, name) in ["older", "newer"].iter().enumerate() {
+            let item = match style {
+                "flow" => format!("- {{name: {name}, url: provider://example, exp_date: {index}}}\n"),
+                "multiline-flow" => {
+                    format!("- {{\n    name: {name},\n    url: provider://example,\n    exp_date: {index}\n# comment inside flow item\n}}\n")
+                }
+                "mixed" if index == 1 => format!("- {{name: {name}, url: provider://example, exp_date: {index}}}\n"),
+                "block" | "mixed" => format!("- name: {name}\n  url: provider://example\n  exp_date: {index}\n"),
+                _ => panic!("unsupported test style"),
+            };
+            writeln!(text, "{}# comment for {name}", " ".repeat(indent)).expect("fixture comment");
+            for line in item.lines() {
+                writeln!(text, "{}{line}", " ".repeat(indent)).expect("fixture line");
+            }
+        }
+        text.push_str(concat!(
+            "  # panel settings belong to the input\n",
+            "  panel_api:\n",
+            "    url: http://panel.example\n",
+            "    api_key: synthetic-key\n",
+            "    alias_pool:\n",
+            "      size:\n",
+            "        min: 1\n",
+            "        max: auto\n",
+            "      remove_expired: true\n",
+            "- name: next-input\n",
+            "  url: http://next.example\n",
+            "sources: []\n",
+        ));
+        text.replace('\n', newline)
+    }
+
+    #[test]
+    fn alias_layout_preserves_flow_block_and_mixed_items_and_following_panel() {
+        for indent in [2, 4] {
+            for style in ["block", "flow", "multiline-flow", "mixed"] {
+                for newline in ["\n", "\r\n"] {
+                    let original = alias_layout_fixture(indent, style, newline);
+                    let doc = parse_patch_document(&original).expect("projection");
+                    let before: SourcesConfigDto = serde_saphyr::from_str(&original).expect("original config");
+                    let aliases = &doc.inputs[0].value.aliases.as_ref().expect("aliases").value;
+                    let suffix_start = original.find("  # panel settings").expect("panel comment");
+                    let prefix = &original[..original.find("aliases:").expect("aliases")];
+                    for alias in aliases {
+                        let range = alias_item_block_range(&original, alias).expect("item range");
+                        assert!(
+                            range.end <= suffix_start,
+                            "indent={indent}, style={style}: {}",
+                            &original[range.clone()]
+                        );
+                        assert!(!original[range].contains("panel_api:"));
+                    }
+
+                    let added = ConfigInputAliasDto {
+                        id: 42,
+                        name: "added".into(),
+                        url: "provider://example".to_string(),
+                        username: Some("user: name".to_string()),
+                        password: Some("pass # with: {}, commas and 'quotes'".to_string()),
+                        priority: 3,
+                        exp_date: Some(500),
+                        enabled: true,
+                        ..Default::default()
+                    };
+                    let mut expected = before.clone();
+                    expected.inputs[0].aliases.as_mut().expect("aliases").push(added.clone());
+                    let edit = build_alias_addition_edit(&original, &doc, "provider", &added).expect("add");
+                    let appended = apply_scalar_edits(&original, vec![edit]).expect("apply");
+                    parse_and_validate_patched_text(&appended, &expected).expect("validate addition");
+                    assert!(appended.starts_with(prefix));
+                    assert!(appended.ends_with(&original[suffix_start..]));
+                    let new_item_prefix = if style == "block" { "- name: added" } else { "- {name: added" };
+                    assert!(appended.contains(new_item_prefix), "style={style}: {appended}");
+                    assert!(!appended.contains("id: 42"));
+                    if newline == "\r\n" {
+                        assert!(!appended.replace("\r\n", "").contains('\n'));
+                    }
+
+                    let mut sorted_expected = before.clone();
+                    sorted_expected.inputs[0].aliases.as_mut().expect("aliases").reverse();
+                    let sort = build_alias_sort_edit(&original, &doc, "provider", &["newer", "older"])
+                        .expect("sort")
+                        .expect("sort edit");
+                    let sorted = apply_scalar_edits(&original, vec![sort]).expect("apply sort");
+                    parse_and_validate_patched_text(&sorted, &sorted_expected).expect("validate sort");
+                    assert!(sorted.ends_with(&original[suffix_start..]));
+
+                    let sorted_aliases = sorted_expected.inputs[0].aliases.as_mut().expect("aliases");
+                    sorted_aliases.insert(0, added.clone());
+                    let sequence_edit = build_alias_sequence_edit(&original, &doc, "provider", sorted_aliases)
+                        .expect("rebuild")
+                        .expect("sequence edit");
+                    let rebuilt = apply_scalar_edits(&original, vec![sequence_edit]).expect("apply rebuild");
+                    parse_and_validate_patched_text(&rebuilt, &sorted_expected).expect("validate rebuild");
+                    assert!(rebuilt.contains(new_item_prefix));
+                    assert!(rebuilt.ends_with(&original[suffix_start..]));
+
+                    for removed_names in [&["newer"][..], &["older", "newer"][..]] {
+                        let mut removal_expected = before.clone();
+                        removal_expected.inputs[0]
+                            .aliases
+                            .as_mut()
+                            .expect("aliases")
+                            .retain(|alias| !removed_names.contains(&alias.name.as_ref()));
+                        let edits =
+                            build_alias_removal_edits(&original, &doc, "provider", removed_names).expect("remove");
+                        let removed = apply_scalar_edits(&original, edits).expect("apply removal");
+                        parse_and_validate_patched_text(&removed, &removal_expected).expect("validate removal");
+                        assert!(removed.ends_with(&original[suffix_start..]));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn alias_layout_stops_at_root_scalars_and_preserves_commented_old_aliases() {
+        let original = alias_layout_fixture(2, "flow", "\n")
+            .replace("  # panel settings", "  max_connections: 1\n  exp_date: 1788779143\n  # panel settings")
+            .replace("  aliases:\n", "  # aliases:\n  # - {name: disabled-old, url: provider://example}\n  aliases:\n");
+        let doc = parse_patch_document(&original).expect("projection");
+        let mut expected: SourcesConfigDto = serde_saphyr::from_str(&original).expect("config");
+        expected.inputs[0].aliases = None;
+        let edits = build_alias_removal_edits(&original, &doc, "provider", &["older", "newer"]).expect("remove");
+        let result = apply_scalar_edits(&original, edits).expect("apply");
+        parse_and_validate_patched_text(&result, &expected).expect("root fields retained");
+        assert!(result.contains("  # - {name: disabled-old, url: provider://example}"));
+        assert!(result.contains("  max_connections: 1\n  exp_date: 1788779143\n"));
+    }
+
+    #[test]
+    fn alias_layout_add_and_sort_handle_missing_final_newline() {
+        let original = "sources: []\ninputs:\n- name: provider\n  url: provider://example\n  aliases:\n  - {name: older, url: provider://example}\n  - {name: newer, url: provider://example}";
+        let doc = parse_patch_document(original).expect("projection");
+        let mut expected: SourcesConfigDto = serde_saphyr::from_str(original).expect("config");
+        expected.inputs[0].aliases.as_mut().expect("aliases").reverse();
+        let sort = build_alias_sort_edit(original, &doc, "provider", &["newer", "older"]).expect("sort").expect("edit");
+        let sorted = apply_scalar_edits(original, vec![sort]).expect("apply sort");
+        parse_and_validate_patched_text(&sorted, &expected).expect("separate item lines after sort");
+        let added =
+            ConfigInputAliasDto { name: "added".into(), url: "provider://example".into(), ..Default::default() };
+        let edit = build_alias_addition_edit(original, &doc, "provider", &added).expect("add");
+        let appended = apply_scalar_edits(original, vec![edit]).expect("apply add");
+        assert!(appended.contains("url: provider://example}\n  - {name: added"));
+        parse_patch_document(&appended).expect("separate item lines after addition");
+    }
 
     const FIXTURE: &str = concat!(
         "templates:\n",
@@ -878,6 +1121,36 @@ mod tests {
     }
 
     #[test]
+    fn flow_style_field_insertion_preserves_single_and_multiline_mappings() {
+        let fixtures = [
+            "inputs:\n  - {name: test, url: http://main.example}\n",
+            concat!(
+                "inputs:\n",
+                "  - {\n",
+                "      name: test, # keep account note\n",
+                "      url: http://main.example\n",
+                "    }\n",
+            ),
+        ];
+
+        for fixture in fixtures {
+            let doc: SourcePatchDocument = serde_saphyr::from_str(fixture).expect("projection parses");
+            let name_range = span_byte_range(&doc.inputs[0].value.name).expect("name span");
+            let edit = build_field_insertion_edit(fixture, &name_range, "enabled", "false").expect("build edit");
+            let patched = apply_scalar_edits(fixture, vec![edit]).expect("apply");
+            let reparsed: SourcePatchDocument = serde_saphyr::from_str(&patched).expect("reparse");
+            let input = &reparsed.inputs[0].value;
+
+            assert!(!input.enabled.as_ref().expect("enabled").value);
+            assert_eq!(input.url.as_ref().expect("url").value, "http://main.example");
+            assert!(patched.contains("name: test, enabled: false"));
+            if fixture.contains("# keep account note") {
+                assert!(patched.contains("# keep account note"));
+            }
+        }
+    }
+
+    #[test]
     fn quoted_values_survive_unchanged() {
         let doc: SourcePatchDocument = serde_saphyr::from_str(FIXTURE).expect("projection parses");
         let aliases = doc.inputs[0].value.aliases.as_ref().expect("aliases");
@@ -956,8 +1229,21 @@ mod tests {
     }
 
     #[test]
-    fn add_first_alias_when_aliases_absent() {
-        let no_aliases_fixture = "inputs:\n  - name: solo\n    url: http://solo.example\n";
+    fn add_first_alias_when_aliases_absent_preserves_nested_fields_and_next_input() {
+        let no_aliases_fixture = concat!(
+            "inputs:\n",
+            "  - name: solo\n",
+            "    url: http://solo.example\n",
+            "    panel_api:\n",
+            "      enabled: true\n",
+            "      alias_pool:\n",
+            "        size:\n",
+            "          min: 1\n",
+            "          max: auto\n",
+            "        remove_expired: true\n",
+            "  - name: next\n",
+            "    url: http://next.example\n",
+        );
         let doc: SourcePatchDocument = serde_saphyr::from_str(no_aliases_fixture).expect("projection parses");
         let new_alias = ConfigInputAliasDto {
             name: "solo-alias".into(),
@@ -973,6 +1259,46 @@ mod tests {
         assert!(patched.contains("aliases:"));
         assert!(patched.contains("- name: solo-alias"));
         assert!(patched.contains("url: http://alias.example"));
+        assert!(patched.contains("    aliases:\n      - name: solo-alias"));
+        assert!(patched.contains("        remove_expired: true"));
+
+        let reparsed: SourcePatchDocument = serde_saphyr::from_str(&patched).expect("reparse");
+        assert_eq!(reparsed.inputs.len(), 2);
+        let aliases = reparsed.inputs[0].value.aliases.as_ref().expect("aliases");
+        assert_eq!(aliases.value.len(), 1);
+        assert_eq!(aliases.value[0].value.name.value, "solo-alias");
+        assert_eq!(reparsed.inputs[1].value.name.value, "next");
+    }
+
+    #[test]
+    fn add_first_alias_replaces_empty_flow_sequence() {
+        let fixture = concat!(
+            "inputs:\n",
+            "  - name: provider\n",
+            "    url: http://main.example\n",
+            "    aliases: [] # keep alias note\n",
+            "  - name: next\n",
+            "    url: http://next.example\n",
+        );
+        let doc: SourcePatchDocument = serde_saphyr::from_str(fixture).expect("projection parses");
+        let new_alias = ConfigInputAliasDto {
+            name: "provider-backup".into(),
+            url: "http://backup.example".to_string(),
+            enabled: true,
+            ..Default::default()
+        };
+
+        let edit = build_alias_addition_edit(fixture, &doc, "provider", &new_alias).expect("build edit");
+        let patched = apply_scalar_edits(fixture, vec![edit]).expect("apply");
+
+        assert!(!patched.contains("aliases: []"));
+        assert!(
+            patched.contains("aliases: # keep alias note\n      - name: provider-backup"),
+            "unexpected patch:\n{patched}"
+        );
+        let reparsed: SourcePatchDocument = serde_saphyr::from_str(&patched).expect("reparse");
+        assert_eq!(reparsed.inputs.len(), 2);
+        assert_eq!(reparsed.inputs[0].value.aliases.as_ref().expect("aliases").value.len(), 1);
     }
 
     #[test]
@@ -1057,7 +1383,7 @@ mod tests {
         assert_eq!(aliases.value[0].value.name.value, "newest");
         assert_eq!(aliases.value[0].value.max_connections.as_ref().expect("max connections").value, 2);
         assert_eq!(aliases.value[1].value.name.value, "oldest");
-        assert_eq!(aliases.value[1].value.enabled.as_ref().expect("enabled").value, false);
+        assert!(!aliases.value[1].value.enabled.as_ref().expect("enabled").value);
     }
 
     #[test]

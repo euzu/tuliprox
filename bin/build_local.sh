@@ -102,6 +102,12 @@ for arg in "$@"; do
     --debug)
       BUILD_DEBUG_SYMBOLS=true
       ;;
+    --dev)
+      BUILD_PROFILE="dev"
+      ;;
+    --dev-slim)
+      BUILD_PROFILE="dev-slim"
+      ;;
     -h|--help)
       usage
       exit 0
@@ -139,9 +145,7 @@ if [ "$BUILD_BACKEND" = true ]; then
     export CARGO_PROFILE_RELEASE_STRIP=false
   fi
 
-  if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
-    SOURCE_DATE_EPOCH="$(date -u +%s)"
-  fi
+  SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct)}"
   export SOURCE_DATE_EPOCH
 
   echo "==> Backend build SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}"
@@ -158,29 +162,29 @@ if [ "$BUILD_BACKEND" = true ]; then
           exit 1
         fi
         rustup target add x86_64-unknown-linux-musl
-        cargo zigbuild -p tuliprox --release --target x86_64-unknown-linux-musl
+        cargo zigbuild -p tuliprox --profile ${BUILD_PROFILE:-release} --target x86_64-unknown-linux-musl
       else
-        cross build -p tuliprox --release --target x86_64-unknown-linux-musl
+        cross build -p tuliprox --profile ${BUILD_PROFILE:-release} --target x86_64-unknown-linux-musl
       fi
       ;;
     linux-gnu)
       if [ "$(uname)" = "Linux" ]; then
-        cargo build -p tuliprox --release
+        cargo build -p tuliprox --profile ${BUILD_PROFILE:-release}
       else
-        cross build -p tuliprox --release --target x86_64-unknown-linux-gnu
+        cross build -p tuliprox --profile ${BUILD_PROFILE:-release} --target x86_64-unknown-linux-gnu
       fi
       ;;
     armv7)
-      cross build -p tuliprox --release --target armv7-unknown-linux-musleabihf
+      cross build -p tuliprox --profile ${BUILD_PROFILE:-release} --target armv7-unknown-linux-musleabihf
       ;;
     aarch64)
-      cross build -p tuliprox --release --target aarch64-unknown-linux-musl
+      cross build -p tuliprox --profile ${BUILD_PROFILE:-release} --target aarch64-unknown-linux-musl
       ;;
     macos)
-      cross build -p tuliprox --release --target x86_64-apple-darwin
+      cross build -p tuliprox --profile ${BUILD_PROFILE:-release} --target x86_64-apple-darwin
       ;;
     windows)
-      cargo build -p tuliprox --release --target x86_64-pc-windows-gnu
+      cargo build -p tuliprox --profile ${BUILD_PROFILE:-release} --target x86_64-pc-windows-gnu
       ;;
   esac
 fi

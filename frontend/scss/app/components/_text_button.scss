@@ -1,3 +1,18 @@
+// Touch browsers can retain :hover and :focus after a tap. Keep that
+// highlight for mouse pointers, while preserving keyboard focus everywhere.
+@mixin text-button-highlight {
+  &:focus-visible {
+    @content;
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    &:focus,
+    &:hover {
+      @content;
+    }
+  }
+}
+
 .tp__text-button {
   display: flex;
   justify-content: center;
@@ -28,8 +43,7 @@
     pointer-events: none;
   }
 
-  &:focus,
-  &:hover {
+  @include text-button-highlight {
     background-color: var(--text-button-hover-background-color);
     color: var(--text-button-hover-color);
     outline: none;
@@ -74,8 +88,7 @@
    border-color: var(--text-button-primary-border-color);
    color: var(--text-button-primary-color);
    fill: var(--text-button-primary-color);
-   &:focus,
-   &:hover {
+   @include text-button-highlight {
       background-color: var(--text-button-primary-hover-background-color);
       color: var(--text-button-primary-hover-color);
       fill: var(--text-button-primary-hover-color);
@@ -88,8 +101,7 @@
   border-color: var(--text-button-secondary-border-color);
   color: var(--text-button-secondary-color);
   fill: var(--text-button-secondary-color);
-  &:focus,
-  &:hover {
+  @include text-button-highlight {
     background-color: var(--text-button-secondary-hover-background-color);
     color: var(--text-button-secondary-hover-color);
     fill: var(--text-button-secondary-hover-color);
@@ -102,8 +114,7 @@
   border-color: var(--text-button-tertiary-border-color);
   color: var(--text-button-tertiary-color);
   fill: var(--text-button-tertiary-color);
-  &:focus,
-  &:hover {
+  @include text-button-highlight {
     background-color: var(--text-button-tertiary-hover-background-color);
     color: var(--text-button-tertiary-hover-color);
     fill: var(--text-button-tertiary-hover-color);
@@ -119,8 +130,7 @@
   border-color: var(--text-button-active-border-color);
   color: var(--text-button-active-color);
   fill: var(--text-button-active-color);
-  &:focus,
-  &:hover {
+  @include text-button-highlight {
     background-color: var(--text-button-active-hover-background-color);
     border-color: var(--text-button-active-border-color);
     color: var(--text-button-active-hover-color);

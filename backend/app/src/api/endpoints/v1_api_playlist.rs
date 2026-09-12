@@ -6,7 +6,7 @@ use crate::{
             create_api_proxy_user, json_or_bin_response, resource_response, try_option_bad_request,
             try_result_bad_request, try_unwrap_body, ResourceFetchPolicy,
         },
-        auth_middleware::permission_layer,
+        auth_middleware::{check_permission, permission_layer, VerifiedClaims},
         endpoints::{
             api_playlist_utils::{
                 get_playlist_for_custom_provider, get_playlist_for_input, get_playlist_for_target,
@@ -29,7 +29,8 @@ use crate::{
     iptv::{stalker::client::validate_public_playable_url, xtream},
     model::{
         parse_xmltv_for_web_ui_from_file, parse_xmltv_for_web_ui_from_url, AppConfig, ConfigInput, ConfigInputFlags,
-        ConfigInputOptions, EpgSource, EpgSourceType, IcsDummyPolicy, InputSource,
+        ConfigInputOptions, ConfigInputUpdateQuality, EpgSource, EpgSourceType, IcsDummyPolicy, InputSource,
+        ProcessTargets, SourcesConfig,
     },
     processing::{
         epg::get_input_raw_epg_file_path,
@@ -53,15 +54,39 @@ use shared::{
     error::TuliproxError,
     foundation::{get_filter_detailed, Filter, ValueProvider},
     model::{
-        permission::Permission, stalker::StalkerStreamKind, EpgChannel, InputType, OperationRunAccepted,
-        PlaylistEpgRequest, PlaylistItem, PlaylistRequest, PlaylistUrlResolveRequest, ProxyType, TargetType,
-        UiPlaylistItem, VirtualId, XtreamCluster,
+        permission::Permission, stalker::StalkerStreamKind, EpgChannel, InputPlaylistUpdateStatusDto, InputType,
+        InputUpdateAction, InputUpdateCapabilities, InputUpdateRequest, OperationRunAccepted,
+        PersistedPlaylistUpdateClusterState, PersistedPlaylistUpdateClusterStatusDto,
+        PersistedPlaylistUpdateInputResult, PlaylistEpgRequest, PlaylistItem, PlaylistRequest,
+        PlaylistUpdateRequestDto, PlaylistUpdateRequestPayload, PlaylistUpdateRunId, PlaylistUpdateState,
+        PlaylistUpdateStatusDto, PlaylistUrlResolveRequest, ProxyType, TargetType, UiPlaylistItem, VirtualId,
+        XtreamCluster,
     },
     utils::{concat_path_leading_slash, deobfuscate_text, sanitize_sensitive_info, Internable},
 };
 use std::{path::Path, str::FromStr, sync::Arc};
 use tokio_stream::StreamExt;
 use url::Url;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManualUpdateEnqueueError {
+    Busy,
+    Unavailable,
+}
+
+fn enqueue_manual_playlist_update(
+    sender: &tokio::sync::mpsc::Sender<crate::api::model::ManualPlaylistUpdateRequest>,
+    targets: Arc<ProcessTargets>,
+    input_action: Option<InputUpdateRequest>,
+) -> Result<PlaylistUpdateRunId, ManualUpdateEnqueueError> {
+    let permit = sender.try_reserve().map_err(|error| match error {
+        tokio::sync::mpsc::error::TrySendError::Full(()) => ManualUpdateEnqueueError::Busy,
+        tokio::sync::mpsc::error::TrySendError::Closed(()) => ManualUpdateEnqueueError::Unavailable,
+    })?;
+    let run_id = PlaylistUpdateRunId::generate();
+    permit.send(crate::api::model::ManualPlaylistUpdateRequest { run_id: run_id.clone(), targets, input_action });
+    Ok(run_id)
+}
 
 fn create_config_input_for_m3u(url: &str) -> ConfigInput {
     ConfigInput {
@@ -72,6 +97,7 @@ fn create_config_input_for_m3u(url: &str) -> ConfigInput {
         enabled: true,
         options: Some(ConfigInputOptions {
             flags: ConfigInputFlags::XtreamLiveStreamUsePrefix | ConfigInputFlags::ResolveBackground,
+            update_quality: ConfigInputUpdateQuality::default(),
             resolve_delay: shared::defaults::default_resolve_delay_secs(),
             probe_delay: shared::defaults::default_probe_delay_secs(),
             probe_live_interval_hours: 120,
@@ -93,6 +119,7 @@ fn create_config_input_for_xtream(username: &str, password: &str, host: &str) ->
         enabled: true,
         options: Some(ConfigInputOptions {
             flags: ConfigInputFlags::XtreamLiveStreamUsePrefix | ConfigInputFlags::ResolveBackground,
+            update_quality: ConfigInputUpdateQuality::default(),
             resolve_delay: shared::defaults::default_resolve_delay_secs(),
             probe_delay: shared::defaults::default_probe_delay_secs(),
             probe_live_interval_hours: 120,
@@ -475,26 +502,49 @@ async fn load_epg_channels_for_input(
 
 async fn playlist_update(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
-    axum::extract::Json(targets): axum::extract::Json<Vec<String>>,
+    claims: Option<axum::Extension<VerifiedClaims>>,
+    axum::extract::Json(payload): axum::extract::Json<PlaylistUpdateRequestPayload>,
 ) -> impl axum::response::IntoResponse + Send {
-    let user_targets = if targets.is_empty() { None } else { Some(targets) };
-    let process_targets = app_state.app_config.sources.load().validate_targets(user_targets.as_ref());
+    let request = payload.into_request();
+    let input_action = match request.manual_input_update() {
+        Ok(action) => action,
+        Err(error) => {
+            return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": error}))).into_response()
+        }
+    };
+    if input_action.is_some_and(|request| request.action == InputUpdateAction::Rescan) {
+        let config = app_state.app_config.config.load();
+        if !config.library.as_ref().is_some_and(|library| library.enabled) {
+            return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Library is not enabled"})))
+                .into_response();
+        }
+        if config.web_ui.as_ref().and_then(|web| web.auth.as_ref()).is_some() {
+            let Some(axum::Extension(VerifiedClaims(claims))) = claims else {
+                return axum::http::StatusCode::UNAUTHORIZED.into_response();
+            };
+            if check_permission::<{ Permission::LibraryWrite as u32 }>(&app_state, &claims, None).is_err() {
+                return axum::http::StatusCode::FORBIDDEN.into_response();
+            }
+        }
+    }
+    let process_targets = resolve_manual_playlist_update_targets(&app_state.app_config.sources.load(), &request);
     match process_targets {
         Ok(valid_targets) => {
             let valid_targets = Arc::new(valid_targets);
-            // Deduplicate rapid clicks: the channel has capacity 1, so at most one
-            // update is queued at any time.  Additional requests while the channel
-            // is full are silently dropped — the pending run already covers them.
-            match app_state
-                .manual_update_sender
-                .try_send(crate::api::model::ManualPlaylistUpdateRequest { targets: valid_targets })
-            {
-                Ok(()) => (axum::http::StatusCode::ACCEPTED, axum::Json(OperationRunAccepted {})).into_response(),
-                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                    debug!("Manual playlist update deduplicated: an update is already pending or running");
-                    (axum::http::StatusCode::ACCEPTED, axum::Json(OperationRunAccepted {})).into_response()
+            match enqueue_manual_playlist_update(&app_state.manual_update_sender, valid_targets, input_action) {
+                Ok(run_id) => {
+                    (axum::http::StatusCode::ACCEPTED, axum::Json(OperationRunAccepted::playlist_update(run_id)))
+                        .into_response()
                 }
-                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                Err(ManualUpdateEnqueueError::Busy) => {
+                    debug!("Manual playlist update rejected: another update is already queued");
+                    (
+                        axum::http::StatusCode::CONFLICT,
+                        axum::Json(json!({"error": "Another playlist update is already queued; retry this request"})),
+                    )
+                        .into_response()
+                }
+                Err(ManualUpdateEnqueueError::Unavailable) => {
                     debug!("Manual playlist update rejected: worker channel closed (server shutting down)");
                     axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response()
                 }
@@ -505,6 +555,144 @@ async fn playlist_update(
             (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()}))).into_response()
         }
     }
+}
+
+fn resolve_manual_playlist_update_targets(
+    sources: &SourcesConfig,
+    request: &PlaylistUpdateRequestDto,
+) -> Result<ProcessTargets, TuliproxError> {
+    let manual_action =
+        request.manual_input_update().map_err(|error| TuliproxError::ConfigSource(error.to_string()))?;
+    let manual_input = if let Some(manual) = manual_action {
+        let input = sources
+            .inputs
+            .iter()
+            .find(|input| input.id == manual.input_id)
+            .ok_or_else(|| TuliproxError::ConfigSource(format!("No input found for id {}", manual.input_id)))?;
+        if !InputUpdateCapabilities::for_input_type(input.input_type, input.enabled).supports_action(manual.action) {
+            return Err(TuliproxError::ConfigSource("Manual action is not supported for this input".to_string()));
+        }
+        // Only the additive action wire form requires IDs. Legacy input_refresh
+        // requests retain the existing name resolution, including empty = all.
+        if request.input_action.is_some() && request.target_ids.is_none() {
+            return Err(TuliproxError::ConfigSource("Manual input actions require explicit target IDs".to_string()));
+        }
+        Some(input)
+    } else {
+        None
+    };
+    let Some(target_ids) = request.target_ids.as_deref() else {
+        let targets = (!request.targets.is_empty()).then_some(&request.targets);
+        return sources.validate_targets(targets);
+    };
+    if !request.targets.is_empty() {
+        return Err(TuliproxError::ConfigSource(
+            "Manual playlist update cannot contain both target names and target IDs".to_string(),
+        ));
+    }
+    if target_ids.is_empty() {
+        return Err(TuliproxError::ConfigSource(
+            "Manual playlist update target ID selection must not be empty".to_string(),
+        ));
+    }
+
+    let mut targets = Vec::with_capacity(target_ids.len());
+    let mut target_names = Vec::with_capacity(target_ids.len());
+    for target_id in target_ids {
+        let Some(target) = sources.get_target_by_id(*target_id) else {
+            return Err(TuliproxError::ConfigSource(format!("No target found for id {target_id}")));
+        };
+        if manual_input.is_some_and(|input| {
+            !sources.sources.iter().any(|source| {
+                source.inputs.contains(&input.name) && source.targets.iter().any(|target| target.id == *target_id)
+            })
+        }) {
+            return Err(TuliproxError::ConfigSource("Target does not belong to the selected input".to_string()));
+        }
+        targets.push(target.id);
+        target_names.push(target.name.clone());
+    }
+
+    Ok(ProcessTargets {
+        enabled: true,
+        inputs: sources.inputs.iter().map(|input| input.id).collect(),
+        targets,
+        target_names,
+    })
+}
+
+async fn read_playlist_update_input_status(
+    read: impl FnOnce() -> crate::processing::input_cache::InputStatus + Send + 'static,
+) -> Result<crate::processing::input_cache::InputStatus, axum::http::StatusCode> {
+    tokio::task::spawn_blocking(read).await.map_err(|error| {
+        error!("Playlist update status reader failed: {error}");
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+    })
+}
+
+async fn playlist_update_status(
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+) -> Result<axum::Json<PlaylistUpdateStatusDto>, axum::http::StatusCode> {
+    let storage_dir = app_state.app_config.config.load().storage_dir.clone();
+    let inputs = app_state.app_config.sources.load().inputs.clone();
+    let mut statuses = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let storage_path = crate::processing::input_cache::resolve_input_storage_path(&storage_dir, &input.name).await;
+        let input_status =
+            read_playlist_update_input_status(move || crate::processing::input_cache::load_input_status(&storage_path))
+                .await?;
+        let cluster_based = input.input_type.is_xtream() || input.input_type.is_stalker();
+        let last_update =
+            input_status.clusters.values().map(|cluster| cluster.timestamp).filter(|timestamp| *timestamp > 0).max();
+        let clusters = if cluster_based || input.input_type == InputType::M3u {
+            [XtreamCluster::Live, XtreamCluster::Video, XtreamCluster::Series]
+                .into_iter()
+                .filter_map(|cluster| {
+                    input_status.clusters.get(cluster.as_ref()).map(|persisted| {
+                        PersistedPlaylistUpdateClusterStatusDto {
+                            cluster,
+                            status: match &persisted.status {
+                                crate::processing::input_cache::ClusterState::Ok => {
+                                    PersistedPlaylistUpdateClusterState::Ok
+                                }
+                                crate::processing::input_cache::ClusterState::Failed => {
+                                    PersistedPlaylistUpdateClusterState::Failed
+                                }
+                            },
+                            timestamp: persisted.timestamp,
+                            last_update: persisted.last_update,
+                        }
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let last_input_update = input_status.last_input_update.or_else(|| {
+            // Legacy cluster-free inputs already persisted a general default status.
+            // Do not infer an aggregate input/target or Quality result from clusters.
+            if cluster_based {
+                return None;
+            }
+            input_status.clusters.get("default").filter(|status| status.timestamp > 0).map(|status| {
+                PersistedPlaylistUpdateInputResult {
+                    state: match status.status {
+                        crate::processing::input_cache::ClusterState::Ok => PlaylistUpdateState::Success,
+                        crate::processing::input_cache::ClusterState::Failed => PlaylistUpdateState::Failure,
+                    },
+                    timestamp: status.timestamp,
+                }
+            })
+        });
+        statuses.push(InputPlaylistUpdateStatusDto { input_id: input.id, last_update, last_input_update, clusters });
+    }
+    let active_updates = app_state
+        .event_manager
+        .playlist_update_snapshot()
+        .into_iter()
+        .filter(|event| event.input_id.is_some_and(|id| statuses.iter().any(|status| status.input_id == id)))
+        .collect();
+    Ok(axum::Json(PlaylistUpdateStatusDto { inputs: statuses, active_updates }))
 }
 
 async fn playlist_content(
@@ -1120,6 +1308,7 @@ pub fn v1_api_playlist_register_protected(router: Router<Arc<AppState>>) -> axum
     router
         .route("/playlist/resolve_url", axum::routing::post(playlist_resolve_url))
         .route("/playlist/update", axum::routing::post(playlist_update))
+        .route("/playlist/update/status", axum::routing::get(playlist_update_status))
         .route("/playlist/epg", axum::routing::post(playlist_epg))
         .route("/playlist/epg/stream", axum::routing::post(stream_epg_api))
         .route("/playlist/live", axum::routing::post(playlist_content_live))
@@ -1145,6 +1334,7 @@ pub fn v1_api_playlist_register_with_permissions(
     app_state: &Arc<AppState>,
 ) -> axum::Router<Arc<AppState>> {
     let read_routes = Router::new()
+        .route("/update/status", axum::routing::get(playlist_update_status))
         .route("/live", axum::routing::post(playlist_content_live))
         .route("/vod", axum::routing::post(playlist_content_vod))
         .route("/series", axum::routing::post(playlist_content_series))
@@ -1203,8 +1393,8 @@ mod tests {
             SharedStreamManager,
         },
         model::{
-            AppConfig, Config, ConfigInput, ConfigInputOptions, ConfigProvider, ConfigSource, ConfigTarget,
-            SourcesConfig, StreamHistoryConfig, VideoDownloadConfig,
+            AppConfig, Config, ConfigInput, ConfigInputOptions, ConfigInputUpdateQuality, ConfigProvider, ConfigSource,
+            ConfigTarget, SourcesConfig, StreamHistoryConfig, VideoDownloadConfig,
         },
         processing::epg::{get_input_raw_epg_file_path, get_input_raw_xmltv_file_path},
         repository::GeoIp,
@@ -1223,8 +1413,12 @@ mod tests {
         foundation::Filter,
         model::{
             provider_saturation::build_group_lookup, ConfigPaths, ConfigProviderDto, EpgChannel, EpgConfigDto,
-            EpgProgramme, EpgSourceDto, EpgSourceTypeDto, IcsDummyConfigDto, IcsEpgSourceConfigDto, InputType,
-            PlaylistRequest, ProcessingOrder, XtreamCluster,
+            EpgProgramme, EpgSourceDto, EpgSourceTypeDto, IcsDummyConfigDto, IcsEpgSourceConfigDto,
+            InputRefreshOverride, InputRefreshPolicy, InputType, OperationRunAccepted,
+            PersistedPlaylistUpdateClusterSnapshot, PersistedPlaylistUpdateClusterState,
+            PersistedPlaylistUpdateQualityDecision, PersistedPlaylistUpdateQualitySnapshot,
+            PersistedPlaylistUpdateTechnicalState, PlaylistRequest, PlaylistUpdateDataSource, PlaylistUpdateRequestDto,
+            PlaylistUpdateRequestPayload, PlaylistUpdateRunId, PlaylistUpdateStatusDto, ProcessingOrder, XtreamCluster,
         },
         utils::Internable,
     };
@@ -1234,6 +1428,967 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use tower::ServiceExt;
     use url::Url;
+
+    fn manual_update_request(
+        input_id: u16,
+        policy: InputRefreshPolicy,
+    ) -> crate::api::model::ManualPlaylistUpdateRequest {
+        crate::api::model::ManualPlaylistUpdateRequest {
+            run_id: PlaylistUpdateRunId::generate(),
+            targets: Arc::new(crate::model::ProcessTargets {
+                enabled: true,
+                inputs: vec![input_id],
+                targets: Vec::new(),
+                target_names: Vec::new(),
+            }),
+            input_action: Some(shared::model::InputUpdateRequest {
+                input_id,
+                action: shared::model::InputUpdateAction::Provider(policy),
+            }),
+        }
+    }
+
+    fn playlist_update_target(id: u16, name: &str) -> Arc<ConfigTarget> {
+        Arc::new(ConfigTarget {
+            id,
+            enabled: true,
+            name: name.to_string(),
+            options: None,
+            sort: None,
+            filter: Filter::default().into(),
+            output: vec![],
+            rename: None,
+            mapping_ids: None,
+            mapping: Arc::default(),
+            favourites: None,
+            processing_order: ProcessingOrder::default(),
+            execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
+            watch: None,
+            use_memory_cache: false,
+        })
+    }
+
+    #[test]
+    fn manual_update_capabilities_reject_unsupported_actions_and_keep_all_required_inputs() {
+        use shared::model::{InputUpdateAction, InputUpdateRequest};
+        for (input_type, allowed) in [
+            (InputType::Xtream, 3),
+            (InputType::Stalker, 3),
+            (InputType::M3u, 3),
+            (InputType::Plex, 2),
+            (InputType::Library, 1),
+            (InputType::Jellyfin, 0),
+            (InputType::Emby, 0),
+            (InputType::M3uBatch, 0),
+            (InputType::XtreamBatch, 0),
+            (InputType::StalkerBatch, 0),
+            (InputType::Staged, 0),
+        ] {
+            for enabled in [false, true] {
+                let input = Arc::new(ConfigInput {
+                    id: 2,
+                    name: "selected".intern(),
+                    input_type,
+                    enabled,
+                    ..ConfigInput::default()
+                });
+                let companion = Arc::new(ConfigInput {
+                    id: 3,
+                    name: "companion".intern(),
+                    input_type: InputType::M3u,
+                    enabled: true,
+                    ..ConfigInput::default()
+                });
+                let sources = SourcesConfig {
+                    inputs: vec![input.clone(), companion.clone()],
+                    sources: vec![ConfigSource {
+                        inputs: vec![input.name.clone(), companion.name.clone()],
+                        targets: vec![playlist_update_target(20, "target")],
+                    }],
+                    ..SourcesConfig::default()
+                };
+                for (index, action) in [
+                    InputUpdateAction::Provider(InputRefreshPolicy::NORMAL),
+                    InputUpdateAction::Provider(InputRefreshPolicy::REFRESH),
+                    InputUpdateAction::Provider(InputRefreshPolicy::FORCE),
+                    InputUpdateAction::Rescan,
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let request = PlaylistUpdateRequestDto {
+                        target_ids: Some(vec![20]),
+                        input_action: Some(InputUpdateRequest { input_id: 2, action }),
+                        ..PlaylistUpdateRequestDto::default()
+                    };
+                    let result = super::resolve_manual_playlist_update_targets(&sources, &request);
+                    let expected =
+                        enabled && if input_type == InputType::Library { index == 3 } else { index < allowed };
+                    assert_eq!(result.is_ok(), expected, "{input_type} {action:?}");
+                    if let Ok(targets) = result {
+                        assert_eq!(targets.targets, vec![20]);
+                        assert_eq!(targets.inputs, vec![2, 3]);
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn manual_update_library_rescan_uses_same_queue_and_requires_library_permission() {
+        use shared::model::{
+            InputUpdateAction, InputUpdateRequest, LibraryConfigDto, WebAuthConfigDto, WebUiConfigDto,
+        };
+        let input = Arc::new(ConfigInput {
+            id: 2,
+            name: "library".intern(),
+            input_type: InputType::Library,
+            enabled: true,
+            ..ConfigInput::default()
+        });
+        let app_config = Arc::new(test_app_config(
+            input.clone(),
+            ConfigSource { inputs: vec![input.name.clone()], targets: vec![playlist_update_target(20, "target")] },
+        ));
+        let mut config = (**app_config.config.load()).clone();
+        config.library =
+            Some(crate::model::LibraryConfig::from(&LibraryConfigDto { enabled: true, ..LibraryConfigDto::default() }));
+        config.web_ui = Some(crate::model::WebUiConfig::from(&WebUiConfigDto {
+            auth: Some(WebAuthConfigDto::default()),
+            ..WebUiConfigDto::default()
+        }));
+        app_config.config.store(Arc::new(config));
+        let mut sources = (**app_config.sources.load()).clone();
+        sources.inputs.push(Arc::new(ConfigInput {
+            id: 3,
+            name: "other-input".intern(),
+            input_type: InputType::M3u,
+            enabled: true,
+            ..ConfigInput::default()
+        }));
+        sources.sources.push(ConfigSource {
+            inputs: vec!["other-input".intern()],
+            targets: vec![playlist_update_target(21, "unrelated-target")],
+        });
+        app_config.sources.store(Arc::new(sources));
+        let (sender, mut receiver) = mpsc::channel(1);
+        let app_state = test_app_state_with_manual_update_sender(app_config, sender);
+        let action = InputUpdateRequest { input_id: 2, action: InputUpdateAction::Rescan };
+        let request = PlaylistUpdateRequestDto {
+            target_ids: Some(vec![20]),
+            input_action: Some(action),
+            ..PlaylistUpdateRequestDto::default()
+        };
+        let mut claims: shared::model::Claims =
+            serde_json::from_value(serde_json::json!({"username":"test", "iss":"test", "iat":0, "exp":0})).unwrap();
+        let rejected = super::playlist_update(
+            State(app_state.clone()),
+            Some(axum::Extension(super::VerifiedClaims(claims.clone()))),
+            Json(PlaylistUpdateRequestPayload::Current(request.clone())),
+        )
+        .await
+        .into_response();
+        assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+        assert!(receiver.try_recv().is_err());
+        let unauthenticated = super::playlist_update(
+            State(app_state.clone()),
+            None,
+            Json(PlaylistUpdateRequestPayload::Current(request.clone())),
+        )
+        .await
+        .into_response();
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+        assert!(receiver.try_recv().is_err());
+        claims.permissions.set(shared::model::permission::Permission::LibraryWrite);
+        // The legacy-name compatibility must never relax the new Rescan wire form.
+        let invalid_requests = [
+            PlaylistUpdateRequestDto { target_ids: None, ..request.clone() },
+            PlaylistUpdateRequestDto { targets: vec!["target".to_string()], target_ids: None, ..request.clone() },
+            PlaylistUpdateRequestDto { target_ids: Some(Vec::new()), ..request.clone() },
+            PlaylistUpdateRequestDto { target_ids: Some(vec![99]), ..request.clone() },
+            PlaylistUpdateRequestDto { target_ids: Some(vec![21]), ..request.clone() },
+            PlaylistUpdateRequestDto { targets: vec!["target".to_string()], ..request.clone() },
+            PlaylistUpdateRequestDto {
+                input_refresh: Some(InputRefreshOverride { input_id: 2, policy: InputRefreshPolicy::NORMAL }),
+                ..request.clone()
+            },
+        ];
+        for invalid in invalid_requests {
+            let rejected = super::playlist_update(
+                State(app_state.clone()),
+                Some(axum::Extension(super::VerifiedClaims(claims.clone()))),
+                Json(PlaylistUpdateRequestPayload::Current(invalid)),
+            )
+            .await
+            .into_response();
+            assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+            assert!(receiver.try_recv().is_err());
+        }
+        let accepted = super::playlist_update(
+            State(app_state),
+            Some(axum::Extension(super::VerifiedClaims(claims))),
+            Json(PlaylistUpdateRequestPayload::Current(request)),
+        )
+        .await
+        .into_response();
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+        let queued = receiver.recv().await.unwrap();
+        assert_eq!(queued.input_action, Some(action));
+        assert_eq!(queued.targets.targets, vec![20]);
+    }
+
+    #[tokio::test]
+    async fn manual_update_target_ids_keep_conflict_instead_of_accepting_a_dropped_force_request() {
+        for pending_policy in [InputRefreshPolicy::NORMAL, InputRefreshPolicy::REFRESH] {
+            let input = Arc::new(ConfigInput {
+                id: 17,
+                name: "force-input".intern(),
+                input_type: InputType::Xtream,
+                enabled: true,
+                ..ConfigInput::default()
+            });
+            let app_config = Arc::new(test_app_config(
+                Arc::clone(&input),
+                ConfigSource {
+                    inputs: vec![Arc::clone(&input.name)],
+                    targets: vec![playlist_update_target(1, "queued-target")],
+                },
+            ));
+            let (sender, mut receiver) = mpsc::channel(1);
+            sender.send(manual_update_request(1, InputRefreshPolicy::NORMAL)).await.unwrap();
+            let running = receiver.recv().await.expect("running request");
+            assert_eq!(
+                running.input_action.map(|request| request.action),
+                Some(shared::model::InputUpdateAction::Provider(InputRefreshPolicy::NORMAL))
+            );
+            sender.send(manual_update_request(2, pending_policy)).await.unwrap();
+            let app_state = test_app_state_with_manual_update_sender(app_config, sender);
+
+            let response = super::playlist_update(
+                State(app_state),
+                None,
+                Json(PlaylistUpdateRequestPayload::Current(PlaylistUpdateRequestDto {
+                    targets: Vec::new(),
+                    target_ids: Some(vec![1]),
+                    input_refresh: Some(InputRefreshOverride { input_id: input.id, policy: InputRefreshPolicy::FORCE }),
+                    input_action: None,
+                })),
+            )
+            .await
+            .into_response();
+
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let pending = receiver.recv().await.expect("pending request remains queued");
+            assert_eq!(
+                pending.input_action,
+                Some(shared::model::InputUpdateRequest {
+                    input_id: 2,
+                    action: shared::model::InputUpdateAction::Provider(pending_policy)
+                })
+            );
+            assert!(receiver.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn manual_update_run_target_ids_and_refresh_override_keep_the_accepted_queue_identity() {
+        let input = Arc::new(ConfigInput {
+            id: 17,
+            name: "stable-input".intern(),
+            input_type: InputType::Xtream,
+            enabled: true,
+            ..ConfigInput::default()
+        });
+        let app_config = Arc::new(test_app_config(
+            Arc::clone(&input),
+            ConfigSource {
+                inputs: vec![Arc::clone(&input.name)],
+                targets: vec![playlist_update_target(1, "shared-name"), playlist_update_target(4, "shared-name")],
+            },
+        ));
+        let (sender, mut receiver) = mpsc::channel(1);
+        let app_state = test_app_state_with_manual_update_sender(app_config, sender);
+        let input_refresh = InputRefreshOverride { input_id: input.id, policy: InputRefreshPolicy::FORCE };
+
+        let response = super::playlist_update(
+            State(app_state),
+            None,
+            Json(PlaylistUpdateRequestPayload::Current(PlaylistUpdateRequestDto {
+                targets: Vec::new(),
+                target_ids: Some(vec![4, 1]),
+                input_refresh: Some(input_refresh),
+                input_action: None,
+            })),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("accepted response body");
+        let accepted = serde_json::from_slice::<OperationRunAccepted>(&body).expect("accepted response payload");
+        let queued = receiver.recv().await.expect("accepted update request");
+        assert_eq!(accepted.run_id.as_ref(), Some(&queued.run_id));
+        assert!(queued.targets.enabled);
+        assert_eq!(queued.targets.inputs, vec![input.id]);
+        assert_eq!(queued.targets.targets, vec![4, 1]);
+        assert_eq!(queued.targets.target_names, vec!["shared-name", "shared-name"]);
+        assert_eq!(
+            queued.input_action,
+            Some(shared::model::InputUpdateRequest {
+                input_id: input_refresh.input_id,
+                action: shared::model::InputUpdateAction::Provider(input_refresh.policy)
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_update_target_ids_reject_unknown_empty_and_ambiguous_selections() {
+        let input = Arc::new(ConfigInput {
+            id: 17,
+            name: "stable-input".intern(),
+            input_type: InputType::Xtream,
+            enabled: true,
+            ..ConfigInput::default()
+        });
+        let app_config = Arc::new(test_app_config(
+            Arc::clone(&input),
+            ConfigSource {
+                inputs: vec![Arc::clone(&input.name)],
+                targets: vec![playlist_update_target(1, "known-target")],
+            },
+        ));
+        let (sender, mut receiver) = mpsc::channel(1);
+        let app_state = test_app_state_with_manual_update_sender(app_config, sender);
+        let input_refresh = Some(InputRefreshOverride { input_id: input.id, policy: InputRefreshPolicy::REFRESH });
+        let invalid_requests = [
+            PlaylistUpdateRequestDto {
+                targets: vec!["known-target".to_string()],
+                input_action: Some(shared::model::InputUpdateRequest {
+                    input_id: input.id,
+                    action: shared::model::InputUpdateAction::Provider(InputRefreshPolicy::REFRESH),
+                }),
+                ..PlaylistUpdateRequestDto::default()
+            },
+            PlaylistUpdateRequestDto {
+                targets: Vec::new(),
+                target_ids: Some(vec![99]),
+                input_refresh,
+                input_action: None,
+            },
+            PlaylistUpdateRequestDto {
+                targets: Vec::new(),
+                target_ids: Some(Vec::new()),
+                input_refresh,
+                input_action: None,
+            },
+            PlaylistUpdateRequestDto {
+                targets: vec!["known-target".to_string()],
+                target_ids: Some(vec![1]),
+                input_refresh,
+                input_action: None,
+            },
+        ];
+
+        for request in invalid_requests {
+            let response = super::playlist_update(
+                State(Arc::clone(&app_state)),
+                None,
+                Json(PlaylistUpdateRequestPayload::Current(request)),
+            )
+            .await
+            .into_response();
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert!(receiver.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn manual_update_target_ids_preserve_named_legacy_and_empty_bulk_requests() {
+        let input = Arc::new(ConfigInput {
+            id: 17,
+            name: "stable-input".intern(),
+            input_type: InputType::Xtream,
+            enabled: true,
+            ..ConfigInput::default()
+        });
+        let app_config = Arc::new(test_app_config(
+            Arc::clone(&input),
+            ConfigSource {
+                inputs: vec![Arc::clone(&input.name)],
+                targets: vec![playlist_update_target(1, "shared-name"), playlist_update_target(4, "shared-name")],
+            },
+        ));
+        let (sender, mut receiver) = mpsc::channel(1);
+        let app_state = test_app_state_with_manual_update_sender(app_config, sender);
+        let requests = [
+            PlaylistUpdateRequestPayload::Current(PlaylistUpdateRequestDto {
+                targets: vec!["shared-name".to_string()],
+                target_ids: None,
+                input_refresh: None,
+                input_action: None,
+            }),
+            PlaylistUpdateRequestPayload::LegacyTargets(vec!["shared-name".to_string()]),
+            PlaylistUpdateRequestPayload::Current(PlaylistUpdateRequestDto {
+                targets: Vec::new(),
+                target_ids: None,
+                input_refresh: None,
+                input_action: None,
+            }),
+        ];
+
+        for (index, request) in requests.into_iter().enumerate() {
+            let response =
+                super::playlist_update(State(Arc::clone(&app_state)), None, Json(request)).await.into_response();
+
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            let queued = receiver.recv().await.expect("accepted legacy request");
+            assert_eq!(queued.input_action, None);
+            if index < 2 {
+                assert!(queued.targets.enabled);
+                assert_eq!(queued.targets.targets, vec![1, 4]);
+                assert_eq!(queued.targets.target_names, vec!["shared-name", "shared-name"]);
+            } else {
+                assert!(!queued.targets.enabled);
+                assert!(queued.targets.targets.is_empty());
+                assert!(queued.targets.target_names.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn manual_update_m3u_force_is_queued_by_stable_ids_and_preserves_conflict() {
+        use shared::model::{InputUpdateAction, InputUpdateRequest};
+        let input = Arc::new(ConfigInput {
+            id: 17,
+            name: "m3u-force".intern(),
+            input_type: InputType::M3u,
+            enabled: true,
+            ..ConfigInput::default()
+        });
+        let config = Arc::new(test_app_config(
+            input.clone(),
+            ConfigSource {
+                inputs: vec![input.name.clone()],
+                targets: vec![playlist_update_target(1, "selected"), playlist_update_target(2, "other")],
+            },
+        ));
+        let (sender, mut receiver) = mpsc::channel(1);
+        let app_state = test_app_state_with_manual_update_sender(config, sender);
+        let action =
+            InputUpdateRequest { input_id: input.id, action: InputUpdateAction::Provider(InputRefreshPolicy::FORCE) };
+        let request = PlaylistUpdateRequestPayload::Current(PlaylistUpdateRequestDto {
+            target_ids: Some(vec![1]),
+            input_action: Some(action),
+            ..PlaylistUpdateRequestDto::default()
+        });
+        let accepted =
+            super::playlist_update(State(app_state.clone()), None, Json(request.clone())).await.into_response();
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+        let conflict = super::playlist_update(State(app_state), None, Json(request)).await.into_response();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        let queued = receiver.try_recv().unwrap();
+        assert_eq!(queued.input_action, Some(action));
+        assert_eq!(queued.targets.targets, [1]);
+        assert_eq!(queued.targets.inputs, [17]);
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn manual_update_legacy_input_refresh_preserves_named_and_all_scope_policy_and_queue_conflicts() {
+        let input = Arc::new(ConfigInput {
+            id: 17,
+            name: "provider".intern(),
+            input_type: InputType::Xtream,
+            enabled: true,
+            ..ConfigInput::default()
+        });
+        let app_config = Arc::new(test_app_config(
+            input.clone(),
+            ConfigSource {
+                inputs: vec![input.name.clone()],
+                targets: vec![playlist_update_target(1, "selected"), playlist_update_target(4, "other")],
+            },
+        ));
+        let (sender, mut receiver) = mpsc::channel(1);
+        let app_state = test_app_state_with_manual_update_sender(app_config, sender);
+        for policy in [InputRefreshPolicy::NORMAL, InputRefreshPolicy::REFRESH, InputRefreshPolicy::FORCE] {
+            for names in [vec!["selected".to_string()], Vec::new()] {
+                let expected = app_state
+                    .app_config
+                    .sources
+                    .load()
+                    .validate_targets((!names.is_empty()).then_some(&names))
+                    .unwrap();
+                let request: PlaylistUpdateRequestPayload = serde_json::from_value(json!({
+                    "targets": names,
+                    "input_refresh": {"input_id": input.id, "policy": policy}
+                }))
+                .unwrap();
+                let response =
+                    super::playlist_update(State(app_state.clone()), None, Json(request.clone())).await.into_response();
+                assert_eq!(response.status(), StatusCode::ACCEPTED);
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                let accepted: OperationRunAccepted = serde_json::from_slice(&body).unwrap();
+                let conflict =
+                    super::playlist_update(State(app_state.clone()), None, Json(request)).await.into_response();
+                assert_eq!(conflict.status(), StatusCode::CONFLICT);
+                let queued = receiver.try_recv().unwrap();
+                assert_eq!(accepted.run_id.as_ref(), Some(&queued.run_id));
+                assert_eq!(queued.targets.enabled, expected.enabled);
+                assert_eq!(queued.targets.inputs, expected.inputs);
+                assert_eq!(queued.targets.targets, expected.targets);
+                assert_eq!(queued.targets.target_names, expected.target_names);
+                assert_eq!(
+                    queued.input_action,
+                    Some(shared::model::InputUpdateRequest {
+                        input_id: input.id,
+                        action: shared::model::InputUpdateAction::Provider(policy),
+                    })
+                );
+                assert!(receiver.try_recv().is_err());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn m3u_update_quality_playlist_update_status_reads_newest_timestamp_from_canonically_resolved_input_path() {
+        let temp_dir = tempdir().expect("temp dir");
+        let input = Arc::new(ConfigInput {
+            id: 7,
+            name: "timestamped/provider legacy".intern(),
+            input_type: InputType::Xtream,
+            enabled: true,
+            ..ConfigInput::default()
+        });
+        let source = ConfigSource { inputs: vec![Arc::clone(&input.name)], targets: Vec::new() };
+        let app_config = test_app_config(Arc::clone(&input), source);
+        app_config.config.store(Arc::new(Config {
+            storage_dir: temp_dir.path().to_string_lossy().to_string(),
+            ..Config::default()
+        }));
+        let mut sources = app_config.sources.load().as_ref().clone();
+        sources.inputs.push(Arc::new(ConfigInput {
+            id: 8,
+            name: "never-updated".intern(),
+            input_type: InputType::Stalker,
+            enabled: true,
+            ..ConfigInput::default()
+        }));
+        sources.inputs.push(Arc::new(ConfigInput {
+            id: 9,
+            name: "m3u-with-legacy-cluster".intern(),
+            input_type: InputType::M3u,
+            enabled: true,
+            ..ConfigInput::default()
+        }));
+        app_config.sources.store(Arc::new(sources));
+
+        let never_updated_path = temp_dir.path().join("input_never_updated");
+        assert!(!never_updated_path.exists());
+        let storage_path = crate::processing::input_cache::resolve_input_storage_path(
+            temp_dir.path().to_string_lossy().as_ref(),
+            &input.name,
+        )
+        .await;
+        assert_eq!(storage_path.file_name().and_then(|name| name.to_str()), Some("input_timestamped_provider_legacy"));
+        let mut persisted = crate::processing::input_cache::InputStatus::default();
+        persisted.clusters.insert(
+            XtreamCluster::Live.as_ref().to_string(),
+            crate::processing::input_cache::ClusterStatus {
+                status: crate::processing::input_cache::ClusterState::Ok,
+                timestamp: 101,
+                last_update: None,
+            },
+        );
+        persisted.clusters.insert(
+            XtreamCluster::Video.as_ref().to_string(),
+            crate::processing::input_cache::ClusterStatus {
+                status: crate::processing::input_cache::ClusterState::Failed,
+                timestamp: 303,
+                last_update: Some(PersistedPlaylistUpdateClusterSnapshot {
+                    policy: Some(InputRefreshPolicy::REFRESH),
+                    source: Some(PlaylistUpdateDataSource::Provider),
+                    quality_guard_threshold: None,
+                    quality: Some(PersistedPlaylistUpdateQualitySnapshot {
+                        threshold: 95,
+                        baseline_count: Some(4_812),
+                        candidate_count: Some(3_104),
+                        achieved_quality: Some(64),
+                        decision: PersistedPlaylistUpdateQualityDecision::Rejected,
+                    }),
+                    active_count: Some(4_812),
+                    technical_state: Some(PersistedPlaylistUpdateTechnicalState::Succeeded),
+                }),
+            },
+        );
+        persisted.clusters.insert(
+            XtreamCluster::Series.as_ref().to_string(),
+            crate::processing::input_cache::ClusterStatus {
+                status: crate::processing::input_cache::ClusterState::Ok,
+                timestamp: 202,
+                last_update: None,
+            },
+        );
+        crate::processing::input_cache::save_input_status(&storage_path, &persisted);
+
+        let m3u_storage_path = crate::processing::input_cache::resolve_input_storage_path(
+            temp_dir.path().to_string_lossy().as_ref(),
+            "m3u-with-legacy-cluster",
+        )
+        .await;
+        let mut m3u_persisted = crate::processing::input_cache::InputStatus::default();
+        m3u_persisted.clusters.insert(
+            XtreamCluster::Live.as_ref().to_string(),
+            crate::processing::input_cache::ClusterStatus {
+                status: crate::processing::input_cache::ClusterState::Failed,
+                timestamp: 404,
+                last_update: None,
+            },
+        );
+        crate::processing::input_cache::save_input_status(&m3u_storage_path, &m3u_persisted);
+
+        let app_state = test_app_state(Arc::new(app_config));
+        let router = super::v1_api_playlist_register_protected(Router::new()).with_state(app_state);
+        let response = router
+            .into_service::<Body>()
+            .oneshot(Request::builder().uri("/playlist/update/status").body(Body::empty()).expect("request"))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        let status = serde_json::from_slice::<PlaylistUpdateStatusDto>(&body).expect("status response");
+        assert_eq!(status.inputs.len(), 3);
+        assert_eq!(status.inputs[0].input_id, 7);
+        assert_eq!(status.inputs[0].last_update, Some(303));
+        assert_eq!(status.inputs[0].clusters.len(), 3);
+        assert_eq!(status.inputs[0].clusters[0].cluster, XtreamCluster::Live);
+        assert_eq!(status.inputs[0].clusters[0].status, PersistedPlaylistUpdateClusterState::Ok);
+        assert_eq!(status.inputs[0].clusters[0].timestamp, 101);
+        assert_eq!(status.inputs[0].clusters[1].cluster, XtreamCluster::Video);
+        assert_eq!(status.inputs[0].clusters[1].status, PersistedPlaylistUpdateClusterState::Failed);
+        assert_eq!(status.inputs[0].clusters[1].timestamp, 303);
+        assert_eq!(
+            status.inputs[0].clusters[1].last_update,
+            Some(PersistedPlaylistUpdateClusterSnapshot {
+                policy: Some(InputRefreshPolicy::REFRESH),
+                source: Some(PlaylistUpdateDataSource::Provider),
+                quality_guard_threshold: None,
+                quality: Some(PersistedPlaylistUpdateQualitySnapshot {
+                    threshold: 95,
+                    baseline_count: Some(4_812),
+                    candidate_count: Some(3_104),
+                    achieved_quality: Some(64),
+                    decision: PersistedPlaylistUpdateQualityDecision::Rejected,
+                }),
+                active_count: Some(4_812),
+                technical_state: Some(PersistedPlaylistUpdateTechnicalState::Succeeded),
+            })
+        );
+        assert_eq!(status.inputs[0].clusters[2].cluster, XtreamCluster::Series);
+        assert_eq!(status.inputs[0].clusters[2].status, PersistedPlaylistUpdateClusterState::Ok);
+        assert_eq!(status.inputs[0].clusters[2].timestamp, 202);
+        assert_eq!(status.inputs[1].input_id, 8);
+        assert_eq!(status.inputs[1].last_update, None);
+        assert!(status.inputs[1].clusters.is_empty());
+        assert_eq!(status.inputs[2].input_id, 9);
+        assert_eq!(status.inputs[2].last_update, Some(404));
+        assert_eq!(status.inputs[2].clusters.len(), 1, "Only the actually persisted M3U cluster is exposed");
+        assert_eq!(status.inputs[2].clusters[0].cluster, XtreamCluster::Live);
+        assert_eq!(status.inputs[2].clusters[0].status, PersistedPlaylistUpdateClusterState::Failed);
+        assert!(never_updated_path.is_dir());
+    }
+
+    #[tokio::test]
+    async fn playlist_update_status_reader_runs_off_the_async_worker() {
+        use crate::processing::input_cache::{
+            load_input_status, save_input_status, ClusterState, ClusterStatus, InputStatus,
+        };
+
+        let temp = tempdir().unwrap();
+        let expected = InputStatus {
+            clusters: HashMap::from([(
+                "live".to_owned(),
+                ClusterStatus { status: ClusterState::Ok, timestamp: 17, last_update: None },
+            )]),
+            ..InputStatus::default()
+        };
+        save_input_status(temp.path(), &expected);
+        let before = std::fs::read(temp.path().join("status.json")).unwrap();
+        let worker = std::thread::current().id();
+        let path = temp.path().to_path_buf();
+        let actual = super::read_playlist_update_input_status(move || {
+            assert_ne!(std::thread::current().id(), worker);
+            load_input_status(&path)
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(actual.clusters, expected.clusters);
+        assert_eq!(std::fs::read(temp.path().join("status.json")).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn playlist_update_status_reader_join_failure_returns_server_error_not_empty_status() {
+        let result = super::read_playlist_update_input_status(|| panic!("simulated status reader failure")).await;
+        assert_eq!(result.unwrap_err(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn playlist_update_status_reload_returns_active_bus_facts_without_persisting_updating() {
+        use shared::model::{EventMessage, PlaylistUpdateProgressEvent, PlaylistUpdateState, PlaylistUpdateSummary};
+        let temp = tempdir().unwrap();
+        let input = Arc::new(ConfigInput {
+            id: 7,
+            name: "reload-input".intern(),
+            input_type: InputType::M3u,
+            enabled: true,
+            ..ConfigInput::default()
+        });
+        let config =
+            test_app_config(input.clone(), ConfigSource { inputs: vec![input.name.clone()], targets: Vec::new() });
+        config
+            .config
+            .store(Arc::new(Config { storage_dir: temp.path().to_string_lossy().into_owned(), ..Config::default() }));
+        let app = test_app_state(Arc::new(config));
+        let path =
+            crate::processing::input_cache::resolve_input_storage_path(&temp.path().to_string_lossy(), &input.name)
+                .await;
+        let persisted = crate::processing::input_cache::InputStatus {
+            last_input_update: Some(shared::model::PersistedPlaylistUpdateInputResult {
+                state: PlaylistUpdateState::Success,
+                timestamp: 1,
+            }),
+            ..crate::processing::input_cache::InputStatus::default()
+        };
+        crate::processing::input_cache::save_input_status(&path, &persisted);
+        let before = std::fs::read(path.join("status.json")).unwrap();
+        let mut progress =
+            PlaylistUpdateProgressEvent::for_run_input("running".into(), 17.into(), 7, "reload-input", "updating");
+        app.event_manager.send_event(EventMessage::PlaylistUpdateProgress(progress.clone()));
+        let unknown = PlaylistUpdateProgressEvent::for_run_input("other".into(), 18.into(), 99, "removed", "updating");
+        app.event_manager.send_event(EventMessage::PlaylistUpdateProgress(unknown));
+        let Json(status) = super::playlist_update_status(State(app.clone())).await.unwrap();
+        assert_eq!(status.active_updates, vec![progress.clone()]);
+        assert_eq!(status.inputs[0].last_input_update, persisted.last_input_update);
+        progress.state = Some(PlaylistUpdateState::Partial);
+        app.event_manager.send_event(EventMessage::PlaylistUpdateProgress(progress.clone()));
+        let Json(status) = super::playlist_update_status(State(app.clone())).await.unwrap();
+        assert_eq!(status.active_updates, vec![progress], "completed input still belongs to a running target rebuild");
+        app.event_manager.send_event(EventMessage::PlaylistUpdate(PlaylistUpdateSummary::for_run(
+            "running".into(),
+            17.into(),
+            PlaylistUpdateState::Failure,
+        )));
+        let Json(status) = super::playlist_update_status(State(app)).await.unwrap();
+        assert!(status.active_updates.is_empty());
+        assert_eq!(
+            std::fs::read(path.join("status.json")).unwrap(),
+            before,
+            "read-only runtime projection never writes transient status"
+        );
+    }
+
+    #[tokio::test]
+    async fn playlist_update_status_reloads_staged_own_completion_without_default_or_parent_inference() {
+        use crate::processing::input_cache::{
+            load_input_status, resolve_input_storage_path, save_input_status, ClusterState, ClusterStatus, InputStatus,
+        };
+        use shared::model::{
+            PersistedPlaylistUpdateClusterStatusDto, PersistedPlaylistUpdateInputResult, PlaylistUpdateState,
+        };
+        for own_state in [Some(PlaylistUpdateState::Success), Some(PlaylistUpdateState::Failure), None] {
+            let temp = tempdir().unwrap();
+            let parent = Arc::new(ConfigInput {
+                id: 7,
+                name: "parent".intern(),
+                input_type: InputType::Xtream,
+                ..ConfigInput::default()
+            });
+            let app_config = test_app_config(
+                parent.clone(),
+                ConfigSource { inputs: vec![parent.name.clone()], targets: Vec::new() },
+            );
+            app_config.config.store(Arc::new(Config {
+                storage_dir: temp.path().to_string_lossy().into_owned(),
+                ..Config::default()
+            }));
+            let mut staged = ConfigInput {
+                id: 8,
+                name: "staged/provider own".intern(),
+                input_type: InputType::Staged,
+                staged_type: shared::model::StagedInputType::Xtream,
+                ..ConfigInput::default()
+            };
+            staged.staged = Some(tuliprox_core::model::ConfigInputStaged {
+                for_input: Some(parent.name.clone()),
+                clusters: shared::model::ClusterFlags::Live,
+            });
+            staged.resolve_staged_download_type();
+            let mut sources = app_config.sources.load().as_ref().clone();
+            sources.inputs.insert(0, Arc::new(staged.clone())); // Deliberately not ID or source order.
+            app_config.sources.store(Arc::new(sources));
+            let path = resolve_input_storage_path(&temp.path().to_string_lossy(), &staged.name).await;
+            let snapshot = PersistedPlaylistUpdateClusterSnapshot {
+                policy: Some(InputRefreshPolicy::REFRESH),
+                source: Some(PlaylistUpdateDataSource::Cache),
+                quality_guard_threshold: Some(95),
+                ..PersistedPlaylistUpdateClusterSnapshot::default()
+            };
+            let mut persisted = InputStatus::default();
+            persisted.clusters.insert(
+                "live".into(),
+                ClusterStatus { status: ClusterState::Ok, timestamp: 123, last_update: Some(snapshot) },
+            );
+            persisted.last_input_update =
+                own_state.map(|state| PersistedPlaylistUpdateInputResult { state, timestamp: 456 });
+            save_input_status(&path, &persisted);
+            let before = std::fs::read(path.join("status.json")).unwrap();
+            let parent_path = resolve_input_storage_path(&temp.path().to_string_lossy(), &parent.name).await;
+            save_input_status(
+                &parent_path,
+                &InputStatus {
+                    last_input_update: Some(PersistedPlaylistUpdateInputResult {
+                        state: PlaylistUpdateState::Partial,
+                        timestamp: 789,
+                    }),
+                    ..InputStatus::default()
+                },
+            );
+            let router = super::v1_api_playlist_register_protected(Router::new())
+                .with_state(test_app_state(Arc::new(app_config)));
+            let response = router
+                .into_service::<Body>()
+                .oneshot(Request::builder().uri("/playlist/update/status").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let dto: PlaylistUpdateStatusDto = serde_json::from_slice(&body).unwrap();
+            let own = dto.inputs.iter().find(|input| input.input_id == 8).unwrap();
+            assert_eq!(own.last_input_update, persisted.last_input_update);
+            assert_eq!(own.last_update, Some(123));
+            assert_eq!(
+                own.clusters,
+                vec![PersistedPlaylistUpdateClusterStatusDto {
+                    cluster: XtreamCluster::Live,
+                    status: PersistedPlaylistUpdateClusterState::Ok,
+                    timestamp: 123,
+                    last_update: Some(snapshot)
+                }]
+            );
+            assert_eq!(
+                dto.inputs.iter().find(|input| input.input_id == 7).unwrap().last_input_update.unwrap().state,
+                PlaylistUpdateState::Partial
+            );
+            assert!(!load_input_status(&path).clusters.contains_key("default"));
+            assert_eq!(
+                std::fs::read(path.join("status.json")).unwrap(),
+                before,
+                "read endpoint must not rewrite canonical status"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn playlist_update_status_exposes_last_input_results_and_legacy_default_without_inventing_clusters() {
+        use crate::processing::input_cache::{
+            load_input_status, resolve_input_storage_path, save_input_status, ClusterState, ClusterStatus, InputStatus,
+        };
+        use shared::model::{PersistedPlaylistUpdateInputResult, PlaylistUpdateState};
+        for last_state in [
+            None,
+            Some(PlaylistUpdateState::Success),
+            Some(PlaylistUpdateState::Partial),
+            Some(PlaylistUpdateState::Failure),
+        ] {
+            let temp = tempdir().unwrap();
+            let app_config = test_app_config(
+                Arc::new(ConfigInput::default()),
+                ConfigSource { inputs: Vec::new(), targets: Vec::new() },
+            );
+            app_config.config.store(Arc::new(Config {
+                storage_dir: temp.path().to_string_lossy().into_owned(),
+                ..Config::default()
+            }));
+            let mut sources = (**app_config.sources.load()).clone();
+            sources.inputs.clear();
+            for (index, input_type) in [
+                InputType::Xtream,
+                InputType::XtreamBatch,
+                InputType::Stalker,
+                InputType::StalkerBatch,
+                InputType::M3u,
+                InputType::M3uBatch,
+                InputType::Library,
+                InputType::Plex,
+                InputType::Emby,
+                InputType::Jellyfin,
+                InputType::Staged,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let input = Arc::new(ConfigInput {
+                    id: u16::try_from(index + 1).unwrap(),
+                    name: format!("input-{index}").intern(),
+                    input_type,
+                    enabled: index % 2 == 0,
+                    ..ConfigInput::default()
+                });
+                let path = resolve_input_storage_path(&temp.path().to_string_lossy(), &input.name).await;
+                let mut persisted = InputStatus::default();
+                persisted.clusters.insert(
+                    "default".to_string(),
+                    ClusterStatus {
+                        status: if input.enabled { ClusterState::Ok } else { ClusterState::Failed },
+                        timestamp: 123,
+                        last_update: None,
+                    },
+                );
+                persisted.last_input_update =
+                    last_state.map(|state| PersistedPlaylistUpdateInputResult { state, timestamp: 456 });
+                save_input_status(&path, &persisted);
+                sources.inputs.push(input);
+            }
+            let inputs = sources.inputs.clone();
+            app_config.sources.store(Arc::new(sources));
+            let router = super::v1_api_playlist_register_protected(Router::new())
+                .with_state(test_app_state(Arc::new(app_config)));
+            let response = router
+                .into_service::<Body>()
+                .oneshot(Request::builder().uri("/playlist/update/status").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let dto: PlaylistUpdateStatusDto = serde_json::from_slice(&body).unwrap();
+            assert_eq!(dto.inputs.len(), inputs.len());
+            for (input, status) in inputs.iter().zip(dto.inputs) {
+                assert_eq!(status.input_id, input.id);
+                assert_eq!(status.last_update, Some(123), "Last update retains the cache timestamp contract");
+                let expected = if let Some(state) = last_state {
+                    Some(PersistedPlaylistUpdateInputResult { state, timestamp: 456 })
+                } else if input.input_type.is_xtream() || input.input_type.is_stalker() {
+                    None // Do not reconstruct an aggregate input result from incomplete legacy clusters.
+                } else {
+                    Some(PersistedPlaylistUpdateInputResult {
+                        state: if input.enabled { PlaylistUpdateState::Success } else { PlaylistUpdateState::Failure },
+                        timestamp: 123,
+                    })
+                };
+                assert_eq!(status.last_input_update, expected);
+                assert!(status.clusters.is_empty(), "no synthetic Live/VOD/Series from default");
+                let path = resolve_input_storage_path(&temp.path().to_string_lossy(), &input.name).await;
+                assert_eq!(
+                    load_input_status(&path).last_input_update.map(|result| result.state),
+                    last_state,
+                    "read endpoint must not persist a legacy projection"
+                );
+            }
+        }
+    }
 
     #[tokio::test]
     async fn stable_recording_route_rejects_target_and_input_from_different_sources() {
@@ -1407,6 +2562,14 @@ mod tests {
     }
 
     fn test_app_state(app_cfg: Arc<AppConfig>) -> Arc<AppState> {
+        let (manual_update_sender, _) = mpsc::channel::<crate::api::model::ManualPlaylistUpdateRequest>(1);
+        test_app_state_with_manual_update_sender(app_cfg, manual_update_sender)
+    }
+
+    fn test_app_state_with_manual_update_sender(
+        app_cfg: Arc<AppConfig>,
+        manual_update_sender: mpsc::Sender<crate::api::model::ManualPlaylistUpdateRequest>,
+    ) -> Arc<AppState> {
         let event_manager = Arc::new(EventManager::new());
         let active_provider = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
         let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
@@ -1435,7 +2598,6 @@ mod tests {
             hls_cache: CancellationToken::new(),
         };
         let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
-        let (manual_update_sender, _) = mpsc::channel::<crate::api::model::ManualPlaylistUpdateRequest>(1);
 
         Arc::new(AppState {
             forced_targets: Arc::new(ArcSwap::from_pointee(crate::model::ProcessTargets {
@@ -2221,6 +3383,7 @@ mod tests {
             enabled: true,
             options: Some(ConfigInputOptions {
                 flags: crate::model::ConfigInputFlagsSet::new(),
+                update_quality: ConfigInputUpdateQuality::default(),
                 resolve_delay: shared::defaults::default_resolve_delay_secs(),
                 probe_delay: shared::defaults::default_probe_delay_secs(),
                 probe_live_interval_hours: 120,

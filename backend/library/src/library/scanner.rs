@@ -181,16 +181,34 @@ pub struct LibraryScanner {
     config: LibraryConfig,
 }
 
+/// Completeness required by a caller that will publish targets from this discovery.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ScanCompleteness {
+    BestEffort,
+    Complete,
+}
+
 impl LibraryScanner {
     pub fn new(config: LibraryConfig) -> Self { Self { config } }
 
     pub async fn scan_all(&self) -> Result<Vec<ScannedMediaFile>, io::Error> {
+        self.scan_all_with_completeness(ScanCompleteness::BestEffort).await
+    }
+
+    pub(super) async fn scan_all_with_completeness(
+        &self,
+        completeness: ScanCompleteness,
+    ) -> Result<Vec<ScannedMediaFile>, io::Error> {
         if !self.config.enabled {
             info!("Library media scanning is disabled");
             return Ok(Vec::new());
         }
 
         let mut all_files = Vec::new();
+
+        if completeness == ScanCompleteness::Complete && !self.config.scan_directories.iter().any(|dir| dir.enabled) {
+            return Err(io::Error::other("Library rescan requires an enabled scan directory"));
+        }
 
         for scan_dir in &self.config.scan_directories {
             if !scan_dir.enabled {
@@ -199,13 +217,16 @@ impl LibraryScanner {
             }
 
             info!("Scanning directory: {}", scan_dir.path);
-            match self.scan_directory(scan_dir).await {
+            match self.scan_directory(scan_dir, completeness).await {
                 Ok(mut files) => {
                     info!("Found {} video files in {}", files.len(), scan_dir.path);
                     all_files.append(&mut files);
                 }
                 Err(err) => {
                     error!("Failed to scan directory {}: {err}", scan_dir.path);
+                    if completeness == ScanCompleteness::Complete {
+                        return Err(err);
+                    }
                 }
             }
         }
@@ -215,22 +236,36 @@ impl LibraryScanner {
     }
 
     // Recursively scans a single directory for video files
-    async fn scan_directory(&self, scan_directory: &LibraryScanDirectory) -> io::Result<Vec<ScannedMediaFile>> {
+    async fn scan_directory(
+        &self,
+        scan_directory: &LibraryScanDirectory,
+        completeness: ScanCompleteness,
+    ) -> io::Result<Vec<ScannedMediaFile>> {
         let path = Path::new(&scan_directory.path);
 
-        if !fs::try_exists(path).await.unwrap_or(false) {
+        if completeness == ScanCompleteness::BestEffort && !fs::try_exists(path).await.unwrap_or(false) {
             warn!("Directory does not exist or is not readable: {}", scan_directory.path);
             return Ok(Vec::new());
         }
 
         let dir_metadata = fs::metadata(path).await?;
         if !dir_metadata.is_dir() {
+            if completeness == ScanCompleteness::Complete {
+                return Err(io::Error::other("Library scan root is not a directory"));
+            }
             warn!("Path is not a directory: {}", scan_directory.path);
             return Ok(Vec::new());
         }
 
         let mut files = Vec::new();
-        self.scan_directory_recursive(path, scan_directory.recursive, scan_directory.content_type, &mut files).await?;
+        self.scan_directory_recursive(
+            path,
+            scan_directory.recursive,
+            scan_directory.content_type,
+            &mut files,
+            completeness,
+        )
+        .await?;
         Ok(files)
     }
 
@@ -240,6 +275,7 @@ impl LibraryScanner {
         recursive: bool,
         content_type: LibraryContentType,
         files: &'a mut Vec<ScannedMediaFile>,
+        completeness: ScanCompleteness,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send + 'a>> {
         Box::pin(async move {
             let mut entries = fs::read_dir(path).await?;
@@ -250,6 +286,9 @@ impl LibraryScanner {
                     Ok(m) => m,
                     Err(err) => {
                         error!("Failed to read metadata for {}: {err}", entry_path.display());
+                        if completeness == ScanCompleteness::Complete {
+                            return Err(err);
+                        }
                         continue;
                     }
                 };
@@ -257,10 +296,14 @@ impl LibraryScanner {
                 if metadata.is_dir() {
                     if recursive {
                         // Recursively scan subdirectories
-                        if let Err(err) =
-                            self.scan_directory_recursive(&entry_path, recursive, content_type, files).await
+                        if let Err(err) = self
+                            .scan_directory_recursive(&entry_path, recursive, content_type, files, completeness)
+                            .await
                         {
                             error!("Failed to scan subdirectory {}: {err}", entry_path.display());
+                            if completeness == ScanCompleteness::Complete {
+                                return Err(err);
+                            }
                         }
                     }
                 } else if metadata.is_file() {
@@ -275,6 +318,9 @@ impl LibraryScanner {
                                 }
                                 Err(err) => {
                                     error!("Failed to read metadata for {}: {err}", entry_path.display());
+                                    if completeness == ScanCompleteness::Complete {
+                                        return Err(err);
+                                    }
                                 }
                             }
                         }

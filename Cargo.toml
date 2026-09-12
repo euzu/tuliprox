@@ -89,6 +89,16 @@ lto = false
 incremental = true
 codegen-units = 256
 
+[profile.dev-slim]
+inherits = "dev"
+opt-level = 0
+strip = "none"
+lto = "off"
+debug = "line-tables-only"
+
+[profile.dev-slim.package."*"]
+debug = false
+
 [profile.release.package.frontend]
 opt-level = 'z'     # Size optimization for frontend
 

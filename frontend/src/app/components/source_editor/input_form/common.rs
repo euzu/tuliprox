@@ -1,23 +1,27 @@
 use super::{
     input_persist_hint_key, input_url_hint_key, ConfigInputFormAction, ConfigInputFormState,
     ConfigInputOptionsDtoFormState, ConfigInputOptionsFormAction, LABEL_CACHE_DURATION, LABEL_DISABLE_HLS_STREAMING,
-    LABEL_ENABLED, LABEL_EXP_DATE, LABEL_FETCH_METHOD, LABEL_HEADERS, LABEL_LIVE_STREAMS, LABEL_MAX_CONNECTIONS,
-    LABEL_METADATA, LABEL_NAME, LABEL_PASSWORD, LABEL_PERSIST, LABEL_PRIORITY, LABEL_PROBE, LABEL_PROBE_DELAY_SEC,
-    LABEL_PROBE_FILTER, LABEL_PROBE_LIVE, LABEL_PROBE_LIVE_INTERVAL_HOURS, LABEL_PROBE_SERIES, LABEL_PROBE_VOD,
-    LABEL_RESOLVE, LABEL_RESOLVE_BACKGROUND, LABEL_RESOLVE_DELAY_SEC, LABEL_RESOLVE_FILTER, LABEL_RESOLVE_SERIES,
-    LABEL_RESOLVE_TMDB, LABEL_RESOLVE_VOD, LABEL_SEQUENTIAL_GROUP, LABEL_SKIP, LABEL_SKIP_LIVE, LABEL_SKIP_SERIES,
-    LABEL_SKIP_VOD, LABEL_URL, LABEL_USERNAME, LABEL_USER_AGENT_STREAM_INDEX, LABEL_XTREAM_LIVE_STREAM_USE_PREFIX,
-    LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION,
+    LABEL_ENABLED, LABEL_EXP_DATE, LABEL_FETCH_METHOD, LABEL_HEADERS, LABEL_LIVE, LABEL_LIVE_STREAMS,
+    LABEL_MAX_CONNECTIONS, LABEL_METADATA, LABEL_NAME, LABEL_PASSWORD, LABEL_PERSIST, LABEL_PRIORITY, LABEL_PROBE,
+    LABEL_PROBE_DELAY_SEC, LABEL_PROBE_FILTER, LABEL_PROBE_LIVE, LABEL_PROBE_LIVE_INTERVAL_HOURS, LABEL_PROBE_SERIES,
+    LABEL_PROBE_VOD, LABEL_RESOLVE, LABEL_RESOLVE_BACKGROUND, LABEL_RESOLVE_DELAY_SEC, LABEL_RESOLVE_FILTER,
+    LABEL_RESOLVE_SERIES, LABEL_RESOLVE_TMDB, LABEL_RESOLVE_VOD, LABEL_SEQUENTIAL_GROUP, LABEL_SERIES, LABEL_SKIP,
+    LABEL_UPDATE_QUALITY, LABEL_URL, LABEL_USERNAME, LABEL_USER_AGENT_STREAM_INDEX, LABEL_VOD,
+    LABEL_XTREAM_LIVE_STREAM_USE_PREFIX, LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION,
 };
 use crate::{
-    app::components::{Card, FilterInput, KeyValueEditor, RadioButtonGroup, TitledCard, ToolAction},
+    app::components::{Card, FilterInput, KeyValueEditor, RadioButtonGroup, RangeSlider, TitledCard, ToolAction},
     config_field, config_field_bool, config_field_child, config_field_custom, config_field_optional,
     config_field_optional_hide, edit_field_bool, edit_field_exp_date, edit_field_number_i16,
     edit_field_number_option_u32, edit_field_number_u16, edit_field_number_u32, edit_field_text,
     edit_field_text_option, html_if,
     i18n::{use_translation, YewI18n},
+    utils::content_cluster_presentation,
 };
-use shared::{model::InputFetchMethod, utils::BATCH_SCHEME_PREFIX};
+use shared::{
+    model::{ConfigInputUpdateQualityDto, InputFetchMethod, XtreamCluster},
+    utils::BATCH_SCHEME_PREFIX,
+};
 use std::{collections::HashMap, rc::Rc};
 use yew::{component, html, use_memo, Callback, Html, Properties, UseReducerHandle, UseStateHandle};
 
@@ -170,8 +174,84 @@ pub(super) fn CommonInputForm(props: &CommonInputFormProps) -> Html {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(super) enum OptionsKind {
     Basic,
+    M3u,
     Xtream,
     Stalker,
+}
+
+impl OptionsKind {
+    pub(super) const fn supports_update_quality(self) -> bool { !matches!(self, Self::Basic) }
+}
+
+fn update_quality_value(update_quality: ConfigInputUpdateQualityDto, cluster: XtreamCluster) -> u8 {
+    match cluster {
+        XtreamCluster::Live => update_quality.live,
+        XtreamCluster::Video => update_quality.vod,
+        XtreamCluster::Series => update_quality.series,
+    }
+}
+
+fn set_update_quality_value(update_quality: &mut ConfigInputUpdateQualityDto, cluster: XtreamCluster, value: u8) {
+    match cluster {
+        XtreamCluster::Live => update_quality.live = value,
+        XtreamCluster::Video => update_quality.vod = value,
+        XtreamCluster::Series => update_quality.series = value,
+    }
+}
+
+const fn update_quality_field(cluster: XtreamCluster) -> (&'static str, &'static str) {
+    let field = match cluster {
+        XtreamCluster::Live => "update_quality_live",
+        XtreamCluster::Video => "update_quality_vod",
+        XtreamCluster::Series => "update_quality_series",
+    };
+    (field, content_cluster_presentation(cluster).label_key)
+}
+
+fn update_quality_content(
+    quality: ConfigInputUpdateQualityDto,
+    translate: impl Fn(&str) -> String,
+    allow_write: bool,
+    on_change: impl Fn(XtreamCluster) -> Callback<u8>,
+) -> Html {
+    let mut clusters = shared::model::xtream_const::XTREAM_CLUSTER;
+    clusters.sort_by_key(|cluster| content_cluster_presentation(*cluster).rank);
+    html! {
+        <TitledCard title={translate(LABEL_UPDATE_QUALITY)}>
+            {for clusters.into_iter().map(|cluster| {
+                let (name, label) = update_quality_field(cluster);
+                let value = update_quality_value(quality, cluster);
+                let on_change = on_change(cluster);
+                config_field_child!(translate(label), "INPUT_FORM.UPDATE_QUALITY", {
+                    html! { <RangeSlider {name} {value} max={100} disabled={!allow_write} {on_change} /> }
+                })
+            })}
+        </TitledCard>
+    }
+}
+
+fn update_quality_options(
+    state: &UseReducerHandle<ConfigInputOptionsDtoFormState>,
+    translate: &YewI18n,
+    allow_write: bool,
+) -> Html {
+    update_quality_content(
+        state.form.update_quality,
+        |key| translate.t(key),
+        allow_write,
+        |cluster| {
+            if allow_write {
+                let state = state.clone();
+                Callback::from(move |value| {
+                    let mut update_quality = state.form.update_quality;
+                    set_update_quality_value(&mut update_quality, cluster, value);
+                    state.dispatch(ConfigInputOptionsFormAction::UpdateQuality(update_quality));
+                })
+            } else {
+                Callback::noop()
+            }
+        },
+    )
 }
 
 #[derive(Properties, Clone)]
@@ -193,36 +273,48 @@ pub(super) fn InputOptionsForm(props: &InputOptionsFormProps) -> Html {
     let translate = use_translation();
     let state = props.state.clone();
     let headers = props.headers.clone();
+    let update_quality = if props.kind.supports_update_quality() {
+        update_quality_options(&state, &translate, props.allow_write)
+    } else {
+        Html::default()
+    };
     let type_options = match (props.allow_write, props.kind) {
         (_, OptionsKind::Basic) => Html::default(),
+        (_, OptionsKind::M3u) => update_quality,
         (false, OptionsKind::Stalker) => html! {
-            <TitledCard title={translate.t("LABEL.STALKER")}>
+            <>
+            <TitledCard title={translate.t("LABEL.SKIP")}>
                 <div class="tp__config-view__cols-3">
-                    { config_field_bool!(state.form, translate.t(LABEL_SKIP_LIVE), skip_live) }
-                    { config_field_bool!(state.form, translate.t(LABEL_SKIP_VOD), skip_vod) }
-                    { config_field_bool!(state.form, translate.t(LABEL_SKIP_SERIES), skip_series) }
+                    { config_field_bool!(state.form, translate.t(LABEL_LIVE), skip_live) }
+                    { config_field_bool!(state.form, translate.t(LABEL_VOD), skip_vod) }
+                    { config_field_bool!(state.form, translate.t(LABEL_SERIES), skip_series) }
                 </div>
+            </TitledCard>
+            {update_quality}
+            <TitledCard title={translate.t("LABEL.STALKER")}>
                 { config_field_bool!(state.form, translate.t("LABEL.STALKER_BULK_EPG"), stalker_bulk_epg) }
                 {props.extra.clone()}
             </TitledCard>
+            </>
         },
         (true, OptionsKind::Stalker) => html! {
             <>
             <TitledCard title={translate.t("LABEL.SKIP")}>
                 <div class="tp__config-view__cols-3">
-                    { edit_field_bool!(state, translate.t(LABEL_SKIP_LIVE), skip_live, ConfigInputOptionsFormAction::SkipLive) }
-                    { edit_field_bool!(state, translate.t(LABEL_SKIP_VOD), skip_vod, ConfigInputOptionsFormAction::SkipVod) }
-                    { edit_field_bool!(state, translate.t(LABEL_SKIP_SERIES), skip_series, ConfigInputOptionsFormAction::SkipSeries) }
+                    { edit_field_bool!(state, translate.t(LABEL_LIVE), skip_live, ConfigInputOptionsFormAction::SkipLive) }
+                    { edit_field_bool!(state, translate.t(LABEL_VOD), skip_vod, ConfigInputOptionsFormAction::SkipVod) }
+                    { edit_field_bool!(state, translate.t(LABEL_SERIES), skip_series, ConfigInputOptionsFormAction::SkipSeries) }
                 </div>
             </TitledCard>
+            {update_quality}
             <TitledCard title={translate.t("LABEL.STALKER")}>
                 { edit_field_bool!(state, translate.t("LABEL.STALKER_BULK_EPG"), stalker_bulk_epg, ConfigInputOptionsFormAction::StalkerBulkEpg) }
                 {props.extra.clone()}
             </TitledCard>
             </>
         },
-        (false, OptionsKind::Xtream) => xtream_options_readonly(&state, &translate),
-        (true, OptionsKind::Xtream) => xtream_options_editable(&state, &translate),
+        (false, OptionsKind::Xtream) => xtream_options_readonly(&state, &translate, update_quality),
+        (true, OptionsKind::Xtream) => xtream_options_editable(&state, &translate, update_quality),
     };
     html! {
         <Card class="tp__config-view__card">
@@ -251,13 +343,18 @@ pub(super) fn InputOptionsForm(props: &InputOptionsFormProps) -> Html {
     }
 }
 
-fn xtream_options_readonly(state: &UseReducerHandle<ConfigInputOptionsDtoFormState>, translate: &YewI18n) -> Html {
+fn xtream_options_readonly(
+    state: &UseReducerHandle<ConfigInputOptionsDtoFormState>,
+    translate: &YewI18n,
+    update_quality: Html,
+) -> Html {
     html! { <>
         <TitledCard title={translate.t(LABEL_SKIP)}><div class="tp__config-view__cols-3">
-            { config_field_bool!(state.form, translate.t(LABEL_SKIP_LIVE), skip_live) }
-            { config_field_bool!(state.form, translate.t(LABEL_SKIP_VOD), skip_vod) }
-            { config_field_bool!(state.form, translate.t(LABEL_SKIP_SERIES), skip_series) }
+            { config_field_bool!(state.form, translate.t(LABEL_LIVE), skip_live) }
+            { config_field_bool!(state.form, translate.t(LABEL_VOD), skip_vod) }
+            { config_field_bool!(state.form, translate.t(LABEL_SERIES), skip_series) }
         </div></TitledCard>
+        {update_quality}
         <TitledCard title={translate.t(LABEL_LIVE_STREAMS)}><div class="tp__config-view__cols-2">
             { config_field_bool!(state.form, translate.t(LABEL_XTREAM_LIVE_STREAM_USE_PREFIX), xtream_live_stream_use_prefix) }
             { config_field_bool!(state.form, translate.t(LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION), xtream_live_stream_without_extension) }
@@ -289,13 +386,18 @@ fn xtream_options_readonly(state: &UseReducerHandle<ConfigInputOptionsDtoFormSta
     </> }
 }
 
-fn xtream_options_editable(state: &UseReducerHandle<ConfigInputOptionsDtoFormState>, translate: &YewI18n) -> Html {
+fn xtream_options_editable(
+    state: &UseReducerHandle<ConfigInputOptionsDtoFormState>,
+    translate: &YewI18n,
+    update_quality: Html,
+) -> Html {
     html! { <>
         <TitledCard title={translate.t(LABEL_SKIP)}><div class="tp__config-view__cols-3">
-            { edit_field_bool!(state, translate.t(LABEL_SKIP_LIVE), skip_live, ConfigInputOptionsFormAction::SkipLive) }
-            { edit_field_bool!(state, translate.t(LABEL_SKIP_VOD), skip_vod, ConfigInputOptionsFormAction::SkipVod) }
-            { edit_field_bool!(state, translate.t(LABEL_SKIP_SERIES), skip_series, ConfigInputOptionsFormAction::SkipSeries) }
+            { edit_field_bool!(state, translate.t(LABEL_LIVE), skip_live, ConfigInputOptionsFormAction::SkipLive) }
+            { edit_field_bool!(state, translate.t(LABEL_VOD), skip_vod, ConfigInputOptionsFormAction::SkipVod) }
+            { edit_field_bool!(state, translate.t(LABEL_SERIES), skip_series, ConfigInputOptionsFormAction::SkipSeries) }
         </div></TitledCard>
+        {update_quality}
         <TitledCard title={translate.t(LABEL_LIVE_STREAMS)}><div class="tp__config-view__cols-2">
             { edit_field_bool!(state, translate.t(LABEL_XTREAM_LIVE_STREAM_USE_PREFIX), xtream_live_stream_use_prefix, ConfigInputOptionsFormAction::XtreamLiveStreamUsePrefix) }
             { edit_field_bool!(state, translate.t(LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION), xtream_live_stream_without_extension, ConfigInputOptionsFormAction::XtreamLiveStreamWithoutExtension) }
@@ -331,4 +433,43 @@ fn xtream_options_editable(state: &UseReducerHandle<ConfigInputOptionsDtoFormSta
             })}
         </TitledCard>
     </> }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_quality_slider_uses_content_taxonomy_without_renaming_config_fields() {
+        let translations: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../../public/assets/i18n/en.json")).unwrap();
+        let translate = |key: &str| {
+            translations
+                .pointer(&format!("/{}", key.replace('.', "/")))
+                .and_then(serde_json::Value::as_str)
+                .unwrap()
+                .to_owned()
+        };
+        let quality = ConfigInputUpdateQualityDto { live: 11, vod: 22, series: 33 };
+        let callback = Callback::noop();
+        for allow_write in [false, true] {
+            let actual = update_quality_content(quality, translate, allow_write, |_| callback.clone());
+            // Compare the complete production VNode, including FieldLabel and RangeSlider
+            // properties, in exact order. No source-text or set/contains assertion.
+            let expected = html! {
+                <TitledCard title={translate(LABEL_UPDATE_QUALITY)}>
+                    {for [("Live", "update_quality_live", 11u8), ("Shows", "update_quality_series", 33u8), ("Movies", "update_quality_vod", 22u8)].into_iter().map(|(label, name, value)| {
+                        config_field_child!(label, "INPUT_FORM.UPDATE_QUALITY", {
+                            html! { <RangeSlider {name} {value} max={100} disabled={!allow_write} on_change={callback.clone()} /> }
+                        })
+                    })}
+                </TitledCard>
+            };
+            assert_eq!(actual, expected, "visible labels/order, values, field names and readonly state");
+        }
+        let mut changed = quality;
+        set_update_quality_value(&mut changed, XtreamCluster::Series, 94);
+        assert_eq!(serde_json::to_value(changed).unwrap(), serde_json::json!({"live": 11, "vod": 22, "series": 94}));
+        assert_eq!(update_quality_value(changed, XtreamCluster::Video), 22);
+    }
 }

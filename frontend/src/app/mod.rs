@@ -12,6 +12,7 @@ use crate::{
     services::request_get,
     utils::{get_local_storage_item, set_local_storage_item},
 };
+pub(crate) use components::{map_sources_to_playlist_rows, InputRow};
 pub use context::*;
 use futures::future::join_all;
 use log::error;

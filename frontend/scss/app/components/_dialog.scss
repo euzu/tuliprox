@@ -1,8 +1,9 @@
 dialog {
+  --dialog-padding: var(--padding-larger);
   display: flex;
   flex-flow: column;
   gap: var(--gap-large);
-  padding: var(--padding-larger);
+  padding: var(--dialog-padding);
   background-color: var(--card-background-color);
   color: var(--card-color);
   border: none;

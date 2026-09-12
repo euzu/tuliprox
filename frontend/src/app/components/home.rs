@@ -219,7 +219,7 @@ pub fn Home() -> Html {
                         ToastOptions { close_mode: ToastCloseMode::Manual },
                     );
                 }
-                EventMessage::PlaylistUpdate(update_state) => match update_state {
+                EventMessage::PlaylistUpdate(update) => match update.state {
                     PlaylistUpdateState::Success => {
                         services_ctx_clone.toastr.success(translate_clone.t("MESSAGES.PLAYLIST_UPDATE.SUCCESS_FINISH"));
                     }

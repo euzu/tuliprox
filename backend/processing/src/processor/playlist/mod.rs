@@ -2,7 +2,6 @@ use super::providers::{LibraryProvider, PlexProvider, StalkerProvider, XmltvEpgP
 use crate::{
     fetched_playlist::FetchedPlaylist,
     input_cache,
-    input_cache::ClusterState,
     metadata_sink::{MetadataUpdateSink, NoopMetadataSink},
     parser::xmltv::{flatten_tvguide, merge_epg_trees, EpgMergeAccumulator, TVGuide},
     playlist_watch::{process_group_watch, process_target_groups_watch},
@@ -24,10 +23,14 @@ use shared::{
     error::{get_errors_notify_message, TuliproxError},
     foundation::{get_field_value, set_field_value, Filter, ValueAccessor, ValueProvider},
     model::{
-        ClusterFlags, ConfigTargetOptions, CounterModifier, EventMessage, EventSink, FieldGet, FieldSet, InputStats,
-        InputType, MappingStage, PipelineStats, PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistStats,
-        PlaylistUpdateProgressEvent, PlaylistUpdateSummary, ProviderFetchFailure, SourceStats, StreamProperties,
-        TargetStats, UUIDType, WatchDisabled, WatchDisabledReason, WatchUnmatched, XtreamCluster,
+        ClusterFlags, ConfigTargetOptions, CounterModifier, EventMessage, EventSink, FieldGet, FieldSet,
+        InputRefreshOverride, InputRefreshPolicy, InputStats, InputType, InputUpdateAction, InputUpdateRequest,
+        MappingStage, PersistedPlaylistUpdateClusterSnapshot, PersistedPlaylistUpdateQualityDecision,
+        PersistedPlaylistUpdateQualitySnapshot, PersistedPlaylistUpdateTechnicalState, PipelineStats, PlaylistGroup,
+        PlaylistItem, PlaylistItemType, PlaylistStats, PlaylistUpdateClusterDecision, PlaylistUpdateClusterTelemetry,
+        PlaylistUpdateDataSource, PlaylistUpdateInputTelemetry, PlaylistUpdateProgressEvent, PlaylistUpdateRunId,
+        PlaylistUpdateRunOrder, PlaylistUpdateState, PlaylistUpdateSummary, ProviderFetchFailure, SourceStats,
+        StreamProperties, TargetStats, UUIDType, WatchDisabled, WatchDisabledReason, WatchUnmatched, XtreamCluster,
     },
     utils::{create_alias_uuid, interner_gc, sanitize_sensitive_info, Internable},
 };
@@ -35,7 +38,7 @@ use std::{
     collections::{HashMap, HashSet},
     future::Future,
     path::PathBuf,
-    sync::{Arc, Weak},
+    sync::{atomic::AtomicU64, Arc, Weak},
     time::{Duration, Instant},
 };
 use tokio::{
@@ -44,10 +47,10 @@ use tokio::{
 };
 use tuliprox_core::{
     model::{
-        is_valid, retain_filtered_playlist, AppConfig, CompiledMapping, ConfigFavourites, ConfigInput,
-        ConfigInputFlags, ConfigInputOptions, ConfigRename, ConfigTarget, Epg, FilterOutcome, MappingProgram,
-        ProcessTargets, ProviderIdType, ResolveReason, ReverseProxyDisabledHeaderConfig, TransformStage, UpdateGuard,
-        UpdateTask,
+        is_valid, retain_filtered_playlist, AppConfig, ClusterForceUpdate, ClusterUpdateRejection, CompiledMapping,
+        ConfigFavourites, ConfigInput, ConfigInputFlags, ConfigInputOptions, ConfigRename, ConfigTarget, Epg,
+        FilterOutcome, MappingProgram, ProcessTargets, ProviderIdType, ResolveReason, ReverseProxyDisabledHeaderConfig,
+        TransformStage, UpdateGuard, UpdateTask,
     },
     utils::{debug_if_enabled, log_memory_snapshot, trace_if_enabled, StepMeasure, StepMeasureCallback},
 };
@@ -62,15 +65,28 @@ use tuliprox_iptv::{
     xtream,
 };
 use tuliprox_repository::{
-    load_input_playlist, persist_input_playlist, persist_playlist, CategoryKey, MemoryPlaylistSource, PlaylistSource,
-    PlaylistStorageState,
+    load_input_playlist, persist_input_playlist_with_options, persist_playlist, CategoryKey,
+    InputPlaylistPersistOptions, MemoryPlaylistSource, PlaylistSource, PlaylistStorageState,
+    TargetPlaylistPersistOptions,
 };
 use tuliprox_session::ActiveProviderManager;
 
 const PLAYLIST_UPDATE_MAX_DURATION_SECS: u64 = 3600;
 const MAX_CONCURRENT_TARGET_FINALIZERS: usize = 2;
+static NEXT_PLAYLIST_UPDATE_RUN_ORDER: AtomicU64 = AtomicU64::new(1);
 
+/// Allocates the order at which a run entered the serial execution boundary.
+#[must_use]
+pub fn next_playlist_update_run_order() -> PlaylistUpdateRunOrder {
+    PlaylistUpdateRunOrder::from(NEXT_PLAYLIST_UPDATE_RUN_ORDER.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
+}
+
+mod fetch_outcome;
 mod ingest;
+mod input_status;
+mod m3u_quality;
+mod manual_update;
+use manual_update::LibraryUpdateMode;
 mod target;
 mod transform;
 
@@ -123,6 +139,7 @@ pub struct ProcessingRun<
     M: MetadataUpdateSink = NoopMetadataSink,
 > {
     client: reqwest::Client,
+    run_id: PlaylistUpdateRunId,
     app_config: Arc<AppConfig>,
     targets: Arc<ProcessTargets>,
     events: E,
@@ -134,12 +151,27 @@ pub struct ProcessingRun<
     metadata_manager: Option<Arc<M>>,
     pre_processed_inputs: Option<HashSet<Arc<str>>>,
     acquired_permit: Option<tuliprox_core::model::UpdateGuardPermit>,
+    input_refresh: Option<InputRefreshOverride>,
+    library_update_mode: LibraryUpdateMode,
 }
 
 impl<E: EventSink + Clone + 'static> ProcessingRun<E, NoBootstrap, NoopMetadataSink> {
     pub fn new(client: reqwest::Client, app_config: Arc<AppConfig>, targets: Arc<ProcessTargets>, events: E) -> Self {
+        Self::for_run(PlaylistUpdateRunId::generate(), client, app_config, targets, events)
+    }
+
+    /// Creates a run for an identity already allocated by an accepted queue request.
+    #[must_use]
+    pub fn for_run(
+        run_id: PlaylistUpdateRunId,
+        client: reqwest::Client,
+        app_config: Arc<AppConfig>,
+        targets: Arc<ProcessTargets>,
+        events: E,
+    ) -> Self {
         Self {
             client,
+            run_id,
             app_config,
             targets,
             events,
@@ -151,6 +183,8 @@ impl<E: EventSink + Clone + 'static> ProcessingRun<E, NoBootstrap, NoopMetadataS
             metadata_manager: None,
             pre_processed_inputs: None,
             acquired_permit: None,
+            input_refresh: None,
+            library_update_mode: LibraryUpdateMode::ExistingCatalog,
         }
     }
 }
@@ -164,6 +198,7 @@ impl<E: EventSink + Clone + 'static, B: UpdateBootstrap, M: MetadataUpdateSink> 
     pub fn with_bootstrap<B2: UpdateBootstrap>(self, bootstrap: B2) -> ProcessingRun<E, B2, M> {
         ProcessingRun {
             client: self.client,
+            run_id: self.run_id,
             app_config: self.app_config,
             targets: self.targets,
             events: self.events,
@@ -175,6 +210,8 @@ impl<E: EventSink + Clone + 'static, B: UpdateBootstrap, M: MetadataUpdateSink> 
             metadata_manager: self.metadata_manager,
             pre_processed_inputs: self.pre_processed_inputs,
             acquired_permit: self.acquired_permit,
+            input_refresh: self.input_refresh,
+            library_update_mode: self.library_update_mode,
         }
     }
 
@@ -211,6 +248,7 @@ impl<E: EventSink + Clone + 'static, B: UpdateBootstrap, M: MetadataUpdateSink> 
     pub fn with_metadata_manager<M2: MetadataUpdateSink>(self, manager: Arc<M2>) -> ProcessingRun<E, B, M2> {
         ProcessingRun {
             client: self.client,
+            run_id: self.run_id,
             app_config: self.app_config,
             targets: self.targets,
             events: self.events,
@@ -222,6 +260,8 @@ impl<E: EventSink + Clone + 'static, B: UpdateBootstrap, M: MetadataUpdateSink> 
             metadata_manager: Some(manager),
             pre_processed_inputs: self.pre_processed_inputs,
             acquired_permit: self.acquired_permit,
+            input_refresh: self.input_refresh,
+            library_update_mode: self.library_update_mode,
         }
     }
 
@@ -240,6 +280,30 @@ impl<E: EventSink + Clone + 'static, B: UpdateBootstrap, M: MetadataUpdateSink> 
         self.acquired_permit = permit.into();
         self
     }
+
+    /// Carries a validated card action through the existing serial run.
+    #[must_use]
+    pub fn with_manual_input_update(mut self, request: Option<InputUpdateRequest>) -> Self {
+        if let Some(request) = request {
+            match request.action {
+                InputUpdateAction::Provider(policy) => {
+                    self.input_refresh = Some(InputRefreshOverride { input_id: request.input_id, policy });
+                }
+                InputUpdateAction::Rescan => {
+                    self.library_update_mode = LibraryUpdateMode::Rescan { input_id: request.input_id };
+                    self.input_refresh = None;
+                }
+            }
+        }
+        self
+    }
+
+    /// Applies one manual policy override without changing the input configuration.
+    #[must_use]
+    pub fn with_input_refresh(mut self, input_refresh: impl Into<Option<InputRefreshOverride>>) -> Self {
+        self.input_refresh = input_refresh.into();
+        self
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -248,6 +312,7 @@ pub async fn exec_processing<E: EventSink + Clone + 'static, B: UpdateBootstrap,
 ) {
     let ProcessingRun {
         client,
+        run_id,
         app_config,
         targets,
         events,
@@ -259,6 +324,8 @@ pub async fn exec_processing<E: EventSink + Clone + 'static, B: UpdateBootstrap,
         metadata_manager,
         pre_processed_inputs,
         acquired_permit,
+        input_refresh,
+        library_update_mode,
     } = run;
 
     let max_update_duration = Duration::from_secs(PLAYLIST_UPDATE_MAX_DURATION_SECS);
@@ -269,7 +336,10 @@ pub async fn exec_processing<E: EventSink + Clone + 'static, B: UpdateBootstrap,
             Some(permit)
         } else {
             warn!("Playlist update lock is closed; update skipped.");
-            events.emit(EventMessage::PlaylistUpdate(PlaylistUpdateSummary::state_only(
+            let execution_order = next_playlist_update_run_order();
+            events.emit(EventMessage::PlaylistUpdate(PlaylistUpdateSummary::for_run(
+                run_id,
+                execution_order,
                 shared::model::PlaylistUpdateState::Failure,
             )));
             return;
@@ -277,6 +347,7 @@ pub async fn exec_processing<E: EventSink + Clone + 'static, B: UpdateBootstrap,
     } else {
         None
     };
+    let execution_order = next_playlist_update_run_order();
 
     if playlist_guard.is_some() {
         if let Some(bootstrap) = bootstrap.as_ref() {
@@ -284,7 +355,9 @@ pub async fn exec_processing<E: EventSink + Clone + 'static, B: UpdateBootstrap,
                 error!(
                     "Playlist update bootstrap timed out after {PLAYLIST_UPDATE_MAX_DURATION_SECS} secs while holding playlist lock",
                 );
-                events.emit(EventMessage::PlaylistUpdate(PlaylistUpdateSummary::state_only(
+                events.emit(EventMessage::PlaylistUpdate(PlaylistUpdateSummary::for_run(
+                    run_id,
+                    execution_order,
                     shared::model::PlaylistUpdateState::Failure,
                 )));
                 return;
@@ -306,11 +379,14 @@ pub async fn exec_processing<E: EventSink + Clone + 'static, B: UpdateBootstrap,
     // Initialize Context
     let ctx = PlaylistProcessingContext {
         client,
+        run_id: run_id.clone(),
+        execution_order,
         config: app_config.clone(),
         user_targets: targets.clone(),
         events: events.clone(),
         playlist_state: playlist_state.clone(),
         processed_inputs: Arc::new(Mutex::new(HashSet::new())),
+        input_completions: Arc::new(Mutex::new(HashMap::new())),
         input_locks: Arc::new(Mutex::new(HashMap::new())),
         disabled_headers,
         provider_manager,
@@ -324,17 +400,24 @@ pub async fn exec_processing<E: EventSink + Clone + 'static, B: UpdateBootstrap,
             StalkerRefreshMode::Complete
         },
         partial_refresh: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        had_quality_rejections: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        input_refresh,
+        library_update_mode,
     };
 
     let start_time = Instant::now();
-    let process_result =
-        tokio::time::timeout(max_update_duration, std::panic::AssertUnwindSafe(process_sources(&ctx)).catch_unwind())
-            .await;
+    let process_result = tokio::time::timeout(
+        max_update_duration,
+        std::panic::AssertUnwindSafe(manual_update::process_manual_update(&ctx, update_guard.as_ref())).catch_unwind(),
+    )
+    .await;
     let (stats, errors) = match process_result {
         Ok(Ok((stats, errors))) => (stats, errors),
         Ok(Err(_)) => {
             error!("Playlist processing panicked");
-            events.emit(EventMessage::PlaylistUpdate(PlaylistUpdateSummary::state_only(
+            events.emit(EventMessage::PlaylistUpdate(PlaylistUpdateSummary::for_run(
+                run_id,
+                execution_order,
                 shared::model::PlaylistUpdateState::Failure,
             )));
             return;
@@ -343,7 +426,9 @@ pub async fn exec_processing<E: EventSink + Clone + 'static, B: UpdateBootstrap,
             error!(
                 "Playlist processing timed out after {PLAYLIST_UPDATE_MAX_DURATION_SECS} secs while holding playlist lock",
             );
-            events.emit(EventMessage::PlaylistUpdate(PlaylistUpdateSummary::state_only(
+            events.emit(EventMessage::PlaylistUpdate(PlaylistUpdateSummary::for_run(
+                run_id,
+                execution_order,
                 shared::model::PlaylistUpdateState::Failure,
             )));
             return;
@@ -373,28 +458,54 @@ pub async fn exec_processing<E: EventSink + Clone + 'static, B: UpdateBootstrap,
     // refresh notified twice. Subscribers now get one event with everything,
     // and the bridge renders the single message from it.
     let error = get_errors_notify_message!(errors, 255);
-    let outcome = if error.is_some() {
-        shared::model::PlaylistUpdateState::Failure
-    } else if ctx.partial_refresh.load(std::sync::atomic::Ordering::Acquire) {
-        shared::model::PlaylistUpdateState::Partial
-    } else {
-        shared::model::PlaylistUpdateState::Success
-    };
-    events.emit(EventMessage::PlaylistUpdate(PlaylistUpdateSummary { state: outcome, stats, error }));
+    let outcome = PlaylistRunSignals {
+        has_error: error.is_some(),
+        has_pending_stalker_refresh: ctx.partial_refresh.load(std::sync::atomic::Ordering::Acquire),
+        has_quality_rejections: ctx.had_quality_rejections.load(std::sync::atomic::Ordering::Acquire),
+    }
+    .state();
+    events.emit(EventMessage::PlaylistUpdate(PlaylistUpdateSummary {
+        run_id: Some(run_id.clone()),
+        execution_order: Some(execution_order),
+        state: outcome,
+        stats,
+        error,
+    }));
 
     let elapsed = start_time.elapsed().as_secs();
     let update_finished_message = format!("🌷 Update process finished! Took {elapsed} secs.");
 
-    events.emit(EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
-        target: "Playlist Update".to_string(),
-        message: update_finished_message.clone(),
-    }));
+    events.emit(EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent::for_run_global(
+        run_id,
+        execution_order,
+        "Playlist Update",
+        update_finished_message.clone(),
+    )));
     log_memory_snapshot("exec_processing before_interner_gc");
     debug!("StringInterner GC removed {} strings", interner_gc());
     log_memory_snapshot("exec_processing after_interner_gc");
     //trim_allocator_after_update();
 
     info!("{update_finished_message}");
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct PlaylistRunSignals {
+    pub(crate) has_error: bool,
+    pub(crate) has_pending_stalker_refresh: bool,
+    pub(crate) has_quality_rejections: bool,
+}
+
+impl PlaylistRunSignals {
+    pub(crate) const fn state(self) -> PlaylistUpdateState {
+        if self.has_error {
+            PlaylistUpdateState::Failure
+        } else if self.has_pending_stalker_refresh || self.has_quality_rejections {
+            PlaylistUpdateState::Partial
+        } else {
+            PlaylistUpdateState::Success
+        }
+    }
 }
 
 #[cfg(test)]

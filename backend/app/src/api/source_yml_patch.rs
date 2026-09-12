@@ -456,6 +456,25 @@ pub(crate) fn apply_sources_yml_patches(
                 let idx = *inputs_by_name.get(input_name).ok_or_else(|| {
                     TuliproxError::ConfigPanelApi(format!("source.yml patch target input '{input_name}' was not found"))
                 })?;
+                let mut existing =
+                    doc.inputs[idx].aliases.iter().flatten().filter(|alias| alias.name.trim() == alias_name.trim());
+                if let Some(alias) = existing.next() {
+                    if existing.next().is_some() {
+                        return Err(TuliproxError::ConfigPanelApi(format!(
+                            "source.yml patch target alias '{alias_name}' under input '{input_name}' is ambiguous"
+                        )));
+                    }
+                    if alias.url == *base_url
+                        && alias.username.as_deref() == Some(username.as_str())
+                        && alias.password.as_deref() == Some(password.as_str())
+                        && alias.exp_date == *exp_date
+                    {
+                        continue;
+                    }
+                    return Err(TuliproxError::ConfigPanelApi(format!(
+                        "source.yml patch: alias '{alias_name}' already exists under input '{input_name}' with different data"
+                    )));
+                }
                 let alias_idx = append_sources_yml_alias(
                     input_name,
                     &mut doc.inputs[idx],
@@ -926,7 +945,7 @@ pub(crate) async fn execute_source_yml_patches(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config_loader::source_patch::{ensure_block_style_for_insertion, TextEdit};
+    use crate::config_loader::source_patch::TextEdit;
     use shared::model::PanelApiConfigDto;
 
     fn edits_to_text(text: &str, edits: Vec<TextEdit>) -> String {
@@ -1046,21 +1065,20 @@ mod tests {
     }
 
     #[test]
-    fn flow_style_insertion_is_rejected_with_actionable_error() {
-        // `find_input` is the entry point; it does not reject flow-style itself. The rejector is
-        // `ensure_block_style_for_insertion`. We drive it directly to keep the unit test focused.
+    fn flow_style_insertion_adds_a_mapping_entry() {
         let fixture = "inputs:\n  - { name: provider, url: http://main.example }\n";
         let doc: crate::config_loader::source_patch::SourcePatchDocument =
             serde_saphyr::from_str(fixture).expect("parse");
         let input = &doc.inputs[0].value;
         let anchor = span_byte_range(&input.name).expect("name span");
 
-        let err = ensure_block_style_for_insertion(fixture, &anchor, "exp_date").expect_err("must reject");
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("cannot insert optional field 'exp_date' into a flow-style YAML mapping"),
-            "unexpected error: {msg}"
-        );
+        let edit = build_field_insertion_edit(fixture, &anchor, "enabled", "false").expect("build edit");
+        let patched = edits_to_text(fixture, vec![edit]);
+        let reparsed: crate::config_loader::source_patch::SourcePatchDocument =
+            serde_saphyr::from_str(&patched).expect("reparse");
+
+        assert!(!reparsed.inputs[0].value.enabled.as_ref().expect("enabled").value);
+        assert!(patched.contains("name: provider, enabled: false"));
     }
 
     // -----------------------------------------------------------------------
@@ -1074,7 +1092,10 @@ mod tests {
             model::{ConfigPaths, InputType, SourcesConfigDto},
             utils::Internable,
         };
-        use std::time::{SystemTime, UNIX_EPOCH};
+        use std::{
+            fmt::Write as _,
+            time::{SystemTime, UNIX_EPOCH},
+        };
         use tuliprox_core::{
             model::{Config, ConfigInput, MediaToolCapabilities, SourcesConfig},
             utils::FileLockManager,
@@ -1143,6 +1164,196 @@ sources: []
         fn unique_path(name: &str) -> std::path::PathBuf {
             let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
             std::env::temp_dir().join(format!("tuliprox-source-yml-patch-{nanos}-{name}"))
+        }
+
+        fn panel_alias_fixture(style: &str, indent: usize, newline: &str) -> String {
+            let mut text = String::from(concat!(
+                "inputs:\n- name: provider\n  type: xtream\n  url: provider://example\n",
+                "  username: root\n  password: pass\n",
+                "  options:\n    update_quality:\n      live: 85\n      vod: 85\n      series: 85\n",
+                "    resolve_background: false\n  cache_duration: 20h\n",
+                "  # aliases:\n  # - {name: commented-old, url: provider://example}\n",
+                "  max_connections: 1\n  exp_date: 1788779143\n  aliases:\n",
+            ));
+            for (name, expiry) in [("expired", 1), ("current", 4_102_444_800_u64)] {
+                let item = if style == "flow" || (style == "mixed" && name == "current") {
+                    format!("- {{name: {name}, url: provider://example, username: {name}, password: pass, max_connections: 1, exp_date: {expiry}}}\n")
+                } else {
+                    format!("- name: {name}\n  url: provider://example\n  username: {name}\n  password: pass\n  max_connections: 1\n  exp_date: {expiry}\n")
+                };
+                for line in item.lines() {
+                    writeln!(text, "{}{line}", " ".repeat(indent)).expect("fixture line");
+                }
+            }
+            text.push_str(concat!(
+                "  # keep panel settings\n  panel_api:\n    enabled: true\n",
+                "    url: http://panel.example\n    api_key: synthetic-key\n",
+                "    alias_pool:\n      size:\n        min: 1\n        max: auto\n      remove_expired: true\n",
+                "- name: next-input\n  url: http://next.example\nsources: []\n",
+            ));
+            text.replace('\n', newline)
+        }
+
+        #[tokio::test]
+        async fn panel_alias_layout_root_update_round_trips_block_flow_and_mixed_lists() {
+            for style in ["block", "flow", "mixed"] {
+                for indent in [2, 4] {
+                    for newline in ["\n", "\r\n"] {
+                        let directory = tempfile::tempdir().expect("temporary fixture");
+                        let source_path = directory.path().join("source.yml");
+                        let backup_dir = directory.path().join("backup");
+                        std::fs::create_dir(&backup_dir).expect("backup directory");
+                        let fixture = panel_alias_fixture(style, indent, newline);
+                        std::fs::write(&source_path, &fixture).expect("write fixture");
+                        let before: SourcesConfigDto = serde_saphyr::from_str(&fixture).expect("original DTO");
+                        let app_cfg = build_app_config(&backup_dir);
+                        let patches = [
+                            SourcesYmlPatch::SortAliases {
+                                input_name: "provider".into(),
+                                order: AliasExpDateSortOrder::NewestFirst,
+                            },
+                            SourcesYmlPatch::UpdateRootCredentials {
+                                input_name: "provider".into(),
+                                username: "renewed-root".into(),
+                                password: "renewed-pass".into(),
+                                exp_date: Some(4_102_444_900),
+                            },
+                            SourcesYmlPatch::UpdateAliasCredentials {
+                                input_name: "provider".into(),
+                                alias_name: "current".into(),
+                                username: "renewed-alias".into(),
+                                password: "pass # with: {}, commas".into(),
+                                exp_date: Some(4_102_444_900),
+                            },
+                            SourcesYmlPatch::AddAlias {
+                                input_name: "provider".into(),
+                                alias_name: "added".into(),
+                                base_url: "provider://example".into(),
+                                username: "added-user".into(),
+                                password: "added-pass".into(),
+                                exp_date: Some(4_102_445_000),
+                            },
+                            SourcesYmlPatch::RemoveExpiredAliases { input_name: "provider".into() },
+                            SourcesYmlPatch::SortAliases {
+                                input_name: "provider".into(),
+                                order: AliasExpDateSortOrder::NewestFirst,
+                            },
+                        ];
+                        assert!(execute_source_yml_patches(&app_cfg, &source_path, &patches).await.expect("patch"));
+                        let patched = std::fs::read_to_string(&source_path).expect("read patched");
+                        let mut parsed: SourcesConfigDto = serde_saphyr::from_str(&patched).expect("reparse");
+                        let input = &parsed.inputs[0];
+                        assert_eq!(input.username.as_deref(), Some("renewed-root"));
+                        assert_eq!(input.exp_date, Some(4_102_444_900));
+                        assert_eq!(input.options, before.inputs[0].options);
+                        assert_eq!(input.panel_api, before.inputs[0].panel_api);
+                        assert_eq!(parsed.inputs[1], before.inputs[1]);
+                        let aliases = input.aliases.as_ref().expect("aliases");
+                        assert_eq!(
+                            aliases.iter().map(|alias| alias.name.as_ref()).collect::<Vec<_>>(),
+                            ["added", "current"]
+                        );
+                        assert_eq!(aliases[1].password.as_deref(), Some("pass # with: {}, commas"));
+                        assert!(patched.contains("# - {name: commented-old, url: provider://example}"));
+                        let panel_start = fixture.find("  # keep panel settings").expect("panel");
+                        assert!(patched.ends_with(&fixture[panel_start..]));
+                        let current_prefix = if style == "block" { "- name: current" } else { "- {name: current" };
+                        assert!(patched.contains(current_prefix));
+                        // The initial sort makes the older entry the last item. In
+                        // mixed lists its block style is the insertion convention.
+                        let added_prefix = if style == "flow" { "- {name: added" } else { "- name: added" };
+                        assert!(patched.contains(added_prefix));
+                        assert!(std::fs::read_dir(&backup_dir).expect("backups").any(|entry| {
+                            let path = entry.expect("backup entry").path();
+                            std::fs::read(path).is_ok_and(|bytes| bytes == fixture.as_bytes())
+                        }));
+                        parsed.inputs[0]
+                            .prepare(0, false, &HashSet::from(["example".to_string()]), None)
+                            .expect("prepare updated config");
+                        assert_eq!(parsed.inputs[0].cache_duration_seconds, 72_000);
+                    }
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn panel_alias_layout_repeated_add_is_noop_and_conflict_preserves_root() {
+            for style in ["block", "flow"] {
+                let directory = tempfile::tempdir().expect("temporary fixture");
+                let source_path = directory.path().join("source.yml");
+                let backup_dir = directory.path().join("backup");
+                std::fs::create_dir(&backup_dir).expect("backup directory");
+                let original = panel_alias_fixture(style, 2, "\n");
+                std::fs::write(&source_path, &original).expect("fixture");
+                let app_cfg = build_app_config(&backup_dir);
+                let add = SourcesYmlPatch::AddAlias {
+                    input_name: "provider".into(),
+                    alias_name: "current".into(),
+                    base_url: "provider://example".into(),
+                    username: "current".into(),
+                    password: "pass".into(),
+                    exp_date: Some(4_102_444_800),
+                };
+                assert!(!execute_source_yml_patches(&app_cfg, &source_path, &[add]).await.expect("identical addition"));
+                let patches = [
+                    SourcesYmlPatch::UpdateRootCredentials {
+                        input_name: "provider".into(),
+                        username: "new-root".into(),
+                        password: "new-pass".into(),
+                        exp_date: Some(4_102_444_900),
+                    },
+                    SourcesYmlPatch::AddAlias {
+                        input_name: "provider".into(),
+                        alias_name: "current".into(),
+                        base_url: "provider://example".into(),
+                        username: "current".into(),
+                        password: "conflicting-password".into(),
+                        exp_date: Some(4_102_444_800),
+                    },
+                ];
+                let error = execute_source_yml_patches(&app_cfg, &source_path, &patches).await.expect_err("conflict");
+                assert!(error.to_string().contains("already exists"));
+                assert!(!error.to_string().contains("conflicting-password"));
+                assert_eq!(std::fs::read(&source_path).expect("unchanged file"), original.as_bytes());
+                assert_eq!(std::fs::read_dir(&backup_dir).expect("backups").count(), 0);
+            }
+        }
+
+        #[tokio::test]
+        async fn panel_alias_layout_replenishes_empty_list_with_block_default() {
+            for style in ["block", "flow"] {
+                let directory = tempfile::tempdir().expect("temporary fixture");
+                let source_path = directory.path().join("source.yml");
+                let backup_dir = directory.path().join("backup");
+                std::fs::create_dir(&backup_dir).expect("backup directory");
+                let original = panel_alias_fixture(style, 2, "\n").replace("4102444800", "2");
+                std::fs::write(&source_path, &original).expect("fixture");
+                let app_cfg = build_app_config(&backup_dir);
+                let patches = [
+                    SourcesYmlPatch::RemoveExpiredAliases { input_name: "provider".into() },
+                    SourcesYmlPatch::UpdateRootCredentials {
+                        input_name: "provider".into(),
+                        username: "new-root".into(),
+                        password: "new-pass".into(),
+                        exp_date: Some(4_102_444_900),
+                    },
+                    SourcesYmlPatch::AddAlias {
+                        input_name: "provider".into(),
+                        alias_name: "added".into(),
+                        base_url: "provider://example".into(),
+                        username: "added-user".into(),
+                        password: "added-pass".into(),
+                        exp_date: Some(4_102_445_000),
+                    },
+                ];
+                assert!(execute_source_yml_patches(&app_cfg, &source_path, &patches).await.expect("replenish"));
+                let result = std::fs::read_to_string(&source_path).expect("read");
+                let parsed: SourcesConfigDto = serde_saphyr::from_str(&result).expect("reparse");
+                assert_eq!(parsed.inputs[0].username.as_deref(), Some("new-root"));
+                assert_eq!(parsed.inputs[0].aliases.as_ref().expect("aliases").len(), 1);
+                assert!(result.contains("  aliases:\n    - name: added\n"));
+                assert!(result.ends_with(&original[original.find("  # keep panel settings").expect("panel")..]));
+            }
         }
 
         #[tokio::test]
@@ -1216,6 +1427,64 @@ sources: []
             let parsed: SourcesConfigDto = serde_saphyr::from_str(&patched).expect("reparse");
             assert_eq!(parsed.inputs[0].exp_date, Some(1_700_000_000));
             assert_eq!(parsed.inputs[0].aliases.as_ref().expect("aliases")[0].exp_date, Some(1_800_000_000));
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[tokio::test]
+        async fn flow_style_expiry_disables_root_and_alias_accounts() {
+            let dir = unique_path("flow-expiry");
+            std::fs::create_dir_all(&dir).expect("mkdir");
+            let source_path = dir.join("source.yml");
+            let backup_dir = dir.join("backup");
+            std::fs::create_dir_all(&backup_dir).expect("mkdir backup");
+            let fixture = concat!(
+                "inputs:\n",
+                "  - {name: flow-root, type: xtream, url: http://root.example, username: root-user, password: root-pass, exp_date: 100}\n",
+                "  - name: provider\n",
+                "    type: xtream\n",
+                "    url: http://main.example\n",
+                "    username: user\n",
+                "    password: pass\n",
+                "    aliases:\n",
+                "      - {name: flow-alias, url: http://alias.example, username: alias-user, password: alias-pass}\n",
+                "sources: []\n",
+            );
+            tokio::fs::write(&source_path, fixture).await.expect("write fixture");
+            let app_cfg = build_app_config(&backup_dir);
+            let commands = [
+                SourcesYmlPatch::SetFetchedExpiry {
+                    input_name: Arc::from("flow-root"),
+                    account_name: Arc::from("flow-root"),
+                    exp_date: 100,
+                    disable: true,
+                },
+                SourcesYmlPatch::SetFetchedExpiry {
+                    input_name: Arc::from("provider"),
+                    account_name: Arc::from("flow-alias"),
+                    exp_date: 200,
+                    disable: true,
+                },
+            ];
+
+            assert!(execute_source_yml_patches(&app_cfg, &source_path, &commands).await.expect("patch"));
+            let patched_text = tokio::fs::read_to_string(&source_path).await.expect("read");
+            let parsed: SourcesConfigDto = serde_saphyr::from_str(&patched_text).expect("reparse");
+            let root = parsed.inputs.iter().find(|input| input.name.as_ref() == "flow-root").expect("root");
+            let provider = parsed.inputs.iter().find(|input| input.name.as_ref() == "provider").expect("provider");
+            let alias = provider
+                .aliases
+                .as_ref()
+                .and_then(|aliases| aliases.iter().find(|alias| alias.name.as_ref() == "flow-alias"))
+                .expect("alias");
+
+            assert!(!root.enabled);
+            assert_eq!(root.exp_date, Some(100));
+            assert!(!alias.enabled);
+            assert_eq!(alias.exp_date, Some(200));
+            assert!(patched_text.contains("name: flow-root, enabled: false"));
+            assert!(patched_text.contains("name: flow-alias, enabled: false"));
+            assert!(patched_text.contains("password: alias-pass, exp_date: 200"));
 
             let _ = std::fs::remove_dir_all(&dir);
         }
@@ -1324,6 +1593,60 @@ sources: []
             assert!(patched.find("name: new").expect("new") < patched.find("name: old").expect("old"));
             assert_eq!(patched.matches("# old account").count(), 1);
             assert!(patched.contains("\r\n"));
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[tokio::test]
+        async fn adding_first_alias_preserves_panel_api_and_following_input() {
+            let dir = unique_path("first-alias");
+            std::fs::create_dir_all(&dir).expect("mkdir");
+            let source_path = dir.join("source.yml");
+            let backup_dir = dir.join("backup");
+            std::fs::create_dir_all(&backup_dir).expect("mkdir backup");
+            let fixture = concat!(
+                "inputs:\n",
+                "  - name: provider\n",
+                "    type: xtream\n",
+                "    url: http://main.example\n",
+                "    username: user\n",
+                "    password: pass\n",
+                "    panel_api:\n",
+                "      enabled: true\n",
+                "      url: http://panel.example\n",
+                "      api_key: test-key\n",
+                "      alias_pool:\n",
+                "        size:\n",
+                "          min: 1\n",
+                "          max: auto\n",
+                "        remove_expired: true\n",
+                "  - name: next\n",
+                "    url: http://next.example\n",
+                "sources: []\n",
+            );
+            tokio::fs::write(&source_path, fixture).await.expect("write fixture");
+            let app_cfg = build_app_config(&backup_dir);
+            let patches = [SourcesYmlPatch::AddAlias {
+                input_name: Arc::from("provider"),
+                alias_name: Arc::from("provider-new"),
+                base_url: "http://new.example".to_string(),
+                username: "new-user".to_string(),
+                password: "new-pass".to_string(),
+                exp_date: Some(300),
+            }];
+
+            assert!(execute_source_yml_patches(&app_cfg, &source_path, &patches).await.expect("patch"));
+            let patched = tokio::fs::read_to_string(&source_path).await.expect("read");
+            let parsed: SourcesConfigDto = serde_saphyr::from_str(&patched).expect("reparse");
+
+            assert_eq!(parsed.inputs.len(), 2);
+            assert!(parsed.inputs[0].panel_api.is_some());
+            let aliases = parsed.inputs[0].aliases.as_ref().expect("aliases");
+            assert_eq!(aliases.len(), 1);
+            assert_eq!(aliases[0].name.as_ref(), "provider-new");
+            assert_eq!(parsed.inputs[1].name.as_ref(), "next");
+            assert!(patched.contains("    aliases:\n      - name: provider-new"));
+            assert!(patched.contains("        remove_expired: true"));
 
             let _ = std::fs::remove_dir_all(&dir);
         }

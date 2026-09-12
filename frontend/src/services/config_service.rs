@@ -11,9 +11,8 @@ use log::error;
 use shared::{
     foundation::{get_filter, prepare_templates, MapperScript},
     model::{
-        permission::Permission, ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigInputDto, IpCheckDto,
-        LibraryScanRequest, OperationRunAccepted, PlansConfigDto, SourcesConfigDto, TargetOutputDto, XtreamLoginInfo,
-        XtreamLoginRequest,
+        permission::Permission, ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigInputDto, IpCheckDto, LibraryStatus,
+        PlansConfigDto, SourcesConfigDto, TargetOutputDto, XtreamLoginInfo, XtreamLoginRequest,
     },
     utils::{
         concat_path, concat_path_leading_slash, HEADER_CONFIG_API_PROXY_REVISION, HEADER_CONFIG_MAIN_REVISION,
@@ -467,10 +466,8 @@ impl ConfigService {
         request_get::<()>(&self.geoip_path, None, None).await
     }
 
-    pub async fn update_library(&self, force_rescan: bool) -> Result<(), Error> {
-        let path = concat_path(&self.library_path, "scan");
-        let params = LibraryScanRequest { force_rescan };
-        request_post::<LibraryScanRequest, OperationRunAccepted>(&path, params, None, None).await.map(|_| ())
+    pub async fn get_library_status(&self) -> Result<Option<LibraryStatus>, Error> {
+        request_get(&concat_path(&self.library_path, "status"), None, None).await
     }
 
     pub async fn complete_setup(&self, payload: SetupCompleteRequestDto) -> Result<(), Error> {

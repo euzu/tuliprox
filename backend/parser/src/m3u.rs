@@ -515,7 +515,23 @@ fn parse_extvlcopt_user_agent(line: &str) -> Option<&str> {
     Some(value.trim())
 }
 
-pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInput, lines: DynReader, mut visit: F) {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ParseScope {
+    Direct,
+    Update,
+}
+
+pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInput, lines: DynReader, visit: F) {
+    let _ = consume_m3u_scoped(cfg, input, lines, visit, ParseScope::Direct).await;
+}
+
+async fn consume_m3u_scoped<F: FnMut(PlaylistItem)>(
+    cfg: &Config,
+    input: &ConfigInput,
+    lines: DynReader,
+    mut visit: F,
+    scope: ParseScope,
+) -> std::io::Result<()> {
     let mut header: Option<String> = None;
     let mut group: Option<Arc<str>> = None;
     let mut upstream_user_agent: Option<Arc<str>> = None;
@@ -528,10 +544,27 @@ pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInp
     };
     let mut lines = tokio::io::BufReader::new(lines).lines();
     let mut ord_counter: u32 = 1;
-    while let Ok(Some(line)) = lines.next_line().await {
+    let mut document_seen = false;
+    loop {
+        let line = match lines.next_line().await {
+            Ok(Some(line)) => line,
+            Err(error) if scope == ParseScope::Update => return Err(error),
+            Ok(None) | Err(_) => break,
+        };
+        let line =
+            if scope == ParseScope::Update { line.trim_start_matches('\u{feff}').trim().to_owned() } else { line };
+        if scope == ParseScope::Update && line.is_empty() {
+            continue;
+        }
         let bytes = line.as_bytes();
         if let Some(b'#') = bytes.first().copied() {
             if bytes.starts_with(b"#EXTINF") {
+                if scope == ParseScope::Update
+                    && (header.is_some() || !line.starts_with("#EXTINF:") || !line.contains(','))
+                {
+                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Incomplete M3U entry"));
+                }
+                document_seen = true;
                 header = Some(line);
                 upstream_user_agent = None;
                 continue;
@@ -543,6 +576,7 @@ pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInp
                 continue;
             }
             if let Some(rest) = line.strip_prefix("#EXTM3U") {
+                document_seen = true;
                 default_catchup_correction = parse_extm3u_catchup_correction(rest);
                 continue;
             }
@@ -551,6 +585,9 @@ pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInp
                 continue;
             }
             continue;
+        }
+        if scope == ParseScope::Update && header.is_none() {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "M3U content without EXTINF"));
         }
         let group_value = group.take();
         if let Some(header_value) = header.take() {
@@ -585,6 +622,10 @@ pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInp
             visit(item);
         }
     }
+    if scope == ParseScope::Update && (!document_seen || header.is_some()) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Incomplete M3U document"));
+    }
+    Ok(())
 }
 
 fn build_series_info(cfg: &Config, items: Vec<PlaylistItem>) -> Option<PlaylistItem> {
@@ -676,27 +717,51 @@ fn build_series_info(cfg: &Config, items: Vec<PlaylistItem>) -> Option<PlaylistI
 }
 
 pub async fn parse_m3u(cfg: &Config, input: &ConfigInput, lines: DynReader) -> Vec<PlaylistGroup> {
+    parse_m3u_scoped(cfg, input, lines, ParseScope::Direct).await.unwrap_or_default()
+}
+
+/// Parses an update candidate completely; read/truncation errors must not become Quality fallback.
+pub async fn parse_m3u_for_update(
+    cfg: &Config,
+    input: &ConfigInput,
+    lines: DynReader,
+) -> std::io::Result<Vec<PlaylistGroup>> {
+    parse_m3u_scoped(cfg, input, lines, ParseScope::Update).await
+}
+
+async fn parse_m3u_scoped(
+    cfg: &Config,
+    input: &ConfigInput,
+    lines: DynReader,
+    scope: ParseScope,
+) -> std::io::Result<Vec<PlaylistGroup>> {
     let mut group_map: IndexMap<CategoryKey, Vec<PlaylistItem>> = IndexMap::new();
     let mut series_map: IndexMap<(Arc<str>, Arc<str>), Vec<PlaylistItem>> = IndexMap::new();
 
-    consume_m3u(cfg, input, lines, |item| {
-        if item.header.xtream_cluster.is_series() {
-            let key = (
-                shared::utils::deunicode_string(&item.header.group).to_lowercase().intern(),
-                shared::utils::deunicode_string(&item.header.parent_code).to_lowercase().intern(),
-            );
-            series_map.entry(key).or_default().push(item);
-            return;
-        }
+    consume_m3u_scoped(
+        cfg,
+        input,
+        lines,
+        |item| {
+            if item.header.xtream_cluster.is_series() {
+                let key = (
+                    shared::utils::deunicode_string(&item.header.group).to_lowercase().intern(),
+                    shared::utils::deunicode_string(&item.header.parent_code).to_lowercase().intern(),
+                );
+                series_map.entry(key).or_default().push(item);
+                return;
+            }
 
-        let key = {
-            let header = &item.header;
-            let normalized_group = shared::utils::deunicode_string(&header.group).to_lowercase().intern();
-            (header.xtream_cluster, normalized_group)
-        };
-        group_map.entry(key).or_default().push(item);
-    })
-    .await;
+            let key = {
+                let header = &item.header;
+                let normalized_group = shared::utils::deunicode_string(&header.group).to_lowercase().intern();
+                (header.xtream_cluster, normalized_group)
+            };
+            group_map.entry(key).or_default().push(item);
+        },
+        scope,
+    )
+    .await?;
 
     for ((_category, _series_name), items) in series_map {
         if let Some(series_info) = build_series_info(cfg, items) {
@@ -706,7 +771,7 @@ pub async fn parse_m3u(cfg: &Config, input: &ConfigInput, lines: DynReader) -> V
     }
 
     let mut grp_id = 0;
-    group_map
+    Ok(group_map
         .into_values()
         .filter_map(|channels| {
             // create a group based on the first playlist item
@@ -718,7 +783,7 @@ pub async fn parse_m3u(cfg: &Config, input: &ConfigInput, lines: DynReader) -> V
                 None
             }
         })
-        .collect()
+        .collect())
 }
 
 #[cfg(test)]
@@ -753,6 +818,51 @@ mod test {
             password: Some("pass".to_string()),
             ..ConfigInput::default()
         }
+    }
+
+    #[tokio::test]
+    async fn m3u_update_quality_parse_failure_does_not_yield_a_partial_candidate() {
+        for text in [
+            "",
+            "<html>unavailable</html>",
+            "#EXTM3U\n#EXTINF:-1,Missing URL\n",
+            "#EXTM3U\n#EXTINF:-1,One\n#EXTINF:-1,Two\nhttp://stream.example/two\n",
+        ] {
+            assert!(
+                super::parse_m3u_for_update(&Config::default(), &test_input(), make_reader(text)).await.is_err(),
+                "{text}"
+            );
+        }
+        let complete = "#EXTM3U\n#EXTINF:-1,Channel\nhttp://stream.example/channel\n";
+        let checked =
+            super::parse_m3u_for_update(&Config::default(), &test_input(), make_reader(complete)).await.unwrap();
+        let direct = parse_m3u(&Config::default(), &test_input(), make_reader(complete)).await;
+        let projection = |groups: &[shared::model::PlaylistGroup]| {
+            groups
+                .iter()
+                .flat_map(|group| {
+                    group.channels.iter().map(|item| {
+                        (group.xtream_cluster, group.title.clone(), item.header.id.clone(), item.header.url.clone())
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(projection(&checked), projection(&direct));
+        assert!(super::parse_m3u_for_update(&Config::default(), &test_input(), make_reader("#EXTM3U\n"))
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn m3u_update_quality_read_error_is_not_a_successful_short_document() {
+        let mut bytes = b"#EXTM3U\n#EXTINF:-1,Channel\nhttp://stream.example/channel\n".to_vec();
+        bytes.extend_from_slice(b"\xff\n");
+        let reader: DynReader = Box::pin(std::io::Cursor::new(bytes.clone()));
+        assert!(super::parse_m3u_for_update(&Config::default(), &test_input(), reader).await.is_err());
+        let reader: DynReader = Box::pin(std::io::Cursor::new(bytes));
+        let direct = parse_m3u(&Config::default(), &test_input(), reader).await;
+        assert_eq!(direct.iter().map(|g| g.channels.len()).sum::<usize>(), 1, "Direct compatibility is unchanged");
     }
 
     #[test]

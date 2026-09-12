@@ -188,7 +188,7 @@ pub async fn require_permission<const P: u32>(
     next.run(request).await
 }
 
-fn check_permission<const P: u32>(
+pub(crate) fn check_permission<const P: u32>(
     app_state: &Arc<AppState>,
     claims: &Claims,
     client_ip: Option<&str>,

@@ -36,6 +36,11 @@ impl Default for PlaylistStorageState {
 impl PlaylistStorageState {
     pub fn new() -> Self { Self { data: RwLock::new(HashMap::new()) } }
 
+    /// Replaces one target only after its complete persisted state has been loaded.
+    pub(crate) async fn replace_target(&self, target_name: &str, storage: TargetPlaylistStorage) {
+        self.data.write().await.insert(target_name.to_string(), storage);
+    }
+
     pub async fn update_target_id_mapping(&self, target: &ConfigTarget, mapping: Vec<VirtualIdRecord>) {
         if target.use_memory_cache {
             if let Some(storage) = self.data.write().await.get_mut(&target.name) {

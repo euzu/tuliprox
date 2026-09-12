@@ -18,6 +18,7 @@
 }
 
 .tp__custom-dialog {
+  --dialog-padding: var(--padding-default);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -37,16 +38,39 @@
   animation: slideIn 0.2s ease-out;
   
   &.tp__confirm-dialog {
-    min-width: size.$confirm-dialog-min-width;
-    max-width: size.$confirm-dialog-max-width;
-    padding: var(--padding-default);
+    --dialog-padding: var(--padding-default);
+
+    min-width: min(size.$confirm-dialog-min-width, 90vw);
+    max-width: min(size.$confirm-dialog-max-width, 90vw);
+    max-height: 80vh;
+    box-sizing: border-box;
+    padding: var(--dialog-padding);
+    gap: var(--gap-large);
     border-radius: var(--border-radius);
+
+    @media (max-width: size.$mobile-breakpoint) {
+      --dialog-padding: var(--padding-larger);
+    }
+
+    .tp__confirm-dialog__message {
+      margin: 0;
+      min-height: 0;
+      font-size: var(--font-size-norm);
+      line-height: 1.5;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      overflow-y: auto;
+    }
+
+    .tp__dialog__toolbar {
+      flex-shrink: 0;
+    }
   }
   
   &.tp__content-dialog {
     min-width: size.$content-dialog-min-width;
     max-width: size.$content-dialog-max-width;
-    padding: var(--padding-default);
+    padding: var(--dialog-padding);
     border-radius: var(--border-radius);
   }
 }
@@ -77,7 +101,7 @@
   display: flex;
   justify-content: flex-end;
   border-top: 1px solid var(--border-color);
-  padding-top: var(--padding-small);
+  padding-top: var(--dialog-padding, var(--padding-small));
   gap: var(--gap-default);
 
   &-left {

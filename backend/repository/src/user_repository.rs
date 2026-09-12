@@ -254,7 +254,7 @@ fn user_get_series_bouquet_path(user_storage_path: &Path, target: TargetType) ->
 }
 
 async fn save_xtream_user_bouquet_for_target(
-    config: &Config,
+    app_config: &AppConfig,
     target_name: &str,
     storage_path: &Path,
     cluster: XtreamCluster,
@@ -268,7 +268,7 @@ async fn save_xtream_user_bouquet_for_target(
 
     match bouquet {
         Some(bouquet_categories) => {
-            if let Some(xtream_categories) = xtream_get_playlist_categories(config, target_name, cluster).await {
+            if let Some(xtream_categories) = xtream_get_playlist_categories(app_config, target_name, cluster).await {
                 let filtered: Vec<PlaylistXtreamCategory> =
                     xtream_categories.iter().filter(|p| bouquet_categories.contains(&p.name)).cloned().collect();
                 if filtered.is_empty() {
@@ -321,7 +321,7 @@ async fn save_m3u_user_bouquet_for_target(
 }
 
 async fn save_user_bouquet_for_target(
-    config: &Config,
+    app_config: &AppConfig,
     target_name: &str,
     storage_path: &Path,
     target: TargetType,
@@ -329,7 +329,7 @@ async fn save_user_bouquet_for_target(
 ) -> Result<(), Error> {
     if target == TargetType::Xtream {
         save_xtream_user_bouquet_for_target(
-            config,
+            app_config,
             target_name,
             storage_path,
             XtreamCluster::Live,
@@ -337,7 +337,7 @@ async fn save_user_bouquet_for_target(
         )
         .await?;
         save_xtream_user_bouquet_for_target(
-            config,
+            app_config,
             target_name,
             storage_path,
             XtreamCluster::Video,
@@ -345,7 +345,7 @@ async fn save_user_bouquet_for_target(
         )
         .await?;
         save_xtream_user_bouquet_for_target(
-            config,
+            app_config,
             target_name,
             storage_path,
             XtreamCluster::Series,
@@ -379,15 +379,26 @@ async fn save_user_bouquet_for_target(
 }
 
 pub async fn save_user_bouquet(
-    cfg: &Config,
+    app_config: &AppConfig,
     target_name: &str,
     username: &str,
     bouquet: &PlaylistBouquetDto,
 ) -> Result<(), Error> {
-    if let Some(storage_path) = ensure_user_storage_path(cfg, username) {
-        save_user_bouquet_for_target(cfg, target_name, &storage_path, TargetType::Xtream, bouquet.xtream.as_ref())
+    let storage_path = {
+        let config = app_config.config.load();
+        ensure_user_storage_path(&config, username)
+    };
+    if let Some(storage_path) = storage_path {
+        save_user_bouquet_for_target(
+            app_config,
+            target_name,
+            &storage_path,
+            TargetType::Xtream,
+            bouquet.xtream.as_ref(),
+        )
+        .await?;
+        save_user_bouquet_for_target(app_config, target_name, &storage_path, TargetType::M3u, bouquet.m3u.as_ref())
             .await?;
-        save_user_bouquet_for_target(cfg, target_name, &storage_path, TargetType::M3u, bouquet.m3u.as_ref()).await?;
         Ok(())
     } else {
         Err(Error::new(std::io::ErrorKind::NotFound, format!("User config path not found for user {username}")))
@@ -641,7 +652,32 @@ mod tests {
         let bouquet_path = user_get_live_bouquet_path(dir.path(), TargetType::Xtream);
         tokio::fs::write(&bouquet_path, "[]").await.expect("test bouquet file should be created");
 
-        save_xtream_user_bouquet_for_target(&Config::default(), "target", dir.path(), XtreamCluster::Live, None)
+        let app_config = AppConfig {
+            config: Arc::new(ArcSwapAny::default()),
+            sources: Arc::new(ArcSwapAny::default()),
+            hdhomerun: Arc::new(ArcSwapAny::default()),
+            api_proxy: Arc::new(ArcSwapAny::default()),
+            paths: Arc::new(ArcSwap::from(Arc::new(ConfigPaths {
+                home_path: String::new(),
+                config_path: String::new(),
+                storage_path: String::new(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
+                mapping_file_path: None,
+                mapping_files_used: None,
+                template_file_path: None,
+                template_files_used: None,
+                api_proxy_file_path: String::new(),
+                custom_stream_response_path: None,
+            }))),
+            file_locks: Arc::new(FileLockManager::default()),
+            custom_stream_response: Arc::new(ArcSwapAny::default()),
+            access_token_secret: Default::default(),
+            encrypt_secret: Default::default(),
+            media_tools: Arc::new(MediaToolCapabilities::new()),
+        };
+
+        save_xtream_user_bouquet_for_target(&app_config, "target", dir.path(), XtreamCluster::Live, None)
             .await
             .expect("saving empty xtream bouquet should succeed");
 

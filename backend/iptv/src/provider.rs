@@ -19,10 +19,12 @@
 use crate::error::ProviderErrorKind;
 use shared::{
     error::TuliproxError,
-    model::{PlaylistGroup, XtreamCluster},
+    model::{PlaylistGroup, UpdateQualityPolicy, XtreamCluster},
 };
 use std::{future::Future, sync::Arc};
-use tuliprox_core::model::{AppConfig, Config, ConfigInput};
+use tuliprox_core::model::{
+    AppConfig, ClusterForceUpdate, ClusterUpdateAcceptance, ClusterUpdateRejection, Config, ConfigInput,
+};
 
 /// What a provider produced for one input.
 ///
@@ -32,6 +34,16 @@ use tuliprox_core::model::{AppConfig, Config, ConfigInput};
 pub struct PlaylistFetch {
     pub groups: Vec<PlaylistGroup>,
     pub errors: Vec<TuliproxError>,
+    /// Clusters explicitly identified at a failing acquisition/publication boundary.
+    /// Unscoped errors must not be assigned to clusters by consumers.
+    pub failed_clusters: Vec<XtreamCluster>,
+    /// Completed normal Quality evaluations whose candidates were accepted.
+    pub quality_acceptances: Vec<ClusterUpdateAcceptance>,
+    /// Completed cluster updates that were rejected by the domain policy.
+    /// These are nonfatal and are intentionally separate from `errors`.
+    pub quality_rejections: Vec<ClusterUpdateRejection>,
+    /// Clusters accepted through an explicit request-local quality bypass.
+    pub force_updates: Vec<ClusterForceUpdate>,
     /// The provider wrote the playlist to disk itself, so the caller must not.
     pub persisted: bool,
     /// The fetch stopped part-way and should be resumed rather than treated as a result.
@@ -40,6 +52,14 @@ pub struct PlaylistFetch {
 }
 
 impl PlaylistFetch {
+    /// Keep the existing error and its known cluster together, without duplicate identities.
+    pub fn record_cluster_error(&mut self, cluster: XtreamCluster, error: TuliproxError) {
+        self.errors.push(error);
+        if !self.failed_clusters.contains(&cluster) {
+            self.failed_clusters.push(cluster);
+        }
+    }
+
     /// A successful fetch of `groups`.
     #[must_use]
     pub fn groups(groups: Vec<PlaylistGroup>) -> Self { Self { groups, ..Self::default() } }
@@ -60,6 +80,24 @@ impl PlaylistFetch {
     }
 
     #[must_use]
+    pub fn with_quality_acceptances(mut self, quality_acceptances: Vec<ClusterUpdateAcceptance>) -> Self {
+        self.quality_acceptances = quality_acceptances;
+        self
+    }
+
+    #[must_use]
+    pub fn with_quality_rejections(mut self, quality_rejections: Vec<ClusterUpdateRejection>) -> Self {
+        self.quality_rejections = quality_rejections;
+        self
+    }
+
+    #[must_use]
+    pub fn with_force_updates(mut self, force_updates: Vec<ClusterForceUpdate>) -> Self {
+        self.force_updates = force_updates;
+        self
+    }
+
+    #[must_use]
     pub fn persisted(mut self, persisted: bool) -> Self {
         self.persisted = persisted;
         self
@@ -71,8 +109,9 @@ impl PlaylistFetch {
         self
     }
 
-    /// Whether the fetch completed without errors. A fetch that produced no groups and no
-    /// errors counts as successful — an empty catalog is a legitimate answer.
+    /// Whether the fetch completed without technical errors. A fetch that produced no groups
+    /// and no errors counts as successful — an empty catalog is a legitimate answer. Quality
+    /// rejections are completed, nonfatal decisions and therefore do not make this false.
     #[must_use]
     pub fn is_ok(&self) -> bool { self.errors.is_empty() && !self.partial }
 
@@ -106,6 +145,9 @@ pub struct PlaylistFetchRequest<'a> {
     /// Which Xtream clusters still need fetching. `None` means "whatever the input
     /// allows"; providers that have no clusters ignore it.
     pub xtream_clusters: Option<&'a [XtreamCluster]>,
+    /// Request-local quality behavior for playlist updates. Direct provider
+    /// callers do not construct this request and retain their own scope.
+    pub update_quality: UpdateQualityPolicy,
 }
 
 /// Fetch one input's playlist.
@@ -124,8 +166,13 @@ impl PlaylistProvider for M3uProvider {
     fn name(&self) -> &'static str { "m3u" }
 
     async fn fetch(&self, request: &PlaylistFetchRequest<'_>) -> PlaylistFetch {
-        let (groups, errors) =
-            crate::m3u::download_m3u_playlist(request.app_config, request.client, request.config, request.input).await;
+        let (groups, errors) = crate::m3u::download_m3u_playlist_for_update(
+            request.app_config,
+            request.client,
+            request.config,
+            request.input,
+        )
+        .await;
         PlaylistFetch::groups(groups).with_errors(errors)
     }
 }
@@ -144,15 +191,15 @@ impl<E: shared::model::EventSink> PlaylistProvider for XtreamProvider<'_, E> {
     fn name(&self) -> &'static str { "xtream" }
 
     async fn fetch(&self, request: &PlaylistFetchRequest<'_>) -> PlaylistFetch {
-        let (groups, errors, persisted) = crate::xtream::download_xtream_playlist(
+        crate::xtream::download_xtream_playlist(
             request.app_config,
             request.client,
             self.events,
             request.input,
             request.xtream_clusters,
+            request.update_quality,
         )
-        .await;
-        PlaylistFetch::groups(groups).with_errors(errors).persisted(persisted)
+        .await
     }
 }
 
@@ -195,7 +242,8 @@ impl PlaylistProvider for BatchContainerProvider {
 #[cfg(test)]
 mod tests {
     use super::PlaylistFetch;
-    use shared::error::TuliproxError;
+    use shared::{error::TuliproxError, model::XtreamCluster};
+    use tuliprox_core::model::ClusterUpdateRejection;
 
     #[test]
     fn an_empty_catalog_is_a_success_not_a_failure() {
@@ -245,5 +293,22 @@ mod tests {
         ]);
         assert!(fetch.needs_operator(), "one blip must not hide a config problem");
         assert!(!fetch.is_retryable());
+    }
+
+    #[test]
+    fn a_quality_rejection_is_not_a_technical_fetch_failure() {
+        let rejection = ClusterUpdateRejection {
+            cluster: XtreamCluster::Video,
+            current_count: 12_543,
+            candidate_count: 217,
+            threshold: 90,
+            quality: 1,
+        };
+        let fetch = PlaylistFetch::groups(Vec::new()).with_quality_rejections(vec![rejection]);
+
+        assert!(fetch.is_ok());
+        assert!(fetch.errors.is_empty());
+        assert!(!fetch.partial);
+        assert_eq!(fetch.quality_rejections, vec![rejection]);
     }
 }

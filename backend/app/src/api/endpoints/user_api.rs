@@ -68,24 +68,23 @@ async fn playlist_categories(
             }
             let target_name = &target.name;
             let xtream_stream = if target.has_output(TargetType::Xtream) {
-                let config = &app_state.app_config.config.load();
                 let live_categories = if user.allows_cluster(XtreamCluster::Live) {
                     get_categories_from_xtream(
-                        xtream_get_playlist_categories(config, target_name, XtreamCluster::Live).await,
+                        xtream_get_playlist_categories(&app_state.app_config, target_name, XtreamCluster::Live).await,
                     )
                 } else {
                     Vec::new()
                 };
                 let vod_categories = if user.allows_cluster(XtreamCluster::Video) {
                     get_categories_from_xtream(
-                        xtream_get_playlist_categories(config, target_name, XtreamCluster::Video).await,
+                        xtream_get_playlist_categories(&app_state.app_config, target_name, XtreamCluster::Video).await,
                     )
                 } else {
                     Vec::new()
                 };
                 let series_categories = if user.allows_cluster(XtreamCluster::Series) {
                     get_categories_from_xtream(
-                        xtream_get_playlist_categories(config, target_name, XtreamCluster::Series).await,
+                        xtream_get_playlist_categories(&app_state.app_config, target_name, XtreamCluster::Series).await,
                     )
                 } else {
                     Vec::new()
@@ -160,8 +159,7 @@ async fn save_playlist_bouquet(
             if user.permission_denied(&app_state.app_config) {
                 return axum::http::StatusCode::FORBIDDEN.into_response();
             }
-            let config = &app_state.app_config.config.load();
-            match save_user_bouquet(config, &target.name, &username, &bouquet).await {
+            match save_user_bouquet(&app_state.app_config, &target.name, &username, &bouquet).await {
                 Ok(()) => {
                     return axum::http::StatusCode::OK.into_response();
                 }

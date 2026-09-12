@@ -7,8 +7,8 @@ linker = "aarch64-linux-gnu-gcc"
 [target.x86_64-pc-windows-gnu]
 linker = "x86_64-w64-mingw32-gcc"
 
-[target.x86_64-apple-darwin]
-linker = "x86_64-apple-darwin14-clang" # Requires osxcross
+#[target.x86_64-apple-darwin]
+#linker = "x86_64-apple-darwin14-clang" # Requires osxcross
 
-[target.aarch64-apple-darwin]
-linker = "aarch64-apple-darwin20.4-clang" # Requires osxcross
+#[target.aarch64-apple-darwin]
+#linker = "aarch64-apple-darwin20.4-clang" # Requires osxcross

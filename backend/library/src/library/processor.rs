@@ -8,7 +8,7 @@ use crate::library::{
 };
 use log::{debug, error, info, warn};
 use path_clean::PathClean;
-use shared::model::{LibraryMetadataFormat, LibraryScanResult};
+use shared::model::{LibraryMetadataFormat, LibraryScanResult, LibraryStatus};
 use std::{collections::HashMap, fmt, future::Future, io, path::PathBuf, pin::Pin, sync::Arc};
 use tuliprox_core::{
     model::{LibraryConfig, MetadataUpdateConfig},
@@ -150,19 +150,35 @@ impl LibraryProcessor {
         }
     }
 
-    // Performs a full Library scan
+    // Performs a full Library scan with the existing standalone best-effort behavior.
     pub async fn scan(&self, force_rescan: bool) -> Result<LibraryScanResult, std::io::Error> {
+        self.scan_with_completeness(force_rescan, super::scanner::ScanCompleteness::BestEffort).await
+    }
+
+    /// Uses the same scanner and writer, but refuses incomplete discovery before a target rebuild.
+    pub async fn scan_for_target_rebuild(&self) -> Result<LibraryScanResult, std::io::Error> {
+        self.scan_with_completeness(false, super::scanner::ScanCompleteness::Complete).await
+    }
+
+    async fn scan_with_completeness(
+        &self,
+        force_rescan: bool,
+        completeness: super::scanner::ScanCompleteness,
+    ) -> Result<LibraryScanResult, std::io::Error> {
         info!("Starting Library scan (force_rescan: {force_rescan})");
 
         // Initialize storage
         self.storage.initialize().await?;
 
         // Load existing metadata cache
-        let existing_entries = self.storage.load_all().await;
+        let existing_entries = match completeness {
+            super::scanner::ScanCompleteness::Complete => self.storage.load_all_complete().await?,
+            super::scanner::ScanCompleteness::BestEffort => self.storage.load_all().await,
+        };
         let existing_map: HashMap<_, _> = existing_entries.iter().map(|e| (e.file_path.clone(), e.clone())).collect();
 
         // Scan for video files
-        let scanned_files = self.scanner.scan_all().await?;
+        let scanned_files = self.scanner.scan_all_with_completeness(completeness).await?;
         let scanned_files_count = scanned_files.len();
         info!("Scanned {scanned_files_count} video files");
         let media_groups = MediaGrouper::group(scanned_files);
@@ -223,6 +239,9 @@ impl LibraryProcessor {
                 debug!("Removing orphaned entry for: {}", entry.file_path);
                 if let Err(e) = self.storage.delete_by_uuid(&entry.uuid).await {
                     error!("Failed to delete orphaned entry: {e}");
+                    if completeness == super::scanner::ScanCompleteness::Complete {
+                        result.errors += 1;
+                    }
                 } else {
                     result.files_removed += 1;
                 }
@@ -672,6 +691,24 @@ impl LibraryProcessor {
     // Gets all cached metadata entries
     pub async fn get_all_entries(&self) -> Vec<MetadataCacheEntry> { self.storage.load_all().await }
 
+    /// Current catalog counts, independent of any scan's file/group counters.
+    pub async fn catalog_status(&self) -> io::Result<LibraryStatus> {
+        self.storage.initialize().await?;
+        let entries = self.storage.load_all_complete().await?;
+        let mut status =
+            LibraryStatus { enabled: self.config.enabled, total_items: entries.len(), ..LibraryStatus::default() };
+        for entry in entries {
+            match entry.metadata {
+                MediaMetadata::Movie(_) => status.movies += 1,
+                MediaMetadata::Series(series) => {
+                    status.series += 1;
+                    status.episodes += series.episodes.as_ref().map_or(0, Vec::len);
+                }
+            }
+        }
+        Ok(status)
+    }
+
     async fn is_local_ffprobe_enabled(&self) -> bool {
         if let Some(probes) = &self.tool_probes {
             return (probes.ffprobe_enabled)().await;
@@ -768,6 +805,76 @@ mod tests {
     use super::*;
     use shared::model::{FfprobeConfigDto, LibraryConfigDto};
     use tuliprox_core::model::MetadataUpdateConfig;
+
+    #[tokio::test]
+    async fn library_catalog_status_counts_canonical_episodes_and_preserves_total_items_on_reload() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = LibraryConfig::from(&LibraryConfigDto { enabled: true, ..LibraryConfigDto::default() });
+        let processor =
+            LibraryProcessor::new(config.clone(), None, reqwest::Client::new(), temp.path().to_str().unwrap());
+        let catalog_path = resolve_metadata_storage_path(None, temp.path().to_str().unwrap()).join("library");
+        assert!(!catalog_path.exists(), "status must also work before the first scan");
+        let empty = processor.catalog_status().await.unwrap();
+        assert_eq!((empty.movies, empty.series, empty.episodes, empty.total_items), (0, 0, 0, 0));
+        assert!(catalog_path.is_dir());
+        for metadata in [
+            MediaMetadata::Movie(super::super::MovieMetadata::default()),
+            MediaMetadata::Series(SeriesMetadata {
+                // Deliberately not the catalog's actual episode count.
+                number_of_episodes: 999,
+                episodes: Some(vec![EpisodeMetadata::default(); 3]),
+                ..SeriesMetadata::default()
+            }),
+            MediaMetadata::Series(SeriesMetadata::default()),
+        ] {
+            // No media files exist; the status is derived exclusively from stored metadata.
+            processor
+                .storage
+                .store(&MetadataCacheEntry::new("/not-a-real-media-file".into(), 0, 0, metadata))
+                .await
+                .unwrap();
+        }
+        let reloaded = LibraryProcessor::new(config, None, reqwest::Client::new(), temp.path().to_str().unwrap());
+        let status = reloaded.catalog_status().await.unwrap();
+        assert_eq!((status.movies, status.series, status.episodes, status.total_items), (1, 2, 3, 3));
+        assert_eq!(status, processor.catalog_status().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn library_catalog_status_and_complete_scan_reject_corrupt_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let processor = LibraryProcessor::new(
+            LibraryConfig::from(&LibraryConfigDto::default()),
+            None,
+            reqwest::Client::new(),
+            temp.path().to_str().unwrap(),
+        );
+        processor.storage.initialize().await.unwrap();
+        let path = resolve_metadata_storage_path(None, temp.path().to_str().unwrap()).join("library/broken.json");
+        tokio::fs::write(path, "not json").await.unwrap();
+        assert_eq!(processor.catalog_status().await.unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(processor.scan_for_target_rebuild().await.unwrap_err().kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn library_catalog_status_reports_storage_initialization_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let metadata_path = temp.path().join("not-a-directory");
+        tokio::fs::write(&metadata_path, "occupied").await.unwrap();
+        let metadata = MetadataUpdateConfig {
+            cache_path: metadata_path.to_string_lossy().into_owned(),
+            ..MetadataUpdateConfig::default()
+        };
+        let processor = LibraryProcessor::new(
+            LibraryConfig::from(&LibraryConfigDto::default()),
+            Some(&metadata),
+            reqwest::Client::new(),
+            temp.path().to_str().unwrap(),
+        );
+
+        assert!(processor.catalog_status().await.is_err(), "unreadable storage is not a zero-count catalog");
+        assert_eq!(tokio::fs::read(metadata_path).await.unwrap(), b"occupied");
+    }
 
     #[test]
     fn test_scan_result_creation() {

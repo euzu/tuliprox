@@ -67,6 +67,9 @@ pub struct StalkerCheckpoint {
     pub processed: u64,
     pub skipped_count: u64,
     pub skipped_sample: Vec<u32>,
+    /// Requested media clusters whose quality check is bypassed for this generation.
+    #[serde(default)]
+    pub quality_bypass_mask: u8,
 }
 
 impl StalkerCheckpoint {
@@ -83,6 +86,7 @@ impl StalkerCheckpoint {
             processed: 0,
             skipped_count: 0,
             skipped_sample: Vec::new(),
+            quality_bypass_mask: 0,
         }
     }
 }
@@ -398,10 +402,23 @@ mod tests {
         let mut checkpoint = StalkerCheckpoint::new(7, 3, 1, 123);
         checkpoint.phase = StalkerRefreshPhase::Vod { page: 9 };
         checkpoint.processed = 42;
+        checkpoint.quality_bypass_mask = 5;
         save_checkpoint(temp.path(), &checkpoint).await?;
 
         assert_eq!(load_checkpoint(temp.path(), 7).await?, Some(checkpoint));
         Ok(())
+    }
+
+    #[test]
+    fn legacy_checkpoint_defaults_quality_bypass_mask_to_zero() {
+        let mut serialized =
+            serde_json::to_value(StalkerCheckpoint::new(7, 3, 1, 123)).expect("checkpoint should serialize");
+        serialized.as_object_mut().expect("checkpoint should serialize as an object").remove("quality_bypass_mask");
+
+        let checkpoint: StalkerCheckpoint =
+            serde_json::from_value(serialized).expect("legacy checkpoint should deserialize");
+
+        assert_eq!(checkpoint.quality_bypass_mask, 0);
     }
 
     #[test]

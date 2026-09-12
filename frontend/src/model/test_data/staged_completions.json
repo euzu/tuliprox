@@ -1,0 +1,361 @@
+[
+  {
+    "progress": [
+      {
+        "run_id": "staged-completion-run",
+        "execution_order": 1,
+        "input_id": 8,
+        "target": "staged",
+        "message": "Input 'staged' cluster 'live' rejected: current=100 candidate=1 threshold=95 quality=1; retaining previous cluster"
+      },
+      {
+        "run_id": "staged-completion-run",
+        "execution_order": 1,
+        "input_id": 8,
+        "state": "Partial",
+        "input_telemetry": {
+          "refresh_policy": {
+            "cache": "respect",
+            "quality": "enforce"
+          },
+          "clusters": [
+            {
+              "cluster": "Live",
+              "requested": true,
+              "source": "provider",
+              "baseline_count": 100,
+              "candidate_count": 1,
+              "active_count": 100,
+              "threshold": 95,
+              "quality": 1,
+              "decision": "rejected"
+            },
+            {
+              "cluster": "Video",
+              "requested": false
+            },
+            {
+              "cluster": "Series",
+              "requested": false
+            }
+          ]
+        },
+        "target": "staged",
+        "message": "Input 'staged' completed partially"
+      },
+      {
+        "run_id": "staged-completion-run",
+        "execution_order": 1,
+        "input_id": 7,
+        "state": "Partial",
+        "input_telemetry": {
+          "refresh_policy": {
+            "cache": "respect",
+            "quality": "enforce"
+          },
+          "clusters": [
+            {
+              "cluster": "Live",
+              "requested": true
+            },
+            {
+              "cluster": "Video",
+              "requested": true,
+              "source": "provider",
+              "candidate_count": 0,
+              "active_count": 0,
+              "decision": "accepted"
+            },
+            {
+              "cluster": "Series",
+              "requested": true,
+              "source": "provider",
+              "candidate_count": 0,
+              "active_count": 0,
+              "decision": "accepted"
+            }
+          ]
+        },
+        "target": "parent",
+        "message": "Input 'parent' completed partially"
+      },
+      {
+        "run_id": "staged-completion-run",
+        "execution_order": 1,
+        "input_id": 9,
+        "state": "Failure",
+        "input_telemetry": {
+          "refresh_policy": {
+            "cache": "respect",
+            "quality": "enforce"
+          },
+          "clusters": [
+            {
+              "cluster": "Live",
+              "requested": true,
+              "source": "provider",
+              "decision": "technical_error"
+            },
+            {
+              "cluster": "Video",
+              "requested": true,
+              "source": "provider",
+              "decision": "technical_error"
+            },
+            {
+              "cluster": "Series",
+              "requested": true,
+              "source": "provider",
+              "decision": "technical_error"
+            }
+          ]
+        },
+        "target": "failed-companion",
+        "message": "Input 'failed-companion' failed during update"
+      }
+    ],
+    "completed": {
+      "run_id": "staged-completion-run",
+      "execution_order": 1,
+      "state": "Failure"
+    },
+    "persisted_input_result": {
+      "state": "Partial",
+      "timestamp": 1
+    }
+  },
+  {
+    "progress": [
+      {
+        "run_id": "staged-completion-run",
+        "execution_order": 1,
+        "input_id": 8,
+        "state": "Success",
+        "input_telemetry": {
+          "refresh_policy": {
+            "cache": "respect",
+            "quality": "enforce"
+          },
+          "clusters": [
+            {
+              "cluster": "Live",
+              "requested": true,
+              "source": "provider",
+              "baseline_count": 100,
+              "candidate_count": 100,
+              "active_count": 100,
+              "threshold": 95,
+              "quality": 100,
+              "decision": "accepted"
+            },
+            {
+              "cluster": "Video",
+              "requested": false
+            },
+            {
+              "cluster": "Series",
+              "requested": false
+            }
+          ]
+        },
+        "target": "staged",
+        "message": "Input 'staged' completed successfully"
+      },
+      {
+        "run_id": "staged-completion-run",
+        "execution_order": 1,
+        "input_id": 7,
+        "state": "Success",
+        "input_telemetry": {
+          "refresh_policy": {
+            "cache": "respect",
+            "quality": "enforce"
+          },
+          "clusters": [
+            {
+              "cluster": "Live",
+              "requested": true
+            },
+            {
+              "cluster": "Video",
+              "requested": true,
+              "source": "provider",
+              "candidate_count": 0,
+              "active_count": 0,
+              "decision": "accepted"
+            },
+            {
+              "cluster": "Series",
+              "requested": true,
+              "source": "provider",
+              "candidate_count": 0,
+              "active_count": 0,
+              "decision": "accepted"
+            }
+          ]
+        },
+        "target": "parent",
+        "message": "Input 'parent' completed successfully"
+      },
+      {
+        "run_id": "staged-completion-run",
+        "execution_order": 1,
+        "input_id": 9,
+        "state": "Failure",
+        "input_telemetry": {
+          "refresh_policy": {
+            "cache": "respect",
+            "quality": "enforce"
+          },
+          "clusters": [
+            {
+              "cluster": "Live",
+              "requested": true,
+              "source": "provider",
+              "decision": "technical_error"
+            },
+            {
+              "cluster": "Video",
+              "requested": true,
+              "source": "provider",
+              "decision": "technical_error"
+            },
+            {
+              "cluster": "Series",
+              "requested": true,
+              "source": "provider",
+              "decision": "technical_error"
+            }
+          ]
+        },
+        "target": "failed-companion",
+        "message": "Input 'failed-companion' failed during update"
+      }
+    ],
+    "completed": {
+      "run_id": "staged-completion-run",
+      "execution_order": 1,
+      "state": "Failure"
+    },
+    "persisted_input_result": {
+      "state": "Success",
+      "timestamp": 1
+    }
+  },
+  {
+    "progress": [
+      {
+        "run_id": "staged-completion-run",
+        "execution_order": 1,
+        "input_id": 8,
+        "state": "Failure",
+        "input_telemetry": {
+          "refresh_policy": {
+            "cache": "respect",
+            "quality": "enforce"
+          },
+          "clusters": [
+            {
+              "cluster": "Live",
+              "requested": true,
+              "source": "provider",
+              "threshold": 95,
+              "decision": "technical_error",
+              "technical_state": "failed"
+            },
+            {
+              "cluster": "Video",
+              "requested": false
+            },
+            {
+              "cluster": "Series",
+              "requested": false
+            }
+          ]
+        },
+        "target": "staged",
+        "message": "Input 'staged' failed during update"
+      },
+      {
+        "run_id": "staged-completion-run",
+        "execution_order": 1,
+        "input_id": 7,
+        "state": "Failure",
+        "input_telemetry": {
+          "refresh_policy": {
+            "cache": "respect",
+            "quality": "enforce"
+          },
+          "clusters": [
+            {
+              "cluster": "Live",
+              "requested": true,
+              "source": "provider",
+              "candidate_count": 1,
+              "decision": "accepted"
+            },
+            {
+              "cluster": "Video",
+              "requested": true,
+              "source": "provider",
+              "candidate_count": 0,
+              "decision": "accepted"
+            },
+            {
+              "cluster": "Series",
+              "requested": true,
+              "source": "provider",
+              "candidate_count": 0,
+              "decision": "accepted"
+            }
+          ]
+        },
+        "target": "parent",
+        "message": "Input 'parent' failed during update"
+      },
+      {
+        "run_id": "staged-completion-run",
+        "execution_order": 1,
+        "input_id": 9,
+        "state": "Failure",
+        "input_telemetry": {
+          "refresh_policy": {
+            "cache": "respect",
+            "quality": "enforce"
+          },
+          "clusters": [
+            {
+              "cluster": "Live",
+              "requested": true,
+              "source": "provider",
+              "decision": "technical_error"
+            },
+            {
+              "cluster": "Video",
+              "requested": true,
+              "source": "provider",
+              "decision": "technical_error"
+            },
+            {
+              "cluster": "Series",
+              "requested": true,
+              "source": "provider",
+              "decision": "technical_error"
+            }
+          ]
+        },
+        "target": "failed-companion",
+        "message": "Input 'failed-companion' failed during update"
+      }
+    ],
+    "completed": {
+      "run_id": "staged-completion-run",
+      "execution_order": 1,
+      "state": "Failure"
+    },
+    "persisted_input_result": {
+      "state": "Failure",
+      "timestamp": 1
+    }
+  }
+]
