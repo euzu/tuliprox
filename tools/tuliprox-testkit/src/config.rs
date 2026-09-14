@@ -98,6 +98,10 @@ pub struct TuliproxConfig {
     pub bootstrap: Option<BootstrapConfig>,
     #[serde(default)]
     pub execution_mode: ExecutionMode,
+    #[serde(default)]
+    pub playback_endpoint: PlaybackEndpoint,
+    #[serde(default)]
+    pub fixture_stream: FixtureStreamOptions,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -129,6 +133,30 @@ pub enum ExecutionMode {
     #[default]
     IsolatedFixture,
     ExistingInstance,
+}
+
+/// Selects which Tuliprox playback endpoint the controller uses to build stream URLs.
+/// `m3u` (default) discovers URLs from the M3U playlist; `xtream` builds an Xtream live URL
+/// from the discovered virtual ID. Currently only `xtream_ts` channels support `xtream`.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaybackEndpoint {
+    #[default]
+    M3u,
+    Xtream,
+}
+
+/// Controls per-fixture live-stream sharing. Defaults mirror the current global behaviour
+/// (both HLS and MPEG-TS sharing enabled) so existing scenarios are unaffected.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FixtureStreamOptions {
+    pub share_live_hls: bool,
+    pub share_live_mpeg_ts: bool,
+}
+
+impl Default for FixtureStreamOptions {
+    fn default() -> Self { Self { share_live_hls: true, share_live_mpeg_ts: true } }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -393,12 +421,32 @@ impl Scenario {
                 return Err(TestkitError::Configuration("rejected playback must not await valid frames".to_owned()));
             }
         }
+        self.validate_policy_contract()?;
+        self.validate_playback_endpoint()?;
+        Ok(())
+    }
+
+    fn validate_policy_contract(&self) -> Result<(), TestkitError> {
         if let Some(contract) = &self.policy_contract {
             if !contract.user_access_control && !contract.users.is_empty() {
                 return Err(TestkitError::Configuration("policy users require user_access_control".to_owned()));
             }
             if contract.grace.as_ref().is_some_and(|grace| grace.timeout_millis == 0) {
                 return Err(TestkitError::Configuration("grace timeout must be non-zero".to_owned()));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_playback_endpoint(&self) -> Result<(), TestkitError> {
+        if self.tuliprox.playback_endpoint == PlaybackEndpoint::Xtream {
+            for (name, channel) in &self.channels {
+                if channel.protocol != "xtream_ts" {
+                    return Err(TestkitError::Configuration(format!(
+                        "channel {name} uses protocol '{}' which is not supported with playback_endpoint: xtream (only xtream_ts is supported)",
+                        channel.protocol
+                    )));
+                }
             }
         }
         Ok(())
@@ -466,6 +514,8 @@ mod tests {
                 playlist_url: None,
                 bootstrap: None,
                 execution_mode: ExecutionMode::IsolatedFixture,
+                playback_endpoint: PlaybackEndpoint::default(),
+                fixture_stream: FixtureStreamOptions::default(),
             },
             origin: None,
             actors: vec![Actor {
@@ -516,6 +566,7 @@ mod tests {
             "vod-range-reopen-preserves-three-live.yml",
             "vod-range-reopen-strict-cap.yml",
             "vod-reopen-backpressured-body.yml",
+            "live-ts-same-channel-retry-latest-wins.yml",
         ] {
             assert!(Scenario::from_path(&root.join(filename)).is_ok(), "{filename}");
         }
@@ -603,5 +654,47 @@ steps:
 
         // Idle timeout MUST NOT pass
         assert!(!expected_rejected.matches_outcome(&PlaybackOutcome::IdleTimeout));
+    }
+
+    #[test]
+    fn playback_endpoint_defaults_to_m3u() {
+        let cfg: TuliproxConfig = serde_saphyr::from_str("base_url: 'http://example.invalid'").unwrap();
+        assert_eq!(cfg.playback_endpoint, PlaybackEndpoint::M3u);
+    }
+
+    #[test]
+    fn playback_endpoint_xtream_deserializes() {
+        let cfg: TuliproxConfig =
+            serde_saphyr::from_str("base_url: 'http://example.invalid'\nplayback_endpoint: xtream").unwrap();
+        assert_eq!(cfg.playback_endpoint, PlaybackEndpoint::Xtream);
+    }
+
+    #[test]
+    fn fixture_stream_defaults_enable_sharing() {
+        let opts = FixtureStreamOptions::default();
+        assert!(opts.share_live_hls);
+        assert!(opts.share_live_mpeg_ts);
+    }
+
+    #[test]
+    fn playback_endpoint_xtream_rejects_non_xtream_ts_channel() {
+        let scenario: Scenario = serde_saphyr::from_str(
+            r"
+schema_version: 1
+name: xtream-validation
+tuliprox:
+  base_url: 'http://example.invalid'
+  execution_mode: existing_instance
+  playback_endpoint: xtream
+actors: [{ id: a, agent: local }]
+channels:
+  ch: { origin_marker: 17, protocol: hls }
+steps:
+  - command_id: s
+    start: { actor: a, playback_id: p, session_group: s, channel: ch }
+",
+        )
+        .unwrap();
+        assert!(scenario.validate().is_err());
     }
 }

@@ -3,6 +3,7 @@ OS := $(shell uname -s)
 ARCH := $(shell uname -m)
 
 # Paths
+PROJECT_DIR ?= $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 CARGO_HOME ?= $(HOME)/.cargo
 CARGO_BIN_DIR ?= $(CARGO_HOME)/bin
 
@@ -33,6 +34,21 @@ BOLD  := \033[1m
 # Number of CPUs (portable): try GNU `nproc`, then POSIX `getconf`, then macOS `sysctl`
 CPU_COUNT := $(shell nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
 CARGO_BUILD_JOBS := $(CPU_COUNT)
+
+# Support positional argument for serve: make serve <settings_folder>
+ifeq ($(firstword $(MAKECMDGOALS)),serve)
+  SETTINGS_ARG := $(word 2,$(MAKECMDGOALS))
+  ifneq ($(SETTINGS_ARG),)
+    SETTINGS_FOLDER ?= $(SETTINGS_ARG)
+    EXTRA_GOALS := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
+    $(eval .PHONY: $(EXTRA_GOALS))
+    $(eval $(EXTRA_GOALS):;@:)
+  endif
+endif
+SETTINGS_FOLDER ?= $(settings_folder)
+ifeq ($(SETTINGS_FOLDER),)
+  SETTINGS_FOLDER := $(TULIPROX_HOME)
+endif
 
 .PHONY: help
 help: ## Display this help
@@ -174,6 +190,16 @@ testkit-e2e: ## Run testkit E2E scenario suite against freshly built SUT
 build: ## Build the entire workspace in parallel using detected CPU count
 	@echo "==> Building workspace with $(CARGO_BUILD_JOBS) jobs"
 	@TMPDIR="$${TMPDIR:-/tmp}" $(CARGO_STABLE) build -j$(CARGO_BUILD_JOBS) --workspace
+
+.PHONY: serve
+serve: ## Run tuliprox server with settings folder: make serve <settings_folder>
+	@if [ -z "$(SETTINGS_FOLDER)" ]; then \
+		echo "❌ Error: Settings folder is required."; \
+		echo "Usage: make serve <settings_folder>  OR  make serve SETTINGS_FOLDER=<settings_folder>"; \
+		exit 1; \
+	fi
+	@echo "==> Starting tuliprox server with TULIPROX_HOME=$(SETTINGS_FOLDER)"
+	TULIPROX_HOME="$(SETTINGS_FOLDER)" $(CARGO) run --release --manifest-path $(PROJECT_DIR)/Cargo.toml --package tuliprox --bin tuliprox -- -s
 
 .PHONY: architecture-check
 architecture-check: ## Verify workspace dependency direction

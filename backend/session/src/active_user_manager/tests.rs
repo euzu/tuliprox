@@ -2520,7 +2520,7 @@ async fn affine_request_claims_keep_playback_until_newest_body_finishes() {
 
 /// PR1 regression: two bodies with distinct request UIDs that map to the same
 /// display stream must both clean up correctly. The current body path passes the
-/// *display* UID (stream_info.uid) to cleanup, not the request UID. This test
+/// *display* UID (`stream_info.uid`) to cleanup, not the request UID. This test
 /// asserts that the cleanup is request-affine — releasing the display UID twice
 /// must drain both claims, and the second release must find the stream.
 #[tokio::test]

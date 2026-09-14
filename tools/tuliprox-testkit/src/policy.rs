@@ -103,14 +103,31 @@ fn validate_grace(
     stream: &serde_json::Map<String, Value>,
     strategies: &[AdmissionStrategy],
 ) -> Result<(), TestkitError> {
-    let timeout = required_u64_object(stream, "grace_period_millis")?;
+    const DEFAULT_GRACE_PERIOD_MILLIS: u64 = 2000;
+    const DEFAULT_GRACE_HOLD_STREAM: bool = true;
+
+    let timeout = match stream.get("grace_period_millis") {
+        Some(value) => value.as_u64().ok_or_else(|| {
+            TestkitError::Protocol(
+                "fixture configuration omits integer config.reverse_proxy.stream.grace_period_millis".to_owned(),
+            )
+        })?,
+        None => DEFAULT_GRACE_PERIOD_MILLIS,
+    };
     if timeout != expected.timeout_millis {
         return Err(TestkitError::Configuration(format!(
             "fixture grace_period_millis mismatch: scenario {}, fixture {timeout}",
             expected.timeout_millis
         )));
     }
-    let hold = required_bool_object(stream, "grace_period_hold_stream")?;
+    let hold = match stream.get("grace_period_hold_stream") {
+        Some(value) => value.as_bool().ok_or_else(|| {
+            TestkitError::Protocol(
+                "fixture configuration omits boolean config.reverse_proxy.stream.grace_period_hold_stream".to_owned(),
+            )
+        })?,
+        None => DEFAULT_GRACE_HOLD_STREAM,
+    };
     let expected_hold = expected.mode == GraceMode::HoldStream;
     if hold != expected_hold {
         return mismatch("grace_period_hold_stream", expected_hold, hold);
@@ -169,23 +186,11 @@ fn required_bool(value: &Value, pointer: &str) -> Result<bool, TestkitError> {
         .ok_or_else(|| TestkitError::Protocol(format!("fixture configuration omits boolean {pointer}")))
 }
 
-fn required_bool_object(value: &serde_json::Map<String, Value>, key: &str) -> Result<bool, TestkitError> {
-    value.get(key).and_then(Value::as_bool).ok_or_else(|| {
-        TestkitError::Protocol(format!("fixture configuration omits boolean config.reverse_proxy.stream.{key}"))
-    })
-}
-
 fn required_u64(value: &Value, key: &str) -> Result<u64, TestkitError> {
     value
         .get(key)
         .and_then(Value::as_u64)
         .ok_or_else(|| TestkitError::Protocol(format!("fixture user omits integer {key}")))
-}
-
-fn required_u64_object(value: &serde_json::Map<String, Value>, key: &str) -> Result<u64, TestkitError> {
-    value.get(key).and_then(Value::as_u64).ok_or_else(|| {
-        TestkitError::Protocol(format!("fixture configuration omits integer config.reverse_proxy.stream.{key}"))
-    })
 }
 
 fn mismatch<T: std::fmt::Display>(field: &str, expected: T, actual: T) -> Result<(), TestkitError> {

@@ -1556,7 +1556,13 @@ impl ActiveUserManager {
                     addr_count == 1
                 }
             })
-            .map(|s| crate::EvictionCandidate { addr: s.addr, client_ip: s.client_ip.clone(), ts: s.ts, uid: s.uid })
+            .map(|s| crate::EvictionCandidate {
+                addr: s.addr,
+                client_ip: s.client_ip.clone(),
+                virtual_id: shared::model::VirtualId::new(s.channel.virtual_id),
+                ts: s.ts,
+                uid: s.uid,
+            })
             .collect();
         candidates
     }

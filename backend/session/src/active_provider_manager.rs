@@ -228,9 +228,10 @@ impl ManagedProviderHandle {
 
     pub fn renew_opening_tokens(&mut self) -> Option<(CancellationToken, CancellationToken)> {
         if let Some(ref mut handle) = self.handle {
-            if let Some((cancel, completion)) = self.manager.renew_opening_tokens(handle.allocation_id) {
+            if let Some((cancel, completion, gen)) = self.manager.renew_opening_tokens(handle.allocation_id) {
                 handle.cancel_token = Some(cancel.clone());
                 handle.completion_token = Some(completion.clone());
+                handle.open_generation = gen;
                 return Some((cancel, completion));
             }
         }
@@ -416,7 +417,11 @@ enum ReleaseAction {
 #[derive(Debug)]
 pub(crate) enum PreemptionOutcome {
     Acquired(ProviderAllocation),
-    PendingCompletion(CancellationToken),
+    /// Victim body is still draining. The optional pair is `(alloc_id, open_generation)` of the
+    /// victim for an idempotent self-release attempt once the token fires; `None` for shared-stream
+    /// teardowns where release happens inside the spawned task and no `complete_release_locked` call
+    /// is needed.
+    PendingCompletion(Option<(AllocationId, u64)>, CancellationToken),
     Exhausted,
 }
 
@@ -1540,11 +1545,16 @@ impl ActiveProviderManager {
                     token.cancel();
                 }
                 if let Some(ssm) = self.shared_stream_manager.get().and_then(Weak::upgrade) {
+                    // Signal completion after teardown finishes so async acquirers can wait for the
+                    // actual upstream shutdown rather than receiving Exhausted immediately.
+                    let done_token = CancellationToken::new();
+                    let done_signal = done_token.clone();
                     tokio::spawn(async move {
                         ssm.teardown_preempted_stream(&stream_url, alloc_id).await;
                         allocation.release();
+                        done_signal.cancel();
                     });
-                    PreemptionOutcome::Exhausted
+                    PreemptionOutcome::PendingCompletion(None, done_token)
                 } else {
                     allocation.release();
                     if let Some(alloc) = self.try_acquire_allocation_after_freed(
@@ -1596,11 +1606,19 @@ impl ActiveProviderManager {
                                 }
                             }
                         });
-                        PreemptionOutcome::PendingCompletion(comp_token)
+                        PreemptionOutcome::PendingCompletion(Some((victim_id, gen)), comp_token)
                     }
                     ReleaseAction::None => {
                         if let Some(token) = completion_token {
-                            PreemptionOutcome::PendingCompletion(token)
+                            // Retrieve the current generation for the idempotent self-release path.
+                            let victim_identity = {
+                                let connections = self.read_connections();
+                                connections
+                                    .single
+                                    .get(&victim_alloc_id)
+                                    .map(|info| (victim_alloc_id, info.open_generation))
+                            };
+                            PreemptionOutcome::PendingCompletion(victim_identity, token)
                         } else {
                             PreemptionOutcome::Exhausted
                         }
@@ -1773,12 +1791,23 @@ impl ActiveProviderManager {
                 let _transition = self.lock_capacity_transition();
                 Some(self.register_allocation(alloc, &params))
             }
-            PreemptionOutcome::PendingCompletion(completion_token) => {
+            PreemptionOutcome::PendingCompletion(victim_identity, completion_token) => {
                 let _ = tokio::time::timeout(PREEMPTION_COMPLETION_TIMEOUT, completion_token.cancelled()).await;
                 if self.is_shutting_down.load(Ordering::Acquire) {
                     return None;
                 }
                 let _transition = self.lock_capacity_transition();
+                // Idempotently free the victim's slot in case the background reaper has not yet run.
+                // complete_release_locked is a no-op if the slot was already freed or the generation
+                // no longer matches.
+                if let Some((victim_alloc_id, victim_gen)) = victim_identity {
+                    let mut connections = self.write_connections();
+                    ActiveProviderManagerCore::complete_release_locked(
+                        &mut connections,
+                        victim_alloc_id,
+                        Some(victim_gen),
+                    );
+                }
                 self.acquire_connection_inner_no_preempt(input_name, allow_grace, &params)
             }
             PreemptionOutcome::Exhausted => None,
@@ -1839,12 +1868,20 @@ impl ActiveProviderManager {
                 let _transition = self.lock_capacity_transition();
                 Some(self.register_allocation(alloc, &params))
             }
-            PreemptionOutcome::PendingCompletion(completion_token) => {
+            PreemptionOutcome::PendingCompletion(victim_identity, completion_token) => {
                 let _ = tokio::time::timeout(PREEMPTION_COMPLETION_TIMEOUT, completion_token.cancelled()).await;
                 if self.is_shutting_down.load(Ordering::Acquire) {
                     return None;
                 }
                 let _transition = self.lock_capacity_transition();
+                if let Some((victim_alloc_id, victim_gen)) = victim_identity {
+                    let mut connections = self.write_connections();
+                    ActiveProviderManagerCore::complete_release_locked(
+                        &mut connections,
+                        victim_alloc_id,
+                        Some(victim_gen),
+                    );
+                }
                 self.acquire_exact_connection_inner_no_preempt(provider_name, allow_grace, &params)
             }
             PreemptionOutcome::Exhausted => None,
@@ -2022,7 +2059,7 @@ impl ActiveProviderManager {
         }
     }
 
-    pub fn renew_opening_tokens(&self, alloc_id: AllocationId) -> Option<(CancellationToken, CancellationToken)> {
+    pub fn renew_opening_tokens(&self, alloc_id: AllocationId) -> Option<(CancellationToken, CancellationToken, u64)> {
         let _transition = self.lock_capacity_transition();
         let mut connections = self.write_connections();
         if let Some(info) = connections.single.get_mut(&alloc_id) {
@@ -2034,7 +2071,7 @@ impl ActiveProviderManager {
                 let completion_token = CancellationToken::new();
                 info.cancel_token = cancel_token.clone();
                 info.completion_token = completion_token.clone();
-                return Some((cancel_token, completion_token));
+                return Some((cancel_token, completion_token, info.open_generation));
             }
         }
         None
@@ -2142,7 +2179,9 @@ impl ActiveProviderManager {
             if connections.single.contains_key(&handle.allocation_id) {
                 if handle.completion_token.as_ref().is_some_and(CancellationToken::is_cancelled) {
                     if let Some(info) = connections.single.get_mut(&handle.allocation_id) {
-                        info.completion_token.cancel();
+                        if info.open_generation == handle.open_generation {
+                            info.completion_token.cancel();
+                        }
                     }
                 }
                 ActiveProviderManagerCore::plan_single_release_locked(&mut connections, handle.allocation_id)
@@ -2187,6 +2226,7 @@ impl ActiveProviderManager {
                                     cancel_token: Some(info.cancel_token.clone()),
                                     completion_token: Some(info.completion_token.clone()),
                                     close_reason: Arc::clone(&info.close_reason),
+                                    open_generation: info.open_generation,
                                 });
                             }
                         }
@@ -2228,7 +2268,6 @@ impl ActiveProviderManager {
                                     info.allocation.get_provider_name(),
                                     info.open_generation,
                                 ));
-                                info.reaper_spawned = true;
                             }
                         }
                     }
@@ -2263,16 +2302,33 @@ impl ActiveProviderManager {
                 self.core.complete_release_with_generation(alloc_id, Some(gen));
             } else {
                 log::warn!("Superseded provider connection {alloc_id} did not close within deadline, retaining slot as Closing until reaped");
-                let core = Arc::clone(&self.core);
-                let shutdown_token = self.shutdown_token.clone();
-                tokio::spawn(async move {
-                    tokio::select! {
-                        () = shutdown_token.cancelled() => {},
-                        () = completion_token.cancelled() => {
-                            core.complete_release_with_generation(alloc_id, Some(gen));
+                // Atomically claim the reaper role under the lock before spawning, so that
+                // if this future was dropped between collection and here, release_handle can
+                // still install its own reaper (reaper_spawned remains false until now).
+                let should_spawn = {
+                    let _transition = self.lock_capacity_transition();
+                    let mut connections = self.write_connections();
+                    connections.single.get_mut(&alloc_id).is_some_and(|info| {
+                        if info.reaper_spawned {
+                            false
+                        } else {
+                            info.reaper_spawned = true;
+                            true
                         }
-                    }
-                });
+                    })
+                };
+                if should_spawn {
+                    let core = Arc::clone(&self.core);
+                    let shutdown_token = self.shutdown_token.clone();
+                    tokio::spawn(async move {
+                        tokio::select! {
+                            () = shutdown_token.cancelled() => {},
+                            () = completion_token.cancelled() => {
+                                core.complete_release_with_generation(alloc_id, Some(gen));
+                            }
+                        }
+                    });
+                }
             }
         }
     }
@@ -2779,8 +2835,8 @@ mod tests {
             .acquire_connection_with_grace_for_session(&input, &addr, false, 0, ConnectionKind::Normal, Some("other"))
             .ok_or("other allocation missing")?;
         manager.release_playback_connections("first", &[addr]);
-        assert!(first.cancel_token.as_ref().is_some_and(|token| token.is_cancelled()));
-        assert!(!other.cancel_token.as_ref().is_some_and(|token| token.is_cancelled()));
+        assert!(first.cancel_token.as_ref().is_some_and(tokio_util::sync::CancellationToken::is_cancelled));
+        assert!(!other.cancel_token.as_ref().is_some_and(tokio_util::sync::CancellationToken::is_cancelled));
         assert_eq!(manager.get_provider_connections_count(), 1);
         let replacement = manager
             .acquire_connection_with_grace_for_session(&input, &addr, false, 0, ConnectionKind::Normal, Some("first"))
@@ -4148,7 +4204,7 @@ mod tests {
 
         {
             let connections = manager.read_connections();
-            assert!(connections.by_owner.get(owner_a).is_none(), "owner-a index is removed after release");
+            assert!(!connections.by_owner.contains_key(owner_a), "owner-a index is removed after release");
             assert_eq!(connections.by_owner.get(owner_b).map_or(0, HashSet::len), 1, "owner-b still indexed");
         }
 
@@ -4529,7 +4585,7 @@ mod tests {
     #[test]
     fn managed_handle_drop_outside_runtime_releases_allocation() {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        let (manager, managed) = rt.block_on(async {
+        let (manager, managed_handle) = rt.block_on(async {
             let app_cfg = create_test_app_config_single_provider_pool();
             let event_manager = Arc::new(EventManager::new());
             let manager = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
@@ -4547,14 +4603,15 @@ mod tests {
                 .expect("allocation should succeed");
             assert_eq!(manager.get_provider_connections_count(), 1);
 
-            let managed = super::ManagedProviderHandle::new(Arc::clone(&manager), handle);
-            (manager, managed)
+            let managed_handle = super::ManagedProviderHandle::new(Arc::clone(&manager), handle);
+            (manager, managed_handle)
         });
 
-        drop(managed);
+        drop(managed_handle);
         assert_eq!(manager.get_provider_connections_count(), 0);
     }
 
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
     fn latency_percentile(sorted: &[u64], p: f64) -> u64 {
         if sorted.is_empty() {
             return 0;
@@ -4593,6 +4650,7 @@ mod tests {
         release_p99: u64,
     }
 
+    #[allow(clippy::cast_possible_truncation)]
     async fn measure_lease_workload(
         manager: &Arc<ActiveProviderManager>,
         input_name: &Arc<str>,
@@ -4675,6 +4733,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "manager microbenchmark: cargo +stable test -p tuliprox-session --release -- --ignored --nocapture bench_provider_lease_microbenchmark"]
+    #[allow(clippy::cast_precision_loss)]
     async fn bench_provider_lease_microbenchmark() {
         let manager = Arc::new(ActiveProviderManager::new(
             &create_test_app_config_single_unlimited_provider_pool(),
@@ -4710,8 +4769,7 @@ mod tests {
             let throughput = stats.ops as f64 / stats.elapsed_secs.max(f64::EPSILON);
             let rss_delta_kib = resident_set_kib()
                 .zip(baseline_rss_kib)
-                .map(|(rss, baseline)| rss.saturating_sub(baseline).to_string())
-                .unwrap_or_else(|| "unsupported".to_string());
+                .map_or_else(|| "unsupported".to_string(), |(rss, baseline)| rss.saturating_sub(baseline).to_string());
             eprintln!(
                 "concurrency={concurrency:>3} ops={:>5} throughput={:>9.1} ops/s | acquire p50/p95/p99={}/{}/{}us | confirm p50/p95/p99={}/{}/{}us | release p50/p95/p99={}/{}/{}us | rss_delta_kib={}",
                 stats.ops,
@@ -4888,5 +4946,115 @@ mod tests {
         assert_eq!(manager.get_provider_connections_count(), 1);
         manager.release_handle(&high_handle);
         assert_eq!(manager.get_provider_connections_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn stale_handle_does_not_cancel_newer_generation_slot() {
+        let app_cfg = create_test_app_config_single_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
+        let input_name: Arc<str> = "provider_1".intern();
+        let addr = SocketAddr::from(([127, 0, 0, 1], 49_001));
+
+        let handle = manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &addr,
+                false,
+                0,
+                ConnectionKind::Normal,
+                Some("session-gen"),
+            )
+            .expect("initial allocation succeeds");
+
+        manager.mark_opening(handle.allocation_id);
+        assert!(manager.register_body_owner(handle.allocation_id));
+
+        // Gen 0 has an old completion token
+        let old_completion_token = handle.completion_token.clone().expect("completion token present");
+
+        // Renew opening tokens to advance generation to 1
+        let (_new_cancel, new_completion, gen) =
+            manager.renew_opening_tokens(handle.allocation_id).expect("renewal should succeed");
+        assert_eq!(gen, 1);
+
+        // Simulate an old handle belonging to generation 0 whose completion token was cancelled
+        old_completion_token.cancel();
+        let stale_handle = tuliprox_core::model::ProviderHandle {
+            playback_request_id: handle.playback_request_id,
+            binding_tag: handle.binding_tag,
+            client_id: handle.client_id,
+            allocation_id: handle.allocation_id,
+            allocation: handle.allocation.clone(),
+            cancel_token: handle.cancel_token.clone(),
+            completion_token: Some(old_completion_token),
+            close_reason: Arc::clone(&handle.close_reason),
+            open_generation: 0, // Stale generation
+        };
+
+        // Releasing the stale handle must NOT poison/cancel the new generation's completion token
+        manager.release_handle(&stale_handle);
+        assert!(
+            !new_completion.is_cancelled(),
+            "new generation completion token must remain uncancelled after stale handle release"
+        );
+        assert_eq!(manager.get_provider_connections_count(), 1, "slot must still be held by the active new generation");
+
+        // When the real new generation completes, the slot is reaped
+        new_completion.cancel();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(manager.get_provider_connections_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn dropped_cleanup_future_does_not_permanently_leak_slot() {
+        let app_cfg = create_test_app_config_single_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
+        let input_name: Arc<str> = "provider_1".intern();
+        let addr = SocketAddr::from(([127, 0, 0, 1], 49_002));
+        let addrs = [addr];
+
+        let handle = manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &addr,
+                false,
+                0,
+                ConnectionKind::Normal,
+                Some("session-drop"),
+            )
+            .expect("allocation succeeds");
+
+        manager.mark_opening(handle.allocation_id);
+        assert!(manager.register_body_owner(handle.allocation_id));
+        let completion_token = handle.completion_token.clone().expect("token present");
+
+        // Start release_playback_connections_await but drop it before completion
+        {
+            let cleanup_fut = manager.release_playback_connections_await("session-drop", &addrs);
+            // Poll once and drop
+            tokio::select! {
+                biased;
+                () = async {} => {},
+                () = cleanup_fut => {},
+            }
+        }
+
+        // Slot must still be occupied
+        assert_eq!(manager.get_provider_connections_count(), 1);
+
+        // Now the handle is released and the body owner signals completion
+        manager.release_handle(&handle);
+        completion_token.cancel();
+
+        // Give the background reaper task time to run
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert_eq!(
+            manager.get_provider_connections_count(),
+            0,
+            "slot must be freed after completion and not permanently leaked in Closing state"
+        );
     }
 }

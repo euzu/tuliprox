@@ -56,6 +56,34 @@ fn is_rejection_http_status(status: u16, headers: &reqwest::header::HeaderMap) -
     matches!(status, 403 | 429) || ((status == 502 || status == 503) && headers.get("x-tuliprox-rejection").is_some())
 }
 
+/// Build the final playback URL for a live channel, dispatching between M3U-discovered URLs and
+/// Xtream live endpoint URLs constructed from the virtual ID embedded in the M3U playlist entry.
+fn resolve_playback_url(
+    endpoint: tuliprox_testkit::config::PlaybackEndpoint,
+    channel_protocol: &str,
+    base_url: &str,
+    username: &str,
+    password: &str,
+    vids: &VirtualIdMap,
+    marker: u32,
+) -> Result<String, TestkitError> {
+    use tuliprox_testkit::config::PlaybackEndpoint;
+    match endpoint {
+        PlaybackEndpoint::M3u => Ok(vids.playback_url(marker)?.to_owned()),
+        PlaybackEndpoint::Xtream => {
+            if channel_protocol != "xtream_ts" {
+                return Err(TestkitError::Configuration(format!(
+                    "playback_endpoint: xtream requires protocol xtream_ts, got {channel_protocol}"
+                )));
+            }
+            let virtual_id = vids.virtual_id_from_marker(marker)?;
+            let username_enc = url::form_urlencoded::byte_serialize(username.as_bytes()).collect::<String>();
+            let password_enc = url::form_urlencoded::byte_serialize(password.as_bytes()).collect::<String>();
+            Ok(format!("{base_url}/live/{username_enc}/{password_enc}/{virtual_id}.ts"))
+        }
+    }
+}
+
 const PLAYBACK_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 const PLAYLIST_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -1600,6 +1628,8 @@ async fn run_controller(
                 scenario.origin.as_ref(),
                 scenario.policy_contract.as_ref(),
                 &scenario.channels,
+                &scenario.tuliprox.fixture_stream,
+                scenario.tuliprox.playback_endpoint == tuliprox_testkit::config::PlaybackEndpoint::Xtream,
             )
             .await
             {
@@ -2186,6 +2216,7 @@ async fn execute_scenario_steps<'a>(
                 .await_frames
                 .or_else(|| step.await_condition.as_ref().and_then(|condition| condition.valid_frames))
                 .unwrap_or(1);
+            let url_owned: String;
             let url = if let Some(url) = start.url.as_deref() {
                 url
             } else {
@@ -2206,12 +2237,21 @@ async fn execute_scenario_steps<'a>(
                     let channel = start.channel.as_deref().ok_or_else(|| {
                         TestkitError::Configuration("start has no URL, vod_object, or channel".to_owned())
                     })?;
-                    let marker = scenario
+                    let channel_def = scenario
                         .channels
                         .get(channel)
-                        .ok_or_else(|| TestkitError::Configuration(format!("unknown channel {channel}")))?
-                        .origin_marker;
-                    vids.playback_url(marker)?
+                        .ok_or_else(|| TestkitError::Configuration(format!("unknown channel {channel}")))?;
+                    let marker = channel_def.origin_marker;
+                    url_owned = resolve_playback_url(
+                        scenario.tuliprox.playback_endpoint,
+                        &channel_def.protocol,
+                        &scenario.tuliprox.base_url,
+                        actor.username.as_deref().unwrap_or(""),
+                        fixture_password(),
+                        vids,
+                        marker,
+                    )?;
+                    &url_owned
                 }
             };
             let marker = if is_vod {

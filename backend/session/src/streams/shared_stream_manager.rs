@@ -1182,7 +1182,7 @@ impl SharedStreamManager {
         }
         #[cfg(test)]
         {
-            let barrier = self.test_preflight_barrier.lock().map(|g| g.clone()).unwrap_or(None);
+            let barrier = self.test_preflight_barrier.lock().ok().and_then(|g| g.clone());
             if let Some(barrier) = barrier {
                 barrier.wait().await;
             }
@@ -2148,7 +2148,7 @@ mod tests {
             )
             .ok_or("provider allocation missing")?;
         let request_id = handle.playback_request_id.ok_or("provider request identity missing")?;
-        let managed = ManagedProviderHandle::new(Arc::clone(&providers), handle);
+        let managed_handle = ManagedProviderHandle::new(Arc::clone(&providers), handle);
         assert_eq!(providers.get_provider_connections_count(), 1);
 
         let dummy_state = Arc::new(SharedStreamState::new(Vec::new(), CHANNEL_SIZE, None, 1024, None));
@@ -2169,7 +2169,7 @@ mod tests {
             id,
             Vec::new(),
             8,
-            Some(managed),
+            Some(managed_handle),
             pending_cleanup,
             0,
             ConnectionKind::Normal,
@@ -2216,7 +2216,7 @@ mod tests {
             )
             .ok_or("provider allocation missing")?;
         let request_id = handle.playback_request_id.ok_or("provider request identity missing")?;
-        let managed = ManagedProviderHandle::new(Arc::clone(&providers), handle);
+        let managed_handle = ManagedProviderHandle::new(Arc::clone(&providers), handle);
         assert_eq!(providers.get_provider_connections_count(), 1);
 
         let mut pending_cleanup = SharedStreamManager::reserve_subscriber_cleanup(&connections, id, addr).await?;
@@ -2242,7 +2242,7 @@ mod tests {
                     id,
                     Vec::new(),
                     8,
-                    Some(managed),
+                    Some(managed_handle),
                     pending_cleanup,
                     0,
                     ConnectionKind::Normal,
@@ -2404,7 +2404,7 @@ mod tests {
         let handle = providers
             .acquire_connection(&"provider_1".intern(), &addr, 0, ConnectionKind::Normal)
             .ok_or("provider allocation missing")?;
-        let managed = ManagedProviderHandle::new(Arc::clone(&providers), handle);
+        let managed_handle = ManagedProviderHandle::new(Arc::clone(&providers), handle);
         let pending = SharedStreamManager::reserve_subscriber_cleanup(&connections, id, addr).await?;
         let (unpolled_body, _, _) = SharedStreamManager::register_shared_stream(
             super::SharedStreamCtx {
@@ -2419,7 +2419,7 @@ mod tests {
             id,
             Vec::new(),
             8,
-            Some(managed),
+            Some(managed_handle),
             pending,
             0,
             ConnectionKind::Normal,
@@ -2603,7 +2603,7 @@ mod tests {
         let manager = Arc::new(SharedStreamManager::new(providers));
         let url = "https://example.invalid/live/meter-successor.ts";
 
-        let (uid, _guard) = manager.reserve_meter_uid(url, || 71);
+        let (uid, guard) = manager.reserve_meter_uid(url, || 71);
         manager.adopt_meter_uid(url, 100);
         // A successor origin commits the same URL and takes over the meter.
         manager.adopt_meter_uid(url, 200);
@@ -2613,7 +2613,7 @@ mod tests {
         manager.remove_meter_uid_if_owned_by(url, Some(100));
         assert_eq!(manager.meter_count(), 1);
         assert_eq!(manager.lock_meter_uids().get(url).map(|entry| entry.uid), Some(uid));
-        _guard.expect("reservation").commit();
+        guard.expect("reservation").commit();
     }
 
     #[tokio::test]

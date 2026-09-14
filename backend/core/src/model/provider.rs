@@ -144,6 +144,7 @@ pub struct ProviderHandle {
     pub cancel_token: Option<CancellationToken>,
     pub completion_token: Option<CancellationToken>,
     pub close_reason: Arc<AtomicU8>,
+    pub open_generation: u64,
 }
 
 impl ProviderHandle {
@@ -162,6 +163,7 @@ impl ProviderHandle {
             close_reason: Arc::new(AtomicU8::new(ProviderCloseReason::Unspecified as u8)),
             playback_request_id: None,
             binding_tag: None,
+            open_generation: 0,
         }
     }
 

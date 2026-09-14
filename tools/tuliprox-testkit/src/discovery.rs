@@ -52,6 +52,14 @@ impl VirtualIdMap {
             .map(String::as_str)
             .ok_or_else(|| TestkitError::Configuration(format!("named media {name} was not published by Tuliprox")))
     }
+
+    /// Extract the numeric virtual ID from the URL stored for `marker`. The virtual ID is the last
+    /// path segment after stripping any query string and file extension. Returns an error if the
+    /// segment cannot be parsed as a `u64`.
+    pub fn virtual_id_from_marker(&self, marker: u32) -> Result<u64, TestkitError> {
+        let url = self.playback_url(marker)?;
+        extract_virtual_id_from_url(url)
+    }
 }
 
 fn marker_from_extinf(line: &str) -> Option<u32> {
@@ -64,6 +72,28 @@ fn name_from_extinf(line: &str) -> Option<String> {
     value.strip_prefix("test-vod-").map(str::to_owned)
 }
 
+/// Extract the numeric virtual ID from the last path segment of a URL.
+/// Query strings and file extensions (e.g. `.ts`, `.m3u8`) are stripped before parsing.
+fn extract_virtual_id_from_url(url: &str) -> Result<u64, TestkitError> {
+    // Drop query string
+    let path = url.split('?').next().unwrap_or(url);
+    // Drop file extension: find the last `.` in the last path segment only
+    let path = {
+        let last_slash = path.rfind('/').map_or(0, |i| i + 1);
+        if let Some(dot_pos) = path[last_slash..].rfind('.') {
+            &path[..last_slash + dot_pos]
+        } else {
+            path
+        }
+    };
+    let segment = path.rsplit('/').next().unwrap_or("");
+    segment.parse::<u64>().map_err(|_| {
+        TestkitError::Configuration(format!(
+            "cannot extract numeric virtual ID from URL {url}: last path segment {segment:?} is not a valid u64"
+        ))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,5 +104,35 @@ mod tests {
         let map = VirtualIdMap::from_m3u(playlist).unwrap();
         assert_eq!(map.playback_url(17).unwrap(), "http://tuliprox/m3u/abc/17");
         assert_eq!(map.named_playback_url("movie.mkv").unwrap(), "http://tuliprox/movie/abc/def/1.mkv");
+    }
+
+    #[test]
+    fn extracts_virtual_id_from_plain_m3u_url() {
+        let map = VirtualIdMap::from_m3u("#EXTM3U\n#EXTINF:-1 tvg-id=\"test-17\",News\nhttp://tuliprox/m3u/abc/42\n")
+            .unwrap();
+        assert_eq!(map.virtual_id_from_marker(17).unwrap(), 42);
+    }
+
+    #[test]
+    fn strips_query_string_before_extracting_virtual_id() {
+        let map = VirtualIdMap::from_m3u(
+            "#EXTM3U\n#EXTINF:-1 tvg-id=\"test-5\",Ch5\nhttp://tuliprox/m3u/user/99?token=abc\n",
+        )
+        .unwrap();
+        assert_eq!(map.virtual_id_from_marker(5).unwrap(), 99);
+    }
+
+    #[test]
+    fn strips_file_extension_before_extracting_virtual_id() {
+        let map = VirtualIdMap::from_m3u("#EXTM3U\n#EXTINF:-1 tvg-id=\"test-3\",Ch3\nhttp://tuliprox/m3u/user/77.ts\n")
+            .unwrap();
+        assert_eq!(map.virtual_id_from_marker(3).unwrap(), 77);
+    }
+
+    #[test]
+    fn non_numeric_last_segment_is_an_error() {
+        let map = VirtualIdMap::from_m3u("#EXTM3U\n#EXTINF:-1 tvg-id=\"test-1\",Ch1\nhttp://tuliprox/m3u/user/abc\n")
+            .unwrap();
+        assert!(map.virtual_id_from_marker(1).is_err());
     }
 }

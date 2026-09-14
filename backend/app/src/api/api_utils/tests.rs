@@ -6358,6 +6358,53 @@ async fn resolve_admission_with_strategies_prevents_recently_evicted_playback_pi
     let active_streams = app_state.active_users.active_streams().await;
     assert_eq!(active_streams.len(), 1);
     assert_eq!(active_streams[0].channel.virtual_id, 9002);
+
+    // A player may retry the winning plain-TS stream on another socket before the
+    // previous HTTP body has drained. That is a replacement of the same playback,
+    // not the evicted channel trying to reclaim its slot.
+    app_state
+        .active_users
+        .mark_recent_eviction_guard_for_addr(&winner_addr, reconnect_addr, RECENT_EVICTION_REENTRY_TTL_SECS)
+        .await;
+    app_state.connection_manager.release_connection_as_kicked(&winner_addr).await;
+    app_state.connection_manager.add_connection(&reconnect_addr).await;
+    app_state
+        .connection_manager
+        .update_connection(crate::api::model::ConnectionParams {
+            meter_uid: 3,
+            username: "loop-user",
+            max_connections: 1,
+            soft_connections: 0,
+            connection_kind: crate::api::model::ConnectionKind::Normal,
+            priority: 0,
+            soft_priority: 0,
+            fingerprint: &reconnect_fingerprint,
+            provider: "provider-a".intern(),
+            stream_channel: &winner_channel,
+            user_agent: std::borrow::Cow::Borrowed("player/1.0"),
+            session_token: None,
+        })
+        .await;
+
+    let retry_addr: std::net::SocketAddr = "127.0.0.1:55184".parse().unwrap_or_else(|_| unreachable!());
+    let retry = resolve_admission_with_strategies(
+        &app_state.admission_ctx(),
+        AdmissionRequest {
+            username: "loop-user",
+            max_connections: 1,
+            soft_connections: 0,
+            client_ip: &reconnect_fingerprint.client_ip,
+            request_addr: &retry_addr,
+            use_session_admission: true,
+            session_token: Some("socket-retry"),
+            activate_unbound_session: false,
+            eviction_reentry_guard: EvictionReentryGuard::SocketPlayback { virtual_id: VirtualId::new(9002) },
+        },
+    )
+    .await;
+
+    assert_eq!(retry.admission.permission, UserConnectionPermission::Allowed);
+    assert!(app_state.active_users.active_streams().await.is_empty());
 }
 
 #[tokio::test]

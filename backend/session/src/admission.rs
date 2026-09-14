@@ -192,19 +192,22 @@ pub async fn resolve_playback_request_admission(
 async fn should_suppress_eviction_for_recent_request(
     adm: &AdmissionCtx,
     request: &AdmissionRequest<'_>,
-    target_addr: &std::net::SocketAddr,
+    target: &crate::EvictionTarget,
 ) -> bool {
     match request.eviction_reentry_guard {
         EvictionReentryGuard::Session(session_token) => adm
             .active_users
             .recently_evicted_session_protected_addr(session_token)
             .await
-            .is_some_and(|protected_addr| protected_addr == *target_addr),
-        EvictionReentryGuard::SocketPlayback { virtual_id } => adm
-            .active_users
-            .recent_socket_reentry_protected_addr(request.username, request.client_ip, virtual_id)
-            .await
-            .is_some_and(|protected_addr| protected_addr == *target_addr),
+            .is_some_and(|protected_addr| protected_addr == target.addr),
+        EvictionReentryGuard::SocketPlayback { virtual_id } => {
+            target.virtual_id != virtual_id
+                && adm
+                    .active_users
+                    .recent_socket_reentry_protected_addr(request.username, request.client_ip, virtual_id)
+                    .await
+                    .is_some_and(|protected_addr| protected_addr == target.addr)
+        }
     }
 }
 
@@ -325,7 +328,7 @@ where
                     );
                     continue;
                 }
-                if should_suppress_eviction_for_recent_request(adm, request, &target.addr).await {
+                if should_suppress_eviction_for_recent_request(adm, request, &target).await {
                     debug!(
                         "Skipping eviction strategy {strategy:?} for recently evicted request of user {username} targeting {}",
                         target.addr

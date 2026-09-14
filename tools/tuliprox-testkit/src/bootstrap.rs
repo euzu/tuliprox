@@ -32,6 +32,8 @@ impl FixturePaths {
         tuliprox_address: SocketAddr,
         policy: Option<&PolicyContract>,
         channels: &HashMap<String, Channel>,
+        fixture_stream: &crate::config::FixtureStreamOptions,
+        add_xtream_output: bool,
     ) -> Result<Self, TestkitError> {
         let directory = tempfile::Builder::new().prefix("tuliprox-testkit-").tempdir()?;
         let root = directory.path().to_path_buf();
@@ -51,7 +53,10 @@ impl FixturePaths {
             &config_file,
             render_config(tuliprox_address, &web_root, &storage_dir, &backup_dir, &history_dir, policy)?,
         )?;
-        std::fs::write(&source_file, render_sources(run_id, origin_address, channels, policy))?;
+        std::fs::write(
+            &source_file,
+            render_sources(run_id, origin_address, channels, policy, fixture_stream, add_xtream_output),
+        )?;
         std::fs::write(&api_proxy_file, render_api_proxy(tuliprox_address, policy))?;
 
         Ok(Self { _directory: directory, root, config_file, source_file, api_proxy_file, web_root })
@@ -108,6 +113,8 @@ fn render_sources(
     origin_address: SocketAddr,
     channels: &HashMap<String, Channel>,
     policy: Option<&PolicyContract>,
+    fixture_stream: &crate::config::FixtureStreamOptions,
+    add_xtream_output: bool,
 ) -> String {
     let mut markers = channels.values().map(|channel| channel.origin_marker).collect::<Vec<_>>();
     markers.sort_unstable();
@@ -119,8 +126,11 @@ fn render_sources(
     let provider_limit = policy
         .and_then(|contract| contract.provider_max_connections)
         .map_or_else(String::new, |limit| format!("    max_connections: {limit}\n"));
+    let share_hls = fixture_stream.share_live_hls;
+    let share_mpeg_ts = fixture_stream.share_live_mpeg_ts;
+    let extra_output = if add_xtream_output { "          - type: xtream\n" } else { "" };
     format!(
-        "inputs:\n  - name: testkit-origin\n    type: m3u\n    url: http://{origin_address}/catalog/input.m3u?run={run_id}\n{provider_limit}sources:\n  - inputs:\n      - testkit-origin\n    targets:\n      - name: testkit\n        output:\n          - type: m3u\n        options:\n          share_live_streams:\n            hls: true\n            mpeg_ts: true\n# Origin markers for this fixture: {marker_comment}\n"
+        "inputs:\n  - name: testkit-origin\n    type: m3u\n    url: http://{origin_address}/catalog/input.m3u?run={run_id}\n{provider_limit}sources:\n  - inputs:\n      - testkit-origin\n    targets:\n      - name: testkit\n        output:\n          - type: m3u\n{extra_output}        options:\n          share_live_streams:\n            hls: {share_hls}\n            mpeg_ts: {share_mpeg_ts}\n# Origin markers for this fixture: {marker_comment}\n"
     )
 }
 
@@ -176,6 +186,8 @@ impl IsolatedFixture {
         origin_config: Option<&crate::config::OriginConfig>,
         policy: Option<&PolicyContract>,
         channels: &HashMap<String, Channel>,
+        fixture_stream: &crate::config::FixtureStreamOptions,
+        add_xtream_output: bool,
     ) -> Result<Self, TestkitError> {
         const MAX_START_ATTEMPTS: usize = 5;
         let mut last_error = None;
@@ -190,6 +202,8 @@ impl IsolatedFixture {
                 origin_config,
                 policy,
                 channels,
+                fixture_stream,
+                add_xtream_output,
             )
             .await
             {
@@ -219,11 +233,21 @@ impl IsolatedFixture {
         origin_config: Option<&crate::config::OriginConfig>,
         policy: Option<&PolicyContract>,
         channels: &HashMap<String, Channel>,
+        fixture_stream: &crate::config::FixtureStreamOptions,
+        add_xtream_output: bool,
     ) -> Result<Self, TestkitError> {
         let origin_address = reserve_loopback_address()?;
         let origin_control_address = reserve_loopback_address()?;
         let tuliprox_address = reserve_loopback_address()?;
-        let paths = FixturePaths::create(run_id, origin_address, tuliprox_address, policy, channels)?;
+        let paths = FixturePaths::create(
+            run_id,
+            origin_address,
+            tuliprox_address,
+            policy,
+            channels,
+            fixture_stream,
+            add_xtream_output,
+        )?;
         let markers = fixture_markers(channels);
         let mut origin_cmd = Command::new(testkit_binary);
         origin_cmd
@@ -448,6 +472,8 @@ mod tests {
             "127.0.0.1:8901".parse::<SocketAddr>().map_err(|error| TestkitError::Configuration(error.to_string()))?,
             Some(&policy),
             &channels,
+            &crate::config::FixtureStreamOptions::default(),
+            false,
         )?;
         let config = std::fs::read_to_string(&fixture.config_file)?;
         let source = std::fs::read_to_string(&fixture.source_file)?;
@@ -458,5 +484,29 @@ mod tests {
         assert!(api_proxy.contains("fixture-user"));
         assert!(!config.contains("/home/"));
         Ok(())
+    }
+
+    #[test]
+    fn render_sources_with_mpeg_ts_sharing_disabled() {
+        let opts = crate::config::FixtureStreamOptions { share_live_hls: true, share_live_mpeg_ts: false };
+        let source = render_sources("run", "127.0.0.1:9910".parse().unwrap(), &HashMap::new(), None, &opts, false);
+        assert!(source.contains("mpeg_ts: false"));
+        assert!(source.contains("hls: true"));
+        assert!(!source.contains("type: xtream"));
+    }
+
+    #[test]
+    fn render_sources_includes_xtream_output_when_requested() {
+        let opts = crate::config::FixtureStreamOptions::default();
+        let source = render_sources("run", "127.0.0.1:9910".parse().unwrap(), &HashMap::new(), None, &opts, true);
+        assert!(source.contains("type: xtream"));
+    }
+
+    #[test]
+    fn render_sources_omits_xtream_output_by_default() {
+        let opts = crate::config::FixtureStreamOptions::default();
+        let source = render_sources("run", "127.0.0.1:9910".parse().unwrap(), &HashMap::new(), None, &opts, false);
+        assert!(!source.contains("type: xtream"));
+        assert!(source.contains("mpeg_ts: true"));
     }
 }

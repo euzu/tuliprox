@@ -10,7 +10,7 @@ on:
       branch:
         type: choice
         description: Target branch
-        options: [develop, master]
+        options: [develop, experimental, master]
         default: develop
       choice:
         type: choice
@@ -18,7 +18,7 @@ on:
         options: [none, major, minor, patch]
         default: none
   push:
-    branches: [develop, master]
+    branches: [develop, experimental, master]
 
 # Avoid multiple parallel builds for the same branch to prevent race conditions
 concurrency:
@@ -29,7 +29,7 @@ jobs:
   docker-build:
     runs-on: ubuntu-latest
     if: >-
-      (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/master') &&
+      (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/experimental' || github.ref == 'refs/heads/master') &&
       (github.event_name != 'push' || github.actor != 'github-actions[bot]')
 
     steps:
@@ -66,7 +66,7 @@ jobs:
           chmod +x ./bin/inc_version.sh
           if [[ "${{ github.event_name }}" == "push" ]]; then
             case "${{ github.ref_name }}" in
-              develop) ./bin/inc_version.sh ;;
+              develop|experimental) ./bin/inc_version.sh ;;
               master) echo "Master builds use the version already committed in the merged PR; skipping version bump." ;;
               *) echo "Unsupported push branch: ${{ github.ref_name }}" >&2; exit 1 ;;
             esac
@@ -146,7 +146,7 @@ jobs:
           done
       - name: Commit version bump
         if: >-
-          (github.event_name == 'push' && github.ref == 'refs/heads/develop') ||
+          (github.event_name == 'push' && (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/experimental')) ||
           (github.event_name == 'workflow_dispatch' && github.event.inputs.branch != 'master')
         id: version_commit
         run: |
@@ -219,7 +219,7 @@ jobs:
         if: >-
           success() &&
           (
-            (github.event_name == 'push' && github.ref == 'refs/heads/develop') ||
+            (github.event_name == 'push' && (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/experimental')) ||
             (github.event_name == 'workflow_dispatch' && github.event.inputs.branch != 'master')
           ) &&
           steps.version_commit.outputs.did_commit == 'true'

@@ -234,4 +234,37 @@ mod tests {
             .admit(Request { playback_id: "c".to_owned(), client_ip: "10.0.0.2".to_owned(), started_order: 2 })
             .is_err());
     }
+
+    #[test]
+    fn sequential_same_ip_eviction_a_then_b_then_c() {
+        let mut oracle = AdmissionOracle::with_policy(
+            1,
+            0,
+            vec![
+                AdmissionStrategy::EvictUserSameIpLatest,
+                AdmissionStrategy::EvictUserSameIpOldest,
+                AdmissionStrategy::EvictUserLatest,
+                AdmissionStrategy::EvictUserOldest,
+            ],
+            Some(GraceMode::HoldStream),
+        );
+        // A admitted on first slot
+        assert!(matches!(
+            oracle.admit(Request { playback_id: "a".to_owned(), client_ip: "10.20.0.10".to_owned(), started_order: 1 }),
+            Ok(Decision::Admit)
+        ));
+        // B evicts A (same IP, latest = A is latest, so A is evicted)
+        assert!(matches!(
+            oracle.admit(Request { playback_id: "b".to_owned(), client_ip: "10.20.0.10".to_owned(), started_order: 2 }),
+            Ok(Decision::Evict { ref playback_id }) if playback_id == "a"
+        ));
+        // C evicts B (same IP, latest = B is latest)
+        assert!(matches!(
+            oracle.admit(Request { playback_id: "c".to_owned(), client_ip: "10.20.0.10".to_owned(), started_order: 3 }),
+            Ok(Decision::Evict { ref playback_id }) if playback_id == "b"
+        ));
+        // Only C remains
+        assert_eq!(oracle.active.len(), 1);
+        assert!(oracle.active.contains_key("c"));
+    }
 }

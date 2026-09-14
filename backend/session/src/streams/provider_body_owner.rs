@@ -316,38 +316,40 @@ mod tests {
         drop(owner);
     }
 
+    struct TwoChunksThenErrStream {
+        count: usize,
+        dropped: Option<oneshot::Sender<()>>,
+    }
+    impl Stream for TwoChunksThenErrStream {
+        type Item = Result<Bytes, StreamError>;
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            match self.count.cmp(&2) {
+                std::cmp::Ordering::Less => {
+                    self.count += 1;
+                    Poll::Ready(Some(Ok(Bytes::from_static(b"chunk"))))
+                }
+                std::cmp::Ordering::Equal => {
+                    self.count += 1;
+                    Poll::Ready(Some(Err(StreamError::Stream("test error".to_owned()))))
+                }
+                std::cmp::Ordering::Greater => Poll::Pending,
+            }
+        }
+    }
+    impl Drop for TwoChunksThenErrStream {
+        fn drop(&mut self) {
+            if let Some(d) = self.dropped.take() {
+                let _ = d.send(());
+            }
+        }
+    }
+
     #[tokio::test]
     async fn error_delivery_does_not_block_cancellation_when_channel_full() {
         let (dropped_tx, dropped_rx) = oneshot::channel();
         let cancel = CancellationToken::new();
         let completion = CancellationToken::new();
         let close_reason = Arc::new(AtomicU8::new(0));
-
-        struct TwoChunksThenErrStream {
-            count: usize,
-            dropped: Option<oneshot::Sender<()>>,
-        }
-        impl Stream for TwoChunksThenErrStream {
-            type Item = Result<Bytes, StreamError>;
-            fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-                if self.count < 2 {
-                    self.count += 1;
-                    Poll::Ready(Some(Ok(Bytes::from_static(b"chunk"))))
-                } else if self.count == 2 {
-                    self.count += 1;
-                    Poll::Ready(Some(Err(StreamError::Stream("test error".to_owned()))))
-                } else {
-                    Poll::Pending
-                }
-            }
-        }
-        impl Drop for TwoChunksThenErrStream {
-            fn drop(&mut self) {
-                if let Some(d) = self.dropped.take() {
-                    let _ = d.send(());
-                }
-            }
-        }
 
         let upstream = TwoChunksThenErrStream { count: 0, dropped: Some(dropped_tx) };
         let owner = ProviderBodyOwner::new(

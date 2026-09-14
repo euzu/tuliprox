@@ -24,6 +24,7 @@ BRANCH="$1"
 case "$BRANCH" in
     master)  TAG_SUFFIX="latest" ;;
     develop) TAG_SUFFIX="dev"    ;;
+    experimental) TAG_SUFFIX="experimental" ;;
     *) echo "🧨 Error: Branch '$BRANCH' not supported"; exit 1 ;;
 esac
 

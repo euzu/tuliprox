@@ -184,7 +184,7 @@ impl SingleProviderLineup {
     }
 
     #[cfg(test)]
-    async fn release(&self, provider_name: &Arc<str>) {
+    fn release(&self, provider_name: &Arc<str>) {
         if &self.provider.name == provider_name {
             self.provider.release();
         }
@@ -490,7 +490,7 @@ impl MultiProviderLineup {
     }
 
     #[cfg(test)]
-    async fn release(&self, provider_name: &Arc<str>) {
+    fn release(&self, provider_name: &Arc<str>) {
         for g in &self.providers {
             match g {
                 ProviderPriorityGroup::SingleProviderGroup(pc) => {
@@ -1289,10 +1289,10 @@ mod tests {
             should_available!(lineup, 1, 5);
             should_grace_period!(lineup, 1, 5);
             should_exhausted!(lineup, 5);
-            lineup.release(&"provider7_1".intern()).await;
+            lineup.release(&"provider7_1".intern());
             should_grace_period!(lineup, 1, 5);
-            lineup.release(&"provider7_1".intern()).await;
-            lineup.release(&"provider7_1".intern()).await;
+            lineup.release(&"provider7_1".intern());
+            lineup.release(&"provider7_1".intern());
             should_available!(lineup, 1, 5);
             should_grace_period!(lineup, 1, 5);
             should_exhausted!(lineup, 5);
@@ -1326,9 +1326,9 @@ mod tests {
             should_grace_period!(lineup, 1, 5);
             should_grace_period!(lineup, 2, 5);
 
-            lineup.release(&"provider8_1".intern()).await;
-            lineup.release(&"alias_2".intern()).await;
-            lineup.release(&"provider8_1".intern()).await;
+            lineup.release(&"provider8_1".intern());
+            lineup.release(&"alias_2".intern());
+            lineup.release(&"provider8_1".intern());
 
             should_available!(lineup, 1, 5);
             should_grace_period!(lineup, 1, 5);

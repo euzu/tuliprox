@@ -1213,7 +1213,7 @@ mod tests {
             finish_completed_refresh_checked(&app_config, temp.path(), identity, &checkpoint, update_quality(90, 0, 0))
                 .await?;
 
-        let StalkerRefreshOutcome::Failed { quality_acceptances, error: _, .. } = reports.into_outcome() else {
+        let StalkerRefreshOutcome::Failed { quality_acceptances, .. } = reports.into_outcome() else {
             return Err("expected failed Stalker completion with retained reports".into());
         };
         assert_eq!(
@@ -1258,7 +1258,7 @@ mod tests {
             finish_completed_refresh_checked(&app_config, temp.path(), identity, &checkpoint, update_quality(90, 0, 0))
                 .await?;
 
-        let StalkerRefreshOutcome::Failed { quality_acceptances, error: _, .. } = reports.into_outcome() else {
+        let StalkerRefreshOutcome::Failed { quality_acceptances, .. } = reports.into_outcome() else {
             return Err("expected failed Stalker completion with retained reports".into());
         };
         assert_eq!(quality_acceptances.len(), 1);
