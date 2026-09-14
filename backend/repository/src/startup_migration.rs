@@ -539,7 +539,7 @@ where
 ///
 /// Returns `true` when a migration was performed, `false` when the file was
 /// already in V7 format or did not exist.
-fn migrate_user_db_schema(db_path: &Path, merge_guard_path: &Path) -> io::Result<bool> {
+pub(crate) fn migrate_user_db_schema(db_path: &Path, merge_guard_path: &Path) -> io::Result<bool> {
     if !db_path.exists() {
         return Ok(false);
     }
