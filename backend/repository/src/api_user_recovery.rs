@@ -12,11 +12,11 @@
 //! Any container may hold any value version, so the supported matrix is all
 //! 21 combinations. Neither axis can be inferred from the other.
 //!
-//! The `StoredApiUserV1`..`V7` types are the historical layouts, moved here
-//! from `startup_migration` rather than copied: two definitions of the same
-//! legacy record would drift, and a drifted legacy decoder silently loses
-//! user data. **Field order is load-bearing** — these are decoded
-//! positionally from MessagePack, so reordering a field reinterprets every
+//! The `StoredApiUserV1`..`StoredApiUserV7` types are the historical layouts,
+//! moved here from `startup_migration` rather than copied: two definitions of
+//! the same legacy record would drift, and a drifted legacy decoder silently
+//! loses user data. **Field order is load-bearing** — these are decoded
+//! positionally from `MessagePack`, so reordering a field reinterprets every
 //! stored record.
 //!
 //! [`ApiUserRecovery`] is the field-named normalized form. It exists so a
@@ -24,14 +24,16 @@
 //! loss: recovery records carry their names, so they can be migrated
 //! forward, while the positional legacy layouts cannot.
 
+use crate::user_repository::StoredProxyUserCredentials;
+use serde_json::Value;
 use shared::model::{ClusterFlags, NetworkAccessDto, ProxyType, ProxyUserStatus};
+use std::{io, path::Path};
+use tuliprox_btree::{
+    BPlusTreeRecoveryJournal, RecoveryBatch, RecoveryOpenReport, RecoveryOperation, RecoveryPaths, RecoveryPolicy,
+    RecoverySchema,
+};
 
 /// B+Tree storage container versions this importer can read.
-///
-/// Test-scoped until Task 20 wires the importer: these pin the contract the
-/// existing detection path already implements, and shipping them as
-/// production items with no caller would be the same dead-code trap this
-/// module exists to avoid.
 #[cfg(test)]
 pub(crate) const SUPPORTED_CONTAINER_VERSIONS: [u16; 3] = [1, 2, 3];
 
@@ -378,9 +380,6 @@ impl StoredApiUserV7 {
 /// Secrets live here because the record has to be able to recreate a working
 /// user. They must never reach a log, a report, a diff or a fixture; the
 /// fixtures use obviously fake values for that reason.
-///
-/// Test-scoped until Task 20 makes the importer write it.
-#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ApiUserRecovery {
@@ -433,6 +432,144 @@ impl From<&StoredApiUserV7> for ApiUserRecovery {
             plan: v7.plan.clone(),
             filter: v7.filter.clone(),
         }
+    }
+}
+
+impl From<&StoredProxyUserCredentials> for ApiUserRecovery {
+    fn from(stored: &StoredProxyUserCredentials) -> Self {
+        Self {
+            target: stored.target.clone(),
+            username: stored.username.clone(),
+            password: stored.password.clone(),
+            token: stored.token.clone(),
+            proxy: stored.proxy,
+            server: stored.server.clone(),
+            epg_timeshift: stored.epg_timeshift.clone(),
+            epg_request_timeshift: stored.epg_request_timeshift.clone(),
+            created_at: stored.created_at,
+            exp_date: stored.exp_date,
+            max_connections: stored.max_connections,
+            status: stored.status,
+            output_clusters: stored.output_clusters,
+            ui_enabled: stored.ui_enabled,
+            comment: stored.comment.clone(),
+            priority: stored.priority,
+            soft_connections: stored.soft_connections,
+            soft_priority: stored.soft_priority,
+            network_access: stored.network_access.clone(),
+            plan: stored.plan.clone(),
+            filter: stored.filter.clone(),
+        }
+    }
+}
+
+impl From<&ApiUserRecovery> for StoredProxyUserCredentials {
+    fn from(recovery: &ApiUserRecovery) -> Self {
+        Self {
+            target: recovery.target.clone(),
+            username: recovery.username.clone(),
+            password: recovery.password.clone(),
+            token: recovery.token.clone(),
+            proxy: recovery.proxy,
+            server: recovery.server.clone(),
+            epg_timeshift: recovery.epg_timeshift.clone(),
+            epg_request_timeshift: recovery.epg_request_timeshift.clone(),
+            created_at: recovery.created_at,
+            exp_date: recovery.exp_date,
+            max_connections: recovery.max_connections,
+            status: recovery.status,
+            output_clusters: recovery.output_clusters,
+            ui_enabled: recovery.ui_enabled,
+            comment: recovery.comment.clone(),
+            priority: recovery.priority,
+            soft_connections: recovery.soft_connections,
+            soft_priority: recovery.soft_priority,
+            network_access: recovery.network_access.clone(),
+            plan: recovery.plan.clone(),
+            filter: recovery.filter.clone(),
+        }
+    }
+}
+
+/// Version 1 of the normalized User API recovery schema.
+///
+/// The legacy `V1`..`V7` numbering is a different axis entirely: those are
+/// positional layouts that predate recovery. This version counts changes to
+/// the *named* record, and starts at 1 no matter which legacy layout the
+/// data arrived as.
+pub(crate) struct ApiUserRecoverySchema;
+
+impl RecoverySchema<String, StoredProxyUserCredentials> for ApiUserRecoverySchema {
+    const NAME: &'static str = "api_user";
+    const CURRENT_VERSION: u32 = 1;
+
+    fn encode_key(&self, key: &String) -> io::Result<Value> { Ok(Value::String(key.clone())) }
+
+    fn migrate_key_one(&self, from: u32, _key: Value) -> io::Result<Value> {
+        Err(invalid(format!("no api user key migration from version {from}")))
+    }
+
+    fn decode_current_key(&self, key: Value) -> io::Result<String> {
+        key.as_str().map(str::to_owned).ok_or_else(|| invalid("api user key is not a string"))
+    }
+
+    fn encode_current(&self, value: &StoredProxyUserCredentials) -> io::Result<Value> {
+        serde_json::to_value(ApiUserRecovery::from(value)).map_err(|error| invalid(error.to_string()))
+    }
+
+    fn migrate_one(&self, from: u32, _value: Value) -> io::Result<Value> {
+        Err(invalid(format!("no api user value migration from version {from}")))
+    }
+
+    fn decode_current(&self, value: Value) -> io::Result<StoredProxyUserCredentials> {
+        let recovery: ApiUserRecovery = serde_json::from_value(value).map_err(|error| invalid(error.to_string()))?;
+        Ok(StoredProxyUserCredentials::from(&recovery))
+    }
+}
+
+fn invalid(message: impl Into<String>) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, message.into()) }
+
+type Journal = BPlusTreeRecoveryJournal<String, StoredProxyUserCredentials, ApiUserRecoverySchema>;
+
+/// The User API database, with a recovery history beside it.
+///
+/// Every mutation goes through here rather than through `BPlusTree::store`,
+/// so a change to the credential shape becomes a migration on restore
+/// instead of an unreadable file.
+pub(crate) struct ApiUserRepository {
+    journal: Journal,
+}
+
+impl ApiUserRepository {
+    pub(crate) fn open(db_path: &Path, recovery_root: &Path) -> io::Result<(Self, RecoveryOpenReport)> {
+        let paths =
+            RecoveryPaths { database: db_path.to_path_buf(), directory: recovery_root.join("api_user_recovery") };
+        let (journal, report) = Journal::open(paths, ApiUserRecoverySchema, RecoveryPolicy::default())?;
+        Ok((Self { journal }, report))
+    }
+
+    pub(crate) fn load(&mut self) -> io::Result<Vec<(String, StoredProxyUserCredentials)>> { self.journal.entries() }
+
+    /// Replace the stored set in one batch.
+    ///
+    /// The whole set is rewritten rather than diffed: the callers above
+    /// rebuild the user list from configuration, so a diff would have to
+    /// reconstruct an intent the caller never expressed.
+    pub(crate) fn commit(&mut self, users: Vec<(String, StoredProxyUserCredentials)>) -> io::Result<()> {
+        let existing = self.journal.entries()?;
+        let incoming: std::collections::BTreeSet<String> = users.iter().map(|(name, _)| name.clone()).collect();
+        let mut operations = Vec::new();
+        for (name, _) in existing {
+            if !incoming.contains(&name) {
+                operations.push(RecoveryOperation::Delete(name));
+            }
+        }
+        for (name, user) in users {
+            operations.push(RecoveryOperation::Upsert(name, user));
+        }
+        let _ = self.journal.apply_batch(RecoveryBatch::new(operations))?;
+        let _ = self.journal.checkpoint_if_needed()?;
+        Ok(())
     }
 }
 
