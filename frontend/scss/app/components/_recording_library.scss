@@ -9,6 +9,23 @@
   &__body {
     overflow: hidden;
   }
+
+  &__status {
+    display: flex;
+    flex-flow: row wrap;
+    align-items: center;
+    gap: var(--gap-large);
+    padding: 0 var(--gap-small) var(--gap-small);
+    font-size: 0.85rem;
+    opacity: 0.8;
+  }
+
+  &__offline {
+    // Stale data stays on screen; this is the only thing saying so.
+    color: var(--warning-color, orange);
+    font-weight: 600;
+    opacity: 1;
+  }
 }
 
 .tp__recording-table {

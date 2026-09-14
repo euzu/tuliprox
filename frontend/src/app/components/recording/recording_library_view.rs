@@ -234,6 +234,18 @@ async fn run_control(control: TaskControl, id: &str) -> Result<(), crate::servic
     }
 }
 
+/// One pool's usage, as `"1.2 GB / 5.0 GB"` or `"1.2 GB"` when unlimited.
+///
+/// An absent limit is unlimited, which must not render as `0` or as a bare
+/// used figure implying a cap that does not exist.
+fn format_quota_pool(used_bytes: u64, limit_bytes: Option<u64>) -> String {
+    let used = format_bytes(used_bytes);
+    match limit_bytes {
+        Some(limit) => format!("{used} / {}", format_bytes(limit)),
+        None => used,
+    }
+}
+
 /// Whether an arriving snapshot should replace what is rendered.
 ///
 /// Revisions are global, so gaps are normal and carry no meaning. Going
@@ -260,6 +272,9 @@ pub fn recording_library_view() -> Html {
     // `use_state` because the subscription closure is created once and
     // would otherwise keep reading the value it captured.
     let seen_revision = use_mut_ref(|| None::<u64>);
+    let quota_state = use_state(shared::model::RecordingQuotaSummaryDto::default);
+    // Stale data is more useful than no data, but it has to be labelled.
+    let connected = use_state(|| true);
 
     let request_snapshot = {
         let services = services.clone();
@@ -274,10 +289,12 @@ pub fn recording_library_view() -> Html {
         let request_snapshot_effect = request_snapshot.clone();
         let initial_loaded = initial_loaded.clone();
         let seen_revision = seen_revision.clone();
+        let quota_state = quota_state.clone();
+        let connected = connected.clone();
         use_effect_with((), move |()| {
             request_snapshot_effect.emit(());
             let sub_id = services.event.subscribe(move |msg| match msg {
-                crate::model::EventMessage::RecordingSnapshot { revision, tasks, .. } => {
+                crate::model::EventMessage::RecordingSnapshot { revision, tasks, quota, .. } => {
                     let mut seen = seen_revision.borrow_mut();
                     if !should_apply_snapshot(*seen, revision) {
                         return;
@@ -285,13 +302,17 @@ pub fn recording_library_view() -> Html {
                     *seen = Some(revision);
                     drop(seen);
                     initial_loaded.set(true);
+                    quota_state.set(quota);
                     tasks_state.set(tasks);
                 }
-                crate::model::EventMessage::WebSocketStatus(true) => {
-                    // A reconnect must be able to replace stale local state
-                    // even if the server's revision has not moved.
-                    *seen_revision.borrow_mut() = None;
-                    request_snapshot_effect.emit(());
+                crate::model::EventMessage::WebSocketStatus(online) => {
+                    connected.set(online);
+                    if online {
+                        // A reconnect must be able to replace stale local state
+                        // even if the server's revision has not moved.
+                        *seen_revision.borrow_mut() = None;
+                        request_snapshot_effect.emit(());
+                    }
                 }
                 _ => {}
             });
@@ -466,6 +487,21 @@ pub fn recording_library_view() -> Html {
                             {render_filter_button(RecordingTab::Completed, "TaskDone", translate.t("LABEL.RECORDING_COMPLETED"))}
                         </div>
                     </div>
+                    <div class="tp__recording-list__status">
+                        <span class="tp__recording-list__quota">
+                            { format!("{}: {}", translate.t("LABEL.RECORDING_QUOTA_PRIVATE"),
+                                format_quota_pool(quota_state.private_used_bytes, quota_state.private_limit_bytes)) }
+                        </span>
+                        <span class="tp__recording-list__quota">
+                            { format!("{}: {}", translate.t("LABEL.RECORDING_QUOTA_SHARED"),
+                                format_quota_pool(quota_state.shared_used_bytes, quota_state.shared_limit_bytes)) }
+                        </span>
+                        if !*connected {
+                            <span class="tp__recording-list__offline">
+                                { translate.t("LABEL.RECORDING_OFFLINE") }
+                            </span>
+                        }
+                    </div>
                     <div class="tp__recording-list__body tp__list-list__body">
                         if *initial_loaded {
                             <Table::<RecordingTaskDto> definition={table_definition} />
@@ -482,8 +518,8 @@ pub fn recording_library_view() -> Html {
 #[cfg(test)]
 mod tests {
     use super::{
-        action_availability, collect_sorted_tasks_for_tab, collect_tasks_for_tab, format_error_parts, is_sortable,
-        normalize_tab, RecordingTab,
+        action_availability, collect_sorted_tasks_for_tab, collect_tasks_for_tab, format_error_parts,
+        format_quota_pool, is_sortable, normalize_tab, should_apply_snapshot, RecordingTab,
     };
     use shared::model::{
         RecordingAllowedActions, RecordingKind, RecordingTaskDto, RecordingVisibility, SortOrder, TaskPriorityDto,
@@ -549,6 +585,21 @@ mod tests {
     #[test]
     fn a_newer_snapshot_replaces_what_is_rendered() {
         assert!(should_apply_snapshot(Some(7), 8));
+    }
+
+    #[test]
+    fn an_unlimited_pool_shows_usage_without_inventing_a_ceiling() {
+        // An absent limit is unlimited. Rendering it as `/ 0` would read as
+        // "full", and dropping the pool entirely would hide real usage.
+        let unlimited = format_quota_pool(1_500_000, None);
+        assert!(!unlimited.contains('/'), "no ceiling to show: {unlimited}");
+        assert!(unlimited.contains('1'), "but the usage is still reported: {unlimited}");
+    }
+
+    #[test]
+    fn a_limited_pool_shows_both_numbers() {
+        let limited = format_quota_pool(1_500_000, Some(5_000_000));
+        assert!(limited.contains('/'), "{limited}");
     }
 
     #[test]
