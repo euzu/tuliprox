@@ -123,13 +123,16 @@ pub fn get_api_user_db_path(cfg: &AppConfig) -> PathBuf {
 
 /// Where User API recovery generations live.
 ///
-/// `backup_dir` when configured, so the history survives the loss of the
-/// config volume; the config directory otherwise, which still survives a
-/// corrupt database file.
-fn api_user_recovery_root(cfg: &AppConfig) -> PathBuf {
-    let config = cfg.config.load();
-    config.backup_dir.as_ref().map_or_else(|| PathBuf::from(&cfg.paths.load().config_path), PathBuf::from)
-}
+/// Beside the database, in the config directory, and deliberately not under
+/// `backup_dir`. Startup migration runs before the config is read, so it
+/// cannot know `backup_dir`; pointing the two at different roots would leave
+/// a migration's export somewhere the runtime never looks. Keeping history
+/// next to the data it describes also means a restored config volume yields a
+/// consistent pair rather than a split one.
+///
+/// `backup_dir` keeps its own role: `backup_api_user_db_file` still copies
+/// there, which is an independent safety net rather than a competing one.
+fn api_user_recovery_root(cfg: &AppConfig) -> PathBuf { PathBuf::from(&cfg.paths.load().config_path) }
 
 /// Open the User API database with its recovery history.
 ///
@@ -678,6 +681,46 @@ mod tests {
         assert_eq!(networks.len(), 2);
         assert!(networks.iter().any(|n| n == "10.0.0.0/8"));
         assert!(networks.iter().any(|n| n == "192.168.1.0/24"));
+    }
+
+    /// Startup migration runs before the config is read, so it can only ever
+    /// use the config directory. If the runtime looked anywhere else, a
+    /// migration's export would land where nothing reads it.
+    #[test]
+    fn the_recovery_history_lives_beside_the_database() {
+        let dir = tempdir().expect("tempdir should succeed");
+        let cfg = AppConfig {
+            config: Arc::new(ArcSwapAny::default()),
+            sources: Arc::new(ArcSwapAny::default()),
+            hdhomerun: Arc::new(ArcSwapAny::default()),
+            api_proxy: Arc::new(ArcSwapAny::default()),
+            paths: Arc::new(ArcSwap::from(Arc::new(ConfigPaths {
+                home_path: String::new(),
+                config_path: dir.path().to_string_lossy().to_string(),
+                storage_path: dir.path().to_string_lossy().to_string(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
+                mapping_file_path: None,
+                mapping_files_used: None,
+                template_file_path: None,
+                template_files_used: None,
+                api_proxy_file_path: String::new(),
+                custom_stream_response_path: None,
+            }))),
+            file_locks: Arc::new(FileLockManager::default()),
+            custom_stream_response: Arc::new(ArcSwapAny::default()),
+            access_token_secret: Default::default(),
+            encrypt_secret: Default::default(),
+            media_tools: Arc::new(MediaToolCapabilities::new()),
+        };
+
+        let db_path = get_api_user_db_path(&cfg);
+        let recovery_root = api_user_recovery_root(&cfg);
+        assert_eq!(
+            Some(recovery_root.as_path()),
+            db_path.parent(),
+            "recovery history must sit beside the database it describes"
+        );
     }
 
     #[tokio::test]
