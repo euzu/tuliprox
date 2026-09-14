@@ -124,6 +124,11 @@ architecture-check: ## Verify workspace dependency direction
 	@echo "==> Checking workspace dependency direction"
 	./bin/check-workspace-deps.sh
 
+.PHONY: doctor-check
+doctor-check: ## Verify the DVR doctor still matches the routes it reports on
+	@echo "==> Checking bin/dvr_doctor.sh"
+	./bin/dvr_doctor-test.sh
+
 .PHONY: lint
 lint: ## Run clippy linter (Nightly)
 	@echo "==> Running clippy (nightly)"
