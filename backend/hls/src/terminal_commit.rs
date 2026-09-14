@@ -30,14 +30,36 @@ const HLS_TERMINAL_COMMIT_LIVE_CLOCK: u64 = u64::MAX;
 
 pub(super) struct HlsTerminalCommitClock {
     fixed_now_ms: AtomicU64,
+    /// When set, `now_ms` is driven by tokio's clock instead of the wall clock.
+    ///
+    /// Scheduling here is expressed as wall-clock milliseconds while the waits
+    /// are tokio timers. That is consistent in production, where both advance
+    /// together, but not under `start_paused`: `tokio::time::advance` moves the
+    /// timers and leaves the wall clock behind, so a loop that sleeps until a
+    /// wall-clock deadline never reaches it and spins until its budget is gone.
+    /// Anchoring both to tokio's clock makes such a test deterministic.
+    #[cfg(test)]
+    virtual_origin: std::sync::Mutex<Option<(u64, tokio::time::Instant)>>,
 }
 
 impl Default for HlsTerminalCommitClock {
-    fn default() -> Self { Self { fixed_now_ms: AtomicU64::new(HLS_TERMINAL_COMMIT_LIVE_CLOCK) } }
+    fn default() -> Self {
+        Self {
+            fixed_now_ms: AtomicU64::new(HLS_TERMINAL_COMMIT_LIVE_CLOCK),
+            #[cfg(test)]
+            virtual_origin: std::sync::Mutex::new(None),
+        }
+    }
 }
 
 impl HlsTerminalCommitClock {
     pub(super) fn now_ms(&self) -> u64 {
+        #[cfg(test)]
+        if let Some((base_ms, origin)) = *self.virtual_origin.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            let elapsed = tokio::time::Instant::now().saturating_duration_since(origin).as_millis();
+            return base_ms.saturating_add(u64::try_from(elapsed).unwrap_or(u64::MAX));
+        }
         let fixed_now_ms = self.fixed_now_ms.load(Ordering::Acquire);
         if fixed_now_ms == HLS_TERMINAL_COMMIT_LIVE_CLOCK {
             current_time_millis()
@@ -46,12 +68,26 @@ impl HlsTerminalCommitClock {
         }
     }
 
+    /// Anchor this clock to tokio's, so `tokio::time::advance` moves it too.
+    #[cfg(test)]
+    pub(super) fn follow_tokio_clock(&self, base_ms: u64) {
+        *self.virtual_origin.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((base_ms, tokio::time::Instant::now()));
+    }
+
     #[cfg(test)]
     pub(super) fn set_fixed_now_ms(&self, now_ms: u64) { self.fixed_now_ms.store(now_ms, Ordering::Release); }
 
+    #[cfg(test)]
+    fn follows_tokio_clock(&self) -> bool {
+        self.virtual_origin.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_some()
+    }
+
     pub(super) fn initial_attempt_now_ms(&self, supplied_now_ms: u64) -> u64 {
+        // A clock anchored to tokio advances on its own, so it behaves like the
+        // live one; only a frozen test clock defers to the supplied value.
         #[cfg(test)]
-        if self.fixed_now_ms.load(Ordering::Acquire) == HLS_TERMINAL_COMMIT_LIVE_CLOCK {
+        if !self.follows_tokio_clock() && self.fixed_now_ms.load(Ordering::Acquire) == HLS_TERMINAL_COMMIT_LIVE_CLOCK {
             return supplied_now_ms;
         }
         self.now_ms().max(supplied_now_ms)
