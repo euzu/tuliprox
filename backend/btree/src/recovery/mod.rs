@@ -96,6 +96,9 @@ pub enum RecoveryOpenAction {
     Created,
     Opened,
     Rebuilt,
+    /// A database written before recovery existed was taken under management,
+    /// its contents becoming the first generation.
+    Adopted,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -219,11 +222,11 @@ where
             fs::create_dir_all(parent)?;
         }
         let placement = detect_placement(&paths);
-        let database_identity = read_database_identity::<K, V>(&paths.database);
+        let database_state = read_database_state::<K, V>(&paths.database);
         let fingerprint = schema_fingerprint(S::NAME);
 
-        let database_id = match &database_identity {
-            Some(identity) => {
+        let database_id = match &database_state {
+            DatabaseState::Tracked(identity) => {
                 if identity.schema_fingerprint != fingerprint {
                     return Err(schema_mismatch());
                 }
@@ -234,7 +237,7 @@ where
                 }
                 hex16(identity.database_id)
             }
-            None => discover_database_id(&paths.directory, S::NAME)?.unwrap_or_else(new_database_id),
+            _ => discover_database_id(&paths.directory, S::NAME)?.unwrap_or_else(new_database_id),
         };
 
         let generations = scan_generations(&paths.directory, S::NAME, &database_id)?;
@@ -262,32 +265,40 @@ where
             _types: PhantomData,
         };
 
-        let report = journal.reconcile(&generations, database_identity)?;
+        let report = journal.reconcile(&generations, &database_state)?;
         Ok((journal, report))
     }
 
     fn reconcile(
         &mut self,
         generations: &[GenerationScan],
-        database_identity: Option<RecoveryIdentity>,
+        database_state: &DatabaseState,
     ) -> io::Result<RecoveryOpenReport> {
         let selected = select_generation(generations).inspect_err(|_| {
             self.fail(RecoveryErrorClass::ForkedHistory);
         })?;
 
         let Some(selected) = selected else {
-            if database_identity.is_some() {
-                self.fail(RecoveryErrorClass::DatabaseAhead);
-                return Err(invalid_data(
-                    "the operational database exists but no verifiable recovery generation was found",
-                ));
+            match database_state {
+                DatabaseState::Tracked(_) => {
+                    self.fail(RecoveryErrorClass::DatabaseAhead);
+                    return Err(invalid_data(
+                        "the operational database exists but no verifiable recovery generation was found",
+                    ));
+                }
+                DatabaseState::Unreadable => {
+                    self.fail(RecoveryErrorClass::Corruption);
+                    return Err(invalid_data("the operational database is unreadable and no recovery data exists"));
+                }
+                DatabaseState::Legacy => {
+                    let revision = self.adopt_legacy_database()?;
+                    return Ok(RecoveryOpenReport { action: RecoveryOpenAction::Adopted, revision });
+                }
+                DatabaseState::Absent => {
+                    let revision = self.create_empty()?;
+                    return Ok(RecoveryOpenReport { action: RecoveryOpenAction::Created, revision });
+                }
             }
-            if self.paths.database.exists() {
-                self.fail(RecoveryErrorClass::Corruption);
-                return Err(invalid_data("the operational database is unreadable and no recovery data exists"));
-            }
-            let revision = self.create_empty()?;
-            return Ok(RecoveryOpenReport { action: RecoveryOpenAction::Created, revision });
         };
 
         self.adopt_generation(selected)?;
@@ -301,8 +312,8 @@ where
             write_current(&self.paths.directory, selected.generation)?;
         }
 
-        match database_identity {
-            Some(identity)
+        match database_state {
+            DatabaseState::Tracked(identity)
                 if identity.applied_revision == self.current_revision
                     && identity.schema_version == S::CURRENT_VERSION =>
             {
@@ -310,7 +321,7 @@ where
                 self.state = RecoveryRepositoryState::Healthy;
                 Ok(RecoveryOpenReport { action: RecoveryOpenAction::Opened, revision: self.current_revision })
             }
-            Some(identity) if identity.applied_revision > self.current_revision => {
+            DatabaseState::Tracked(identity) if identity.applied_revision > self.current_revision => {
                 self.fail(RecoveryErrorClass::DatabaseAhead);
                 Err(invalid_data("the operational database is ahead of every recovery generation"))
             }
@@ -349,6 +360,31 @@ where
         self.generation = 1;
         self.publish_checkpoint(std::iter::empty(), revision, 0)?;
         let mut tree = BPlusTree::<K, V>::new();
+        tree.set_metadata(BPlusTreeMetadata::Recovery(self.identity(revision)));
+        let _ = tree.store(&self.paths.database)?;
+        self.current_revision = revision;
+        self.database_revision = revision;
+        self.state = RecoveryRepositoryState::Healthy;
+        Ok(revision)
+    }
+
+    /// Takes a database written before recovery existed under management.
+    ///
+    /// The existing rows become the first checkpoint, so the history starts out
+    /// describing exactly what is already on disk. The database is only
+    /// restamped with its new identity once that checkpoint is durable: a crash
+    /// in between leaves an unstamped database and a complete generation, which
+    /// the next `open` reconciles by rebuilding rather than by losing rows.
+    fn adopt_legacy_database(&mut self) -> io::Result<u64> {
+        let entries = self.live_entries()?;
+        let records = entries.len() as u64;
+        let revision = 1;
+        self.generation = 1;
+        self.publish_checkpoint(entries.clone().into_iter(), revision, records)?;
+        let mut tree = BPlusTree::<K, V>::new();
+        for (key, value) in entries {
+            tree.insert(key, value);
+        }
         tree.set_metadata(BPlusTreeMetadata::Recovery(self.identity(revision)));
         let _ = tree.store(&self.paths.database)?;
         self.current_revision = revision;
@@ -840,10 +876,44 @@ where
     K: Ord + Clone + Serialize + DeserializeOwned,
     V: Serialize + DeserializeOwned,
 {
-    let query = BPlusTreeQuery::<K, V>::try_new(database).ok()?;
-    match query.metadata() {
-        BPlusTreeMetadata::Recovery(identity) => Some(*identity),
+    match read_database_state::<K, V>(database) {
+        DatabaseState::Tracked(identity) => Some(identity),
         _ => None,
+    }
+}
+
+/// What `open` found where the operational database should be.
+///
+/// The distinction that matters is between a database written before recovery
+/// existed and one that cannot be read at all. Both lack a recovery identity,
+/// but only the first is safe to adopt: it opens and iterates cleanly, so its
+/// contents can seed the first generation. Treating the two alike would refuse
+/// to start on every install that predates recovery.
+enum DatabaseState {
+    /// No database file: a genuinely new repository.
+    Absent,
+    /// Opens and reads cleanly, but carries no recovery identity.
+    Legacy,
+    /// Carries a recovery identity.
+    Tracked(RecoveryIdentity),
+    /// Present but unreadable.
+    Unreadable,
+}
+
+fn read_database_state<K, V>(database: &Path) -> DatabaseState
+where
+    K: Ord + Clone + Serialize + DeserializeOwned,
+    V: Serialize + DeserializeOwned,
+{
+    if !database.exists() {
+        return DatabaseState::Absent;
+    }
+    let Ok(query) = BPlusTreeQuery::<K, V>::try_new(database) else {
+        return DatabaseState::Unreadable;
+    };
+    match query.metadata() {
+        BPlusTreeMetadata::Recovery(identity) => DatabaseState::Tracked(*identity),
+        _ => DatabaseState::Legacy,
     }
 }
 

@@ -210,3 +210,73 @@ fn commit_mixed_batch_survives_a_database_fault_intact() -> io::Result<()> {
     );
     Ok(())
 }
+
+/// Writes a database the way the code did before recovery existed: real rows,
+/// no recovery metadata.
+fn write_legacy_database(fixture: &Fixture, rows: &[(&str, &str)]) -> io::Result<()> {
+    if let Some(parent) = fixture.paths.database.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut tree = crate::BPlusTree::<Key, Record>::new();
+    for (key, name) in rows {
+        tree.insert(Key((*key).to_owned()), Record { name: (*name).to_owned() });
+    }
+    let _ = tree.store(&fixture.paths.database)?;
+    Ok(())
+}
+
+/// The upgrade path every existing install takes: a database that predates
+/// recovery must be adopted, not mistaken for corruption.
+#[test]
+fn a_database_written_before_recovery_is_adopted_with_every_row() -> io::Result<()> {
+    let fixture = Fixture::new()?;
+    write_legacy_database(&fixture, &[("a", "A"), ("b", "B"), ("c", "C")])?;
+
+    let (mut journal, action) = fixture.open()?;
+    assert_eq!(action, RecoveryOpenAction::Adopted);
+    assert_eq!(
+        journal.entries()?,
+        vec![
+            (Key("a".into()), Record { name: "A".into() }),
+            (Key("b".into()), Record { name: "B".into() }),
+            (Key("c".into()), Record { name: "C".into() }),
+        ]
+    );
+    assert_eq!(journal.health().state, RecoveryRepositoryState::Healthy);
+    Ok(())
+}
+
+/// Adoption happens once. The second open finds a tracked database with a
+/// matching generation and simply opens it.
+#[test]
+fn an_adopted_database_is_merely_opened_the_next_time() -> io::Result<()> {
+    let fixture = Fixture::new()?;
+    write_legacy_database(&fixture, &[("a", "A")])?;
+    let (_, first) = fixture.open()?;
+    assert_eq!(first, RecoveryOpenAction::Adopted);
+
+    let (mut journal, second) = fixture.open()?;
+    assert_eq!(second, RecoveryOpenAction::Opened);
+    assert_eq!(journal.entries()?.len(), 1);
+    // Adoption left a writable repository behind, not a read-only snapshot.
+    assert_eq!(journal.apply_batch(batch("b", "B"))?.revision, 2);
+    Ok(())
+}
+
+/// The distinction adoption rests on: a file that cannot be read is still
+/// refused. Without this, "adopt anything unrecognised" would silently discard
+/// a corrupt database's contents.
+#[test]
+fn a_database_that_cannot_be_read_is_still_refused() -> io::Result<()> {
+    let fixture = Fixture::new()?;
+    if let Some(parent) = fixture.paths.database.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&fixture.paths.database, b"this is not a b+tree")?;
+
+    let Err(error) = fixture.open() else {
+        panic!("an unreadable database must not be adopted");
+    };
+    assert!(error.to_string().contains("unreadable"), "the error must name corruption, not adoption: {error}");
+    Ok(())
+}
