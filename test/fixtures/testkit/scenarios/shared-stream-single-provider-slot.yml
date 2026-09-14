@@ -1,0 +1,38 @@
+schema_version: 1
+name: shared-stream-uses-one-provider-slot
+tuliprox:
+  base_url: http://fixture.invalid
+  execution_mode: isolated_fixture
+  bootstrap:
+    command: "${env:TULIPROX_TESTKIT_SUT_BINARY}"
+    arguments: ["-s", "-c", "{config_file}", "-i", "{source_file}", "-a", "{api_proxy_file}"]
+    readiness_url: "{base_url}/healthcheck"
+origin:
+  run_id: shared-stream-uses-one-provider-slot
+actors:
+  - id: tv-a
+    agent: local
+    username: admission-user
+    user_agent: tuliprox-testkit/shared-a
+    client_ip: { mode: forwarded, value: 10.20.0.10 }
+  - id: tv-b
+    agent: local
+    username: admission-user
+    user_agent: tuliprox-testkit/shared-b
+    client_ip: { mode: forwarded, value: 10.20.0.11 }
+channels:
+  live-17: { origin_marker: 17, protocol: xtream_ts }
+steps:
+  - command_id: start-a
+    start: { actor: tv-a, playback_id: playback-a, session_group: shared-live-17, channel: live-17 }
+    await: { valid_frames: 5 }
+  - command_id: start-b
+    start: { actor: tv-b, playback_id: playback-b, session_group: shared-live-17, channel: live-17 }
+    await: { valid_frames: 5 }
+policy_contract:
+  user_access_control: true
+  users:
+    admission-user: { max_connections: 2 }
+  admission_strategies: []
+  provider_max_connections: 1
+  expected_provider_slots: 1

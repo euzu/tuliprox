@@ -140,3 +140,43 @@ jobs:
 
       - name: Run Tests
         run: make test
+
+  admission:
+    name: Admission & Provider Lifecycle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify admission and provider lifecycle invariants
+        run: make admission-test
+
+  testkit:
+    name: Testkit Unit & E2E Scenarios
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run Testkit Unit Tests
+        run: make testkit-test
+
+      - name: Run Testkit E2E Scenarios
+        run: make testkit-e2e
+
+      - name: Upload Testkit Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testkit-report
+          path: testkit-report/

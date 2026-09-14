@@ -1556,7 +1556,7 @@ impl ActiveUserManager {
                     addr_count == 1
                 }
             })
-            .map(|s| crate::EvictionCandidate { addr: s.addr, client_ip: s.client_ip.clone(), ts: s.ts })
+            .map(|s| crate::EvictionCandidate { addr: s.addr, client_ip: s.client_ip.clone(), ts: s.ts, uid: s.uid })
             .collect();
         candidates
     }

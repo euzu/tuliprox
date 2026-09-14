@@ -10,18 +10,18 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     net::SocketAddr,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
         Arc, LazyLock, OnceLock, RwLockReadGuard, RwLockWriteGuard, Weak,
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tokio::time::Instant as TokioInstant;
 use tokio_util::sync::CancellationToken;
 use tuliprox_core::{
     model::{
-        AllocationId, AppConfig, ConfigInput, GracePeriodOptions, PlaybackKind, PlaybackLeaseId, PlaybackRequestId,
-        PlaybackRequestOutcome, PlaybackSelectionReason, ProviderAllocation, ProviderBindingTag, ProviderConfig,
-        ProviderHandle, SharedSubscriberId,
+        AllocationId, AppConfig, ConfigInput, ConnectionLifecycle, GracePeriodOptions, PlaybackKind, PlaybackLeaseId,
+        PlaybackRequestId, PlaybackRequestOutcome, PlaybackSelectionReason, ProviderAllocation, ProviderBindingTag,
+        ProviderCloseReason, ProviderConfig, ProviderHandle, SharedSubscriberId,
     },
     utils::debug_if_enabled,
 };
@@ -36,6 +36,8 @@ type PreemptionCandidate = (PriorityOwner, AllocationId, i8, Instant);
 // Ties are broken by `Reverse<Instant>`: among equal priority values, the oldest connection
 // (smallest `created_at`) sorts last and is evicted first.
 type PriorityKey = (i8, Reverse<Instant>, AllocationId);
+
+const PREEMPTION_COMPLETION_TIMEOUT: Duration = Duration::from_millis(1500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionKind {
@@ -134,6 +136,12 @@ struct ActiveConnectionInfo {
     allocation: ProviderAllocation,
     // Used to signal preemption to the consumer of this connection
     cancel_token: CancellationToken,
+    completion_token: CancellationToken,
+    close_reason: Arc<AtomicU8>,
+    lifecycle: ConnectionLifecycle,
+    has_body_owner: bool,
+    reaper_spawned: bool,
+    open_generation: u64,
     created_at: Instant,
     priority: i8,
     kind: ConnectionKind,
@@ -188,6 +196,9 @@ impl std::fmt::Debug for ManagedProviderHandle {
 
 impl ManagedProviderHandle {
     #[inline]
+    pub fn manager(&self) -> &Arc<ActiveProviderManager> { &self.manager }
+
+    #[inline]
     pub fn new(manager: Arc<ActiveProviderManager>, handle: ProviderHandle) -> Self {
         Self { manager, handle: Some(handle) }
     }
@@ -200,6 +211,31 @@ impl ManagedProviderHandle {
 
     #[inline]
     pub fn disarm(&mut self) -> Option<ProviderHandle> { self.handle.take() }
+
+    pub fn mark_opening(&self) {
+        if let Some(handle) = self.handle.as_ref() {
+            self.manager.mark_opening(handle.allocation_id);
+        }
+    }
+
+    pub fn register_body_owner(&self) -> bool {
+        if let Some(handle) = self.handle.as_ref() {
+            self.manager.register_body_owner(handle.allocation_id)
+        } else {
+            false
+        }
+    }
+
+    pub fn renew_opening_tokens(&mut self) -> Option<(CancellationToken, CancellationToken)> {
+        if let Some(ref mut handle) = self.handle {
+            if let Some((cancel, completion)) = self.manager.renew_opening_tokens(handle.allocation_id) {
+                handle.cancel_token = Some(cancel.clone());
+                handle.completion_token = Some(completion.clone());
+                return Some((cancel, completion));
+            }
+        }
+        None
+    }
 }
 
 impl Drop for ManagedProviderHandle {
@@ -210,18 +246,18 @@ impl Drop for ManagedProviderHandle {
     }
 }
 
-pub struct ActiveProviderManager {
+pub struct ActiveProviderManagerCore {
     // Serializes capacity transitions across counters, allocation indices and leases.
     capacity_transition: std::sync::Mutex<()>,
     is_shutting_down: AtomicBool,
+    shutdown_token: CancellationToken,
     providers: ProviderLineupManager,
     connections: std::sync::RwLock<Connections>,
     leases: std::sync::RwLock<ProviderLeaseTable>,
     next_allocation_id: AtomicU64,
-    shared_stream_manager: OnceLock<Weak<SharedStreamManager>>,
 }
 
-impl ActiveProviderManager {
+impl ActiveProviderManagerCore {
     fn lock_capacity_transition(&self) -> std::sync::MutexGuard<'_, ()> {
         match self.capacity_transition.lock() {
             Ok(guard) => guard,
@@ -270,6 +306,133 @@ impl ActiveProviderManager {
         }
     }
 
+    pub fn complete_release(&self, alloc_id: AllocationId) { self.complete_release_with_generation(alloc_id, None); }
+
+    pub fn complete_release_with_generation(&self, alloc_id: AllocationId, generation: Option<u64>) {
+        let _transition = self.lock_capacity_transition();
+        let mut connections = self.write_connections();
+        Self::complete_release_locked(&mut connections, alloc_id, generation);
+    }
+
+    fn complete_release_locked(
+        connections: &mut Connections,
+        alloc_id: AllocationId,
+        expected_generation: Option<u64>,
+    ) -> Option<ProviderAllocation> {
+        if let Some(info) = connections.single.get(&alloc_id) {
+            if let Some(expected_gen) = expected_generation {
+                if info.open_generation != expected_gen {
+                    return None;
+                }
+            }
+        }
+        if let Some(mut info) = connections.single.remove(&alloc_id) {
+            ActiveProviderManager::unindex_owner(connections, alloc_id, info.session_owner.as_ref());
+            if let Some(set) = connections.single_by_addr.get_mut(&info.client_addr) {
+                set.remove(&alloc_id);
+                if set.is_empty() {
+                    connections.single_by_addr.remove(&info.client_addr);
+                }
+            }
+            if !info.allocation.is_unlimited_provider() {
+                if let Some(name) = info.allocation.get_provider_name() {
+                    if let Some(list) = connections.by_provider.get_mut(&name) {
+                        list.remove(&alloc_id);
+                    }
+                    ActiveProviderManager::remove_priority_entry(
+                        connections,
+                        &name,
+                        &(info.priority, Reverse(info.created_at), alloc_id),
+                        info.kind,
+                    );
+                }
+            }
+            info.lifecycle = ConnectionLifecycle::Closed;
+            info.cancel_token.cancel();
+            info.allocation.release();
+            Some(info.allocation)
+        } else {
+            None
+        }
+    }
+
+    fn plan_single_release_locked(connections: &mut Connections, alloc_id: AllocationId) -> ReleaseAction {
+        let Some(info) = connections.single.get_mut(&alloc_id) else {
+            return ReleaseAction::None;
+        };
+        if info.lifecycle == ConnectionLifecycle::Closed {
+            return ReleaseAction::None;
+        }
+
+        info.cancel_token.cancel();
+
+        let completed = info.completion_token.is_cancelled();
+        let needs_completion_wait = (info.lifecycle == ConnectionLifecycle::Closing
+            || info.lifecycle == ConnectionLifecycle::Opening
+            || info.has_body_owner)
+            && !completed;
+
+        if needs_completion_wait {
+            info.lifecycle = ConnectionLifecycle::Closing;
+            let client_addr = info.client_addr;
+            let prio = info
+                .allocation
+                .get_provider_name()
+                .map(|name| (name, (info.priority, Reverse(info.created_at), alloc_id), info.kind));
+            let already_spawned = info.reaper_spawned;
+            info.reaper_spawned = true;
+            let gen = info.open_generation;
+            let completion_token = info.completion_token.clone();
+
+            if let Some((name, key, kind)) = prio {
+                ActiveProviderManager::remove_priority_entry(connections, &name, &key, kind);
+            }
+            if let Some(set) = connections.single_by_addr.get_mut(&client_addr) {
+                set.remove(&alloc_id);
+                if set.is_empty() {
+                    connections.single_by_addr.remove(&client_addr);
+                }
+            }
+            if already_spawned {
+                ReleaseAction::None
+            } else {
+                ReleaseAction::Wait(alloc_id, gen, completion_token)
+            }
+        } else {
+            let gen = info.open_generation;
+            Self::complete_release_locked(connections, alloc_id, Some(gen));
+            ReleaseAction::Immediate
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ReleaseAction {
+    None,
+    Immediate,
+    Wait(AllocationId, u64, CancellationToken),
+}
+
+#[derive(Debug)]
+pub(crate) enum PreemptionOutcome {
+    Acquired(ProviderAllocation),
+    PendingCompletion(CancellationToken),
+    Exhausted,
+}
+
+pub struct ActiveProviderManager {
+    core: Arc<ActiveProviderManagerCore>,
+    shared_stream_manager: OnceLock<Weak<SharedStreamManager>>,
+}
+
+impl std::ops::Deref for ActiveProviderManager {
+    type Target = ActiveProviderManagerCore;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target { &self.core }
+}
+
+impl ActiveProviderManager {
     fn upsert_priority_entry(
         connections: &mut Connections,
         provider_name: &Arc<str>,
@@ -336,12 +499,15 @@ impl ActiveProviderManager {
         let grace_period_options = Self::get_grace_options(cfg);
         let inputs = Self::get_config_inputs(cfg);
         Self {
-            capacity_transition: std::sync::Mutex::new(()),
-            is_shutting_down: AtomicBool::new(false),
-            providers: ProviderLineupManager::new(inputs, grace_period_options, event_manager),
-            connections: std::sync::RwLock::new(Connections::default()),
-            leases: std::sync::RwLock::new(ProviderLeaseTable::default()),
-            next_allocation_id: AtomicU64::new(1),
+            core: Arc::new(ActiveProviderManagerCore {
+                capacity_transition: std::sync::Mutex::new(()),
+                is_shutting_down: AtomicBool::new(false),
+                shutdown_token: CancellationToken::new(),
+                providers: ProviderLineupManager::new(inputs, grace_period_options, event_manager),
+                connections: std::sync::RwLock::new(Connections::default()),
+                leases: std::sync::RwLock::new(ProviderLeaseTable::default()),
+                next_allocation_id: AtomicU64::new(1),
+            }),
             shared_stream_manager: OnceLock::new(),
         }
     }
@@ -352,6 +518,7 @@ impl ActiveProviderManager {
 
     /// Closes provider admission and releases all physical allocations and leases.
     pub fn shutdown(&self) {
+        self.shutdown_token.cancel();
         self.is_shutting_down.store(true, Ordering::Release);
         let _transition = self.lock_capacity_transition();
         let connections = std::mem::take(&mut *self.write_connections());
@@ -806,7 +973,7 @@ impl ActiveProviderManager {
         leases.lease_of_owner(owner).map(|lease| ProviderBindingTag::new(lease.id, lease.binding_generation))
     }
 
-    fn acquire_exact_connection_inner(
+    fn acquire_exact_connection_inner_no_preempt(
         &self,
         provider_name: &Arc<str>,
         allow_grace: bool,
@@ -822,6 +989,27 @@ impl ActiveProviderManager {
             return None;
         }
         Some(self.register_allocation(allocation.take(), params))
+    }
+
+    fn acquire_exact_connection_inner(
+        &self,
+        provider_name: &Arc<str>,
+        allow_grace: bool,
+        params: &AcquireProviderParams<'_>,
+    ) -> Option<ProviderHandle> {
+        if let Some(handle) = self.acquire_exact_connection_inner_no_preempt(provider_name, allow_grace, params) {
+            return Some(handle);
+        }
+        if let Some(preempted_alloc) = self.try_preempt_connection(
+            provider_name,
+            params.priority,
+            allow_grace,
+            params.kind,
+            params.session_owner(),
+        ) {
+            return Some(self.register_allocation(preempted_alloc, params));
+        }
+        None
     }
 
     fn finalize_lineup_allocation(
@@ -863,7 +1051,9 @@ impl ActiveProviderManager {
         let mut victim = None;
 
         for (prov_name, tree) in index {
-            if !self.providers.is_provider_for_input(prov_name, input_name) || reserved_providers.contains(prov_name) {
+            if (!self.providers.is_provider_for_input(prov_name, input_name) && prov_name != input_name)
+                || reserved_providers.contains(prov_name)
+            {
                 continue;
             }
 
@@ -894,6 +1084,7 @@ impl ActiveProviderManager {
         match candidate.0 {
             PriorityOwner::Single(alloc_id) => connections.single.get(&alloc_id).is_some_and(|info| {
                 info.kind == ConnectionKind::Normal
+                    && info.lifecycle != ConnectionLifecycle::Closing
                     && info.allocation.get_provider_name().as_ref() == Some(provider_name)
             }),
             PriorityOwner::Shared(shared_id) => connections
@@ -931,7 +1122,7 @@ impl ActiveProviderManager {
 
                 let mut victim = None;
                 for (prov_name, tree) in &connections.priority_index {
-                    if !self.providers.is_provider_for_input(prov_name, input_name)
+                    if (!self.providers.is_provider_for_input(prov_name, input_name) && prov_name != input_name)
                         || reserved_providers.contains(prov_name)
                     {
                         continue;
@@ -963,22 +1154,15 @@ impl ActiveProviderManager {
         }
     }
 
-    fn acquire_connection_inner(
+    fn acquire_connection_inner_no_preempt(
         &self,
         provider_or_input_name: &Arc<str>,
         allow_grace: bool,
         params: &AcquireProviderParams<'_>,
     ) -> Option<ProviderHandle> {
-        if self.is_shutting_down.load(Ordering::Acquire) {
-            return None;
-        }
-        let _transition = self.lock_capacity_transition();
-        if self.is_shutting_down.load(Ordering::Acquire) {
-            return None;
-        }
         if let Some(owner) = params.session_owner() {
             if let Some(reserved_provider) = self.get_reserved_provider_for_owner(provider_or_input_name, owner) {
-                return self.acquire_exact_connection_inner(&reserved_provider, allow_grace, params);
+                return self.acquire_exact_connection_inner_no_preempt(&reserved_provider, allow_grace, params);
             }
         }
 
@@ -1008,6 +1192,26 @@ impl ActiveProviderManager {
             return Some(self.finalize_lineup_allocation(provider_or_input_name, allow_grace, allocation, params));
         }
 
+        None
+    }
+
+    fn acquire_connection_inner(
+        &self,
+        provider_or_input_name: &Arc<str>,
+        allow_grace: bool,
+        params: &AcquireProviderParams<'_>,
+    ) -> Option<ProviderHandle> {
+        if self.is_shutting_down.load(Ordering::Acquire) {
+            return None;
+        }
+        let _transition = self.lock_capacity_transition();
+        if self.is_shutting_down.load(Ordering::Acquire) {
+            return None;
+        }
+        if let Some(handle) = self.acquire_connection_inner_no_preempt(provider_or_input_name, allow_grace, params) {
+            return Some(handle);
+        }
+
         if let Some(preempted_alloc) = self.try_preempt_connection(
             provider_or_input_name,
             params.priority,
@@ -1031,6 +1235,8 @@ impl ActiveProviderManager {
         let provider_name = allocation.get_provider_name().unwrap_or_default();
         let allocation_id = self.next_allocation_id.fetch_add(1, Ordering::Relaxed);
         let cancel_token = CancellationToken::new();
+        let completion_token = CancellationToken::new();
+        let close_reason = Arc::new(AtomicU8::new(ProviderCloseReason::Unspecified as u8));
         let now = Instant::now();
         let is_unlimited = allocation.is_unlimited_provider();
 
@@ -1066,6 +1272,12 @@ impl ActiveProviderManager {
                 client_addr: *addr,
                 allocation: allocation.clone(),
                 cancel_token: cancel_token.clone(),
+                completion_token: completion_token.clone(),
+                close_reason: Arc::clone(&close_reason),
+                lifecycle: ConnectionLifecycle::Active,
+                has_body_owner: false,
+                reaper_spawned: false,
+                open_generation: 0,
                 created_at: now,
                 priority,
                 kind,
@@ -1103,6 +1315,8 @@ impl ActiveProviderManager {
             sanitize_sensitive_info(&addr.to_string())
         );
         let mut handle = ProviderHandle::new(*addr, allocation_id, allocation, Some(cancel_token));
+        handle.completion_token = Some(completion_token);
+        handle.close_reason = close_reason;
         handle.playback_request_id = lease.map(|lease| lease.request_id);
         handle.binding_tag = binding_tag;
         handle
@@ -1178,70 +1392,236 @@ impl ActiveProviderManager {
                     if let Some(token) = cancel_token {
                         token.cancel();
                     }
-                    allocation.release();
-                    // Stop the shared stream broadcast task to match the released capacity.
-                    // Without this, the broadcast keeps running and consuming a provider slot
-                    // that was already freed by allocation.release().
                     if let Some(ssm) = self.shared_stream_manager.get().and_then(Weak::upgrade) {
                         tokio::spawn(async move {
                             ssm.teardown_preempted_stream(&stream_url, alloc_id).await;
+                            allocation.release();
                         });
+                        return false;
                     }
+                    allocation.release();
                 }
             }
             PriorityOwner::Single(victim_alloc_id) => {
-                let removed_info = {
-                    let mut connections = self.write_connections();
-                    if let Some(info) = connections.single.get(&victim_alloc_id) {
-                        if info.priority != v_prio || info.created_at != victim_created_at {
-                            return false;
-                        }
+                let mut connections = self.write_connections();
+                if let Some(info) = connections.single.get(&victim_alloc_id) {
+                    if info.priority != v_prio || info.created_at != victim_created_at {
+                        return false;
                     }
-                    if let Some(info) = connections.single.remove(&victim_alloc_id) {
-                        debug_if_enabled!(
-                            "Grace-evicting single connection from {} (prio={}) on input {} for higher priority request (prio={})",
-                            sanitize_sensitive_info(&info.client_addr.to_string()),
-                            v_prio,
-                            sanitize_sensitive_info(input_name),
-                            new_priority
-                        );
-                        Self::unindex_owner(&mut connections, victim_alloc_id, info.session_owner.as_ref());
-                        if let Some(set) = connections.single_by_addr.get_mut(&info.client_addr) {
-                            set.remove(&victim_alloc_id);
-                            if set.is_empty() {
-                                connections.single_by_addr.remove(&info.client_addr);
+                }
+                if let Some(info) = connections.single.get_mut(&victim_alloc_id) {
+                    debug_if_enabled!(
+                        "Grace-evicting single connection from {} (prio={}) on input {} for higher priority request (prio={})",
+                        sanitize_sensitive_info(&info.client_addr.to_string()),
+                        v_prio,
+                        sanitize_sensitive_info(input_name),
+                        new_priority
+                    );
+                    info.close_reason.store(ProviderCloseReason::PriorityPreempted as u8, Ordering::Release);
+                }
+                let action = ActiveProviderManagerCore::plan_single_release_locked(&mut connections, victim_alloc_id);
+                if let ReleaseAction::Wait(alloc_id, gen, completion_token) = action {
+                    let shutdown_token = self.shutdown_token.clone();
+                    let core = Arc::clone(&self.core);
+                    tokio::spawn(async move {
+                        tokio::select! {
+                            () = shutdown_token.cancelled() => {},
+                            () = completion_token.cancelled() => {
+                                core.complete_release_with_generation(alloc_id, Some(gen));
                             }
                         }
-                        if let Some(name) = info.allocation.get_provider_name() {
-                            if let Some(list) = connections.by_provider.get_mut(&name) {
-                                list.remove(&victim_alloc_id);
-                            }
-                            Self::remove_priority_entry(
-                                &mut connections,
-                                &name,
-                                &(v_prio, Reverse(victim_created_at), victim_alloc_id),
-                                info.kind,
-                            );
-                        }
-                        Some(info)
-                    } else {
-                        None
-                    }
-                };
-
-                let Some(info) = removed_info else {
+                    });
                     return false;
-                };
-                // Preempted probes must stop immediately; they must not keep a custom stream alive.
-                info.cancel_token.cancel();
-                info.allocation.release();
+                }
             }
         }
 
         true
     }
 
+    fn try_acquire_allocation_after_freed(
+        &self,
+        input_name: &Arc<str>,
+        allow_grace: bool,
+        reserved_providers: &HashSet<Arc<str>>,
+        session_owner: Option<&str>,
+    ) -> Option<ProviderAllocation> {
+        let attempts = self.providers.provider_names_for_input(input_name).len().max(1);
+        let mut excluded_providers = reserved_providers.clone();
+        for _ in 0..attempts {
+            let allocation = self.providers.acquire_connection_with_grace_override_excluding(
+                input_name,
+                allow_grace,
+                &excluded_providers,
+            );
+            if matches!(allocation, ProviderAllocation::Exhausted) {
+                break;
+            }
+            if let Some(provider_name) = allocation.get_provider_name() {
+                if self.exceeds_reserved_capacity(&provider_name, session_owner) {
+                    excluded_providers.insert(provider_name);
+                    allocation.release();
+                    continue;
+                }
+            }
+            return Some(allocation);
+        }
+        None
+    }
+
     #[allow(clippy::too_many_lines)]
+    fn try_preempt_connection_outcome(
+        &self,
+        input_name: &Arc<str>,
+        new_priority: i8,
+        allow_grace: bool,
+        kind_needed: ConnectionKind,
+        session_owner: Option<&str>,
+    ) -> PreemptionOutcome {
+        let reserved_providers = self.reserved_provider_names_for_other(input_name, session_owner);
+        let victim = {
+            let connections = self.read_connections();
+            self.select_preemption_candidate(&connections, input_name, new_priority, kind_needed, &reserved_providers)
+        };
+
+        let Some((owner, alloc_id, v_prio, victim_created_at)) = victim else {
+            return PreemptionOutcome::Exhausted;
+        };
+
+        match owner {
+            PriorityOwner::Shared(shared_id) => {
+                debug_if_enabled!(
+                    "Preempting shared connection (allocation_id={shared_id}, prio={v_prio}) for higher priority request (prio={new_priority})"
+                );
+                let released_shared_allocation = {
+                    let mut connections = self.write_connections();
+                    let Some(key) = connections.shared.shared_by_allocation_id.get(&shared_id).cloned() else {
+                        return PreemptionOutcome::Exhausted;
+                    };
+
+                    let still_match = connections.shared.by_key.get(&key).is_some_and(|shared| {
+                        shared.allocation_id == alloc_id
+                            && shared.priority == v_prio
+                            && shared.created_at == victim_created_at
+                    });
+                    if !still_match {
+                        return PreemptionOutcome::Exhausted;
+                    }
+
+                    if let Some(shared) = connections.shared.by_key.remove(&key) {
+                        connections.shared.shared_by_allocation_id.remove(&shared.allocation_id);
+                        Self::unindex_owner(&mut connections, shared.allocation_id, shared.session_owner.as_ref());
+                        for subscriber_id in shared.connections.keys() {
+                            connections.shared.key_by_subscriber.remove(subscriber_id);
+                        }
+
+                        if let Some(name) = shared.allocation.get_provider_name() {
+                            if let Some(list) = connections.by_provider.get_mut(&name) {
+                                list.remove(&shared.allocation_id);
+                            }
+                            Self::remove_priority_entry(
+                                &mut connections,
+                                &name,
+                                &(v_prio, Reverse(victim_created_at), alloc_id),
+                                shared.kind,
+                            );
+                        }
+                        Some((key, shared.allocation, shared.cancel_token))
+                    } else {
+                        None
+                    }
+                };
+
+                let Some((stream_url, allocation, cancel_token)) = released_shared_allocation else {
+                    return PreemptionOutcome::Exhausted;
+                };
+
+                if let Some(token) = cancel_token {
+                    token.cancel();
+                }
+                if let Some(ssm) = self.shared_stream_manager.get().and_then(Weak::upgrade) {
+                    tokio::spawn(async move {
+                        ssm.teardown_preempted_stream(&stream_url, alloc_id).await;
+                        allocation.release();
+                    });
+                    PreemptionOutcome::Exhausted
+                } else {
+                    allocation.release();
+                    if let Some(alloc) = self.try_acquire_allocation_after_freed(
+                        input_name,
+                        allow_grace,
+                        &reserved_providers,
+                        session_owner,
+                    ) {
+                        PreemptionOutcome::Acquired(alloc)
+                    } else {
+                        PreemptionOutcome::Exhausted
+                    }
+                }
+            }
+            PriorityOwner::Single(victim_alloc_id) => {
+                let (action, completion_token) = {
+                    let mut connections = self.write_connections();
+                    if let Some(info) = connections.single.get(&victim_alloc_id) {
+                        if info.priority != v_prio || info.created_at != victim_created_at {
+                            return PreemptionOutcome::Exhausted;
+                        }
+                    } else {
+                        return PreemptionOutcome::Exhausted;
+                    }
+                    if let Some(info) = connections.single.get_mut(&victim_alloc_id) {
+                        debug_if_enabled!(
+                            "Preempting single connection from {} (prio={v_prio}) for higher priority request (prio={new_priority})",
+                            sanitize_sensitive_info(&info.client_addr.to_string())
+                        );
+                        info.close_reason.store(ProviderCloseReason::PriorityPreempted as u8, Ordering::Release);
+                    }
+                    let completion_token =
+                        connections.single.get(&victim_alloc_id).map(|info| info.completion_token.clone());
+                    let action =
+                        ActiveProviderManagerCore::plan_single_release_locked(&mut connections, victim_alloc_id);
+                    (action, completion_token)
+                };
+
+                match action {
+                    ReleaseAction::Wait(victim_id, gen, comp_token) => {
+                        let shutdown_token = self.shutdown_token.clone();
+                        let core = Arc::clone(&self.core);
+                        let reaper_token = comp_token.clone();
+                        tokio::spawn(async move {
+                            tokio::select! {
+                                () = shutdown_token.cancelled() => {},
+                                () = reaper_token.cancelled() => {
+                                    core.complete_release_with_generation(victim_id, Some(gen));
+                                }
+                            }
+                        });
+                        PreemptionOutcome::PendingCompletion(comp_token)
+                    }
+                    ReleaseAction::None => {
+                        if let Some(token) = completion_token {
+                            PreemptionOutcome::PendingCompletion(token)
+                        } else {
+                            PreemptionOutcome::Exhausted
+                        }
+                    }
+                    ReleaseAction::Immediate => {
+                        if let Some(alloc) = self.try_acquire_allocation_after_freed(
+                            input_name,
+                            allow_grace,
+                            &reserved_providers,
+                            session_owner,
+                        ) {
+                            PreemptionOutcome::Acquired(alloc)
+                        } else {
+                            PreemptionOutcome::Exhausted
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn try_preempt_connection(
         &self,
         input_name: &Arc<str>,
@@ -1250,144 +1630,10 @@ impl ActiveProviderManager {
         kind_needed: ConnectionKind,
         session_owner: Option<&str>,
     ) -> Option<ProviderAllocation> {
-        let reserved_providers = self.reserved_provider_names_for_other(input_name, session_owner);
-        let victim = {
-            let connections = self.read_connections();
-            self.select_preemption_candidate(&connections, input_name, new_priority, kind_needed, &reserved_providers)
-        };
-
-        if let Some((owner, alloc_id, v_prio, victim_created_at)) = victim {
-            match owner {
-                PriorityOwner::Shared(shared_id) => {
-                    debug_if_enabled!(
-                        "Preempting shared connection (allocation_id={shared_id}, prio={v_prio}) for higher priority request (prio={new_priority})"
-                    );
-                    let released_shared_allocation = {
-                        let mut connections = self.write_connections();
-                        let key = connections.shared.shared_by_allocation_id.get(&shared_id).cloned()?;
-
-                        // Revalidate the selected shared victim under WRITE lock.
-                        let still_match = connections.shared.by_key.get(&key).is_some_and(|shared| {
-                            shared.allocation_id == alloc_id
-                                && shared.priority == v_prio
-                                && shared.created_at == victim_created_at
-                        });
-                        if !still_match {
-                            None
-                        } else if let Some(shared) = connections.shared.by_key.remove(&key) {
-                            connections.shared.shared_by_allocation_id.remove(&shared.allocation_id);
-                            Self::unindex_owner(&mut connections, shared.allocation_id, shared.session_owner.as_ref());
-                            for subscriber_id in shared.connections.keys() {
-                                connections.shared.key_by_subscriber.remove(subscriber_id);
-                            }
-
-                            if let Some(name) = shared.allocation.get_provider_name() {
-                                if let Some(list) = connections.by_provider.get_mut(&name) {
-                                    list.remove(&shared.allocation_id);
-                                }
-                                Self::remove_priority_entry(
-                                    &mut connections,
-                                    &name,
-                                    &(v_prio, Reverse(victim_created_at), alloc_id),
-                                    shared.kind,
-                                );
-                            }
-                            Some((key, shared.allocation, shared.cancel_token))
-                        } else {
-                            None
-                        }
-                    };
-                    let (stream_url, allocation, cancel_token) = released_shared_allocation?;
-                    if let Some(token) = cancel_token {
-                        token.cancel();
-                    }
-                    allocation.release();
-                    // Shared broadcast has to be torn down explicitly, otherwise the provider
-                    // stream may continue after allocation counters were already released.
-                    if let Some(ssm) = self.shared_stream_manager.get().and_then(Weak::upgrade) {
-                        tokio::spawn(async move {
-                            ssm.teardown_preempted_stream(&stream_url, alloc_id).await;
-                        });
-                    } else {
-                        error!(
-                            "SharedStreamManager not initialised during preemption teardown for {}; \
-                             shared stream may linger after allocation release",
-                            sanitize_sensitive_info(&stream_url)
-                        );
-                    }
-                }
-                PriorityOwner::Single(victim_alloc_id) => {
-                    let removed_info = {
-                        let mut connections = self.write_connections();
-                        if let Some(info) = connections.single.get(&victim_alloc_id) {
-                            if info.priority != v_prio || info.created_at != victim_created_at {
-                                return None;
-                            }
-                        }
-                        if let Some(info) = connections.single.remove(&victim_alloc_id) {
-                            debug_if_enabled!(
-                                "Preempting single connection from {} (prio={v_prio}) for higher priority request (prio={new_priority})",
-                                sanitize_sensitive_info(&info.client_addr.to_string())
-                            );
-                            Self::unindex_owner(&mut connections, victim_alloc_id, info.session_owner.as_ref());
-                            if let Some(set) = connections.single_by_addr.get_mut(&info.client_addr) {
-                                set.remove(&victim_alloc_id);
-                                if set.is_empty() {
-                                    connections.single_by_addr.remove(&info.client_addr);
-                                }
-                            }
-                            if let Some(name) = info.allocation.get_provider_name() {
-                                if let Some(list) = connections.by_provider.get_mut(&name) {
-                                    list.remove(&victim_alloc_id);
-                                }
-                                Self::remove_priority_entry(
-                                    &mut connections,
-                                    &name,
-                                    &(v_prio, Reverse(victim_created_at), victim_alloc_id),
-                                    info.kind,
-                                );
-                            }
-                            Some(info)
-                        } else {
-                            None
-                        }
-                    };
-
-                    let Some(info) = removed_info else {
-                        // Another preemptor already removed this victim.
-                        return None;
-                    };
-
-                    // Preempted probes must stop immediately; they must not keep a custom stream alive.
-                    info.cancel_token.cancel();
-                    info.allocation.release();
-                }
-            }
-
-            // Now try acquire again preserving the original grace policy.
-            let attempts = self.providers.provider_names_for_input(input_name).len().max(1);
-            let mut excluded_providers = reserved_providers;
-            for _ in 0..attempts {
-                let allocation = self.providers.acquire_connection_with_grace_override_excluding(
-                    input_name,
-                    allow_grace,
-                    &excluded_providers,
-                );
-                if matches!(allocation, ProviderAllocation::Exhausted) {
-                    break;
-                }
-                if let Some(provider_name) = allocation.get_provider_name() {
-                    if self.exceeds_reserved_capacity(&provider_name, session_owner) {
-                        excluded_providers.insert(provider_name);
-                        allocation.release();
-                        continue;
-                    }
-                }
-                return Some(allocation);
-            }
+        match self.try_preempt_connection_outcome(input_name, new_priority, allow_grace, kind_needed, session_owner) {
+            PreemptionOutcome::Acquired(alloc) => Some(alloc),
+            _ => None,
         }
-
-        None
     }
 
     pub fn acquire_exact_connection_with_grace(
@@ -1491,6 +1737,54 @@ impl ActiveProviderManager {
         self.acquire_connection_inner(input_name, allow_grace, &AcquireProviderParams { addr, priority, kind, lease })
     }
 
+    /// Lineup acquisition with an explicit playback lease identity, awaiting preemption completion if needed.
+    pub async fn acquire_connection_with_lease_for_session_await(
+        &self,
+        input_name: &Arc<str>,
+        addr: &SocketAddr,
+        allow_grace: bool,
+        priority: i8,
+        kind: ConnectionKind,
+        lease: Option<PlaybackLeaseRef<'_>>,
+    ) -> Option<ProviderHandle> {
+        let params = AcquireProviderParams { addr, priority, kind, lease };
+        let outcome = {
+            if self.is_shutting_down.load(Ordering::Acquire) {
+                return None;
+            }
+            let _transition = self.lock_capacity_transition();
+            if self.is_shutting_down.load(Ordering::Acquire) {
+                return None;
+            }
+            if let Some(handle) = self.acquire_connection_inner_no_preempt(input_name, allow_grace, &params) {
+                return Some(handle);
+            }
+            self.try_preempt_connection_outcome(
+                input_name,
+                params.priority,
+                allow_grace,
+                params.kind,
+                params.session_owner(),
+            )
+        };
+
+        match outcome {
+            PreemptionOutcome::Acquired(alloc) => {
+                let _transition = self.lock_capacity_transition();
+                Some(self.register_allocation(alloc, &params))
+            }
+            PreemptionOutcome::PendingCompletion(completion_token) => {
+                let _ = tokio::time::timeout(PREEMPTION_COMPLETION_TIMEOUT, completion_token.cancelled()).await;
+                if self.is_shutting_down.load(Ordering::Acquire) {
+                    return None;
+                }
+                let _transition = self.lock_capacity_transition();
+                self.acquire_connection_inner_no_preempt(input_name, allow_grace, &params)
+            }
+            PreemptionOutcome::Exhausted => None,
+        }
+    }
+
     /// Exact-provider acquisition with an explicit playback lease identity.
     pub fn acquire_exact_connection_with_lease_for_session(
         &self,
@@ -1507,6 +1801,54 @@ impl ActiveProviderManager {
             allow_grace,
             &AcquireProviderParams { addr, priority, kind, lease },
         )
+    }
+
+    /// Exact-provider acquisition with an explicit playback lease identity, awaiting preemption completion if needed.
+    pub async fn acquire_exact_connection_with_lease_for_session_await(
+        &self,
+        provider_name: &Arc<str>,
+        addr: &SocketAddr,
+        allow_grace: bool,
+        priority: i8,
+        kind: ConnectionKind,
+        lease: Option<PlaybackLeaseRef<'_>>,
+    ) -> Option<ProviderHandle> {
+        let params = AcquireProviderParams { addr, priority, kind, lease };
+        let outcome = {
+            if self.is_shutting_down.load(Ordering::Acquire) {
+                return None;
+            }
+            let _transition = self.lock_capacity_transition();
+            if self.is_shutting_down.load(Ordering::Acquire) {
+                return None;
+            }
+            if let Some(handle) = self.acquire_exact_connection_inner_no_preempt(provider_name, allow_grace, &params) {
+                return Some(handle);
+            }
+            self.try_preempt_connection_outcome(
+                provider_name,
+                params.priority,
+                allow_grace,
+                params.kind,
+                params.session_owner(),
+            )
+        };
+
+        match outcome {
+            PreemptionOutcome::Acquired(alloc) => {
+                let _transition = self.lock_capacity_transition();
+                Some(self.register_allocation(alloc, &params))
+            }
+            PreemptionOutcome::PendingCompletion(completion_token) => {
+                let _ = tokio::time::timeout(PREEMPTION_COMPLETION_TIMEOUT, completion_token.cancelled()).await;
+                if self.is_shutting_down.load(Ordering::Acquire) {
+                    return None;
+                }
+                let _transition = self.lock_capacity_transition();
+                self.acquire_exact_connection_inner_no_preempt(provider_name, allow_grace, &params)
+            }
+            PreemptionOutcome::Exhausted => None,
+        }
     }
 
     /// Acquire a provider connection for probe tasks with configurable priority.
@@ -1653,47 +1995,100 @@ impl ActiveProviderManager {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
+    pub fn register_body_owner(&self, alloc_id: AllocationId) -> bool {
+        let _transition = self.lock_capacity_transition();
+        let mut connections = self.write_connections();
+        if let Some(info) = connections.single.get_mut(&alloc_id) {
+            if info.lifecycle == ConnectionLifecycle::Closing || info.lifecycle == ConnectionLifecycle::Closed {
+                return false;
+            }
+            info.has_body_owner = true;
+            if info.lifecycle == ConnectionLifecycle::Opening {
+                info.lifecycle = ConnectionLifecycle::Active;
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn mark_opening(&self, alloc_id: AllocationId) {
+        let _transition = self.lock_capacity_transition();
+        let mut connections = self.write_connections();
+        if let Some(info) = connections.single.get_mut(&alloc_id) {
+            if info.lifecycle != ConnectionLifecycle::Closing && info.lifecycle != ConnectionLifecycle::Closed {
+                info.lifecycle = ConnectionLifecycle::Opening;
+            }
+        }
+    }
+
+    pub fn renew_opening_tokens(&self, alloc_id: AllocationId) -> Option<(CancellationToken, CancellationToken)> {
+        let _transition = self.lock_capacity_transition();
+        let mut connections = self.write_connections();
+        if let Some(info) = connections.single.get_mut(&alloc_id) {
+            if info.lifecycle != ConnectionLifecycle::Closing && info.lifecycle != ConnectionLifecycle::Closed {
+                info.lifecycle = ConnectionLifecycle::Opening;
+                info.open_generation = info.open_generation.wrapping_add(1);
+                info.reaper_spawned = false;
+                let cancel_token = CancellationToken::new();
+                let completion_token = CancellationToken::new();
+                info.cancel_token = cancel_token.clone();
+                info.completion_token = completion_token.clone();
+                return Some((cancel_token, completion_token));
+            }
+        }
+        None
+    }
+
+    pub fn mark_closing(&self, alloc_id: AllocationId) {
+        let _transition = self.lock_capacity_transition();
+        let mut connections = self.write_connections();
+        let prio = if let Some(info) = connections.single.get_mut(&alloc_id) {
+            info.lifecycle = ConnectionLifecycle::Closing;
+            info.cancel_token.cancel();
+            info.allocation
+                .get_provider_name()
+                .map(|name| (name, (info.priority, Reverse(info.created_at), alloc_id), info.kind))
+        } else {
+            None
+        };
+        if let Some((name, key, kind)) = prio {
+            Self::remove_priority_entry(&mut connections, &name, &key, kind);
+        }
+    }
+
     pub fn release_connection(&self, addr: &SocketAddr) {
         let _transition = self.lock_capacity_transition();
-        // Single connection - all index updates in one lock scope
-        let single_allocations = {
+        let single_alloc_ids = {
             let mut connections = self.write_connections();
-            if let Some(alloc_ids) = connections.single_by_addr.remove(addr) {
-                let mut allocations = Vec::with_capacity(alloc_ids.len());
-                for id in alloc_ids {
-                    if let Some(info) = connections.single.remove(&id) {
-                        Self::unindex_owner(&mut connections, id, info.session_owner.as_ref());
-                        if !info.allocation.is_unlimited_provider() {
-                            if let Some(name) = info.allocation.get_provider_name() {
-                                if let Some(list) = connections.by_provider.get_mut(&name) {
-                                    list.remove(&id);
-                                }
-                                Self::remove_priority_entry(
-                                    &mut connections,
-                                    &name,
-                                    &(info.priority, Reverse(info.created_at), id),
-                                    info.kind,
-                                );
-                            }
-                        }
-                        allocations.push(info);
-                    }
-                }
-                Some(allocations)
-            } else {
-                None
-            }
+            connections.single_by_addr.remove(addr)
         };
 
-        if let Some(allocations) = single_allocations {
-            for info in allocations {
-                debug_if_enabled!(
-                    "Released provider connection {:?} for {}",
-                    info.allocation.get_provider_name().unwrap_or_default(),
-                    sanitize_sensitive_info(&addr.to_string())
-                );
-                info.allocation.release();
+        if let Some(alloc_ids) = single_alloc_ids {
+            let mut to_reap = Vec::new();
+            {
+                let mut connections = self.write_connections();
+                for id in alloc_ids {
+                    if let ReleaseAction::Wait(alloc_id, gen, token) =
+                        ActiveProviderManagerCore::plan_single_release_locked(&mut connections, id)
+                    {
+                        to_reap.push((alloc_id, gen, token));
+                    }
+                }
+            }
+            for (id, gen, completion_token) in to_reap {
+                let core = Arc::clone(&self.core);
+                let shutdown_token = self.shutdown_token.clone();
+                if let Ok(rt_handle) = tokio::runtime::Handle::try_current() {
+                    rt_handle.spawn(async move {
+                        tokio::select! {
+                            () = shutdown_token.cancelled() => {},
+                            () = completion_token.cancelled() => {
+                                core.complete_release_with_generation(id, Some(gen));
+                            }
+                        }
+                    });
+                }
             }
         }
 
@@ -1705,76 +2100,71 @@ impl ActiveProviderManager {
         }
     }
 
-    pub fn release_handle(&self, handle: &ProviderHandle) {
-        let _transition = self.lock_capacity_transition();
+    fn release_shared_handle_locked(
+        connections: &mut Connections,
+        handle: &ProviderHandle,
+    ) -> Option<ProviderAllocation> {
         let mut released = None;
         let mut released_priority_key: Option<(Arc<str>, PriorityKey, ConnectionKind)> = None;
-        {
-            let mut connections = self.write_connections();
-
-            // Try removing from Single directly by allocation_id
-            if let Some(info) = connections.single.remove(&handle.allocation_id) {
-                Self::unindex_owner(&mut connections, handle.allocation_id, info.session_owner.as_ref());
-                let pkey = (info.priority, Reverse(info.created_at), handle.allocation_id);
-                released = Some(info.allocation);
-                let released_kind = info.kind;
-                if let Some(set) = connections.single_by_addr.get_mut(&info.client_addr) {
-                    set.remove(&handle.allocation_id);
-                    if set.is_empty() {
-                        connections.single_by_addr.remove(&info.client_addr);
-                    }
+        if let Some(key) = connections.shared.shared_by_allocation_id.remove(&handle.allocation_id) {
+            if let Some(shared) = connections.shared.by_key.remove(&key) {
+                Self::unindex_owner(connections, handle.allocation_id, shared.session_owner.as_ref());
+                let pkey = (shared.priority, Reverse(shared.created_at), handle.allocation_id);
+                let shared_kind = shared.kind;
+                let shared_is_unlimited = shared.allocation.is_unlimited_provider();
+                released = Some(shared.allocation);
+                for subscriber_id in shared.connections.keys() {
+                    connections.shared.key_by_subscriber.remove(subscriber_id);
                 }
-
-                // Remove from by_provider index. Skip for unlimited providers:
-                // they were never inserted by `register_allocation`, so the
-                // keys/values are not present and a removal would be a no-op
-                // at best and could race with concurrent unrelated operations
-                // on the same HashSet entry at worst.
-                if !released.as_ref().is_some_and(ProviderAllocation::is_unlimited_provider) {
+                if !shared_is_unlimited {
                     if let Some(name) = released.as_ref().and_then(ProviderAllocation::get_provider_name) {
                         if let Some(list) = connections.by_provider.get_mut(&name) {
                             list.remove(&handle.allocation_id);
                         }
-                        released_priority_key = Some((name, pkey, released_kind));
+                        released_priority_key = Some((name, pkey, shared_kind));
                     }
                 }
-            }
-
-            if released.is_none() {
-                // Try removing from Shared
-                if let Some(key) = connections.shared.shared_by_allocation_id.remove(&handle.allocation_id) {
-                    if let Some(shared) = connections.shared.by_key.remove(&key) {
-                        Self::unindex_owner(&mut connections, handle.allocation_id, shared.session_owner.as_ref());
-                        let pkey = (shared.priority, Reverse(shared.created_at), handle.allocation_id);
-                        let shared_kind = shared.kind;
-                        let shared_is_unlimited = shared.allocation.is_unlimited_provider();
-                        released = Some(shared.allocation);
-                        for subscriber_id in shared.connections.keys() {
-                            connections.shared.key_by_subscriber.remove(subscriber_id);
-                        }
-                        if !shared_is_unlimited {
-                            if let Some(name) = released.as_ref().and_then(ProviderAllocation::get_provider_name) {
-                                if let Some(list) = connections.by_provider.get_mut(&name) {
-                                    list.remove(&handle.allocation_id);
-                                }
-                                released_priority_key = Some((name, pkey, shared_kind));
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Remove from priority_index
-            if let Some((name, pkey, kind)) = &released_priority_key {
-                Self::remove_priority_entry(&mut connections, name, pkey, *kind);
             }
         }
-
-        // Releasing the physical provider allocation never concludes the playback
-        // request: the request end is applied separately via `finish_*` with the
-        // actual outcome, so a generic handle drop cannot invent a clean end.
-        if let Some(allocation) = released {
+        if let Some((name, pkey, kind)) = &released_priority_key {
+            Self::remove_priority_entry(connections, name, pkey, *kind);
+        }
+        if let Some(allocation) = released.as_ref() {
             allocation.release();
+        }
+        released
+    }
+
+    pub fn release_handle(&self, handle: &ProviderHandle) {
+        let _transition = self.lock_capacity_transition();
+        let wait_action = {
+            let mut connections = self.write_connections();
+            if connections.single.contains_key(&handle.allocation_id) {
+                if handle.completion_token.as_ref().is_some_and(CancellationToken::is_cancelled) {
+                    if let Some(info) = connections.single.get_mut(&handle.allocation_id) {
+                        info.completion_token.cancel();
+                    }
+                }
+                ActiveProviderManagerCore::plan_single_release_locked(&mut connections, handle.allocation_id)
+            } else {
+                Self::release_shared_handle_locked(&mut connections, handle);
+                ReleaseAction::None
+            }
+        };
+
+        if let ReleaseAction::Wait(alloc_id, gen, completion_token) = wait_action {
+            let core = Arc::clone(&self.core);
+            let shutdown_token = self.shutdown_token.clone();
+            if let Ok(rt_handle) = tokio::runtime::Handle::try_current() {
+                rt_handle.spawn(async move {
+                    tokio::select! {
+                        () = shutdown_token.cancelled() => {},
+                        () = completion_token.cancelled() => {
+                            core.complete_release_with_generation(alloc_id, Some(gen));
+                        }
+                    }
+                });
+            }
         }
     }
 
@@ -1795,6 +2185,8 @@ impl ActiveProviderManager {
                                     allocation_id: info.allocation_id,
                                     allocation: info.allocation.clone(),
                                     cancel_token: Some(info.cancel_token.clone()),
+                                    completion_token: Some(info.completion_token.clone()),
+                                    close_reason: Arc::clone(&info.close_reason),
                                 });
                             }
                         }
@@ -1804,10 +2196,84 @@ impl ActiveProviderManager {
             handles
         };
         for handle in handles {
+            handle.set_close_reason(ProviderCloseReason::Superseded);
             if let Some(token) = &handle.cancel_token {
                 token.cancel();
             }
             self.release_handle(&handle);
+        }
+    }
+
+    /// Stops stale requests of this playback and awaits upstream body closure before releasing capacity.
+    pub async fn release_playback_connections_await(&self, owner: &str, addrs: &[SocketAddr]) {
+        let targets = {
+            let mut connections = self.write_connections();
+            let mut targets = Vec::new();
+            for addr in addrs {
+                if let Some(alloc_ids) = connections.single_by_addr.get(addr).cloned() {
+                    for id in alloc_ids {
+                        if let Some(info) = connections.single.get_mut(&id) {
+                            if info.session_owner.as_deref() == Some(owner)
+                                && info.lifecycle != ConnectionLifecycle::Closed
+                            {
+                                info.lifecycle = ConnectionLifecycle::Closing;
+                                info.close_reason.store(ProviderCloseReason::Superseded as u8, Ordering::Release);
+                                targets.push((
+                                    info.allocation_id,
+                                    info.cancel_token.clone(),
+                                    info.completion_token.clone(),
+                                    info.priority,
+                                    info.created_at,
+                                    info.kind,
+                                    info.allocation.get_provider_name(),
+                                    info.open_generation,
+                                ));
+                                info.reaper_spawned = true;
+                            }
+                        }
+                    }
+                }
+            }
+            for (alloc_id, _, _, priority, created_at, kind, provider_name, _) in &targets {
+                if let Some(name) = provider_name {
+                    Self::remove_priority_entry(
+                        &mut connections,
+                        name,
+                        &(*priority, Reverse(*created_at), *alloc_id),
+                        *kind,
+                    );
+                }
+            }
+            targets
+        };
+
+        if targets.is_empty() {
+            return;
+        }
+
+        for (_, cancel_token, _, _, _, _, _, _) in &targets {
+            cancel_token.cancel();
+        }
+
+        let futures: Vec<_> = targets.iter().map(|(_, _, token, _, _, _, _, _)| token.cancelled()).collect();
+        let _ = tokio::time::timeout(Duration::from_millis(1000), futures::future::join_all(futures)).await;
+
+        for (alloc_id, _, completion_token, _, _, _, _, gen) in targets {
+            if completion_token.is_cancelled() {
+                self.core.complete_release_with_generation(alloc_id, Some(gen));
+            } else {
+                log::warn!("Superseded provider connection {alloc_id} did not close within deadline, retaining slot as Closing until reaped");
+                let core = Arc::clone(&self.core);
+                let shutdown_token = self.shutdown_token.clone();
+                tokio::spawn(async move {
+                    tokio::select! {
+                        () = shutdown_token.cancelled() => {},
+                        () = completion_token.cancelled() => {
+                            core.complete_release_with_generation(alloc_id, Some(gen));
+                        }
+                    }
+                });
+            }
         }
     }
 
@@ -3536,6 +4002,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_preemption_respects_registered_body_owner_completion() {
+        let app_cfg = build_test_app_config(None, 1);
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+
+        let input_name = "provider_1".intern();
+        let addr_1: SocketAddr = "127.0.0.1:49061".parse().unwrap();
+        let addr_2: SocketAddr = "127.0.0.1:49062".parse().unwrap();
+
+        // 1. First request with prio 5 occupies limit=1
+        let handle_1 = manager
+            .acquire_connection(&input_name, &addr_1, 5, ConnectionKind::Normal)
+            .expect("first allocation should succeed");
+
+        // 2. Register body owner on handle_1
+        manager.register_body_owner(handle_1.allocation_id);
+
+        // 3. Higher-priority request with prio -1 arrives without grace while handle_1 is active
+        let handle_2 = manager.acquire_connection_with_grace(&input_name, &addr_2, false, -1, ConnectionKind::Normal);
+
+        // 4. Replacement must NOT be admitted before completion
+        assert!(handle_2.is_none(), "replacement must not be admitted before victim completion");
+        assert!(
+            handle_1.cancel_token.as_ref().expect("cancel token").is_cancelled(),
+            "victim should receive cancel signal"
+        );
+        assert_eq!(
+            handle_1.close_reason.load(std::sync::atomic::Ordering::Acquire),
+            tuliprox_core::model::ProviderCloseReason::PriorityPreempted as u8,
+            "victim close reason must be PriorityPreempted"
+        );
+
+        // 5. Victim completes upstream reading
+        handle_1.completion_token.as_ref().expect("completion token").cancel();
+
+        // Allow background complete_release task to run
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // 6. Now replacement request can be admitted
+        let handle_2 = manager
+            .acquire_connection(&input_name, &addr_2, -1, ConnectionKind::Normal)
+            .expect("replacement should succeed after victim has completed release");
+
+        manager.release_handle(&handle_2);
+    }
+
+    #[tokio::test]
+    async fn test_preemption_respects_opening_connection_completion() {
+        let app_cfg = build_test_app_config(None, 1);
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+
+        let input_name = "provider_1".intern();
+        let addr_1: SocketAddr = "127.0.0.1:49063".parse().unwrap();
+        let addr_2: SocketAddr = "127.0.0.1:49064".parse().unwrap();
+
+        // 1. First request with prio 5 occupies limit=1
+        let handle_1 = manager
+            .acquire_connection(&input_name, &addr_1, 5, ConnectionKind::Normal)
+            .expect("first allocation should succeed");
+        manager.mark_opening(handle_1.allocation_id);
+
+        // Verify lifecycle is Opening and body owner is not yet registered
+        {
+            let connections = manager.read_connections();
+            let info = connections.single.get(&handle_1.allocation_id).expect("handle_1 exists");
+            assert_eq!(info.lifecycle, tuliprox_core::model::ConnectionLifecycle::Opening);
+            assert!(!info.has_body_owner);
+        }
+
+        // 2. Higher-priority request with prio -1 arrives without grace while handle_1 is in Opening
+        let handle_2 = manager.acquire_connection_with_grace(&input_name, &addr_2, false, -1, ConnectionKind::Normal);
+
+        // 3. Replacement must NOT be admitted before completion of opening
+        assert!(handle_2.is_none(), "replacement must not be admitted while victim is still opening");
+        assert!(
+            handle_1.cancel_token.as_ref().expect("cancel token").is_cancelled(),
+            "victim should receive cancel signal during open"
+        );
+        assert_eq!(
+            handle_1.close_reason.load(std::sync::atomic::Ordering::Acquire),
+            tuliprox_core::model::ProviderCloseReason::PriorityPreempted as u8,
+            "victim close reason must be PriorityPreempted"
+        );
+
+        // 4. Victim's open future completes and signals completion
+        handle_1.completion_token.as_ref().expect("completion token").cancel();
+
+        // Allow background complete_release task to run
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // 5. Now replacement request can be admitted
+        let handle_2 = manager
+            .acquire_connection(&input_name, &addr_2, -1, ConnectionKind::Normal)
+            .expect("replacement should succeed after victim open future has completed release");
+
+        manager.release_handle(&handle_2);
+    }
+
+    #[tokio::test]
     async fn test_owner_index_consistent_through_lifecycle() {
         let app_cfg = build_test_app_config(None, 2);
         let event_manager = Arc::new(EventManager::new());
@@ -4165,5 +4733,160 @@ mod tests {
         assert_eq!(manager.get_provider_connections_count(), 0);
         let usage = manager.provider_lease_usage(&input_name);
         assert_eq!(usage.total(), 0, "lease table must return to baseline after churn");
+    }
+
+    #[tokio::test]
+    async fn closing_state_blocks_slot_release_until_completion_token_cancelled() {
+        let app_cfg = create_test_app_config_single_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
+        let input_name: Arc<str> = "provider_1".intern();
+
+        let handle1 = manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &SocketAddr::from(([127, 0, 0, 1], 46_001)),
+                false,
+                0,
+                ConnectionKind::Normal,
+                Some("session-1"),
+            )
+            .expect("first allocation should succeed");
+        assert_eq!(manager.get_provider_connections_count(), 1);
+
+        let completion_token = handle1.completion_token.clone().expect("completion token present");
+        let alloc_id = handle1.allocation_id;
+
+        // Mark Closing (simulating supersede / release_playback_connections_await)
+        manager.mark_closing(alloc_id);
+
+        // Drop the handle while completion_token is still pending (upstream body not yet closed)
+        manager.release_handle(&handle1);
+
+        // The slot must still be occupied by the Closing allocation
+        assert_eq!(manager.get_provider_connections_count(), 1);
+
+        // A second start attempt must fail because the provider is at its limit (1 connection)
+        let handle2 = manager.acquire_connection_with_grace_for_session(
+            &input_name,
+            &SocketAddr::from(([127, 0, 0, 1], 46_002)),
+            false,
+            0,
+            ConnectionKind::Normal,
+            Some("session-2"),
+        );
+        assert!(handle2.is_none(), "second start must be rejected while first slot is Closing");
+
+        // Now signal completion (upstream body owner dropped upstream socket)
+        completion_token.cancel();
+
+        // Allow background reaper task to execute complete_release
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert_eq!(manager.get_provider_connections_count(), 0);
+
+        // Second start attempt now succeeds
+        let handle3 = manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &SocketAddr::from(([127, 0, 0, 1], 46_003)),
+                false,
+                0,
+                ConnectionKind::Normal,
+                Some("session-3"),
+            )
+            .expect("start must succeed after completion releases the slot");
+        assert_eq!(manager.get_provider_connections_count(), 1);
+
+        manager.release_handle(&handle3);
+        assert_eq!(manager.get_provider_connections_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn reaper_cleanup_is_idempotent_and_removes_all_indices() {
+        let app_cfg = create_test_app_config_single_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
+        let input_name: Arc<str> = "provider_1".intern();
+
+        let handle = manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &SocketAddr::from(([127, 0, 0, 1], 47_001)),
+                false,
+                0,
+                ConnectionKind::Normal,
+                Some("session-idempotent"),
+            )
+            .expect("allocation should succeed");
+
+        let completion_token = handle.completion_token.clone().expect("completion token present");
+        let alloc_id = handle.allocation_id;
+        manager.mark_closing(alloc_id);
+
+        manager.release_handle(&handle);
+        completion_token.cancel();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(manager.get_provider_connections_count(), 0);
+
+        // Duplicate releases must be completely safe and no-op
+        manager.complete_release(alloc_id);
+        manager.release_handle(&handle);
+        manager.release_connection(&SocketAddr::from(([127, 0, 0, 1], 47_001)));
+        assert_eq!(manager.get_provider_connections_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_single_request_preemption_awaits_victim_completion() {
+        let app_cfg = create_test_app_config_single_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
+        let input_name: Arc<str> = "provider_1".intern();
+
+        let low_addr = SocketAddr::from(([127, 0, 0, 1], 48_001));
+        let high_addr = SocketAddr::from(([127, 0, 0, 1], 48_002));
+
+        let low_handle = manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &low_addr,
+                false,
+                10,
+                ConnectionKind::Normal,
+                Some("session-victim"),
+            )
+            .expect("initial low-priority allocation succeeds");
+
+        manager.mark_opening(low_handle.allocation_id);
+        assert!(manager.register_body_owner(low_handle.allocation_id));
+
+        let cancel_token = low_handle.cancel_token.clone().unwrap();
+        let completion_token = low_handle.completion_token.clone().unwrap();
+
+        // Simulate upstream body owner: when cancelled, complete release after 30ms
+        let comp_clone = completion_token.clone();
+        tokio::spawn(async move {
+            cancel_token.cancelled().await;
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            comp_clone.cancel();
+        });
+
+        // High priority acquire should preempt the victim, await its completion, and succeed in the same call
+        let high_handle = manager
+            .acquire_connection_with_lease_for_session_await(
+                &input_name,
+                &high_addr,
+                false,
+                0,
+                ConnectionKind::Normal,
+                None,
+            )
+            .await
+            .expect("high-priority allocation must succeed in the same call after awaiting victim completion");
+
+        assert_eq!(manager.get_provider_connections_count(), 1);
+        manager.release_handle(&high_handle);
+        assert_eq!(manager.get_provider_connections_count(), 0);
     }
 }

@@ -7200,6 +7200,7 @@ async fn should_pin_provider_for_session_skips_reservation_on_failure_custom_vid
         provider_handle: None,
         content_representation: crate::api::model::ProviderContentRepresentationMode::PreserveOrigin,
         grace_resolution_context: None,
+        custom_reason: None,
     };
     assert!(
         should_pin_provider_for_session(&no_video_details, &app_state, PlaylistItemType::Catchup),
@@ -7222,6 +7223,7 @@ async fn should_pin_provider_for_session_skips_reservation_on_failure_custom_vid
         provider_handle: None,
         content_representation: crate::api::model::ProviderContentRepresentationMode::PreserveOrigin,
         grace_resolution_context: None,
+        custom_reason: None,
     };
     assert!(
         should_pin_provider_for_session(&provisioning_details, &app_state, PlaylistItemType::Catchup),
@@ -7251,6 +7253,7 @@ async fn should_pin_provider_for_session_skips_reservation_on_failure_custom_vid
             provider_handle: None,
             content_representation: crate::api::model::ProviderContentRepresentationMode::PreserveOrigin,
             grace_resolution_context: None,
+            custom_reason: None,
         };
         assert!(
             !should_pin_provider_for_session(&failure_details, &app_state, PlaylistItemType::Catchup),
@@ -8276,7 +8279,7 @@ async fn forced_reopen_cleanup_for_adaptive_streams_does_not_close_client_socket
     let addr: SocketAddr = "127.0.0.1:55220".parse().unwrap_or_else(|_| unreachable!());
     let mut close_rx = app_state.connection_manager.get_close_connection_channel();
 
-    cleanup_forced_reopen_addrs(&app_state, "adaptive-owner", &[addr]);
+    cleanup_forced_reopen_addrs(&app_state, "adaptive-owner", &[addr]).await;
 
     let signal =
         tokio::time::timeout(std::time::Duration::from_millis(50), close_rx.recv()).await.ok().and_then(Result::ok);
@@ -8289,7 +8292,7 @@ async fn forced_reopen_cleanup_for_non_adaptive_streams_preserves_client_socket(
     let addr: SocketAddr = "127.0.0.1:55221".parse().unwrap_or_else(|_| unreachable!());
     let mut close_rx = app_state.connection_manager.get_close_connection_channel();
 
-    cleanup_forced_reopen_addrs(&app_state, "live-owner", &[addr]);
+    cleanup_forced_reopen_addrs(&app_state, "live-owner", &[addr]).await;
 
     let signal =
         tokio::time::timeout(std::time::Duration::from_millis(50), close_rx.recv()).await.ok().and_then(Result::ok);
@@ -8692,4 +8695,146 @@ fn evaluate_network_access_respects_allow_policy() {
         evaluate_network_access(&user, "8.8.8.8", &geoip, GeoIpUnavailablePolicy::Allow),
         NetworkAccessDecision::AllowedGeoIpUnavailable
     );
+}
+
+#[tokio::test]
+async fn test_channel_unavailable_fallback_does_not_register_body_owner_or_leak_slot() {
+    let app_state = create_test_provider_app_state();
+    let provider_name = "provider_1".intern();
+    let mut cfg = (**app_state.app_config.config.load()).clone();
+    cfg.custom_stream_response_enabled = true;
+    app_state.app_config.config.store(std::sync::Arc::new(cfg));
+    let addr: std::net::SocketAddr = "127.0.0.1:49080".parse().unwrap();
+
+    let custom_video = crate::model::CustomStreamResponse {
+        channel_unavailable: Some(crate::api::model::TransportStreamBuffer::new(b"channel-unavailable-bytes".to_vec())),
+        user_connections_exhausted: None,
+        provider_connections_exhausted: None,
+        low_priority_preempted: None,
+        user_account_expired: None,
+        panel_api_provisioning: None,
+        hls_session_or_lease_expired: None,
+        panel_api_provisioning_hls_segments: Vec::new(),
+    };
+    app_state.app_config.custom_stream_response.store(Some(std::sync::Arc::new(custom_video)));
+
+    let handle = app_state
+        .active_provider
+        .acquire_connection(&provider_name, &addr, 0, tuliprox_session::ConnectionKind::Normal)
+        .expect("connection should be acquired");
+
+    assert_eq!(app_state.active_provider.get_provider_connections_count(), 1);
+
+    let (channel_unavail_stream, info) =
+        create_channel_unavailable_stream(&app_state.app_config, &[], axum::http::StatusCode::OK);
+    assert!(channel_unavail_stream.is_some());
+
+    let factory_response = tuliprox_session::ProviderStreamFactoryResponse {
+        stream: channel_unavail_stream.unwrap(),
+        info,
+        provider_session_headers: std::collections::HashMap::new(),
+        has_upstream_owner: false,
+    };
+
+    if factory_response.has_upstream_owner {
+        app_state.active_provider.register_body_owner(handle.allocation_id);
+    }
+
+    app_state.active_provider.release_handle(&handle);
+
+    assert_eq!(app_state.active_provider.get_provider_connections_count(), 0);
+    assert_eq!(app_state.active_provider.active_connections().map(|m| m.values().sum::<usize>()).unwrap_or(0), 0);
+}
+
+#[tokio::test]
+async fn test_provider_open_cancelled_during_header_wait_releases_slot_without_leak() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_addr = listener.local_addr().unwrap();
+
+    let accepted = std::sync::Arc::new(tokio::sync::Notify::new());
+    let accepted_clone = std::sync::Arc::clone(&accepted);
+
+    let server_task = tokio::spawn(async move {
+        if let Ok((mut socket, _)) = listener.accept().await {
+            accepted_clone.notify_waiters();
+            let mut buf = [0u8; 1024];
+            loop {
+                use tokio::io::AsyncReadExt;
+                match socket.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        }
+    });
+
+    let app_state = create_test_provider_app_state();
+    let provider_name = "provider_1".intern();
+    let client_addr: std::net::SocketAddr = "127.0.0.1:49081".parse().unwrap();
+
+    let handle = app_state
+        .active_provider
+        .acquire_connection(&provider_name, &client_addr, 0, tuliprox_session::ConnectionKind::Normal)
+        .expect("connection should be acquired");
+
+    assert_eq!(app_state.active_provider.get_provider_connections_count(), 1);
+
+    let url = url::Url::parse(&format!("http://{local_addr}/stream.ts")).unwrap();
+    let req_headers = axum::http::HeaderMap::new();
+    let stream_options = get_stream_options(&app_state.app_config);
+    let mut options =
+        crate::api::model::ProviderStreamFactoryOptions::new(&crate::api::model::ProviderStreamFactoryParams {
+            addr: client_addr,
+            item_type: PlaylistItemType::Live,
+            share_stream: false,
+            stream_options: &stream_options,
+            stream_url: &url,
+            req_headers: &req_headers,
+            input_headers: None,
+            session_headers: None,
+            disabled_headers: None,
+            default_user_agent: None,
+            username: None,
+            client_ip: None,
+            stream_channel: None,
+            connect_failure_stage: None,
+            content_representation: tuliprox_session::ProviderContentRepresentationMode::PreserveOrigin,
+        });
+    options.set_provider_handle_tokens(
+        handle.cancel_token.clone(),
+        handle.completion_token.clone(),
+        Some(handle.close_reason.clone()),
+    );
+    app_state.active_provider.mark_opening(handle.allocation_id);
+
+    let ctx = app_state.provider_stream_ctx();
+    let client = app_state.http_client.load().as_ref().clone();
+
+    let open_task =
+        tokio::spawn(async move { crate::api::model::create_provider_stream(&ctx, &client, options).await });
+
+    // Wait until TCP connection is accepted and waiting for response headers
+    accepted.notified().await;
+
+    // Now cancel the handle while it is waiting for response headers
+    handle.cancel_token.as_ref().unwrap().cancel();
+
+    // The open task should finish quickly because it is cancelled
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), open_task)
+        .await
+        .expect("open task should abort upon cancellation")
+        .expect("task join");
+    assert!(outcome.is_none());
+
+    // Release the handle
+    app_state.active_provider.release_handle(&handle);
+
+    // Yield to allow background completion tasks to process
+    tokio::task::yield_now().await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    assert_eq!(app_state.active_provider.get_provider_connections_count(), 0);
+    assert_eq!(app_state.active_provider.active_connections().map(|m| m.values().sum::<usize>()).unwrap_or(0), 0);
+
+    let _ = server_task.await;
 }

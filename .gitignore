@@ -72,3 +72,6 @@ backend/app/Cargo.lock
 .env.*
 !.env.example
 
+# Testkit report artifacts
+/testkit-report/
+

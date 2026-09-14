@@ -21,6 +21,7 @@ pub struct ProviderStreamFactoryResponse {
     pub stream: BoxedProviderStream,
     pub info: ProviderStreamInfo,
     pub provider_session_headers: HashMap<String, String>,
+    pub has_upstream_owner: bool,
 }
 
 /// Controls whether a provider stream preserves its origin representation or normalizes it to identity bytes.
@@ -85,6 +86,7 @@ pub struct StreamDetails {
     /// Set when the stream was admitted via a user-grace strategy. Carried through to
     /// `stream_grace_period` so remaining strategies can be evaluated if the grace fails.
     pub grace_resolution_context: Option<crate::GraceResolutionContext>,
+    pub custom_reason: Option<ProviderStreamCustomReason>,
 }
 
 /// Manual Clone: stream and `provider_handle` cannot be duplicated so we set them to None on the clone.
@@ -107,6 +109,7 @@ impl Clone for StreamDetails {
             provider_handle: None,
             content_representation: self.content_representation,
             grace_resolution_context: self.grace_resolution_context.clone(),
+            custom_reason: self.custom_reason,
         }
     }
 }
@@ -129,6 +132,7 @@ impl StreamDetails {
             provider_handle: None,
             content_representation: ProviderContentRepresentationMode::PreserveOrigin,
             grace_resolution_context: None,
+            custom_reason: None,
         }
     }
     #[inline]

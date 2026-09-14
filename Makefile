@@ -149,6 +149,27 @@ test: ## Run all workspace tests (Stable) — use detected CPU count for paralle
 	@echo "==> Running tests (stable) with $(CPU_COUNT) jobs/threads"
 	@TMPDIR="$${TMPDIR:-/tmp}" RUST_TEST_THREADS=$(CPU_COUNT) ./bin/test.sh -j$(CPU_COUNT) --workspace -- --test-threads=$(CPU_COUNT)
 
+.PHONY: admission-test
+admission-test: ## Verify admission, provider-slot, seek/reopen, shared-stream, and cleanup invariants
+	@echo "==> Running HTTP admission and provider lifecycle tests"
+	@$(CARGO_STABLE) test --package tuliprox api_utils::tests:: -- --test-threads=1
+	@echo "==> Running client stream lifecycle tests"
+	@$(CARGO_STABLE) test --package tuliprox api::model::streams::active_client_stream::tests:: -- --test-threads=1
+	@echo "==> Running session, eviction, and provider-slot lifecycle tests"
+	@$(CARGO_STABLE) test --package tuliprox-session -- --test-threads=1
+
+.PHONY: testkit-test
+testkit-test: ## Run unit tests in tuliprox-testkit
+	@echo "==> Running testkit unit tests"
+	@$(CARGO_STABLE) test --package tuliprox-testkit
+
+.PHONY: testkit-e2e
+testkit-e2e: ## Run testkit E2E scenario suite against freshly built SUT
+	@echo "==> Building tuliprox and tuliprox-testkit"
+	@$(CARGO_STABLE) build --package tuliprox --package tuliprox-testkit
+	@echo "==> Executing testkit scenario suite"
+	@./bin/run-testkit-scenarios.sh
+
 .PHONY: build
 build: ## Build the entire workspace in parallel using detected CPU count
 	@echo "==> Building workspace with $(CARGO_BUILD_JOBS) jobs"
@@ -180,6 +201,8 @@ fmt: ## Format all code using nightly rules (Compact)
 fmt-check: ## Check if code follows formatting rules (Nightly)
 	@echo "==> Checking formatting (nightly)"
 	$(CARGO_NIGHTLY) fmt --all -- --check
+	@echo "==> Checking git diff for whitespace errors"
+	git diff --check
 
 .PHONY: markdown-lint
 markdown-lint: ## Lint markdown files

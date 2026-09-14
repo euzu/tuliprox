@@ -230,7 +230,18 @@ pub fn create_custom_video_stream_response(
     // configured `custom_stream_response_error_status` (default 502) instead of a
     // hard-coded 403, so a reverse proxy with `proxy_intercept_errors on;` can sever
     // the socket.
-    get_custom_stream_response_error_status(config).into_response()
+    let status = get_custom_stream_response_error_status(config);
+    let mut builder = axum::response::Response::builder().status(status);
+    if matches!(
+        video_response,
+        CustomVideoStreamType::UserConnectionsExhausted
+            | CustomVideoStreamType::ProviderConnectionsExhausted
+            | CustomVideoStreamType::LowPriorityPreempted
+            | CustomVideoStreamType::UserAccountExpired
+    ) {
+        builder = builder.header("x-tuliprox-rejection", "admission_rejected");
+    }
+    builder.body(axum::body::Body::empty()).unwrap_or_else(|_| status.into_response())
 }
 pub fn get_header_filter_for_item_type(item_type: PlaylistItemType) -> HeaderFilter {
     match item_type {

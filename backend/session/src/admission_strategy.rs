@@ -109,8 +109,8 @@ fn select_candidate<'a>(
         let should_replace = match selected {
             None => true,
             Some(current) => match order {
-                EvictionOrder::Oldest => candidate.ts < current.ts,
-                EvictionOrder::Latest => candidate.ts > current.ts,
+                EvictionOrder::Oldest => (candidate.ts, candidate.uid) < (current.ts, current.uid),
+                EvictionOrder::Latest => (candidate.ts, candidate.uid) > (current.ts, current.uid),
             },
         };
         if should_replace {
@@ -125,6 +125,8 @@ pub struct EvictionCandidate {
     pub addr: SocketAddr,
     pub client_ip: String,
     pub ts: u64,
+    /// Monotonic stream identity used to order streams created in the same second.
+    pub uid: u32,
 }
 
 #[cfg(test)]
@@ -135,7 +137,7 @@ mod tests {
     fn addr(port: u16) -> SocketAddr { SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port) }
 
     fn candidate(port: u16, ip: &str, ts: u64) -> EvictionCandidate {
-        EvictionCandidate { addr: addr(port), client_ip: ip.to_string(), ts }
+        EvictionCandidate { addr: addr(port), client_ip: ip.to_string(), ts, uid: u32::from(port) }
     }
 
     #[test]
@@ -181,6 +183,13 @@ mod tests {
         let candidates =
             vec![candidate(1000, "2.2.2.2", 300), candidate(1001, "1.1.1.1", 200), candidate(1002, "3.3.3.3", 100)];
         assert_evict(AdmissionStrategy::EvictUserLatest, &candidates, 1000);
+    }
+
+    #[test]
+    fn equal_timestamp_uses_monotonic_stream_identity() {
+        let candidates = vec![candidate(1000, "1.1.1.1", 100), candidate(1001, "1.1.1.1", 100)];
+        assert_evict(AdmissionStrategy::EvictUserSameIpOldest, &candidates, 1000);
+        assert_evict(AdmissionStrategy::EvictUserSameIpLatest, &candidates, 1001);
     }
 
     #[test]

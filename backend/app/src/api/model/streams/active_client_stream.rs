@@ -2,10 +2,10 @@ use crate::{
     api::{
         model::{
             connection_manager::{PROVIDER_END_CLOSED, PROVIDER_END_ERROR, PROVIDER_END_NOT_SET},
-            create_provider_stream, uses_direct_body_idle_timeout, AppState, BoxedProviderStream, CleanupEvent,
-            ConnectionManager, CustomVideoStreamType, EventManager, MeteringStream, PendingProviderWakeSource,
-            ProviderStreamFactoryOptions, StreamDetails, StreamError, StreamMeterHandle, TimedClientStream,
-            TransportStreamBuffer,
+            open_provider_stream_with_lifecycle, uses_direct_body_idle_timeout, AppState, BoxedProviderStream,
+            CleanupEvent, ConnectionManager, CustomVideoStreamType, EventManager, MeteringStream,
+            PendingProviderWakeSource, ProviderStreamFactoryOptions, ProviderStreamOpenLifecycle, StreamDetails,
+            StreamError, StreamMeterHandle, TimedClientStream, TransportStreamBuffer,
         },
         panel_api::{can_provision_on_exhausted, find_input_by_provider_name, run_panel_api_provisioning_probe},
     },
@@ -421,6 +421,12 @@ impl ActiveClientStreamState {
         self.preempt_cancelled = None;
         self.stop_grace_task();
 
+        let is_superseded = self
+            .provider_handle
+            .as_ref()
+            .and_then(|m| m.handle())
+            .is_some_and(|h| h.get_close_reason() == tuliprox_core::model::ProviderCloseReason::Superseded);
+
         let mut serve_preempted_custom = false;
         if self.provider_handle.is_some() {
             let managed = self.provider_handle.take();
@@ -428,7 +434,7 @@ impl ActiveClientStreamState {
             // Synchronous provider-slot release; the custom-video detail update is a
             // separate, best-effort UI effect.
             drop(managed);
-            if self.custom_video.low_priority_preempted.is_some() {
+            if !is_superseded && self.custom_video.low_priority_preempted.is_some() {
                 serve_preempted_custom = true;
                 if let Some(flag) = &self.send_custom_stream_flag {
                     flag.store(StreamMode::LowPriorityPreempted as u8, Ordering::Release);
@@ -706,11 +712,17 @@ impl Stream for ActiveClientStream {
                                         let http_client = app_state.http_client.load();
                                         http_client.as_ref().clone()
                                     };
+                                    let lifecycle = self
+                                        .state
+                                        .provider_handle
+                                        .as_ref()
+                                        .and_then(ProviderStreamOpenLifecycle::from_managed);
                                     let future = Box::pin(async move {
-                                        match create_provider_stream(
+                                        match open_provider_stream_with_lifecycle(
                                             &app_state.provider_stream_ctx(),
                                             &client,
                                             context.provider_stream_factory_options,
+                                            lifecycle,
                                         )
                                         .await
                                         {
@@ -1995,6 +2007,7 @@ mod tests {
             provider_handle: Some(provider_handle),
             content_representation: ProviderContentRepresentationMode::PreserveOrigin,
             grace_resolution_context: None,
+            custom_reason: None,
         }
     }
 
@@ -2934,6 +2947,7 @@ mod tests {
             provider_handle: None,
             content_representation: ProviderContentRepresentationMode::PreserveOrigin,
             grace_resolution_context: Some(grace_context.clone()),
+            custom_reason: None,
         };
 
         let (flag, grace_task) = stream_grace_period(GracePeriodParams {

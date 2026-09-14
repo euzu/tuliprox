@@ -187,6 +187,8 @@ fn classify_token(t: &str) -> M3uToken {
         4 => {
             if eq_ascii(bytes, b"cuid") {
                 M3uToken::ProviderId
+            } else if eq_ascii(bytes, b"type") {
+                M3uToken::TvgType
             } else {
                 M3uToken::Unknown
             }

@@ -4897,6 +4897,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "tuliprox-testkit"
+version = "3.3.109"
+dependencies = [
+ "axum",
+ "base64 0.23.1",
+ "blake3",
+ "bytes",
+ "clap",
+ "crc32fast",
+ "futures",
+ "hyper",
+ "hyper-util",
+ "pin-project-lite",
+ "reqwest",
+ "serde",
+ "serde-saphyr",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite",
+ "tower",
+ "tower-service",
+ "url",
+]
+
+[[package]]
 name = "tungstenite"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

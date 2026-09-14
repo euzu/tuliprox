@@ -3692,6 +3692,7 @@ pub fn create_panel_api_provisioning_stream_details(
             provider_handle: None,
             content_representation: crate::api::model::ProviderContentRepresentationMode::PreserveOrigin,
             grace_resolution_context: None,
+            custom_reason: None,
         };
     }
 
@@ -3722,6 +3723,7 @@ pub fn create_panel_api_provisioning_stream_details(
         provider_handle: None,
         content_representation: crate::api::model::ProviderContentRepresentationMode::PreserveOrigin,
         grace_resolution_context: None,
+        custom_reason: None,
     }
 }
 

@@ -94,6 +94,42 @@ impl ProviderAllocation {
     }
 }
 
+use std::sync::atomic::{AtomicU8, Ordering};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionLifecycle {
+    Opening,
+    Active,
+    Closing,
+    Closed,
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderCloseReason {
+    Unspecified = 0,
+    Superseded = 1,
+    PriorityPreempted = 2,
+    ClientClosed = 3,
+    IdleTimeout = 4,
+    ProviderError = 5,
+    Shutdown = 6,
+}
+
+impl ProviderCloseReason {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Superseded,
+            2 => Self::PriorityPreempted,
+            3 => Self::ClientClosed,
+            4 => Self::IdleTimeout,
+            5 => Self::ProviderError,
+            6 => Self::Shutdown,
+            _ => Self::Unspecified,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ProviderHandle {
     pub playback_request_id: Option<super::PlaybackRequestId>,
@@ -106,6 +142,8 @@ pub struct ProviderHandle {
     pub allocation: ProviderAllocation,
     // Token to cancel the background task (e.g. internal probe) if preempted
     pub cancel_token: Option<CancellationToken>,
+    pub completion_token: Option<CancellationToken>,
+    pub close_reason: Arc<AtomicU8>,
 }
 
 impl ProviderHandle {
@@ -115,7 +153,29 @@ impl ProviderHandle {
         allocation: ProviderAllocation,
         cancel_token: Option<CancellationToken>,
     ) -> Self {
-        Self { client_id, allocation_id, allocation, cancel_token, playback_request_id: None, binding_tag: None }
+        Self {
+            client_id,
+            allocation_id,
+            allocation,
+            cancel_token,
+            completion_token: None,
+            close_reason: Arc::new(AtomicU8::new(ProviderCloseReason::Unspecified as u8)),
+            playback_request_id: None,
+            binding_tag: None,
+        }
+    }
+
+    pub fn set_close_reason(&self, reason: ProviderCloseReason) {
+        let _ = self.close_reason.compare_exchange(
+            ProviderCloseReason::Unspecified as u8,
+            reason as u8,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        );
+    }
+
+    pub fn get_close_reason(&self) -> ProviderCloseReason {
+        ProviderCloseReason::from_u8(self.close_reason.load(Ordering::Acquire))
     }
 }
 

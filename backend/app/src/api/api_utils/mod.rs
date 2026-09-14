@@ -7,12 +7,13 @@ use crate::{
         endpoints::xtream_api::{get_xtream_player_api_stream_url, ApiStreamContext},
         model::{
             create_active_client_stream, create_channel_unavailable_stream, create_custom_video_stream_response,
-            create_provider_connections_exhausted_stream, create_provider_stream,
-            get_custom_stream_response_error_status, get_stream_response_with_headers, is_custom_video_stream_enabled,
+            create_provider_connections_exhausted_stream, get_custom_stream_response_error_status,
+            get_stream_response_with_headers, is_custom_video_stream_enabled, open_provider_stream_with_lifecycle,
             tee_stream, AppState, BoxedProviderStream, CustomVideoStreamType, PendingProviderReason, PlaybackLeaseRef,
             ProviderAllocation, ProviderConfig, ProviderStreamCustomReason, ProviderStreamFactoryOptions,
-            ProviderStreamInfo, ProviderStreamState, SharedStreamCtx, SharedStreamManager, StreamAdmissionError,
-            StreamDetails, StreamError, StreamingStrategy, ThrottledStream, UserApiRequest, UserSession,
+            ProviderStreamInfo, ProviderStreamOpenLifecycle, ProviderStreamState, SharedStreamCtx, SharedStreamManager,
+            StreamAdmissionError, StreamDetails, StreamError, StreamingStrategy, ThrottledStream, UserApiRequest,
+            UserSession,
         },
     },
     auth::Fingerprint,
@@ -189,7 +190,11 @@ pub(crate) fn admission_failure_response(
 /// players receive an unambiguous error instead of an empty success body.
 fn stream_admission_rejected_response(error: StreamAdmissionError, username: &str) -> axum::response::Response {
     error!("Stream admission rejected for user {username}: {error:?}");
-    StatusCode::SERVICE_UNAVAILABLE.into_response()
+    axum::response::Response::builder()
+        .status(StatusCode::SERVICE_UNAVAILABLE)
+        .header("x-tuliprox-rejection", "admission_rejected")
+        .body(axum::body::Body::empty())
+        .unwrap_or_else(|_| StatusCode::SERVICE_UNAVAILABLE.into_response())
 }
 
 #[macro_export]
@@ -1156,7 +1161,7 @@ fn create_unmapped_provider_stream(app_config: &AppConfig) -> ProviderStreamStat
     }
 }
 
-fn acquire_stream_provider_handle(
+async fn acquire_stream_provider_handle(
     app_state: &Arc<AppState>,
     input: &ConfigInput,
     fingerprint: &Fingerprint,
@@ -1167,14 +1172,18 @@ fn acquire_stream_provider_handle(
     match options.force_provider {
         Some(provider) => {
             // First try to stay on the exact pinned provider account without over-allocating.
-            if let Some(handle) = app_state.active_provider.acquire_exact_connection_with_lease_for_session(
-                provider,
-                &fingerprint.addr,
-                options.allow_provider_grace,
-                options.user_priority,
-                options.connection_kind,
-                lease,
-            ) {
+            if let Some(handle) = app_state
+                .active_provider
+                .acquire_exact_connection_with_lease_for_session_await(
+                    provider,
+                    &fingerprint.addr,
+                    options.allow_provider_grace,
+                    options.user_priority,
+                    options.connection_kind,
+                    lease,
+                )
+                .await
+            {
                 Some(managed(handle))
             } else if options.allow_forced_provider_fallback {
                 debug_if_enabled!(
@@ -1184,7 +1193,7 @@ fn acquire_stream_provider_handle(
                 );
                 app_state
                     .active_provider
-                    .acquire_connection_with_lease_for_session(
+                    .acquire_connection_with_lease_for_session_await(
                         &input.name,
                         &fingerprint.addr,
                         options.allow_provider_grace,
@@ -1192,6 +1201,7 @@ fn acquire_stream_provider_handle(
                         options.connection_kind,
                         lease,
                     )
+                    .await
                     .map(managed)
             } else {
                 debug_if_enabled!(
@@ -1204,7 +1214,7 @@ fn acquire_stream_provider_handle(
         }
         None => app_state
             .active_provider
-            .acquire_connection_with_lease_for_session(
+            .acquire_connection_with_lease_for_session_await(
                 &input.name,
                 &fingerprint.addr,
                 options.allow_provider_grace,
@@ -1212,6 +1222,7 @@ fn acquire_stream_provider_handle(
                 options.connection_kind,
                 lease,
             )
+            .await
             .map(managed),
     }
 }
@@ -1269,7 +1280,7 @@ async fn resolve_streaming_strategy(
 ) -> StreamingStrategy {
     // allocate a provider connection
     let accept_requested_stream_url = options.accept_requested_stream_url || input.input_type.is_stalker();
-    let mut provider_connection_handle = acquire_stream_provider_handle(app_state, input, fingerprint, &options);
+    let mut provider_connection_handle = acquire_stream_provider_handle(app_state, input, fingerprint, &options).await;
 
     // panel_api provisioning/loading is handled later in the stream creation flow
 
@@ -1556,7 +1567,7 @@ async fn create_stream_response_details(
 
     match streaming_strategy.provider_stream_state {
         // custom stream means we display our own stream like connection exhausted, channel-unavailable...
-        ProviderStreamState::Custom { response: provider_stream, .. } => {
+        ProviderStreamState::Custom { response: provider_stream, reason } => {
             let (stream, stream_info) = provider_stream;
             // When allocation is exhausted or no connection was acquired, guard_provider_name is None.
             // Use input.name as fallback so the provider field is never empty.
@@ -1577,6 +1588,7 @@ async fn create_stream_response_details(
                 provider_handle: streaming_strategy.provider_handle.take(),
                 content_representation,
                 grace_resolution_context,
+                custom_reason: Some(reason),
             })
         }
         ProviderStreamState::Available(_provider_name, request_url)
@@ -1654,10 +1666,15 @@ async fn create_stream_response_details(
                             }
 
                             let reconnect_flag = provider_stream_factory_options.get_reconnect_flag_clone();
-                            let provider_stream = match create_provider_stream(
+                            let lifecycle = streaming_strategy
+                                .provider_handle
+                                .as_ref()
+                                .and_then(ProviderStreamOpenLifecycle::from_managed);
+                            let provider_stream = match open_provider_stream_with_lifecycle(
                                 &app_state.provider_stream_ctx(),
                                 &app_state.http_client.load(),
                                 provider_stream_factory_options,
+                                lifecycle,
                             )
                             .await
                             {
@@ -1717,11 +1734,19 @@ async fn create_stream_response_details(
                                     }
                                     options.set_provider(input.get_resolve_provider(url.as_ref()));
                                     options.require_public_destination();
+                                    if let Some(m) = streaming_strategy.provider_handle.as_mut() {
+                                        let _ = m.renew_opening_tokens();
+                                    }
                                     let retry_reconnect_flag = options.get_reconnect_flag_clone();
-                                    let retried = create_provider_stream(
+                                    let retry_lifecycle = streaming_strategy
+                                        .provider_handle
+                                        .as_ref()
+                                        .and_then(ProviderStreamOpenLifecycle::from_managed);
+                                    let retried = open_provider_stream_with_lifecycle(
                                         &app_state.provider_stream_ctx(),
                                         &app_state.http_client.load(),
                                         options,
+                                        retry_lifecycle,
                                     )
                                     .await;
                                     if let Some(response) = retried {
@@ -1790,6 +1815,7 @@ async fn create_stream_response_details(
                 provider_handle,
                 content_representation,
                 grace_resolution_context,
+                custom_reason: None,
             })
         }
     }
@@ -2086,7 +2112,7 @@ pub async fn force_provider_stream_response(
             sanitize_sensitive_info(&user_session.token),
             sanitize_sensitive_info(&fingerprint.addr.to_string())
         );
-        cleanup_forced_reopen_addrs(app_state, &user_session.token, &cleanup_addrs);
+        cleanup_forced_reopen_addrs(app_state, &user_session.token, &cleanup_addrs).await;
     }
 
     // Provider-affine playback must stay on the same provider account across seeks/range reconnects.
@@ -2742,6 +2768,24 @@ pub(crate) async fn stream_response(
             activation.placeholder_transition_version.is_some(),
         )
         .await;
+    if stream_details.custom_reason == Some(ProviderStreamCustomReason::ProviderExhausted) {
+        record_connect_failed_attempt(ConnectFailedAttempt {
+            app_state,
+            fingerprint,
+            user,
+            stream_channel,
+            provider_name: stream_details.provider_name.unwrap_or_else(|| input.name.clone()),
+            req_headers,
+            reason: ConnectFailureReason::ProviderConnectionsExhausted,
+            failure_stage: FailureStage::Admission,
+        });
+        return create_custom_video_stream_response(
+            &app_state.provider_stream_ctx(),
+            &fingerprint.addr,
+            CustomVideoStreamType::ProviderConnectionsExhausted,
+        )
+        .into_response();
+    }
     no_custom_video_fallback_status(&app_state.app_config).into_response()
 }
 
@@ -2991,8 +3035,8 @@ pub(crate) fn get_hls_session_ttl_secs(app_state: &Arc<AppState>) -> u64 {
     get_stream_config_u64(app_state, |stream| stream.hls_session_ttl_secs, default_hls_session_ttl_secs())
 }
 
-fn cleanup_forced_reopen_addrs(app_state: &Arc<AppState>, session_owner: &str, cleanup_addrs: &[SocketAddr]) {
-    app_state.active_provider.release_playback_connections(session_owner, cleanup_addrs);
+async fn cleanup_forced_reopen_addrs(app_state: &Arc<AppState>, session_owner: &str, cleanup_addrs: &[SocketAddr]) {
+    app_state.active_provider.release_playback_connections_await(session_owner, cleanup_addrs).await;
 }
 
 pub(crate) fn get_catchup_session_ttl_secs(app_state: &Arc<AppState>) -> u64 {
