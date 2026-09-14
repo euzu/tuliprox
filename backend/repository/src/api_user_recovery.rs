@@ -571,6 +571,11 @@ impl ApiUserRepository {
         let _ = self.journal.checkpoint_if_needed()?;
         Ok(())
     }
+
+    #[cfg(test)]
+    pub(crate) fn inject_fault(&mut self, point: Option<tuliprox_btree::RecoveryFaultPoint>) {
+        self.journal.inject_fault(point);
+    }
 }
 
 #[cfg(test)]
@@ -1328,6 +1333,136 @@ mod future_chain {
             RecoveryPolicy::default(),
         );
         assert!(result.is_err(), "a generation from a future schema must be refused");
+        Ok(())
+    }
+}
+
+/// What a half-finished adoption leaves behind.
+///
+/// Adopting the User API database is a staged operation, and every stage can
+/// fail. The requirement is the same at each one: whatever was already stored
+/// must still be there afterwards. A failure that loses the previous contents
+/// is worse than no adoption at all.
+#[cfg(test)]
+mod staged_adoption {
+    use super::ApiUserRepository;
+    use crate::user_repository::StoredProxyUserCredentials;
+    use std::{io, path::Path};
+    use tempfile::tempdir;
+    use tuliprox_btree::RecoveryFaultPoint;
+
+    fn db_path(root: &Path) -> std::path::PathBuf { root.join("api_user.db") }
+
+    fn user(username: &str) -> (String, StoredProxyUserCredentials) {
+        let mut stored = super::matrix::current_credentials();
+        stored.username = username.to_string();
+        (username.to_string(), stored)
+    }
+
+    fn seeded(root: &Path) -> io::Result<()> {
+        let (mut repository, _) = ApiUserRepository::open(&db_path(root), root)?;
+        repository.commit(vec![user("first")])
+    }
+
+    /// Every fault point must leave a coherent stored set behind.
+    ///
+    /// Not "the write never happened": once a journal record reaches the file
+    /// it may legitimately replay on reopen, so some of these fault points
+    /// leave the new user in place. The invariant that matters is that the
+    /// result is always exactly one of the two states, never empty and never
+    /// a mixture.
+    #[test]
+    fn a_failed_commit_always_leaves_a_coherent_set() -> io::Result<()> {
+        let faults = [
+            RecoveryFaultPoint::BeforeJournalAppend,
+            RecoveryFaultPoint::DuringJournalAppend,
+            RecoveryFaultPoint::BeforeJournalSync,
+            RecoveryFaultPoint::DuringDatabaseBatch,
+            RecoveryFaultPoint::DuringDatabaseCommit,
+        ];
+
+        for fault in faults {
+            let dir = tempdir()?;
+            seeded(dir.path())?;
+
+            {
+                let (mut repository, _) = ApiUserRepository::open(&db_path(dir.path()), dir.path())?;
+                repository.inject_fault(Some(fault));
+                assert!(
+                    repository.commit(vec![user("second")]).is_err(),
+                    "{fault:?}: the commit must fail with a fault injected"
+                );
+            }
+
+            // Reopening is the operator's next move after a crash.
+            let (mut repository, _) = ApiUserRepository::open(&db_path(dir.path()), dir.path())?;
+            let users = repository.load()?;
+            assert_eq!(users.len(), 1, "{fault:?}: the stored set must hold exactly one user, got {users:?}");
+            assert!(
+                users[0].0 == "first" || users[0].0 == "second",
+                "{fault:?}: the stored user is neither of the two coherent states: {}",
+                users[0].0
+            );
+        }
+        Ok(())
+    }
+
+    /// The two points before anything durable is written must not apply.
+    #[test]
+    fn a_fault_before_the_journal_is_written_does_not_apply() -> io::Result<()> {
+        for fault in [RecoveryFaultPoint::BeforeJournalAppend, RecoveryFaultPoint::DuringJournalAppend] {
+            let dir = tempdir()?;
+            seeded(dir.path())?;
+
+            {
+                let (mut repository, _) = ApiUserRepository::open(&db_path(dir.path()), dir.path())?;
+                repository.inject_fault(Some(fault));
+                assert!(repository.commit(vec![user("second")]).is_err());
+            }
+
+            let (mut repository, _) = ApiUserRepository::open(&db_path(dir.path()), dir.path())?;
+            let users = repository.load()?;
+            assert_eq!(users[0].0, "first", "{fault:?}: a write that never reached the journal was applied");
+        }
+        Ok(())
+    }
+
+    /// A fault after the journal record is durable is a committed write, so
+    /// reopening must show it rather than lose it.
+    #[test]
+    fn a_fault_after_the_journal_is_durable_still_commits() -> io::Result<()> {
+        let dir = tempdir()?;
+        seeded(dir.path())?;
+
+        {
+            let (mut repository, _) = ApiUserRepository::open(&db_path(dir.path()), dir.path())?;
+            repository.inject_fault(Some(RecoveryFaultPoint::AfterJournalSync));
+            let _ = repository.commit(vec![user("second")]);
+        }
+
+        let (mut repository, _) = ApiUserRepository::open(&db_path(dir.path()), dir.path())?;
+        let users = repository.load()?;
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].0, "second", "a durable journal record must survive the reopen");
+        Ok(())
+    }
+
+    /// A repository that failed mid-write refuses further writes until it is
+    /// reopened, rather than continuing from an uncertain state.
+    #[test]
+    fn a_failed_repository_refuses_further_writes_until_reopened() -> io::Result<()> {
+        let dir = tempdir()?;
+        seeded(dir.path())?;
+
+        let (mut repository, _) = ApiUserRepository::open(&db_path(dir.path()), dir.path())?;
+        repository.inject_fault(Some(RecoveryFaultPoint::DuringJournalAppend));
+        assert!(repository.commit(vec![user("second")]).is_err());
+
+        repository.inject_fault(None);
+        assert!(
+            repository.commit(vec![user("third")]).is_err(),
+            "a repository that failed mid-write must not accept another write"
+        );
         Ok(())
     }
 }
