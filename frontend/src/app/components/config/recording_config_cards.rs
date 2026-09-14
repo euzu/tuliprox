@@ -691,6 +691,26 @@ mod tests {
         RecordingQuotaConfigDto, RecordingRetentionConfigDto,
     };
     use std::collections::HashMap;
+    use yew::Reducible;
+
+    #[test]
+    fn absorbing_a_child_edit_keeps_the_form_modified() {
+        // The recording form is split across two components, and the outer
+        // one takes the inner one's whole DTO when it changes. Doing that
+        // with `SetAll` marks the form clean, so a user's edit inside the
+        // cards never reaches the save button.
+        let state = std::rc::Rc::new(RecordingConfigFormState { form: RecordingConfigDto::default(), modified: false });
+        let mut edited = RecordingConfigDto::default();
+        edited.priority = 9;
+
+        let after_reload = state.clone().reduce(RecordingConfigFormAction::SetAll(edited.clone()));
+        assert!(!after_reload.modified(), "a reload is not an edit");
+
+        let after_edit = state.reduce(RecordingConfigFormAction::SetAllEdited(edited));
+
+        assert!(after_edit.modified(), "an edit that crossed a component boundary is still an edit");
+        assert_eq!(after_edit.form.priority, 9);
+    }
 
     pub(super) fn populated_recording() -> RecordingConfigDto {
         RecordingConfigDto {

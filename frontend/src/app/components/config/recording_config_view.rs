@@ -107,7 +107,16 @@ pub fn RecordingConfigView() -> Html {
     };
     let handle_recording = {
         let state = state.clone();
-        Callback::from(move |(_, recording)| state.dispatch(RecordingConfigFormAction::SetAll(recording)))
+        Callback::from(move |(modified, recording)| {
+            // The cards own several of this form's fields. Absorbing their
+            // edit with `SetAll` would clear `modified` and the change
+            // would never reach the save button.
+            state.dispatch(if modified {
+                RecordingConfigFormAction::SetAllEdited(recording)
+            } else {
+                RecordingConfigFormAction::SetAll(recording)
+            });
+        })
     };
     let transfer_view = html! {
         <>
