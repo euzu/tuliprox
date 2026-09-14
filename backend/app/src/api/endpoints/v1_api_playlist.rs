@@ -68,6 +68,8 @@ use std::{path::Path, str::FromStr, sync::Arc};
 use tokio_stream::StreamExt;
 use url::Url;
 
+const PLAYLIST_UPDATE_STATUS_READ_CONCURRENCY: usize = 8;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ManualUpdateEnqueueError {
     Busy,
@@ -635,24 +637,27 @@ async fn playlist_update_status(
 ) -> Result<axum::Json<PlaylistUpdateStatusDto>, axum::http::StatusCode> {
     let storage_dir = app_state.app_config.config.load().storage_dir.clone();
     let inputs = app_state.app_config.sources.load().inputs.clone();
-    let status_reads = futures::stream::iter(inputs.clone().into_iter().map(|input| {
+    let status_reads = futures::stream::iter(inputs.into_iter().map(|input| {
         let storage_dir = storage_dir.clone();
         let input_name = input.name.clone();
         async move {
             let storage_path =
                 crate::processing::input_cache::resolve_input_storage_path(&storage_dir, &input_name).await;
-            read_playlist_update_input_status(move || crate::processing::input_cache::load_input_status(&storage_path))
-                .await
+            let input_status = read_playlist_update_input_status(move || {
+                crate::processing::input_cache::load_input_status(&storage_path)
+            })
+            .await?;
+            Ok::<_, axum::http::StatusCode>((input, input_status))
         }
     }));
     let status_reads = {
         use futures::StreamExt as _;
-        status_reads.buffered(8)
+        status_reads.buffered(PLAYLIST_UPDATE_STATUS_READ_CONCURRENCY)
     };
     let input_statuses: Vec<_> = futures::StreamExt::collect(status_reads).await;
     let input_statuses = input_statuses.into_iter().collect::<Result<Vec<_>, _>>()?;
-    let mut statuses = Vec::with_capacity(inputs.len());
-    for (input, input_status) in inputs.into_iter().zip(input_statuses) {
+    let mut statuses = Vec::with_capacity(input_statuses.len());
+    for (input, input_status) in input_statuses {
         let cluster_based = input.input_type.is_xtream() || input.input_type.is_stalker();
         let last_update =
             input_status.clusters.values().map(|cluster| cluster.timestamp).filter(|timestamp| *timestamp > 0).max();
