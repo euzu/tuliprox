@@ -253,7 +253,7 @@ fn format_quota_pool(used_bytes: u64, limit_bytes: Option<u64>) -> String {
 /// regress the list to a state the server has already moved past. `None`
 /// means nothing has been rendered yet, or a reconnect has just discarded
 /// what was.
-fn should_apply_snapshot(seen: Option<u64>, incoming: u64) -> bool { !seen.is_some_and(|last| incoming <= last) }
+fn should_apply_snapshot(seen: Option<u64>, incoming: u64) -> bool { seen.is_none_or(|last| incoming > last) }
 
 #[function_component(RecordingLibraryView)]
 pub fn recording_library_view() -> Html {

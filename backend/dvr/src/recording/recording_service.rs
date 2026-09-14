@@ -305,6 +305,59 @@ impl RecordingService {
         self.create_recording_idempotent(claims, input, None).await
     }
 
+    /// Builds the task a live request describes, and the space it reserves.
+    ///
+    /// Split out of `create_recording_idempotent` purely for length: this is
+    /// the request-to-task translation, with no admission decisions in it.
+    fn build_live_recording(
+        owner_id: &UserId,
+        input: &CreateRecordingInput,
+        recording_cfg: &tuliprox_core::model::RecordingConfig,
+        window: &EffectiveRecordingWindow,
+        url: &str,
+        duration_secs: u64,
+    ) -> Result<(RecordingTask, u64), ServiceError> {
+        let filename = render_filename_preview(input);
+        let input_name: Option<Arc<str>> =
+            (!input.source.input_name.trim().is_empty()).then(|| Arc::from(input.source.input_name.as_str()));
+        let source = RecordingSource::new(
+            input.source.target_id.clone(),
+            input.source.virtual_id.clone(),
+            input.source.input_name.clone(),
+        )
+        .with_cluster(input.source.cluster);
+        let mut meta = RecordingMetadata::new_live(
+            RecordingOwner::User(owner_id.clone()),
+            input.visibility,
+            source,
+            input.program_start,
+            input.program_end,
+            input.pre_roll_secs,
+            input.post_roll_secs,
+        );
+        meta.scheduled_start = Some(window.scheduled_start);
+        meta.scheduled_end = Some(window.scheduled_end);
+        meta.channel_id.clone_from(&input.channel_id);
+        meta.channel_name.clone_from(&input.channel_name);
+        meta.program_title = Some(input.program_title.clone());
+        meta.provenance = input.provenance.clone();
+        meta.epg.clone_from(&input.epg);
+        let (reserved_bytes, _) =
+            recording_quota::estimate_reservation(duration_secs, 0, recording_cfg.fallback_bytes_per_minute);
+        meta.reserved_bytes = reserved_bytes;
+        let recording = RecordingTask::new(
+            RecordingKind::Live,
+            url,
+            &filename,
+            recording_cfg,
+            input_name,
+            recording_cfg.priority,
+            meta,
+        )
+        .ok_or(ServiceError::InvalidSource)?;
+        Ok((recording, reserved_bytes))
+    }
+
     /// `create_recording`, honouring an `Idempotency-Key`.
     ///
     /// A replay of an accepted request is answered from the stored record
@@ -361,38 +414,8 @@ impl RecordingService {
         authorize_create_recording(claims, &owner_id, input.visibility)?;
 
         let duration_secs = window.remaining_duration_secs;
-        let priority = recording_cfg.priority;
-        let filename = render_filename_preview(input);
-        let input_name: Option<Arc<str>> =
-            (!input.source.input_name.trim().is_empty()).then(|| Arc::from(input.source.input_name.as_str()));
-        let source = RecordingSource::new(
-            input.source.target_id.clone(),
-            input.source.virtual_id.clone(),
-            input.source.input_name.clone(),
-        )
-        .with_cluster(input.source.cluster);
-        let mut meta = RecordingMetadata::new_live(
-            RecordingOwner::User(owner_id.clone()),
-            input.visibility,
-            source,
-            input.program_start,
-            input.program_end,
-            input.pre_roll_secs,
-            input.post_roll_secs,
-        );
-        meta.scheduled_start = Some(window.scheduled_start);
-        meta.scheduled_end = Some(window.scheduled_end);
-        meta.channel_id.clone_from(&input.channel_id);
-        meta.channel_name.clone_from(&input.channel_name);
-        meta.program_title = Some(input.program_title.clone());
-        meta.provenance = input.provenance.clone();
-        meta.epg.clone_from(&input.epg);
-        let fallback_bytes_per_minute = recording_cfg.fallback_bytes_per_minute;
-        let (reserved_bytes, _) = recording_quota::estimate_reservation(duration_secs, 0, fallback_bytes_per_minute);
-        meta.reserved_bytes = reserved_bytes;
-        let recording =
-            RecordingTask::new(RecordingKind::Live, &url, &filename, recording_cfg, input_name, priority, meta)
-                .ok_or(ServiceError::InvalidSource)?;
+        let (recording, reserved_bytes) =
+            Self::build_live_recording(&owner_id, input, recording_cfg, &window, &url, duration_secs)?;
         let mut persisted = RecordingQueue::to_persisted(&recording);
         let view_task = recording.clone();
         let quota_limits = quota_limits_from_config(recording_cfg.quota.as_ref());

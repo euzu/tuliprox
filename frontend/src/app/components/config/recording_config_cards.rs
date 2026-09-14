@@ -700,8 +700,7 @@ mod tests {
         // with `SetAll` marks the form clean, so a user's edit inside the
         // cards never reaches the save button.
         let state = std::rc::Rc::new(RecordingConfigFormState { form: RecordingConfigDto::default(), modified: false });
-        let mut edited = RecordingConfigDto::default();
-        edited.priority = 9;
+        let edited = RecordingConfigDto { priority: 9, ..RecordingConfigDto::default() };
 
         let after_reload = state.clone().reduce(RecordingConfigFormAction::SetAll(edited.clone()));
         assert!(!after_reload.modified(), "a reload is not an edit");
