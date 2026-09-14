@@ -771,6 +771,12 @@ mod matrix {
         }
     }
 
+    /// Shared with the future-chain rehearsal, which needs a fully populated
+    /// current record without a `Default` impl existing for one.
+    pub(super) fn current_credentials() -> crate::user_repository::StoredProxyUserCredentials {
+        crate::user_repository::StoredProxyUserCredentials::from(&super::ApiUserRecovery::from(&v7()))
+    }
+
     /// Writes the database the way the code at `container_version` would have.
     ///
     /// Container 1 is produced by writing a v2 file and patching the version
@@ -1097,6 +1103,231 @@ mod matrix {
             let rendered = format!("{error}");
             assert!(!rendered.contains(MARKER_PASSWORD), "a password reached an error: {rendered}");
         }
+        Ok(())
+    }
+}
+
+/// A rehearsal for the change this module exists to survive.
+///
+/// The normalized record is field-named so that a future change to the
+/// credential shape is a migration rather than a reinterpretation of bytes.
+/// Nothing proves that until a second version exists, so these simulate one:
+/// schemas at version 2 and 3 that rename and add fields, run against
+/// generations written at version 1 and 2.
+///
+/// This axis is unrelated to the legacy positional V1-V7 numbering.
+#[cfg(test)]
+mod future_chain {
+    use super::{ApiUserRecoverySchema, ApiUserRepository};
+    use crate::user_repository::StoredProxyUserCredentials;
+    use serde_json::Value;
+    use std::{io, path::Path};
+    use tempfile::tempdir;
+    use tuliprox_btree::{
+        BPlusTreeRecoveryJournal, RecoveryBatch, RecoveryOperation, RecoveryPaths, RecoveryPolicy, RecoverySchema,
+    };
+
+    const USERNAME: &str = "fixture-user";
+    const PASSWORD: &str = "not-a-real-password";
+
+    fn invalid(message: impl Into<String>) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, message.into()) }
+
+    /// What the record is expected to look like once it reaches version 3.
+    #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+    struct FutureApiUser {
+        username: String,
+        password: String,
+        /// Renamed from `plan` by the 2 -> 3 step.
+        plan_id: Option<String>,
+        /// Introduced by the 1 -> 2 step.
+        locale: Option<String>,
+    }
+
+    /// What a build at version 2 would have had: `plan` not yet renamed.
+    ///
+    /// Using the version 3 type here instead would decode a version 2 record
+    /// into a field that does not exist yet, silently dropping `plan` - which
+    /// is exactly the failure this rehearsal is meant to catch.
+    #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+    struct FutureApiUserV2 {
+        username: String,
+        password: String,
+        plan: Option<String>,
+        locale: Option<String>,
+    }
+
+    /// The 1 -> 2 step: a new field appears with a default.
+    fn step_one_to_two(mut value: Value) -> io::Result<Value> {
+        let object = value.as_object_mut().ok_or_else(|| invalid("recovery record is not an object"))?;
+        object.entry("locale").or_insert(Value::Null);
+        Ok(value)
+    }
+
+    /// The 2 -> 3 step: a field is renamed, which is exactly what positional
+    /// encoding could never survive.
+    fn step_two_to_three(mut value: Value) -> io::Result<Value> {
+        let object = value.as_object_mut().ok_or_else(|| invalid("recovery record is not an object"))?;
+        let plan = object.remove("plan").unwrap_or(Value::Null);
+        object.insert("plan_id".to_string(), plan);
+        Ok(value)
+    }
+
+    /// Shares `NAME` with the real schema so it reads the same generations.
+    struct SchemaV2;
+
+    impl RecoverySchema<String, FutureApiUserV2> for SchemaV2 {
+        const NAME: &'static str = "api_user";
+        const CURRENT_VERSION: u32 = 2;
+
+        fn encode_key(&self, key: &String) -> io::Result<Value> { Ok(Value::String(key.clone())) }
+
+        fn migrate_key_one(&self, _from: u32, key: Value) -> io::Result<Value> { Ok(key) }
+
+        fn decode_current_key(&self, key: Value) -> io::Result<String> {
+            key.as_str().map(str::to_owned).ok_or_else(|| invalid("key is not a string"))
+        }
+
+        fn encode_current(&self, value: &FutureApiUserV2) -> io::Result<Value> {
+            serde_json::to_value(value).map_err(|error| invalid(error.to_string()))
+        }
+
+        fn migrate_one(&self, from: u32, value: Value) -> io::Result<Value> {
+            match from {
+                1 => step_one_to_two(value),
+                other => Err(invalid(format!("no api user migration from version {other}"))),
+            }
+        }
+
+        fn decode_current(&self, value: Value) -> io::Result<FutureApiUserV2> {
+            serde_json::from_value(value).map_err(|error| invalid(error.to_string()))
+        }
+    }
+
+    struct SchemaV3;
+
+    impl RecoverySchema<String, FutureApiUser> for SchemaV3 {
+        const NAME: &'static str = "api_user";
+        const CURRENT_VERSION: u32 = 3;
+
+        fn encode_key(&self, key: &String) -> io::Result<Value> { Ok(Value::String(key.clone())) }
+
+        fn migrate_key_one(&self, _from: u32, key: Value) -> io::Result<Value> { Ok(key) }
+
+        fn decode_current_key(&self, key: Value) -> io::Result<String> {
+            key.as_str().map(str::to_owned).ok_or_else(|| invalid("key is not a string"))
+        }
+
+        fn encode_current(&self, value: &FutureApiUser) -> io::Result<Value> {
+            serde_json::to_value(value).map_err(|error| invalid(error.to_string()))
+        }
+
+        fn migrate_one(&self, from: u32, value: Value) -> io::Result<Value> {
+            match from {
+                1 => step_one_to_two(value),
+                2 => step_two_to_three(value),
+                other => Err(invalid(format!("no api user migration from version {other}"))),
+            }
+        }
+
+        fn decode_current(&self, value: Value) -> io::Result<FutureApiUser> {
+            serde_json::from_value(value).map_err(|error| invalid(error.to_string()))
+        }
+    }
+
+    type JournalV2 = BPlusTreeRecoveryJournal<String, FutureApiUserV2, SchemaV2>;
+    type JournalV3 = BPlusTreeRecoveryJournal<String, FutureApiUser, SchemaV3>;
+
+    fn paths(root: &Path) -> RecoveryPaths {
+        RecoveryPaths { database: root.join("api_user.db"), directory: root.join("api_user_recovery") }
+    }
+
+    fn a_user() -> StoredProxyUserCredentials {
+        let mut user = super::matrix::current_credentials();
+        user.username = USERNAME.to_string();
+        user.password = PASSWORD.to_string();
+        user.plan = Some("fixture-plan".to_string());
+        user
+    }
+
+    /// Writes a version 1 generation using the real schema.
+    fn seed_version_one(root: &Path) -> io::Result<()> {
+        let (mut repository, _) = ApiUserRepository::open(&paths(root).database, root)?;
+        repository.commit(vec![(USERNAME.to_string(), a_user())])
+    }
+
+    /// The whole chain: a generation written at 1, read by a build at 3.
+    #[test]
+    fn recovery_v1_migrates_through_v2_to_v3() -> io::Result<()> {
+        let dir = tempdir()?;
+        seed_version_one(dir.path())?;
+
+        let (mut journal, _) = JournalV3::open(paths(dir.path()), SchemaV3, RecoveryPolicy::default())?;
+        let entries = journal.entries()?;
+
+        assert_eq!(entries.len(), 1);
+        let (key, user) = &entries[0];
+        assert_eq!(key, USERNAME);
+        assert_eq!(
+            user,
+            &FutureApiUser {
+                username: USERNAME.to_string(),
+                password: PASSWORD.to_string(),
+                // Carried across the rename rather than lost.
+                plan_id: Some("fixture-plan".to_string()),
+                locale: None,
+            }
+        );
+        Ok(())
+    }
+
+    /// The shorter hop, which must not depend on having gone through 1.
+    #[test]
+    fn recovery_v2_migrates_to_v3() -> io::Result<()> {
+        let dir = tempdir()?;
+        seed_version_one(dir.path())?;
+
+        // A build at version 2 reads the version 1 generation and writes it
+        // forward, leaving a genuine version 2 generation behind.
+        {
+            let (mut journal, _) = JournalV2::open(paths(dir.path()), SchemaV2, RecoveryPolicy::default())?;
+            let entries = journal.entries()?;
+            assert_eq!(entries[0].1.plan, Some("fixture-plan".to_string()), "version 2 still calls it `plan`");
+            let operations =
+                entries.into_iter().map(|(key, value)| RecoveryOperation::Upsert(key, value)).collect::<Vec<_>>();
+            let _ = journal.apply_batch(RecoveryBatch::new(operations))?;
+        }
+
+        let (mut journal, _) = JournalV3::open(paths(dir.path()), SchemaV3, RecoveryPolicy::default())?;
+        let entries = journal.entries()?;
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1.plan_id, Some("fixture-plan".to_string()));
+        assert_eq!(entries[0].1.password, PASSWORD);
+        Ok(())
+    }
+
+    /// A generation from a version this build has never heard of is refused,
+    /// not guessed at.
+    #[test]
+    fn a_generation_from_the_future_is_refused() -> io::Result<()> {
+        let dir = tempdir()?;
+        seed_version_one(dir.path())?;
+        {
+            let (mut journal, _) = JournalV3::open(paths(dir.path()), SchemaV3, RecoveryPolicy::default())?;
+            let entries = journal.entries()?;
+            let operations =
+                entries.into_iter().map(|(key, value)| RecoveryOperation::Upsert(key, value)).collect::<Vec<_>>();
+            let _ = journal.apply_batch(RecoveryBatch::new(operations))?;
+        }
+
+        // The original schema is at version 1 and must refuse a version 3
+        // generation rather than reinterpret it.
+        let result = BPlusTreeRecoveryJournal::<String, StoredProxyUserCredentials, ApiUserRecoverySchema>::open(
+            paths(dir.path()),
+            ApiUserRecoverySchema,
+            RecoveryPolicy::default(),
+        );
+        assert!(result.is_err(), "a generation from a future schema must be refused");
         Ok(())
     }
 }
