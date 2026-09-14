@@ -1003,4 +1003,100 @@ mod matrix {
     fn api_user_recovery_matrix_layouts_without_clusters_default_to_all() {
         assert_eq!(StoredApiUserV7::from_v2(&v2()).output_clusters, ClusterFlags::all());
     }
+
+    /// Legacy data reaches normalized recovery before anything can mutate it.
+    ///
+    /// Not because the importer exports on its way past, but structurally:
+    /// every mutation path opens the repository first, and opening a database
+    /// that has no history adopts it. So the normalized generation exists
+    /// before the first write, whatever that write turns out to be.
+    #[test]
+    fn api_user_recovery_matrix_legacy_data_is_normalized_before_any_mutation() -> io::Result<()> {
+        let dir = tempdir()?;
+        let db_path = dir.path().join(storage_const::API_USER_DB_FILE);
+        let guard_path = startup_migration::user_db_merge_guard_path(dir.path());
+        // A legacy container holding a layout four versions behind current.
+        write_value_version(&db_path, 2, 3)?;
+        assert!(startup_migration::migrate_user_db_schema(&db_path, &guard_path)?);
+
+        let (mut repository, report) = super::ApiUserRepository::open(&db_path, dir.path())?;
+        assert_eq!(
+            report.action,
+            tuliprox_btree::RecoveryOpenAction::Adopted,
+            "the first open of a migrated database must take it under management"
+        );
+        assert!(dir.path().join("api_user_recovery").is_dir(), "the generation must be on disk after open");
+
+        let users = repository.load()?;
+        assert_eq!(users.len(), 1, "the migrated user must be present in recovery");
+        let (key, user) = &users[0];
+        assert_eq!(key, FIXTURE_KEY);
+        assert_eq!(user.username, FIXTURE_KEY);
+        assert_eq!(user.password, "not-a-real-password");
+        assert_eq!(user.priority, Some(FIXTURE_PRIORITY));
+        assert_eq!(user.epg_request_timeshift.as_deref(), Some("+2"));
+        Ok(())
+    }
+
+    /// The normalized record survives a restart, which is what makes it a
+    /// migration target rather than a cache.
+    #[test]
+    fn api_user_recovery_matrix_the_normalized_generation_survives_reopen() -> io::Result<()> {
+        let dir = tempdir()?;
+        let db_path = dir.path().join(storage_const::API_USER_DB_FILE);
+        let guard_path = startup_migration::user_db_merge_guard_path(dir.path());
+        write_value_version(&db_path, 2, 3)?;
+        assert!(startup_migration::migrate_user_db_schema(&db_path, &guard_path)?);
+
+        let (_, first) = super::ApiUserRepository::open(&db_path, dir.path())?;
+        assert_eq!(first.action, tuliprox_btree::RecoveryOpenAction::Adopted);
+
+        let (mut repository, second) = super::ApiUserRepository::open(&db_path, dir.path())?;
+        assert_eq!(
+            second.action,
+            tuliprox_btree::RecoveryOpenAction::Opened,
+            "adoption happens once; later opens must find a tracked database"
+        );
+        assert_eq!(repository.load()?.len(), 1);
+        Ok(())
+    }
+
+    /// Nothing an operator or a log can see may carry a credential.
+    ///
+    /// Counts, revisions and schema versions are fine; the secret itself is
+    /// not. The fixture password is a marker string so a leak anywhere in a
+    /// rendered report or error is unambiguous.
+    #[test]
+    fn api_user_recovery_matrix_reports_and_errors_carry_no_secrets() -> io::Result<()> {
+        const MARKER_PASSWORD: &str = "LEAK-MARKER-PASSWORD";
+        const MARKER_TOKEN: &str = "LEAK-MARKER-TOKEN";
+
+        let dir = tempdir()?;
+        let db_path = dir.path().join(storage_const::API_USER_DB_FILE);
+        let mut value = v7();
+        value.password = MARKER_PASSWORD.to_string();
+        value.token = Some(MARKER_TOKEN.to_string());
+        write_container(&db_path, 3, value)?;
+
+        let (mut repository, report) = super::ApiUserRepository::open(&db_path, dir.path())?;
+        let rendered_report = format!("{report:?}");
+
+        // The record itself must still round-trip, or this test would pass by
+        // simply having lost the data.
+        let users = repository.load()?;
+        assert_eq!(users[0].1.password, MARKER_PASSWORD, "the credential must survive the round trip");
+
+        assert!(!rendered_report.contains(MARKER_PASSWORD), "a password reached a report: {rendered_report}");
+        assert!(!rendered_report.contains(MARKER_TOKEN), "a token reached a report: {rendered_report}");
+
+        // A refused open is the other surface an operator sees.
+        let corrupt_dir = tempdir()?;
+        let corrupt_db = corrupt_dir.path().join(storage_const::API_USER_DB_FILE);
+        std::fs::write(&corrupt_db, format!("not a b+tree {MARKER_PASSWORD}"))?;
+        if let Err(error) = super::ApiUserRepository::open(&corrupt_db, corrupt_dir.path()) {
+            let rendered = format!("{error}");
+            assert!(!rendered.contains(MARKER_PASSWORD), "a password reached an error: {rendered}");
+        }
+        Ok(())
+    }
 }
