@@ -4,6 +4,7 @@ mod target_id_mapping;
 // Both read repository storage directly, so they belong here rather than in
 // `utils`, which must not depend on this layer.
 mod alias_repository;
+mod api_user_recovery;
 mod db_viewer;
 mod epg_repository;
 mod geoip;
