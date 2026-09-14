@@ -34,7 +34,7 @@ use crate::{
         },
     },
     model::{AppConfig, Config, HdHomeRunFlags, Healthcheck, ProcessTargets, RateLimitConfig},
-    processing::processor::{exec_processing, ProcessingRun},
+    processing::processor::{exec_processing, next_playlist_update_run_order, ProcessingRun},
     repository::{get_geoip_path, GeoIp},
     utils::{exec_file_lock_prune, get_default_web_root_path},
     VERSION,
@@ -49,7 +49,7 @@ use dashmap::DashSet;
 use log::{debug, error, info, warn};
 use shared::{
     error::TuliproxError,
-    model::ServerLifecycleEvent,
+    model::{PlaylistUpdateState, PlaylistUpdateSummary, ServerLifecycleEvent},
     utils::{concat_path_leading_slash, sanitize_sensitive_info},
 };
 use std::{
@@ -471,15 +471,22 @@ async fn run_manual_update_worker(
 ) {
     while let Some(request) = rx.recv().await {
         let Some(permit) = app_state.update_guard.acquire_playlist_lock().await else {
+            app_state.event_manager.send_event(EventMessage::PlaylistUpdate(PlaylistUpdateSummary::for_run(
+                request.run_id,
+                next_playlist_update_run_order(),
+                PlaylistUpdateState::Failure,
+            )));
             break;
         };
         exec_processing(
-            ProcessingRun::new(
+            ProcessingRun::for_run(
+                request.run_id,
                 client.clone(),
                 Arc::clone(&app_state.app_config),
                 request.targets,
                 Arc::clone(&app_state.event_manager),
             )
+            .with_manual_input_update(request.input_action)
             .with_bootstrap({
                 let state = Arc::clone(&app_state);
                 move || {

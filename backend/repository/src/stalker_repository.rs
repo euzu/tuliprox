@@ -13,7 +13,7 @@
 //! takes a write lock for each file it removes.
 
 use crate::{
-    bplustree::{BPlusTree, BPlusTreeQuery, BPlusTreeUpdate, FlushPolicy},
+    bplustree::{BPlusTree, BPlusTreeError, BPlusTreeQuery, BPlusTreeUpdate, FlushPolicy},
     storage::ensure_input_storage_path,
     storage_const,
 };
@@ -28,6 +28,7 @@ use shared::{
 };
 use std::{
     collections::HashSet,
+    io::ErrorKind,
     ops::Bound,
     path::{Path, PathBuf},
     sync::Arc,
@@ -257,6 +258,33 @@ pub async fn load_stalker_items_at(
     file_path: &Path,
 ) -> Result<Vec<StalkerPlaylistItem>, TuliproxError> {
     load_stalker_items_after(app_config, file_path, None, usize::MAX).await
+}
+
+/// Counts one Stalker generation file without materializing its records.
+///
+/// The read lock is acquired before opening the tree, so a missing file is a
+/// stable `None` result rather than an existence-check race.
+pub async fn count_stalker_items_at(
+    app_config: &Arc<AppConfig>,
+    file_path: &Path,
+) -> Result<Option<usize>, TuliproxError> {
+    let file_lock = app_config.file_locks.read_lock(file_path).await;
+    let blocking_path = file_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let _guard = file_lock;
+        let mut query = match BPlusTreeQuery::<u32, StalkerPlaylistItem>::try_new(&blocking_path) {
+            Ok(query) => query,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(repo_err!("open {} failed: {err}", blocking_path.display())),
+        };
+        query
+            .len()
+            .map(Some)
+            .map_err(BPlusTreeError::to_io)
+            .map_err(|err| repo_err!("count {} failed: {err}", blocking_path.display()))
+    })
+    .await
+    .map_err(|err| repo_err!("blocking task join error: {err}"))?
 }
 
 pub async fn prepare_stalker_episode_series_at(

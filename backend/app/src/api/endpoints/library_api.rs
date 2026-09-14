@@ -53,7 +53,7 @@ async fn scan_library(
         permit,
     );
 
-    (axum::http::StatusCode::ACCEPTED, axum::Json(OperationRunAccepted {})).into_response()
+    (axum::http::StatusCode::ACCEPTED, axum::Json(OperationRunAccepted::default())).into_response()
 }
 
 /// Gets Library status
@@ -61,42 +61,32 @@ async fn get_library_status(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> axum::response::Response {
     let config_snapshot = app_state.app_config.config.load();
-    if let Some(config) = config_snapshot.library.as_ref() {
-        if config.enabled {
-            let client = app_state.http_client.load_full().as_ref().clone();
-            // Get statistics from processor
-            let processor = LibraryProcessor::new(
-                config.clone(),
-                config_snapshot.metadata_update.as_ref(),
-                client,
-                &config_snapshot.storage_dir,
-            );
-            let entries = processor.get_all_entries().await;
-
-            let movies = entries.iter().filter(|e| e.metadata.is_movie()).count();
-            let series = entries.iter().filter(|e| e.metadata.is_series()).count();
-
-            let response = LibraryStatus {
-                enabled: true,
-                total_items: entries.len(),
-                movies,
-                series,
-                path: Some(
-                    resolve_metadata_storage_path(
-                        config_snapshot.metadata_update.as_ref(),
-                        &config_snapshot.storage_dir,
-                    )
-                    .to_string_lossy()
-                    .to_string(),
-                ),
-            };
-
-            return axum::Json(response).into_response();
+    match read_library_status(&config_snapshot, app_state.http_client.load_full().as_ref().clone()).await {
+        Ok(status) => axum::Json(status).into_response(),
+        Err(err) => {
+            log::error!("Failed to read Library catalog status: {err}");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
+}
 
-    let response = LibraryStatus::default();
-    axum::Json(response).into_response()
+// Both counts and the exposed path refer to the scanner's canonical catalog.
+async fn read_library_status(
+    config: &tuliprox_core::model::Config,
+    client: reqwest::Client,
+) -> std::io::Result<LibraryStatus> {
+    let Some(library) = config.library.as_ref().filter(|library| library.enabled) else {
+        return Ok(LibraryStatus::default());
+    };
+    let processor =
+        LibraryProcessor::new(library.clone(), config.metadata_update.as_ref(), client, &config.storage_dir);
+    let mut status = processor.catalog_status().await?;
+    status.path = Some(
+        resolve_metadata_storage_path(config.metadata_update.as_ref(), &config.storage_dir)
+            .to_string_lossy()
+            .into_owned(),
+    );
+    Ok(status)
 }
 
 async fn get_thumbnail(
@@ -131,6 +121,57 @@ async fn get_thumbnail(
 
     let etag = format!("\"{id}\"");
     serve_thumbnail_hash(&storage, &id, etag, &headers).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn library_status_read_uses_canonical_catalog_with_episodes_without_a_new_scan() {
+        use crate::library::{EpisodeMetadata, MediaMetadata, MetadataCacheEntry, SeriesMetadata};
+        use shared::model::LibraryConfigDto;
+        use tuliprox_core::model::{Config, LibraryConfig, MetadataUpdateConfig};
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config {
+            storage_dir: temp.path().to_string_lossy().into_owned(),
+            library: Some(LibraryConfig::from(&LibraryConfigDto { enabled: true, ..LibraryConfigDto::default() })),
+            metadata_update: Some(MetadataUpdateConfig {
+                cache_path: "canonical".into(),
+                ..MetadataUpdateConfig::default()
+            }),
+            ..Config::default()
+        };
+        let storage =
+            MetadataStorage::new(resolve_metadata_storage_path(config.metadata_update.as_ref(), &config.storage_dir));
+        storage.initialize().await.unwrap();
+        storage
+            .store(&MetadataCacheEntry::new(
+                "/not-scanned".into(),
+                0,
+                0,
+                MediaMetadata::Series(SeriesMetadata {
+                    episodes: Some(vec![EpisodeMetadata::default(); 3]),
+                    number_of_episodes: 999,
+                    ..SeriesMetadata::default()
+                }),
+            ))
+            .await
+            .unwrap();
+        let status = read_library_status(&config, reqwest::Client::new()).await.unwrap();
+        assert_eq!((status.movies, status.series, status.episodes, status.total_items), (0, 1, 3, 1));
+        assert_eq!(status.path.as_deref(), temp.path().join("canonical").to_str());
+        let response = axum::Json(status.clone()).into_response();
+        let json: serde_json::Value =
+            serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(json["episodes"], 3);
+        assert_eq!(read_library_status(&config, reqwest::Client::new()).await.unwrap(), status);
+        assert!(!json.to_string().contains("files_scanned"));
+        assert_eq!(
+            read_library_status(&Config::default(), reqwest::Client::new()).await.unwrap(),
+            LibraryStatus::default()
+        );
+    }
 }
 
 async fn serve_thumbnail_hash(

@@ -9,7 +9,7 @@ pub struct LibraryScanRequest {
 }
 
 // Scan result with statistics
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct LibraryScanResult {
     pub files_scanned: usize,
     pub groups_scanned: usize,
@@ -33,11 +33,14 @@ pub struct LibraryScanSummary {
     pub result: Option<LibraryScanResult>,
 }
 
-#[derive(Default, Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Default, Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct LibraryStatus {
     pub enabled: bool,
     pub total_items: usize,
     pub movies: usize,
     pub series: usize,
+    /// Stored episode records; `total_items` still counts movie/series catalog entries.
+    #[serde(default)]
+    pub episodes: usize,
     pub path: Option<String>,
 }

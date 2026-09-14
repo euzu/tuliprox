@@ -13,8 +13,9 @@ use log::{error, trace};
 use shared::{
     defaults::default_kick_secs,
     model::{
-        Claims, Permission, ProtocolHandler, ProtocolHandlerMemory, ProtocolMessage, RoleSet, UserCommand, UserId,
-        UserRole, WsCloseCode, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, PROTOCOL_VERSION, TOKEN_NO_AUTH,
+        Claims, Permission, PlaylistUpdateRunStateEvent, ProtocolHandler, ProtocolHandlerMemory, ProtocolMessage,
+        RoleSet, UserCommand, UserId, UserRole, WsCloseCode, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL,
+        PROTOCOL_VERSION, TOKEN_NO_AUTH,
     },
     utils::concat_path_leading_slash,
 };
@@ -444,11 +445,18 @@ fn to_protocol_message(event: EventMessage) -> Option<(ProtocolMessage, &'static
         EventMessage::ConfigChange(config) => {
             (ProtocolMessage::ConfigChangeResponse(config), "Configuration files change event")
         }
-        // The wire carries the outcome only. The run summary rides along on
+        // The wire carries the correlated outcome only. Statistics stay on
         // the bus for notifications and plugins; the Web UI re-fetches its
         // own view rather than reading statistics off this frame.
         EventMessage::PlaylistUpdate(summary) => {
-            (ProtocolMessage::PlaylistUpdateResponse(summary.state), "Playlist update event")
+            (
+                ProtocolMessage::PlaylistUpdateResponse(PlaylistUpdateRunStateEvent {
+                    run_id: summary.run_id,
+                    execution_order: summary.execution_order,
+                    state: summary.state,
+                }),
+                "Playlist update event",
+            )
         }
         EventMessage::PlaylistUpdateProgress(progress) => {
             (ProtocolMessage::PlaylistUpdateProgressResponse(progress), "Playlist update progress event")
@@ -661,7 +669,8 @@ mod tests {
         AuthAuditEvent, AuthAuditOutcome, Claims, ConfigReloadFailure, DiskAlert, DiskAlertLevel, DownloadsDelta,
         DownloadsResponse, FileDownloadDto, LibraryScanProgressEvent, LibraryScanSummary, LibraryScanSummaryStatus,
         MetadataUpdateFailure, MsgKind, Permission, PlaylistGroupsChanged, PlaylistUpdateProgressEvent,
-        ProtocolHandler, ProtocolHandlerMemory, ProviderAccountEvent, ProviderAccountState, ProviderFailureKind,
+        PlaylistUpdateRunId, PlaylistUpdateRunOrder, PlaylistUpdateState, PlaylistUpdateSummary, ProtocolHandler,
+        ProtocolHandlerMemory, ProtocolMessage, ProviderAccountEvent, ProviderAccountState, ProviderFailureKind,
         ProviderFetchFailure, ProviderPoolExhausted, ProviderPriorityFallback, RecordingLifecycleMessage, RoleSet,
         TaskKindDto, TaskPriorityDto, TransferStatusDto, UserId, UserRole, WatchChanges, WatchDisabled,
         WatchDisabledReason, WatchUnmatched, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, PROTOCOL_VERSION,
@@ -739,6 +748,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn playlist_update_run_websocket_terminal_keeps_the_processing_identity() {
+        let run_id = PlaylistUpdateRunId::from("websocket-run");
+        let execution_order = PlaylistUpdateRunOrder::from(29);
+        let mapped = to_protocol_message(EventMessage::PlaylistUpdate(PlaylistUpdateSummary::for_run(
+            run_id.clone(),
+            execution_order,
+            PlaylistUpdateState::Partial,
+        )))
+        .expect("playlist update event is wire mapped");
+
+        let ProtocolMessage::PlaylistUpdateResponse(terminal) = mapped.0 else {
+            panic!("expected playlist update terminal response");
+        };
+        assert_eq!(terminal.run_id, Some(run_id));
+        assert_eq!(terminal.execution_order, Some(execution_order));
+        assert_eq!(terminal.state, PlaylistUpdateState::Partial);
+    }
+
     fn provider_fetch_failure() -> ProviderFetchFailure {
         ProviderFetchFailure {
             input: "i".into(),
@@ -787,10 +815,7 @@ mod tests {
             EventMessage::ActiveProvider("p".into(), 1),
             EventMessage::ConfigChange(ConfigType::Config),
             EventMessage::PlaylistUpdate(PlaylistUpdateSummary::state_only(PlaylistUpdateState::Success)),
-            EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
-                target: String::new(),
-                message: String::new(),
-            }),
+            EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent::global("", "")),
             EventMessage::SystemInfoUpdate(Arc::new(SystemInfo {
                 cpu_usage: 0.0,
                 memory_usage: 0,
@@ -1047,10 +1072,7 @@ mod tests {
 
         assert!(websocket_can_receive_runtime_events(
             &mem,
-            &EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
-                target: "target".to_string(),
-                message: "step".to_string(),
-            })
+            &EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent::global("target", "step"))
         ));
     }
 

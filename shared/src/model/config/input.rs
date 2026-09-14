@@ -9,14 +9,14 @@ use crate::{
     error::TuliproxError,
     foundation::{get_filter, Filter},
     model::{
-        config::media_server_catalog::MediaServerInputConfigDto, ClusterFlags, EpgConfigDto, PatternTemplate, Prepare,
-        StalkerAuthMode, StalkerInputConfigDto,
+        config::media_server_catalog::MediaServerInputConfigDto, ClusterFlags, ConfigInputUpdateQualityDto,
+        EpgConfigDto, PatternTemplate, Prepare, StalkerAuthMode, StalkerInputConfigDto,
     },
     utils::{
         arc_str_option_serde, arc_str_serde, arc_str_vec_serde, deserialize_timestamp, get_credentials_from_url_str,
         get_trimmed_string, is_blank_optional_arc_str, is_blank_optional_string, is_non_blank_optional_string,
-        parse_duration_seconds, parse_provider_scheme_url_parts, sanitize_sensitive_info,
-        serialize_option_vec_flow_map_items, trim_last_slash, Internable, BATCH_SCHEME_PREFIX, PROVIDER_SCHEME_PREFIX,
+        parse_duration_seconds, parse_provider_scheme_url_parts, sanitize_sensitive_info, trim_last_slash, Internable,
+        BATCH_SCHEME_PREFIX, PROVIDER_SCHEME_PREFIX,
     },
 };
 use log::warn;
@@ -275,6 +275,8 @@ pub struct ConfigInputOptionsDto {
     pub skip_vod: bool,
     #[serde(default, alias = "xtream_skip_series", alias = "stalker_skip_series", skip_serializing_if = "is_false")]
     pub skip_series: bool,
+    #[serde(default, skip_serializing_if = "ConfigInputUpdateQualityDto::is_disabled")]
+    pub update_quality: ConfigInputUpdateQualityDto,
     #[serde(default = "default_xtream_live_stream_use_prefix", skip_serializing_if = "is_true")]
     pub xtream_live_stream_use_prefix: bool,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -326,6 +328,7 @@ impl Default for ConfigInputOptionsDto {
             skip_live: false,
             skip_vod: false,
             skip_series: false,
+            update_quality: ConfigInputUpdateQualityDto::default(),
             xtream_live_stream_use_prefix: default_xtream_live_stream_use_prefix(),
             xtream_live_stream_without_extension: false,
             disable_hls_streaming: false,
@@ -354,6 +357,7 @@ impl ConfigInputOptionsDto {
         !self.skip_live
             && !self.skip_vod
             && !self.skip_series
+            && self.update_quality.is_empty()
             && self.xtream_live_stream_use_prefix
             && !self.xtream_live_stream_without_extension
             && !self.disable_hls_streaming
@@ -377,6 +381,7 @@ impl ConfigInputOptionsDto {
         self.skip_live = false;
         self.skip_vod = false;
         self.skip_series = false;
+        self.update_quality.clean();
         self.xtream_live_stream_use_prefix = default_as_true();
         self.xtream_live_stream_without_extension = false;
         self.disable_hls_streaming = false;
@@ -403,6 +408,7 @@ impl Prepare for ConfigInputOptionsDto {
     type Ctx<'a> = Option<&'a [PatternTemplate]>;
 
     fn prepare(&mut self, templates: Self::Ctx<'_>) -> Result<(), TuliproxError> {
+        self.update_quality.prepare(())?;
         if let Some(raw_filter) = &self.resolve_filter {
             self.t_resolve_filter = Some(get_filter(raw_filter, templates)?);
         }
@@ -496,7 +502,7 @@ pub struct ConfigInputDto {
     pub cache_duration: Option<String>,
     #[serde(skip)]
     pub cache_duration_seconds: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "serialize_option_vec_flow_map_items")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aliases: Option<Vec<ConfigInputAliasDto>>,
     #[serde(default, skip_serializing_if = "is_zero_i16")]
     pub priority: i16,
@@ -1351,6 +1357,44 @@ mod tests {
     }
 
     #[test]
+    fn config_input_alias_serialization_uses_block_default_and_reads_both_styles() {
+        for aliases in [
+            "- {name: alias-one, url: provider://example, username: alias, password: 'pass # with: {}, commas', max_connections: 1, exp_date: 1788779145}\n",
+            "- name: alias-one\n  url: provider://example\n  username: alias\n  password: 'pass # with: {}, commas'\n  max_connections: 1\n  exp_date: 1788779145\n",
+        ] {
+            let yaml = format!(
+                "name: provider\ntype: xtream\nurl: provider://example\nusername: root\npassword: pass\noptions:\n  update_quality:\n    live: 85\n    vod: 85\n    series: 85\n  resolve_background: false\ncache_duration: 20h\nmax_connections: 1\nexp_date: 1788779143\naliases:\n{aliases}panel_api:\n  url: http://panel.example\n  api_key: synthetic-key\n"
+            );
+            let input: ConfigInputDto = serde_saphyr::from_str(&yaml).expect("both alias styles parse");
+            let serialized = serde_saphyr::to_string(&input).expect("serialize input");
+            assert!(serialized.contains("- name: alias-one\n"));
+            assert!(!serialized.contains("- {"));
+            let reparsed: ConfigInputDto = serde_saphyr::from_str(&serialized).expect("read serialized input");
+            assert_eq!(reparsed, input);
+            let json = serde_json::to_string(&input).expect("JSON serialization");
+            assert_eq!(serde_json::from_str::<ConfigInputDto>(&json).expect("JSON roundtrip"), input);
+
+            let mut prepared = input;
+            prepared.prepare(0, false, &HashSet::from(["example".to_string()]), None).expect("prepare input");
+            assert_eq!(prepared.cache_duration_seconds, 72_000);
+            let options = prepared.options.as_ref().expect("options");
+            assert_eq!(options.update_quality, ConfigInputUpdateQualityDto { live: 85, vod: 85, series: 85 });
+            assert!(!options.resolve_background);
+            assert_eq!(prepared.aliases.as_ref().expect("aliases").len(), 1);
+            assert!(prepared.panel_api.is_some());
+        }
+    }
+
+    #[test]
+    fn config_input_alias_serialization_preserves_empty_and_missing_lists() {
+        for aliases in [None, Some(Vec::new())] {
+            let input = ConfigInputDto { name: "provider".intern(), aliases, ..Default::default() };
+            let serialized = serde_saphyr::to_string(&input).expect("serialize input");
+            assert_eq!(serde_saphyr::from_str::<ConfigInputDto>(&serialized).expect("roundtrip"), input);
+        }
+    }
+
+    #[test]
     fn sequential_group_round_trips_yaml_and_json() {
         let yaml = "name: grouped\ntype: m3u\nurl: http://example.com/list.m3u\nsequential_group: 7\n";
         let dto: ConfigInputDto = serde_saphyr::from_str(yaml).expect("sequential group should deserialize from yaml");
@@ -1992,6 +2036,67 @@ mod tests {
         assert_eq!(value.get("skip_vod"), Some(&serde_json::Value::Bool(true)));
         assert!(value.get("xtream_skip_live").is_none());
         assert!(value.get("stalker_skip_vod").is_none());
+    }
+
+    #[test]
+    fn config_input_options_without_update_quality_remains_backward_compatible() -> Result<(), serde_json::Error> {
+        let options: ConfigInputOptionsDto = serde_json::from_str("{}")?;
+        let value = serde_json::to_value(&options)?;
+
+        assert_eq!(options.update_quality, ConfigInputUpdateQualityDto::default());
+        assert!(options.is_empty());
+        assert!(value.get("update_quality").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn config_input_options_update_quality_round_trips_and_keeps_options_non_empty() -> Result<(), serde_json::Error> {
+        let options: ConfigInputOptionsDto = serde_json::from_value(serde_json::json!({
+            "update_quality": {
+                "live": 95,
+                "vod": 90,
+                "series": 100
+            }
+        }))?;
+
+        assert!(!options.is_empty());
+        assert_eq!(options.update_quality.live, 95);
+        assert_eq!(options.update_quality.vod, 90);
+        assert_eq!(options.update_quality.series, 100);
+        assert_eq!(
+            serde_json::to_value(options)?,
+            serde_json::json!({
+                "update_quality": {
+                    "live": 95,
+                    "vod": 90,
+                    "series": 100
+                }
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn config_input_options_prepare_validates_update_quality() {
+        let mut options: ConfigInputOptionsDto = serde_saphyr::from_str("update_quality:\n  live: 101\n")
+            .expect("manually edited update quality should deserialize before validation");
+
+        let error = options.prepare(None).expect_err("invalid update quality must be rejected");
+
+        assert!(error.to_string().contains("options.update_quality.live"));
+    }
+
+    #[test]
+    fn config_input_options_clean_resets_update_quality() {
+        let mut options = ConfigInputOptionsDto {
+            update_quality: ConfigInputUpdateQualityDto { live: 95, vod: 90, series: 85 },
+            ..ConfigInputOptionsDto::default()
+        };
+
+        options.clean();
+
+        assert_eq!(options.update_quality, ConfigInputUpdateQualityDto::default());
+        assert!(options.is_empty());
     }
 
     #[test]

@@ -23,6 +23,28 @@ const WS_RECONNECT_BASE_MS: u32 = 300;
 const WS_RECONNECT_MAX_MS: u32 = 2000;
 const WS_RECONNECT_MAX_ATTEMPTS: u16 = 20;
 
+/// Frontend-local identity of one concrete WebSocket connection lifecycle.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WebSocketConnectionContext {
+    socket_epoch: u64,
+    connected: bool,
+}
+
+impl WebSocketConnectionContext {
+    #[must_use]
+    pub const fn new(socket_epoch: u64, connected: bool) -> Self { Self { socket_epoch, connected } }
+
+    #[must_use]
+    pub const fn is_connected(self) -> bool { self.connected }
+
+    #[must_use]
+    pub fn is_same_live_connection(self, other: Self) -> bool { self.connected && self == other }
+}
+
+const fn next_socket_epoch(current: u64) -> u64 { current.saturating_add(1) }
+
+const fn socket_epoch_is_current(current: u64, candidate: u64) -> bool { current == candidate }
+
 fn reconnect_delay(attempt: u16) -> u32 {
     if attempt < 6 {
         let d = WS_RECONNECT_BASE_MS * (u32::from(attempt) + 1u32);
@@ -39,6 +61,7 @@ type JsOnOpenCallback = Option<Closure<dyn FnMut(Event)>>;
 
 pub struct WebSocketService {
     connected: Rc<Cell<bool>>,
+    connection_epoch: Rc<Cell<u64>>,
     attempt_counter: Rc<Cell<u16>>,
     ws: Rc<RefCell<Option<WebSocket>>>,
     pending_messages: Rc<RefCell<VecDeque<Vec<u8>>>>,
@@ -58,6 +81,7 @@ impl WebSocketService {
         let base_href = get_base_href();
         Self {
             connected: Rc::new(Cell::new(false)),
+            connection_epoch: Rc::new(Cell::new(0)),
             attempt_counter: Rc::new(Cell::new(0)),
             ws: Rc::new(RefCell::new(None)),
             pending_messages: Rc::new(RefCell::new(VecDeque::new())),
@@ -73,10 +97,21 @@ impl WebSocketService {
 
     pub fn is_connected(&self) -> bool { self.connected.get() }
 
+    #[must_use]
+    pub fn connection_context(&self) -> WebSocketConnectionContext {
+        WebSocketConnectionContext::new(self.connection_epoch.get(), self.connected.get())
+    }
+
+    #[must_use]
+    pub fn is_current_connection(&self, context: WebSocketConnectionContext) -> bool {
+        self.connection_context().is_same_live_connection(context)
+    }
+
     /// Helper function to allow cloning the service into JS closures for reconnect
     fn clone_for_reconnect(&self) -> Self {
         Self {
             connected: self.connected.clone(),
+            connection_epoch: self.connection_epoch.clone(),
             attempt_counter: self.attempt_counter.clone(),
             ws: self.ws.clone(),
             pending_messages: self.pending_messages.clone(),
@@ -102,6 +137,8 @@ impl WebSocketService {
         match WebSocket::new(&self.ws_path) {
             Err(err) => error!("Failed to open websocket connection: {err:?}"),
             Ok(socket) => {
+                let socket_epoch = next_socket_epoch(self.connection_epoch.get());
+                self.connection_epoch.set(socket_epoch);
                 socket.set_binary_type(web_sys::BinaryType::Arraybuffer);
                 let ws_clone = self.ws.clone();
                 *ws_clone.borrow_mut() = Some(socket.clone());
@@ -113,9 +150,13 @@ impl WebSocketService {
                     let event_service = self.event_service.clone();
                     let attempt_counter = self.attempt_counter.clone();
                     let connected = self.connected.clone();
+                    let connection_epoch = self.connection_epoch.clone();
                     let pending_messages = self.pending_messages.clone();
                     let onmessage_callback =
                         Closure::<dyn FnMut(MessageEvent)>::wrap(Box::new(move |event: MessageEvent| {
+                            if !socket_epoch_is_current(connection_epoch.get(), socket_epoch) {
+                                return;
+                            }
                             trace!("WebSocket received message: {event:?}");
                             if let Some(response) = handle_socket_protocol_msg(
                                 event,
@@ -138,7 +179,11 @@ impl WebSocketService {
                     let ws_onopen_ref = self.ws_onopen.clone();
                     let ws_open_clone = ws_clone.clone();
                     let connected_clone = self.connected.clone();
+                    let connection_epoch = self.connection_epoch.clone();
                     let onopen_callback = Closure::<dyn FnMut(Event)>::wrap(Box::new(move |_event: Event| {
+                        if !socket_epoch_is_current(connection_epoch.get(), socket_epoch) {
+                            return;
+                        }
                         // on open starts the protocol handshake; application messages wait until authorization.
                         trace!("WebSocket connection opened.");
                         connected_clone.set(false);
@@ -162,10 +207,14 @@ impl WebSocketService {
                     let ws_onerror_ref = self.ws_onerror.clone();
                     let ws_close_rc = self.ws.clone();
                     let connected_clone = self.connected.clone();
+                    let connection_epoch = self.connection_epoch.clone();
                     let event_service_clone = Rc::clone(&self.event_service);
                     let ws_service_reconnect_clone = Rc::clone(&ws_service_reconnect);
 
                     let onclose_callback = Closure::<dyn FnMut(CloseEvent)>::wrap(Box::new(move |e: CloseEvent| {
+                        if !socket_epoch_is_current(connection_epoch.get(), socket_epoch) {
+                            return;
+                        }
                         trace!(
                             "WebSocket closed (Code {}, Reason: {}, Clean: {})",
                             e.code(),
@@ -203,10 +252,14 @@ impl WebSocketService {
                 {
                     let ws_onerror_ref = self.ws_onerror.clone();
                     let connected_clone = self.connected.clone();
+                    let connection_epoch = self.connection_epoch.clone();
                     let event_service_clone = Rc::clone(&self.event_service);
                     //let ws_service_reconnect_clone = Rc::clone(&ws_service_reconnect);
 
                     let onerror_callback = Closure::<dyn FnMut(ErrorEvent)>::wrap(Box::new(move |e: ErrorEvent| {
+                        if !socket_epoch_is_current(connection_epoch.get(), socket_epoch) {
+                            return;
+                        }
                         error!("WebSocket error: {e:?}");
                         connected_clone.set(false);
                         event_service_clone.broadcast(EventMessage::WebSocketStatus(false));
@@ -440,4 +493,31 @@ fn flush_pending_messages(pending_messages: &Rc<RefCell<VecDeque<Vec<u8>>>>, ws:
     }
 
     *pending = remaining;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{next_socket_epoch, socket_epoch_is_current, WebSocketConnectionContext};
+
+    #[test]
+    fn playlist_update_status_socket_epoch_advances_for_each_connection_and_rejects_stale_callbacks() {
+        let first = next_socket_epoch(0);
+        let second = next_socket_epoch(first);
+
+        assert_eq!(first, 1);
+        assert_eq!(second, 2);
+        assert!(socket_epoch_is_current(second, second));
+        assert!(!socket_epoch_is_current(second, first));
+    }
+
+    #[test]
+    fn playlist_update_status_connection_context_matches_only_the_same_live_socket() {
+        let first = WebSocketConnectionContext::new(1, true);
+        let first_disconnected = WebSocketConnectionContext::new(1, false);
+        let second = WebSocketConnectionContext::new(2, true);
+
+        assert!(first.is_same_live_connection(first));
+        assert!(!first_disconnected.is_same_live_connection(first_disconnected));
+        assert!(!second.is_same_live_connection(first));
+    }
 }

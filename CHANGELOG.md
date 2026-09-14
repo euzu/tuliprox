@@ -4,6 +4,10 @@
 
 ## ⚠️ Breaking Changes
 
+- **The Web UI WebSocket protocol is now version 4.** Playlist update completion messages carry the correlated
+  run ID and execution order instead of a bare status. Reload existing browser tabs after upgrading the server;
+  version-3 clients are rejected during the handshake rather than receiving incompatible update messages.
+
 - **Smart EPG normalization now preserves XMLTV ID separators by default.** The default `normalize_regex` changed from
   `[^a-zA-Z0-9\-]` to `[^a-zA-Z0-9._\-]`. Existing configurations that explicitly set the former pattern keep the
   legacy separator-removal behavior; remove the override or use the new pattern to adopt the new default.
@@ -111,6 +115,44 @@
   groups. Bouquet filters support both whitelist and blacklist mode, are stored by the target's unique name, and take
   effect on the next playlist update. Leaving every cluster unselected means no bouquet restriction; an individual
   cluster may intentionally have no selected groups while another cluster remains configured.
+
+- **Per-cluster update quality guards for Xtream, Stalker, and M3U inputs.** Optional `update_quality` thresholds
+  compare Live, VOD, and Series item counts with the last accepted cluster and retain its data when a candidate falls
+  outside the configured range. Xtream retains its active cluster database and categories; Stalker retains its active
+  manifest entry and generation. M3U evaluates the clusters within one downloaded document and combines accepted
+  candidates with retained clusters before persistence. Quality rejections are reported as partial updates, separately
+  from technical failures. Omitted thresholds default to `0`, disabling the guard; `100` requires an unchanged item
+  count. The Source Editor exposes these settings through the shared range-slider component.
+
+- **Input-focused playlist updates in the Web UI.** The Update tab now provides compact input cards with consistent
+  status badges, last-update times, and selection of affected targets by stable ID. Available actions follow each
+  input's capabilities: Xtream, Stalker, and M3U offer Update, Refresh, and Force Update; Plex offers Update and Refresh;
+  Library offers Rescan. Update may reuse a valid cache, Refresh bypasses cache reads while enforcing quality, and
+  Force Update bypasses both for the selected input without changing saved configuration. Selected targets rebuild
+  with all their required inputs; the bulk action remains separate. Existing target-name API requests remain supported.
+
+- **Collapsible pipeline transparency instead of a permanent update log.** Update Details separates input/cluster
+  outcomes from target processing and output status. It shows available quality thresholds and evaluations, actual
+  cache/provider origin, effective update mode, and correlated run details. Target summaries use the configured
+  processing order and label Filter/Rename/Mapping counts as configured rules, not runtime hits. Technical failures,
+  quality rejections, and unavailable facts remain distinct. A running target rebuild keeps its run's status and
+  details until completion, even when a follow-up update has already been queued.
+
+- **Reload-safe input and cluster status.** Completed input results and one latest snapshot per cluster use the
+  existing `status.json`, without a separate history or browser persistence. Available snapshots retain the run's
+  policy, actual data source, historical quality-guard threshold, quality evaluation, active count, and technical
+  outcome. Current correlated runs take priority over persisted snapshots; older status files remain readable and
+  missing facts stay unknown. Browser reloads can also restore in-progress state from the running server without
+  persisting queued or updating states as completed results.
+
+- **Library rescans rebuild selected targets and expose catalog and scan facts separately.** Rescan completes the
+  filesystem scan before rebuilding targets; scan errors prevent the rebuild. A complete, error-free empty scan is
+  authoritative, including deletion of the last item, while other required inputs remain available to the target's
+  configured filters. Library details show Movies, Series, Episodes, and Total items from the stored catalog; Episodes
+  counts stored episode records while Total items remains the movie/series-entry count. Last rescan shows the actual
+  scanned-file, media-group, added, updated, removed, and error counts for the correlated run, including reported scan
+  failures. Catalog counts survive reloads; unavailable rescan metrics remain unknown rather than being inferred from
+  the catalog. Library cards no longer present their catalog as a generic provider/cache acquisition.
 
 - **Target filters can run during processing or immediately before persistence.** The existing scalar `filter` syntax
   remains the `processing` stage. The staged map accepts optional `processing` and `persist` filters; `persist` sees
@@ -933,6 +975,15 @@
   the `shared` crate, so `/ready` and the banner can no longer drift apart in how they group inputs and aliases.
 
 ## 🐛 Fixes
+
+- **Playlist update status reads no longer block an async request worker on filesystem I/O.** The existing input
+  status reader runs on the blocking pool; its status format and reload projection are unchanged.
+- **Xtream disk processing preserves successful cluster downloads when another cluster request fails.** Existing
+  per-cluster quality checks still apply, while the failed cluster retains its previous data.
+- **Stalker acquisition failures now identify the affected requested clusters.** Portal, client, storage and handshake
+  errors mark only requested, non-skipped clusters as failed instead of leaving their status unknown.
+- **The Library catalog status initializes storage before its first read.** A fresh installation reports zero catalog
+  counts, while initialization failures and corrupt catalog data remain errors rather than appearing empty.
 
 - **Trakt curation now requires an explicitly configured Client ID.** Tuliprox no longer bundles or falls back to a
   shared Client ID. Blank or header-invalid `trakt.api.api_key` values now produce one target-scoped warning and skip

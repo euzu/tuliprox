@@ -2,6 +2,7 @@
 
 use crate::model::{ClusterFlags, RuntimeConfigReportFormat};
 
+pub const fn is_zero_u8(v: &u8) -> bool { *v == 0 }
 pub const fn is_zero_u16(v: &u16) -> bool { *v == 0 }
 pub const fn is_zero_i16(v: &i16) -> bool { *v == 0 }
 pub const fn is_zero_u32(v: &u32) -> bool { *v == 0 }

@@ -26,7 +26,7 @@ use reqwest::Client;
 use shared::{
     create_bitset,
     error::TuliproxError,
-    model::{UserConnectionPermission, VideoDownloadConfigDto, WebAuthConfigDto},
+    model::{PlaylistUpdateRunId, UserConnectionPermission, VideoDownloadConfigDto, WebAuthConfigDto},
     utils::small_vecs_equal_unordered,
 };
 use std::{
@@ -418,7 +418,9 @@ fn video_download_changed(a: &crate::model::VideoDownloadConfig, b: &crate::mode
 
 #[derive(Clone)]
 pub struct ManualPlaylistUpdateRequest {
+    pub run_id: PlaylistUpdateRunId,
     pub targets: Arc<ProcessTargets>,
+    pub input_action: Option<shared::model::InputUpdateRequest>,
 }
 
 #[derive(Clone)]

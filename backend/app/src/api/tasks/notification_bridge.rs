@@ -565,10 +565,7 @@ mod tests {
             EventMessage::ActiveProvider("p".into(), 1),
             EventMessage::ConfigChange(ConfigType::Config),
             EventMessage::PlaylistUpdate(PlaylistUpdateSummary::state_only(PlaylistUpdateState::Success)),
-            EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
-                target: String::new(),
-                message: String::new(),
-            }),
+            EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent::global("", "")),
             EventMessage::SystemInfoUpdate(Arc::new(SystemInfo {
                 cpu_usage: 0.0,
                 memory_usage: 0,
