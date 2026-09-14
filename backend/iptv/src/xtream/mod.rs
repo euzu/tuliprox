@@ -1,32 +1,36 @@
+use crate::provider::PlaylistFetch;
 use chrono::{DateTime, Utc};
 use log::{error, info, warn};
 use shared::{
     concat_string,
     error::TuliproxError,
     model::{
-        EventMessage, EventSink, InputType, PlaylistEntry, PlaylistGroup, ProviderAccountEvent, ProviderAccountState,
-        ProxyUserStatus, SeriesStreamProperties, StreamProperties, VideoStreamProperties, XtreamCluster,
-        XtreamLoginInfo, XtreamPlaylistItem, XtreamSeriesInfo, XtreamVideoInfo, XtreamVideoInfoDoc,
+        EventMessage, EventSink, InputType, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemType,
+        ProviderAccountEvent, ProviderAccountState, ProviderId, ProxyUserStatus, SeriesStreamProperties,
+        StreamProperties, UpdateQualityPolicy, VideoStreamProperties, XtreamCluster, XtreamLoginInfo,
+        XtreamPlaylistItem, XtreamSeriesInfo, XtreamVideoInfo, XtreamVideoInfoDoc,
     },
     utils::{
         extract_extension_from_url, get_i64_from_serde_value, get_string_from_serde_value, sanitize_sensitive_info,
         Internable, PROVIDER_SCHEME_PREFIX,
     },
 };
-use std::{collections::HashMap, io::Error, str::FromStr, sync::Arc};
+use std::{collections::HashMap, future::Future, io::Error, str::FromStr, sync::Arc};
 use tuliprox_core::{
     model::{
-        is_input_expired, xtream_mapping_option_from_target_options, AppConfig, ConfigInput, ConfigInputFlags,
-        ConfigTarget, InputSource, ProxyUserCredentials, XtreamTargetOutput,
+        evaluate_update_quality, is_input_expired, xtream_mapping_option_from_target_options, AppConfig,
+        ClusterForceUpdate, ConfigInput, ConfigInputFlags, ConfigTarget, InputSource, ProxyUserCredentials,
+        XtreamTargetOutput,
     },
     utils::request,
 };
 use tuliprox_parser::{xtream, xtream::parse_xtream_series_info};
 use tuliprox_repository::{
-    get_input_storage_path, get_target_id_mapping, get_target_storage_path, persist_input_vod_info,
-    persist_input_xtream_playlist_clusters_to_disk, persists_input_series_info,
+    count_input_xtream_cluster, get_input_storage_path, get_target_id_mapping, get_target_storage_path,
+    persist_input_vod_info, persist_input_xtream_playlist_clusters_to_disk, persists_input_series_info,
     rewrite_provider_series_info_episode_virtual_id, write_playlist_batch_item_upsert, write_playlist_item_update,
-    PlaylistStorageState, ProviderEpisodeKey, VirtualIdRecord,
+    PlaylistStorageState, ProviderEpisodeKey, VirtualIdRecord, XtreamClusterPublishBatchResult,
+    XtreamClusterQualityPolicy, XtreamClusterRefreshRequest,
 };
 
 const THREE_DAYS_IN_SECS: i64 = 3 * 24 * 60 * 60;
@@ -503,6 +507,142 @@ pub fn requested_clusters(requested: Option<&[XtreamCluster]>, skip_cluster: &[X
         .collect()
 }
 
+fn apply_cluster_update_quality(
+    fetch: &mut PlaylistFetch,
+    cluster: XtreamCluster,
+    current_count: Option<usize>,
+    threshold: u8,
+    mut candidate_groups: Vec<PlaylistGroup>,
+) {
+    let candidate_count = candidate_groups.iter().map(|group| group.channels.len()).sum();
+    let decision = evaluate_update_quality(current_count, candidate_count, threshold);
+    if let Some(rejection) = decision.rejection(cluster) {
+        fetch.quality_rejections.push(rejection);
+    } else {
+        if let Some(acceptance) = decision.acceptance(cluster) {
+            fetch.quality_acceptances.push(acceptance);
+        }
+        fetch.groups.append(&mut candidate_groups);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum XtreamDownloadScope {
+    PlaylistUpdate { quality: UpdateQualityPolicy },
+    Direct,
+}
+
+struct XtreamDownloadContext {
+    source_input_type: InputType,
+    scope: XtreamDownloadScope,
+}
+
+fn disk_cluster_quality_policy(
+    scope: XtreamDownloadScope,
+    input: &ConfigInput,
+    cluster: XtreamCluster,
+) -> XtreamClusterQualityPolicy {
+    let configured_threshold = input.options.as_ref().map_or(0, |options| options.update_quality.threshold(cluster));
+    match scope {
+        XtreamDownloadScope::PlaylistUpdate { quality: UpdateQualityPolicy::Enforce } => {
+            XtreamClusterQualityPolicy::Enforce { threshold: configured_threshold }
+        }
+        XtreamDownloadScope::PlaylistUpdate { quality: UpdateQualityPolicy::Bypass } => {
+            XtreamClusterQualityPolicy::Bypass { configured_threshold }
+        }
+        XtreamDownloadScope::Direct => XtreamClusterQualityPolicy::Enforce { threshold: 0 },
+    }
+}
+
+fn apply_disk_cluster_publish_result(fetch: &mut PlaylistFetch, mut result: XtreamClusterPublishBatchResult) {
+    fetch.quality_acceptances.append(&mut result.quality_acceptances);
+    fetch.quality_rejections.append(&mut result.quality_rejections);
+    fetch.force_updates.append(&mut result.force_updates);
+    fetch.errors.append(&mut result.errors);
+    if let Some(cluster) = result.failed_cluster {
+        fetch.failed_clusters.push(cluster);
+    }
+}
+
+struct InMemoryXtreamCandidateWinner {
+    group_index: usize,
+    item: PlaylistItem,
+}
+
+fn input_btree_provider_id(item: &PlaylistItem) -> ProviderId {
+    let header = &item.header;
+    let missing_live_input_identity = header.input_stream_id.is_empty()
+        && (header.item_type.is_live() || header.item_type == PlaylistItemType::Catchup);
+    let provider_id = if missing_live_input_identity { None } else { item.get_provider_id() };
+
+    // The input BTree uses the converted item's provider id as its key. Keeping
+    // the same unset sentinel here is required for candidate/baseline parity.
+    ProviderId::new(provider_id.unwrap_or_default())
+}
+
+fn normalize_in_memory_xtream_candidate(mut candidate_groups: Vec<PlaylistGroup>) -> Vec<PlaylistGroup> {
+    let candidate_count = candidate_groups.iter().map(|group| group.channels.len()).sum();
+    let mut winning_position_by_provider_id = HashMap::<ProviderId, usize>::with_capacity(candidate_count);
+    let mut candidates = Vec::<Option<InMemoryXtreamCandidateWinner>>::with_capacity(candidate_count);
+
+    for (group_index, group) in candidate_groups.iter_mut().enumerate() {
+        for item in std::mem::take(&mut group.channels) {
+            let provider_id = input_btree_provider_id(&item);
+            let candidate_position = candidates.len();
+            if let Some(previous_position) = winning_position_by_provider_id.insert(provider_id, candidate_position) {
+                candidates[previous_position] = None;
+            }
+            candidates.push(Some(InMemoryXtreamCandidateWinner { group_index, item }));
+        }
+    }
+
+    for winner in candidates.into_iter().flatten() {
+        candidate_groups[winner.group_index].channels.push(winner.item);
+    }
+    candidate_groups.retain(|group| !group.channels.is_empty());
+    candidate_groups
+}
+
+async fn apply_in_memory_cluster_download<B, Fut>(
+    scope: XtreamDownloadScope,
+    input: &ConfigInput,
+    cluster: XtreamCluster,
+    mut candidate_groups: Vec<PlaylistGroup>,
+    fetch: &mut PlaylistFetch,
+    load_baseline_count: B,
+) -> Result<(), TuliproxError>
+where
+    B: FnOnce() -> Fut,
+    Fut: Future<Output = Result<Option<usize>, TuliproxError>>,
+{
+    match scope {
+        XtreamDownloadScope::Direct => {
+            fetch.groups.append(&mut candidate_groups);
+            return Ok(());
+        }
+        XtreamDownloadScope::PlaylistUpdate { quality: UpdateQualityPolicy::Bypass } => {
+            candidate_groups = normalize_in_memory_xtream_candidate(candidate_groups);
+            let candidate_count = candidate_groups.iter().map(|group| group.channels.len()).sum();
+            let configured_threshold =
+                input.options.as_ref().map_or(0, |options| options.update_quality.threshold(cluster));
+            fetch.groups.append(&mut candidate_groups);
+            fetch.force_updates.push(ClusterForceUpdate { cluster, candidate_count, configured_threshold });
+            return Ok(());
+        }
+        XtreamDownloadScope::PlaylistUpdate { quality: UpdateQualityPolicy::Enforce } => {}
+    }
+
+    let threshold = input.options.as_ref().map_or(0, |options| options.update_quality.threshold(cluster));
+    let current_count = if threshold == 0 {
+        None
+    } else {
+        candidate_groups = normalize_in_memory_xtream_candidate(candidate_groups);
+        load_baseline_count().await?
+    };
+    apply_cluster_update_quality(fetch, cluster, current_count, threshold, candidate_groups);
+    Ok(())
+}
+
 /// Downloads xtream clusters from a single source (either main input or staged input).
 async fn download_xtream_from_source<E: EventSink>(
     app_config: &Arc<AppConfig>,
@@ -510,9 +650,9 @@ async fn download_xtream_from_source<E: EventSink>(
     events: &E,
     input: &ConfigInput,
     input_source: &InputSource,
-    source_input_type: InputType,
     clusters: &[XtreamCluster],
-) -> (Vec<PlaylistGroup>, Vec<TuliproxError>, bool) {
+    context: XtreamDownloadContext,
+) -> PlaylistFetch {
     let (username, password) =
         (input_source.username.as_deref().unwrap_or(""), input_source.password.as_deref().unwrap_or(""));
 
@@ -522,7 +662,7 @@ async fn download_xtream_from_source<E: EventSink>(
     } else {
         match input.resolve_url(&input_source.url) {
             Ok(url) => url.into_owned(),
-            Err(err) => return (Vec::new(), vec![err], false),
+            Err(err) => return PlaylistFetch { failed_clusters: clusters.to_vec(), ..PlaylistFetch::failed(err) },
         }
     };
 
@@ -531,16 +671,14 @@ async fn download_xtream_from_source<E: EventSink>(
 
     if let Err(err) = xtream_login(app_config, client, events, &input_source_login, username).await {
         error!("Could not log in with xtream user {username} for provider {}. {err}", input.name);
-        return (Vec::new(), vec![err], false);
+        return PlaylistFetch { failed_clusters: clusters.to_vec(), ..PlaylistFetch::failed(err) };
     }
-
-    let mut playlist_groups: Vec<PlaylistGroup> = Vec::with_capacity(128);
 
     let cfg = app_config.config.load();
     let storage_dir = &cfg.storage_dir;
-    let use_disk_based_processing = cfg.disk_based_processing && source_input_type.is_xtream();
+    let use_disk_based_processing = cfg.disk_based_processing && context.source_input_type.is_xtream();
+    let mut fetch = PlaylistFetch::groups(Vec::with_capacity(128)).persisted(use_disk_based_processing);
 
-    let mut errors = vec![];
     let mut disk_cluster_readers = Vec::new();
     for (xtream_cluster, category, stream) in &ACTIONS {
         if !clusters.contains(xtream_cluster) {
@@ -565,12 +703,28 @@ async fn download_xtream_from_source<E: EventSink>(
         ) {
             (Ok(category_content), Ok(stream_content)) => {
                 if use_disk_based_processing {
-                    disk_cluster_readers.push((*xtream_cluster, category_content, stream_content));
+                    disk_cluster_readers.push(XtreamClusterRefreshRequest {
+                        cluster: *xtream_cluster,
+                        quality: disk_cluster_quality_policy(context.scope, input, *xtream_cluster),
+                        categories: category_content,
+                        streams: stream_content,
+                    });
                 } else {
                     match xtream::parse_xtream(input, *xtream_cluster, category_content, stream_content).await {
                         Ok(sub_playlist_parsed) => {
-                            if let Some(mut xtream_sub_playlist) = sub_playlist_parsed {
-                                playlist_groups.append(&mut xtream_sub_playlist);
+                            if let Some(xtream_sub_playlist) = sub_playlist_parsed {
+                                if let Err(err) = apply_in_memory_cluster_download(
+                                    context.scope,
+                                    input,
+                                    *xtream_cluster,
+                                    xtream_sub_playlist,
+                                    &mut fetch,
+                                    || count_input_xtream_cluster(app_config, input, *xtream_cluster),
+                                )
+                                .await
+                                {
+                                    fetch.record_cluster_error(*xtream_cluster, err);
+                                }
                             } else {
                                 error!(
                                     "Could not parse playlist {xtream_cluster} for input {}: {}",
@@ -579,58 +733,100 @@ async fn download_xtream_from_source<E: EventSink>(
                                 );
                             }
                         }
-                        Err(err) => errors.push(err),
+                        Err(err) => fetch.record_cluster_error(*xtream_cluster, err),
                     }
                 }
             }
             (Err(err1), Err(err2)) => {
-                errors.extend([err1, err2]);
+                fetch.record_cluster_error(*xtream_cluster, err1);
+                fetch.record_cluster_error(*xtream_cluster, err2);
             }
-            (_, Err(err)) | (Err(err), _) => errors.push(err),
+            (_, Err(err)) | (Err(err), _) => fetch.record_cluster_error(*xtream_cluster, err),
         }
     }
 
-    if use_disk_based_processing && errors.is_empty() && !disk_cluster_readers.is_empty() {
-        if let Err(err) = persist_input_xtream_playlist_clusters_to_disk(app_config, input, disk_cluster_readers).await
-        {
+    if use_disk_based_processing && !disk_cluster_readers.is_empty() {
+        let result = persist_input_xtream_playlist_clusters_to_disk(app_config, input, disk_cluster_readers).await;
+        for err in &result.errors {
             error!("persist_input_xtream_playlist_clusters_to_disk failed: {err}");
-            errors.push(err);
         }
+        apply_disk_cluster_publish_result(&mut fetch, result);
     }
 
-    (playlist_groups, errors, use_disk_based_processing)
+    fetch
 }
 
+async fn download_xtream_playlist_with_scope<E: EventSink>(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    events: &E,
+    input: &ConfigInput,
+    clusters: Option<&[XtreamCluster]>,
+    scope: XtreamDownloadScope,
+) -> PlaylistFetch {
+    let skip_cluster = get_skip_cluster(input);
+    let main_clusters = requested_clusters(clusters, &skip_cluster);
+
+    let mut fetch = PlaylistFetch::groups(Vec::with_capacity(128));
+
+    if !main_clusters.is_empty() {
+        check_alias_user_state(events, input);
+        let source: InputSource = input.into();
+        let mut source_fetch = download_xtream_from_source(
+            app_config,
+            client,
+            events,
+            input,
+            &source,
+            &main_clusters,
+            XtreamDownloadContext { source_input_type: input.input_type, scope },
+        )
+        .await;
+        fetch.groups.append(&mut source_fetch.groups);
+        fetch.errors.append(&mut source_fetch.errors);
+        fetch.failed_clusters.append(&mut source_fetch.failed_clusters);
+        fetch.quality_acceptances.append(&mut source_fetch.quality_acceptances);
+        fetch.quality_rejections.append(&mut source_fetch.quality_rejections);
+        fetch.force_updates.append(&mut source_fetch.force_updates);
+        fetch.persisted |= source_fetch.persisted;
+    }
+
+    for (grp_id, plg) in (1_u32..).zip(fetch.groups.iter_mut()) {
+        plg.id = grp_id;
+    }
+
+    fetch
+}
+
+/// Downloads an Xtream candidate for the playlist-update flow and applies the configured quality policy.
 pub async fn download_xtream_playlist<E: EventSink>(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
     events: &E,
     input: &ConfigInput,
     clusters: Option<&[XtreamCluster]>,
-) -> (Vec<PlaylistGroup>, Vec<TuliproxError>, bool) {
-    let skip_cluster = get_skip_cluster(input);
-    let main_clusters = requested_clusters(clusters, &skip_cluster);
+    quality: UpdateQualityPolicy,
+) -> PlaylistFetch {
+    download_xtream_playlist_with_scope(
+        app_config,
+        client,
+        events,
+        input,
+        clusters,
+        XtreamDownloadScope::PlaylistUpdate { quality },
+    )
+    .await
+}
 
-    let mut all_groups = Vec::with_capacity(128);
-    let mut all_errors = Vec::new();
-    let mut any_disk = false;
-
-    if !main_clusters.is_empty() {
-        check_alias_user_state(events, input);
-        let source: InputSource = input.into();
-        let (g, e, d) =
-            download_xtream_from_source(app_config, client, events, input, &source, input.input_type, &main_clusters)
-                .await;
-        all_groups.extend(g);
-        all_errors.extend(e);
-        any_disk |= d;
-    }
-
-    for (grp_id, plg) in (1_u32..).zip(all_groups.iter_mut()) {
-        plg.id = grp_id;
-    }
-
-    (all_groups, all_errors, any_disk)
+/// Downloads Xtream data for a direct caller without consulting the persisted update baseline.
+pub async fn download_xtream_playlist_direct<E: EventSink>(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    events: &E,
+    input: &ConfigInput,
+    clusters: Option<&[XtreamCluster]>,
+) -> PlaylistFetch {
+    download_xtream_playlist_with_scope(app_config, client, events, input, clusters, XtreamDownloadScope::Direct).await
 }
 
 fn check_alias_user_state<E: EventSink>(events: &E, input: &ConfigInput) {
@@ -714,14 +910,31 @@ pub fn create_vod_info_from_item(pli: &XtreamPlaylistItem) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{create_vod_info_from_item, requested_clusters};
+    use super::{
+        apply_cluster_update_quality, apply_disk_cluster_publish_result, apply_in_memory_cluster_download,
+        create_vod_info_from_item, disk_cluster_quality_policy, input_btree_provider_id, requested_clusters,
+        XtreamDownloadScope,
+    };
+    use crate::provider::PlaylistFetch;
     use serde_json::Value;
     use shared::{
-        model::{InputType, PlaylistItemType, ProxyType, XtreamCluster, XtreamPlaylistItem},
+        error::TuliproxError,
+        model::{
+            ConfigInputOptionsDto, ConfigInputUpdateQualityDto, InputType, PlaylistGroup, PlaylistItem,
+            PlaylistItemHeader, PlaylistItemType, ProxyType, UpdateQualityPolicy, XtreamCluster, XtreamPlaylistItem,
+        },
         utils::Internable,
     };
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
     use tuliprox_core::model::{
-        ConfigInput, ConfigInputFlags, ConfigInputFlagsSet, ConfigInputOptions, ProxyUserCredentials,
+        ClusterForceUpdate, ClusterUpdateAcceptance, ClusterUpdateRejection, ConfigInput, ConfigInputFlags,
+        ConfigInputFlagsSet, ConfigInputOptions, ProxyUserCredentials,
+    };
+    use tuliprox_repository::{
+        XtreamClusterPublishBatchResult, XtreamClusterPublishOutcome, XtreamClusterQualityPolicy,
     };
 
     /// Records what reached the bus, so the expiry branches can be asserted rather than
@@ -809,6 +1022,456 @@ mod tests {
     fn requested_clusters_excludes_skip_clusters() {
         let clusters = requested_clusters(None, &[XtreamCluster::Series]);
         assert_eq!(clusters, vec![XtreamCluster::Live, XtreamCluster::Video]);
+    }
+
+    fn candidate_group(cluster: XtreamCluster, category_id: u32, count: usize) -> PlaylistGroup {
+        let title = format!("{cluster}-{category_id}").intern();
+        let channels = (0..count)
+            .map(|index| {
+                let stream_id = format!("{category_id}{index:03}").intern();
+                PlaylistItem {
+                    header: PlaylistItemHeader {
+                        id: Arc::clone(&stream_id),
+                        input_stream_id: stream_id,
+                        name: format!("stream-{index}").intern(),
+                        title: format!("stream-{index}").intern(),
+                        group: Arc::clone(&title),
+                        url: format!("http://provider.example/{cluster}/{index}").intern(),
+                        item_type: PlaylistItemType::from(cluster),
+                        xtream_cluster: cluster,
+                        category_id,
+                        input_name: "provider".intern(),
+                        ..PlaylistItemHeader::default()
+                    },
+                }
+            })
+            .collect();
+        PlaylistGroup { id: category_id, title, channels, xtream_cluster: cluster }
+    }
+
+    fn set_candidate_provider_id(item: &mut PlaylistItem, provider_id: u32) {
+        let provider_id = provider_id.to_string().intern();
+        item.header.id = Arc::clone(&provider_id);
+        item.header.input_stream_id = provider_id;
+    }
+
+    #[test]
+    fn in_memory_candidate_key_matches_persisted_input_btree_key() {
+        let resolved = candidate_group(XtreamCluster::Video, 1, 1).channels.remove(0);
+
+        let mut unresolved = candidate_group(XtreamCluster::Video, 2, 1).channels.remove(0);
+        unresolved.header.id = "not-an-id".intern();
+        unresolved.header.url = "http://provider.example/movie/not-an-id".intern();
+
+        let mut missing_live_input_identity = candidate_group(XtreamCluster::Live, 3, 1).channels.remove(0);
+        missing_live_input_identity.header.input_stream_id = "".intern();
+
+        for (name, item) in [
+            ("resolved", resolved),
+            ("unresolved", unresolved),
+            ("missing live input identity", missing_live_input_identity),
+        ] {
+            assert_eq!(
+                input_btree_provider_id(&item).get(),
+                XtreamPlaylistItem::from(&item).provider_id,
+                "case: {name}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn in_memory_quality_direct_download_skips_baseline_while_update_rejects_same_candidate() {
+        let options = ConfigInputOptions::from(&ConfigInputOptionsDto {
+            update_quality: ConfigInputUpdateQualityDto { live: 90, ..ConfigInputUpdateQualityDto::default() },
+            ..ConfigInputOptionsDto::default()
+        });
+        let input = ConfigInput {
+            name: "provider".intern(),
+            input_type: InputType::Xtream,
+            options: Some(options),
+            ..ConfigInput::default()
+        };
+        let candidate = vec![candidate_group(XtreamCluster::Live, 1, 89)];
+        let baseline_reads = AtomicUsize::new(0);
+
+        let mut direct_fetch = PlaylistFetch::default();
+        apply_in_memory_cluster_download(
+            XtreamDownloadScope::Direct,
+            &input,
+            XtreamCluster::Live,
+            candidate.clone(),
+            &mut direct_fetch,
+            || async {
+                baseline_reads.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(100))
+            },
+        )
+        .await
+        .expect("direct candidate should be accepted");
+
+        assert_eq!(baseline_reads.load(Ordering::SeqCst), 0);
+        assert_eq!(direct_fetch.groups.len(), 1);
+        assert_eq!(direct_fetch.groups[0].channels.len(), 89);
+        assert!(direct_fetch.quality_rejections.is_empty());
+
+        let mut update_fetch = PlaylistFetch::default();
+        apply_in_memory_cluster_download(
+            XtreamDownloadScope::PlaylistUpdate { quality: UpdateQualityPolicy::Enforce },
+            &input,
+            XtreamCluster::Live,
+            candidate,
+            &mut update_fetch,
+            || async {
+                baseline_reads.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(100))
+            },
+        )
+        .await
+        .expect("update candidate should produce a domain decision");
+
+        assert_eq!(baseline_reads.load(Ordering::SeqCst), 1);
+        assert!(update_fetch.groups.is_empty());
+        assert_eq!(
+            update_fetch.quality_rejections,
+            vec![tuliprox_core::model::ClusterUpdateRejection {
+                cluster: XtreamCluster::Live,
+                current_count: 100,
+                candidate_count: 89,
+                threshold: 90,
+                quality: 89,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn pipeline_transparency_in_memory_quality_preserves_accepted_evaluation() {
+        let options = ConfigInputOptions::from(&ConfigInputOptionsDto {
+            update_quality: ConfigInputUpdateQualityDto { live: 100, ..ConfigInputUpdateQualityDto::default() },
+            ..ConfigInputOptionsDto::default()
+        });
+        let input = ConfigInput {
+            name: "provider".intern(),
+            input_type: InputType::Xtream,
+            options: Some(options),
+            ..ConfigInput::default()
+        };
+        let mut first_group = candidate_group(XtreamCluster::Live, 1, 1);
+        set_candidate_provider_id(&mut first_group.channels[0], 7);
+        let mut winning_group = candidate_group(XtreamCluster::Live, 2, 2);
+        set_candidate_provider_id(&mut winning_group.channels[0], 7);
+        set_candidate_provider_id(&mut winning_group.channels[1], 8);
+        winning_group.channels[0].header.name = "winning-duplicate".intern();
+        winning_group.channels[0].header.title = "winning-duplicate".intern();
+        let baseline_reads = AtomicUsize::new(0);
+        let mut fetch = PlaylistFetch::default();
+
+        apply_in_memory_cluster_download(
+            XtreamDownloadScope::PlaylistUpdate { quality: UpdateQualityPolicy::Enforce },
+            &input,
+            XtreamCluster::Live,
+            vec![first_group, winning_group],
+            &mut fetch,
+            || async {
+                baseline_reads.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(2))
+            },
+        )
+        .await
+        .expect("deduplicated candidate should be accepted");
+
+        assert_eq!(baseline_reads.load(Ordering::SeqCst), 1);
+        assert!(fetch.quality_rejections.is_empty());
+        assert_eq!(
+            fetch.quality_acceptances,
+            vec![ClusterUpdateAcceptance {
+                cluster: XtreamCluster::Live,
+                current_count: Some(2),
+                candidate_count: 2,
+                threshold: 100,
+                quality: Some(100),
+            }]
+        );
+        assert_eq!(fetch.groups.len(), 1, "the emptied first category must be removed");
+        assert_eq!(fetch.groups[0].id, 2);
+        assert_eq!(fetch.groups[0].channels.len(), 2);
+        let winner =
+            fetch.groups[0].channels.iter().find(|item| item.header.id.as_ref() == "7").expect("winning duplicate");
+        assert_eq!(winner.header.name.as_ref(), "winning-duplicate");
+        assert_eq!(winner.header.category_id, 2);
+    }
+
+    #[tokio::test]
+    async fn in_memory_quality_direct_and_disabled_paths_preserve_duplicate_rows_without_baseline_io() {
+        let guarded_options = ConfigInputOptions::from(&ConfigInputOptionsDto {
+            update_quality: ConfigInputUpdateQualityDto { live: 100, ..ConfigInputUpdateQualityDto::default() },
+            ..ConfigInputOptionsDto::default()
+        });
+        let guarded_input = ConfigInput {
+            name: "provider".intern(),
+            input_type: InputType::Xtream,
+            options: Some(guarded_options),
+            ..ConfigInput::default()
+        };
+        let disabled_input = ConfigInput {
+            name: "provider".intern(),
+            input_type: InputType::Xtream,
+            options: Some(ConfigInputOptions::from(&ConfigInputOptionsDto::default())),
+            ..ConfigInput::default()
+        };
+        let mut first_group = candidate_group(XtreamCluster::Live, 1, 1);
+        set_candidate_provider_id(&mut first_group.channels[0], 7);
+        let mut second_group = candidate_group(XtreamCluster::Live, 2, 1);
+        set_candidate_provider_id(&mut second_group.channels[0], 7);
+        let candidate = vec![first_group, second_group];
+        let baseline_reads = AtomicUsize::new(0);
+
+        let mut direct_fetch = PlaylistFetch::default();
+        apply_in_memory_cluster_download(
+            XtreamDownloadScope::Direct,
+            &guarded_input,
+            XtreamCluster::Live,
+            candidate.clone(),
+            &mut direct_fetch,
+            || async {
+                baseline_reads.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(2))
+            },
+        )
+        .await
+        .expect("direct candidate should remain unguarded");
+
+        let mut disabled_fetch = PlaylistFetch::default();
+        apply_in_memory_cluster_download(
+            XtreamDownloadScope::PlaylistUpdate { quality: UpdateQualityPolicy::Enforce },
+            &disabled_input,
+            XtreamCluster::Live,
+            candidate,
+            &mut disabled_fetch,
+            || async {
+                baseline_reads.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(2))
+            },
+        )
+        .await
+        .expect("disabled quality guard should preserve the candidate");
+
+        assert_eq!(baseline_reads.load(Ordering::SeqCst), 0);
+        assert_eq!(direct_fetch.groups.iter().map(|group| group.channels.len()).sum::<usize>(), 2);
+        assert_eq!(disabled_fetch.groups.iter().map(|group| group.channels.len()).sum::<usize>(), 2);
+        assert!(direct_fetch.quality_rejections.is_empty());
+        assert!(disabled_fetch.quality_rejections.is_empty());
+    }
+
+    #[tokio::test]
+    async fn in_memory_force_normalizes_and_accepts_without_baseline_io() {
+        let options = ConfigInputOptions::from(&ConfigInputOptionsDto {
+            update_quality: ConfigInputUpdateQualityDto { live: 100, ..ConfigInputUpdateQualityDto::default() },
+            ..ConfigInputOptionsDto::default()
+        });
+        let input = ConfigInput {
+            name: "provider".intern(),
+            input_type: InputType::Xtream,
+            options: Some(options),
+            ..ConfigInput::default()
+        };
+        let mut first_group = candidate_group(XtreamCluster::Live, 1, 1);
+        set_candidate_provider_id(&mut first_group.channels[0], 7);
+        let mut winning_group = candidate_group(XtreamCluster::Live, 2, 2);
+        set_candidate_provider_id(&mut winning_group.channels[0], 7);
+        set_candidate_provider_id(&mut winning_group.channels[1], 8);
+        winning_group.channels[0].header.name = "winning-duplicate".intern();
+        let baseline_reads = AtomicUsize::new(0);
+        let mut fetch = PlaylistFetch::default();
+
+        apply_in_memory_cluster_download(
+            XtreamDownloadScope::PlaylistUpdate { quality: UpdateQualityPolicy::Bypass },
+            &input,
+            XtreamCluster::Live,
+            vec![first_group, winning_group],
+            &mut fetch,
+            || async {
+                baseline_reads.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(100))
+            },
+        )
+        .await
+        .expect("forced candidate should be accepted");
+
+        assert_eq!(baseline_reads.load(Ordering::SeqCst), 0);
+        assert!(fetch.quality_rejections.is_empty());
+        assert_eq!(fetch.groups.len(), 1);
+        assert_eq!(fetch.groups[0].channels.len(), 2);
+        assert_eq!(fetch.groups[0].channels[0].header.name.as_ref(), "winning-duplicate");
+        assert_eq!(
+            fetch.force_updates,
+            vec![ClusterForceUpdate { cluster: XtreamCluster::Live, candidate_count: 2, configured_threshold: 100 }]
+        );
+    }
+
+    #[test]
+    fn in_memory_quality_applies_exact_90_percent_boundaries() {
+        for (name, candidate_count, rejected) in [
+            ("lower boundary", 90, false),
+            ("below lower boundary", 89, true),
+            ("upper boundary", 110, false),
+            ("above upper boundary", 111, true),
+        ] {
+            let mut fetch = PlaylistFetch::default();
+            apply_cluster_update_quality(
+                &mut fetch,
+                XtreamCluster::Live,
+                Some(100),
+                90,
+                vec![candidate_group(XtreamCluster::Live, 1, candidate_count)],
+            );
+
+            assert_eq!(!fetch.quality_rejections.is_empty(), rejected, "case: {name}");
+            assert_eq!(fetch.groups.is_empty(), rejected, "case: {name}");
+            if rejected {
+                let rejection = fetch.quality_rejections.first().expect("rejection report");
+                assert_eq!(rejection.current_count, 100, "case: {name}");
+                assert_eq!(rejection.candidate_count, candidate_count, "case: {name}");
+                assert_eq!(rejection.threshold, 90, "case: {name}");
+                assert_eq!(rejection.quality, 89, "case: {name}");
+            }
+        }
+    }
+
+    #[test]
+    fn in_memory_quality_preserves_disabled_and_bootstrap_behavior() {
+        let mut disabled = PlaylistFetch::default();
+        apply_cluster_update_quality(
+            &mut disabled,
+            XtreamCluster::Live,
+            Some(100),
+            0,
+            vec![candidate_group(XtreamCluster::Live, 1, 1)],
+        );
+        assert_eq!(disabled.groups[0].channels.len(), 1);
+        assert!(disabled.quality_rejections.is_empty());
+
+        let mut bootstrap = PlaylistFetch::default();
+        apply_cluster_update_quality(
+            &mut bootstrap,
+            XtreamCluster::Video,
+            None,
+            90,
+            vec![candidate_group(XtreamCluster::Video, 2, 3)],
+        );
+        assert_eq!(bootstrap.groups[0].channels.len(), 3);
+        assert!(bootstrap.quality_rejections.is_empty());
+
+        let mut empty_bootstrap = PlaylistFetch::default();
+        apply_cluster_update_quality(&mut empty_bootstrap, XtreamCluster::Series, None, 90, Vec::new());
+        assert!(empty_bootstrap.groups.is_empty());
+        assert_eq!(
+            empty_bootstrap.quality_rejections,
+            vec![tuliprox_core::model::ClusterUpdateRejection {
+                cluster: XtreamCluster::Series,
+                current_count: 0,
+                candidate_count: 0,
+                threshold: 90,
+                quality: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn rejected_vod_does_not_block_accepted_live_and_series_clusters() {
+        let mut fetch = PlaylistFetch::default();
+        apply_cluster_update_quality(
+            &mut fetch,
+            XtreamCluster::Live,
+            Some(100),
+            90,
+            vec![candidate_group(XtreamCluster::Live, 1, 90)],
+        );
+        apply_cluster_update_quality(
+            &mut fetch,
+            XtreamCluster::Video,
+            Some(100),
+            90,
+            vec![candidate_group(XtreamCluster::Video, 2, 40), candidate_group(XtreamCluster::Video, 3, 49)],
+        );
+        apply_cluster_update_quality(
+            &mut fetch,
+            XtreamCluster::Series,
+            Some(100),
+            90,
+            vec![candidate_group(XtreamCluster::Series, 4, 110)],
+        );
+
+        assert_eq!(fetch.groups.len(), 2);
+        assert!(fetch.groups.iter().any(|group| group.xtream_cluster == XtreamCluster::Live));
+        assert!(fetch.groups.iter().any(|group| group.xtream_cluster == XtreamCluster::Series));
+        assert!(!fetch.groups.iter().any(|group| group.xtream_cluster == XtreamCluster::Video));
+        assert_eq!(fetch.quality_rejections.len(), 1);
+        assert_eq!(fetch.quality_rejections[0].cluster, XtreamCluster::Video);
+        assert_eq!(fetch.quality_rejections[0].candidate_count, 89);
+    }
+
+    #[test]
+    fn pipeline_transparency_disk_batch_transports_quality_and_error_facts_together() {
+        let acceptance = ClusterUpdateAcceptance {
+            cluster: XtreamCluster::Live,
+            current_count: Some(100),
+            candidate_count: 90,
+            threshold: 90,
+            quality: Some(90),
+        };
+        let rejection = ClusterUpdateRejection {
+            cluster: XtreamCluster::Video,
+            current_count: 100,
+            candidate_count: 89,
+            threshold: 90,
+            quality: 89,
+        };
+        let force_update =
+            ClusterForceUpdate { cluster: XtreamCluster::Series, candidate_count: 80, configured_threshold: 95 };
+        let technical_error = TuliproxError::RepositoryXtream("injected post-quality failure".to_string());
+        let mut fetch = PlaylistFetch::default().persisted(true);
+
+        apply_disk_cluster_publish_result(
+            &mut fetch,
+            XtreamClusterPublishBatchResult {
+                outcomes: vec![XtreamClusterPublishOutcome::QualityAccepted(acceptance)],
+                quality_acceptances: vec![acceptance],
+                quality_rejections: vec![rejection],
+                force_updates: vec![force_update],
+                errors: vec![technical_error],
+                failed_cluster: Some(XtreamCluster::Series),
+            },
+        );
+
+        assert!(fetch.persisted);
+        assert!(fetch.groups.is_empty());
+        assert_eq!(fetch.quality_acceptances, vec![acceptance]);
+        assert_eq!(fetch.quality_rejections, vec![rejection]);
+        assert_eq!(fetch.force_updates, vec![force_update]);
+        assert_eq!(fetch.errors.len(), 1);
+        assert_eq!(fetch.failed_clusters, [XtreamCluster::Series]);
+    }
+
+    #[test]
+    fn disk_quality_scope_disables_guard_for_direct_downloads() {
+        let options = ConfigInputOptions::from(&ConfigInputOptionsDto {
+            update_quality: ConfigInputUpdateQualityDto { live: 90, ..ConfigInputUpdateQualityDto::default() },
+            ..ConfigInputOptionsDto::default()
+        });
+        let input = ConfigInput { options: Some(options), ..ConfigInput::default() };
+
+        assert_eq!(
+            disk_cluster_quality_policy(
+                XtreamDownloadScope::PlaylistUpdate { quality: UpdateQualityPolicy::Enforce },
+                &input,
+                XtreamCluster::Live,
+            ),
+            XtreamClusterQualityPolicy::Enforce { threshold: 90 }
+        );
+        assert_eq!(
+            disk_cluster_quality_policy(XtreamDownloadScope::Direct, &input, XtreamCluster::Live),
+            XtreamClusterQualityPolicy::Enforce { threshold: 0 }
+        );
     }
 
     fn test_vod_item() -> XtreamPlaylistItem {

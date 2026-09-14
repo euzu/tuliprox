@@ -1,5 +1,9 @@
 use crate::{
-    app::components::{button_utils::prevent_default_and_stop, popup_menu::PopupMenu, AppIcon, IconButton},
+    app::components::{
+        button_utils::prevent_default_and_stop,
+        popup_menu::{PopupMenu, PopupMenuPlacement, PopupMenuWidth},
+        AppIcon, IconButton,
+    },
     html_if,
 };
 use std::{collections::HashSet, rc::Rc};
@@ -38,6 +42,12 @@ pub struct DropDownIconButtonProps {
     #[prop_or_default]
     pub button_ref: Option<NodeRef>,
     #[prop_or_default]
+    pub popup_width: PopupMenuWidth,
+    #[prop_or_default]
+    pub popup_placement: PopupMenuPlacement,
+    #[prop_or_default]
+    pub width_anchor_ref: Option<NodeRef>,
+    #[prop_or_default]
     pub aria_label: Option<String>,
     #[prop_or_default]
     pub aria_required: Option<bool>,
@@ -64,8 +74,12 @@ pub fn DropDownIconButton(props: &DropDownIconButtonProps) -> Html {
 
     let handle_popup_close = {
         let set_is_open = popup_is_open.clone();
+        let button_ref = button_ref.clone();
         Callback::from(move |()| {
             set_is_open.set(false);
+            if let Some(button) = button_ref.cast::<web_sys::HtmlElement>() {
+                let _ = button.focus();
+            }
         })
     };
 
@@ -87,6 +101,7 @@ pub fn DropDownIconButton(props: &DropDownIconButtonProps) -> Html {
         let selections = selections.clone();
         let onselect = props.on_select.clone();
         let set_is_open = popup_is_open.clone();
+        let button_ref = button_ref.clone();
         Callback::from(move |(id, _event): (String, MouseEvent)| {
             let selected_options = if multi_select {
                 if selections.current().contains(&id) {
@@ -107,6 +122,9 @@ pub fn DropDownIconButton(props: &DropDownIconButtonProps) -> Html {
             onselect.emit((name.clone(), selected_options));
             if !multi_select {
                 set_is_open.set(false);
+                if let Some(button) = button_ref.cast::<web_sys::HtmlElement>() {
+                    let _ = button.focus();
+                }
             }
         })
     };
@@ -121,7 +139,9 @@ pub fn DropDownIconButton(props: &DropDownIconButtonProps) -> Html {
             aria_required={props.aria_required}
             aria_invalid={props.aria_invalid}
             aria_describedby={props.aria_describedby.clone()} />
-         <PopupMenu list_role="listbox" is_open={*popup_is_open} anchor_ref={(*popup_anchor_ref).clone()} on_close={handle_popup_close}>
+         <PopupMenu list_role="listbox" is_open={*popup_is_open} anchor_ref={(*popup_anchor_ref).clone()}
+            width={props.popup_width} placement={props.popup_placement}
+            width_anchor_ref={props.width_anchor_ref.clone()} on_close={handle_popup_close}>
             {
                 for props.options.iter().map(|o| {
                     let checkbox_id = o.id.clone();
@@ -131,7 +151,7 @@ pub fn DropDownIconButton(props: &DropDownIconButtonProps) -> Html {
                         move |event| checkbox_handler.emit((id.clone(), event))
                     });
                     html! {
-                        <div role="option" aria-selected={selections.current().contains(&o.id).to_string()} class={classes!("tp__dropdown-icon-button__option", "tp__menu-item", if selections.current().contains(&o.id) {"checked"} else {"unchecked"})} onclick={option_click}>
+                        <button type="button" role="option" aria-selected={selections.current().contains(&o.id).to_string()} class={classes!("tp__dropdown-icon-button__option", "tp__menu-item", if selections.current().contains(&o.id) {"checked"} else {"unchecked"})} onclick={option_click}>
                             {
                                 html_if!(
                                     props.multi_select,
@@ -144,7 +164,7 @@ pub fn DropDownIconButton(props: &DropDownIconButtonProps) -> Html {
                                 })
                             }
                             <span class={"tp__dropdown-icon-button__option-item"}>{o.label.clone()}</span>
-                        </div>
+                        </button>
                 }})
             }
         </PopupMenu>

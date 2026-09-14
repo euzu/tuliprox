@@ -93,14 +93,23 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
     targets: &[&Arc<ConfigTarget>],
     input_stats: &mut HashMap<Arc<str>, InputStats>,
     errors: &mut Vec<TuliproxError>,
+    accepted_empty_clusters: ClusterFlags,
     process_parallel: bool,
 ) -> Vec<TargetStats> {
     if !process_parallel {
         let mut target_stats = Vec::with_capacity(targets.len());
         for (index, target) in targets.iter().enumerate() {
             let consume_input_source = index + 1 == targets.len();
-            let result =
-                prepare_playlist_for_target(ctx, playlists, target, input_stats, errors, consume_input_source).await;
+            let result = prepare_playlist_for_target(
+                ctx,
+                playlists,
+                target,
+                input_stats,
+                errors,
+                accepted_empty_clusters,
+                consume_input_source,
+            )
+            .await;
             match result {
                 Ok(prepared) => {
                     let processing = prepared.processing.clone();
@@ -142,7 +151,9 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
         let (completion, receiver) = watch::channel(false);
         completion_receivers.push(receiver);
 
-        match prepare_playlist_for_target(ctx, playlists, target, input_stats, errors, false).await {
+        match prepare_playlist_for_target(ctx, playlists, target, input_stats, errors, accepted_empty_clusters, false)
+            .await
+        {
             Ok(prepared) => {
                 let processing = prepared.processing.clone();
                 let task_ctx = Arc::clone(ctx);
@@ -232,10 +243,12 @@ pub(crate) fn apply_persist_filter(target: &ConfigTarget, groups: &mut Vec<Playl
 }
 
 pub(crate) struct PreparedTarget {
+    pub(crate) library_empty: tuliprox_repository::LibraryEmptyPublication,
     pub(crate) target: ConfigTarget,
     pub(crate) playlist: Vec<PlaylistGroup>,
     pub(crate) epg: Vec<Epg>,
     pub(crate) processing: PipelineStats,
+    pub(crate) accepted_empty_clusters: ClusterFlags,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -245,6 +258,7 @@ pub(crate) async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, 
     target: &ConfigTarget,
     stats: &mut HashMap<Arc<str>, InputStats>,
     errors: &mut Vec<TuliproxError>,
+    accepted_empty_clusters: ClusterFlags,
     consume_input_source: bool,
 ) -> Result<PreparedTarget, Vec<TuliproxError>> {
     debug_if_enabled!("Processing order is {}", &target.processing_order);
@@ -254,9 +268,15 @@ pub(crate) async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, 
     let mut new_epg = vec![];
     let mut new_playlist: Vec<PlaylistGroup> = vec![];
     let mut aggregate_outcome = PipelineOutcome::default();
+    let mut has_empty_library = false;
+    let mut all_inputs_empty = !playlists.is_empty();
+    let mut only_library_inputs = true;
+    // The caller has already required Ready for every input. An empty foreign input
+    // still needs its own Force contract; it cannot borrow Library's filter permission.
+    let mut non_library_inputs_populated = true;
 
     debug!("Executing processing pipes");
-    let broadcast_step = create_broadcast_callback(&ctx.events);
+    let broadcast_step = create_broadcast_callback(&ctx.events, &ctx.run_id, ctx.execution_order);
 
     let bouquet_file =
         tuliprox_repository::load_target_bouquet(&ctx.config, &target.name).await.map_err(|err| vec![err])?;
@@ -270,6 +290,11 @@ pub(crate) async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, 
     let pipe = get_processing_pipe(target);
     let mut step = StepMeasure::new(&target.name, broadcast_step);
     for provider_fpl in playlists.iter_mut() {
+        let input_is_empty = provider_fpl.source.is_empty();
+        all_inputs_empty &= input_is_empty;
+        only_library_inputs &= provider_fpl.input.input_type == InputType::Library;
+        non_library_inputs_populated &= provider_fpl.input.input_type == InputType::Library || !input_is_empty;
+        has_empty_library |= provider_fpl.input.input_type == InputType::Library && input_is_empty;
         log_memory_snapshot(
             format!("target '{}' input '{}' before_pipe", target.name, provider_fpl.input.name).as_str(),
         );
@@ -319,10 +344,19 @@ pub(crate) async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, 
     log_memory_snapshot(format!("target '{}' after_filter_rename_map_epg", target.name).as_str());
     step.stop("Preparing playlist");
     Ok(PreparedTarget {
+        library_empty: match (has_empty_library, all_inputs_empty && only_library_inputs) {
+            (true, true) => tuliprox_repository::LibraryEmptyPublication::CompleteTarget,
+            (true, false) if non_library_inputs_populated && accepted_empty_clusters.is_empty() => {
+                tuliprox_repository::LibraryEmptyPublication::FilterableContribution
+            }
+            (true, false) => tuliprox_repository::LibraryEmptyPublication::Contribution,
+            (false, _) => tuliprox_repository::LibraryEmptyPublication::None,
+        },
         target: target.clone(),
         playlist: new_playlist,
         epg: new_epg,
         processing: aggregate_outcome.to_stats(),
+        accepted_empty_clusters,
     })
 }
 
@@ -373,7 +407,7 @@ pub(crate) async fn finalize_prepared_target<E: EventSink + Clone + 'static, M: 
     let mut new_playlist = prepared.playlist;
     let mut new_epg = prepared.epg;
     let mut errors = Vec::new();
-    let broadcast_step = create_broadcast_callback(&ctx.events);
+    let broadcast_step = create_broadcast_callback(&ctx.events, &ctx.run_id, ctx.execution_order);
     let mut step = StepMeasure::new(&target.name, broadcast_step);
     if target.favourites.is_some() {
         step.broadcast("Processing favourites for '{}' playlist", &target.name);
@@ -381,7 +415,9 @@ pub(crate) async fn finalize_prepared_target<E: EventSink + Clone + 'static, M: 
         log_memory_snapshot(format!("target '{}' after_favourites", target.name).as_str());
     }
 
-    if new_playlist.is_empty() {
+    let library_empty = prepared.library_empty.for_filtered_playlist(&new_playlist);
+    if new_playlist.is_empty() && prepared.accepted_empty_clusters.is_empty() && !library_empty.replaces_empty_target()
+    {
         step.stop("");
         info!("Playlist is empty: {}", target.name);
         (Ok(()), errors)
@@ -455,12 +491,14 @@ pub(crate) async fn finalize_prepared_target<E: EventSink + Clone + 'static, M: 
         } else {
             flatten_tvguide(new_epg)
         };
+        let library_empty = library_empty.for_filtered_playlist(&flat_new_playlist);
         let result = persist_playlist(
             &ctx.config,
             &mut flat_new_playlist,
             merged_epg.as_ref(),
             target,
             ctx.playlist_state.as_ref(),
+            TargetPlaylistPersistOptions { accepted_empty_clusters: prepared.accepted_empty_clusters, library_empty },
         )
         .await;
         if result.is_ok() && process_watch(&ctx.config, &ctx.events, target, &flat_new_playlist).await {

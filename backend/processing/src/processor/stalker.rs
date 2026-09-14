@@ -10,15 +10,15 @@
 
 #![allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
 
-use super::stalker_refresh::{
-    advance_stalker_refresh, StalkerClusterSelection, StalkerRefreshMode, StalkerRefreshOutcome,
-};
+use super::stalker_refresh::{advance_stalker_refresh, StalkerRefreshMode, StalkerRefreshOutcome, StalkerRefreshPlan};
 use log::{debug, info, warn};
 use lru::LruCache;
 use parking_lot::Mutex;
 use shared::{
     error::TuliproxError,
-    model::{stalker::StalkerStreamKind, stalker_item::StalkerPlaylistItem, PlaylistGroup, PlaylistItem},
+    model::{
+        stalker::StalkerStreamKind, stalker_item::StalkerPlaylistItem, PlaylistGroup, PlaylistItem, UpdateQualityPolicy,
+    },
     utils::Internable,
 };
 use std::{
@@ -29,7 +29,10 @@ use std::{
     time::{Duration, Instant},
 };
 use tuliprox_core::model::{AppConfig, ConfigInput, ConfigInputFlags, StalkerInputConfig};
-use tuliprox_iptv::stalker::{client::StalkerApiClient, error::StalkerError, parser};
+use tuliprox_iptv::{
+    provider::PlaylistFetch,
+    stalker::{client::StalkerApiClient, error::StalkerError, parser},
+};
 use tuliprox_repository::{
     stalker_generation_repository::{load_active_manifest, load_checkpoint},
     stalker_repository::{ensure_stalker_storage_path, load_stalker_items_at, read_stalker_item_at},
@@ -87,6 +90,24 @@ async fn try_acquire_stalker_refresh(input_name: &Arc<str>) -> Option<tokio::syn
     semaphore.try_acquire_owned().ok()
 }
 
+fn stalker_refresh_busy_fetch(input_name: &str, persisted: bool, quality_policy: UpdateQualityPolicy) -> PlaylistFetch {
+    if matches!(quality_policy, UpdateQualityPolicy::Bypass) {
+        PlaylistFetch::failed(TuliproxError::ProviderConnection(format!(
+            "Stalker refresh for input '{input_name}' is busy; retry the forced update"
+        )))
+        .persisted(persisted)
+    } else {
+        PlaylistFetch::nothing_to_do().persisted(persisted).partial(true)
+    }
+}
+
+fn failed_stalker_acquisition(error: TuliproxError, clusters: &[StalkerCluster]) -> PlaylistFetch {
+    PlaylistFetch {
+        failed_clusters: clusters.iter().copied().map(xtream_cluster).collect(),
+        ..PlaylistFetch::failed(error)
+    }
+}
+
 fn cached_resolved_link(key: RuntimeLinkKey, force_refresh: bool) -> Option<Arc<str>> {
     let mut cache = RUNTIME_STALKER_LINKS.lock();
     let expired = cache.peek(&key).is_some_and(|entry| entry.expires_at <= Instant::now());
@@ -111,19 +132,15 @@ pub async fn download_stalker_playlist(
     clusters: Option<&[StalkerCluster]>,
     refresh_mode: StalkerRefreshMode,
     materialize_active: bool,
-) -> (Vec<PlaylistGroup>, Vec<TuliproxError>, bool, bool) {
+    quality_policy: UpdateQualityPolicy,
+) -> PlaylistFetch {
     let stalker_cfg = match input.stalker.as_ref() {
         Some(cfg) => cfg.clone(),
         None => {
-            return (
-                vec![],
-                vec![TuliproxError::ConfigInput(format!(
-                    "Stalker input '{}' has no stalker configuration block",
-                    input.name
-                ))],
-                false,
-                false,
-            );
+            return PlaylistFetch::failed(TuliproxError::ConfigInput(format!(
+                "Stalker input '{}' has no stalker configuration block",
+                input.name
+            )));
         }
     };
 
@@ -136,27 +153,22 @@ pub async fn download_stalker_playlist(
 
     if resolved_clusters.is_empty() {
         info!("Stalker input '{}' has all clusters skipped", input.name);
-        return (vec![], vec![], false, false);
+        return PlaylistFetch::nothing_to_do();
     }
-    let refresh_selection = StalkerClusterSelection::requested(input, &resolved_clusters);
+    let refresh_plan = StalkerRefreshPlan::requested(input, &resolved_clusters, quality_policy);
 
     let portal_url = match resolve_stalker_portal_url(input) {
         Ok(url) => url,
-        Err(err) => return (vec![], vec![err], false, false),
+        Err(err) => return failed_stalker_acquisition(err, &resolved_clusters),
     };
 
     let identity_fingerprint = stalker_identity_fingerprint(&portal_url, &stalker_cfg);
     let api_client = match cached_runtime_stalker_client(client, portal_url, &stalker_cfg) {
         Ok(client) => client,
         Err(err) => {
-            return (
-                vec![],
-                vec![TuliproxError::ConfigInput(format!(
-                    "failed to build Stalker client for input '{}': {err}",
-                    input.name
-                ))],
-                false,
-                false,
+            return failed_stalker_acquisition(
+                TuliproxError::ConfigInput(format!("failed to build Stalker client for input '{}': {err}", input.name)),
+                &resolved_clusters,
             );
         }
     };
@@ -164,11 +176,9 @@ pub async fn download_stalker_playlist(
     let storage_path = match ensure_stalker_storage_path(app_config, &input.name).await {
         Ok(p) => p,
         Err(err) => {
-            return (
-                vec![],
-                vec![TuliproxError::Io(format!("could not prepare Stalker storage for input '{}': {err}", input.name))],
-                false,
-                false,
+            return failed_stalker_acquisition(
+                TuliproxError::Io(format!("could not prepare Stalker storage for input '{}': {err}", input.name)),
+                &resolved_clusters,
             );
         }
     };
@@ -178,14 +188,12 @@ pub async fn download_stalker_playlist(
         let handshake = match api_client.handshake().await {
             Ok(handshake) => handshake,
             Err(err) => {
-                return (
-                    vec![],
-                    vec![TuliproxError::ProviderConnection(format!(
+                return failed_stalker_acquisition(
+                    TuliproxError::ProviderConnection(format!(
                         "Stalker handshake for input '{}' failed: {err}",
                         input.name
-                    ))],
-                    false,
-                    false,
+                    )),
+                    &resolved_clusters,
                 );
             }
         };
@@ -194,7 +202,7 @@ pub async fn download_stalker_playlist(
                 app_config,
                 api_client.as_ref(),
                 &handshake,
-                refresh_selection,
+                refresh_plan,
                 &storage_path,
                 identity_fingerprint,
                 refresh_mode.budget(),
@@ -205,7 +213,7 @@ pub async fn download_stalker_playlist(
                 } else {
                     let checkpoint = match load_checkpoint(&storage_path, identity_fingerprint).await {
                         Ok(checkpoint) => checkpoint,
-                        Err(err) => return (Vec::new(), vec![err], false, false),
+                        Err(err) => return PlaylistFetch::failed(err),
                     };
                     break StalkerRefreshOutcome::Yielded {
                         phase: checkpoint.as_ref().map_or(
@@ -227,18 +235,40 @@ pub async fn download_stalker_playlist(
                     tokio::task::yield_now().await;
                 }
                 Ok(outcome) => break outcome,
-                Err(err) => return (Vec::new(), vec![err], false, false),
+                Err(err) => return PlaylistFetch::failed(err),
             }
         }
     } else {
-        return (Vec::new(), Vec::new(), app_config.config.load().disk_based_processing, true);
+        return stalker_refresh_busy_fetch(&input.name, app_config.config.load().disk_based_processing, quality_policy);
     };
 
     let yielded = matches!(&outcome, StalkerRefreshOutcome::Yielded { .. });
     let terminal = matches!(&outcome, StalkerRefreshOutcome::Terminal(_));
     let mut errors = Vec::new();
+    let mut quality_acceptances = Vec::new();
+    let mut quality_rejections = Vec::new();
+    let mut force_updates = Vec::new();
     match outcome {
-        StalkerRefreshOutcome::Complete => {}
+        StalkerRefreshOutcome::Complete {
+            quality_acceptances: completed_acceptances,
+            quality_rejections: completed_rejections,
+            force_updates: completed_force_updates,
+        } => {
+            quality_acceptances = completed_acceptances;
+            quality_rejections = completed_rejections;
+            force_updates = completed_force_updates;
+        }
+        StalkerRefreshOutcome::Failed {
+            quality_acceptances: completed_acceptances,
+            quality_rejections: completed_rejections,
+            force_updates: completed_force_updates,
+            error,
+        } => {
+            return PlaylistFetch::failed(error)
+                .with_quality_acceptances(completed_acceptances)
+                .with_quality_rejections(completed_rejections)
+                .with_force_updates(completed_force_updates);
+        }
         StalkerRefreshOutcome::Yielded { phase, processed, skipped, error } => {
             info!(
                 "Stalker input '{}' yielded in phase {phase:?} after {processed} records ({skipped} skipped)",
@@ -255,7 +285,12 @@ pub async fn download_stalker_playlist(
         Ok(manifest) => manifest,
         Err(err) => {
             errors.push(err);
-            return (Vec::new(), errors, false, yielded);
+            return PlaylistFetch::groups(Vec::new())
+                .with_errors(errors)
+                .with_quality_acceptances(quality_acceptances)
+                .with_quality_rejections(quality_rejections)
+                .with_force_updates(force_updates)
+                .partial(yielded);
         }
     };
     if terminal {
@@ -268,7 +303,13 @@ pub async fn download_stalker_playlist(
     }
     let use_disk_based_processing = app_config.config.load().disk_based_processing;
     if !materialize_active {
-        return (Vec::new(), errors, use_disk_based_processing, yielded);
+        return PlaylistFetch::groups(Vec::new())
+            .with_errors(errors)
+            .with_quality_acceptances(quality_acceptances)
+            .with_quality_rejections(quality_rejections)
+            .with_force_updates(force_updates)
+            .persisted(use_disk_based_processing)
+            .partial(yielded);
     }
     let mut groups = Vec::new();
     let mut counts = [0_usize; 3];
@@ -324,7 +365,13 @@ pub async fn download_stalker_playlist(
         }
     }
     parser::log_stalker_download_summary(&input.name, counts[0], counts[1], counts[2]);
-    (groups, errors, use_disk_based_processing, yielded)
+    PlaylistFetch::groups(groups)
+        .with_errors(errors)
+        .with_quality_acceptances(quality_acceptances)
+        .with_quality_rejections(quality_rejections)
+        .with_force_updates(force_updates)
+        .persisted(use_disk_based_processing)
+        .partial(yielded)
 }
 
 /// Resolve a per-input portal URL using the standard `provider://` resolution pipeline.
@@ -583,5 +630,32 @@ mod tests {
         assert!(try_acquire_stalker_refresh(&name).await.is_none());
         drop(first);
         assert!(try_acquire_stalker_refresh(&name).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn force_stalker_refresh_busy_is_visible_and_does_not_mutate_checkpoint() {
+        use tuliprox_repository::stalker_generation_repository::{save_checkpoint, StalkerCheckpoint};
+
+        let temp = tempfile::tempdir().expect("temporary Stalker storage");
+        let input_name: Arc<str> = "force-busy-portal".into();
+        let identity = 17;
+        save_checkpoint(temp.path(), &StalkerCheckpoint::new(identity, 23, 0b1111, 123))
+            .await
+            .expect("checkpoint should persist");
+
+        let refresh_permit = try_acquire_stalker_refresh(&input_name).await.expect("first refresh owns permit");
+        let fetch = stalker_refresh_busy_fetch(&input_name, true, UpdateQualityPolicy::Bypass);
+
+        assert_eq!(fetch.errors.len(), 1);
+        assert!(!fetch.partial);
+        assert!(fetch.persisted);
+        let checkpoint = load_checkpoint(temp.path(), identity)
+            .await
+            .expect("checkpoint should load")
+            .expect("checkpoint should remain present");
+        assert_eq!(checkpoint.quality_bypass_mask, 0);
+
+        drop(refresh_permit);
+        assert!(try_acquire_stalker_refresh(&input_name).await.is_some());
     }
 }

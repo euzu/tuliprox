@@ -4,6 +4,7 @@ mod epg_view;
 mod filter_view;
 mod input;
 mod input_table;
+mod input_update_card;
 mod list;
 mod mapper_counter_view;
 mod mapper_script_view;
@@ -20,10 +21,10 @@ mod target;
 mod target_table;
 
 pub use self::{
-    epg_config_view::*, epg_source_selector::*, epg_view::*, filter_view::*, input::*, input_table::*, list::*,
-    mapper_counter_view::*, mapper_script_view::*, mappings::*, playlist_explorer_view::*, playlist_rows::*,
-    playlist_settings_view::*, playlist_source_selector::*, playlist_update_view::*, processing::*, target::*,
-    target_table::*,
+    epg_config_view::*, epg_source_selector::*, epg_view::*, filter_view::*, input::*, input_table::*,
+    input_update_card::*, list::*, mapper_counter_view::*, mapper_script_view::*, mappings::*,
+    playlist_explorer_view::*, playlist_rows::*, playlist_settings_view::*, playlist_source_selector::*,
+    playlist_update_view::*, processing::*, target::*, target_table::*,
 };
 pub use crate::app::context::*;
 use crate::{

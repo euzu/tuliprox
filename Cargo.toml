@@ -3,7 +3,7 @@ members = ["backend/*", "frontend", "shared", "tools/tuliprox-testkit"]
 resolver = "2"
 
 [workspace.package]
-version = "3.3.109"
+version = "3.3.110"
 edition = "2021"
 rust-version = "1.95.0"
 
@@ -88,6 +88,16 @@ incremental = false
 lto = false
 incremental = true
 codegen-units = 256
+
+[profile.dev-slim]
+inherits = "dev"
+opt-level = 0
+strip = "none"
+lto = "off"
+debug = "line-tables-only"
+
+[profile.dev-slim.package."*"]
+debug = false
 
 [profile.release.package.frontend]
 opt-level = 'z'     # Size optimization for frontend

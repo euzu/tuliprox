@@ -16,10 +16,6 @@ pub async fn persist_input_library_playlist(
     library_path: &Path,
     playlist: Vec<PlaylistGroup>,
 ) -> (Vec<PlaylistGroup>, Result<(), TuliproxError>) {
-    if playlist.is_empty() {
-        return (playlist, Ok(()));
-    }
-
     let file_lock = app_config.file_locks.write_lock(library_path).await;
     let library_path = library_path.to_path_buf();
     let library_path_err = library_path.clone();
@@ -169,7 +165,7 @@ pub async fn load_input_local_library_playlist(
         return Ok(groups);
     }
 
-    Ok(Vec::new())
+    Err(TuliproxError::RepositoryLibrary(format!("Library input is missing: {}", lib_path.display())))
 }
 
 #[cfg(test)]

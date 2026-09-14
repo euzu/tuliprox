@@ -66,16 +66,19 @@ pub async fn download_library_playlist(
     input: &ConfigInput,
 ) -> (Vec<PlaylistGroup>, Vec<TuliproxError>) {
     let config = &*app_config.config.load();
-    let Some(library_config) = config.library.as_ref() else { return (vec![], vec![]) };
-    if !library_config.enabled {
-        return (vec![], vec![]);
-    }
+    let failure = |error: String| (vec![], vec![TuliproxError::RepositoryLibrary(error)]);
+    let Some(library_config) = config.library.as_ref().filter(|library| library.enabled) else {
+        return failure("Library is disabled or unavailable".into());
+    };
     let api_base_path =
         concat_path_leading_slash(config.web_ui.as_ref().and_then(|w| w.path.as_deref()).unwrap_or(""), "api/v1");
 
     let storage_path =
         resolve_metadata_storage_path(config.metadata_update.as_ref(), &config.storage_dir).join("library");
-    let mut metadata_iter = MetadataAsyncIter::new(&storage_path).await;
+    let mut metadata_iter = match MetadataAsyncIter::try_new(&storage_path).await {
+        Ok(iter) => iter,
+        Err(err) => return failure(format!("Failed to open Library catalog: {err}")),
+    };
     let mut group_movies = PlaylistGroup {
         id: 0,
         title: library_config.playlist.movie_category.clone(),
@@ -88,7 +91,12 @@ pub async fn download_library_playlist(
         channels: vec![],
         xtream_cluster: XtreamCluster::Series,
     };
-    while let Some(entry) = metadata_iter.next().await {
+    loop {
+        let entry = match metadata_iter.try_next().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => break,
+            Err(err) => return failure(format!("Failed to read Library catalog: {err}")),
+        };
         match entry.metadata {
             MediaMetadata::Movie(_) => {
                 to_playlist_item(

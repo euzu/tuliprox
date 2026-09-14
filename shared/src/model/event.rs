@@ -15,10 +15,11 @@ use crate::model::{
     stats::SourceStats,
     ActiveUserConnectionChange, ConfigReloadFailure, ConfigType, ConnectionDenied, DiskAlert, DownloadsDelta,
     DownloadsResponse, LibraryScanProgressEvent, LibraryScanSummaryStatus, MetadataUpdateFailure, MsgKind,
-    NotificationDeadLetter, Permission, PlaylistGroupsChanged, PlaylistUpdateProgressEvent, PlaylistUpdateState,
-    ProviderAccountEvent, ProviderAccountState, ProviderFetchFailure, ProviderPoolExhausted, ProviderPriorityFallback,
-    RecordingLifecycleMessage, ScheduledTaskFailure, ServerLifecycleEvent, ServerLifecycleState, StreamProbeFailure,
-    SystemInfo, UserLifecycleEvent, UserLifecycleState, WatchChanges, WatchDisabled, WatchUnmatched,
+    NotificationDeadLetter, Permission, PlaylistGroupsChanged, PlaylistUpdateProgressEvent, PlaylistUpdateRunId,
+    PlaylistUpdateRunOrder, PlaylistUpdateState, ProviderAccountEvent, ProviderAccountState, ProviderFetchFailure,
+    ProviderPoolExhausted, ProviderPriorityFallback, RecordingLifecycleMessage, ScheduledTaskFailure,
+    ServerLifecycleEvent, ServerLifecycleState, StreamProbeFailure, SystemInfo, UserLifecycleEvent, UserLifecycleState,
+    WatchChanges, WatchDisabled, WatchUnmatched,
 };
 use std::sync::Arc;
 
@@ -694,6 +695,12 @@ impl EventMessage {
 /// `playlist.update` got a bare enum.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PlaylistUpdateSummary {
+    /// Stable identity of the processing run. Missing only on legacy/test-only events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<PlaylistUpdateRunId>,
+    /// Actual serial execution order. Missing only on legacy/test-only events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_order: Option<PlaylistUpdateRunOrder>,
     pub state: PlaylistUpdateState,
     /// Per-source statistics. Empty when the run produced none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -707,7 +714,18 @@ impl PlaylistUpdateSummary {
     /// A summary carrying only an outcome - the timeout and panic paths,
     /// which have no statistics to report.
     #[must_use]
-    pub fn state_only(state: PlaylistUpdateState) -> Self { Self { state, stats: Vec::new(), error: None } }
+    pub fn state_only(state: PlaylistUpdateState) -> Self {
+        Self { run_id: None, execution_order: None, state, stats: Vec::new(), error: None }
+    }
+
+    #[must_use]
+    pub fn for_run(
+        run_id: PlaylistUpdateRunId,
+        execution_order: PlaylistUpdateRunOrder,
+        state: PlaylistUpdateState,
+    ) -> Self {
+        Self { run_id: Some(run_id), execution_order: Some(execution_order), state, stats: Vec::new(), error: None }
+    }
 }
 
 /// A set of [`EventKind`]s, as one word.
