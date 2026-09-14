@@ -724,11 +724,14 @@ impl RecordingRepository {
     }
 
     pub fn checkpoint_if_needed(&mut self) -> io::Result<CheckpointOutcome> {
-        // Compaction is the natural moment to drop dead keys: rewriting the
-        // checkpoint with them in it would carry them into the new
-        // generation.
-        let _ = self.purge_expired_idempotency(chrono::Utc::now().timestamp())?;
-        self.journal.checkpoint_if_needed()
+        let outcome = self.journal.checkpoint_if_needed()?;
+        // Only after a checkpoint actually happened. Purging scans every
+        // record, and this is called after every commit, so purging
+        // unconditionally would double the cost of every write.
+        if matches!(outcome, CheckpointOutcome::Created { .. }) {
+            let _ = self.purge_expired_idempotency(chrono::Utc::now().timestamp())?;
+        }
+        Ok(outcome)
     }
 
     pub fn health(&self) -> RecoveryHealth { self.journal.health() }

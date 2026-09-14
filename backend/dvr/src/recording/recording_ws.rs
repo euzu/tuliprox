@@ -285,4 +285,120 @@ mod tests {
         assert_eq!(snapshot.revision.0, 0);
         assert!(snapshot.tasks.is_empty());
     }
+
+    /// Every internal fact a recording carries that a client must never
+    /// see. Checked as substrings of the serialized snapshot rather than
+    /// field by field, so a field added later is caught by its *value*
+    /// even if nobody updates this list.
+    fn forbidden_in_a_snapshot() -> Vec<(&'static str, String)> {
+        vec![
+            ("source url", "https://provider.example/secret-stream".to_string()),
+            ("absolute path", "/srv/recordings/alice/movie.ts".to_string()),
+            ("partial path", "movie.ts.partial".to_string()),
+            ("provider input name", "provider-input-a".to_string()),
+            ("target id", "target-internal-7".to_string()),
+            ("resume validator", "W/\"etag-abc123\"".to_string()),
+            ("configured header", "X-Provider-Secret".to_string()),
+        ]
+    }
+
+    /// The DTOs that actually cross the socket. `RecordingSnapshot` itself
+    /// is internal and deliberately not `Serialize`.
+    fn wire_form(snapshot: &RecordingSnapshot) -> String {
+        let tasks = serde_json::to_string(&snapshot.tasks).expect("serialize tasks");
+        let quota = serde_json::to_string(&snapshot.quota).expect("serialize quota");
+        format!("{tasks}{quota}")
+    }
+
+    fn seeded_task(
+        kind: shared::model::RecordingKind,
+        url: &str,
+        owner: &str,
+        visibility: RecordingVisibility,
+        input_name: Option<std::sync::Arc<str>>,
+    ) -> crate::recording::recording_queue::RecordingTask {
+        crate::recording::recording_queue::RecordingTask::new(
+            kind,
+            url,
+            "movie.ts",
+            &tuliprox_core::model::RecordingConfig::from(&shared::model::RecordingConfigDto::default()),
+            input_name,
+            0,
+            meta(owner, visibility),
+        )
+        .expect("task")
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_carries_no_path_url_or_provider_detail() {
+        // The snapshot is the only recording shape most clients ever see.
+        // Asserting on the serialized form is the point: a field added to
+        // the DTO later leaks through serde without touching this module.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let queue = RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open repository");
+        let mut task = seeded_task(
+            shared::model::RecordingKind::Vod,
+            "https://provider.example/secret-stream",
+            "web:alice",
+            RecordingVisibility::Private,
+            Some(std::sync::Arc::from("provider-input-a")),
+        );
+        task.file_dir = std::path::PathBuf::from("/srv/recordings/alice");
+        task.file_path = std::path::PathBuf::from("/srv/recordings/alice/movie.ts");
+        task.recording.source = RecordingSource::new("target-internal-7", "1", "provider-input-a");
+        queue.scheduled.write().await.push(task);
+
+        let snapshot = recording_snapshot(&queue, &alice_claims(), &bare_app_config()).await;
+        assert_eq!(snapshot.tasks.len(), 1, "the owner sees their own recording");
+        let wire = wire_form(&snapshot);
+
+        for (what, secret) in forbidden_in_a_snapshot() {
+            assert!(!wire.contains(&secret), "{what} leaked into the snapshot: {wire}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_never_names_another_user() {
+        // A shared recording is visible to everyone with `recording.read`,
+        // but who made it is not part of the deal.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let queue = RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open repository");
+        queue.scheduled.write().await.push(seeded_task(
+            shared::model::RecordingKind::Vod,
+            "https://provider.example/stream",
+            "web:bob",
+            RecordingVisibility::Shared,
+            None,
+        ));
+
+        let snapshot = recording_snapshot(&queue, &alice_claims(), &bare_app_config()).await;
+        assert_eq!(snapshot.tasks.len(), 1, "alice can see bob's shared recording");
+
+        assert!(!wire_form(&snapshot).contains("web:bob"), "the other user's id reached alice");
+    }
+
+    #[tokio::test]
+    async fn a_regular_user_is_given_no_materialization_id_to_act_on() {
+        // The three administrator routes are addressed by materialization
+        // id. If a regular user's DTO carried one, the only thing stopping
+        // them calling those routes would be the role check.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let queue = RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open repository");
+        let task = seeded_task(
+            shared::model::RecordingKind::Vod,
+            "https://provider.example/stream",
+            "web:alice",
+            RecordingVisibility::Private,
+            None,
+        );
+        let materialization_id =
+            tuliprox_repository::recording_repository::materialization_id_for(&RecordingQueue::to_persisted(&task));
+        queue.scheduled.write().await.push(task);
+
+        let snapshot = recording_snapshot(&queue, &alice_claims(), &bare_app_config()).await;
+        let wire = wire_form(&snapshot);
+
+        assert!(!wire.contains(&materialization_id), "a regular user was handed a materialization id: {wire}");
+        assert!(!wire.contains("reference_count"), "reference counts are not a user's business: {wire}");
+    }
 }
