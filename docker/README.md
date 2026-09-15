@@ -57,7 +57,8 @@ Tuliprox supports loading secrets from `.env` files for `${env:VAR}` interpolati
 - **Custom path via `TULIPROX_ENV_FILE`:** Mount the file into the container and set `TULIPROX_ENV_FILE=/path/to/.env`.
 - **Docker Compose `env_file:`:** Add `env_file: [.env]` in `docker-compose.yml`.
 
-> Changing a mounted `.env` file requires restarting the container (`docker compose restart`). When using `env_file:`, recreate the container (`docker compose up -d --force-recreate`).
+> Changing a mounted `.env` file requires restarting the container (`docker compose restart`).
+> When using `env_file:`, recreate the container (`docker compose up -d --force-recreate`).
 
 ## Docker Container Templates — Deployment Guide
 
