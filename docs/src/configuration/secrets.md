@@ -57,18 +57,84 @@ Variable names match `[a-zA-Z_][a-zA-Z0-9_]*`.
   (see below).
 - **Also works in CLI paths:** any `--home` / `-c` / `-i` / `-a` argument can be `${env:...}` too.
 
-### Supplying the variables
+### `.env` file support
 
-Because Tuliprox reads from the process environment, any mechanism that sets environment variables works:
+Tuliprox automatically loads environment variables from a `.env` file at startup. This makes it easy to keep protected
+credentials in a local `.env` file without committing them to source control (the repository's `.gitignore` already
+ignores `.env` and `.env.*`). A sample template is provided at `config/.env.example`.
+
+#### Discovery and precedence
+
+Tuliprox searches for a `.env` file in the following order:
+
+1. **Explicit CLI argument or environment variable:** `-e, --env-file <PATH>` or `TULIPROX_ENV_FILE=<PATH>`.
+   If explicitly specified, the file must exist and have valid syntax; otherwise Tuliprox exits with an error.
+2. **Config file directory:** if `-c <PATH>` was provided, the parent directory of that file (e.g. `<config_file_dir>/.env`).
+3. **Config directory:** `<config_path>/.env` (default: `<home_path>/config/.env`).
+4. **Home directory:** `<home_path>/.env`.
+5. **Current working directory:** `./.env`.
+
+The first matching file found is loaded.
+
+#### Docker usage
+
+There are three common ways to use `.env` files with Docker:
+
+- **Automatic via mounted `config` directory (Recommended):**
+  If your `docker-compose.yml` mounts `./config:/app/config`, simply place your `.env` file at `./config/.env` on the host.
+  Because Tuliprox starts with `-p /app/config`, it automatically discovers and loads `/app/config/.env` at startup.
+
+- **Custom location via `TULIPROX_ENV_FILE`:**
+  If your secrets file is located elsewhere on the host, mount it into the container and point the `TULIPROX_ENV_FILE`
+  environment variable to it:
+
+  ```yaml
+  services:
+    tuliprox:
+      image: ghcr.io/euzu/tuliprox:latest
+      environment:
+        - TULIPROX_ENV_FILE=/secrets/tuliprox.env
+      volumes:
+        - /etc/secrets/tuliprox.env:/secrets/tuliprox.env:ro
+        - ./config:/app/config
+  ```
+
+- **Native Docker Compose `env_file:` directive:**
+  Docker Compose can directly populate container environment variables from a `.env` file on the host without mounting:
+
+  ```yaml
+  services:
+    tuliprox:
+      image: ghcr.io/euzu/tuliprox:latest
+      env_file:
+        - .env
+  ```
+
+#### 12-factor rules: Existing environment variables take precedence
+
+Variables already defined in the system or container environment (e.g. via `export VAR=value`, Docker `environment:`,
+or Kubernetes secrets) **are never overwritten** by a `.env` file. The `.env` file serves as a default/fallback
+configuration.
+
+#### ⚠️ Restart required on change (no dynamic hot-reload)
+
+> **Important:** Changes to `.env` files do **not** take effect dynamically via configuration reload.
+> For mounted `.env` files or bare-metal installations, restart the `tuliprox` service or container
+> (`docker compose restart`). When using Docker Compose `env_file:`, recreate the container
+> (`docker compose up -d --force-recreate`) to apply changed values.
+>
+> *Why:* In Rust, modifying environment variables in a multi-threaded runtime (`setenv`) is inherently
+> not thread-safe and can cause undefined behavior or data races with concurrent readers. `.env` values are loaded
+> strictly once at application startup and require a restart to change.
+
+### Other ways of supplying variables
+
+Because Tuliprox resolves from the process environment, any standard mechanism works alongside or instead of `.env`:
 
 - `export TULIPROX_WEB_SECRET=...` in the shell / init script that starts the process,
 - `environment:` entries in a container or compose file,
 - `Environment=` lines of a service unit,
 - the secret store / environment settings of whatever runtime you picked.
-
-> Tuliprox does **not** read a `.env` file automatically. If your runtime auto-loads `.env` files, that is fine — the
-> process environment is what matters. For a quick manual check on a Linux shell:
-> `VAR=value ./tuliprox -s` or `export VAR=value && ./tuliprox -s`.
 
 ## Web UI credentials (`user.txt`)
 

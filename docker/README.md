@@ -49,6 +49,17 @@ Set timezone in docker-compose.yml like
       - TZ=${TZ:-Europe/Paris}
 ```
 
+### Environment variables and `.env` files
+
+Tuliprox supports loading secrets from `.env` files for `${env:VAR}` interpolation in configuration files:
+
+- **Automatic:** Place `.env` in `./config/.env`. It is mounted into `/app/config/.env` and automatically loaded at startup.
+- **Custom path via `TULIPROX_ENV_FILE`:** Mount the file into the container and set `TULIPROX_ENV_FILE=/path/to/.env`.
+- **Docker Compose `env_file:`:** Add `env_file: [.env]` in `docker-compose.yml`.
+
+> Changing a mounted `.env` file requires restarting the container (`docker compose restart`).
+> When using `env_file:`, recreate the container (`docker compose up -d --force-recreate`).
+
 ## Docker Container Templates — Deployment Guide
 
 This repository contains ready-to-use Docker Compose templates for a secure reverse proxy stack with VPN egress and CrowdSec protection. It includes
