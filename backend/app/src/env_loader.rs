@@ -17,11 +17,14 @@ pub fn find_candidate_env_paths(
     config_path: Option<&str>,
     home: Option<&str>,
 ) -> Vec<PathBuf> {
-    let home_path = home.filter(|p| !p.trim().is_empty()).map_or_else(utils::get_home_path, PathBuf::from);
-
-    let config_dir = config_path
+    let home_path = home
         .filter(|p| !p.trim().is_empty())
-        .map_or_else(|| utils::get_default_path_for_home(Path::new(&home_path), CONFIG_PATH), PathBuf::from);
+        .map_or_else(utils::get_home_path, |p| PathBuf::from(utils::resolve_env_var(p)));
+
+    let config_dir = config_path.filter(|p| !p.trim().is_empty()).map_or_else(
+        || utils::get_default_path_for_home(Path::new(&home_path), CONFIG_PATH),
+        |p| PathBuf::from(utils::resolve_env_var(p)),
+    );
 
     let mut candidates = Vec::new();
 
@@ -109,6 +112,8 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
+    static TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_candidate_discovery_order() {
         let candidates = find_candidate_env_paths(
@@ -122,6 +127,28 @@ mod tests {
     }
 
     #[test]
+    fn test_candidate_discovery_with_env_var_resolution() {
+        let _guard = TEST_MUTEX.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let var_home = format!("TULIPROX_TEST_HOME_{}", fastrand::u64(..));
+        let var_cfg = format!("TULIPROX_TEST_CFG_{}", fastrand::u64(..));
+
+        std::env::set_var(&var_home, "/resolved_home");
+        std::env::set_var(&var_cfg, "/resolved_cfg");
+
+        let candidates = find_candidate_env_paths(
+            None,
+            Some(&format!("${{env:{var_cfg}}}/custom")),
+            Some(&format!("${{env:{var_home}}}/myhome")),
+        );
+
+        assert_eq!(candidates[0], PathBuf::from("/resolved_cfg/custom/.env"));
+        assert_eq!(candidates[1], PathBuf::from("/resolved_home/myhome/.env"));
+
+        std::env::remove_var(&var_home);
+        std::env::remove_var(&var_cfg);
+    }
+
+    #[test]
     fn test_candidate_deduplication() {
         let candidates =
             find_candidate_env_paths(Some("/same/dir/config.yml"), Some("/same/dir"), Some("/custom/home"));
@@ -131,6 +158,7 @@ mod tests {
 
     #[test]
     fn test_explicit_env_file_not_found() {
+        let _guard = TEST_MUTEX.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let result = load_env_file(Some("/nonexistent/file/.env"), None, None, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("does not exist or is not a file"));
@@ -138,6 +166,7 @@ mod tests {
 
     #[test]
     fn test_explicit_env_file_success_and_no_overwrite() {
+        let _guard = TEST_MUTEX.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempdir().expect("tempdir");
         let env_file = dir.path().join(".env");
         let unique_var = format!("TULIPROX_TEST_VAR_{}", fastrand::u64(..));
@@ -162,6 +191,7 @@ mod tests {
 
     #[test]
     fn test_discovered_env_file_loaded() {
+        let _guard = TEST_MUTEX.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempdir().expect("tempdir");
         let env_file = dir.path().join(".env");
         let unique_var = format!("TULIPROX_DISCOVERED_{}", fastrand::u64(..));
@@ -178,6 +208,7 @@ mod tests {
 
     #[test]
     fn test_env_var_override_path() {
+        let _guard = TEST_MUTEX.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempdir().expect("tempdir");
         let env_file = dir.path().join("my_custom.env");
         let unique_var = format!("TULIPROX_CUSTOM_ENV_{}", fastrand::u64(..));
@@ -197,6 +228,7 @@ mod tests {
 
     #[test]
     fn test_no_env_file_returns_ok_none() {
+        let _guard = TEST_MUTEX.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempdir().expect("tempdir");
         let non_existing_config = dir.path().join("does_not_exist_cfg");
         let non_existing_home = dir.path().join("does_not_exist_home");

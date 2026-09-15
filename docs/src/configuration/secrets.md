@@ -119,11 +119,13 @@ configuration.
 #### ⚠️ Restart required on change (no dynamic hot-reload)
 
 > **Important:** Changes to `.env` files do **not** take effect dynamically via configuration reload.
-> You must **restart** the `tuliprox` service or container for `.env` updates to be loaded.
+> For mounted `.env` files or bare-metal installations, restart the `tuliprox` service or container
+> (`docker compose restart`). When using Docker Compose `env_file:`, recreate the container
+> (`docker compose up -d --force-recreate`) to apply changed values.
 >
-> *Why:* In Rust, modifying environment variables in a multi-threaded Tokio runtime (`setenv`) is inherently
-> not thread-safe and can cause undefined behavior or data races with concurrent readers. Loading occurs strictly once
-> at application startup before worker threads are created.
+> *Why:* In Rust, modifying environment variables in a multi-threaded runtime (`setenv`) is inherently
+> not thread-safe and can cause undefined behavior or data races with concurrent readers. `.env` values are loaded
+> strictly once at application startup and require a restart to change.
 
 ### Other ways of supplying variables
 

@@ -83,8 +83,9 @@ configuration files. In Docker, three methods are supported:
     - .env
   ```
 
-> **Important:** Changes to `.env` files require restarting the container (`docker compose restart`) because environment
-> variables are loaded strictly once at application launch for thread safety.
+> **Important:** Changes to mounted `.env` files require restarting the container (`docker compose restart`). If using
+> Compose `env_file:`, recreate the container (`docker compose up -d --force-recreate`) to apply changed values.
+> Environment variables are loaded strictly once at application launch for thread safety.
 
 ### Docker Image Variants (`scratch` vs. `alpine`)
 

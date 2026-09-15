@@ -116,8 +116,7 @@
     (if `-c` was supplied), `<config_path>/.env`, `<home_path>/.env`, and `./.env`.
   - **12-factor compatibility:** variables already present in the host/Docker environment take precedence and are never
     overwritten.
-  - **Safe thread model:** variables are populated once at process startup prior to worker thread creation. Modifying
-    a `.env` file requires a service or container restart.
+  - **Safe thread model:** `.env` values load once at application startup and require a service or container restart to change.
   - An example configuration template is provided at `config/.env.example`.
 
 - **Target-specific bouquet filters are now managed directly from the Source Editor.** Each target shows its current
@@ -985,7 +984,6 @@
   the `shared` crate, so `/ready` and the banner can no longer drift apart in how they group inputs and aliases.
 
 ## 🐛 Fixes
-
 
 - **PTT title parsing: fixed panics on multi-byte UTF-8 character boundaries (e.g. en-dash `–`).** During title
   metadata parsing (such as background VOD/series metadata enrichment), previous match indices recorded from earlier
