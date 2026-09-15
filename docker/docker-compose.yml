@@ -11,6 +11,13 @@ services:
       - ./downloads:/app/downloads
     environment:
       - TZ=Europe/Paris
+      # - TULIPROX_ENV_FILE=/path/to/.env
+    # env_file:
+    #   - .env
     ports:
       - "8901:8901"
     restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535

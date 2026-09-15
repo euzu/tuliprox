@@ -15,6 +15,7 @@ dist
 /dataSources.local.xml
 /dev/
 /debug/
+/testkit-report
 
 # ignore everything inside docs
 docs/**/*

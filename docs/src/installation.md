@@ -54,6 +54,38 @@ The separation of volumes is critical for security and performance:
 | `/app/downloads` | Destination folder for local video downloads initiated via the Web UI. |
 | `/app/cache` | Destination folder for local image downloads initiated via the xtream codes or m3u api use. |
 
+### Managing Secrets with `.env` Files
+
+To keep provider credentials and tokens out of version control, use a `.env` file referenced by `${env:VAR}` in your
+configuration files. In Docker, three methods are supported:
+
+- **Automatic Discovery via Config Mount (Recommended):**
+  Place your `.env` file directly inside your host config directory (e.g. `/opt/tuliprox/config/.env`).
+  Because `/app/config` is mounted, Tuliprox automatically discovers and loads `/app/config/.env` at process launch
+  before any configuration file is processed.
+- **Custom Location via `TULIPROX_ENV_FILE`:**
+  Mount the `.env` file to an arbitrary path inside the container and specify `TULIPROX_ENV_FILE`:
+
+  ```yaml
+  environment:
+    - TZ=Europe/Berlin
+    - TULIPROX_ENV_FILE=/secrets/.env
+  volumes:
+    - /path/to/my-secrets.env:/secrets/.env:ro
+    - /opt/tuliprox/config:/app/config
+  ```
+
+- **Native Docker Compose `env_file:` Directive:**
+  Let Docker Compose populate container environment variables directly from a host `.env` file without mounting:
+
+  ```yaml
+  env_file:
+    - .env
+  ```
+
+> **Important:** Changes to `.env` files require restarting the container (`docker compose restart`) because environment
+> variables are loaded strictly once at application launch for thread safety.
+
 ### Docker Image Variants (`scratch` vs. `alpine`)
 
 Two distinct flavors are available in the container registry:
@@ -97,10 +129,10 @@ Run Tuliprox as a persistent IPTV proxy server:
 
 This mode enables:
 
-* The Web UI Dashboard
-* The active Reverse-Proxy Streaming Engine
-* API endpoints (Xtream/M3U for players)
-* Background Workers (Metadata Scanner, DNS Resolver, Scheduler)
+- The Web UI Dashboard
+- The active Reverse-Proxy Streaming Engine
+- API endpoints (Xtream/M3U for players)
+- Background Workers (Metadata Scanner, DNS Resolver, Scheduler)
 
 ### CLI Mode (One-Shot Processing)
 
@@ -143,9 +175,9 @@ You can view all arguments using `./tuliprox --help`:
 Tuliprox is built to be a team player. In the `docker/container-templates/` directory of the repository, you will find complete,
 production-ready stack templates:
 
-* **Traefik Integration:** Automated Let's Encrypt TLS, strict Content-Security-Policy headers, and ACME DNS-01 challenges.
-* **Gluetun (VPN) Integration:** Route your upstream provider requests through WireGuard tunnels to hide your server IP, utilizing SOCKS5 proxy sidecars.
-* **CrowdSec Integration:** Protect your Tuliprox instance against L7 AppSec attacks, path traversal, and brute-force attempts using Traefik Bouncers.
+- **Traefik Integration:** Automated Let's Encrypt TLS, strict Content-Security-Policy headers, and ACME DNS-01 challenges.
+- **Gluetun (VPN) Integration:** Route your upstream provider requests through WireGuard tunnels to hide your server IP, utilizing SOCKS5 proxy sidecars.
+- **CrowdSec Integration:** Protect your Tuliprox instance against L7 AppSec attacks, path traversal, and brute-force attempts using Traefik Bouncers.
 
 *(For an in-depth implementation guide on these templates, see the [Build & Deploy (For Professionals)](build-and-deploy.md) and
 [Examples & Recipes](examples-recipes.md) chapters).

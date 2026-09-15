@@ -136,7 +136,11 @@ impl PttParser {
                 let match_index = match_info.match_index;
                 let raw_len = match_info.raw_match.len();
 
-                if match_info.remove && match_index + raw_len <= context.title.len() {
+                if match_info.remove
+                    && match_index + raw_len <= context.title.len()
+                    && context.title.is_char_boundary(match_index)
+                    && context.title.is_char_boundary(match_index + raw_len)
+                {
                     context.title.replace_range(match_index..match_index + raw_len, "");
                 }
 
@@ -161,6 +165,10 @@ impl PttParser {
         result.episodes.dedup();
         result.languages.sort_unstable();
         result.languages.dedup();
+
+        while end_of_title > 0 && !context.title.is_char_boundary(end_of_title) {
+            end_of_title -= 1;
+        }
 
         let final_title =
             if end_of_title <= context.title.len() { context.title[..end_of_title].to_string() } else { context.title };
