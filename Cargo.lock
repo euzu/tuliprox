@@ -1228,7 +1228,7 @@ checksum = "431a4c31778fde52b4400de34975f219eeca55cc829a9de157cd743a5b230ecb"
 
 [[package]]
 name = "frontend"
-version = "3.3.111"
+version = "3.3.112"
 dependencies = [
  "base64 0.23.1",
  "bytes",
