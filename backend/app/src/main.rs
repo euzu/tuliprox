@@ -28,8 +28,8 @@ extern crate pest;
 // `api` used to be declared by an `include_modules!()` macro. rustfmt does not
 // expand macros, so it never walked into this module and silently skipped every
 // file under `api/` - `cargo fmt --all -- --check` passed on unformatted code.
-// Declaring the module directly is what puts that subtree back under the gate.
 pub mod api;
+mod env_loader;
 
 // The media-server anti-corruption layer is its own package; aliased under its
 // historical module name so `crate::media_server::X` paths keep resolving.
@@ -75,6 +75,10 @@ use tuliprox_repository as repository;
 #[command(version)]
 #[command(about = "Extended playlist proxy", long_about = None)]
 struct Args {
+    /// Path to .env file for environment variable overrides
+    #[arg(short = 'e', long = "env-file")]
+    env_file: Option<String>,
+
     /// The home directory (base for config, storage, backup, downloads)
     #[arg(short = 'H', long = "home")]
     home: Option<String>,
@@ -278,6 +282,19 @@ async fn main() {
     api::api_utils::init_uptime_clock();
     let args = Args::parse();
 
+    let loaded_env = match env_loader::load_env_file(
+        args.env_file.as_deref(),
+        args.config_file.as_deref(),
+        args.config_path.as_deref(),
+        args.home.as_deref(),
+    ) {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(1);
+        }
+    };
+
     if let Some(ref db_path) = args.inspect_db {
         handle_inspect_db(db_path, args.db_type.as_deref());
     }
@@ -303,6 +320,9 @@ async fn main() {
     let mut config_paths = get_file_paths(&args);
 
     init_logger(args.log_level.as_deref(), config_paths.config_file_path.as_str());
+    if let Some(ref env_path) = loaded_env {
+        info!("Loaded environment from: {}", env_path.display());
+    }
 
     if args.healthcheck {
         let healthy = healthcheck(config_paths.config_file_path.as_str()).await;
@@ -350,7 +370,7 @@ async fn main() {
     let app_config = crate::config_loader::read_initial_app_config(&mut config_paths, true, true, args.server)
         .await
         .unwrap_or_else(|err| exit!("{err}"));
-    print_info(&app_config).await;
+    print_info(&app_config, loaded_env.as_deref()).await;
 
     let sources = <Arc<ArcSwap<SourcesConfig>> as Access<SourcesConfig>>::load(&app_config.sources);
     let targets = sources.validate_targets(args.target.as_ref()).unwrap_or_else(|err| exit!("{err}"));
@@ -362,12 +382,15 @@ async fn main() {
     }
 }
 
-async fn print_info(app_config: &AppConfig) {
+async fn print_info(app_config: &AppConfig, loaded_env: Option<&Path>) {
     let config = <Arc<ArcSwap<Config>> as Access<Config>>::load(&app_config.config);
     let paths = <Arc<ArcSwap<ConfigPaths>> as Access<ConfigPaths>>::load(&app_config.paths);
     info!("Current time: {}", chrono::offset::Local::now().format("%Y-%m-%d %H:%M:%S"));
     info!("Temp dir: {}", tempfile::env::temp_dir().display());
     info!("Storage dir: {}", config.storage_dir);
+    if let Some(env_path) = loaded_env {
+        info!("Environment file: {}", env_path.display());
+    }
     info!("Config dir: {}", paths.config_path);
     info!("Config file: {}", paths.config_file_path);
     info!("Source file: {}", paths.sources_file_path);

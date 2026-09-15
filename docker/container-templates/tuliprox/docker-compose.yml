@@ -3,6 +3,10 @@ services:
     container_name: tuliprox
     image: ghcr.io/euzu/tuliprox:latest
     restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     networks:
       - proxy-net
     expose:

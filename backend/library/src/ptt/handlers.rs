@@ -1563,7 +1563,13 @@ pub fn add_defaults(parser: &mut PttParser) {
             let title = &context.title;
             let matched = &context.matched;
 
-            let start_index = matched.get("year").map_or(0, |m| m.match_index);
+            let start_index = matched.get("year").map_or(0, |m| {
+                let mut idx = m.match_index.min(title.len());
+                while idx > 0 && !title.is_char_boundary(idx) {
+                    idx -= 1;
+                }
+                idx
+            });
 
             if start_index >= title.len() {
                 return None;
@@ -2754,7 +2760,13 @@ pub fn add_defaults(parser: &mut PttParser) {
             let title = &context.title;
             let matched = &context.matched;
 
-            let start_index = matched.get("year").map_or(0, |m| m.match_index);
+            let start_index = matched.get("year").map_or(0, |m| {
+                let mut idx = m.match_index.min(title.len());
+                while idx > 0 && !title.is_char_boundary(idx) {
+                    idx -= 1;
+                }
+                idx
+            });
 
             if start_index >= title.len() {
                 return None;

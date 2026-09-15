@@ -110,6 +110,15 @@
 
 ## 🌟 New Features
 
+- **`.env` file support for secrets and environment variables:** Tuliprox now automatically loads environment variables
+  from a `.env` file at startup.
+  - **Discovery order:** searches `--env-file <PATH>` (or `-e`), `TULIPROX_ENV_FILE`, then `<config_file_dir>/.env`
+    (if `-c` was supplied), `<config_path>/.env`, `<home_path>/.env`, and `./.env`.
+  - **12-factor compatibility:** variables already present in the host/Docker environment take precedence and are never
+    overwritten.
+  - **Safe thread model:** `.env` values load once at application startup and require a service or container restart to change.
+  - An example configuration template is provided at `config/.env.example`.
+
 - **Target-specific bouquet filters are now managed directly from the Source Editor.** Each target shows its current
   bouquet status below the regular filter settings and opens a full-size editor for selecting Live, VOD, and Series
   groups. Bouquet filters support both whitelist and blacklist mode, are stored by the target's unique name, and take
@@ -975,6 +984,16 @@
   the `shared` crate, so `/ready` and the banner can no longer drift apart in how they group inputs and aliases.
 
 ## 🐛 Fixes
+
+- **PTT title parsing: fixed panics on multi-byte UTF-8 character boundaries (e.g. en-dash `–`).** During title
+  metadata parsing (such as background VOD/series metadata enrichment), previous match indices recorded from earlier
+  handlers (e.g. `year`) could become stale after preceding handlers removed matched substrings in-place with
+  `replace_range`. In the `volumes` handlers, slicing `&title[start_index..]` using the stale index caused a worker
+  thread panic (`start byte index X is not a char boundary; it is inside '...'`) whenever the offset landed within a
+  multi-byte UTF-8 sequence such as an en dash (`–`), em dash (`—`), or non-ASCII characters, crashing the background
+  update worker. Slicing offsets in `volumes` now clamp and snap down to the nearest valid UTF-8 character boundary
+  (`is_char_boundary`), and `parser.rs` string operations (`replace_range` and title truncation) now explicitly verify
+  char boundaries before slicing.
 
 - **Playlist update status reads no longer block an async request worker on filesystem I/O.** The existing input
   status reader runs on the blocking pool; its status format and reload projection are unchanged.

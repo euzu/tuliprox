@@ -119,3 +119,89 @@ docker exec -it tuliprox tuliprox --migrate-db /app/data/input_dir/series.db
 See [Database Migration & Inspection](./operations-debugging.md#6-database-migration--inspection-migrate_dbsh--cli) for full details.
 
 ---
+
+## 4. File Descriptor Exhaustion (`No file descriptors available (os error 24)`)
+
+**The Problem:**
+
+The server logs show cascade errors failing to open files or establish network connections:
+
+```text
+[WARN tuliprox_session::qos_aggregation_manager] QoS aggregation run failed: I/O error: No file descriptors available (os error 24)
+[INFO tuliprox_processing::processor::playlist] 🌷 Update process started.
+[WARN tuliprox_processing::input_cache] Failed to read input status file /app/data/input_PrimeTrial/status.json: No file descriptors available (os error 24)
+[WARN tuliprox_iptv::xtream] Failed to login xtream account PrimeTrial repository Network error: can't download input PrimeTrial => Request error: error sending request for url (http://***/player_api.php?...)
+[ERROR tuliprox_processing::input_cache] Failed to write input status file /app/data/input_PrimeTrial/status.json: No file descriptors available (os error 24)
+```
+
+**Root Cause:**
+
+The operating system error `os error 24` is **`EMFILE`** (*"Too many open files"*). On Unix and Linux systems,
+all I/O abstractions consume file descriptors (FDs):
+
+* **Client TCP Sockets:** Every media player connected to a live stream or VOD session (MPEG-TS, HLS chunk streaming).
+* **Upstream TCP Sockets:** Every active proxy connection to an IPTV provider.
+* **HTTP Client Connection Pools:** Reqwest and Hyper keep-alive connections held open for API requests and playlist downloads.
+* **B+Tree Databases & Sidecars:** Every database (`xtream_*.db`, `m3u_*.db`, `epg_*.db`, `target_id_mapping.db`,
+  `qos_snapshot.db`), along with WAL files and `.sidecar` lock handles.
+* **Async Runtime:** Tokio worker threads, event notification file descriptors (`epoll`, `eventfd`, `timerfd`).
+
+By default, Docker daemons and Linux user sessions often configure a low limit of only **1024** file descriptors
+per container/process (`ulimit -n`). In a streaming proxy where background jobs (such as QoS aggregation or scheduled
+playlist updates) run concurrently with active media streams, 1024 descriptors can be exhausted quickly. Once exhausted,
+any operation requiring a new descriptor (such as opening a file or creating a socket for an HTTP request) fails immediately.
+
+**The Solution:**
+
+1. **Configure `ulimits` in `docker-compose.yml` (Recommended):**
+   Increase the maximum open file limit for the Tuliprox container by defining `ulimits.nofile`:
+
+   ```yaml
+   services:
+     tuliprox:
+       image: ghcr.io/euzu/tuliprox:latest
+       container_name: tuliprox
+       restart: unless-stopped
+       ulimits:
+         nofile:
+           soft: 65535
+           hard: 65535
+       # ... remaining configuration
+   ```
+
+   Apply the updated configuration by recreating the container:
+
+   ```bash
+   docker compose up -d
+   ```
+
+2. **Host / Systemd Service Limit (Native Deployment):**
+   If running Tuliprox natively outside Docker via `systemd`, set `LimitNOFILE` in your unit file (e.g. `/etc/systemd/system/tuliprox.service`):
+
+   ```ini
+   [Service]
+   LimitNOFILE=65535
+   ```
+
+   Then reload systemd and restart the service:
+
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl restart tuliprox
+   ```
+
+3. **Diagnosing Open File Descriptors:**
+   To check how many descriptors are currently open and identify what is using them:
+
+   ```bash
+   # Find the process ID
+   PID=$(pgrep tuliprox)
+
+   # Count active open descriptors
+   ls -1 /proc/$PID/fd | wc -l
+
+   # List open files and sockets
+   ls -l /proc/$PID/fd
+   ```
+
+---
