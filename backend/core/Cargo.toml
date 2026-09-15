@@ -30,7 +30,6 @@ flate2 = "1.1.9"
 futures.workspace = true
 indexmap.workspace = true
 ipnet = "2"
-mime = "0.3.17"
 log.workspace = true
 parking_lot = "0.12.5"
 paste.workspace = true

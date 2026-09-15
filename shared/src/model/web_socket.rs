@@ -1,13 +1,15 @@
 use crate::model::{
     user_command::UserCommand, ActiveUserConnectionChange, ConfigType, DownloadsDelta, DownloadsResponse,
-    FileDownloadDto, LibraryScanProgressEvent, PermissionSet, PlaylistUpdateProgressEvent, PlaylistUpdateState,
+    FileDownloadDto, LibraryScanProgressEvent, PermissionSet, PlaylistUpdateProgressEvent, PlaylistUpdateRunStateEvent,
     QueueRevision, StatusCheck, StreamMeterEntry, SystemInfo,
 };
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::{io, sync::Arc};
 
-pub const PROTOCOL_VERSION: u8 = 3;
+// Version 4 carries correlated run objects in PlaylistUpdateResponse. Version 3
+// clients expect a bare state and must reconnect with an updated frontend.
+pub const PROTOCOL_VERSION: u8 = 4;
 
 #[derive(Default, PartialOrd, PartialEq, Debug, Clone)]
 pub enum UserRole {
@@ -93,7 +95,7 @@ pub enum ProtocolMessage {
     ActiveProviderCountRequest(String),
     ActiveProviderCountResponse(usize),
     ConfigChangeResponse(ConfigType),
-    PlaylistUpdateResponse(PlaylistUpdateState),
+    PlaylistUpdateResponse(PlaylistUpdateRunStateEvent),
     PlaylistUpdateProgressResponse(PlaylistUpdateProgressEvent),
     UserActionResponse(bool),
     SystemInfoResponse(SystemInfo),
@@ -150,6 +152,43 @@ impl ProtocolMessage {
             //bincode_deserialize::<ProtocolMessage>(bytes.as_ref())
             let s = std::str::from_utf8(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             serde_json::from_str(s).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProtocolMessage, PROTOCOL_VERSION};
+    use crate::model::{PlaylistUpdateRunStateEvent, PlaylistUpdateState};
+    use bytes::Bytes;
+
+    #[test]
+    fn playlist_update_protocol_version_distinguishes_legacy_clients() {
+        assert_eq!(PROTOCOL_VERSION, 4);
+        assert_eq!(ProtocolMessage::Version(PROTOCOL_VERSION).to_bytes().unwrap().as_ref(), &[4]);
+        let ProtocolMessage::Version(legacy) = ProtocolMessage::from_bytes(Bytes::from_static(&[3])).unwrap() else {
+            panic!("expected a protocol handshake");
+        };
+        assert_ne!(legacy, PROTOCOL_VERSION, "the server's version gate must reject legacy clients");
+    }
+
+    #[test]
+    fn playlist_update_protocol_preserves_correlated_frames_and_legacy_decoding() {
+        for state in [PlaylistUpdateState::Success, PlaylistUpdateState::Partial, PlaylistUpdateState::Failure] {
+            let event = PlaylistUpdateRunStateEvent::correlated("review-run".into(), 17.into(), state);
+            let bytes = ProtocolMessage::PlaylistUpdateResponse(event.clone()).to_bytes().unwrap();
+            let ProtocolMessage::PlaylistUpdateResponse(decoded) = ProtocolMessage::from_bytes(bytes).unwrap() else {
+                panic!("expected a correlated playlist update frame");
+            };
+            assert_eq!(decoded, event);
+
+            let legacy = serde_json::to_vec(&serde_json::json!({"PlaylistUpdateResponse": state})).unwrap();
+            let ProtocolMessage::PlaylistUpdateResponse(decoded) =
+                ProtocolMessage::from_bytes(Bytes::from(legacy)).unwrap()
+            else {
+                panic!("expected a legacy playlist update frame");
+            };
+            assert_eq!(decoded, PlaylistUpdateRunStateEvent::uncorrelated(state));
         }
     }
 }

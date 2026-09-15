@@ -14,10 +14,15 @@
   }
 
   &__option {
+    box-sizing: border-box;
+    width: 100%;
+    height: auto;
+    min-height: 1.3rem;
     cursor: pointer;
   }
 
   &__option-item {
+    min-width: 0;
     pointer-events: none;
   }
 }

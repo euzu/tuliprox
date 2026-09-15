@@ -232,6 +232,14 @@ impl TargetIdMapping {
         !self.pending_virtual_id_upserts.is_empty() || !self.pending_uuid_upserts.is_empty()
     }
 
+    /// Discards the in-memory batch when target persistence is rejected before
+    /// any output is written. This prevents [`Drop`] from committing mapping
+    /// changes for a target state that never became client-visible.
+    pub(crate) fn discard_unpersisted_changes(&mut self) {
+        self.pending_virtual_id_upserts.clear();
+        self.pending_uuid_upserts.clear();
+    }
+
     pub fn find_virtual_ids(&self, provider_id: u32) -> Vec<VirtualId> {
         self.mem_by_virtual_id
             .values()

@@ -7,12 +7,14 @@
 //! [`StreamMeterRegistry`] now; `EventManager` owns one so the composition
 //! root still constructs a single handle.
 
+mod playlist_update;
+
 use crate::{
     meter_registry::{MeterQos, StreamMeterRegistry},
     StreamMeterHandle,
 };
 use log::trace;
-use shared::model::{EventKind, EventKindMask, EventMessage, EventSink, StreamMeterEntry};
+use shared::model::{EventKind, EventKindMask, EventMessage, EventSink, PlaylistUpdateProgressEvent, StreamMeterEntry};
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
@@ -146,6 +148,12 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+#[derive(Default)]
+struct LatchedEvents {
+    messages: HashMap<EventKind, EventMessage>,
+    playlist_updates: playlist_update::PlaylistUpdates,
+}
+
 pub struct EventManager {
     channel_tx: tokio::sync::broadcast::Sender<EventMessage>,
     meters: StreamMeterRegistry,
@@ -156,7 +164,7 @@ pub struct EventManager {
     last_nudge: Mutex<HashMap<EventKind, Instant>>,
     /// The newest message of each latched kind, for subscribers that connect
     /// after it was published.
-    latched: Mutex<HashMap<EventKind, EventMessage>>,
+    latched: Mutex<LatchedEvents>,
     /// The last [`RECENT_EVENT_CAPACITY`] events, newest last.
     recent: Mutex<VecDeque<RecordedEvent>>,
     started: Instant,
@@ -191,7 +199,7 @@ impl EventManager {
             meters: StreamMeterRegistry::new(),
             stats: Arc::new(EventBusStats::default()),
             last_nudge: Mutex::new(HashMap::new()),
-            latched: Mutex::new(HashMap::new()),
+            latched: Mutex::new(LatchedEvents::default()),
             recent: Mutex::new(VecDeque::with_capacity(RECENT_EVENT_CAPACITY)),
             started: Instant::now(),
         }
@@ -235,8 +243,12 @@ impl EventManager {
             return EmitOutcome::Coalesced;
         }
 
-        if kind.is_latched() {
-            lock(&self.latched).insert(kind, event.clone());
+        if kind.is_latched() || matches!(kind, EventKind::PlaylistUpdateProgress | EventKind::PlaylistUpdate) {
+            let mut latched = lock(&self.latched);
+            if kind.is_latched() {
+                latched.messages.insert(kind, event.clone());
+            }
+            latched.playlist_updates.record(&event);
         }
 
         let outcome = match self.channel_tx.send(event) {
@@ -267,7 +279,14 @@ impl EventManager {
     /// resync-on-lag path re-requested a status snapshot for the same
     /// reason. Both are answered by handing over what the bus already has.
     #[must_use]
-    pub fn snapshot(&self) -> Vec<EventMessage> { lock(&self.latched).values().cloned().collect() }
+    pub fn snapshot(&self) -> Vec<EventMessage> { lock(&self.latched).messages.values().cloned().collect() }
+
+    /// Current correlated input facts, removed at their run's completion.
+    /// This read projection is volatile and never writes input status/history.
+    #[must_use]
+    pub fn playlist_update_snapshot(&self) -> Vec<PlaylistUpdateProgressEvent> {
+        lock(&self.latched).playlist_updates.snapshot()
+    }
 
     /// The last [`RECENT_EVENT_CAPACITY`] events, oldest first.
     ///
@@ -615,10 +634,8 @@ mod coalescing_tests {
         let _rx = manager.get_event_channel();
 
         for _ in 0..5 {
-            let outcome = manager.send_event(EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
-                target: "t".to_string(),
-                message: "m".to_string(),
-            }));
+            let outcome =
+                manager.send_event(EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent::global("t", "m")));
             assert!(outcome.is_delivered(), "dropping a progress tick would lose the message it carried");
         }
         assert_eq!(manager.stats().coalesced(), 0);

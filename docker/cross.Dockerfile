@@ -26,6 +26,7 @@ COPY backend/auth/Cargo.toml ./backend/auth/
 COPY backend/btree/Cargo.toml ./backend/btree/
 COPY backend/config-loader/Cargo.toml ./backend/config-loader/
 COPY backend/core/Cargo.toml ./backend/core/
+COPY backend/curation/Cargo.toml ./backend/curation/
 COPY backend/dvr/Cargo.toml ./backend/dvr/
 COPY backend/hls/Cargo.toml ./backend/hls/
 COPY backend/iptv/Cargo.toml ./backend/iptv/
@@ -43,7 +44,7 @@ RUN mkdir -p frontend/src backend/app/src/tools && \
     printf 'fn main() {}\n' > frontend/src/main.rs && \
     printf 'fn main() {}\n' > backend/app/src/main.rs && \
     printf 'fn main() {}\n' > backend/app/src/tools/flags_builder.rs && \
-    for crate in auth btree config-loader core dvr hls iptv library media-server metadata messaging mpegts parser processing repository session; do \
+    for crate in auth btree config-loader core curation dvr hls iptv library media-server metadata messaging mpegts parser processing repository session; do \
       mkdir -p "backend/${crate}/src"; \
       printf '\n' > "backend/${crate}/src/lib.rs"; \
     done

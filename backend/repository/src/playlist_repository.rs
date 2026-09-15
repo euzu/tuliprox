@@ -1,20 +1,23 @@
-use super::playlist_mem_cache::{PlaylistM3uStorage, PlaylistStorage, PlaylistStorageState, PlaylistXtreamStorage};
+use super::playlist_mem_cache::{
+    PlaylistM3uStorage, PlaylistStorageState, PlaylistXtreamStorage, TargetPlaylistStorage,
+};
 use crate::{
     ensure_target_storage_path, epg_write_for_target, get_input_storage_path, get_target_id_mapping_file,
     get_target_storage_path, load_input_local_library_playlist, load_input_m3u_playlist, load_input_xtream_playlist,
     m3u_get_file_path_for_db, m3u_write_playlist, persist_input_library_playlist, persist_input_m3u_playlist,
-    persist_input_xtream_playlist, stalker_repository::get_stalker_storage_path, write_strm_playlist,
-    xtream_get_file_path, xtream_get_storage_path, xtream_write_playlist, BPlusTree, LocalLibraryDiskPlaylistSource,
-    M3uDiskPlaylistSource, MediaServerDiskPlaylistSource, MemoryPlaylistSource, PlaylistSource,
-    StalkerDiskPlaylistSource, TargetIdMapping, VirtualIdRecord, XtreamDiskPlaylistSource, FILE_SUFFIX_DB,
+    stalker_repository::get_stalker_storage_path, write_strm_playlist, xtream_get_file_path, xtream_get_storage_path,
+    xtream_write_playlist, BPlusTree, LocalLibraryDiskPlaylistSource, M3uDiskPlaylistSource,
+    MediaServerDiskPlaylistSource, MemoryPlaylistSource, PlaylistSource, StalkerDiskPlaylistSource, TargetIdMapping,
+    VirtualIdRecord, XtreamDiskPlaylistSource, FILE_SUFFIX_DB,
 };
 use log::{debug, warn};
 use shared::{
     error::TuliproxError,
     model::{
-        xtream_const::XTREAM_CLUSTER, ConfigTargetOptions, InputPersistence, M3uPlaylistItem, PlaylistEntry,
-        PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties,
-        SeriesStreamDetailProperties, StreamProperties, UUIDType, VirtualId, XtreamCluster, XtreamPlaylistItem,
+        xtream_const::XTREAM_CLUSTER, ClusterFlags, ConfigTargetOptions, InputPersistence, M3uPlaylistItem,
+        PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType,
+        SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties, StreamProperties, UUIDType, VirtualId,
+        XtreamCluster, XtreamPlaylistItem,
     },
     utils::{is_dash_url, is_hls_url, Internable},
 };
@@ -34,6 +37,172 @@ struct LocalEpisodeKey {
 }
 
 fn playlist_has_items(playlist: &[PlaylistGroup]) -> bool { playlist.iter().any(|group| !group.channels.is_empty()) }
+
+#[derive(Debug, Clone, Copy, Default)]
+enum TargetPersistenceMode {
+    #[default]
+    Persist,
+    #[cfg(test)]
+    FailCacheReloadAt(TargetCacheReloadStage),
+    #[cfg(test)]
+    FailEmptyReplacementAt(crate::TargetEmptyReplacementFailure),
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetCacheReloadStage {
+    IdMapping,
+    XtreamStorage,
+}
+
+/// Scoped persistence behavior derived from technically successful forced clusters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputPlaylistPersistOptions {
+    pub accepted_empty_clusters: ClusterFlags,
+}
+
+impl Default for InputPlaylistPersistOptions {
+    fn default() -> Self { Self { accepted_empty_clusters: ClusterFlags::empty() } }
+}
+
+/// Empty Library contribution proven by successful input jobs, before target transforms.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LibraryEmptyPublication {
+    #[default]
+    None,
+    /// Empty Library contribution without permission to clear the complete target/output.
+    Contribution,
+    /// All inputs are ready, non-Library inputs are populated, and no forced-empty cluster is involved.
+    /// Configured transformations may remove the remaining entries from a target or individual output.
+    FilterableContribution,
+    /// All required inputs are empty Library catalogs, or the proven complete inputs
+    /// have been reduced to an empty target/output by the configured transformations.
+    CompleteTarget,
+}
+
+impl LibraryEmptyPublication {
+    #[must_use]
+    pub const fn replaces_empty_target(self) -> bool { matches!(self, Self::CompleteTarget) }
+
+    /// Resolve the input-level authorization against the actual prepared target/output.
+    /// A plain contribution never authorizes a fully empty result from a foreign input.
+    #[must_use]
+    pub fn for_filtered_playlist(self, playlist: &[PlaylistGroup]) -> Self {
+        match self {
+            Self::FilterableContribution if !playlist_has_items(playlist) => Self::CompleteTarget,
+            Self::None | Self::Contribution | Self::FilterableContribution | Self::CompleteTarget => self,
+        }
+    }
+
+    fn replacement_clusters(self) -> ClusterFlags {
+        match self {
+            Self::None => ClusterFlags::empty(),
+            Self::Contribution | Self::FilterableContribution => ClusterFlags::Vod | ClusterFlags::Series,
+            Self::CompleteTarget => ClusterFlags::all(),
+        }
+    }
+}
+
+/// Target persistence behavior authorized by successful input results, not by Quality inference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TargetPlaylistPersistOptions {
+    pub accepted_empty_clusters: ClusterFlags,
+    pub library_empty: LibraryEmptyPublication,
+}
+
+impl Default for TargetPlaylistPersistOptions {
+    fn default() -> Self {
+        Self { accepted_empty_clusters: ClusterFlags::empty(), library_empty: LibraryEmptyPublication::None }
+    }
+}
+
+fn validate_target_playlist_persistence(
+    target: &ConfigTarget,
+    playlist_is_empty: bool,
+    options: TargetPlaylistPersistOptions,
+) -> Result<(), TuliproxError> {
+    if !playlist_is_empty || options.library_empty.replaces_empty_target() {
+        return Ok(());
+    }
+    if options.accepted_empty_clusters.is_empty() {
+        return Err(TuliproxError::RepositoryPlaylist(format!(
+            "Refusing to persist empty playlist for target '{}'; existing data was retained",
+            target.name
+        )));
+    }
+    if target.output.iter().any(|output| !matches!(output, TargetOutput::Xtream(_))) {
+        return Err(TuliproxError::RepositoryPlaylist(format!(
+            "Target '{}' has non-Xtream outputs that cannot safely publish a fully empty forced result; existing data was retained",
+            target.name
+        )));
+    }
+    Ok(())
+}
+
+fn prepare_target_output_playlists(
+    target: &ConfigTarget,
+    playlist: &[PlaylistGroup],
+) -> Vec<Option<Vec<PlaylistGroup>>> {
+    target
+        .output
+        .iter()
+        .map(|output| output.filter().map(|filter| apply_filter_to_playlist(playlist, filter)))
+        .collect()
+}
+
+fn validate_force_empty_output_filters(
+    target: &ConfigTarget,
+    prepared_outputs: &[Option<Vec<PlaylistGroup>>],
+    options: TargetPlaylistPersistOptions,
+) -> Result<(), TuliproxError> {
+    if options.accepted_empty_clusters.is_empty() {
+        return Ok(());
+    }
+
+    debug_assert_eq!(target.output.len(), prepared_outputs.len());
+    for (output, prepared_output) in target.output.iter().zip(prepared_outputs) {
+        let output_name = match output {
+            TargetOutput::M3u(_) => "M3U",
+            TargetOutput::Strm(_) => "STRM",
+            TargetOutput::Xtream(_) | TargetOutput::HdHomeRun(_) => continue,
+        };
+        let Some(filtered_playlist) = prepared_output else {
+            continue;
+        };
+        if !playlist_has_items(filtered_playlist) {
+            return Err(TuliproxError::RepositoryPlaylist(format!(
+                "Refusing to publish force-empty {output_name} output for target '{}' after its output filter; existing data was retained",
+                target.name
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+async fn persist_xtream_target_playlist(
+    app_config: &Arc<AppConfig>,
+    target: &ConfigTarget,
+    playlist: &mut [PlaylistGroup],
+    accepted_empty_clusters: ClusterFlags,
+    mode: TargetPersistenceMode,
+) -> Result<(), TuliproxError> {
+    #[cfg(test)]
+    if let TargetPersistenceMode::FailEmptyReplacementAt(failure) = mode {
+        return crate::xtream_write_playlist_with_injected_empty_replacement_failure(
+            app_config,
+            target,
+            playlist,
+            accepted_empty_clusters,
+            failure,
+        )
+        .await;
+    }
+    #[cfg(not(test))]
+    let _ = mode;
+
+    xtream_write_playlist(app_config, target, playlist, accepted_empty_clusters).await
+}
 
 pub struct ProviderEpisodeKey {
     pub provider_id: u32,
@@ -66,12 +235,33 @@ pub async fn persist_playlist(
     epg: Option<&Epg>,
     target: &ConfigTarget,
     playlist_state: Option<&Arc<PlaylistStorageState>>,
+    options: TargetPlaylistPersistOptions,
 ) -> Result<(), Vec<TuliproxError>> {
-    if !playlist_has_items(playlist) {
-        return Err(vec![TuliproxError::RepositoryPlaylist(format!(
-            "Refusing to persist empty playlist for target '{}'; existing data was retained",
-            target.name
-        ))]);
+    persist_playlist_with_mode(
+        app_config,
+        playlist,
+        epg,
+        target,
+        playlist_state,
+        options,
+        TargetPersistenceMode::Persist,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_lines)]
+async fn persist_playlist_with_mode(
+    app_config: &Arc<AppConfig>,
+    playlist: &mut [PlaylistGroup],
+    epg: Option<&Epg>,
+    target: &ConfigTarget,
+    playlist_state: Option<&Arc<PlaylistStorageState>>,
+    options: TargetPlaylistPersistOptions,
+    persistence_mode: TargetPersistenceMode,
+) -> Result<(), Vec<TuliproxError>> {
+    let playlist_is_empty = !playlist_has_items(playlist);
+    if let Err(error) = validate_target_playlist_persistence(target, playlist_is_empty, options) {
+        return Err(vec![error]);
     }
     let mut errors = vec![];
     let config = &app_config.config.load();
@@ -148,17 +338,39 @@ pub async fn persist_playlist(
 
     normalize_target_playlist_epg_ids(playlist, target.options.as_ref());
 
-    for output in &target.output {
-        let mut filtered: Option<Vec<PlaylistGroup>> =
-            output.filter().map(|flt| apply_filter_to_playlist(playlist, flt));
+    let mut prepared_outputs = prepare_target_output_playlists(target, playlist);
+    if let Err(error) = validate_force_empty_output_filters(target, &prepared_outputs, options) {
+        target_id_mapping.discard_unpersisted_changes();
+        drop(target_id_mapping);
+        drop(file_lock);
+        return Err(vec![error]);
+    }
 
-        let pl: &mut [PlaylistGroup] =
-            if let Some(filtered_playlist) = filtered.as_mut() { filtered_playlist.as_mut_slice() } else { playlist };
+    for (output, prepared_output) in target.output.iter().zip(&mut prepared_outputs) {
+        let pl: &mut [PlaylistGroup] = if let Some(filtered_playlist) = prepared_output.as_mut() {
+            filtered_playlist.as_mut_slice()
+        } else {
+            &mut *playlist
+        };
+        let library_empty = options.library_empty.for_filtered_playlist(pl);
 
         let result = match output {
-            TargetOutput::Xtream(_xtream_output) => xtream_write_playlist(app_config, target, pl).await,
-            TargetOutput::M3u(m3u_output) => m3u_write_playlist(app_config, target, m3u_output, &target_path, pl).await,
-            TargetOutput::Strm(strm_output) => write_strm_playlist(app_config, target, strm_output, pl).await,
+            TargetOutput::Xtream(_xtream_output) => {
+                persist_xtream_target_playlist(
+                    app_config,
+                    target,
+                    pl,
+                    options.accepted_empty_clusters | library_empty.replacement_clusters(),
+                    persistence_mode,
+                )
+                .await
+            }
+            TargetOutput::M3u(m3u_output) => {
+                m3u_write_playlist(app_config, target, m3u_output, &target_path, pl, library_empty).await
+            }
+            TargetOutput::Strm(strm_output) => {
+                write_strm_playlist(app_config, target, strm_output, pl, library_empty).await
+            }
             TargetOutput::HdHomeRun(_hdhomerun_output) => Ok(()),
         };
 
@@ -186,30 +398,18 @@ pub async fn persist_playlist(
     drop(target_id_mapping);
     drop(file_lock);
 
-    if target.use_memory_cache {
-        if let Some(playlist_storage) = playlist_state {
-            if let Ok(id_mapping) = load_id_mapping_target_storage(app_config, target).await {
-                playlist_storage.cache_id_mapping(&target.name, id_mapping).await;
-            }
-            for output in &target.output {
-                match output {
-                    TargetOutput::Xtream(_) => {
-                        if let Ok(storage) = load_xtream_target_storage(app_config, target).await {
-                            playlist_storage
-                                .cache_playlist(&target.name, PlaylistStorage::XtreamPlaylist(Box::new(storage)))
-                                .await;
-                        }
-                    }
-                    TargetOutput::M3u(_) => {
-                        if let Ok(storage) = load_m3u_target_storage(app_config, target).await {
-                            playlist_storage
-                                .cache_playlist(&target.name, PlaylistStorage::M3uPlaylist(Box::new(storage)))
-                                .await;
-                        }
-                    }
-                    _ => {}
+    if errors.is_empty() && target.use_memory_cache {
+        match playlist_state {
+            Some(playlist_storage) => {
+                match load_target_memory_cache_snapshot(app_config, target, persistence_mode).await {
+                    Ok(storage) => playlist_storage.replace_target(&target.name, storage).await,
+                    Err(error) => errors.push(error),
                 }
             }
+            None => errors.push(TuliproxError::RepositoryPlaylist(format!(
+                "Target '{}' was persisted but its configured memory cache is unavailable",
+                target.name
+            ))),
         }
     }
 
@@ -637,6 +837,56 @@ pub async fn load_m3u_target_storage(
     }
 }
 
+fn target_cache_reload_error(target: &ConfigTarget, component: &str, error: impl std::fmt::Display) -> TuliproxError {
+    TuliproxError::RepositoryPlaylist(format!(
+        "Target '{}' was persisted but its {component} could not be reloaded into the memory cache: {error}",
+        target.name
+    ))
+}
+
+async fn load_target_memory_cache_snapshot(
+    app_config: &AppConfig,
+    target: &ConfigTarget,
+    mode: TargetPersistenceMode,
+) -> Result<TargetPlaylistStorage, TuliproxError> {
+    #[cfg(not(test))]
+    let _ = mode;
+
+    #[cfg(test)]
+    if matches!(mode, TargetPersistenceMode::FailCacheReloadAt(TargetCacheReloadStage::IdMapping)) {
+        return Err(target_cache_reload_error(target, "ID mapping", "injected reload failure"));
+    }
+    let id_mapping = load_id_mapping_target_storage(app_config, target)
+        .await
+        .map_err(|error| target_cache_reload_error(target, "ID mapping", error))?;
+
+    let xtream = if target.output.iter().any(|output| matches!(output, TargetOutput::Xtream(_))) {
+        #[cfg(test)]
+        if matches!(mode, TargetPersistenceMode::FailCacheReloadAt(TargetCacheReloadStage::XtreamStorage)) {
+            return Err(target_cache_reload_error(target, "Xtream storage", "injected reload failure"));
+        }
+        Some(
+            load_xtream_target_storage(app_config, target)
+                .await
+                .map_err(|error| target_cache_reload_error(target, "Xtream storage", error))?,
+        )
+    } else {
+        None
+    };
+
+    let m3u = if target.output.iter().any(|output| matches!(output, TargetOutput::M3u(_))) {
+        Some(
+            load_m3u_target_storage(app_config, target)
+                .await
+                .map_err(|error| target_cache_reload_error(target, "M3U storage", error))?,
+        )
+    } else {
+        None
+    };
+
+    Ok(TargetPlaylistStorage { xtream, m3u, id_mapping: Some(id_mapping) })
+}
+
 async fn publish_all_cluster_catalogs(
     app_config: &AppConfig,
     storage_path: &Path,
@@ -670,9 +920,22 @@ async fn publish_all_cluster_catalogs(
 pub async fn persist_input_playlist(
     app_config: &Arc<AppConfig>,
     input: &ConfigInput,
-    mut playlist: Vec<PlaylistGroup>,
+    playlist: Vec<PlaylistGroup>,
 ) -> (Vec<PlaylistGroup>, Option<TuliproxError>) {
-    if !playlist_has_items(&playlist) {
+    persist_input_playlist_with_options(app_config, input, playlist, InputPlaylistPersistOptions::default()).await
+}
+
+pub async fn persist_input_playlist_with_options(
+    app_config: &Arc<AppConfig>,
+    input: &ConfigInput,
+    mut playlist: Vec<PlaylistGroup>,
+    options: InputPlaylistPersistOptions,
+) -> (Vec<PlaylistGroup>, Option<TuliproxError>) {
+    let persistence = input.get_download_input_type().persistence();
+    let accepts_empty = persistence == InputPersistence::Library
+        || (!options.accepted_empty_clusters.is_empty()
+            && matches!(persistence, InputPersistence::Xtream | InputPersistence::Stalker));
+    if !playlist_has_items(&playlist) && !accepts_empty {
         let empty_error = TuliproxError::RepositoryPlaylist(format!(
             "Refusing to persist empty playlist for input '{}'; existing data was retained",
             input.name
@@ -694,7 +957,7 @@ pub async fn persist_input_playlist(
             ),
         };
     }
-    if input.get_download_input_type().persistence() == InputPersistence::Stalker {
+    if persistence == InputPersistence::Stalker {
         // The Stalker processor (`processor::stalker::download_stalker_playlist`)
         // is the single writer of the per-cluster B+Tree and raw group catalogs.
         // Re-encoding the `PlaylistItem` runtime projection back into `StalkerPlaylistItem`
@@ -719,8 +982,16 @@ pub async fn persist_input_playlist(
         }
     };
 
-    let (persisted_playlist, err) = match input.get_download_input_type().persistence() {
-        InputPersistence::Xtream => persist_input_xtream_playlist(app_config, &storage_path, playlist).await,
+    let (persisted_playlist, err) = match persistence {
+        InputPersistence::Xtream => {
+            crate::persist_input_xtream_playlist_with_empty_replacements(
+                app_config,
+                &storage_path,
+                playlist,
+                options.accepted_empty_clusters,
+            )
+            .await
+        }
 
         InputPersistence::M3u => {
             // Persist M3U
@@ -934,21 +1205,409 @@ mod tests {
     use super::{
         assign_local_series_info_episode_key, assign_media_server_series_info_episode,
         get_input_media_server_playlist_file_path, materialize_media_server_series_info_episodes,
-        normalize_target_playlist_epg_ids, playlist_has_items, rewrite_local_series_info_episode_virtual_id,
-        rewrite_series_episode_parent_virtual_ids, rewrite_series_info_episode_virtual_id, skipped_clusters,
-        LocalEpisodeKey, ProviderEpisodeKey,
+        normalize_target_playlist_epg_ids, persist_playlist_with_mode, playlist_has_items,
+        rewrite_local_series_info_episode_virtual_id, rewrite_series_episode_parent_virtual_ids,
+        rewrite_series_info_episode_virtual_id, skipped_clusters, validate_target_playlist_persistence,
+        LocalEpisodeKey, ProviderEpisodeKey, TargetCacheReloadStage, TargetPersistenceMode,
+        TargetPlaylistPersistOptions,
     };
-    use crate::{BPlusTreeQuery, TargetIdMapping, VirtualIdRecord};
+    use crate::{load_xtream_target_storage, BPlusTreeQuery, PlaylistStorageState, TargetIdMapping, VirtualIdRecord};
+    use arc_swap::{ArcSwap, ArcSwapOption};
     use shared::{
+        foundation::get_filter,
         model::{
-            ConfigTargetOptions, EpgOutputOptions, EpisodeStreamProperties, M3uPlaylistItem, PlaylistEntry,
-            PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties,
-            SeriesStreamDetailProperties, SeriesStreamDetailSeasonProperties, SeriesStreamProperties, StreamProperties,
-            UUIDType, VirtualId, XtreamCluster, XtreamPlaylistItem,
+            ClusterFlags, ConfigPaths, ConfigTargetOptions, EpgOutputOptions, EpisodeStreamProperties, M3uPlaylistItem,
+            PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, ProcessingOrder,
+            SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties, SeriesStreamDetailSeasonProperties,
+            SeriesStreamProperties, StreamProperties, StrmExportStyle, UUIDType, VirtualId, XtreamCluster,
+            XtreamPlaylistItem,
         },
         utils::Internable,
     };
-    use std::{collections::HashMap, sync::Arc};
+    use std::{collections::HashMap, path::Path, sync::Arc};
+    use tuliprox_core::{
+        model::{
+            ApiProxyConfig, AppConfig, Config, ConfigTarget, CustomStreamResponse, HdHomeRunConfig, M3uTargetOutput,
+            MediaToolCapabilities, SourcesConfig, StagedFilter, StrmTargetFlagsSet, StrmTargetOutput,
+            TargetExecutionPlan, TargetOutput, XtreamTargetFlagsSet, XtreamTargetOutput,
+        },
+        utils::FileLockManager,
+    };
+
+    fn target_with_outputs(output: Vec<TargetOutput>) -> ConfigTarget {
+        target_with_options("target-empty-guard", output, false)
+    }
+
+    fn target_with_options(name: &str, output: Vec<TargetOutput>, use_memory_cache: bool) -> ConfigTarget {
+        ConfigTarget {
+            id: 1,
+            enabled: true,
+            name: name.to_string(),
+            options: None,
+            sort: None,
+            filter: StagedFilter::default(),
+            output,
+            rename: None,
+            mapping_ids: None,
+            mapping: Arc::new(ArcSwapOption::new(None)),
+            favourites: None,
+            processing_order: ProcessingOrder::default(),
+            execution_plan: TargetExecutionPlan::default(),
+            watch: None,
+            use_memory_cache,
+        }
+    }
+
+    fn test_app_config(storage_dir: &Path) -> Arc<AppConfig> {
+        Arc::new(AppConfig {
+            config: Arc::new(ArcSwap::from_pointee(Config {
+                storage_dir: storage_dir.to_string_lossy().into_owned(),
+                ..Config::default()
+            })),
+            sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
+            hdhomerun: Arc::new(ArcSwapOption::<HdHomeRunConfig>::default()),
+            api_proxy: Arc::new(ArcSwapOption::<ApiProxyConfig>::default()),
+            file_locks: Arc::new(FileLockManager::default()),
+            paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
+                home_path: String::new(),
+                config_path: String::new(),
+                storage_path: String::new(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
+                mapping_file_path: None,
+                mapping_files_used: None,
+                template_file_path: None,
+                template_files_used: None,
+                api_proxy_file_path: String::new(),
+                custom_stream_response_path: None,
+            })),
+            custom_stream_response: Arc::new(ArcSwapOption::<CustomStreamResponse>::default()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            media_tools: Arc::new(MediaToolCapabilities::new()),
+        })
+    }
+
+    fn target_group(cluster: XtreamCluster, id: u32, name: &str) -> PlaylistGroup {
+        let name = name.intern();
+        let mut header = PlaylistItemHeader {
+            id: id.to_string().intern(),
+            input_stream_id: id.to_string().intern(),
+            name: Arc::clone(&name),
+            title: Arc::clone(&name),
+            group: Arc::clone(&name),
+            input_name: "target-test-input".intern(),
+            item_type: PlaylistItemType::from(cluster),
+            xtream_cluster: cluster,
+            category_id: id,
+            ..PlaylistItemHeader::default()
+        };
+        header.gen_uuid();
+        PlaylistGroup { id, title: name, channels: vec![PlaylistItem { header }], xtream_cluster: cluster }
+    }
+
+    fn xtream_target(name: &str, use_memory_cache: bool) -> ConfigTarget {
+        target_with_options(
+            name,
+            vec![TargetOutput::Xtream(XtreamTargetOutput {
+                flags: XtreamTargetFlagsSet::new(),
+                trakt: None,
+                filter: None,
+            })],
+            use_memory_cache,
+        )
+    }
+
+    async fn cached_target_signature(
+        playlist_state: &PlaylistStorageState,
+        target_name: &str,
+    ) -> (usize, Vec<(XtreamCluster, u32, Arc<str>)>) {
+        let cache = playlist_state.data.read().await;
+        let target = cache.get(target_name).expect("target cache");
+        let mapping_len = target.id_mapping.as_ref().expect("cached ID mapping").len();
+        let xtream = target.xtream.as_ref().expect("cached Xtream storage");
+        let mut items = Vec::new();
+        for (cluster, storage) in [
+            (XtreamCluster::Live, &xtream.live),
+            (XtreamCluster::Video, &xtream.vod),
+            (XtreamCluster::Series, &xtream.series),
+        ] {
+            for virtual_id in 1..=16 {
+                if let Some(item) = storage.query(&virtual_id) {
+                    items.push((cluster, virtual_id, Arc::clone(&item.name)));
+                }
+            }
+        }
+        (mapping_len, items)
+    }
+
+    async fn seed_memory_cached_xtream_target(
+        app_config: &Arc<AppConfig>,
+        playlist_state: &Arc<PlaylistStorageState>,
+        target: &ConfigTarget,
+    ) {
+        let mut baseline = vec![
+            target_group(XtreamCluster::Live, 101, "old-live"),
+            target_group(XtreamCluster::Video, 201, "old-vod"),
+            target_group(XtreamCluster::Series, 301, "old-series"),
+        ];
+        persist_playlist_with_mode(
+            app_config,
+            &mut baseline,
+            None,
+            target,
+            Some(playlist_state),
+            TargetPlaylistPersistOptions::default(),
+            TargetPersistenceMode::Persist,
+        )
+        .await
+        .expect("baseline target persistence");
+    }
+
+    #[test]
+    fn target_force_empty_authorization_is_limited_to_xtream_outputs() {
+        let xtream_target = target_with_outputs(vec![TargetOutput::Xtream(XtreamTargetOutput {
+            flags: XtreamTargetFlagsSet::new(),
+            trakt: None,
+            filter: None,
+        })]);
+        let options = TargetPlaylistPersistOptions {
+            accepted_empty_clusters: ClusterFlags::Vod,
+            ..TargetPlaylistPersistOptions::default()
+        };
+        assert!(validate_target_playlist_persistence(&xtream_target, true, options).is_ok());
+
+        let mixed_target = target_with_outputs(vec![
+            TargetOutput::Xtream(XtreamTargetOutput { flags: XtreamTargetFlagsSet::new(), trakt: None, filter: None }),
+            TargetOutput::M3u(M3uTargetOutput {
+                filename: None,
+                include_type_in_url: false,
+                mask_redirect_url: false,
+                filter: None,
+            }),
+        ]);
+        let error = validate_target_playlist_persistence(&mixed_target, true, options)
+            .expect_err("fully empty mixed output must fail before persistence");
+        assert!(error.to_string().contains("non-Xtream outputs"));
+    }
+
+    #[test]
+    fn target_empty_playlist_without_force_authorization_remains_rejected() {
+        let target = target_with_outputs(vec![TargetOutput::Xtream(XtreamTargetOutput {
+            flags: XtreamTargetFlagsSet::new(),
+            trakt: None,
+            filter: None,
+        })]);
+        let error = validate_target_playlist_persistence(&target, true, TargetPlaylistPersistOptions::default())
+            .expect_err("unauthorized empty target must remain rejected");
+        assert!(error.to_string().contains("Refusing to persist empty playlist"));
+    }
+
+    #[tokio::test]
+    async fn target_cache_reload_failures_return_errors_without_mutating_the_previous_cache() {
+        for stage in [TargetCacheReloadStage::IdMapping, TargetCacheReloadStage::XtreamStorage] {
+            let directory = tempdir().expect("temporary storage");
+            let app_config = test_app_config(directory.path());
+            let playlist_state = Arc::new(PlaylistStorageState::new());
+            let target = xtream_target(&format!("cache-reload-{stage:?}"), true);
+            seed_memory_cached_xtream_target(&app_config, &playlist_state, &target).await;
+            let before = cached_target_signature(&playlist_state, &target.name).await;
+            let mut candidate = vec![
+                target_group(XtreamCluster::Live, 102, "new-live"),
+                target_group(XtreamCluster::Series, 302, "new-series"),
+            ];
+
+            let errors = persist_playlist_with_mode(
+                &app_config,
+                &mut candidate,
+                None,
+                &target,
+                Some(&playlist_state),
+                TargetPlaylistPersistOptions {
+                    accepted_empty_clusters: ClusterFlags::Vod,
+                    ..TargetPlaylistPersistOptions::default()
+                },
+                TargetPersistenceMode::FailCacheReloadAt(stage),
+            )
+            .await
+            .expect_err("injected target cache reload must fail");
+
+            assert!(errors.iter().any(|error| error.to_string().contains("could not be reloaded")));
+            assert_eq!(cached_target_signature(&playlist_state, &target.name).await, before);
+            let persisted = load_xtream_target_storage(&app_config, &target).await.expect("persisted target storage");
+            assert_eq!([persisted.live.len(), persisted.vod.len(), persisted.series.len()], [1, 0, 1]);
+        }
+    }
+
+    #[tokio::test]
+    async fn target_force_empty_reload_replaces_the_complete_memory_cache() {
+        let directory = tempdir().expect("temporary storage");
+        let app_config = test_app_config(directory.path());
+        let playlist_state = Arc::new(PlaylistStorageState::new());
+        let target = xtream_target("force-empty-cache-success", true);
+        seed_memory_cached_xtream_target(&app_config, &playlist_state, &target).await;
+        let mut candidate = vec![
+            target_group(XtreamCluster::Live, 102, "new-live"),
+            target_group(XtreamCluster::Series, 302, "new-series"),
+        ];
+
+        persist_playlist_with_mode(
+            &app_config,
+            &mut candidate,
+            None,
+            &target,
+            Some(&playlist_state),
+            TargetPlaylistPersistOptions {
+                accepted_empty_clusters: ClusterFlags::Vod,
+                ..TargetPlaylistPersistOptions::default()
+            },
+            TargetPersistenceMode::Persist,
+        )
+        .await
+        .expect("force-empty target persistence and cache reload");
+
+        let (_, cached_items) = cached_target_signature(&playlist_state, &target.name).await;
+        assert_eq!(cached_items.iter().filter(|(cluster, _, _)| *cluster == XtreamCluster::Live).count(), 1);
+        assert!(!cached_items.iter().any(|(cluster, _, _)| *cluster == XtreamCluster::Video));
+        assert_eq!(cached_items.iter().filter(|(cluster, _, _)| *cluster == XtreamCluster::Series).count(), 1);
+        assert!(cached_items.iter().any(|(_, _, name)| name.as_ref() == "new-live"));
+        assert!(cached_items.iter().any(|(_, _, name)| name.as_ref() == "new-series"));
+    }
+
+    #[tokio::test]
+    async fn target_empty_replacement_failures_leave_the_memory_cache_unchanged() {
+        for failure in [
+            crate::TargetEmptyReplacementFailure::CategoryPersistence,
+            crate::TargetEmptyReplacementFailure::BTreePersistence,
+            crate::TargetEmptyReplacementFailure::Publication,
+        ] {
+            let directory = tempdir().expect("temporary storage");
+            let app_config = test_app_config(directory.path());
+            let playlist_state = Arc::new(PlaylistStorageState::new());
+            let target = xtream_target(&format!("empty-persist-{failure:?}"), true);
+            seed_memory_cached_xtream_target(&app_config, &playlist_state, &target).await;
+            let before = cached_target_signature(&playlist_state, &target.name).await;
+            let mut candidate = vec![
+                target_group(XtreamCluster::Live, 102, "new-live"),
+                target_group(XtreamCluster::Series, 302, "new-series"),
+            ];
+
+            let errors = persist_playlist_with_mode(
+                &app_config,
+                &mut candidate,
+                None,
+                &target,
+                Some(&playlist_state),
+                TargetPlaylistPersistOptions {
+                    accepted_empty_clusters: ClusterFlags::Vod,
+                    ..TargetPlaylistPersistOptions::default()
+                },
+                TargetPersistenceMode::FailEmptyReplacementAt(failure),
+            )
+            .await
+            .expect_err("injected empty replacement must fail");
+
+            assert!(errors.iter().any(|error| error.to_string().contains("target cluster failed")));
+            assert_eq!(cached_target_signature(&playlist_state, &target.name).await, before);
+            let persisted = load_xtream_target_storage(&app_config, &target).await.expect("retained target storage");
+            assert_eq!(persisted.vod.len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn force_empty_output_filters_reject_m3u_and_strm_before_mutation() {
+        let filter = get_filter(r#"EpgId ~ "^Mixed\.Case$""#, None).expect("case-sensitive EPG-ID filter");
+        let cases = [
+            (
+                "filtered-m3u",
+                TargetOutput::M3u(M3uTargetOutput {
+                    filename: Some("client.m3u".to_string()),
+                    include_type_in_url: false,
+                    mask_redirect_url: false,
+                    filter: Some(filter.clone()),
+                }),
+                "client.m3u",
+            ),
+            (
+                "filtered-strm",
+                TargetOutput::Strm(StrmTargetOutput {
+                    directory: "client-strm".to_string(),
+                    username: None,
+                    style: StrmExportStyle::Jellyfin,
+                    flags: StrmTargetFlagsSet::new(),
+                    strm_props: None,
+                    filter: Some(filter),
+                    probe_probe_size_bytes: None,
+                    probe_analyze_duration: None,
+                }),
+                "client-strm/old.strm",
+            ),
+        ];
+
+        for (target_name, output, artifact) in cases {
+            let directory = tempdir().expect("temporary storage");
+            let app_config = test_app_config(directory.path());
+            let artifact_path = directory.path().join(artifact);
+            tokio::fs::create_dir_all(artifact_path.parent().expect("artifact parent"))
+                .await
+                .expect("artifact directory");
+            tokio::fs::write(&artifact_path, b"previous-client-state").await.expect("previous client artifact");
+            let mut target = target_with_options(target_name, vec![output], false);
+            target.options = Some(epg_normalization_options(true));
+            let target_path = {
+                let config = app_config.config.load();
+                crate::get_target_storage_path(&config, &target.name).expect("target storage path")
+            };
+            tokio::fs::create_dir_all(&target_path).await.expect("target storage directory");
+            let mapping_path = crate::get_target_id_mapping_file(&target_path);
+            let mapping_uuid_path = mapping_path.with_extension("uuid.db");
+            let seed_group = target_group(XtreamCluster::Live, 100, "mapping-seed");
+            {
+                let seed_header = &seed_group.channels[0].header;
+                let mut mapping = TargetIdMapping::new(&mapping_path, false).expect("seed target ID mapping");
+                mapping.get_and_update_virtual_id(
+                    seed_header.get_uuid(),
+                    0,
+                    seed_header.item_type,
+                    VirtualId::default(),
+                );
+                mapping.persist().expect("persist target ID mapping seed");
+            }
+            let mapping_before = [
+                tokio::fs::read(&mapping_path).await.expect("target ID mapping"),
+                tokio::fs::read(&mapping_uuid_path).await.expect("target UUID mapping"),
+            ];
+            let mut candidate = vec![target_group(XtreamCluster::Live, 101, "filtered-after-normalization")];
+            candidate[0].channels[0].header.epg_channel_id = Some("Mixed.Case".intern());
+
+            let errors = persist_playlist_with_mode(
+                &app_config,
+                &mut candidate,
+                None,
+                &target,
+                None,
+                TargetPlaylistPersistOptions {
+                    accepted_empty_clusters: ClusterFlags::Vod,
+                    ..TargetPlaylistPersistOptions::default()
+                },
+                TargetPersistenceMode::Persist,
+            )
+            .await
+            .expect_err("force-empty filtered output must be rejected");
+
+            assert!(errors.iter().any(|error| error.to_string().contains("after its output filter")));
+            assert_eq!(candidate[0].channels[0].header.epg_channel_id.as_deref(), Some("mixed.case"));
+            assert_eq!(
+                tokio::fs::read(&artifact_path).await.expect("retained client artifact"),
+                b"previous-client-state"
+            );
+            assert_eq!(tokio::fs::read(&mapping_path).await.expect("retained target ID mapping"), mapping_before[0]);
+            assert_eq!(
+                tokio::fs::read(&mapping_uuid_path).await.expect("retained target UUID mapping"),
+                mapping_before[1]
+            );
+        }
+    }
 
     #[test]
     fn playlist_without_channels_is_empty_for_persistence() {

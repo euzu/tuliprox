@@ -66,11 +66,17 @@ normal tuliprox-metadata -> tuliprox-core
 normal tuliprox-metadata -> tuliprox-processing
 normal tuliprox-metadata -> tuliprox-repository
 normal tuliprox-metadata -> tuliprox-session
+# Playlist curation owns the source-neutral matching/projection kernel and
+# translates its concrete Trakt edge into that trusted representation.
+normal tuliprox-curation -> shared
+normal tuliprox-curation -> tuliprox-core
 # The playlist pipeline. It states what it needs from the background
 # metadata worker as a trait (`MetadataUpdateSink`) that the binary
-# implements, so it does not depend on the worker itself.
+# implements, so it does not depend on the worker itself. It delegates
+# optional category matching/projection to the curation capability.
 normal tuliprox-processing -> shared
 normal tuliprox-processing -> tuliprox-core
+normal tuliprox-processing -> tuliprox-curation
 normal tuliprox-processing -> tuliprox-iptv
 normal tuliprox-processing -> tuliprox-library
 normal tuliprox-processing -> tuliprox-media-server

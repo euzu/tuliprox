@@ -3,7 +3,7 @@ members = ["backend/*", "frontend", "shared"]
 resolver = "2"
 
 [workspace.package]
-version = "3.3.107"
+version = "3.3.110"
 edition = "2021"
 rust-version = "1.95.0"
 
@@ -42,6 +42,7 @@ tuliprox-session = { version = "3", path = "backend/session" }
 tuliprox-media-server = { version = "3", path = "backend/media-server" }
 tuliprox-repository = { version = "3", path = "backend/repository" }
 tuliprox-core = { version = "3", path = "backend/core" }
+tuliprox-curation = { version = "3", path = "backend/curation" }
 tuliprox-library = { version = "3", path = "backend/library" }
 serde         = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json    = { version = "1.0.151" }
@@ -88,6 +89,16 @@ incremental = false
 lto = false
 incremental = true
 codegen-units = 256
+
+[profile.dev-slim]
+inherits = "dev"
+opt-level = 0
+strip = "none"
+lto = "off"
+debug = "line-tables-only"
+
+[profile.dev-slim.package."*"]
+debug = false
 
 [profile.release.package.frontend]
 opt-level = 'z'     # Size optimization for frontend

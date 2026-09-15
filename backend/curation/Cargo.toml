@@ -1,0 +1,24 @@
+[package]
+name = "tuliprox-curation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Source-neutral playlist curation with a Trakt edge adapter for tuliprox"
+
+[lints]
+workspace = true
+
+[dependencies]
+shared = { workspace = true }
+tuliprox-core = { workspace = true }
+indexmap.workspace = true
+log.workspace = true
+mime = "0.3.17"
+regex.workspace = true
+reqwest = { version = "0.13.4", features = ["json", "rustls"] }
+serde.workspace = true
+serde_json.workspace = true
+strsim = "0.11.1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util"] }
