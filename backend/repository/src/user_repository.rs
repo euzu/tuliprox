@@ -183,6 +183,16 @@ pub async fn merge_api_user(cfg: &AppConfig, target_users: &[TargetUser]) -> Res
     result
 }
 
+/// Copies the user database to `backup_dir`, timestamped.
+///
+/// This is deliberately kept now that the database has a recovery history.
+/// The two cover different failures: recovery rebuilds a corrupt or truncated
+/// database, but it lives beside that database in the config directory, so
+/// losing the config volume loses both. This copy is the only thing that
+/// survives that, and it is the reason the recovery root is not moved to
+/// `backup_dir` - startup migration runs before the config is read and cannot
+/// know that path, so the history has to stay next to the data.
+///
 /// # Panics
 ///
 /// Will panic if `backup_dir` is not given
