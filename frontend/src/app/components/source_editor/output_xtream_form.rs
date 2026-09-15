@@ -141,10 +141,11 @@ fn build_trakt_output_config(
     lists: Vec<TraktListConfigDto>,
     charts: Vec<TraktChartConfigDto>,
 ) -> Option<TraktConfigDto> {
-    if lists.is_empty() && charts.is_empty() {
+    let candidate = TraktConfigDto { enabled, catalog_selection, include_xtream_base_categories, api, lists, charts };
+    if candidate.is_source_less_noop() {
         None
     } else {
-        Some(TraktConfigDto { enabled, catalog_selection, include_xtream_base_categories, api, lists, charts })
+        Some(candidate)
     }
 }
 
@@ -716,16 +717,120 @@ mod tests {
     use shared::model::{TraktChartKind, TraktChartType};
 
     #[test]
-    fn build_trakt_output_config_returns_none_when_empty() {
+    fn build_trakt_output_config_returns_none_for_source_less_default_policy() {
+        let api = TraktApiConfigDto {
+            api_key: "draft-client-id".to_string(),
+            version: "draft-version".to_string(),
+            url: "draft-url".to_string(),
+            user_agent: "draft-agent".to_string(),
+        };
+
+        for enabled in [true, false] {
+            let result = build_trakt_output_config(
+                enabled,
+                TraktCatalogSelection::Full,
+                true,
+                api.clone(),
+                Vec::new(),
+                Vec::new(),
+            );
+            assert!(result.is_none());
+        }
+    }
+
+    #[test]
+    fn build_trakt_output_config_preserves_source_less_curated_policy() {
+        let api = TraktApiConfigDto {
+            api_key: "draft-client-id".to_string(),
+            version: "draft-version".to_string(),
+            url: "draft-url".to_string(),
+            user_agent: "draft-agent".to_string(),
+        };
+
+        let result =
+            build_trakt_output_config(true, TraktCatalogSelection::Curated, true, api.clone(), Vec::new(), Vec::new())
+                .expect("source-less curated policy should be preserved");
+
+        assert_eq!(
+            result,
+            TraktConfigDto {
+                enabled: true,
+                catalog_selection: TraktCatalogSelection::Curated,
+                include_xtream_base_categories: true,
+                api,
+                lists: Vec::new(),
+                charts: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn build_trakt_output_config_preserves_source_less_base_category_policy() {
+        let result = build_trakt_output_config(
+            true,
+            TraktCatalogSelection::Full,
+            false,
+            TraktApiConfigDto::default(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("source-less base-category policy should be preserved");
+
+        assert!(!result.include_xtream_base_categories);
+    }
+
+    #[test]
+    fn preserved_enabled_source_less_trakt_policy_reaches_preparation() {
+        let mut result = build_trakt_output_config(
+            true,
+            TraktCatalogSelection::Curated,
+            true,
+            TraktApiConfigDto::default(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("source-less curated policy should be preserved");
+
+        assert!(result.prepare().is_err());
+    }
+
+    #[test]
+    fn preserved_disabled_source_less_trakt_policy_prepares_successfully() {
+        let mut result = build_trakt_output_config(
+            false,
+            TraktCatalogSelection::Curated,
+            true,
+            TraktApiConfigDto::default(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("disabled source-less policy should be preserved");
+
+        assert!(result.prepare().is_ok());
+        assert_eq!(result.catalog_selection, TraktCatalogSelection::Curated);
+    }
+
+    #[test]
+    fn build_trakt_output_config_keeps_lists_without_charts() {
+        let lists = vec![TraktListConfigDto {
+            user: "alice".to_string(),
+            list_slug: "watchlist".to_string(),
+            create_xtream_category: false,
+            ..TraktListConfigDto::default()
+        }];
+
         let result = build_trakt_output_config(
             true,
             TraktCatalogSelection::Full,
             true,
             TraktApiConfigDto::default(),
+            lists.clone(),
             Vec::new(),
-            Vec::new(),
-        );
-        assert!(result.is_none());
+        )
+        .expect("lists-only trakt config");
+
+        assert_eq!(result.lists, lists);
+        assert!(result.charts.is_empty());
     }
 
     #[test]

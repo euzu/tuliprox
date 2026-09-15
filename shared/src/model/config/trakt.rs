@@ -196,6 +196,17 @@ fn prepare_selector_category(
 }
 
 impl TraktConfigDto {
+    pub fn has_selectors(&self) -> bool { !self.lists.is_empty() || !self.charts.is_empty() }
+
+    /// Returns whether this is the compatible all-default, source-less no-op.
+    ///
+    /// Enabled and API edit fields do not affect this classification.
+    pub fn is_source_less_noop(&self) -> bool {
+        !self.has_selectors()
+            && self.catalog_selection == TraktCatalogSelection::Full
+            && self.include_xtream_base_categories
+    }
+
     pub fn prepare(&mut self) -> Result<(), TuliproxError> {
         self.api.prepare();
         for selector in &mut self.lists {
@@ -214,11 +225,7 @@ impl TraktConfigDto {
                 "chart",
             )?;
         }
-        if self.enabled
-            && self.lists.is_empty()
-            && self.charts.is_empty()
-            && (self.catalog_selection != TraktCatalogSelection::Full || !self.include_xtream_base_categories)
-        {
+        if self.enabled && !self.has_selectors() && !self.is_source_less_noop() {
             return Err(TuliproxError::Config(
                 "Enabled Trakt curation with non-default policy requires at least one list or chart".to_string(),
             ));
@@ -348,13 +355,18 @@ mod tests {
     }
 
     #[test]
-    fn source_less_non_default_policy_is_rejected_only_when_enabled() {
-        let mut enabled =
-            TraktConfigDto { catalog_selection: TraktCatalogSelection::Curated, ..TraktConfigDto::default() };
-        assert!(enabled.prepare().is_err());
+    fn source_less_non_default_trakt_policy_axes_are_rejected_only_when_enabled() {
+        let configs = [
+            TraktConfigDto { catalog_selection: TraktCatalogSelection::Curated, ..TraktConfigDto::default() },
+            TraktConfigDto { include_xtream_base_categories: false, ..TraktConfigDto::default() },
+        ];
 
-        enabled.enabled = false;
-        assert!(enabled.prepare().is_ok());
+        for mut enabled in configs {
+            assert!(enabled.prepare().is_err());
+
+            enabled.enabled = false;
+            assert!(enabled.prepare().is_ok());
+        }
     }
 
     #[test]
