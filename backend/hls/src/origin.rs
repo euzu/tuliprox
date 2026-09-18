@@ -167,11 +167,22 @@ impl HlsOriginAccountIoLease {
         if self.acquiring.load(std::sync::atomic::Ordering::Acquire) {
             return false;
         }
-        self.active_io_count
-            .fetch_update(std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire, |count| {
-                (count > 0).then(|| count.checked_add(1)).flatten()
-            })
-            .is_ok()
+        let mut count = self.active_io_count.load(std::sync::atomic::Ordering::Acquire);
+        loop {
+            if count == 0 {
+                return false;
+            }
+            let Some(next) = count.checked_add(1) else { return false };
+            match self.active_io_count.compare_exchange_weak(
+                count,
+                next,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(observed) => count = observed,
+            }
+        }
     }
 
     fn take_resource(&self) -> Option<(ProviderHandle, tokio::sync::mpsc::OwnedPermit<CleanupEvent>)> {

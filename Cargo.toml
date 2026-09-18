@@ -29,7 +29,6 @@ shared = { version = "3", path = "shared" }
 tuliprox-hls = { version = "3", path = "backend/hls" }
 tuliprox-auth = { version = "3", path = "backend/auth" }
 tuliprox-dvr = { version = "3", path = "backend/dvr" }
-tuliprox = { version = "3", path = "backend/app" }
 tuliprox-mpegts = { version = "3", path = "backend/mpegts" }
 tuliprox-iptv = { version = "3", path = "backend/iptv" }
 tuliprox-parser = { version = "3", path = "backend/parser" }

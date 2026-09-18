@@ -47,6 +47,11 @@ pub struct PolicyContract {
     /// from an explicit empty admission-strategy list.
     #[serde(default)]
     pub admission_strategies: Option<Vec<AdmissionStrategy>>,
+    /// Overrides the reentry cooldown applied after an eviction. When set, a retry of
+    /// the evicted playback inside this window is suppressed instead of evicting its
+    /// replacement. Used by the reentry-suppression scenario.
+    #[serde(default)]
+    pub recent_eviction_reentry_ttl_ms: Option<u64>,
     #[serde(default)]
     pub grace: Option<GraceContract>,
     #[serde(default)]
@@ -224,6 +229,9 @@ pub enum ExpectedPlayback {
     Streaming,
     Rejected,
     RejectedWith(ExpectedRejection),
+    /// A recently evicted playback retried and the SUT terminated it quietly
+    /// (HTTP 204, no custom error video, no connection-denied event).
+    Suppressed,
 }
 
 impl ExpectedPlayback {
@@ -231,14 +239,19 @@ impl ExpectedPlayback {
     pub fn is_streaming(&self) -> bool { matches!(self, Self::Streaming) }
 
     #[must_use]
-    pub fn is_rejected(&self) -> bool { matches!(self, Self::Rejected | Self::RejectedWith(_)) }
+    pub fn is_rejected(&self) -> bool { matches!(self, Self::Rejected | Self::RejectedWith(_) | Self::Suppressed) }
 
     #[must_use]
     pub fn matches_outcome(&self, outcome: &crate::protocol::PlaybackOutcome) -> bool {
         use crate::protocol::{PlaybackOutcome, RejectionReason};
         match (self, outcome) {
             (Self::Streaming, PlaybackOutcome::Streaming { .. })
-            | (Self::Rejected, PlaybackOutcome::AdmissionRejected { .. }) => true,
+            | (Self::Rejected, PlaybackOutcome::AdmissionRejected { .. })
+            // A quiet suppression is exactly the 204 the SUT returns for a
+            // reentry-protected retry. Any other rejection reason must fail.
+            | (Self::Suppressed, PlaybackOutcome::AdmissionRejected { reason: RejectionReason::HttpStatus(204) }) => {
+                true
+            }
             (Self::RejectedWith(expected), PlaybackOutcome::AdmissionRejected { reason }) => match reason {
                 RejectionReason::CustomVideo(kind) => {
                     expected.custom_video.is_none_or(|expected_kind| expected_kind == *kind)
@@ -412,7 +425,7 @@ impl Scenario {
                 return Err(TestkitError::Configuration(format!("duplicate playback ID {}", start.playback_id)));
             }
             playback_ids.insert(start.playback_id.as_str());
-            if step.expect == ExpectedPlayback::Rejected
+            if step.expect.is_rejected()
                 && step
                     .await_frames
                     .or_else(|| step.await_condition.as_ref().and_then(|condition| condition.valid_frames))
@@ -567,6 +580,7 @@ mod tests {
             "vod-range-reopen-strict-cap.yml",
             "vod-reopen-backpressured-body.yml",
             "live-ts-same-channel-retry-latest-wins.yml",
+            "reentry-suppresses-evicted-retry.yml",
         ] {
             assert!(Scenario::from_path(&root.join(filename)).is_ok(), "{filename}");
         }
@@ -654,6 +668,26 @@ steps:
 
         // Idle timeout MUST NOT pass
         assert!(!expected_rejected.matches_outcome(&PlaybackOutcome::IdleTimeout));
+    }
+
+    #[test]
+    fn suppressed_matches_only_204_quiet_termination() {
+        use crate::{
+            custom_video::CustomVideoKind,
+            protocol::{PlaybackOutcome, RejectionReason},
+        };
+
+        let suppressed = ExpectedPlayback::Suppressed;
+        assert!(suppressed
+            .matches_outcome(&PlaybackOutcome::AdmissionRejected { reason: RejectionReason::HttpStatus(204) }));
+        // A custom error video (the regression this scenario guards against) must fail.
+        assert!(!suppressed.matches_outcome(&PlaybackOutcome::AdmissionRejected {
+            reason: RejectionReason::CustomVideo(CustomVideoKind::UserConnectionsExhausted),
+        }));
+        assert!(!suppressed
+            .matches_outcome(&PlaybackOutcome::AdmissionRejected { reason: RejectionReason::HttpStatus(503) }));
+        // An empty body without the 204 classification (bare EOF) must fail too.
+        assert!(!suppressed.matches_outcome(&PlaybackOutcome::UnexpectedEof { frames: 0, bytes: 0 }));
     }
 
     #[test]

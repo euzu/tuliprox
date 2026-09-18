@@ -19,6 +19,7 @@ pub enum GraceMode {
 pub struct EvictionTarget {
     pub addr: SocketAddr,
     pub virtual_id: VirtualId,
+    pub uid: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -89,18 +90,22 @@ fn evaluate_evict_same_ip(
     }
 
     match selected {
-        Some(candidate) => {
-            AdmissionDecision::Evict(EvictionTarget { addr: candidate.addr, virtual_id: candidate.virtual_id })
-        }
+        Some(candidate) => AdmissionDecision::Evict(EvictionTarget {
+            addr: candidate.addr,
+            virtual_id: candidate.virtual_id,
+            uid: candidate.uid,
+        }),
         None => AdmissionDecision::NoMatch,
     }
 }
 
 fn evaluate_evict_user(candidates: &[EvictionCandidate], order: EvictionOrder) -> AdmissionDecision {
     match select_candidate(candidates.iter(), order) {
-        Some(candidate) => {
-            AdmissionDecision::Evict(EvictionTarget { addr: candidate.addr, virtual_id: candidate.virtual_id })
-        }
+        Some(candidate) => AdmissionDecision::Evict(EvictionTarget {
+            addr: candidate.addr,
+            virtual_id: candidate.virtual_id,
+            uid: candidate.uid,
+        }),
         None => AdmissionDecision::NoMatch,
     }
 }

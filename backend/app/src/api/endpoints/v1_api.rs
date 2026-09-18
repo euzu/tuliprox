@@ -71,6 +71,7 @@ pub async fn create_status_check(app_state: &Arc<AppState>) -> StatusCheck {
         active_provider_connections,
         active_user_streams,
         cache,
+        reentry_suppressed_total: app_state.active_users.reentry_suppressed_total(),
     }
 }
 async fn status(axum::extract::State(app_state): axum::extract::State<Arc<AppState>>) -> axum::response::Response {

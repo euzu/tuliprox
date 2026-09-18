@@ -120,10 +120,7 @@ async fn playlist_resolve_series_info<E: EventSink + Clone + 'static, M: Metadat
     target: &ConfigTarget,
 ) {
     let filter = |pli: &PlaylistItem| {
-        if pli.header.xtream_cluster != XtreamCluster::Series || pli.header.item_type != PlaylistItemType::SeriesInfo {
-            return false;
-        }
-        true
+        pli.header.xtream_cluster == XtreamCluster::Series && pli.header.item_type == PlaylistItemType::SeriesInfo
     };
 
     // Skip if nothing to do

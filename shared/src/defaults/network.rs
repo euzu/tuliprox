@@ -1,6 +1,11 @@
 //! Generic networking defaults: resolve/probe delays, grace periods, retry,
 //! interner GC, port, user-agent, background flags.
 
+/// Default reentry cooldown after an eviction: how long the evicted playback's
+/// immediate retry is suppressed so it cannot immediately evict its replacement.
+/// This is the single source of truth for the default.
+pub const DEFAULT_RECENT_EVICTION_REENTRY_TTL_MS: u64 = 3000;
+
 default_eq_fns!(
     default_resolve_delay_secs, is_default_resolve_delay_secs, u16, 2;
     default_probe_delay_secs, is_default_probe_delay_secs, u16, 2;
@@ -18,6 +23,7 @@ default_eq_fns!(
     default_custom_stream_response_error_status, is_default_custom_stream_response_error_status, u16, 502;
     default_event_channel_capacity, is_default_event_channel_capacity, u32, 256;
     default_cleanup_queue_capacity, is_default_cleanup_queue_capacity, usize, 4096;
+    default_recent_eviction_reentry_ttl_ms, is_default_recent_eviction_reentry_ttl_ms, u64, DEFAULT_RECENT_EVICTION_REENTRY_TTL_MS;
 );
 
 pub const fn default_resource_retry_backoff_multiplier() -> f64 { 1.0 }

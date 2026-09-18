@@ -186,6 +186,30 @@ testkit-e2e: ## Run testkit E2E scenario suite against freshly built SUT
 	@echo "==> Executing testkit scenario suite"
 	@./bin/run-testkit-scenarios.sh
 
+.PHONY: testkit-scenario
+testkit-scenario: ## Run one testkit scenario: make testkit-scenario SCENARIO=<name> [RUN_ID=<id>]
+	@if [ -z "$(SCENARIO)" ]; then \
+		echo "❌ Error: SCENARIO is required."; \
+		echo "Usage: make testkit-scenario SCENARIO=<scenario-name>"; \
+		echo "Available scenarios:"; \
+		ls test/fixtures/testkit/scenarios/*.yml | xargs -n1 basename | sed 's/\.yml$$//' | sed 's/^/  - /'; \
+		exit 1; \
+	fi
+	@if [ ! -f "test/fixtures/testkit/scenarios/$(SCENARIO).yml" ]; then \
+		echo "❌ Unknown scenario: $(SCENARIO)"; \
+		exit 1; \
+	fi
+	@echo "==> Building tuliprox and tuliprox-testkit"
+	@$(CARGO_STABLE) build --package tuliprox --package tuliprox-testkit
+	@mkdir -p testkit-report/$(SCENARIO)
+	@echo "==> Running scenario $(SCENARIO)"
+	@TULIPROX_TESTKIT_SUT_BINARY="$(PROJECT_DIR)/target/debug/tuliprox" \
+		./target/debug/tuliprox-testkit controller \
+		--scenario test/fixtures/testkit/scenarios/$(SCENARIO).yml \
+		--report-directory testkit-report/$(SCENARIO) \
+		$(if $(RUN_ID),--run-id $(RUN_ID),)
+	@echo "==> Report: testkit-report/$(SCENARIO)/summary.txt"
+
 .PHONY: build
 build: ## Build the entire workspace in parallel using detected CPU count
 	@echo "==> Building workspace with $(CARGO_BUILD_JOBS) jobs"

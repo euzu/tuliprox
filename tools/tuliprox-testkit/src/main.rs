@@ -56,6 +56,13 @@ fn is_rejection_http_status(status: u16, headers: &reqwest::header::HeaderMap) -
     matches!(status, 403 | 429) || ((status == 502 || status == 503) && headers.get("x-tuliprox-rejection").is_some())
 }
 
+/// Tuliprox answers a suppressed reentry retry with `204 No Content`: a success status
+/// and an empty body. Classify it as an admission rejection so a scenario can assert the
+/// quiet termination instead of observing a bare end-of-body.
+fn quiet_suppression_outcome(status: u16) -> Option<PlaybackOutcome> {
+    (status == 204).then_some(PlaybackOutcome::AdmissionRejected { reason: RejectionReason::HttpStatus(status) })
+}
+
 /// Build the final playback URL for a live channel, dispatching between M3U-discovered URLs and
 /// Xtream live endpoint URLs constructed from the virtual ID embedded in the M3U playlist entry.
 fn resolve_playback_url(
@@ -1018,6 +1025,9 @@ async fn run_agent(
             PlaybackOutcome::HttpError { status }
         });
     }
+    if let Some(outcome) = quiet_suppression_outcome(status) {
+        return Ok(outcome);
+    }
     let mut body = response.bytes_stream();
     let mut decoder = FrameDecoder::default();
     let mut validator = FrameValidator::new(expected_run_id, expected_marker);
@@ -1100,6 +1110,9 @@ async fn run_agent_until_released(
         } else {
             PlaybackOutcome::HttpError { status }
         });
+    }
+    if let Some(outcome) = quiet_suppression_outcome(status) {
+        return Ok(outcome);
     }
     let mut body = response.bytes_stream();
     let mut decoder = FrameDecoder::default();
@@ -2306,7 +2319,11 @@ async fn execute_scenario_steps<'a>(
                     scenario.policy_contract.as_ref().and_then(|contract| contract.provider_max_connections).is_some()
                         && step.expect.is_rejected()
                         && oracle_expected == ExpectedPlayback::Streaming;
-                if step.expect != oracle_expected && !provider_limited_rejection {
+                // The static oracle does not model the time-based reentry guard, so a
+                // suppressed retry intentionally diverges from its eviction prediction.
+                // The concrete SUT outcome is asserted through `step.expect`.
+                let reentry_suppression = matches!(step.expect, ExpectedPlayback::Suppressed);
+                if step.expect != oracle_expected && !provider_limited_rejection && !reentry_suppression {
                     return Err(TestkitError::Configuration(format!(
                         "step {} expects {:?}, but policy oracle expects {:?}",
                         step.command_id, step.expect, oracle_expected

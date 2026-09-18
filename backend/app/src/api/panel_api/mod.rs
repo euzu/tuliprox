@@ -1242,10 +1242,7 @@ pub(crate) fn can_provision_on_exhausted(app_state: &AppState, input: &ConfigInp
         debug_if_enabled!("panel_api config invalid: {}", sanitize_sensitive_info(&err.to_string()));
         return false;
     }
-    if is_alias_pool_max_reached(app_state, input) {
-        return false;
-    }
-    true
+    !is_alias_pool_max_reached(app_state, input)
 }
 
 pub(crate) fn find_input_by_provider_name(app_state: &AppState, provider_name: &str) -> Option<Arc<ConfigInput>> {

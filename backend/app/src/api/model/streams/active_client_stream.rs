@@ -1,7 +1,9 @@
 use crate::{
     api::{
         model::{
-            connection_manager::{PROVIDER_END_CLOSED, PROVIDER_END_ERROR, PROVIDER_END_NOT_SET},
+            connection_manager::{
+                PROVIDER_END_CLOSED, PROVIDER_END_ERROR, PROVIDER_END_NOT_SET, PROVIDER_END_PREEMPTED,
+            },
             open_provider_stream_with_lifecycle, uses_direct_body_idle_timeout, AppState, BoxedProviderStream,
             CleanupEvent, ConnectionManager, CustomVideoStreamType, EventManager, MeteringStream,
             PendingProviderWakeSource, ProviderStreamFactoryOptions, ProviderStreamOpenLifecycle, StreamDetails,
@@ -42,38 +44,57 @@ const DIRECT_BODY_SOCKET_ACTIVITY_TOUCH_SECS: u64 = 1;
 /// Stored as `u8` in an `AtomicU8` for lock-free access inside `poll_next`.
 /// Lower numeric values correspond to a live or custom stream; `GracePending`
 /// (255) is a transient sentinel that parks the poll until the grace task resolves.
+///
+/// Discriminants are implicit (declaration order) except for the `255` sentinel.
+/// The byte mapping lives once, in [`StreamMode::try_from`], and is pinned by
+/// `test_stream_mode_byte_values`.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StreamMode {
     /// Forward bytes directly from the upstream provider.
-    Inner = 0,
+    Inner,
     /// Show the "user connections exhausted" custom video.
-    UserExhausted = 1,
+    UserExhausted,
     /// Show the "provider connections exhausted" custom video.
-    ProviderExhausted = 2,
+    ProviderExhausted,
     /// Show the "channel unavailable" custom video.
-    ChannelUnavailable = 3,
+    ChannelUnavailable,
     /// Show the provisioning/placeholder custom video while probing for capacity.
-    Provisioning = 4,
+    Provisioning,
     /// Show the "low-priority preempted" custom video.
-    LowPriorityPreempted = 5,
+    LowPriorityPreempted,
+    /// A recently evicted playback retried while this stream held a grace slot and
+    /// every remaining eviction candidate is reentry-protected. The body must end
+    /// without painting a user-visible "connections exhausted" error video.
+    ReentrySuppressed,
     /// Transient: grace-period check is still in progress; `poll_next` must park.
     GracePending = 255,
 }
 
-impl StreamMode {
-    fn from_u8(v: u8) -> Self {
-        match v {
-            0 => Self::Inner,
-            1 => Self::UserExhausted,
-            2 => Self::ProviderExhausted,
-            3 => Self::ChannelUnavailable,
-            4 => Self::Provisioning,
-            5 => Self::LowPriorityPreempted,
-            _ => Self::GracePending,
+impl TryFrom<u8> for StreamMode {
+    type Error = u8;
+
+    /// Decodes the atomic mode flag. Returns `Err(value)` for a byte that was never a
+    /// valid [`StreamMode`]; callers must fail safe instead of inventing a live state
+    /// such as `GracePending`.
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Inner),
+            1 => Ok(Self::UserExhausted),
+            2 => Ok(Self::ProviderExhausted),
+            3 => Ok(Self::ChannelUnavailable),
+            4 => Ok(Self::Provisioning),
+            5 => Ok(Self::LowPriorityPreempted),
+            6 => Ok(Self::ReentrySuppressed),
+            255 => Ok(Self::GracePending),
+            other => Err(other),
         }
     }
 }
+
+/// Publishes a new mode to the lock-free flag with release ordering. All writers go
+/// through this so the `as u8` cast and the memory ordering live in one place.
+fn store_stream_mode(flag: &AtomicU8, mode: StreamMode) { flag.store(mode as u8, Ordering::Release); }
 
 /// Holds the optional custom video buffers for each error/placeholder scenario.
 /// Using named fields avoids the positional-indexing confusion of a 4-tuple.
@@ -288,15 +309,28 @@ impl ActiveClientStreamState {
         }
     }
 
-    fn custom_video_type_for_mode(mode: StreamMode) -> CustomVideoStreamType {
+    /// Maps a mode to the custom video it serves, if any. `ReentrySuppressed` and the
+    /// transparent forwarding modes deliberately have no custom video: a suppressed
+    /// reentry must never surface a user-visible error clip.
+    fn custom_video_type_for_mode(mode: StreamMode) -> Option<CustomVideoStreamType> {
         match mode {
-            StreamMode::UserExhausted => CustomVideoStreamType::UserConnectionsExhausted,
-            StreamMode::ProviderExhausted => CustomVideoStreamType::ProviderConnectionsExhausted,
-            StreamMode::Provisioning => CustomVideoStreamType::Provisioning,
-            StreamMode::LowPriorityPreempted => CustomVideoStreamType::LowPriorityPreempted,
-            StreamMode::ChannelUnavailable | StreamMode::Inner | StreamMode::GracePending => {
-                CustomVideoStreamType::ChannelUnavailable
-            }
+            StreamMode::UserExhausted => Some(CustomVideoStreamType::UserConnectionsExhausted),
+            StreamMode::ProviderExhausted => Some(CustomVideoStreamType::ProviderConnectionsExhausted),
+            StreamMode::Provisioning => Some(CustomVideoStreamType::Provisioning),
+            StreamMode::LowPriorityPreempted => Some(CustomVideoStreamType::LowPriorityPreempted),
+            StreamMode::ChannelUnavailable => Some(CustomVideoStreamType::ChannelUnavailable),
+            StreamMode::Inner | StreamMode::GracePending | StreamMode::ReentrySuppressed => None,
+        }
+    }
+
+    /// Drops the provider handle at most once (releasing the provider slot
+    /// synchronously) and detaches the provider body stream. The stream claim itself
+    /// is released separately through [`Self::release_user_stream`].
+    fn release_provider_handle_and_detach_body(&mut self) {
+        self.inner = None;
+        if !self.provider_handle_released {
+            self.provider_handle_released = true;
+            drop(self.provider_handle.take());
         }
     }
 
@@ -343,26 +377,8 @@ impl ActiveClientStreamState {
 
     fn release_stream_and_provider_handle_once(&mut self) {
         self.stop_grace_task();
-        // The provider slot is owned by a managed handle and released synchronously on
-        // drop. The stream claim is released through the reserved cleanup right, never a
-        // lossy cleanup message, with the actual provider outcome.
-        if !self.provider_handle_released {
-            self.provider_handle_released = true;
-            drop(self.provider_handle.take());
-        }
-        if self.user_stream_released {
-            return;
-        }
-        self.user_stream_released = true;
-        if let Some(cleanup) = self.request_cleanup.as_mut() {
-            cleanup.finish(
-                self.lease_request_id,
-                self.provider_end_reason.load(Ordering::Relaxed),
-                self.provider_reconnect_count.load(Ordering::Relaxed),
-                self.provider_error_class,
-                self.provider_http_status,
-            );
-        }
+        self.release_provider_handle_and_detach_body();
+        self.release_user_stream();
     }
 
     fn stop_direct_body_idle_timeout(&mut self) {
@@ -420,6 +436,8 @@ impl ActiveClientStreamState {
         self.provider_stopped = true;
         self.preempt_cancelled = None;
         self.stop_grace_task();
+        self.provider_end_reason.store(PROVIDER_END_PREEMPTED, Ordering::Relaxed);
+        self.provider_error_class = Some("preempted");
 
         let is_superseded = self
             .provider_handle
@@ -437,14 +455,14 @@ impl ActiveClientStreamState {
             if !is_superseded && self.custom_video.low_priority_preempted.is_some() {
                 serve_preempted_custom = true;
                 if let Some(flag) = &self.send_custom_stream_flag {
-                    flag.store(StreamMode::LowPriorityPreempted as u8, Ordering::Release);
+                    store_stream_mode(flag, StreamMode::LowPriorityPreempted);
                 } else {
                     // Fallback: create_active_client_stream usually initializes this via stream_grace_period.
                     self.send_custom_stream_flag =
                         Some(Arc::new(AtomicU8::new(StreamMode::LowPriorityPreempted as u8)));
                 }
             } else if let Some(flag) = &self.send_custom_stream_flag {
-                flag.store(StreamMode::Inner as u8, Ordering::Release);
+                store_stream_mode(flag, StreamMode::Inner);
             }
 
             if let Some(waker) = &self.waker {
@@ -480,11 +498,9 @@ impl ActiveClientStreamState {
         self.stop_grace_task();
 
         if self.provider_handle.is_some() {
-            let managed = self.provider_handle.take();
-            self.provider_handle_released = true;
             // Synchronous provider-slot release; the custom-video detail update is a
             // separate, best-effort UI effect.
-            drop(managed);
+            self.release_provider_handle_and_detach_body();
 
             if mode == StreamMode::ChannelUnavailable {
                 if let Some(flag) = &self.send_custom_stream_flag {
@@ -502,30 +518,43 @@ impl ActiveClientStreamState {
             }
 
             let addr = self.fingerprint.addr;
-            // Drop the provider stream immediately instead of replacing with an
-            // allocated empty stream — avoids a heap allocation on every mode switch.
-            self.inner = None;
-
-            let video_type = Self::custom_video_type_for_mode(mode);
             let reason = match mode {
                 StreamMode::ChannelUnavailable => "unavailable provider channel",
                 StreamMode::UserExhausted => "user grace period exhaustion",
                 StreamMode::ProviderExhausted => "provider grace period exhaustion",
                 StreamMode::Provisioning => "provider grace period provisioning",
                 StreamMode::LowPriorityPreempted => "low-priority preemption",
+                StreamMode::ReentrySuppressed => "reentry suppression",
                 StreamMode::Inner | StreamMode::GracePending => "stream mode transition",
             };
             debug_if_enabled!(
                 "Provider stream stopped due to {reason} for {}",
                 sanitize_sensitive_info(&addr.to_string())
             );
-            self.connection_manager.send_cleanup(CleanupEvent::UpdateDetailAndReleaseProvider {
-                addr,
-                stream_uid: self.stream_uid,
-                video_type,
-                handle: None,
-            });
+            if let Some(video_type) = Self::custom_video_type_for_mode(mode) {
+                self.connection_manager.send_cleanup(CleanupEvent::UpdateDetailAndReleaseProvider {
+                    addr,
+                    stream_uid: self.stream_uid,
+                    video_type,
+                    handle: None,
+                });
+            } else {
+                // No custom video for this mode: release the request without publishing
+                // a detail update so no error clip is shown.
+                self.release_user_stream();
+            }
         }
+    }
+
+    /// Ends the response body without switching to a custom error video. Used for a
+    /// suppressed reentry retry, where a visible "connections exhausted" video would be
+    /// misleading: the request was declined by the reentry guard, not by a real limit.
+    fn terminate_quietly(&mut self) {
+        self.provider_stopped = true;
+        self.preempt_cancelled = None;
+        self.stop_grace_task();
+        self.release_provider_handle_and_detach_body();
+        self.release_user_stream();
     }
 
     fn reset_custom_video_timeout(&mut self) {
@@ -686,9 +715,19 @@ impl Stream for ActiveClientStream {
             }
 
             // 3. Read atomic mode flag (set by grace task or stop_provider_stream)
-            let mode = match &self.state.send_custom_stream_flag {
-                Some(flag) => StreamMode::from_u8(flag.load(Ordering::Acquire)),
-                None => StreamMode::Inner,
+            let Some(mode) = (match &self.state.send_custom_stream_flag {
+                Some(flag) => StreamMode::try_from(flag.load(Ordering::Acquire)).ok(),
+                None => Some(StreamMode::Inner),
+            }) else {
+                // An unknown mode can only come from a corrupted flag. Never map it
+                // onto a live state such as `GracePending`; end the body safely.
+                debug_assert!(false, "unknown stream mode flag");
+                error!(
+                    "Unknown stream mode for {}, terminating stream",
+                    sanitize_sensitive_info(&self.state.fingerprint.addr.to_string())
+                );
+                self.state.terminate_quietly();
+                return Poll::Ready(None);
             };
 
             // Dispatch based on the current streaming phase.
@@ -825,6 +864,17 @@ impl Stream for ActiveClientStream {
                             return Poll::Pending;
                         }
                     }
+                }
+
+                // Quiet termination: the reentry guard declined a retry of a recently
+                // evicted playback. End the body without a user-visible error video.
+                StreamMode::ReentrySuppressed => {
+                    info!(
+                        "Suppressing reentry retry for {}, terminating stream",
+                        sanitize_sensitive_info(&self.state.fingerprint.addr.to_string())
+                    );
+                    self.state.terminate_quietly();
+                    return Poll::Ready(None);
                 }
 
                 // Custom video modes: serve the appropriate buffer
@@ -1341,32 +1391,46 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                                     grace_kind,
                                 )
                                 .await;
-                            match remaining_result.admission.permission {
+                            match remaining_result.admission.permission() {
                                 shared::model::UserConnectionPermission::Allowed
                                 | shared::model::UserConnectionPermission::GracePeriod => {
                                     // Remaining strategy succeeded — proceed to Inner.
-                                    stream_strategy_flag_copy.store(StreamMode::Inner as u8, Ordering::Release);
+                                    store_stream_mode(&stream_strategy_flag_copy, StreamMode::Inner);
                                     // updated stays false
                                 }
                                 shared::model::UserConnectionPermission::Exhausted => {
-                                    // Remaining strategies exhausted — final UserExhausted.
-                                    stream_strategy_flag_copy.store(StreamMode::UserExhausted as u8, Ordering::Release);
-                                    connection_manager
-                                        .update_stream_detail(
-                                            &fingerprint.addr,
-                                            CustomVideoStreamType::UserConnectionsExhausted,
-                                        )
-                                        .await;
+                                    let suppressed = remaining_result.admission.is_reentry_suppressed();
+                                    if suppressed {
+                                        // Every remaining eviction candidate is reentry-protected,
+                                        // so this is a suppressed retry of a recently evicted
+                                        // playback. End the body quietly: a visible
+                                        // connections-exhausted video would be misleading because
+                                        // the request was declined by the reentry guard, not by a
+                                        // real connection limit.
+                                        store_stream_mode(&stream_strategy_flag_copy, StreamMode::ReentrySuppressed);
+                                        info!(
+                                            "Suppressing reentry retry for recently evicted playback of user {username}"
+                                        );
+                                    } else {
+                                        // Remaining strategies exhausted — final UserExhausted.
+                                        store_stream_mode(&stream_strategy_flag_copy, StreamMode::UserExhausted);
+                                        connection_manager
+                                            .update_stream_detail(
+                                                &fingerprint.addr,
+                                                CustomVideoStreamType::UserConnectionsExhausted,
+                                            )
+                                            .await;
+                                        info!("User connections exhausted for active clients: {username}");
+                                    }
                                     if let Some(id) = shared_subscriber_id {
                                         connection_manager.shared_stream_manager.release_subscriber(id).await;
                                     }
-                                    info!("User connections exhausted for active clients: {username}");
                                     updated = true;
                                 }
                             }
                         } else {
                             // No grace context — immediate UserExhausted.
-                            stream_strategy_flag_copy.store(StreamMode::UserExhausted as u8, Ordering::Release);
+                            store_stream_mode(&stream_strategy_flag_copy, StreamMode::UserExhausted);
                             connection_manager
                                 .update_stream_detail(
                                     &fingerprint.addr,
@@ -1386,7 +1450,7 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                     if let Some(provider_name) = provider_grace_check {
                         if provider_manager.is_over_limit(&provider_name) {
                             if let Some(provisioning_info) = provisioning_info {
-                                stream_strategy_flag_copy.store(StreamMode::Provisioning as u8, Ordering::Release);
+                                store_stream_mode(&stream_strategy_flag_copy, StreamMode::Provisioning);
                                 connection_manager
                                     .update_stream_detail(&fingerprint.addr, CustomVideoStreamType::Provisioning)
                                     .await;
@@ -1411,7 +1475,7 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                                     }
                                 });
                             } else {
-                                stream_strategy_flag_copy.store(StreamMode::ProviderExhausted as u8, Ordering::Release);
+                                store_stream_mode(&stream_strategy_flag_copy, StreamMode::ProviderExhausted);
                                 connection_manager
                                     .update_stream_detail(
                                         &fingerprint.addr,
@@ -1430,7 +1494,7 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                 }
 
                 if !updated {
-                    stream_strategy_flag_copy.store(StreamMode::Inner as u8, Ordering::Release);
+                    store_stream_mode(&stream_strategy_flag_copy, StreamMode::Inner);
                 }
 
                 // Resolve session lifecycle transitions.
@@ -2128,26 +2192,54 @@ mod tests {
 
     #[test]
     fn test_custom_video_type_mapping_for_grace_modes() {
-        assert!(matches!(
+        assert_eq!(
             ActiveClientStreamState::custom_video_type_for_mode(StreamMode::UserExhausted),
-            CustomVideoStreamType::UserConnectionsExhausted
-        ));
-        assert!(matches!(
+            Some(CustomVideoStreamType::UserConnectionsExhausted)
+        );
+        assert_eq!(
             ActiveClientStreamState::custom_video_type_for_mode(StreamMode::ProviderExhausted),
-            CustomVideoStreamType::ProviderConnectionsExhausted
-        ));
-        assert!(matches!(
+            Some(CustomVideoStreamType::ProviderConnectionsExhausted)
+        );
+        assert_eq!(
             ActiveClientStreamState::custom_video_type_for_mode(StreamMode::Provisioning),
-            CustomVideoStreamType::Provisioning
-        ));
-        assert!(matches!(
+            Some(CustomVideoStreamType::Provisioning)
+        );
+        assert_eq!(
             ActiveClientStreamState::custom_video_type_for_mode(StreamMode::LowPriorityPreempted),
-            CustomVideoStreamType::LowPriorityPreempted
-        ));
-        assert!(matches!(
+            Some(CustomVideoStreamType::LowPriorityPreempted)
+        );
+        assert_eq!(
             ActiveClientStreamState::custom_video_type_for_mode(StreamMode::ChannelUnavailable),
-            CustomVideoStreamType::ChannelUnavailable
-        ));
+            Some(CustomVideoStreamType::ChannelUnavailable)
+        );
+        // A suppressed reentry must never map to a user-visible error clip.
+        assert_eq!(ActiveClientStreamState::custom_video_type_for_mode(StreamMode::ReentrySuppressed), None);
+        assert_eq!(ActiveClientStreamState::custom_video_type_for_mode(StreamMode::Inner), None);
+        assert_eq!(ActiveClientStreamState::custom_video_type_for_mode(StreamMode::GracePending), None);
+    }
+
+    #[test]
+    fn test_stream_mode_byte_values_match_the_implicit_discriminants() {
+        // Discriminants are implicit (declaration order) except the 255 sentinel, so
+        // this pins the wire mapping against accidental reordering.
+        assert_eq!(StreamMode::Inner as u8, 0);
+        assert_eq!(StreamMode::UserExhausted as u8, 1);
+        assert_eq!(StreamMode::ProviderExhausted as u8, 2);
+        assert_eq!(StreamMode::ChannelUnavailable as u8, 3);
+        assert_eq!(StreamMode::Provisioning as u8, 4);
+        assert_eq!(StreamMode::LowPriorityPreempted as u8, 5);
+        assert_eq!(StreamMode::ReentrySuppressed as u8, 6);
+        assert_eq!(StreamMode::GracePending as u8, 255);
+    }
+
+    #[test]
+    fn test_stream_mode_try_from_rejects_unknown_values() {
+        assert_eq!(StreamMode::try_from(0), Ok(StreamMode::Inner));
+        assert_eq!(StreamMode::try_from(6), Ok(StreamMode::ReentrySuppressed));
+        assert_eq!(StreamMode::try_from(255), Ok(StreamMode::GracePending));
+        // Unknown values must not be silently mapped onto GracePending.
+        assert_eq!(StreamMode::try_from(7), Err(7));
+        assert_eq!(StreamMode::try_from(200), Err(200));
     }
 
     #[test]
@@ -2217,7 +2309,7 @@ mod tests {
             start_deferred_provider_grace_resolution(&app_state, &provider_name, deferred_addr, None).await;
 
         assert_eq!(
-            StreamMode::from_u8(flag.load(Ordering::Acquire)),
+            StreamMode::try_from(flag.load(Ordering::Acquire)).unwrap(),
             StreamMode::GracePending,
             "provider grace resolution must begin in GracePending while provider capacity is exhausted"
         );
@@ -2230,7 +2322,7 @@ mod tests {
             "provider grace resolution stayed pending after capacity_notify should have fired"
         );
         assert_eq!(
-            StreamMode::from_u8(flag.load(Ordering::Acquire)),
+            StreamMode::try_from(flag.load(Ordering::Acquire)).unwrap(),
             StreamMode::Inner,
             "capacity-notify should resolve provider grace from GracePending to Inner before the deadline"
         );
@@ -2706,7 +2798,7 @@ mod tests {
         .await;
 
         assert_eq!(
-            StreamMode::from_u8(flag.load(Ordering::Acquire)),
+            StreamMode::try_from(flag.load(Ordering::Acquire)).unwrap(),
             StreamMode::GracePending,
             "provider grace resolution must begin in GracePending while provider capacity is exhausted"
         );
@@ -2719,7 +2811,7 @@ mod tests {
             "grace-resolution task should complete once the deadline expires without capacity becoming available"
         );
         assert_eq!(
-            StreamMode::from_u8(flag.load(Ordering::Acquire)),
+            StreamMode::try_from(flag.load(Ordering::Acquire)).unwrap(),
             StreamMode::ProviderExhausted,
             "provider grace resolution should transition from GracePending to ProviderExhausted when the deadline expires"
         );
@@ -2766,6 +2858,7 @@ mod tests {
             shared_burst_buffer_mb: 1,
             shared_subscriber_idle_timeout_secs: 300,
             cleanup_queue_capacity: 4096,
+            recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
         });
 
@@ -2972,7 +3065,7 @@ mod tests {
 
         // Grace should be pending initially.
         assert_eq!(
-            StreamMode::from_u8(flag.as_ref().unwrap().load(Ordering::Acquire)),
+            StreamMode::try_from(flag.as_ref().unwrap().load(Ordering::Acquire)).unwrap(),
             StreamMode::GracePending,
             "user grace should start in GracePending"
         );
@@ -2984,7 +3077,7 @@ mod tests {
         // Remaining strategies are exhausted (only GraceHoldStream was configured, no eviction).
         // The session should expire with UserExhausted.
         assert_eq!(
-            StreamMode::from_u8(flag.as_ref().unwrap().load(Ordering::Acquire)),
+            StreamMode::try_from(flag.as_ref().unwrap().load(Ordering::Acquire)).unwrap(),
             StreamMode::UserExhausted,
             "exhausted remaining strategies should result in UserExhausted"
         );
@@ -3017,6 +3110,233 @@ mod tests {
             session.connection_kind,
             Some(crate::api::model::ConnectionKind::Soft),
             "session connection_kind should remain Soft (unchanged from creation)"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::too_many_lines)]
+    async fn test_user_grace_failure_reentry_suppression_terminates_quietly() {
+        // GraceHoldStream admits the request; the remaining EvictUserOldest candidate
+        // is reentry-protected, so the grace task must resolve to ReentrySuppressed
+        // instead of painting the user-visible connections-exhausted video.
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 100,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: true,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
+            cleanup_queue_capacity: 4096,
+            recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
+            admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream, AdmissionStrategy::EvictUserOldest]),
+        });
+
+        let provider_name = "provider_1".intern();
+        let first_addr: std::net::SocketAddr = "127.0.0.1:55211".parse().unwrap_or_else(|_| unreachable!());
+        let second_addr: std::net::SocketAddr = "127.0.0.1:55212".parse().unwrap_or_else(|_| unreachable!());
+        let preload_addr: std::net::SocketAddr = "127.0.0.1:55213".parse().unwrap_or_else(|_| unreachable!());
+        let first_fingerprint = create_test_fingerprint(first_addr);
+        let second_fingerprint = create_test_fingerprint(second_addr);
+        let preload_fingerprint = create_test_fingerprint(preload_addr);
+
+        let mut user = create_test_user("grace-reentry-user");
+        user.max_connections = 1;
+        user.soft_connections = 0;
+
+        // Two counted Normal streams make the user over limit when grace expires.
+        app_state
+            .active_users
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-first",
+                virtual_id: 1,
+                provider: provider_name.as_ref(),
+                stream_url: "http://provider-1.example/live/1.ts",
+                addr: &first_addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+        app_state
+            .connection_manager
+            .update_connection(crate::api::model::ConnectionParams {
+                meter_uid: 1,
+                username: "grace-reentry-user",
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 10,
+                fingerprint: &first_fingerprint,
+                provider: provider_name.clone(),
+                stream_channel: &create_test_stream_channel(1, "http://provider-1.example/live/1.ts"),
+                user_agent: std::borrow::Cow::Borrowed("ua"),
+                session_token: Some("tok-first"),
+            })
+            .await;
+        app_state
+            .active_users
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-preload",
+                virtual_id: 3,
+                provider: provider_name.as_ref(),
+                stream_url: "http://provider-1.example/live/3.ts",
+                addr: &preload_addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+        app_state
+            .connection_manager
+            .update_connection(crate::api::model::ConnectionParams {
+                meter_uid: 3,
+                username: "grace-reentry-user",
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 10,
+                fingerprint: &preload_fingerprint,
+                provider: provider_name.clone(),
+                stream_channel: &create_test_stream_channel(3, "http://provider-1.example/live/3.ts"),
+                user_agent: std::borrow::Cow::Borrowed("ua"),
+                session_token: Some("tok-preload"),
+            })
+            .await;
+
+        // Grace session on a distinct channel; its socket-bound stream row is what
+        // `mark_recent_eviction_guard_for_addr` keys the reentry guard on.
+        app_state
+            .active_users
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-second",
+                virtual_id: 2,
+                provider: provider_name.as_ref(),
+                stream_url: "http://provider-1.example/live/2.ts",
+                addr: &second_addr,
+                connection_permission: UserConnectionPermission::GracePeriod,
+                connection_kind: Some(crate::api::model::ConnectionKind::Soft),
+                socket_bound: false,
+            })
+            .await;
+        app_state
+            .connection_manager
+            .update_connection(crate::api::model::ConnectionParams {
+                meter_uid: 2,
+                username: "grace-reentry-user",
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 10,
+                fingerprint: &second_fingerprint,
+                provider: provider_name.clone(),
+                stream_channel: &create_test_stream_channel(2, "http://provider-1.example/live/2.ts"),
+                user_agent: std::borrow::Cow::Borrowed("ua"),
+                session_token: Some("tok-second"),
+            })
+            .await;
+
+        // Protect the oldest candidate (channel 1) against a retry of this channel 2.
+        app_state
+            .active_users
+            .mark_recent_eviction_guard_for_addr(&second_addr, first_addr, Duration::from_secs(3))
+            .await;
+
+        let _pending_version = app_state
+            .active_users
+            .mark_pending_provider(
+                "grace-reentry-user",
+                "tok-second",
+                crate::api::model::PendingProviderReason::GraceHold,
+                9_999,
+            )
+            .await
+            .expect("pending version must be created for tok-second");
+
+        let grace_context = GraceResolutionContext {
+            strategy_index: 0,
+            strategies: [AdmissionStrategy::GraceHoldStream, AdmissionStrategy::EvictUserOldest].into(),
+            kind: Some(crate::api::model::ConnectionKind::Soft),
+        };
+        let pending_version = app_state
+            .active_users
+            .pending_provider_version("grace-reentry-user", "tok-second")
+            .await
+            .expect("pending version must be created for tok-second");
+
+        let stream_details = StreamDetails {
+            shared_subscriber_id: None,
+            stream: None,
+            stream_info: None,
+            provider_name: Some(provider_name),
+            request_url: Some("http://provider-1.example/live/2.ts".intern()),
+            session_headers: None,
+            provider_session_headers: HashMap::new(),
+            user_agent_stream_index: None,
+            grace_period: GracePeriodOptions { period_millis: 100, timeout_secs: 0, hold_stream: true },
+            provider_grace_active: false,
+            disable_provider_grace: false,
+            reconnect_flag: None,
+            provider_handle: None,
+            content_representation: ProviderContentRepresentationMode::PreserveOrigin,
+            grace_resolution_context: Some(grace_context.clone()),
+            custom_reason: None,
+        };
+
+        let (flag, grace_task) = stream_grace_period(GracePeriodParams {
+            app_state: Arc::clone(&app_state),
+            stream_details,
+            user_grace_period: true,
+            user: user.clone(),
+            fingerprint: second_fingerprint.clone(),
+            virtual_id: VirtualId::new(2),
+            session_token: Some("tok-second".to_string()),
+            provisioning_info: None,
+            waker: None,
+            hold_stream: true,
+            capacity_notify: app_state.connection_manager.capacity_notified(),
+            pending_provider_version: Some(pending_version),
+            grace_active_version: None,
+            grace_resolution_context: Some(grace_context),
+            grace_kind: Some(crate::api::model::ConnectionKind::Soft),
+            socket_bound: true,
+            shared_subscriber_id: None,
+        });
+
+        assert_eq!(
+            StreamMode::try_from(flag.as_ref().unwrap().load(Ordering::Acquire)).unwrap(),
+            StreamMode::GracePending,
+            "user grace should start in GracePending"
+        );
+
+        tokio::time::advance(Duration::from_millis(101)).await;
+        let _ = grace_task.expect("grace task should be spawned").await;
+
+        assert_eq!(
+            StreamMode::try_from(flag.as_ref().unwrap().load(Ordering::Acquire)).unwrap(),
+            StreamMode::ReentrySuppressed,
+            "reentry-protected remaining candidate must resolve to quiet termination"
+        );
+
+        let session = app_state
+            .active_users
+            .get_and_update_user_session("grace-reentry-user", "tok-second")
+            .await
+            .expect("session must exist after grace failure");
+        assert!(
+            matches!(session.lifecycle, crate::api::model::PlaybackLifecycle::Expired),
+            "session lifecycle should be Expired after reentry-suppressed grace failure"
         );
     }
 

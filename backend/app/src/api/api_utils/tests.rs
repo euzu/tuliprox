@@ -41,10 +41,8 @@ use tokio::{
 };
 use tuliprox_core::utils::response_compression::should_compress_response;
 use tuliprox_session::{
-    admission::{
-        evaluate_remaining_strategies_after_grace, get_effective_admission_strategies, RECENT_EVICTION_REENTRY_TTL_SECS,
-    },
-    GraceResolutionContext,
+    admission::{evaluate_remaining_strategies_after_grace, get_effective_admission_strategies},
+    AdmissionRejectionReason, GraceResolutionContext,
 };
 
 #[test]
@@ -871,6 +869,33 @@ fn media_server_playback_urls_are_proxy_only_redirect_guard_candidates() {
         .as_ref(),
         "media-server://<redacted>"
     );
+}
+
+#[test]
+fn test_resolve_request_url_for_logging_respects_sanitization_setting() {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    struct SanitizeSettingGuard(bool);
+    impl Drop for SanitizeSettingGuard {
+        fn drop(&mut self) { shared::utils::set_sanitize_sensitive_info(self.0); }
+    }
+
+    let prev = shared::utils::is_sanitize_sensitive_info_enabled();
+    let _restore = SanitizeSettingGuard(prev);
+
+    let m3u_input = ConfigInput { input_type: InputType::M3u, ..ConfigInput::default() };
+    let media_ref = "media-server://plex/server/rating?part_key=%2Flibrary%2Fparts%2Fsecret_key";
+    let standard_url = "http://provider.example/live/stream.m3u8";
+
+    // 1. When sanitization is enabled:
+    shared::utils::set_sanitize_sensitive_info(true);
+    assert_eq!(resolve_request_url_for_logging(&m3u_input, media_ref).as_ref(), "media-server://<redacted>");
+    assert_eq!(resolve_request_url_for_logging(&m3u_input, standard_url).as_ref(), standard_url);
+
+    // 2. When sanitization is disabled:
+    shared::utils::set_sanitize_sensitive_info(false);
+    assert_eq!(resolve_request_url_for_logging(&m3u_input, media_ref).as_ref(), media_ref);
+    assert_eq!(resolve_request_url_for_logging(&m3u_input, standard_url).as_ref(), standard_url);
 }
 
 #[test]
@@ -4631,6 +4656,7 @@ async fn activate_session_before_stream_open_skips_placeholder_for_follow_up_ses
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
+        recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
         admission_strategies: Some(vec![AdmissionStrategy::EvictUserSameIpOldest]),
     });
     let addr: SocketAddr = "127.0.0.1:55220".parse().unwrap_or_else(|_| unreachable!());
@@ -4694,8 +4720,8 @@ async fn activate_session_before_stream_open_skips_placeholder_for_follow_up_ses
     )
     .await;
 
-    assert_eq!(activation.admission.permission, UserConnectionPermission::Allowed);
-    assert_eq!(activation.admission.kind, Some(crate::api::model::ConnectionKind::Normal));
+    assert_eq!(activation.admission.permission(), UserConnectionPermission::Allowed);
+    assert_eq!(activation.admission.kind(), Some(crate::api::model::ConnectionKind::Normal));
     assert_eq!(activation.grace_mode, None);
     assert!(
         activation.placeholder_transition_version.is_none(),
@@ -4719,6 +4745,7 @@ async fn activate_session_before_stream_open_revalidates_precomputed_follow_up_r
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
+        recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
         admission_strategies: Some(vec![AdmissionStrategy::EvictUserSameIpOldest]),
     });
     let addr: SocketAddr = "127.0.0.1:55221".parse().unwrap_or_else(|_| unreachable!());
@@ -4764,8 +4791,8 @@ async fn activate_session_before_stream_open_revalidates_precomputed_follow_up_r
     )
     .await;
 
-    assert_eq!(activation.admission.permission, UserConnectionPermission::Allowed);
-    assert_eq!(activation.admission.kind, Some(crate::api::model::ConnectionKind::Normal));
+    assert_eq!(activation.admission.permission(), UserConnectionPermission::Allowed);
+    assert_eq!(activation.admission.kind(), Some(crate::api::model::ConnectionKind::Normal));
     assert_eq!(activation.grace_mode, None);
     assert!(
         activation.placeholder_transition_version.is_some(),
@@ -4792,6 +4819,7 @@ async fn activate_session_before_stream_open_stale_follow_up_reclassified_on_cou
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
+        recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
         admission_strategies: Some(vec![AdmissionStrategy::EvictUserSameIpOldest]),
     });
     let addr: SocketAddr = "127.0.0.1:55230".parse().unwrap_or_else(|_| unreachable!());
@@ -4868,6 +4896,7 @@ async fn activate_session_before_stream_open_pre_resolved_grace_period_materiali
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
+        recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
         admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
     });
     let addr: SocketAddr = "127.0.0.1:55231".parse().unwrap_or_else(|_| unreachable!());
@@ -4915,7 +4944,7 @@ async fn activate_session_before_stream_open_pre_resolved_grace_period_materiali
     )
     .await;
 
-    assert_eq!(activation.admission.permission, UserConnectionPermission::GracePeriod);
+    assert_eq!(activation.admission.permission(), UserConnectionPermission::GracePeriod);
     assert_eq!(activation.grace_mode, Some(crate::api::model::GraceMode::Hold));
 
     let session = app_state.active_users.get_and_update_user_session(&user.username, "tok-pre-resolved-grace").await;
@@ -4942,6 +4971,7 @@ async fn activate_session_before_stream_open_skips_placeholder_for_prepare() {
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
+        recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
         admission_strategies: Some(vec![AdmissionStrategy::EvictUserSameIpOldest]),
     });
     let addr: SocketAddr = "127.0.0.1:55222".parse().unwrap_or_else(|_| unreachable!());
@@ -4971,7 +5001,7 @@ async fn activate_session_before_stream_open_skips_placeholder_for_prepare() {
     .await;
 
     // Prepare returns Allowed without running admission strategies.
-    assert_eq!(activation.admission.permission, UserConnectionPermission::Allowed);
+    assert_eq!(activation.admission.permission(), UserConnectionPermission::Allowed);
     assert_eq!(activation.grace_mode, None);
     assert!(
         activation.placeholder_transition_version.is_none(),
@@ -4996,6 +5026,7 @@ async fn resolve_playback_request_admission_prepare_only_returns_prepare_class()
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
+        recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
         admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
     });
     let addr: SocketAddr = "127.0.0.1:55223".parse().unwrap_or_else(|_| unreachable!());
@@ -5019,7 +5050,7 @@ async fn resolve_playback_request_admission_prepare_only_returns_prepare_class()
 
     assert_eq!(request_class, PlaybackRequestClass::Prepare);
     // Prepare returns Allowed without running strategies.
-    assert_eq!(admission.permission, UserConnectionPermission::Allowed);
+    assert_eq!(admission.permission(), UserConnectionPermission::Allowed);
     assert_eq!(grace_mode, None);
 }
 
@@ -5041,6 +5072,7 @@ async fn resolve_playback_request_admission_terminate_returns_terminate_class() 
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
+        recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
         admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
     });
     let addr: SocketAddr = "127.0.0.1:55224".parse().unwrap_or_else(|_| unreachable!());
@@ -5084,7 +5116,7 @@ async fn resolve_playback_request_admission_terminate_returns_terminate_class() 
     .await;
 
     assert_eq!(request_class, PlaybackRequestClass::Terminate);
-    assert_eq!(admission.permission, UserConnectionPermission::Exhausted);
+    assert_eq!(admission.permission(), UserConnectionPermission::Exhausted);
     assert_eq!(grace_mode, None);
 
     // Session should be expired after terminate.
@@ -5119,6 +5151,7 @@ async fn activate_session_before_stream_open_marks_pending_provider_for_grace_ho
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
+        recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
         admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
     };
     let mut app_cfg = create_test_app_config();
@@ -5190,7 +5223,7 @@ async fn activate_session_before_stream_open_marks_pending_provider_for_grace_ho
     )
     .await;
 
-    assert_eq!(activation.admission.permission, UserConnectionPermission::GracePeriod);
+    assert_eq!(activation.admission.permission(), UserConnectionPermission::GracePeriod);
     assert_eq!(activation.grace_mode, Some(crate::api::model::GraceMode::Hold));
 
     let session = app_state
@@ -5226,6 +5259,7 @@ async fn activate_session_before_stream_open_does_not_commit_user_lease_before_p
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
+        recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
         admission_strategies: None,
     };
     let mut app_cfg = create_test_app_config();
@@ -5273,7 +5307,7 @@ async fn activate_session_before_stream_open_does_not_commit_user_lease_before_p
     )
     .await;
 
-    assert_eq!(activation.admission.permission, UserConnectionPermission::Allowed);
+    assert_eq!(activation.admission.permission(), UserConnectionPermission::Allowed);
     assert_eq!(activation.grace_mode, None);
 
     let session = app_state
@@ -5349,6 +5383,7 @@ async fn effective_admission_strategies_use_legacy_grace_when_field_missing() {
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
+        recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
         admission_strategies: None,
     });
 
@@ -5374,6 +5409,7 @@ async fn effective_admission_strategies_respect_explicit_empty_list() {
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
+        recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
         admission_strategies: Some(vec![]),
     });
 
@@ -5398,6 +5434,7 @@ async fn grace_context_is_populated_when_grace_strategy_is_actually_granted() {
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
+        recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
         admission_strategies: Some(vec![
             AdmissionStrategy::EvictUserSameIpOldest,
             AdmissionStrategy::GraceHoldStream,
@@ -5473,7 +5510,7 @@ async fn grace_context_is_populated_when_grace_strategy_is_actually_granted() {
     )
     .await;
 
-    assert_eq!(result.admission.permission, UserConnectionPermission::GracePeriod, "grace should be granted");
+    assert_eq!(result.admission.permission(), UserConnectionPermission::GracePeriod, "grace should be granted");
     assert!(matches!(result.grace_mode, Some(crate::api::model::GraceMode::Hold)));
     let ctx = result.grace_context.expect("grace_context must be present when grace is granted");
     assert_eq!(ctx.strategy_index, 1, "GraceHoldStream is at index 1");
@@ -5503,6 +5540,7 @@ async fn evaluate_remaining_strategies_evicts_after_used_grace() {
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
+        recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
         admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream, AdmissionStrategy::EvictUserOldest]),
     });
 
@@ -5571,7 +5609,11 @@ async fn evaluate_remaining_strategies_evicts_after_used_grace() {
     )
     .await;
 
-    assert_eq!(result.admission.permission, UserConnectionPermission::Allowed, "EvictUserOldest should free the slot");
+    assert_eq!(
+        result.admission.permission(),
+        UserConnectionPermission::Allowed,
+        "EvictUserOldest should free the slot"
+    );
     assert!(result.grace_context.is_none(), "no grace context on eviction success");
 }
 
@@ -5602,6 +5644,7 @@ async fn evaluate_remaining_strategies_skips_no_match_and_uses_later_eviction() 
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
+        recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
         admission_strategies: Some(vec![
             AdmissionStrategy::GraceHoldStream,
             AdmissionStrategy::EvictUserSameIpOldest,
@@ -5675,7 +5718,7 @@ async fn evaluate_remaining_strategies_skips_no_match_and_uses_later_eviction() 
     .await;
 
     assert_eq!(
-        result.admission.permission,
+        result.admission.permission(),
         UserConnectionPermission::Allowed,
         "EvictUserSameIpOldest should NoMatch, EvictUserOldest should succeed"
     );
@@ -5702,6 +5745,7 @@ async fn evaluate_remaining_strategies_empty_slice_denies() {
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
+        recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
         admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
     });
 
@@ -5726,7 +5770,7 @@ async fn evaluate_remaining_strategies_empty_slice_denies() {
     )
     .await;
 
-    assert_eq!(result.admission.permission, UserConnectionPermission::Exhausted, "empty remaining slice should deny");
+    assert_eq!(result.admission.permission(), UserConnectionPermission::Exhausted, "empty remaining slice should deny");
 }
 
 #[tokio::test]
@@ -5755,6 +5799,7 @@ async fn evaluate_remaining_strategies_preserves_soft_kind_on_exhausted() {
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
+        recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
         admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
     });
 
@@ -5779,9 +5824,9 @@ async fn evaluate_remaining_strategies_preserves_soft_kind_on_exhausted() {
     )
     .await;
 
-    assert_eq!(result.admission.permission, UserConnectionPermission::Exhausted, "empty remaining slice should deny");
+    assert_eq!(result.admission.permission(), UserConnectionPermission::Exhausted, "empty remaining slice should deny");
     assert_eq!(
-        result.admission.kind,
+        result.admission.kind(),
         Some(crate::api::model::ConnectionKind::Soft),
         "exhausted result must preserve the original Soft connection kind"
     );
@@ -5815,6 +5860,7 @@ async fn evaluate_remaining_strategies_does_not_retry_used_prefix() {
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
+        recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
         admission_strategies: Some(strategies_for_config),
     });
 
@@ -5884,7 +5930,7 @@ async fn evaluate_remaining_strategies_does_not_retry_used_prefix() {
     .await;
 
     assert_eq!(
-        result.admission.permission,
+        result.admission.permission(),
         UserConnectionPermission::Allowed,
         "only EvictUserOldest should be evaluated, not GraceHoldStream"
     );
@@ -5917,6 +5963,7 @@ async fn evaluate_remaining_strategies_empty_slice_uses_original_kind_not_contex
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
+        recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
         admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
     });
 
@@ -5941,9 +5988,10 @@ async fn evaluate_remaining_strategies_empty_slice_uses_original_kind_not_contex
     )
     .await;
 
-    assert_eq!(result.admission.permission, UserConnectionPermission::Exhausted);
+    assert_eq!(result.admission.permission(), UserConnectionPermission::Exhausted);
     assert_eq!(
-        result.admission.kind, original_kind,
+        result.admission.kind(),
+        original_kind,
         "exhausted result must use original_kind (Soft), not grace_context.kind (Normal)"
     );
 }
@@ -5979,6 +6027,7 @@ async fn evaluate_remaining_strategies_later_grace_uses_original_kind_not_contex
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
+        recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
         admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream, AdmissionStrategy::GraceInstantStream]),
     });
 
@@ -6048,7 +6097,7 @@ async fn evaluate_remaining_strategies_later_grace_uses_original_kind_not_contex
     .await;
 
     assert_eq!(
-        result.admission.permission,
+        result.admission.permission(),
         UserConnectionPermission::GracePeriod,
         "remaining GraceInstantStream should grant GracePeriod"
     );
@@ -6077,6 +6126,7 @@ async fn resolve_admission_with_strategies_falls_through_after_failed_grace_gran
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
+        recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
         admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream, AdmissionStrategy::EvictUserOldest]),
     });
 
@@ -6179,8 +6229,8 @@ async fn resolve_admission_with_strategies_falls_through_after_failed_grace_gran
     let admission = result.admission;
     let grace_mode = result.grace_mode;
 
-    assert_eq!(admission.permission, UserConnectionPermission::Allowed);
-    assert_eq!(admission.kind, Some(crate::api::model::ConnectionKind::Normal));
+    assert_eq!(admission.permission(), UserConnectionPermission::Allowed);
+    assert_eq!(admission.kind(), Some(crate::api::model::ConnectionKind::Normal));
     assert_eq!(grace_mode, None);
 }
 
@@ -6241,7 +6291,7 @@ async fn resolve_admission_with_strategies_allows_existing_session_even_when_use
         },
     )
     .await;
-    assert_eq!(session_based.admission.permission, UserConnectionPermission::Allowed);
+    assert_eq!(session_based.admission.permission(), UserConnectionPermission::Allowed);
 
     let connection_based = resolve_admission_with_strategies(
         &app_state.admission_ctx(),
@@ -6258,7 +6308,7 @@ async fn resolve_admission_with_strategies_allows_existing_session_even_when_use
         },
     )
     .await;
-    assert_eq!(connection_based.admission.permission, UserConnectionPermission::Exhausted);
+    assert_eq!(connection_based.admission.permission(), UserConnectionPermission::Exhausted);
 }
 
 #[tokio::test]
@@ -6277,6 +6327,7 @@ async fn resolve_admission_with_strategies_prevents_recently_evicted_playback_pi
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
+        recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
         admission_strategies: Some(vec![AdmissionStrategy::EvictUserOldest]),
     });
 
@@ -6291,8 +6342,40 @@ async fn resolve_admission_with_strategies_prevents_recently_evicted_playback_pi
     let mut winner_channel = create_test_live_channel("http://provider-1.example/live/9002.ts");
     winner_channel.virtual_id = 9002;
 
+    let mut session_user = ProxyUserCredentials::default();
+    session_user.username = "loop-user".to_string();
+
     app_state.connection_manager.add_connection(&victim_addr).await;
     app_state.connection_manager.add_connection(&winner_addr).await;
+
+    app_state
+        .active_users
+        .create_user_session(crate::api::model::CreateUserSessionParams {
+            user: &session_user,
+            session_token: "session-victim",
+            virtual_id: 9001,
+            provider: "provider-a",
+            stream_url: "http://provider-1.example/live/9001.ts",
+            addr: &victim_addr,
+            connection_permission: shared::model::UserConnectionPermission::Allowed,
+            connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+            socket_bound: false,
+        })
+        .await;
+    app_state
+        .active_users
+        .create_user_session(crate::api::model::CreateUserSessionParams {
+            user: &session_user,
+            session_token: "session-winner",
+            virtual_id: 9002,
+            provider: "provider-a",
+            stream_url: "http://provider-1.example/live/9002.ts",
+            addr: &winner_addr,
+            connection_permission: shared::model::UserConnectionPermission::Allowed,
+            connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+            socket_bound: false,
+        })
+        .await;
 
     app_state
         .connection_manager
@@ -6331,7 +6414,7 @@ async fn resolve_admission_with_strategies_prevents_recently_evicted_playback_pi
 
     app_state
         .active_users
-        .mark_recent_eviction_guard_for_addr(&victim_addr, winner_addr, RECENT_EVICTION_REENTRY_TTL_SECS)
+        .mark_recent_eviction_guard_for_addr(&victim_addr, winner_addr, std::time::Duration::from_secs(3))
         .await;
     app_state.connection_manager.release_connection_as_kicked(&victim_addr).await;
 
@@ -6353,7 +6436,9 @@ async fn resolve_admission_with_strategies_prevents_recently_evicted_playback_pi
     let admission = result.admission;
     let grace_mode = result.grace_mode;
 
-    assert_eq!(admission.permission, UserConnectionPermission::Exhausted);
+    assert_eq!(admission.permission(), UserConnectionPermission::Exhausted);
+    assert_eq!(admission.rejection_reason(), Some(AdmissionRejectionReason::RecentEvictionReentry));
+    assert!(admission.is_reentry_suppressed());
     assert_eq!(grace_mode, None);
     let active_streams = app_state.active_users.active_streams().await;
     assert_eq!(active_streams.len(), 1);
@@ -6364,7 +6449,7 @@ async fn resolve_admission_with_strategies_prevents_recently_evicted_playback_pi
     // not the evicted channel trying to reclaim its slot.
     app_state
         .active_users
-        .mark_recent_eviction_guard_for_addr(&winner_addr, reconnect_addr, RECENT_EVICTION_REENTRY_TTL_SECS)
+        .mark_recent_eviction_guard_for_addr(&winner_addr, reconnect_addr, std::time::Duration::from_secs(3))
         .await;
     app_state.connection_manager.release_connection_as_kicked(&winner_addr).await;
     app_state.connection_manager.add_connection(&reconnect_addr).await;
@@ -6403,7 +6488,7 @@ async fn resolve_admission_with_strategies_prevents_recently_evicted_playback_pi
     )
     .await;
 
-    assert_eq!(retry.admission.permission, UserConnectionPermission::Allowed);
+    assert_eq!(retry.admission.permission(), UserConnectionPermission::Allowed);
     assert!(app_state.active_users.active_streams().await.is_empty());
 }
 
@@ -6424,6 +6509,7 @@ async fn resolve_admission_with_strategies_allows_other_channel_after_recent_evi
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
+        recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
         admission_strategies: Some(vec![AdmissionStrategy::EvictUserOldest]),
     });
 
@@ -6510,7 +6596,7 @@ async fn resolve_admission_with_strategies_allows_other_channel_after_recent_evi
 
     app_state
         .active_users
-        .mark_recent_eviction_guard_for_addr(&victim_addr, winner_addr, RECENT_EVICTION_REENTRY_TTL_SECS)
+        .mark_recent_eviction_guard_for_addr(&victim_addr, winner_addr, std::time::Duration::from_secs(3))
         .await;
     app_state.connection_manager.release_connection_as_kicked(&victim_addr).await;
 
@@ -6531,7 +6617,7 @@ async fn resolve_admission_with_strategies_allows_other_channel_after_recent_evi
     .await;
     let admission = result.admission;
 
-    assert_eq!(admission.permission, UserConnectionPermission::Allowed);
+    assert_eq!(admission.permission(), UserConnectionPermission::Allowed);
     assert!(app_state.active_users.active_streams().await.is_empty());
 }
 
@@ -6552,6 +6638,7 @@ async fn resolve_admission_with_strategies_does_not_suppress_different_session_o
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
+        recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
         admission_strategies: Some(vec![AdmissionStrategy::EvictUserOldest]),
     });
 
@@ -6637,7 +6724,7 @@ async fn resolve_admission_with_strategies_does_not_suppress_different_session_o
 
     app_state
         .active_users
-        .mark_recent_eviction_guard_for_addr(&victim_addr, winner_addr, RECENT_EVICTION_REENTRY_TTL_SECS)
+        .mark_recent_eviction_guard_for_addr(&victim_addr, winner_addr, std::time::Duration::from_secs(3))
         .await;
     app_state.connection_manager.release_connection_as_kicked(&victim_addr).await;
 
@@ -6659,7 +6746,7 @@ async fn resolve_admission_with_strategies_does_not_suppress_different_session_o
     let admission = result.admission;
     let grace_mode = result.grace_mode;
 
-    assert_eq!(admission.permission, UserConnectionPermission::Allowed);
+    assert_eq!(admission.permission(), UserConnectionPermission::Allowed);
     assert_eq!(grace_mode, None);
     assert!(app_state.active_users.active_streams().await.is_empty());
 }
@@ -6680,6 +6767,7 @@ async fn resolve_admission_with_strategies_allows_recently_evicted_playback_when
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
+        recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
         admission_strategies: Some(vec![AdmissionStrategy::EvictUserOldest]),
     });
 
@@ -6734,7 +6822,7 @@ async fn resolve_admission_with_strategies_allows_recently_evicted_playback_when
 
     app_state
         .active_users
-        .mark_recent_eviction_guard_for_addr(&victim_addr, winner_addr, RECENT_EVICTION_REENTRY_TTL_SECS)
+        .mark_recent_eviction_guard_for_addr(&victim_addr, winner_addr, std::time::Duration::from_secs(3))
         .await;
     app_state.connection_manager.release_connection_as_kicked(&victim_addr).await;
 
@@ -6756,8 +6844,8 @@ async fn resolve_admission_with_strategies_allows_recently_evicted_playback_when
     let admission = result.admission;
     let grace_mode = result.grace_mode;
 
-    assert_eq!(admission.permission, UserConnectionPermission::Allowed);
-    assert_eq!(admission.kind, Some(crate::api::model::ConnectionKind::Soft));
+    assert_eq!(admission.permission(), UserConnectionPermission::Allowed);
+    assert_eq!(admission.kind(), Some(crate::api::model::ConnectionKind::Soft));
     assert_eq!(grace_mode, None);
 
     let active_streams = app_state.active_users.active_streams().await;
@@ -6902,7 +6990,7 @@ async fn local_stream_response_rechecks_limits_before_registering_socket_bound_s
                 &second_token
             )
             .await
-            .permission,
+            .permission(),
         UserConnectionPermission::Exhausted,
         "failed second open must not leave a placeholder session that bypasses admission"
     );
@@ -6982,8 +7070,8 @@ async fn stream_response_preserves_soft_kind_for_shared_reuse() {
 
     let admission =
         app_state.active_users.connection_admission(&user.username, user.max_connections, user.soft_connections).await;
-    assert_eq!(admission.permission, UserConnectionPermission::Allowed);
-    assert_eq!(admission.kind, Some(crate::api::model::ConnectionKind::Soft));
+    assert_eq!(admission.permission(), UserConnectionPermission::Allowed);
+    assert_eq!(admission.kind(), Some(crate::api::model::ConnectionKind::Soft));
 
     let soft_addr = "127.0.0.1:55142".parse().unwrap_or_else(|_| unreachable!());
     let soft_fingerprint = create_test_fingerprint(soft_addr);
@@ -6999,8 +7087,8 @@ async fn stream_response_preserves_soft_kind_for_shared_reuse() {
         &input,
         &target,
         &user,
-        admission.permission,
-        admission.kind.unwrap_or(crate::api::model::ConnectionKind::Normal),
+        admission.permission(),
+        admission.kind().unwrap_or(crate::api::model::ConnectionKind::Normal),
         false,
         None,
     )
@@ -7012,7 +7100,7 @@ async fn stream_response_preserves_soft_kind_for_shared_reuse() {
         .active_users
         .connection_admission_for_session(&user.username, user.max_connections, user.soft_connections, "soft-session")
         .await;
-    assert_eq!(session_admission.kind, Some(crate::api::model::ConnectionKind::Soft));
+    assert_eq!(session_admission.kind(), Some(crate::api::model::ConnectionKind::Soft));
 }
 
 #[tokio::test]
@@ -7587,7 +7675,7 @@ async fn local_stream_response_preserves_soft_kind_across_reopens() {
             playback_session_token,
         )
         .await;
-    assert_eq!(session_admission.kind, Some(crate::api::model::ConnectionKind::Soft));
+    assert_eq!(session_admission.kind(), Some(crate::api::model::ConnectionKind::Soft));
 }
 
 #[tokio::test]
@@ -7662,8 +7750,8 @@ async fn activated_session_admission_keeps_hls_placeholders_uncounted_via_api_ut
     )
     .await;
 
-    assert_eq!(first_admission.admission.permission, UserConnectionPermission::Allowed);
-    assert_eq!(second_admission.admission.permission, UserConnectionPermission::Allowed);
+    assert_eq!(first_admission.admission.permission(), UserConnectionPermission::Allowed);
+    assert_eq!(second_admission.admission.permission(), UserConnectionPermission::Allowed);
     assert_eq!(app_state.active_users.user_connections(&user.username).await, 0);
 }
 
@@ -7722,7 +7810,7 @@ async fn socket_bound_playback_sessions_enforce_hard_limits_per_socket() {
         .active_users
         .connection_admission_for_session(&user.username, user.max_connections, user.soft_connections, &second_token)
         .await;
-    assert_eq!(admission.permission, UserConnectionPermission::Exhausted);
+    assert_eq!(admission.permission(), UserConnectionPermission::Exhausted);
 }
 
 #[tokio::test]
@@ -7742,6 +7830,7 @@ async fn resolve_admission_with_strategies_evicts_preserved_hls_session_for_same
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
         cleanup_queue_capacity: 4096,
+        recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
         admission_strategies: Some(vec![
             AdmissionStrategy::EvictUserSameIpOldest,
             AdmissionStrategy::EvictUserSameIpLatest,
@@ -7819,7 +7908,7 @@ async fn resolve_admission_with_strategies_evicts_preserved_hls_session_for_same
     let admission = result.admission;
     let grace_mode = result.grace_mode;
 
-    assert_eq!(admission.permission, UserConnectionPermission::Allowed);
+    assert_eq!(admission.permission(), UserConnectionPermission::Allowed);
     assert_eq!(grace_mode, None);
     assert!(app_state.active_users.active_streams().await.is_empty());
     assert_eq!(
@@ -7895,8 +7984,8 @@ async fn socket_bound_playback_sessions_still_allow_soft_slots() {
         .active_users
         .connection_admission_for_session(&user.username, user.max_connections, user.soft_connections, &second_token)
         .await;
-    assert_eq!(second_admission.permission, UserConnectionPermission::Allowed);
-    assert_eq!(second_admission.kind, Some(crate::api::model::ConnectionKind::Soft));
+    assert_eq!(second_admission.permission(), UserConnectionPermission::Allowed);
+    assert_eq!(second_admission.kind(), Some(crate::api::model::ConnectionKind::Soft));
 
     app_state
         .active_users
@@ -7935,7 +8024,7 @@ async fn socket_bound_playback_sessions_still_allow_soft_slots() {
         .active_users
         .connection_admission_for_session(&user.username, user.max_connections, user.soft_connections, &third_token)
         .await;
-    assert_eq!(third_admission.permission, UserConnectionPermission::Exhausted);
+    assert_eq!(third_admission.permission(), UserConnectionPermission::Exhausted);
 }
 
 #[test]
@@ -8035,6 +8124,7 @@ async fn xtream_hls_then_ts_uses_distinct_tokens_and_evicts_old_hls_session() {
                 shared_burst_buffer_mb: 1,
                 shared_subscriber_idle_timeout_secs: 300,
                 cleanup_queue_capacity: 4096,
+                recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
                 admission_strategies: Some(vec![
                     AdmissionStrategy::EvictUserSameIpOldest,
                     AdmissionStrategy::EvictUserSameIpLatest,
@@ -8122,7 +8212,7 @@ async fn xtream_hls_then_ts_uses_distinct_tokens_and_evicts_old_hls_session() {
             .active_users
             .connection_admission(&user.username, user.max_connections, user.soft_connections)
             .await
-            .permission,
+            .permission(),
         UserConnectionPermission::Exhausted,
         "the preserved HLS playback must still reserve the user's only slot before the TS request is evaluated"
     );
@@ -8145,7 +8235,7 @@ async fn xtream_hls_then_ts_uses_distinct_tokens_and_evicts_old_hls_session() {
     )
     .await;
     assert_eq!(request_class, PlaybackRequestClass::Activate);
-    assert_eq!(ts_admission.permission, UserConnectionPermission::Allowed);
+    assert_eq!(ts_admission.permission(), UserConnectionPermission::Allowed);
     assert_eq!(ts_grace_mode, None);
     assert!(
             app_state
@@ -8172,8 +8262,8 @@ async fn xtream_hls_then_ts_uses_distinct_tokens_and_evicts_old_hls_session() {
             provider: "provider_1",
             stream_url: ts_channel.url.as_ref(),
             addr: &ts_addr,
-            connection_permission: ts_admission.permission,
-            connection_kind: ts_admission.kind,
+            connection_permission: ts_admission.permission(),
+            connection_kind: ts_admission.kind(),
             socket_bound: true,
         })
         .await;
@@ -8884,4 +8974,592 @@ async fn test_provider_open_cancelled_during_header_wait_releases_slot_without_l
     assert_eq!(app_state.active_provider.active_connections().map(|m| m.values().sum::<usize>()).unwrap_or(0), 0);
 
     let _ = server_task.await;
+}
+
+#[tokio::test]
+async fn test_reentry_suppression_response_behavior() {
+    let response = crate::api::api_utils::reentry_suppressed_response();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(!response.headers().contains_key("x-tuliprox-rejection"));
+    assert!(!response.headers().contains_key("content-type"));
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn test_eviction_strategy_falls_back_when_candidate_protected_by_reentry() {
+    let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+        retry: true,
+        metrics_enabled: true,
+        buffer: None,
+        grace_period_millis: 0,
+        grace_period_timeout_secs: 8,
+        grace_period_hold_stream: false,
+        hls_session_ttl_secs: 10,
+        catchup_session_ttl_secs: 10,
+        throttle_str: None,
+        throttle_kbps: 0,
+        shared_burst_buffer_mb: 1,
+        shared_subscriber_idle_timeout_secs: 300,
+        cleanup_queue_capacity: 4096,
+        recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
+        admission_strategies: Some(vec![AdmissionStrategy::EvictUserSameIpOldest, AdmissionStrategy::EvictUserOldest]),
+    });
+
+    let victim_addr: SocketAddr = "127.0.0.1:55301".parse().unwrap_or_else(|_| unreachable!());
+    let winner_addr: SocketAddr = "127.0.0.1:55302".parse().unwrap_or_else(|_| unreachable!());
+    let other_ip_addr: SocketAddr = "10.0.0.1:55303".parse().unwrap_or_else(|_| unreachable!());
+    let retry_addr: SocketAddr = "127.0.0.1:55304".parse().unwrap_or_else(|_| unreachable!());
+
+    let victim_fingerprint = create_test_fingerprint_with_user_agent(victim_addr, "player/1.0");
+    let winner_fingerprint = create_test_fingerprint_with_user_agent(winner_addr, "winner/1.0");
+    let other_ip_fingerprint = create_test_fingerprint_with_user_agent(other_ip_addr, "other/1.0");
+    let retry_fingerprint = create_test_fingerprint_with_user_agent(retry_addr, "player/1.0");
+
+    let mut victim_channel = create_test_live_channel("http://provider-1.example/live/9501.ts");
+    victim_channel.virtual_id = 9501;
+    let winner_channel = create_test_live_channel("http://provider-1.example/live/9502.ts");
+    let other_channel = create_test_live_channel("http://provider-1.example/live/9503.ts");
+
+    let mut session_user = ProxyUserCredentials::default();
+    session_user.username = "fallback-user".to_string();
+
+    app_state.connection_manager.add_connection(&victim_addr).await;
+    app_state.connection_manager.add_connection(&winner_addr).await;
+    app_state.connection_manager.add_connection(&other_ip_addr).await;
+
+    // Create user sessions so streams are linked to counted sessions
+    app_state
+        .active_users
+        .create_user_session(crate::api::model::CreateUserSessionParams {
+            user: &session_user,
+            session_token: "session-victim",
+            virtual_id: 9501,
+            provider: "provider-a",
+            stream_url: "http://provider-1.example/live/9501.ts",
+            addr: &victim_addr,
+            connection_permission: shared::model::UserConnectionPermission::Allowed,
+            connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+            socket_bound: false,
+        })
+        .await;
+    app_state
+        .active_users
+        .create_user_session(crate::api::model::CreateUserSessionParams {
+            user: &session_user,
+            session_token: "session-winner",
+            virtual_id: 9502,
+            provider: "provider-a",
+            stream_url: "http://provider-1.example/live/9502.ts",
+            addr: &winner_addr,
+            connection_permission: shared::model::UserConnectionPermission::Allowed,
+            connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+            socket_bound: false,
+        })
+        .await;
+    app_state
+        .active_users
+        .create_user_session(crate::api::model::CreateUserSessionParams {
+            user: &session_user,
+            session_token: "session-other",
+            virtual_id: 9503,
+            provider: "provider-a",
+            stream_url: "http://provider-1.example/live/9503.ts",
+            addr: &other_ip_addr,
+            connection_permission: shared::model::UserConnectionPermission::Allowed,
+            connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+            socket_bound: false,
+        })
+        .await;
+
+    // Stream 0: victim on same IP (127.0.0.1), channel 9501
+    app_state
+        .connection_manager
+        .update_connection(crate::api::model::ConnectionParams {
+            meter_uid: 99,
+            username: "fallback-user",
+            max_connections: 3,
+            soft_connections: 0,
+            connection_kind: crate::api::model::ConnectionKind::Normal,
+            priority: 0,
+            soft_priority: 0,
+            fingerprint: &victim_fingerprint,
+            provider: "provider-a".intern(),
+            stream_channel: &victim_channel,
+            user_agent: std::borrow::Cow::Borrowed("player/1.0"),
+            session_token: Some("session-victim"),
+        })
+        .await;
+
+    // Stream 1: winner on same IP (127.0.0.1), channel 9502
+    app_state
+        .connection_manager
+        .update_connection(crate::api::model::ConnectionParams {
+            meter_uid: 1,
+            username: "fallback-user",
+            max_connections: 2,
+            soft_connections: 0,
+            connection_kind: crate::api::model::ConnectionKind::Normal,
+            priority: 0,
+            soft_priority: 0,
+            fingerprint: &winner_fingerprint,
+            provider: "provider-a".intern(),
+            stream_channel: &winner_channel,
+            user_agent: std::borrow::Cow::Borrowed("winner/1.0"),
+            session_token: Some("session-winner"),
+        })
+        .await;
+
+    // Stream 2: stream on different IP (10.0.0.1), channel 9503
+    app_state
+        .connection_manager
+        .update_connection(crate::api::model::ConnectionParams {
+            meter_uid: 2,
+            username: "fallback-user",
+            max_connections: 2,
+            soft_connections: 0,
+            connection_kind: crate::api::model::ConnectionKind::Normal,
+            priority: 0,
+            soft_priority: 0,
+            fingerprint: &other_ip_fingerprint,
+            provider: "provider-a".intern(),
+            stream_channel: &other_channel,
+            user_agent: std::borrow::Cow::Borrowed("other/1.0"),
+            session_token: Some("session-other"),
+        })
+        .await;
+
+    // Mark winner_addr as protected against reentry of victim_addr (channel 9501)
+    app_state
+        .active_users
+        .mark_recent_eviction_guard_for_addr(&victim_addr, winner_addr, std::time::Duration::from_secs(3))
+        .await;
+    app_state.connection_manager.release_connection_as_kicked(&victim_addr).await;
+
+    // Retry for channel 9501 arrives from same IP (127.0.0.1).
+    // EvictUserSameIpOldest will target winner_addr (same IP), but winner_addr is protected!
+    // It should be suppressed, filtered out, and Fall B will continue to EvictUserOldest.
+    // EvictUserOldest will then target other_ip_addr (which is NOT protected).
+    let result = resolve_admission_with_strategies(
+        &app_state.admission_ctx(),
+        AdmissionRequest {
+            username: "fallback-user",
+            max_connections: 2,
+            soft_connections: 0,
+            client_ip: &retry_fingerprint.client_ip,
+            request_addr: &retry_fingerprint.addr,
+            use_session_admission: true,
+            session_token: Some("session-retry"),
+            activate_unbound_session: false,
+            eviction_reentry_guard: EvictionReentryGuard::SocketPlayback { virtual_id: VirtualId::new(9501) },
+        },
+    )
+    .await;
+
+    // Request must be Admitted because the fallback strategy evicted the unprotected stream!
+    assert_eq!(result.admission.permission(), UserConnectionPermission::Allowed);
+    assert_eq!(result.admission.rejection_reason(), None);
+
+    // Now test rejection when NO other candidate exists (only the protected stream).
+    // EvictUserSameIpOldest suppresses winner_addr; EvictUserOldest finds no candidates left.
+    let result_exhausted = resolve_admission_with_strategies(
+        &app_state.admission_ctx(),
+        AdmissionRequest {
+            username: "fallback-user",
+            max_connections: 1,
+            soft_connections: 0,
+            client_ip: &retry_fingerprint.client_ip,
+            request_addr: &retry_fingerprint.addr,
+            use_session_admission: true,
+            session_token: Some("session-retry-2"),
+            activate_unbound_session: false,
+            eviction_reentry_guard: EvictionReentryGuard::SocketPlayback { virtual_id: VirtualId::new(9501) },
+        },
+    )
+    .await;
+
+    assert_eq!(result_exhausted.admission.permission(), UserConnectionPermission::Exhausted);
+    assert_eq!(result_exhausted.admission.rejection_reason(), Some(AdmissionRejectionReason::RecentEvictionReentry));
+    assert!(result_exhausted.admission.is_reentry_suppressed());
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn test_mixed_suppressed_and_legitimate_eviction_reports_exhaustion() {
+    // A protected candidate is skipped, then a legitimate (but uncounted) candidate is
+    // evicted and admission still fails. That residual failure is real exhaustion and
+    // must not be mislabelled as `RecentEvictionReentry`.
+    let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+        retry: true,
+        metrics_enabled: true,
+        buffer: None,
+        grace_period_millis: 0,
+        grace_period_timeout_secs: 8,
+        grace_period_hold_stream: false,
+        hls_session_ttl_secs: 10,
+        catchup_session_ttl_secs: 10,
+        throttle_str: None,
+        throttle_kbps: 0,
+        shared_burst_buffer_mb: 1,
+        shared_subscriber_idle_timeout_secs: 300,
+        cleanup_queue_capacity: 4096,
+        recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
+        admission_strategies: Some(vec![AdmissionStrategy::EvictUserSameIpOldest, AdmissionStrategy::EvictUserOldest]),
+    });
+
+    let victim_addr: SocketAddr = "127.0.0.1:55321".parse().unwrap_or_else(|_| unreachable!());
+    let protected_addr: SocketAddr = "127.0.0.1:55322".parse().unwrap_or_else(|_| unreachable!());
+    let orphan_addr: SocketAddr = "10.0.0.1:55323".parse().unwrap_or_else(|_| unreachable!());
+    let request_addr: SocketAddr = "127.0.0.1:55324".parse().unwrap_or_else(|_| unreachable!());
+
+    let victim_fingerprint = create_test_fingerprint_with_user_agent(victim_addr, "player/1.0");
+    let protected_fingerprint = create_test_fingerprint_with_user_agent(protected_addr, "protected/1.0");
+    let orphan_fingerprint = create_test_fingerprint_with_user_agent(orphan_addr, "orphan/1.0");
+    let request_fingerprint = create_test_fingerprint_with_user_agent(request_addr, "player/1.0");
+
+    let mut victim_channel = create_test_live_channel("http://provider-1.example/live/9701.ts");
+    victim_channel.virtual_id = 9701;
+    let mut protected_channel = create_test_live_channel("http://provider-1.example/live/9702.ts");
+    protected_channel.virtual_id = 9702;
+    let mut orphan_channel = create_test_live_channel("http://provider-1.example/live/9703.ts");
+    orphan_channel.virtual_id = 9703;
+
+    let mut session_user = ProxyUserCredentials::default();
+    session_user.username = "mixed-user".to_string();
+
+    app_state.connection_manager.add_connection(&victim_addr).await;
+    app_state.connection_manager.add_connection(&protected_addr).await;
+    app_state.connection_manager.add_connection(&orphan_addr).await;
+
+    // The guard source: a counted stream on the requested channel (9701). It supplies the
+    // socket reentry key and is released before the retry is resolved.
+    app_state
+        .active_users
+        .create_user_session(crate::api::model::CreateUserSessionParams {
+            user: &session_user,
+            session_token: "session-victim",
+            virtual_id: 9701,
+            provider: "provider-a",
+            stream_url: "http://provider-1.example/live/9701.ts",
+            addr: &victim_addr,
+            connection_permission: shared::model::UserConnectionPermission::Allowed,
+            connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+            socket_bound: false,
+        })
+        .await;
+    app_state
+        .connection_manager
+        .update_connection(crate::api::model::ConnectionParams {
+            meter_uid: 91,
+            username: "mixed-user",
+            max_connections: 1,
+            soft_connections: 0,
+            connection_kind: crate::api::model::ConnectionKind::Normal,
+            priority: 0,
+            soft_priority: 0,
+            fingerprint: &victim_fingerprint,
+            provider: "provider-a".intern(),
+            stream_channel: &victim_channel,
+            user_agent: std::borrow::Cow::Borrowed("player/1.0"),
+            session_token: Some("session-victim"),
+        })
+        .await;
+
+    // The protected candidate: counted, same IP as the retry, different channel.
+    app_state
+        .active_users
+        .create_user_session(crate::api::model::CreateUserSessionParams {
+            user: &session_user,
+            session_token: "session-protected",
+            virtual_id: 9702,
+            provider: "provider-a",
+            stream_url: "http://provider-1.example/live/9702.ts",
+            addr: &protected_addr,
+            connection_permission: shared::model::UserConnectionPermission::Allowed,
+            connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+            socket_bound: false,
+        })
+        .await;
+    app_state
+        .connection_manager
+        .update_connection(crate::api::model::ConnectionParams {
+            meter_uid: 92,
+            username: "mixed-user",
+            max_connections: 1,
+            soft_connections: 0,
+            connection_kind: crate::api::model::ConnectionKind::Normal,
+            priority: 0,
+            soft_priority: 0,
+            fingerprint: &protected_fingerprint,
+            provider: "provider-a".intern(),
+            stream_channel: &protected_channel,
+            user_agent: std::borrow::Cow::Borrowed("protected/1.0"),
+            session_token: Some("session-protected"),
+        })
+        .await;
+
+    // The legitimate fallback candidate: an orphan stream (no session), so evicting it
+    // frees no counted connection and admission stays exhausted.
+    app_state
+        .connection_manager
+        .update_connection(crate::api::model::ConnectionParams {
+            meter_uid: 93,
+            username: "mixed-user",
+            max_connections: 1,
+            soft_connections: 0,
+            connection_kind: crate::api::model::ConnectionKind::Normal,
+            priority: 0,
+            soft_priority: 0,
+            fingerprint: &orphan_fingerprint,
+            provider: "provider-a".intern(),
+            stream_channel: &orphan_channel,
+            user_agent: std::borrow::Cow::Borrowed("orphan/1.0"),
+            session_token: None,
+        })
+        .await;
+
+    app_state
+        .active_users
+        .mark_recent_eviction_guard_for_addr(&victim_addr, protected_addr, std::time::Duration::from_secs(3))
+        .await;
+    app_state.connection_manager.release_connection_as_kicked(&victim_addr).await;
+
+    let result = resolve_admission_with_strategies(
+        &app_state.admission_ctx(),
+        AdmissionRequest {
+            username: "mixed-user",
+            max_connections: 1,
+            soft_connections: 0,
+            client_ip: &request_fingerprint.client_ip,
+            request_addr: &request_fingerprint.addr,
+            use_session_admission: true,
+            session_token: Some("session-retry"),
+            activate_unbound_session: false,
+            eviction_reentry_guard: EvictionReentryGuard::SocketPlayback { virtual_id: VirtualId::new(9701) },
+        },
+    )
+    .await;
+
+    assert_eq!(result.admission.permission(), UserConnectionPermission::Exhausted);
+    assert_eq!(result.admission.rejection_reason(), Some(AdmissionRejectionReason::UserConnectionsExhausted));
+    assert!(!result.admission.is_reentry_suppressed());
+}
+
+fn connection_denied_count(app_state: &Arc<AppState>) -> u64 {
+    app_state
+        .active_users
+        .events()
+        .stats()
+        .emitted()
+        .into_iter()
+        .find_map(|(kind, count)| (kind == shared::model::EventKind::ConnectionDenied).then_some(count))
+        .unwrap_or(0)
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn test_reentry_suppression_does_not_emit_connection_denied() {
+    let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+        retry: true,
+        metrics_enabled: true,
+        buffer: None,
+        grace_period_millis: 0,
+        grace_period_timeout_secs: 8,
+        grace_period_hold_stream: false,
+        hls_session_ttl_secs: 10,
+        catchup_session_ttl_secs: 10,
+        throttle_str: None,
+        throttle_kbps: 0,
+        shared_burst_buffer_mb: 1,
+        shared_subscriber_idle_timeout_secs: 300,
+        cleanup_queue_capacity: 4096,
+        recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
+        admission_strategies: Some(vec![AdmissionStrategy::EvictUserSameIpOldest, AdmissionStrategy::EvictUserOldest]),
+    });
+
+    let victim_addr: SocketAddr = "127.0.0.1:55331".parse().unwrap_or_else(|_| unreachable!());
+    let protected_addr: SocketAddr = "127.0.0.1:55332".parse().unwrap_or_else(|_| unreachable!());
+    let request_addr: SocketAddr = "127.0.0.1:55333".parse().unwrap_or_else(|_| unreachable!());
+    let victim_fingerprint = create_test_fingerprint_with_user_agent(victim_addr, "player/1.0");
+    let protected_fingerprint = create_test_fingerprint_with_user_agent(protected_addr, "protected/1.0");
+    let request_fingerprint = create_test_fingerprint_with_user_agent(request_addr, "player/1.0");
+
+    let mut victim_channel = create_test_live_channel("http://provider-1.example/live/9711.ts");
+    victim_channel.virtual_id = 9711;
+    let mut protected_channel = create_test_live_channel("http://provider-1.example/live/9712.ts");
+    protected_channel.virtual_id = 9712;
+
+    let mut user = ProxyUserCredentials::default();
+    user.username = "event-reentry-user".to_string();
+    user.max_connections = 1;
+    user.soft_connections = 0;
+
+    app_state.connection_manager.add_connection(&victim_addr).await;
+    app_state.connection_manager.add_connection(&protected_addr).await;
+
+    for (token, virtual_id, url, addr, fingerprint, channel, meter_uid) in [
+        (
+            "session-victim",
+            9711,
+            "http://provider-1.example/live/9711.ts",
+            &victim_addr,
+            &victim_fingerprint,
+            &victim_channel,
+            201_u32,
+        ),
+        (
+            "session-protected",
+            9712,
+            "http://provider-1.example/live/9712.ts",
+            &protected_addr,
+            &protected_fingerprint,
+            &protected_channel,
+            202_u32,
+        ),
+    ] {
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &user,
+                session_token: token,
+                virtual_id,
+                provider: "provider-a",
+                stream_url: url,
+                addr,
+                connection_permission: shared::model::UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+        app_state
+            .connection_manager
+            .update_connection(crate::api::model::ConnectionParams {
+                meter_uid,
+                username: "event-reentry-user",
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint,
+                provider: "provider-a".intern(),
+                stream_channel: channel,
+                user_agent: std::borrow::Cow::Borrowed("player/1.0"),
+                session_token: Some(token),
+            })
+            .await;
+    }
+
+    app_state
+        .active_users
+        .mark_recent_eviction_guard_for_addr(&victim_addr, protected_addr, std::time::Duration::from_secs(3))
+        .await;
+    app_state.connection_manager.release_connection_as_kicked(&victim_addr).await;
+
+    let (admission, _, _) = crate::api::api_utils::resolve_playback_request_admission(
+        &app_state.admission_ctx(),
+        &user,
+        &request_fingerprint,
+        None,
+        "session-event",
+        false,
+        EvictionReentryGuard::SocketPlayback { virtual_id: VirtualId::new(9711) },
+        false,
+        false,
+    )
+    .await;
+
+    assert_eq!(admission.permission(), UserConnectionPermission::Exhausted);
+    assert!(admission.is_reentry_suppressed());
+    assert_eq!(connection_denied_count(&app_state), 0, "a suppressed reentry must not emit ConnectionDenied");
+    assert_eq!(
+        app_state.active_users.reentry_suppressed_total(),
+        1,
+        "a suppressed reentry must be counted once as a diagnostic"
+    );
+}
+
+#[tokio::test]
+async fn test_real_exhaustion_emits_connection_denied() {
+    // Negative control: a genuine connection-limit denial must still emit the event.
+    let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+        retry: true,
+        metrics_enabled: true,
+        buffer: None,
+        grace_period_millis: 0,
+        grace_period_timeout_secs: 8,
+        grace_period_hold_stream: false,
+        hls_session_ttl_secs: 10,
+        catchup_session_ttl_secs: 10,
+        throttle_str: None,
+        throttle_kbps: 0,
+        shared_burst_buffer_mb: 1,
+        shared_subscriber_idle_timeout_secs: 300,
+        cleanup_queue_capacity: 4096,
+        recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
+        admission_strategies: Some(vec![]),
+    });
+
+    let addr: SocketAddr = "127.0.0.1:55341".parse().unwrap_or_else(|_| unreachable!());
+    let fingerprint = create_test_fingerprint_with_user_agent(addr, "player/1.0");
+    let mut user = ProxyUserCredentials::default();
+    user.username = "event-limit-user".to_string();
+    user.max_connections = 1;
+    user.soft_connections = 0;
+
+    app_state.connection_manager.add_connection(&addr).await;
+    app_state
+        .active_users
+        .create_user_session(crate::api::model::CreateUserSessionParams {
+            user: &user,
+            session_token: "session-limit",
+            virtual_id: 9721,
+            provider: "provider-a",
+            stream_url: "http://provider-1.example/live/9721.ts",
+            addr: &addr,
+            connection_permission: shared::model::UserConnectionPermission::Allowed,
+            connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+            socket_bound: false,
+        })
+        .await;
+    // A stream row is what makes the session count towards `max_connections`.
+    let channel = create_test_live_channel("http://provider-1.example/live/9721.ts");
+    app_state
+        .connection_manager
+        .update_connection(crate::api::model::ConnectionParams {
+            meter_uid: 211,
+            username: "event-limit-user",
+            max_connections: 1,
+            soft_connections: 0,
+            connection_kind: crate::api::model::ConnectionKind::Normal,
+            priority: 0,
+            soft_priority: 0,
+            fingerprint: &fingerprint,
+            provider: "provider-a".intern(),
+            stream_channel: &channel,
+            user_agent: std::borrow::Cow::Borrowed("player/1.0"),
+            session_token: Some("session-limit"),
+        })
+        .await;
+
+    let (admission, _, _) = crate::api::api_utils::resolve_playback_request_admission(
+        &app_state.admission_ctx(),
+        &user,
+        &fingerprint,
+        None,
+        "session-new",
+        false,
+        EvictionReentryGuard::Session("session-new"),
+        false,
+        false,
+    )
+    .await;
+
+    assert_eq!(admission.permission(), UserConnectionPermission::Exhausted);
+    assert_eq!(admission.rejection_reason(), Some(AdmissionRejectionReason::UserConnectionsExhausted));
+    assert_eq!(connection_denied_count(&app_state), 1, "a real limit denial must emit ConnectionDenied");
+    assert_eq!(
+        app_state.active_users.reentry_suppressed_total(),
+        0,
+        "a real limit denial must not be counted as reentry suppression"
+    );
 }

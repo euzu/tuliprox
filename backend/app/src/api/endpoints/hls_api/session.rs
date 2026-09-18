@@ -1022,6 +1022,22 @@ pub(super) async fn prepare_hls_origin_policy_preempt_runtime(
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
 
+    let is_valid_victim = {
+        let victim = candidate.session.read().await;
+        let has_no_active_origin_work =
+            victim.activity.active_origin_work_count.load(std::sync::atomic::Ordering::Acquire) == 0;
+        victim.origin_account_binding.as_ref().is_some_and(|b| {
+            b.account_name == candidate.account_name
+                && b.session_owner == candidate.session_owner
+                && matches!(b.binding_mode, HlsOriginAccountBindingMode::Active)
+                && has_no_active_origin_work
+        })
+    };
+    if !is_valid_victim {
+        debug!("HLS origin policy preemption denied: reason=stale-candidate");
+        return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
+    }
+
     app_state.active_provider.clear_identified_provider_reservation(
         &candidate.session_owner,
         &candidate.account_name,

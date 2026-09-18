@@ -153,9 +153,53 @@ struct UserConnectionCounts {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionRejectionReason {
+    UserConnectionsExhausted,
+    RecentEvictionReentry,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConnectionAdmission {
-    pub permission: UserConnectionPermission,
-    pub kind: Option<ConnectionKind>,
+    permission: UserConnectionPermission,
+    kind: Option<ConnectionKind>,
+    rejection_reason: Option<AdmissionRejectionReason>,
+}
+
+impl ConnectionAdmission {
+    pub fn allowed(kind: Option<ConnectionKind>) -> Self {
+        Self { permission: UserConnectionPermission::Allowed, kind, rejection_reason: None }
+    }
+
+    pub fn grace_period(kind: Option<ConnectionKind>) -> Self {
+        Self { permission: UserConnectionPermission::GracePeriod, kind, rejection_reason: None }
+    }
+
+    pub fn exhausted(reason: AdmissionRejectionReason, kind: Option<ConnectionKind>) -> Self {
+        Self { permission: UserConnectionPermission::Exhausted, kind, rejection_reason: Some(reason) }
+    }
+
+    /// Maps a stored session permission onto an admission. An exhausted session is
+    /// classified as a genuine connection-limit rejection so the
+    /// `Exhausted ⇒ rejection_reason.is_some()` invariant always holds.
+    pub fn from_permission(permission: UserConnectionPermission, kind: Option<ConnectionKind>) -> Self {
+        match permission {
+            UserConnectionPermission::Allowed => Self::allowed(kind),
+            UserConnectionPermission::GracePeriod => Self::grace_period(kind),
+            UserConnectionPermission::Exhausted => {
+                Self::exhausted(AdmissionRejectionReason::UserConnectionsExhausted, kind)
+            }
+        }
+    }
+
+    pub fn permission(&self) -> UserConnectionPermission { self.permission }
+
+    pub fn kind(&self) -> Option<ConnectionKind> { self.kind }
+
+    pub fn rejection_reason(&self) -> Option<AdmissionRejectionReason> { self.rejection_reason }
+
+    pub fn is_reentry_suppressed(&self) -> bool {
+        self.rejection_reason == Some(AdmissionRejectionReason::RecentEvictionReentry)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -475,7 +519,7 @@ fn uses_session_reentry_guard(stream: &StreamInfo) -> bool {
 #[derive(Clone, Copy, Debug)]
 struct RecentWinnerProtection {
     protected_addr: SocketAddr,
-    expires_at: u64,
+    expires_at: Instant,
 }
 
 #[derive(Debug, Default)]
@@ -644,6 +688,7 @@ pub struct ActiveUserManager {
     provider_manager: tokio::sync::OnceCell<Arc<ActiveProviderManager>>,
     transition_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub dropped_cleanup_events: AtomicU64,
+    reentry_suppressed_total: AtomicU64,
     divergence_cache: Mutex<LruCache<String, DivergenceEntry>>,
     divergence_cooldown_secs: u64,
 }
@@ -744,10 +789,18 @@ impl ActiveUserManager {
             provider_manager: tokio::sync::OnceCell::new(),
             transition_gates: Mutex::new(HashMap::new()),
             dropped_cleanup_events: AtomicU64::new(0),
+            reentry_suppressed_total: AtomicU64::new(0),
             divergence_cache: Mutex::new(LruCache::new(DIVERGENCE_CACHE_CAPACITY)),
             divergence_cooldown_secs: 300,
         }
     }
+
+    /// Cumulative count of admission requests quietly suppressed by the recent-eviction
+    /// reentry guard. A diagnostic counter, not a failure metric.
+    pub fn reentry_suppressed_total(&self) -> u64 { self.reentry_suppressed_total.load(Ordering::Relaxed) }
+
+    /// Records one suppressed reentry retry.
+    pub fn record_reentry_suppressed(&self) { self.reentry_suppressed_total.fetch_add(1, Ordering::Relaxed); }
 
     fn transition_gate_key(username: &str, token: &str) -> String {
         let mut key = String::with_capacity(username.len() + token.len() + 1);
@@ -1333,7 +1386,7 @@ impl ActiveUserManager {
                 connection_data.granted_grace = false;
                 connection_data.grace_ts = 0;
             }
-            return ConnectionAdmission { permission: UserConnectionPermission::Allowed, kind: Some(kind) };
+            return ConnectionAdmission::allowed(Some(kind));
         }
 
         let now = get_current_timestamp();
@@ -1344,7 +1397,7 @@ impl ActiveUserManager {
             {
                 // Grace timeout, still active, deny connection
                 debug!("User access denied, grace exhausted, too many connections: {username}");
-                return ConnectionAdmission { permission: UserConnectionPermission::Exhausted, kind: None };
+                return ConnectionAdmission::exhausted(AdmissionRejectionReason::UserConnectionsExhausted, None);
             }
             // Grace timeout expired, reset grace counters
             if effective_connections < connection_data.max_connections {
@@ -1354,7 +1407,7 @@ impl ActiveUserManager {
         }
 
         debug!("User access denied, too many connections: {username}");
-        ConnectionAdmission { permission: UserConnectionPermission::Exhausted, kind: None }
+        ConnectionAdmission::exhausted(AdmissionRejectionReason::UserConnectionsExhausted, None)
     }
 
     fn check_connection_admission(
@@ -1382,7 +1435,7 @@ impl ActiveUserManager {
                 return self.check_connection_admission(username, connection_data);
             }
         }
-        ConnectionAdmission { permission: UserConnectionPermission::Allowed, kind: Some(ConnectionKind::Normal) }
+        ConnectionAdmission::allowed(Some(ConnectionKind::Normal))
     }
 
     pub async fn connection_permission(
@@ -1402,18 +1455,12 @@ impl ActiveUserManager {
         session_token: &str,
     ) -> ConnectionAdmission {
         if max_connections == 0 && soft_connections == 0 {
-            return ConnectionAdmission {
-                permission: UserConnectionPermission::Allowed,
-                kind: Some(ConnectionKind::Normal),
-            };
+            return ConnectionAdmission::allowed(Some(ConnectionKind::Normal));
         }
 
         let mut connections = self.connections.write().await;
         let Some(connection_data) = connections.by_key.get_mut(username) else {
-            return ConnectionAdmission {
-                permission: UserConnectionPermission::Allowed,
-                kind: Some(ConnectionKind::Normal),
-            };
+            return ConnectionAdmission::allowed(Some(ConnectionKind::Normal));
         };
         connection_data.max_connections = max_connections;
         connection_data.soft_connections = soft_connections;
@@ -1424,10 +1471,9 @@ impl ActiveUserManager {
         };
 
         if connection_data.sessions[session_index].lifecycle.is_counted() {
-            return ConnectionAdmission {
-                permission: UserConnectionPermission::Allowed,
-                kind: connection_data.sessions[session_index].connection_kind.or(Some(ConnectionKind::Normal)),
-            };
+            return ConnectionAdmission::allowed(
+                connection_data.sessions[session_index].connection_kind.or(Some(ConnectionKind::Normal)),
+            );
         }
 
         self.check_connection_admission_with_counts(
@@ -1446,7 +1492,7 @@ impl ActiveUserManager {
     ) -> UserConnectionPermission {
         self.connection_admission_for_session(username, max_connections, soft_connections, session_token)
             .await
-            .permission
+            .permission()
     }
 
     pub async fn refresh_session_connection_kind_for_origin_policy(
@@ -1479,15 +1525,15 @@ impl ActiveUserManager {
                     connection_data,
                     connection_data.effective_counts_for_admission(Some(session_token)),
                 );
-                if admission.permission == UserConnectionPermission::Allowed {
-                    if let Some(kind) = admission.kind {
+                if admission.permission() == UserConnectionPermission::Allowed {
+                    if let Some(kind) = admission.kind() {
                         Self::update_session_admission(
                             &mut connection_data.sessions[session_index],
-                            admission.permission,
+                            admission.permission(),
                             Some(kind),
                         );
                     }
-                    admission.kind
+                    admission.kind()
                 } else {
                     None
                 }
@@ -2075,18 +2121,12 @@ impl ActiveUserManager {
         session_token: &str,
     ) -> ConnectionAdmission {
         if max_connections == 0 && soft_connections == 0 {
-            return ConnectionAdmission {
-                permission: UserConnectionPermission::Allowed,
-                kind: Some(ConnectionKind::Normal),
-            };
+            return ConnectionAdmission::allowed(Some(ConnectionKind::Normal));
         }
 
         let mut connections = self.connections.write().await;
         let Some(connection_data) = connections.by_key.get_mut(username) else {
-            return ConnectionAdmission {
-                permission: UserConnectionPermission::Allowed,
-                kind: Some(ConnectionKind::Normal),
-            };
+            return ConnectionAdmission::allowed(Some(ConnectionKind::Normal));
         };
         connection_data.max_connections = max_connections;
         connection_data.soft_connections = soft_connections;
@@ -2103,10 +2143,9 @@ impl ActiveUserManager {
         if connection_data.sessions[session_index].lifecycle.is_counted()
             || Self::session_has_stream(connection_data, session_token)
         {
-            return ConnectionAdmission {
-                permission: UserConnectionPermission::Allowed,
-                kind: connection_data.sessions[session_index].connection_kind.or(Some(ConnectionKind::Normal)),
-            };
+            return ConnectionAdmission::allowed(
+                connection_data.sessions[session_index].connection_kind.or(Some(ConnectionKind::Normal)),
+            );
         }
 
         // Uncounted session with no stream row: run normal admission.
@@ -2117,9 +2156,9 @@ impl ActiveUserManager {
             connection_data,
             connection_data.effective_counts_for_admission(Some(session_token)),
         );
-        if admission.permission == UserConnectionPermission::Allowed {
+        if admission.permission() == UserConnectionPermission::Allowed {
             let session = &mut connection_data.sessions[session_index];
-            Self::update_session_admission(session, admission.permission, admission.kind);
+            Self::update_session_admission(session, admission.permission(), admission.kind());
         }
         admission
     }
@@ -3032,11 +3071,19 @@ impl ActiveUserManager {
 
     /// Allocates the next process-local, globally unique User-Agent stream index.
     pub fn next_user_agent_stream_index(&self) -> u64 {
-        self.next_user_agent_stream_index
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(if current == 0 || current == u64::MAX { 1 } else { current + 1 })
-            })
-            .map_or(1, |val| if val == 0 { 1 } else { val })
+        let mut current = self.next_user_agent_stream_index.load(Ordering::Relaxed);
+        loop {
+            let next = if current == 0 || current == u64::MAX { 1 } else { current + 1 };
+            match self.next_user_agent_stream_index.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(previous) => return if previous == 0 { 1 } else { previous },
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     /// Persists a previously allocated index without replacing an existing session identity.
@@ -3080,9 +3127,9 @@ impl ActiveUserManager {
             && !matches!(connection_data.sessions[session_index].lifecycle, PlaybackLifecycle::PendingProvider { .. })
         {
             let admission = self.check_connection_admission(username, connection_data);
-            connection_data.sessions[session_index].permission = admission.permission;
-            if admission.kind.is_some() {
-                connection_data.sessions[session_index].connection_kind = admission.kind;
+            connection_data.sessions[session_index].permission = admission.permission();
+            if admission.kind().is_some() {
+                connection_data.sessions[session_index].connection_kind = admission.kind();
             }
         }
 
@@ -3167,9 +3214,8 @@ impl ActiveUserManager {
 
     pub async fn recently_evicted_session_protected_addr(&self, session_token: &str) -> Option<SocketAddr> {
         let connections = self.connections.read().await;
-        let now = current_time_secs();
         let protection = connections.recently_evicted_sessions.get(session_token)?;
-        if protection.expires_at > now {
+        if protection.expires_at > Instant::now() {
             return Some(protection.protected_addr);
         }
 
@@ -3190,18 +3236,13 @@ impl ActiveUserManager {
         virtual_id: VirtualId,
     ) -> Option<SocketAddr> {
         let connections = self.connections.read().await;
-        let now = current_time_secs();
         let key = create_socket_reentry_guard_key(username, client_ip, virtual_id);
         let protection = connections.recent_socket_reentry_guards.get(&key)?;
-        if protection.expires_at > now {
-            return Some(protection.protected_addr);
+        if protection.expires_at > Instant::now() {
+            Some(protection.protected_addr)
+        } else {
+            None
         }
-
-        connections
-            .key_by_addr
-            .get(&protection.protected_addr)
-            .filter(|registration| registration.usernames.contains(username))
-            .map(|_| protection.protected_addr)
     }
 
     pub async fn block_user_for_stream(&self, addr: &SocketAddr, virtual_id: VirtualId, blocked_secs: u64) {
@@ -3250,14 +3291,14 @@ impl ActiveUserManager {
         &self,
         addr: &SocketAddr,
         protected_addr: SocketAddr,
-        ttl_secs: u64,
+        ttl: Duration,
     ) {
-        if ttl_secs == 0 {
+        if ttl.is_zero() {
             return;
         }
 
         let mut connections = self.connections.write().await;
-        let now = current_time_secs();
+        let now = Instant::now();
         connections.recently_evicted_sessions.retain(|_, protection| protection.expires_at > now);
         connections.recent_socket_reentry_guards.retain(|_, protection| protection.expires_at > now);
 
@@ -3266,7 +3307,7 @@ impl ActiveUserManager {
             return;
         }
 
-        let protection = RecentWinnerProtection { protected_addr, expires_at: now + ttl_secs };
+        let protection = RecentWinnerProtection { protected_addr, expires_at: now + ttl };
         let mut session_tokens = Vec::new();
         let mut socket_guard_keys = Vec::new();
 
@@ -3611,8 +3652,13 @@ impl ActiveUserManager {
             {
                 if let Ok(mut user_connections) = self.connections.try_write() {
                     user_connections.kicked.retain(|_, (expires_at, _)| *expires_at > now);
-                    user_connections.recently_evicted_sessions.retain(|_, protection| protection.expires_at > now);
-                    user_connections.recent_socket_reentry_guards.retain(|_, protection| protection.expires_at > now);
+                    let now_instant = Instant::now();
+                    user_connections
+                        .recently_evicted_sessions
+                        .retain(|_, protection| protection.expires_at > now_instant);
+                    user_connections
+                        .recent_socket_reentry_guards
+                        .retain(|_, protection| protection.expires_at > now_instant);
                     for connection_data in user_connections.by_key.values_mut() {
                         Self::release_expired_session_reservations(connection_data, now);
                         connection_data.sessions.retain(|s| now.saturating_sub(s.ts) < USER_CON_TTL);

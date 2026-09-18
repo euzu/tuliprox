@@ -728,7 +728,7 @@ pub(super) async fn try_reserve_hls_virtual_entry_origin_account_for_redirect(
         false,
     )
     .await;
-    if connection_admission.permission == UserConnectionPermission::Exhausted {
+    if connection_admission.permission() == UserConnectionPermission::Exhausted {
         return false;
     }
 
@@ -743,7 +743,7 @@ pub(super) async fn try_reserve_hls_virtual_entry_origin_account_for_redirect(
     let Some(hls_cache_origin) = build_hls_origin_resolution(input, &origin_playlist_url) else {
         return false;
     };
-    let Some(connection_kind) = connection_admission.kind else {
+    let Some(connection_kind) = connection_admission.kind() else {
         return false;
     };
     let (shared_hls_session_owner, reservation_ttl_secs) = if hls_cache_enabled_for_target(app_state, target) {
@@ -770,7 +770,7 @@ pub(super) async fn try_reserve_hls_virtual_entry_origin_account_for_redirect(
         session_owner,
         PlaybackKind::LiveHls,
         reservation_ttl_secs,
-        connection_admission.permission,
+        connection_admission.permission(),
         connection_kind,
         false,
     )

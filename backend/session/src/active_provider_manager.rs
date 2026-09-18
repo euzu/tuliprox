@@ -259,6 +259,12 @@ pub struct ActiveProviderManagerCore {
 }
 
 impl ActiveProviderManagerCore {
+    /// Serialises capacity transitions (acquire/release/reclassify) so a reclassify
+    /// cannot race an acquire or release.
+    ///
+    /// Lock-order invariant: this lock must be acquired **before** the connections
+    /// lock (`read_connections`/`write_connections`). No path may hold the
+    /// connections lock and then call this; doing so can deadlock.
     fn lock_capacity_transition(&self) -> std::sync::MutexGuard<'_, ()> {
         match self.capacity_transition.lock() {
             Ok(guard) => guard,
@@ -2344,6 +2350,7 @@ impl ActiveProviderManager {
         kind: ConnectionKind,
         priority: i8,
     ) -> bool {
+        let _transition = self.lock_capacity_transition();
         let mut connections = self.write_connections();
 
         let Some(alloc_ids) = connections.single_by_addr.get(addr).cloned() else {
@@ -2386,6 +2393,7 @@ impl ActiveProviderManager {
         kind: ConnectionKind,
         priority: i8,
     ) -> bool {
+        let _transition = self.lock_capacity_transition();
         let mut connections = self.write_connections();
         let shared_key = connections.shared.key_by_subscriber.get(&subscriber_id).cloned();
         let Some(shared_key) = shared_key else {

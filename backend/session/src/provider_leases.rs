@@ -235,6 +235,10 @@ impl ProviderLeaseTable {
                     lease.created_at = now;
                     lease.state =
                         ProviderLeaseState::Starting { expires_at: Self::startup_expiry(now, lease.idle_ttl_secs) };
+                } else if !lease.state.is_confirmed() {
+                    lease.state = ProviderLeaseState::Starting {
+                        expires_at: Self::startup_expiry(lease.created_at, lease.idle_ttl_secs),
+                    };
                 }
                 // The kind is authoritative from the first acquire of this playback and
                 // is never overwritten, so a compatibility renewal cannot downgrade a
@@ -242,11 +246,6 @@ impl ProviderLeaseTable {
                 lease.request_id = request_id;
                 lease.request_ids.insert(request_id);
                 lease.last_activity_at = now;
-                if !lease.state.is_confirmed() && !lease.state.is_idle() {
-                    lease.state = ProviderLeaseState::Starting {
-                        expires_at: Self::startup_expiry(lease.created_at, lease.idle_ttl_secs),
-                    };
-                }
                 self.expirations.insert((lease.state.expires_at(), id));
                 return id;
             }
@@ -486,7 +485,7 @@ impl ProviderLeaseTable {
     ) -> Option<ProviderSlotLease> {
         let id = self.by_owner.get(owner).copied()?;
         let now = TokioInstant::now();
-        let (keep_idle, remove) = {
+        let keep_idle = {
             let lease = self.leases.get_mut(&id)?;
             if !lease.request_ids.remove(&request_id) {
                 return None;
@@ -511,15 +510,13 @@ impl ProviderLeaseTable {
                 lease.state = ProviderLeaseState::Idle { expires_at: now + Duration::from_secs(ttl) };
                 self.expirations.insert((lease.state.expires_at(), id));
             }
-            (keep, !keep)
+            keep
         };
         if keep_idle {
-            return None;
+            None
+        } else {
+            self.remove_lease(id)
         }
-        if remove {
-            return self.remove_lease(id);
-        }
-        None
     }
 
     /// Releases one request claim. A stale generation cannot clear its successor.
@@ -556,6 +553,8 @@ impl ProviderLeaseTable {
         if lease.request_id == request_id {
             if let Some(next) = lease.request_ids.iter().next().copied() {
                 lease.request_id = next;
+            } else {
+                lease.request_id = PlaybackRequestId::default();
             }
         }
         true

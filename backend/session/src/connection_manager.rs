@@ -44,6 +44,7 @@ const CONTROL_CLEANUP_CAPACITY: usize = 64;
 pub const PROVIDER_END_NOT_SET: u8 = 0;
 pub const PROVIDER_END_CLOSED: u8 = 1; // Provider EOF
 pub const PROVIDER_END_ERROR: u8 = 2; // Provider Err
+pub const PROVIDER_END_PREEMPTED: u8 = 3; // Preempted by higher priority
 const PREEMPT_REENTRY_BLOCK_SECS: u64 = 3;
 // Bounded wait for a mandatory cleanup admission right before a request registration.
 const CLEANUP_ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1621,6 +1622,7 @@ fn resolve_disconnect_reason(provider_end_reason: u8, stream_info: &StreamInfo) 
     match provider_end_reason {
         PROVIDER_END_CLOSED => DisconnectReason::ProviderClosed,
         PROVIDER_END_ERROR => DisconnectReason::ProviderError,
+        PROVIDER_END_PREEMPTED => DisconnectReason::Preempted,
         _ => DisconnectReason::ClientClosed,
     }
 }
@@ -1631,6 +1633,7 @@ fn resolve_disconnect_reason_from_provider_end(provider_end_reason: u8) -> Disco
     match provider_end_reason {
         PROVIDER_END_CLOSED => DisconnectReason::ProviderClosed,
         PROVIDER_END_ERROR => DisconnectReason::ProviderError,
+        PROVIDER_END_PREEMPTED => DisconnectReason::Preempted,
         _ => DisconnectReason::ClientClosed,
     }
 }
@@ -2160,6 +2163,17 @@ mod tests {
         let info = make_stream_info("tuliprox", "low_priority_preempted");
         let reason = resolve_disconnect_reason(PROVIDER_END_NOT_SET, &info);
         assert_eq!(reason, DisconnectReason::Preempted);
+    }
+
+    #[test]
+    fn test_provider_preempted_atomic_maps_to_preempted() {
+        let info = make_stream_info("some_provider", "Some Channel");
+        let reason = resolve_disconnect_reason(PROVIDER_END_PREEMPTED, &info);
+        assert_eq!(reason, DisconnectReason::Preempted);
+
+        let reason_direct = resolve_disconnect_reason_from_provider_end(PROVIDER_END_PREEMPTED);
+        assert_eq!(reason_direct, DisconnectReason::Preempted);
+        assert_eq!(playback_outcome_for_reason(reason_direct), PlaybackRequestOutcome::Preempted);
     }
 
     #[test]

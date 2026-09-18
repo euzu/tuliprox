@@ -2066,7 +2066,7 @@ async fn recently_evicted_session_guard_survives_ttl_while_protected_addr_is_sti
         })
         .await;
 
-    manager.mark_recent_eviction_guard_for_addr(&evicted_addr, protected_addr, 1).await;
+    manager.mark_recent_eviction_guard_for_addr(&evicted_addr, protected_addr, Duration::from_secs(1)).await;
     {
         let mut connections = manager.connections.write().await;
         if let Some(registration) = connections.key_by_addr.get_mut(&protected_addr) {
@@ -2076,7 +2076,7 @@ async fn recently_evicted_session_guard_survives_ttl_while_protected_addr_is_sti
             .recently_evicted_sessions
             .get_mut("tok-guard-session")
             .expect("recent eviction guard should exist");
-        protection.expires_at = current_time_secs().saturating_sub(1);
+        protection.expires_at = Instant::now().checked_sub(Duration::from_secs(1)).unwrap_or_else(Instant::now);
     }
 
     assert_eq!(manager.recently_evicted_session_protected_addr("tok-guard-session").await, Some(protected_addr));
@@ -2133,7 +2133,7 @@ async fn recently_evicted_vod_uses_session_reentry_guard() {
         })
         .await;
 
-    manager.mark_recent_eviction_guard_for_addr(&evicted_addr, protected_addr, 10).await;
+    manager.mark_recent_eviction_guard_for_addr(&evicted_addr, protected_addr, Duration::from_secs(10)).await;
 
     assert_eq!(manager.recently_evicted_session_protected_addr("tok-guard-vod").await, Some(protected_addr));
     let connections = manager.connections.read().await;
@@ -2177,7 +2177,7 @@ async fn provider_affine_stream_without_session_token_uses_socket_reentry_fallba
         })
         .await;
 
-    manager.mark_recent_eviction_guard_for_addr(&evicted_addr, protected_addr, 10).await;
+    manager.mark_recent_eviction_guard_for_addr(&evicted_addr, protected_addr, Duration::from_secs(10)).await;
 
     assert_eq!(
         manager
@@ -2189,6 +2189,56 @@ async fn provider_affine_stream_without_session_token_uses_socket_reentry_fallba
             .await,
         Some(protected_addr)
     );
+}
+
+#[tokio::test]
+async fn socket_reentry_guard_expires_at_ttl() {
+    let config = Config::default();
+    let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+    let event_manager = Arc::new(EventManager::new());
+    let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+    let evicted_addr: SocketAddr = "127.0.0.1:55117".parse().unwrap();
+    let protected_addr: SocketAddr = "127.0.0.1:55118".parse().unwrap();
+    let fingerprint = Fingerprint::new("fp-socket-ttl".to_string(), "127.0.0.1".to_string(), evicted_addr);
+    let channel = test_channel(2021);
+
+    manager.add_connection(&evicted_addr).await;
+    manager
+        .update_connection(ActiveUserConnectionParams {
+            uid: 21,
+            meter_uid: 0,
+            username: "socket-ttl-user",
+            max_connections: 1,
+            soft_connections: 0,
+            connection_kind: ConnectionKind::Normal,
+            priority: 0,
+            soft_priority: 0,
+            fingerprint: &fingerprint,
+            provider: "provider-a".intern(),
+            stream_channel: &channel,
+            user_agent: Cow::Borrowed("ua"),
+            session_token: None,
+        })
+        .await;
+
+    manager.mark_recent_eviction_guard_for_addr(&evicted_addr, protected_addr, Duration::from_secs(10)).await;
+    let virtual_id = shared::model::VirtualId::new(channel.virtual_id);
+    assert_eq!(
+        manager.recent_socket_reentry_protected_addr("socket-ttl-user", "127.0.0.1", virtual_id).await,
+        Some(protected_addr)
+    );
+
+    // Expire only the guard while the protected address stays registered: the TTL is
+    // authoritative and must not fall back to the still-present socket registration.
+    {
+        let mut connections = manager.connections.write().await;
+        let key = create_socket_reentry_guard_key("socket-ttl-user", "127.0.0.1", virtual_id);
+        let protection =
+            connections.recent_socket_reentry_guards.get_mut(&key).expect("socket reentry guard should exist");
+        protection.expires_at = Instant::now().checked_sub(Duration::from_secs(1)).unwrap_or_else(Instant::now);
+    }
+    assert_eq!(manager.recent_socket_reentry_protected_addr("socket-ttl-user", "127.0.0.1", virtual_id).await, None);
 }
 
 #[tokio::test]
@@ -4510,9 +4560,9 @@ async fn session_activation_keeps_first_hls_slot_uncommitted_before_stream_regis
         .connection_admission_for_session_activation(&user.username, user.max_connections, 0, "tok-second")
         .await;
 
-    assert_eq!(first_admission.permission, UserConnectionPermission::Allowed);
-    assert_eq!(first_admission.kind, Some(ConnectionKind::Normal));
-    assert_eq!(second_admission.permission, UserConnectionPermission::Allowed);
+    assert_eq!(first_admission.permission(), UserConnectionPermission::Allowed);
+    assert_eq!(first_admission.kind(), Some(ConnectionKind::Normal));
+    assert_eq!(second_admission.permission(), UserConnectionPermission::Allowed);
 
     let connections = manager.connections.read().await;
     let connection_data = connections.by_key.get(&user.username).expect("user connection data");
@@ -4587,8 +4637,8 @@ async fn binding_reserved_sessions_keeps_hard_and_soft_counts_stable() {
             "tok-normal",
         )
         .await;
-    assert_eq!(first_admission.permission, UserConnectionPermission::Allowed);
-    assert_eq!(first_admission.kind, Some(ConnectionKind::Normal));
+    assert_eq!(first_admission.permission(), UserConnectionPermission::Allowed);
+    assert_eq!(first_admission.kind(), Some(ConnectionKind::Normal));
 
     manager
         .update_connection(ActiveUserConnectionParams {
@@ -4617,8 +4667,8 @@ async fn binding_reserved_sessions_keeps_hard_and_soft_counts_stable() {
             "tok-soft",
         )
         .await;
-    assert_eq!(second_admission.permission, UserConnectionPermission::Allowed);
-    assert_eq!(second_admission.kind, Some(ConnectionKind::Soft));
+    assert_eq!(second_admission.permission(), UserConnectionPermission::Allowed);
+    assert_eq!(second_admission.kind(), Some(ConnectionKind::Soft));
 
     manager
         .update_connection(ActiveUserConnectionParams {
@@ -4712,8 +4762,8 @@ async fn origin_policy_refresh_promotes_counted_soft_session_when_hard_slot_is_a
             "tok-normal",
         )
         .await;
-    assert_eq!(normal_admission.permission, UserConnectionPermission::Allowed);
-    assert_eq!(normal_admission.kind, Some(ConnectionKind::Normal));
+    assert_eq!(normal_admission.permission(), UserConnectionPermission::Allowed);
+    assert_eq!(normal_admission.kind(), Some(ConnectionKind::Normal));
     manager
         .update_connection(ActiveUserConnectionParams {
             uid: 411,
@@ -4741,8 +4791,8 @@ async fn origin_policy_refresh_promotes_counted_soft_session_when_hard_slot_is_a
             "tok-soft",
         )
         .await;
-    assert_eq!(soft_admission.permission, UserConnectionPermission::Allowed);
-    assert_eq!(soft_admission.kind, Some(ConnectionKind::Soft));
+    assert_eq!(soft_admission.permission(), UserConnectionPermission::Allowed);
+    assert_eq!(soft_admission.kind(), Some(ConnectionKind::Soft));
     manager
         .update_connection(ActiveUserConnectionParams {
             uid: 412,
@@ -4916,7 +4966,7 @@ async fn release_unbound_session_reservation_frees_reserved_slot() {
     let admission = manager
         .connection_admission_for_session_activation(&user.username, user.max_connections, 0, "tok-release")
         .await;
-    assert_eq!(admission.permission, UserConnectionPermission::Allowed);
+    assert_eq!(admission.permission(), UserConnectionPermission::Allowed);
 
     manager.release_unbound_session_reservation(&user.username, "tok-release", None, false).await;
 
@@ -4949,7 +4999,7 @@ async fn preserved_reactivation_admission_does_not_create_ownerless_counted_slot
 
     let virtual_admission =
         manager.connection_admission(&user.username, user.max_connections, user.soft_connections).await;
-    assert_eq!(virtual_admission.permission, UserConnectionPermission::Exhausted);
+    assert_eq!(virtual_admission.permission(), UserConnectionPermission::Exhausted);
 
     let admission = manager
         .connection_admission_for_session_activation(
@@ -4960,8 +5010,8 @@ async fn preserved_reactivation_admission_does_not_create_ownerless_counted_slot
         )
         .await;
 
-    assert_eq!(admission.permission, UserConnectionPermission::Allowed);
-    assert_eq!(admission.kind, Some(ConnectionKind::Normal));
+    assert_eq!(admission.permission(), UserConnectionPermission::Allowed);
+    assert_eq!(admission.kind(), Some(ConnectionKind::Normal));
     let connections = manager.connections.read().await;
     let connection_data = connections.by_key.get(&user.username).expect("user connection data");
     assert_preserved_session_is_uncounted(connection_data, session_token, stream_uid);
@@ -4990,7 +5040,7 @@ async fn preserved_reactivation_admission_then_kicked_release_removes_state_with
             session_token,
         )
         .await;
-    assert_eq!(admission.permission, UserConnectionPermission::Allowed);
+    assert_eq!(admission.permission(), UserConnectionPermission::Allowed);
     {
         let connections = manager.connections.read().await;
         let connection_data = connections.by_key.get(&user.username).expect("user connection data");
@@ -5038,7 +5088,7 @@ async fn preserved_reactivation_admission_then_lease_idle_cleanup_leaves_counter
             session_token,
         )
         .await;
-    assert_eq!(admission.permission, UserConnectionPermission::Allowed);
+    assert_eq!(admission.permission(), UserConnectionPermission::Allowed);
     {
         let connections = manager.connections.read().await;
         let connection_data = connections.by_key.get(&user.username).expect("user connection data");
@@ -5087,7 +5137,7 @@ async fn repeated_preserved_reactivation_cleanup_does_not_accumulate_connections
                 session_token,
             )
             .await;
-        assert_eq!(admission.permission, UserConnectionPermission::Allowed);
+        assert_eq!(admission.permission(), UserConnectionPermission::Allowed);
 
         let counter_changed =
             manager.release_session_streams_and_counted_reservation(&user.username, session_token).await;
@@ -5125,7 +5175,7 @@ async fn dashboard_counts_only_real_slots_during_preserved_reactivation_admissio
             session_token,
         )
         .await;
-    assert_eq!(admission.permission, UserConnectionPermission::Allowed);
+    assert_eq!(admission.permission(), UserConnectionPermission::Allowed);
     assert_eq!(manager.active_users_and_connections().await, (0, 0));
 
     let connections = manager.connections.read().await;
@@ -5199,8 +5249,8 @@ async fn preserved_soft_reactivation_and_cleanup_leave_normal_slot_unchanged() {
             session_token,
         )
         .await;
-    assert_eq!(admission.permission, UserConnectionPermission::Allowed);
-    assert_eq!(admission.kind, Some(ConnectionKind::Soft));
+    assert_eq!(admission.permission(), UserConnectionPermission::Allowed);
+    assert_eq!(admission.kind(), Some(ConnectionKind::Soft));
 
     {
         let connections = manager.connections.read().await;
@@ -5515,7 +5565,7 @@ async fn connection_admission_treats_preserved_stream_as_reserved_capacity() {
 
     let admission = manager.connection_admission(username, user.max_connections, 0).await;
     assert_eq!(
-        admission.permission,
+        admission.permission(),
         UserConnectionPermission::Exhausted,
         "a preserved stream should still reserve capacity against unrelated playback admissions"
     );
@@ -5593,7 +5643,7 @@ async fn connection_admission_for_session_evaluates_admission_for_uncounted_sess
     // freeing a slot for the uncounted session to reactivate
     let admission = manager.connection_admission_for_session(username, 1, 0, "tok-uncounted").await;
     assert_eq!(
-        admission.permission,
+        admission.permission(),
         UserConnectionPermission::Exhausted,
         "uncounted session should not bypass admission when user is at limit; \
              bug: session exists -> Allowed -> strategy evaluation skipped"
@@ -5961,7 +6011,7 @@ async fn arm_eviction_protection_protects_all_users_on_addr() {
         .await
         .expect("register user_b");
 
-    manager.mark_recent_eviction_guard_for_addr(&addr, protected_addr, 60).await;
+    manager.mark_recent_eviction_guard_for_addr(&addr, protected_addr, Duration::from_secs(60)).await;
 
     let connections = manager.connections.read().await;
     let key_a = create_socket_reentry_guard_key("user_a", "192.168.1.100", shared::model::VirtualId::new(2001));

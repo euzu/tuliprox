@@ -1,10 +1,11 @@
 use crate::{
     defaults::{
         default_as_true, default_catchup_session_ttl_secs, default_cleanup_queue_capacity, default_grace_period_millis,
-        default_grace_period_timeout_secs, default_hls_session_ttl_secs, default_shared_burst_buffer_mb,
-        default_shared_subscriber_idle_timeout_secs, default_stream_buffer_max_bytes_mb,
-        is_default_catchup_session_ttl_secs, is_default_cleanup_queue_capacity, is_default_grace_period_millis,
-        is_default_grace_period_timeout_secs, is_default_hls_session_ttl_secs, is_default_shared_burst_buffer_mb,
+        default_grace_period_timeout_secs, default_hls_session_ttl_secs, default_recent_eviction_reentry_ttl_ms,
+        default_shared_burst_buffer_mb, default_shared_subscriber_idle_timeout_secs,
+        default_stream_buffer_max_bytes_mb, is_default_catchup_session_ttl_secs, is_default_cleanup_queue_capacity,
+        is_default_grace_period_millis, is_default_grace_period_timeout_secs, is_default_hls_session_ttl_secs,
+        is_default_recent_eviction_reentry_ttl_ms, is_default_shared_burst_buffer_mb,
         is_default_shared_subscriber_idle_timeout_secs, is_default_stream_buffer_max_bytes_mb, is_false, is_true,
     },
     error::TuliproxError,
@@ -117,6 +118,11 @@ pub struct StreamConfigDto {
     /// growing memory without limit.
     #[serde(default = "default_cleanup_queue_capacity", skip_serializing_if = "is_default_cleanup_queue_capacity")]
     pub cleanup_queue_capacity: usize,
+    #[serde(
+        default = "default_recent_eviction_reentry_ttl_ms",
+        skip_serializing_if = "is_default_recent_eviction_reentry_ttl_ms"
+    )]
+    pub recent_eviction_reentry_ttl_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admission_strategies: Option<Vec<AdmissionStrategy>>,
 }
@@ -134,6 +140,7 @@ impl Default for StreamConfigDto {
             shared_burst_buffer_mb: default_shared_burst_buffer_mb(),
             shared_subscriber_idle_timeout_secs: default_shared_subscriber_idle_timeout_secs(),
             cleanup_queue_capacity: default_cleanup_queue_capacity(),
+            recent_eviction_reentry_ttl_ms: default_recent_eviction_reentry_ttl_ms(),
             grace_period_hold_stream: true,
             hls_session_ttl_secs: default_hls_session_ttl_secs(),
             catchup_session_ttl_secs: default_catchup_session_ttl_secs(),
@@ -154,6 +161,7 @@ impl StreamConfigDto {
             && self.shared_burst_buffer_mb == default_shared_burst_buffer_mb()
             && self.shared_subscriber_idle_timeout_secs == default_shared_subscriber_idle_timeout_secs()
             && self.cleanup_queue_capacity == default_cleanup_queue_capacity()
+            && self.recent_eviction_reentry_ttl_ms == default_recent_eviction_reentry_ttl_ms()
             && self.grace_period_hold_stream
             && self.hls_session_ttl_secs == default_hls_session_ttl_secs()
             && self.catchup_session_ttl_secs == default_catchup_session_ttl_secs()

@@ -84,11 +84,11 @@ use tuliprox_hls::api::MAX_HLS_MANIFEST_BYTES;
 use url::Url;
 
 pub(crate) fn resolve_request_url_for_logging<'a>(input: &ConfigInput, stream_url: &'a str) -> Cow<'a, str> {
+    if !is_sanitize_sensitive_info_enabled() {
+        return Cow::Borrowed(stream_url);
+    }
     if is_media_server_playback_url(input, stream_url) {
         return Cow::Borrowed("media-server://<redacted>");
-    }
-    if is_sanitize_sensitive_info_enabled() {
-        return Cow::Borrowed(stream_url);
     }
 
     let provider = input.get_resolve_provider(stream_url);
@@ -196,6 +196,9 @@ fn stream_admission_rejected_response(error: StreamAdmissionError, username: &st
         .body(axum::body::Body::empty())
         .unwrap_or_else(|_| StatusCode::SERVICE_UNAVAILABLE.into_response())
 }
+
+/// Produces a quiet termination response when a recently evicted stream retries.
+pub fn reentry_suppressed_response() -> axum::response::Response { StatusCode::NO_CONTENT.into_response() }
 
 #[macro_export]
 macro_rules! try_option_bad_request {
@@ -517,7 +520,7 @@ async fn activate_session_before_stream_open(
     // Classify based on current session state, not the pre-computed value.
     // If caller passes FollowUp, verify the session is still counted under the guard.
     // A stale FollowUp would bypass admission — reclassify to catch this.
-    let effective_request_class = if let Some(request_class) = request_class {
+    let (effective_request_class, loaded_session) = if let Some(request_class) = request_class {
         if matches!(request_class, PlaybackRequestClass::FollowUp | PlaybackRequestClass::Activate) {
             // Re-read session under the guard to ensure the counted lease is still held or acquired.
             // If it is no longer counted, classify it from the current lifecycle so
@@ -525,21 +528,23 @@ async fn activate_session_before_stream_open(
             // If it became counted, classify it so stale Activate requests don't double count.
             let current_session =
                 app_state.active_users.get_and_update_user_session(&user.username, session_token).await;
-            classify_playback_request(PlaybackRequestFacts {
+            let classified = classify_playback_request(PlaybackRequestFacts {
                 existing_session: current_session.as_ref(),
                 prepare_only: false,
                 terminate: false,
-            })
+            });
+            (classified, Some(current_session))
         } else {
-            request_class
+            (request_class, None)
         }
     } else {
         let existing_session = app_state.active_users.get_and_update_user_session(&user.username, session_token).await;
-        classify_playback_request(PlaybackRequestFacts {
+        let classified = classify_playback_request(PlaybackRequestFacts {
             existing_session: existing_session.as_ref(),
             prepare_only: false,
             terminate: false,
-        })
+        });
+        (classified, Some(existing_session))
     };
     let limits_enabled = app_state.app_config.config.load().user_access_control
         && (user.max_connections > 0 || user.soft_connections > 0);
@@ -553,7 +558,10 @@ async fn activate_session_before_stream_open(
     if connection_permission == UserConnectionPermission::GracePeriod {
         // Materialize grace lifecycle under the guard so the session state is consistent.
         // Determine which grace mode applies by checking the current session state.
-        let current_session = app_state.active_users.get_and_update_user_session(&user.username, session_token).await;
+        let current_session = match loaded_session {
+            Some(session) => session,
+            None => app_state.active_users.get_and_update_user_session(&user.username, session_token).await,
+        };
         let (_, resolved_grace) = match current_session.as_ref().map(|s| &s.lifecycle) {
             Some(crate::api::model::PlaybackLifecycle::PendingProvider { .. }) => {
                 // Session already in PendingProvider — refresh deadline.
@@ -623,10 +631,10 @@ async fn activate_session_before_stream_open(
             }
         };
         return PlaybackActivationResult {
-            admission: crate::api::model::ConnectionAdmission {
-                permission: connection_permission,
-                kind: Some(connection_kind),
-            },
+            admission: crate::api::model::ConnectionAdmission::from_permission(
+                connection_permission,
+                Some(connection_kind),
+            ),
             grace_mode: resolved_grace,
             grace_context: None,
             placeholder_transition_version: None,
@@ -638,10 +646,10 @@ async fn activate_session_before_stream_open(
         || effective_request_class == PlaybackRequestClass::Prepare
     {
         return PlaybackActivationResult {
-            admission: crate::api::model::ConnectionAdmission {
-                permission: connection_permission,
-                kind: Some(connection_kind),
-            },
+            admission: crate::api::model::ConnectionAdmission::from_permission(
+                connection_permission,
+                Some(connection_kind),
+            ),
             grace_mode: None,
             grace_context: None,
             placeholder_transition_version: None,
@@ -688,7 +696,7 @@ async fn activate_session_before_stream_open(
     let grace_mode = result.grace_mode;
     let grace_context = result.grace_context;
 
-    if admission.permission == UserConnectionPermission::GracePeriod {
+    if admission.permission() == UserConnectionPermission::GracePeriod {
         if matches!(grace_mode, Some(crate::api::model::GraceMode::Hold)) {
             // Hold: session waits for provider slot. Does not count until provider is acquired.
             let deadline = current_time_secs().saturating_add(app_state.get_grace_options().timeout_secs);
@@ -2304,8 +2312,8 @@ pub(crate) async fn stream_response(
     )
     .await;
     let grace_mode = activation.grace_mode.or(grace_mode);
-    connection_permission = activation.admission.permission;
-    connection_kind = activation.admission.kind.unwrap_or(connection_kind);
+    connection_permission = activation.admission.permission();
+    connection_kind = activation.admission.kind().unwrap_or(connection_kind);
 
     let allow_shared_reuse =
         connection_permission != UserConnectionPermission::Exhausted || allow_exhausted_shared_reconnect;
@@ -2325,6 +2333,7 @@ pub(crate) async fn stream_response(
                 stream_channel.clone(),
                 session_token,
                 req_headers,
+                activation.placeholder_transition_version,
             )
             .await
             {
@@ -2346,6 +2355,7 @@ pub(crate) async fn stream_response(
                 stream_channel.clone(),
                 session_token,
                 req_headers,
+                activation.placeholder_transition_version,
             )
             .await
             {
@@ -2366,6 +2376,9 @@ pub(crate) async fn stream_response(
                 activation.placeholder_transition_version.is_some(),
             )
             .await;
+        if activation.admission.is_reentry_suppressed() {
+            return reentry_suppressed_response();
+        }
         record_connect_failed_attempt(ConnectFailedAttempt {
             app_state,
             fingerprint,
@@ -3074,7 +3087,7 @@ pub(crate) fn should_pin_provider_for_session(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn try_shared_stream_response_if_any(
     app_state: &Arc<AppState>,
     stream_url: &str,
@@ -3085,6 +3098,7 @@ async fn try_shared_stream_response_if_any(
     mut stream_channel: StreamChannel,
     session_token: &str,
     req_headers: &HeaderMap,
+    placeholder_transition_version: Option<u64>,
 ) -> Option<impl IntoResponse> {
     let subscriber_id =
         tuliprox_core::model::SharedSubscriberId::from_stream_uid(app_state.connection_manager.next_stream_uid());
@@ -3105,7 +3119,18 @@ async fn try_shared_stream_response_if_any(
     let (stream, provider, cleanup_capability) = match shared_subscription {
         Ok(Some(subscription)) => subscription,
         Ok(None) => return None,
-        Err(reason) => return Some(stream_admission_rejected_response(reason.into(), &user.username)),
+        Err(reason) => {
+            app_state
+                .active_users
+                .release_unbound_session_reservation(
+                    &user.username,
+                    session_token,
+                    placeholder_transition_version,
+                    placeholder_transition_version.is_some(),
+                )
+                .await;
+            return Some(stream_admission_rejected_response(reason.into(), &user.username));
+        }
     };
     debug_if_enabled!("Using shared stream {}", sanitize_sensitive_info(stream_url));
     if let Some(headers) = app_state.shared_stream_manager.get_shared_state_headers(stream_url).await {
@@ -3120,22 +3145,25 @@ async fn try_shared_stream_response_if_any(
         stream_details.provider_name = provider;
         let socket_bound =
             is_socket_bound_playback_session(stream_channel.item_type, extract_extension_from_url(stream_url));
-        if let Some(provider_name) = stream_details.provider_name.as_deref() {
-            let _ = app_state
-                .active_users
-                .create_user_session(crate::api::model::CreateUserSessionParams {
-                    user,
-                    session_token,
-                    virtual_id: stream_channel.virtual_id,
-                    provider: provider_name,
-                    stream_url,
-                    addr: &fingerprint.addr,
-                    connection_permission: connect_permission,
-                    connection_kind: Some(connection_kind),
-                    socket_bound,
-                })
-                .await;
-        }
+        // A shared origin may have no provider allocation (e.g. a local/unknown owner), in
+        // which case `provider` is `None`. The subscriber must still be tracked as a user
+        // session, so fall back to a stable placeholder name rather than skipping session
+        // creation; `is_over_limit` on an unknown provider is a no-op.
+        let provider_name = stream_details.provider_name.as_deref().unwrap_or("shared");
+        let _ = app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user,
+                session_token,
+                virtual_id: stream_channel.virtual_id,
+                provider: provider_name,
+                stream_url,
+                addr: &fingerprint.addr,
+                connection_permission: connect_permission,
+                connection_kind: Some(connection_kind),
+                socket_bound,
+            })
+            .await;
         stream_channel.shared = true;
         stream_channel.shared_joined_existing = Some(true);
         // Joining an existing origin reuses its meter identity. When metrics are disabled
@@ -3377,8 +3405,8 @@ pub(crate) async fn local_stream_response(
         )
         .await;
         grace_mode = activation.grace_mode;
-        connection_permission = activation.admission.permission;
-        connection_kind = activation.admission.kind.unwrap_or(connection_kind);
+        connection_permission = activation.admission.permission();
+        connection_kind = activation.admission.kind().unwrap_or(connection_kind);
 
         if connection_permission == UserConnectionPermission::Exhausted {
             app_state
@@ -3390,6 +3418,9 @@ pub(crate) async fn local_stream_response(
                     activation.placeholder_transition_version.is_some(),
                 )
                 .await;
+            if activation.admission.is_reentry_suppressed() {
+                return reentry_suppressed_response();
+            }
             return create_custom_video_stream_response(
                 &app_state.provider_stream_ctx(),
                 &fingerprint.addr,

@@ -99,6 +99,9 @@ fn render_config(
                 }
             }
         }
+        if let Some(ttl_ms) = policy.recent_eviction_reentry_ttl_ms {
+            let _ = writeln!(config, "    recent_eviction_reentry_ttl_ms: {ttl_ms}");
+        }
     }
     let _ = writeln!(
         config,
@@ -458,6 +461,7 @@ mod tests {
                 crate::config::UserPolicy { max_connections: 1, soft_connections: 0 },
             )]),
             admission_strategies: Some(vec![crate::oracle::AdmissionStrategy::EvictUserSameIpLatest]),
+            recent_eviction_reentry_ttl_ms: None,
             grace: None,
             provider_max_connections: None,
             expected_provider_slots: None,

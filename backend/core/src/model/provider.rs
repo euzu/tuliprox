@@ -391,17 +391,20 @@ impl ProviderConfig {
         if max == 0 {
             return false;
         }
-        let mut guard = self.write_connection();
-        if guard.current_connections < self.max_connections {
-            guard.grace_started_at = None;
-        }
-
+        let guard = self.read_connection();
         if guard.current_connections > max {
             if Self::grace_is_active(&guard, Instant::now(), grace_period_timeout_secs) {
                 // Grace timeout still active, deny connection
                 debug!("Provider access denied, grace exhausted, too many connections, over limit: {}", self.name);
             }
             return true;
+        }
+        if guard.current_connections < max && guard.grace_started_at.is_some() {
+            drop(guard);
+            let mut write_guard = self.write_connection();
+            if write_guard.current_connections < max {
+                write_guard.grace_started_at = None;
+            }
         }
         false
     }

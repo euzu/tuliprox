@@ -21,7 +21,6 @@ serde_json.workspace = true
 serde-saphyr.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "process", "signal", "sync", "time"] }
-tokio-stream = "0.1.19"
 tokio-tungstenite = "0.29.0"
 tempfile = "3.27.0"
 pin-project-lite = "0.2.17"
@@ -32,3 +31,4 @@ tower-service = "0.3.3"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+tokio-stream = "0.1.19"

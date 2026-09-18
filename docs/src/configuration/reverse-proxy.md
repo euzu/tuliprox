@@ -110,6 +110,7 @@ reverse_proxy:
     catchup_session_ttl_secs: 45
     shared_burst_buffer_mb: 12
     cleanup_queue_capacity: 4096
+    recent_eviction_reentry_ttl_ms: 3000
     metrics_enabled: false
 ```
 
@@ -131,6 +132,7 @@ reverse_proxy:
 | `catchup_session_ttl_secs` | Int | `45` | Same session-holding principle applied to Archive/Catchup TV. See notes on section [Session TTLs for HLS & Catchup](#session-ttls-for-hls-m3u8--catchup) for details. |
 | `shared_burst_buffer_mb` | Int | `12` | Minimum burst buffer size (in MB) used for shared live streams to immediately synchronize new clients without Keyframe dropouts. See notes on section [Shared Live Streams](#shared-live-streams) for details. |
 | `cleanup_queue_capacity` | Int | `4096` | Maximum number of concurrent cleanup permits available to active response bodies and shared subscribers. Must be at least `1`. If all permits remain held, new stream admission waits for a bounded interval and then returns `503 Service Unavailable` instead of growing memory without limit. |
+| `recent_eviction_reentry_ttl_ms` | Int | `3000` | Time window after an eviction during which a retry of the evicted playback must not evict its replacement. The guard is scoped to the user, client address and channel, so unrelated clients are not blocked. Suppressed retries end quietly (no `user_connections_exhausted` video and no `ConnectionDenied` event), since they are not a real connection-limit refusal. Raise this for players with slow automatic retries; `0` disables the guard. The cumulative suppression count is exposed as `reentry_suppressed_total` in the server status (`GET /api/v1/status`). |
 
 ### 1.1 `retry` & `buffer` (Deep Dive)
 

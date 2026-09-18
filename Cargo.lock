@@ -4905,7 +4905,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-testkit"
-version = "3.3.110"
+version = "3.3.113"
 dependencies = [
  "axum",
  "base64 0.23.1",

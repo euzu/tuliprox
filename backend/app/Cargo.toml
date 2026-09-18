@@ -122,5 +122,5 @@ proxy-auth-regression = []
 
 
 [[bin]]
-name = "flags_builder"
+name = "flags-builder"
 path = "src/tools/flags_builder.rs"

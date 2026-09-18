@@ -139,16 +139,6 @@ pub(super) async fn prepare_hls_resource_access(
             return Err(Box::new(hls_resource_access_lease_validation_response(&err)));
         }
     };
-    app_state
-        .hls_proxy
-        .sync_session_access_lease_count_and_detach_if_needed(
-            &app_state.active_users,
-            &app_state.active_provider,
-            &session,
-            proxy_session_id,
-            now_ms,
-        )
-        .await;
     reclaim_hls_account_overlap_if_needed(app_state, &session, now_ms).await;
     let Some(lease) =
         app_state.hls_proxy.access_lease_response_snapshot(&access_context.lease_id, proxy_session_id, now_ms).await
@@ -2985,8 +2975,8 @@ pub(super) async fn hls_api_stream_resolved(
                 false,
             )
             .await;
-        let connection_permission = connection_admission.permission;
-        let connection_kind = connection_admission.kind.or(session.connection_kind);
+        let connection_permission = connection_admission.permission();
+        let connection_kind = connection_admission.kind().or(session.connection_kind);
         session.permission = connection_permission;
         if let Some(connection_kind) = connection_kind {
             session.connection_kind = Some(connection_kind);
@@ -2994,6 +2984,9 @@ pub(super) async fn hls_api_stream_resolved(
         if connection_permission == UserConnectionPermission::Exhausted
             || (connection_permission == UserConnectionPermission::GracePeriod && connection_kind.is_none())
         {
+            if connection_admission.is_reentry_suppressed() {
+                return crate::api::api_utils::reentry_suppressed_response();
+            }
             let provider = if session.provider.is_empty() { input.name.clone() } else { session.provider.clone() };
             let stream_channel = resolve_stream_channel(
                 &app_state,
