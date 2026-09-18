@@ -1,8 +1,11 @@
 # **tuliprox** — Self-Hosted Media Gateway & Playlist Processor
 
-`tuliprox` is a high-performance, self-hosted media gateway for bringing IPTV providers, media servers, playlists, EPG data, and local media libraries together behind one clean and controllable interface.
+`tuliprox` is a high-performance, self-hosted media gateway for bringing IPTV providers, media servers, playlists, EPG data,  
+and local media libraries together behind one clean and controllable interface.
 
-Instead of configuring every player against every upstream source, Tuliprox sits in the middle: it imports your authorized media sources, normalizes and enriches their metadata, filters and reorganizes the catalog, manages provider connections, and publishes the result in the formats your clients already understand.
+Instead of configuring every player against every upstream source, Tuliprox sits in the middle: it imports your authorized  
+media sources, normalizes and enriches their metadata, filters and reorganizes the catalog, manages provider connections,  
+and publishes the result in the formats your clients already understand.
 
 **One service. Multiple sources. Multiple users. Multiple output formats. Full control.**
 
@@ -10,27 +13,32 @@ Instead of configuring every player against every upstream source, Tuliprox sits
 
 Tuliprox is built for more than playlist conversion. It is designed to become the central media gateway for a self-hosted setup:
 
-- **Unify fragmented sources** — combine Xtream, M3U/M3U8, Stalker/Ministra, Plex, Emby, Jellyfin, local media, staged catalogs, and EPG data in one place.
-- **Publish once, consume everywhere** — expose the same processed catalog as M3U, Xtream Codes API, HDHomeRun, or STRM without maintaining separate setups.
-- **Protect provider connections** — share streams, enforce connection limits, prioritize users, recover from upstream problems, and avoid wasting provider slots on unnecessary background work.
+- **Unify fragmented sources** — combine Xtream, M3U/M3U8, Stalker/Ministra, Plex, Emby, Jellyfin, local media, staged catalogs,  
+  and EPG data in one place.
+- **Publish once, consume everywhere** — expose the same processed catalog as M3U, Xtream Codes API, HDHomeRun, or STRM without  
+  maintaining separate setups.
+- **Protect provider connections** — share streams, enforce connection limits, prioritize users, recover from upstream problems,  
+  and avoid wasting provider slots on unnecessary background work.
 - **Shape the catalog your way** — filter, rename, map, sort, merge, deduplicate, curate, and enrich content before it reaches users.
-- **Operate multiple users safely** — assign targets, plans, output clusters, network restrictions, priorities, limits, and server profiles per user.
-- **Run it like infrastructure** — health and readiness probes, durable notifications, stream history, QoS snapshots, quality guards, hot reloads, audit events, and optional runtime watchdog support are built in.
+- **Operate multiple users safely** — assign targets, plans, output clusters, network restrictions, priorities, limits, and  
+  server profiles per user.
+- **Run it like infrastructure** — health and readiness probes, durable notifications, stream history, QoS snapshots, quality  
+  guards, hot reloads, audit events, and optional runtime watchdog support are built in.
 - **Keep the stack small** — Rust, a single application, embedded storage, and no mandatory external database.
 - **Stay in control of your data** — self-hosted configuration, metadata, user management, recordings, and operational state.
 
 ## 🚀 At a Glance
 
-| Area | What Tuliprox gives you |
-|---|---|
-| **Inputs** | Xtream, M3U/M3U8, Stalker/Ministra, Plex, Emby, Jellyfin, local libraries, staged sources |
-| **Outputs** | M3U/M3U8, Xtream Codes API, HDHomeRun, STRM |
-| **Processing** | Filtering, mapping DSL, sorting, templates, EPG matching, metadata enrichment, curation |
-| **Streaming** | Reverse proxy, redirects, shared MPEG-TS/HLS, HLS cache/prefetch, catchup proxying, failover |
-| **Users** | Multi-user gateway, plans, connection limits, priorities, output clusters, category access, network policies |
-| **Operations** | Web UI, REST API, scheduler, health/readiness probes, notifications, QoS, stream history, watchdog |
-| **Storage** | Embedded B+Tree engine, WAL protection, mmap scans, compression, compaction — no external DB required |
-| **Deployment** | Docker, Docker Compose templates, Raspberry Pi, NAS, VPS, x86 and ARM |
+| Area           | What Tuliprox gives you                                                                                      |
+|----------------|--------------------------------------------------------------------------------------------------------------|
+| **Inputs**     | Xtream, M3U/M3U8, Stalker/Ministra, Plex, Emby, Jellyfin, local libraries, staged sources                    |
+| **Outputs**    | M3U/M3U8, Xtream Codes API, HDHomeRun, STRM                                                                  |
+| **Processing** | Filtering, mapping DSL, sorting, templates, EPG matching, metadata enrichment, curation                      |
+| **Streaming**  | Reverse proxy, redirects, shared MPEG-TS/HLS, HLS cache/prefetch, catchup proxying, failover                 |
+| **Users**      | Multi-user gateway, plans, connection limits, priorities, output clusters, category access, network policies |
+| **Operations** | Web UI, REST API, scheduler, health/readiness probes, notifications, QoS, stream history, watchdog           |
+| **Storage**    | Embedded B+Tree engine, WAL protection, mmap scans, compression, compaction — no external DB required        |
+| **Deployment** | Docker, Docker Compose templates, Raspberry Pi, NAS, VPS, x86 and ARM                                        |
 
 > **Legal Notice**
 >
@@ -54,10 +62,12 @@ Tuliprox is written in Rust and designed to keep the runtime footprint small eve
 - Tokio-based asynchronous I/O for highly concurrent streaming and background work
 - Runs on Raspberry Pi, NAS, small VPS instances, and x86/ARM systems
 - Hot configuration reloads reduce the need for service restarts
-- Optional **runtime liveness watchdog** can detect a wedged async runtime and capture diagnostics; it can optionally trigger a restart when explicitly enabled
+- Optional **runtime liveness watchdog** can detect a wedged async runtime and capture diagnostics; it can optionally  
+  trigger a restart when explicitly enabled
 - Dedicated `/healthcheck` and `/ready` endpoints separate process liveness from actual provider capacity
 
-**Benefit:** Tuliprox can stay in the background as infrastructure instead of becoming another heavyweight service stack you constantly have to maintain.
+**Benefit:** Tuliprox can stay in the background as infrastructure instead of becoming another heavyweight service stack  
+you constantly have to maintain.
 
 ### 2. Bring All Your Media Sources Together
 
@@ -65,23 +75,26 @@ Use different upstream technologies without forcing every downstream player to u
 
 - **Xtream Codes** — Live, VOD, Series, Catchup, EPG metadata, provider aliases, and CSV batch accounts
 - **M3U/M3U8** — remote or local playlists with headers, credentials, EPG sources, and CSV batch inputs
-- **Stalker & Ministra** — full portal catalogs with MAC, credential or combined authentication, configurable MAG profiles, `create_link` playback resolution, resumable refreshes, and per-alias configuration
+- **Stalker & Ministra** — full portal catalogs with MAC, credential or combined authentication, configurable MAG profiles,  
+  `create_link` playback resolution, resumable refreshes, and per-alias configuration
 - **Plex, Emby & Jellyfin** — import selected movie and TV libraries and resolve protected playback and artwork through Tuliprox
 - **Local Media Library** — scan movies and series from disk and enrich them with NFO or TMDB metadata
-- **Staged Sources** — overlay a prepared Live, VOD, or Series catalog while keeping the original provider responsible for actual stream delivery
+- **Staged Sources** — overlay a prepared Live, VOD, or Series catalog while keeping the original provider responsible for  
+  actual stream delivery
 
-Tuliprox can also stream large provider catalogs incrementally instead of requiring the complete catalog to be buffered in memory before processing starts.
+Tuliprox can also stream large provider catalogs incrementally instead of requiring the complete catalog to be buffered in  
+memory before processing starts.
 
 **Benefit:** change providers, combine sources, or migrate clients without rebuilding your whole media setup around one vendor-specific API.
 
 ### 3. One Catalog, Four Output Formats
 
-| Format | Best for |
-|---|---|
-| **M3U/M3U8** | IPTV players such as VLC, TiviMate, iMPlayer, and similar clients |
+| Format               | Best for                                                                               |
+|----------------------|----------------------------------------------------------------------------------------|
+| **M3U/M3U8**         | IPTV players such as VLC, TiviMate, iMPlayer, and similar clients                      |
 | **Xtream Codes API** | Clients expecting Live, VOD, Series, Catchup, EPG, categories, and account information |
-| **HDHomeRun** | Plex, Jellyfin, Emby, and compatible tuner-based integrations with SSDP discovery |
-| **STRM** | Kodi, Jellyfin, and Emby libraries with multi-version support and quality tags |
+| **HDHomeRun**        | Plex, Jellyfin, Emby, and compatible tuner-based integrations with SSDP discovery      |
+| **STRM**             | Kodi, Jellyfin, and Emby libraries with multi-version support and quality tags         |
 
 Generate several output types from the same processed source at the same time.
 
@@ -98,7 +111,8 @@ Tuliprox can transform provider data into the structure you actually want to use
   (Group ~ "^DE.*") AND NOT (Name ~ ".*XXX.*")
   ```
 
-- Target filters can run during normal processing or at the final **persist** stage after EPG processing, mapping, merging, deduplication, sorting, numbering, and counters
+- Target filters can run during normal processing or at the final **persist** stage after EPG processing, mapping, merging,  
+  deduplication, sorting, numbering, and counters
 - **Mapper DSL** for advanced transformations:
   - regex renaming with capture groups and backreferences
   - variables, `if`/`else`, and `for_each`
@@ -145,7 +159,8 @@ Tuliprox is not just a metadata processor — it actively manages stream deliver
 - Anti-ping-pong protection for aggressive reconnect loops
 - Session-aware handling for HLS/catchup and socket-bound admission for regular TS/VOD/local playback
 
-**Benefit:** limited provider capacity can be shared intentionally instead of being consumed unpredictably by clients, reconnects, probes, and background jobs.
+**Benefit:** limited provider capacity can be shared intentionally instead of being consumed unpredictably by clients,  
+reconnects, probes, and background jobs.
 
 ### 6. Provider Resilience, Failover, and Safer Refreshes
 
@@ -159,7 +174,8 @@ Upstream providers are not always reliable. Tuliprox is designed to preserve usa
 - HTTP, HTTPS, and SOCKS5 outbound proxy support for VPN gateways, corporate proxies, or Gluetun
 - Effective public IPv4/IPv6 display in the Web UI to verify routing
 - Provider aliases and CSV batch configuration for larger account pools
-- **Per-cluster update quality guards** for Xtream, Stalker, and M3U inputs can reject suspicious Live/VOD/Series refreshes and retain the last accepted data
+- **Per-cluster update quality guards** for Xtream, Stalker, and M3U inputs can reject suspicious Live/VOD/Series refreshes  
+  and retain the last accepted data
 - Quality rejections are reported separately from technical failures
 - Independent inputs can update in parallel while optional sequential groups protect providers that must not be refreshed concurrently
 - Automatic Xtream account-expiration refresh with throttling designed to reduce unnecessary provider requests
@@ -206,8 +222,10 @@ Tuliprox can be configured and monitored directly from the browser.
 - **Dashboard** with backend status, active streams, system metrics, and provider capacity
 - **Source Editor** for M3U, Xtream, Stalker, Plex, Emby, Jellyfin, local-library, and target configuration
 - Drag & drop, block selection, batch editing, and target bouquet whitelist/blacklist editing
-- **Input-focused Update view** with per-input actions, affected-target selection, status, last update time, and capability-aware Update/Refresh/Force Update/Rescan actions
-- **Update Details** explain where data came from, which quality guards were applied, processing order, target results, and technical versus quality failures
+- **Input-focused Update view** with per-input actions, affected-target selection, status, last update time, and  
+  capability-aware Update/Refresh/Force Update/Rescan actions
+- **Update Details** explain where data came from, which quality guards were applied, processing order, target results,  
+  and technical versus quality failures
 - Reload-safe update/cluster status so a browser refresh does not erase the operational picture
 - **Playlist Explorer** with tree/gallery views, EPG timeline, text/regex search, and field-scoped search
 - **Download & Recording Manager** with retries, queue controls, fairness, and RBAC-protected actions
@@ -309,7 +327,8 @@ Notification capabilities include:
 - HMAC-SHA256 signing for REST webhooks
 - Per-channel Handlebars templates
 - Preview/test endpoint so templates can be rendered without sending them
-- Events for provider failures, exhausted pools, priority fallback, user connection denial, auth activity, config reload failures, metadata failures, scheduled-task failures, recording lifecycle, disk alerts, and more
+- Events for provider failures, exhausted pools, priority fallback, user connection denial, auth activity, config reload  
+  failures, metadata failures, scheduled-task failures, recording lifecycle, disk alerts, and more
 - Event statistics and a recent-event ring for troubleshooting
 - Disk usage alerts with warning/critical thresholds and configurable repeat intervals
 
@@ -384,7 +403,8 @@ Tuliprox includes its own storage engine for playlist and runtime data.
 - JSON and CBOR responses on supported endpoints
 - CLI one-shot processing for scripts and CI/CD
 
-**Benefit:** common maintenance tasks can run unattended, while the same operations remain available through the UI, API, or CLI when manual control is needed.
+**Benefit:** common maintenance tasks can run unattended, while the same operations remain available through the UI, API,  
+or CLI when manual control is needed.
 
 ### 16. Complete Xtream-Compatible Delivery
 
