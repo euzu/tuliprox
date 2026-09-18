@@ -2051,7 +2051,7 @@ async fn check_origin_assertions<'a>(
     any_failed: &mut bool,
     observations_incomplete: &mut bool,
 ) {
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(2000);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     loop {
         if let Ok(stats) = obs.stats(origin_run_id).await {
             let body_matches =
