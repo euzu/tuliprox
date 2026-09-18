@@ -928,7 +928,6 @@ pub async fn update_series_metadata(
                         } else {
                             active_provider
                                 .acquire_connection_for_probe(&input.name, probe_priority)
-                                .await
                                 .map(|handle| ProbeHandleGuard::new(active_provider, handle))
                         };
 
@@ -957,7 +956,7 @@ pub async fn update_series_metadata(
                                         }
                                     }
                                     if let Some(guard) = temp_handle {
-                                        guard.release().await;
+                                        guard.release();
                                     }
                                     continue;
                                 }
@@ -971,7 +970,7 @@ pub async fn update_series_metadata(
                                     probe_url.as_ref()
                                 );
                                 if let Some(guard) = temp_handle {
-                                    guard.release().await;
+                                    guard.release();
                                 }
                                 continue;
                             }
@@ -1045,7 +1044,7 @@ pub async fn update_series_metadata(
                         }
 
                         if let Some(guard) = temp_handle {
-                            guard.release().await;
+                            guard.release();
                         }
                     }
                 }

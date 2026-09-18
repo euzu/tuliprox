@@ -7,12 +7,11 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::{
-    sync::{Mutex, Notify},
-    time::timeout,
+use tokio::{sync::Notify, time::timeout};
+use tuliprox_core::model::{
+    is_input_expired, PlaybackKind, PlaybackRequestId, ProviderAllocation, ProviderBindingTag, ProviderHandle,
 };
-use tuliprox_core::model::{is_input_expired, ProviderAllocation, ProviderHandle};
-use tuliprox_session::ConnectionKind;
+use tuliprox_session::{CleanupEvent, ConnectionKind, PlaybackLeaseRef};
 
 const HLS_ACCOUNT_OVERLAP_FALLBACK_TARGET_DURATION_MS: u64 = 15_000;
 const HLS_ORIGIN_ACCOUNT_IO_WAIT_RECHECK: Duration = Duration::from_millis(25);
@@ -102,19 +101,26 @@ pub struct HlsOriginAccountBinding {
     pub input_name: Arc<str>,
     pub account_name: Arc<str>,
     pub session_owner: String,
+    pub playback_request_id: Option<PlaybackRequestId>,
     pub pinned_at_ms: u64,
     pub last_origin_io_at_ms: Option<u64>,
     pub last_reservation_refresh_at_ms: Option<u64>,
     pub binding_mode: HlsOriginAccountBindingMode,
     pub generation: u64,
+    /// The provider lease's binding tag captured when this binding acquired its slot.
+    /// A stale detach/clear carries the old tag and cannot delete a successor lease
+    /// on the same account (A→A rebind or remove/recreate).
+    pub provider_binding_tag: Option<ProviderBindingTag>,
 }
 
 pub struct HlsOriginAccountIoLease {
     pub account_name: Arc<str>,
     pub session_owner: String,
-    pub active_io_count: usize,
-    provider_handle: Option<ProviderHandle>,
-    acquiring: bool,
+    pub generation: u64,
+    pub active_io_count: std::sync::atomic::AtomicUsize,
+    provider_handle: std::sync::Mutex<Option<ProviderHandle>>,
+    cleanup_permit: std::sync::Mutex<Option<tokio::sync::mpsc::OwnedPermit<CleanupEvent>>>,
+    acquiring: std::sync::atomic::AtomicBool,
     notify: Arc<Notify>,
 }
 
@@ -123,18 +129,62 @@ impl HlsOriginAccountIoLease {
         Self {
             account_name: Arc::clone(&binding.account_name),
             session_owner: binding.session_owner.clone(),
-            active_io_count: 0,
-            provider_handle: None,
-            acquiring: true,
+            generation: binding.generation,
+            active_io_count: std::sync::atomic::AtomicUsize::new(0),
+            provider_handle: std::sync::Mutex::new(None),
+            cleanup_permit: std::sync::Mutex::new(None),
+            acquiring: std::sync::atomic::AtomicBool::new(true),
+            notify: Arc::new(Notify::new()),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn active_for_test(binding: &HlsOriginAccountBinding, active_io_count: usize) -> Self {
+        Self {
+            account_name: Arc::clone(&binding.account_name),
+            session_owner: binding.session_owner.clone(),
+            generation: binding.generation,
+            active_io_count: std::sync::atomic::AtomicUsize::new(active_io_count),
+            provider_handle: std::sync::Mutex::new(None),
+            cleanup_permit: std::sync::Mutex::new(None),
+            acquiring: std::sync::atomic::AtomicBool::new(false),
             notify: Arc::new(Notify::new()),
         }
     }
 
     fn matches_binding(&self, binding: &HlsOriginAccountBinding) -> bool {
-        self.account_name == binding.account_name && self.session_owner == binding.session_owner
+        self.account_name == binding.account_name
+            && self.session_owner == binding.session_owner
+            && self.generation == binding.generation
     }
 
-    pub const fn is_active_or_acquiring(&self) -> bool { self.active_io_count > 0 || self.acquiring }
+    pub fn is_active_or_acquiring(&self) -> bool {
+        self.active_io_count.load(std::sync::atomic::Ordering::Acquire) > 0
+            || self.acquiring.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn try_join(&self) -> bool {
+        if self.acquiring.load(std::sync::atomic::Ordering::Acquire) {
+            return false;
+        }
+        self.active_io_count
+            .fetch_update(std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire, |count| {
+                (count > 0).then(|| count.checked_add(1)).flatten()
+            })
+            .is_ok()
+    }
+
+    fn take_resource(&self) -> Option<(ProviderHandle, tokio::sync::mpsc::OwnedPermit<CleanupEvent>)> {
+        let handle = match self.provider_handle.lock() {
+            Ok(mut guard) => guard.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        }?;
+        let permit = match self.cleanup_permit.lock() {
+            Ok(mut guard) => guard.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        }?;
+        Some((handle, permit))
+    }
 }
 
 impl fmt::Debug for HlsOriginAccountIoLease {
@@ -142,23 +192,100 @@ impl fmt::Debug for HlsOriginAccountIoLease {
         f.debug_struct("HlsOriginAccountIoLease")
             .field("account_name", &self.account_name)
             .field("session_owner", &"<redacted>")
-            .field("active_io_count", &self.active_io_count)
-            .field("has_provider_handle", &self.provider_handle.is_some())
-            .field("acquiring", &self.acquiring)
+            .field("generation", &self.generation)
+            .field("active_io_count", &self.active_io_count.load(std::sync::atomic::Ordering::Relaxed))
+            .field("has_provider_handle", &self.provider_handle.lock().is_ok_and(|guard| guard.is_some()))
+            .field("acquiring", &self.acquiring.load(std::sync::atomic::Ordering::Relaxed))
             .finish_non_exhaustive()
     }
 }
 
-#[derive(Debug, Clone)]
 pub struct HlsOriginAccountIoLeaseGuard {
     binding: HlsOriginAccountBinding,
+    lease: Arc<HlsOriginAccountIoLease>,
+    disarmed: bool,
+}
+
+impl fmt::Debug for HlsOriginAccountIoLeaseGuard {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HlsOriginAccountIoLeaseGuard")
+            .field("binding", &self.binding)
+            .field("disarmed", &self.disarmed)
+            .finish_non_exhaustive()
+    }
 }
 
 impl HlsOriginAccountIoLeaseGuard {
+    pub fn new(binding: HlsOriginAccountBinding, lease: Arc<HlsOriginAccountIoLease>) -> Self {
+        Self { binding, lease, disarmed: false }
+    }
+
     pub fn binding(&self) -> &HlsOriginAccountBinding { &self.binding }
+
+    pub fn disarm(&mut self) { self.disarmed = true; }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+impl Drop for HlsOriginAccountIoLeaseGuard {
+    fn drop(&mut self) {
+        if self.disarmed {
+            return;
+        }
+        self.disarmed = true;
+        if self.lease.active_io_count.fetch_sub(1, std::sync::atomic::Ordering::AcqRel) == 1 {
+            if let Some((handle, permit)) = self.lease.take_resource() {
+                permit.send(CleanupEvent::ReleaseProviderHandle { handle: Some(handle) });
+            }
+        }
+    }
+}
+
+struct ManagedHandleGuard {
+    handle: Option<ProviderHandle>,
+    cleanup_permit: Option<tokio::sync::mpsc::OwnedPermit<CleanupEvent>>,
+}
+
+impl ManagedHandleGuard {
+    fn new(handle: ProviderHandle, cleanup_permit: tokio::sync::mpsc::OwnedPermit<CleanupEvent>) -> Self {
+        Self { handle: Some(handle), cleanup_permit: Some(cleanup_permit) }
+    }
+
+    fn take_resource(&mut self) -> Option<(ProviderHandle, tokio::sync::mpsc::OwnedPermit<CleanupEvent>)> {
+        Some((self.handle.take()?, self.cleanup_permit.take()?))
+    }
+}
+
+impl Drop for ManagedHandleGuard {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            if let Some(permit) = self.cleanup_permit.take() {
+                permit.send(CleanupEvent::ReleaseProviderHandle { handle: Some(handle) });
+            }
+        }
+    }
+}
+
+pub struct PendingAcquireGuard {
+    lease: Arc<HlsOriginAccountIoLease>,
+    disarmed: bool,
+}
+
+impl PendingAcquireGuard {
+    fn new(lease: Arc<HlsOriginAccountIoLease>) -> Self { Self { lease, disarmed: false } }
+
+    fn disarm(&mut self) { self.disarmed = true; }
+}
+
+impl Drop for PendingAcquireGuard {
+    fn drop(&mut self) {
+        if self.disarmed {
+            return;
+        }
+        self.disarmed = true;
+        self.lease.acquiring.store(false, std::sync::atomic::Ordering::Release);
+        self.lease.notify.notify_waiters();
+    }
+}
+
 pub struct HlsAccountOverlapTiming {
     pub target_duration_ms: u64,
     pub hard_active_window_ms: u64,
@@ -203,7 +330,7 @@ impl HlsAccountBindingProtection {
 pub fn classify_account_binding_protection(
     last_authorized_media_at_ms: Option<u64>,
     now_ms: u64,
-    timing: HlsAccountOverlapTiming,
+    timing: &HlsAccountOverlapTiming,
 ) -> HlsAccountBindingProtection {
     let Some(last_media) = last_authorized_media_at_ms else {
         return HlsAccountBindingProtection::NoMediaYet;
@@ -258,11 +385,13 @@ impl HlsOriginAccountBinding {
             input_name,
             account_name,
             session_owner: build_hls_origin_session_owner(proxy_session_id),
+            playback_request_id: None,
             pinned_at_ms: now_ms,
             last_origin_io_at_ms: None,
             last_reservation_refresh_at_ms: None,
             binding_mode: HlsOriginAccountBindingMode::Active,
             generation: 0,
+            provider_binding_tag: None,
         }
     }
 
@@ -277,11 +406,13 @@ impl HlsOriginAccountBinding {
             input_name,
             account_name,
             session_owner,
+            playback_request_id: None,
             pinned_at_ms: now_ms,
             last_origin_io_at_ms: None,
             last_reservation_refresh_at_ms: None,
             binding_mode: HlsOriginAccountBindingMode::Active,
             generation,
+            provider_binding_tag: None,
         }
     }
 
@@ -324,11 +455,13 @@ impl fmt::Debug for HlsOriginAccountBinding {
             .field("input_name", &self.input_name)
             .field("account_name", &self.account_name)
             .field("session_owner", &"<redacted>")
+            .field("playback_request_id", &self.playback_request_id)
             .field("pinned_at_ms", &self.pinned_at_ms)
             .field("last_origin_io_at_ms", &self.last_origin_io_at_ms)
             .field("last_reservation_refresh_at_ms", &self.last_reservation_refresh_at_ms)
             .field("binding_mode", &self.binding_mode)
             .field("generation", &self.generation)
+            .field("provider_binding_tag", &self.provider_binding_tag)
             .finish()
     }
 }
@@ -480,7 +613,7 @@ pub struct HlsOriginIoContext {
     pub priority: i8,
     pub connection_kind: ConnectionKind,
     pub reservation_ttl_secs: u64,
-    pub preacquired_provider_handle: Option<Arc<Mutex<Option<ProviderHandle>>>>,
+    pub preacquired_provider_handle: Option<Arc<std::sync::Mutex<Option<tuliprox_session::ManagedProviderHandle>>>>,
     pub started_generation: Option<u64>,
 }
 
@@ -491,13 +624,19 @@ impl HlsOriginIoContext {
     }
 
     pub fn with_preacquired_provider_handle(mut self, provider_handle: ProviderHandle) -> Self {
-        self.preacquired_provider_handle = Some(Arc::new(Mutex::new(Some(provider_handle))));
+        let managed =
+            tuliprox_session::ManagedProviderHandle::new(Arc::clone(&self.ctx.active_provider), provider_handle);
+        self.preacquired_provider_handle = Some(Arc::new(std::sync::Mutex::new(Some(managed))));
         self
     }
 
-    pub async fn take_preacquired_provider_handle(&self) -> Option<ProviderHandle> {
+    pub fn take_preacquired_provider_handle(&self) -> Option<tuliprox_session::ManagedProviderHandle> {
         let handle = self.preacquired_provider_handle.as_ref()?;
-        handle.lock().await.take()
+        let mut guard = match handle.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard.take()
     }
 }
 
@@ -518,7 +657,7 @@ pub fn hls_origin_account_status(ctx: &HlsCtx, binding: &HlsOriginAccountBinding
     HlsOriginAccountStatus::Known
 }
 
-pub async fn acquire_bound_hls_origin_account_handle(
+pub fn acquire_bound_hls_origin_account_handle(
     ctx: &HlsCtx,
     binding: &HlsOriginAccountBinding,
     client_addr: &SocketAddr,
@@ -534,28 +673,21 @@ pub async fn acquire_bound_hls_origin_account_handle(
         HlsOriginAccountStatus::Expired => return Err(HlsBoundAccountAcquireErrorKind::Expired),
         HlsOriginAccountStatus::Known => {}
     }
-    if ctx
-        .active_provider
-        .is_provider_reserved_for_other_session(&binding.account_name, Some(&binding.session_owner))
-        .await
-    {
+    if ctx.active_provider.is_provider_reserved_for_other_session(&binding.account_name, Some(&binding.session_owner)) {
         return Err(HlsBoundAccountAcquireErrorKind::ReservedForOther);
     }
-    let handle = ctx
-        .active_provider
-        .acquire_exact_connection_with_grace_for_session(
-            &binding.account_name,
-            client_addr,
-            allow_grace,
-            priority,
-            connection_kind,
-            Some(&binding.session_owner),
-        )
-        .await;
+    let handle = ctx.active_provider.acquire_exact_connection_with_lease_for_session(
+        &binding.account_name,
+        client_addr,
+        allow_grace,
+        priority,
+        connection_kind,
+        Some(PlaybackLeaseRef::new(&binding.session_owner, PlaybackKind::LiveHls)),
+    );
     if let Some(handle) = handle {
         return Ok(handle);
     }
-    let kind = if ctx.active_provider.is_exhausted(&binding.account_name).await {
+    let kind = if ctx.active_provider.is_exhausted(&binding.account_name) {
         HlsBoundAccountAcquireErrorKind::Exhausted
     } else {
         HlsBoundAccountAcquireErrorKind::Unavailable
@@ -595,65 +727,108 @@ async fn begin_hls_origin_account_io_inner(
         return Err(HlsBoundAccountAcquireErrorKind::Detached);
     }
 
-    if matches!(
-        reserve_hls_origin_account_io_slot(session, binding, acquire_timeout).await?,
-        HlsOriginAccountIoSlot::Joined
-    ) {
-        if let Some(unused_handle) = origin_io.take_preacquired_provider_handle().await {
-            origin_io.ctx.connection_manager.release_provider_handle(Some(unused_handle)).await;
-        }
-        return Ok(HlsOriginAccountIoLeaseGuard { binding: binding.clone() });
+    let deadline = acquire_timeout.map(|duration| Instant::now() + duration);
+    let slot = reserve_hls_origin_account_io_slot(session, binding, deadline).await?;
+    if let HlsOriginAccountIoSlot::Joined(lease) = slot {
+        let guard = HlsOriginAccountIoLeaseGuard::new(binding.clone(), lease);
+        // Release any unused pre-acquired handle synchronously on drop. It needs no
+        // cleanup permit, so a join cannot self-block on a single-permit cleanup queue.
+        drop(origin_io.take_preacquired_provider_handle());
+        return Ok(guard);
     }
 
-    let acquired_handle = if let Some(handle) = origin_io.take_preacquired_provider_handle().await {
-        Ok(handle)
+    let HlsOriginAccountIoSlot::Acquire(lease) = slot else {
+        return Err(HlsBoundAccountAcquireErrorKind::StoreRace);
+    };
+    // Own the pending lease before the first suspend after the slot reserve: the
+    // guard's Drop clears `acquiring` and wakes waiters if the cleanup-permit wait
+    // below times out, is cancelled, or the cleanup channel is closed.
+    let mut pending_guard = PendingAcquireGuard::new(Arc::clone(&lease));
+    let cleanup_permit = reserve_cleanup_permit(origin_io, deadline).await?;
+
+    let acquired_handle = if let Some(mut managed) = origin_io.take_preacquired_provider_handle() {
+        // Disarm the managed owner only after the cleanup permit is already reserved,
+        // so the naked handle is immediately paired with its release responsibility.
+        // The wrapper always carries its handle; fall back to a fresh acquire defensively.
+        match managed.disarm() {
+            Some(handle) => Ok(handle),
+            None => acquire_bound_hls_origin_account_handle(
+                &origin_io.ctx,
+                binding,
+                &origin_io.client_addr,
+                origin_io.allow_grace,
+                origin_io.priority,
+                origin_io.connection_kind,
+            ),
+        }
     } else {
-        let acquire = acquire_bound_hls_origin_account_handle(
+        acquire_bound_hls_origin_account_handle(
             &origin_io.ctx,
             binding,
             &origin_io.client_addr,
             origin_io.allow_grace,
             origin_io.priority,
             origin_io.connection_kind,
-        );
-        if let Some(acquire_timeout) = acquire_timeout {
-            if let Ok(result) = timeout(acquire_timeout, acquire).await {
-                result
-            } else {
-                clear_pending_hls_origin_account_io_lease(session, binding).await;
-                return Err(HlsBoundAccountAcquireErrorKind::AcquireTimedOut);
-            }
-        } else {
-            acquire.await
-        }
+        )
     };
 
     match acquired_handle {
-        Ok(handle) => store_acquired_hls_origin_account_io_handle(origin_io, session, binding, handle).await,
+        Ok(handle) => {
+            store_acquired_hls_origin_account_io_handle(
+                origin_io,
+                session,
+                binding,
+                handle,
+                cleanup_permit,
+                pending_guard,
+                deadline,
+            )
+            .await
+        }
         Err(err) => {
-            clear_pending_hls_origin_account_io_lease(session, binding).await;
+            clear_pending_hls_origin_account_io_lease(session, &pending_guard.lease, deadline).await;
+            pending_guard.disarm();
             Err(err)
         }
+    }
+}
+
+async fn reserve_cleanup_permit(
+    origin_io: &HlsOriginIoContext,
+    deadline: Option<Instant>,
+) -> Result<tokio::sync::mpsc::OwnedPermit<CleanupEvent>, HlsBoundAccountAcquireErrorKind> {
+    let reserve = origin_io.ctx.connection_manager.control_cleanup_tx().reserve_owned();
+    match deadline {
+        Some(deadline) => timeout(deadline.saturating_duration_since(Instant::now()), reserve)
+            .await
+            .map_err(|_| HlsBoundAccountAcquireErrorKind::AcquireTimedOut)?
+            .map_err(|_| HlsBoundAccountAcquireErrorKind::Unavailable),
+        None => reserve.await.map_err(|_| HlsBoundAccountAcquireErrorKind::Unavailable),
     }
 }
 
 async fn reserve_hls_origin_account_io_slot(
     session: &HlsSessionHandle,
     binding: &HlsOriginAccountBinding,
-    acquire_timeout: Option<Duration>,
+    wait_deadline: Option<Instant>,
 ) -> Result<HlsOriginAccountIoSlot, HlsBoundAccountAcquireErrorKind> {
-    let wait_deadline = acquire_timeout.map(|duration| Instant::now() + duration);
     loop {
-        let outcome = {
+        let reserve = async {
             let mut session = session.write().await;
             try_reserve_hls_origin_account_io_slot(&mut session, binding)
         };
+        let outcome = match wait_deadline {
+            Some(deadline) => timeout(deadline.saturating_duration_since(Instant::now()), reserve)
+                .await
+                .map_err(|_| HlsBoundAccountAcquireErrorKind::WaitTimedOut)?,
+            None => reserve.await,
+        };
         match outcome {
-            HlsOriginAccountIoReserveOutcome::Joined => {
-                return Ok(HlsOriginAccountIoSlot::Joined);
+            HlsOriginAccountIoReserveOutcome::Joined(lease) => {
+                return Ok(HlsOriginAccountIoSlot::Joined(lease));
             }
-            HlsOriginAccountIoReserveOutcome::Acquire => {
-                return Ok(HlsOriginAccountIoSlot::Acquire);
+            HlsOriginAccountIoReserveOutcome::Acquire(lease) => {
+                return Ok(HlsOriginAccountIoSlot::Acquire(lease));
             }
             HlsOriginAccountIoReserveOutcome::Wait(notify) => {
                 if let Some(deadline) = wait_deadline {
@@ -673,24 +848,24 @@ async fn reserve_hls_origin_account_io_slot(
                     }
                 }
             }
-            HlsOriginAccountIoReserveOutcome::Unavailable => {
-                return Err(HlsBoundAccountAcquireErrorKind::Unavailable);
-            }
             HlsOriginAccountIoReserveOutcome::ReservedForOther => {
                 return Err(HlsBoundAccountAcquireErrorKind::ReservedForOther);
+            }
+            HlsOriginAccountIoReserveOutcome::Unavailable => {
+                return Err(HlsBoundAccountAcquireErrorKind::Unavailable);
             }
         }
     }
 }
 
 enum HlsOriginAccountIoSlot {
-    Joined,
-    Acquire,
+    Joined(Arc<HlsOriginAccountIoLease>),
+    Acquire(Arc<HlsOriginAccountIoLease>),
 }
 
 enum HlsOriginAccountIoReserveOutcome {
-    Joined,
-    Acquire,
+    Joined(Arc<HlsOriginAccountIoLease>),
+    Acquire(Arc<HlsOriginAccountIoLease>),
     Wait(Arc<Notify>),
     ReservedForOther,
     Unavailable,
@@ -704,22 +879,23 @@ fn try_reserve_hls_origin_account_io_slot(
         return HlsOriginAccountIoReserveOutcome::Unavailable;
     }
 
-    match session.origin_account_io_lease.as_mut() {
-        Some(lease) if lease.matches_binding(binding) && lease.provider_handle.is_some() => {
-            lease.active_io_count = lease.active_io_count.saturating_add(1);
-            HlsOriginAccountIoReserveOutcome::Joined
-        }
-        Some(lease) if lease.matches_binding(binding) && lease.acquiring => {
-            HlsOriginAccountIoReserveOutcome::Wait(Arc::clone(&lease.notify))
+    match session.origin_account_io_lease.as_ref() {
+        Some(lease) if lease.matches_binding(binding) => {
+            if lease.acquiring.load(std::sync::atomic::Ordering::Acquire) {
+                HlsOriginAccountIoReserveOutcome::Wait(Arc::clone(&lease.notify))
+            } else if lease.try_join() {
+                HlsOriginAccountIoReserveOutcome::Joined(Arc::clone(lease))
+            } else {
+                let lease = Arc::new(HlsOriginAccountIoLease::acquiring(binding));
+                session.origin_account_io_lease = Some(Arc::clone(&lease));
+                HlsOriginAccountIoReserveOutcome::Acquire(lease)
+            }
         }
         Some(lease) if lease.is_active_or_acquiring() => HlsOriginAccountIoReserveOutcome::ReservedForOther,
-        Some(_) => {
-            session.origin_account_io_lease = None;
-            HlsOriginAccountIoReserveOutcome::Acquire
-        }
-        None => {
-            session.origin_account_io_lease = Some(HlsOriginAccountIoLease::acquiring(binding));
-            HlsOriginAccountIoReserveOutcome::Acquire
+        _ => {
+            let lease = Arc::new(HlsOriginAccountIoLease::acquiring(binding));
+            session.origin_account_io_lease = Some(Arc::clone(&lease));
+            HlsOriginAccountIoReserveOutcome::Acquire(lease)
         }
     }
 }
@@ -729,97 +905,150 @@ async fn store_acquired_hls_origin_account_io_handle(
     session: &HlsSessionHandle,
     binding: &HlsOriginAccountBinding,
     handle: ProviderHandle,
+    cleanup_permit: tokio::sync::mpsc::OwnedPermit<CleanupEvent>,
+    mut pending_guard: PendingAcquireGuard,
+    deadline: Option<Instant>,
 ) -> Result<HlsOriginAccountIoLeaseGuard, HlsBoundAccountAcquireErrorKind> {
-    origin_io
-        .ctx
-        .active_provider
-        .refresh_provider_reservation(&binding.account_name, &binding.session_owner, origin_io.reservation_ttl_secs)
-        .await;
-
-    let mut release_handle = None;
-    let mut notify_waiters = None;
-    {
-        let mut session = session.write().await;
-        if let Some(lease) = session
-            .origin_account_io_lease
-            .as_mut()
-            .filter(|lease| lease.matches_binding(binding) && lease.acquiring && lease.provider_handle.is_none())
-        {
-            lease.provider_handle = Some(handle);
-            lease.acquiring = false;
-            lease.active_io_count = 1;
-            notify_waiters = Some(Arc::clone(&lease.notify));
-        } else {
-            release_handle = Some(handle);
+    let playback_request_id = handle.playback_request_id;
+    // The handle carries the exact provider binding tag it was acquired under, so a
+    // later detach/clear can prove it still targets this binding, not a successor.
+    let provider_binding_tag = handle.binding_tag;
+    let mut handle_guard = ManagedHandleGuard::new(handle, cleanup_permit);
+    if let Some(request_id) = playback_request_id {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            clear_pending_hls_origin_account_io_lease(session, &pending_guard.lease, deadline).await;
+            pending_guard.disarm();
+            return Err(HlsBoundAccountAcquireErrorKind::AcquireTimedOut);
         }
+        let lease_ref = PlaybackLeaseRef { owner: &binding.session_owner, kind: PlaybackKind::LiveHls, request_id };
+        origin_io.ctx.active_provider.refresh_playback_lease(
+            &binding.account_name,
+            &lease_ref,
+            origin_io.reservation_ttl_secs,
+        );
     }
-    if let Some(notify) = notify_waiters {
-        notify.notify_waiters();
+
+    let lease = Arc::clone(&pending_guard.lease);
+
+    let store = async {
+        let mut session_guard = session.write().await;
+        let session_lease_matches =
+            session_guard.origin_account_io_lease.as_ref().is_some_and(|current| Arc::ptr_eq(current, &lease));
+        let binding_still_current = session_guard.origin_account_binding.as_ref().is_some_and(|current| {
+            current.generation == binding.generation
+                && current.account_name == binding.account_name
+                && current.session_owner == binding.session_owner
+                && current.is_active()
+        });
+        if !session_lease_matches
+            || !binding_still_current
+            || session_guard.is_gc_marked_for_removal()
+            || !matches!(hls_origin_account_status(&origin_io.ctx, binding), HlsOriginAccountStatus::Known)
+        {
+            return None;
+        }
+
+        let (handle, permit) = handle_guard.take_resource()?;
+        match lease.provider_handle.lock() {
+            Ok(mut guard) => *guard = Some(handle),
+            Err(poisoned) => *poisoned.into_inner() = Some(handle),
+        }
+        match lease.cleanup_permit.lock() {
+            Ok(mut guard) => *guard = Some(permit),
+            Err(poisoned) => *poisoned.into_inner() = Some(permit),
+        }
+        lease.active_io_count.store(1, std::sync::atomic::Ordering::Release);
+        lease.acquiring.store(false, std::sync::atomic::Ordering::Release);
+        lease.notify.notify_waiters();
+        if let Some(current) = session_guard.origin_account_binding.as_mut() {
+            current.playback_request_id = playback_request_id;
+            current.provider_binding_tag = provider_binding_tag;
+        }
+        let mut guard_binding = binding.clone();
+        guard_binding.playback_request_id = playback_request_id;
+        guard_binding.provider_binding_tag = provider_binding_tag;
+        Some(HlsOriginAccountIoLeaseGuard::new(guard_binding, Arc::clone(&lease)))
+    };
+
+    let lease_guard = match deadline {
+        Some(deadline) => {
+            if let Ok(guard) = timeout(deadline.saturating_duration_since(Instant::now()), store).await {
+                guard
+            } else {
+                clear_pending_hls_origin_account_io_lease(session, &pending_guard.lease, Some(deadline)).await;
+                pending_guard.disarm();
+                return Err(HlsBoundAccountAcquireErrorKind::AcquireTimedOut);
+            }
+        }
+        None => store.await,
+    };
+
+    if let Some(lease_guard) = lease_guard {
+        pending_guard.disarm();
+        Ok(lease_guard)
+    } else {
+        clear_pending_hls_origin_account_io_lease(session, &pending_guard.lease, deadline).await;
+        pending_guard.disarm();
+        Err(HlsBoundAccountAcquireErrorKind::StoreRace)
     }
-    if let Some(handle) = release_handle {
-        origin_io.ctx.connection_manager.release_provider_handle(Some(handle)).await;
-        origin_io.ctx.active_provider.clear_provider_reservation(&binding.session_owner).await;
-        return Err(HlsBoundAccountAcquireErrorKind::StoreRace);
-    }
-    Ok(HlsOriginAccountIoLeaseGuard { binding: binding.clone() })
 }
 
-async fn clear_pending_hls_origin_account_io_lease(session: &HlsSessionHandle, binding: &HlsOriginAccountBinding) {
-    let notify_waiters = {
+async fn clear_pending_hls_origin_account_io_lease(
+    session: &HlsSessionHandle,
+    pending_lease: &Arc<HlsOriginAccountIoLease>,
+    deadline: Option<Instant>,
+) {
+    pending_lease.acquiring.store(false, std::sync::atomic::Ordering::Release);
+    pending_lease.notify.notify_waiters();
+    let clear = async {
         let mut session = session.write().await;
-        let notify = session
-            .origin_account_io_lease
-            .as_ref()
-            .filter(|lease| lease.matches_binding(binding) && lease.acquiring)
-            .map(|lease| Arc::clone(&lease.notify));
-        if notify.is_some() {
+        if session.origin_account_io_lease.as_ref().is_some_and(|lease| Arc::ptr_eq(lease, pending_lease)) {
             session.origin_account_io_lease = None;
         }
-        notify
     };
-    if let Some(notify) = notify_waiters {
-        notify.notify_waiters();
+    match deadline {
+        Some(deadline) => {
+            let _ = timeout(deadline.saturating_duration_since(Instant::now()), clear).await;
+        }
+        None => clear.await,
     }
-}
-
-pub async fn finish_hls_origin_io(
-    ctx: &HlsCtx,
-    binding: &HlsOriginAccountBinding,
-    provider_handle: Option<ProviderHandle>,
-    reservation_ttl_secs: u64,
-) {
-    ctx.connection_manager.release_provider_handle(provider_handle).await;
-    ctx.active_provider
-        .refresh_provider_reservation(&binding.account_name, &binding.session_owner, reservation_ttl_secs)
-        .await;
 }
 
 pub async fn finish_hls_origin_account_io(
     origin_io: &HlsOriginIoContext,
     session: &HlsSessionHandle,
-    guard: HlsOriginAccountIoLeaseGuard,
+    mut guard: HlsOriginAccountIoLeaseGuard,
     refresh_reservation: bool,
 ) {
-    let binding = guard.binding;
-    let mut provider_handle_to_release = None;
+    let binding = guard.binding().clone();
+    let mut provider_resource_to_release = None;
     let mut should_refresh_reservation = false;
-    let mut should_clear_reservation = false;
+    let confirmed_ttl_secs;
     {
         let mut session = session.write().await;
-        if let Some(lease) = session
-            .origin_account_io_lease
-            .as_mut()
-            .filter(|lease| lease.matches_binding(&binding) && lease.active_io_count > 0)
-        {
-            lease.active_io_count = lease.active_io_count.saturating_sub(1);
-            if lease.active_io_count == 0 {
-                provider_handle_to_release = lease.provider_handle.take();
+
+        let now_ms = chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default();
+        confirmed_ttl_secs = session.activity.last_delivered_media_at_ms.map_or(0, |last| {
+            last.saturating_add(origin_io.reservation_ttl_secs.saturating_mul(1000))
+                .saturating_sub(now_ms)
+                .div_ceil(1000)
+        });
+
+        // Decrement directly on guard.lease, not session.origin_account_io_lease.
+        // The session may have been rebound or replaced between I/O start and finish.
+        // Only clear the session reference if it still points to this exact lease instance.
+        guard.disarm();
+        if guard.lease.active_io_count.fetch_sub(1, std::sync::atomic::Ordering::AcqRel) == 1 {
+            provider_resource_to_release = guard.lease.take_resource();
+            if session
+                .origin_account_io_lease
+                .as_ref()
+                .is_some_and(|session_lease| std::sync::Arc::ptr_eq(session_lease, &guard.lease))
+            {
                 session.origin_account_io_lease = None;
-                if refresh_reservation {
-                    should_refresh_reservation = true;
-                } else {
-                    should_clear_reservation = true;
-                }
+            }
+            if refresh_reservation && confirmed_ttl_secs > 0 {
+                should_refresh_reservation = true;
             }
         }
 
@@ -827,6 +1056,7 @@ pub async fn finish_hls_origin_account_io(
             current.is_active()
                 && current.account_name == binding.account_name
                 && current.session_owner == binding.session_owner
+                && current.generation == binding.generation
         }) {
             let now_ms = chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default();
             current.last_origin_io_at_ms = Some(now_ms);
@@ -836,14 +1066,19 @@ pub async fn finish_hls_origin_account_io(
         }
     }
 
-    if let Some(provider_handle) = provider_handle_to_release {
+    if let Some((provider_handle, cleanup_permit)) = provider_resource_to_release {
+        let mut handle_guard = ManagedHandleGuard::new(provider_handle, cleanup_permit);
         if should_refresh_reservation {
-            finish_hls_origin_io(&origin_io.ctx, &binding, Some(provider_handle), origin_io.reservation_ttl_secs).await;
-        } else {
-            origin_io.ctx.connection_manager.release_provider_handle(Some(provider_handle)).await;
-            if should_clear_reservation {
-                origin_io.ctx.active_provider.clear_provider_reservation(&binding.session_owner).await;
+            if let Some(request_id) = binding.playback_request_id {
+                origin_io.ctx.active_provider.refresh_playback_lease(
+                    &binding.account_name,
+                    &PlaybackLeaseRef { owner: &binding.session_owner, kind: PlaybackKind::LiveHls, request_id },
+                    confirmed_ttl_secs,
+                );
             }
+        }
+        if let Some((handle, permit)) = handle_guard.take_resource() {
+            permit.send(CleanupEvent::ReleaseProviderHandle { handle: Some(handle) });
         }
     }
 }
@@ -874,7 +1109,7 @@ mod tests {
         let mut session = HlsSession::new(HlsSessionKey::new(1, "lock-release"), b"secret", 1_000);
         let binding =
             HlsOriginAccountBinding::new(Arc::from("input"), Arc::from("account"), &session.proxy_session_id, 1_000);
-        session.origin_account_io_lease = Some(HlsOriginAccountIoLease::acquiring(&binding));
+        session.origin_account_io_lease = Some(std::sync::Arc::new(HlsOriginAccountIoLease::acquiring(&binding)));
         let session = Arc::new(tokio::sync::RwLock::new(session));
         let waiting_session = Arc::clone(&session);
         let waiting_binding = binding.clone();
@@ -889,7 +1124,7 @@ mod tests {
         let completion = tokio::spawn(async move {
             let notify = {
                 let mut session = completing_session.write().await;
-                session.origin_account_io_lease.take().map(|lease| lease.notify)
+                session.origin_account_io_lease.take().map(|lease| std::sync::Arc::clone(&lease.notify))
             };
             if let Some(notify) = notify {
                 notify.notify_waiters();
@@ -898,7 +1133,7 @@ mod tests {
         tokio::task::yield_now().await;
         assert!(completion.is_finished(), "the waiter must not retain the session lock");
         completion.await.expect("controlled completion task");
-        assert!(matches!(waiter.await.expect("controlled waiter task"), Ok(HlsOriginAccountIoSlot::Acquire)));
+        assert!(matches!(waiter.await.expect("controlled waiter task"), Ok(HlsOriginAccountIoSlot::Acquire(_))));
     }
 
     #[test]
@@ -907,6 +1142,54 @@ mod tests {
 
         assert_eq!(owner, "hls-cache:abcdef");
         assert!(!owner.contains('|'));
+    }
+
+    #[test]
+    fn released_origin_io_lease_cannot_be_rejoined() {
+        let session = HlsSession::new(HlsSessionKey::new(1, "released-io"), b"secret", 1_000);
+        let binding =
+            HlsOriginAccountBinding::new(Arc::from("input"), Arc::from("account"), &session.proxy_session_id, 1_000);
+        let lease = HlsOriginAccountIoLease::active_for_test(&binding, 0);
+
+        assert!(!lease.try_join());
+        assert_eq!(lease.active_io_count.load(std::sync::atomic::Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn active_origin_io_lease_cannot_be_replaced_by_another_generation() {
+        let mut session = HlsSession::new(HlsSessionKey::new(1, "generation-conflict"), b"secret", 1_000);
+        let binding =
+            HlsOriginAccountBinding::new(Arc::from("input"), Arc::from("account"), &session.proxy_session_id, 1_000);
+        let conflicting = HlsOriginAccountBinding::rebound(
+            Arc::clone(&binding.input_name),
+            Arc::clone(&binding.account_name),
+            binding.session_owner.clone(),
+            binding.generation + 1,
+            1_001,
+        );
+        let lease = Arc::new(HlsOriginAccountIoLease::active_for_test(&binding, 1));
+        session.origin_account_io_lease = Some(Arc::clone(&lease));
+
+        assert!(matches!(
+            super::try_reserve_hls_origin_account_io_slot(&mut session, &conflicting),
+            super::HlsOriginAccountIoReserveOutcome::ReservedForOther
+        ));
+        assert!(session.origin_account_io_lease.as_ref().is_some_and(|current| Arc::ptr_eq(current, &lease)));
+        assert_eq!(lease.active_io_count.load(std::sync::atomic::Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn gc_marked_session_rejects_origin_io_reservation() {
+        let mut session = HlsSession::new(HlsSessionKey::new(1, "gc-marked"), b"secret", 1_000);
+        let binding =
+            HlsOriginAccountBinding::new(Arc::from("input"), Arc::from("account"), &session.proxy_session_id, 1_000);
+        session.mark_for_gc_removal();
+
+        assert!(matches!(
+            super::try_reserve_hls_origin_account_io_slot(&mut session, &binding),
+            super::HlsOriginAccountIoReserveOutcome::Unavailable
+        ));
+        assert!(session.origin_account_io_lease.is_none());
     }
 
     #[test]
@@ -945,18 +1228,18 @@ mod tests {
         let timing = HlsAccountOverlapTiming::from_target_duration_secs(Some(10));
 
         assert_eq!(
-            classify_account_binding_protection(Some(1_000), 5_000, timing),
+            classify_account_binding_protection(Some(1_000), 5_000, &timing),
             HlsAccountBindingProtection::HardActive { until_ms: 11_000 }
         );
         assert_eq!(
-            classify_account_binding_protection(Some(1_000), 20_000, timing),
+            classify_account_binding_protection(Some(1_000), 20_000, &timing),
             HlsAccountBindingProtection::SoftActive { reclaim_until_ms: 31_000 }
         );
         assert_eq!(
-            classify_account_binding_protection(Some(1_000), 32_000, timing),
+            classify_account_binding_protection(Some(1_000), 32_000, &timing),
             HlsAccountBindingProtection::Expired
         );
-        assert_eq!(classify_account_binding_protection(None, 1_000, timing), HlsAccountBindingProtection::NoMediaYet);
+        assert_eq!(classify_account_binding_protection(None, 1_000, &timing), HlsAccountBindingProtection::NoMediaYet);
     }
 
     #[test]
@@ -1116,5 +1399,214 @@ mod tests {
         assert!(state.is_allowed_now(3_001));
         assert_eq!(state.consecutive_rebind_failures, 0);
         assert_eq!(state.next_rebind_allowed_at_ms, None);
+    }
+
+    #[tokio::test]
+    async fn origin_account_io_lease_guard_drop_decrements_count_and_cleans_up() {
+        let mut session = HlsSession::new(HlsSessionKey::new(1, "guard-drop"), b"secret", 1_000);
+        let binding =
+            HlsOriginAccountBinding::new(Arc::from("input"), Arc::from("account"), &session.proxy_session_id, 1_000);
+        session.origin_account_io_lease = Some(std::sync::Arc::new(HlsOriginAccountIoLease {
+            account_name: Arc::clone(&binding.account_name),
+            session_owner: binding.session_owner.clone(),
+            provider_handle: std::sync::Mutex::new(None),
+            cleanup_permit: std::sync::Mutex::new(None),
+            acquiring: std::sync::atomic::AtomicBool::new(false),
+            active_io_count: std::sync::atomic::AtomicUsize::new(2),
+            notify: Arc::new(tokio::sync::Notify::new()),
+            generation: 0,
+        }));
+        let session = Arc::new(tokio::sync::RwLock::new(session));
+        let guard = super::HlsOriginAccountIoLeaseGuard::new(
+            binding.clone(),
+            Arc::clone(session.try_read().unwrap().origin_account_io_lease.as_ref().unwrap()),
+        );
+        drop(guard);
+
+        let active_count = session
+            .read()
+            .await
+            .origin_account_io_lease
+            .as_ref()
+            .map(|l| l.active_io_count.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(active_count, Some(1), "drop must decrement active_io_count");
+    }
+
+    #[tokio::test]
+    async fn pending_acquire_guard_drop_clears_lease_and_notifies() {
+        let mut session = HlsSession::new(HlsSessionKey::new(1, "pending-drop"), b"secret", 1_000);
+        let binding =
+            HlsOriginAccountBinding::new(Arc::from("input"), Arc::from("account"), &session.proxy_session_id, 1_000);
+        session.origin_account_io_lease = Some(std::sync::Arc::new(HlsOriginAccountIoLease::acquiring(&binding)));
+        let session = Arc::new(tokio::sync::RwLock::new(session));
+        let guard = super::PendingAcquireGuard::new(Arc::clone(
+            session.try_read().unwrap().origin_account_io_lease.as_ref().unwrap(),
+        ));
+        drop(guard);
+
+        assert!(
+            !session
+                .read()
+                .await
+                .origin_account_io_lease
+                .as_ref()
+                .unwrap()
+                .acquiring
+                .load(std::sync::atomic::Ordering::Acquire),
+            "pending acquire drop must clear acquiring flag"
+        );
+    }
+
+    #[tokio::test]
+    async fn origin_account_io_lease_guard_drop_under_lock_contention_decrements_and_cleans_up() {
+        let mut session = HlsSession::new(HlsSessionKey::new(1, "guard-contention"), b"secret", 1_000);
+        let binding =
+            HlsOriginAccountBinding::new(Arc::from("input"), Arc::from("account"), &session.proxy_session_id, 1_000);
+        session.origin_account_io_lease = Some(std::sync::Arc::new(HlsOriginAccountIoLease {
+            account_name: Arc::clone(&binding.account_name),
+            session_owner: binding.session_owner.clone(),
+            provider_handle: std::sync::Mutex::new(None),
+            cleanup_permit: std::sync::Mutex::new(None),
+            acquiring: std::sync::atomic::AtomicBool::new(false),
+            active_io_count: std::sync::atomic::AtomicUsize::new(2),
+            notify: Arc::new(tokio::sync::Notify::new()),
+            generation: 0,
+        }));
+        let session = Arc::new(tokio::sync::RwLock::new(session));
+        let guard = super::HlsOriginAccountIoLeaseGuard::new(
+            binding.clone(),
+            Arc::clone(session.try_read().unwrap().origin_account_io_lease.as_ref().unwrap()),
+        );
+
+        let lock = session.read().await;
+        drop(guard);
+        assert_eq!(
+            lock.origin_account_io_lease.as_ref().map(|l| l.active_io_count.load(std::sync::atomic::Ordering::Acquire)),
+            Some(1),
+            "drop MUST synchronously modify active_io_count even when session is locked"
+        );
+        drop(lock);
+
+        for _ in 0..100 {
+            if session
+                .read()
+                .await
+                .origin_account_io_lease
+                .as_ref()
+                .map(|l| l.active_io_count.load(std::sync::atomic::Ordering::Acquire))
+                == Some(1)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let active_count = session
+            .read()
+            .await
+            .origin_account_io_lease
+            .as_ref()
+            .map(|l| l.active_io_count.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(active_count, Some(1), "deferred cleanup must decrement active_io_count");
+    }
+
+    #[tokio::test]
+    async fn pending_acquire_guard_drop_under_lock_contention_clears_lease_and_notifies() {
+        let mut session = HlsSession::new(HlsSessionKey::new(1, "pending-contention"), b"secret", 1_000);
+        let binding =
+            HlsOriginAccountBinding::new(Arc::from("input"), Arc::from("account"), &session.proxy_session_id, 1_000);
+        let notify = Arc::new(tokio::sync::Notify::new());
+        session.origin_account_io_lease = Some(std::sync::Arc::new(HlsOriginAccountIoLease {
+            account_name: Arc::clone(&binding.account_name),
+            session_owner: binding.session_owner.clone(),
+            provider_handle: std::sync::Mutex::new(None),
+            cleanup_permit: std::sync::Mutex::new(None),
+            acquiring: std::sync::atomic::AtomicBool::new(true),
+            active_io_count: std::sync::atomic::AtomicUsize::new(0),
+            notify: Arc::clone(&notify),
+            generation: 0,
+        }));
+        let session = Arc::new(tokio::sync::RwLock::new(session));
+        let guard = super::PendingAcquireGuard::new(Arc::clone(
+            session.try_read().unwrap().origin_account_io_lease.as_ref().unwrap(),
+        ));
+
+        let lock = session.read().await;
+        let notified_future = notify.notified();
+        drop(guard);
+        assert!(
+            !lock.origin_account_io_lease.as_ref().unwrap().acquiring.load(std::sync::atomic::Ordering::Acquire),
+            "drop MUST synchronously clear acquiring flag"
+        );
+        drop(lock);
+
+        let notified = tokio::time::timeout(std::time::Duration::from_secs(1), notified_future).await;
+        assert!(notified.is_ok(), "deferred cleanup must notify waiters");
+        assert!(
+            !session
+                .read()
+                .await
+                .origin_account_io_lease
+                .as_ref()
+                .unwrap()
+                .acquiring
+                .load(std::sync::atomic::Ordering::Acquire),
+            "synchronous drop must clear acquiring flag"
+        );
+    }
+
+    /// The begin path must own the pending lease before the first cleanup-permit wait:
+    /// when the cleanup channel is saturated and the permit wait times out, the pending
+    /// lease is cleared instead of staying `acquiring` forever.
+    #[tokio::test]
+    async fn begin_cleanup_permit_timeout_allows_next_acquire() {
+        let ctx = crate::hls_ctx::HlsCtx::for_test(tuliprox_core::model::Config::default());
+        let origin_io = super::HlsOriginIoContext {
+            ctx: ctx.clone(),
+            client_addr: "127.0.0.1:8080".parse().unwrap(),
+            allow_grace: false,
+            priority: 0,
+            connection_kind: tuliprox_session::ConnectionKind::Normal,
+            reservation_ttl_secs: 60,
+            preacquired_provider_handle: None,
+            started_generation: None,
+        };
+
+        let mut session = HlsSession::new(HlsSessionKey::new(1, "permit-timeout"), b"secret", 1_000);
+        let binding =
+            HlsOriginAccountBinding::new(Arc::from("input"), Arc::from("account"), &session.proxy_session_id, 1_000);
+        session.origin_account_binding = Some(binding.clone());
+        let session = Arc::new(tokio::sync::RwLock::new(session));
+
+        // Saturate the control cleanup lane so `reserve_cleanup_permit` blocks until
+        // the bounded deadline fires.
+        let mut held_permits = Vec::new();
+        while let Ok(permit) = tokio::time::timeout(
+            std::time::Duration::from_millis(1),
+            ctx.connection_manager.control_cleanup_tx().reserve_owned(),
+        )
+        .await
+        {
+            held_permits.push(permit);
+        }
+
+        let result = super::begin_hls_origin_account_io_bounded(
+            &origin_io,
+            &session,
+            &binding,
+            std::time::Duration::from_millis(50),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(HlsBoundAccountAcquireErrorKind::AcquireTimedOut)),
+            "a saturated cleanup queue must time out the permit wait, got {result:?}"
+        );
+
+        let pending_cleared = session
+            .read()
+            .await
+            .origin_account_io_lease
+            .as_ref()
+            .is_none_or(|lease| !lease.acquiring.load(std::sync::atomic::Ordering::Acquire));
+        assert!(pending_cleared, "the pending lease must not stay acquiring after the permit timeout");
     }
 }

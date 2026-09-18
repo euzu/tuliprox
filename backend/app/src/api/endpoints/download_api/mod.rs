@@ -1161,7 +1161,7 @@ pub(in crate::api) async fn ensure_download_worker_running(
                             };
                             if let Some(input_name) = input_name {
                                 loop {
-                                    let capacities = active_provider.provider_capacities_for_input(&input_name).await;
+                                    let capacities = active_provider.provider_capacities_for_input(&input_name);
                                     if background_download_should_wait(priority, &capacities, &download_cfg) {
                                         if let Err(err) = broadcast_worker_mutation(
                                             &event_manager,
@@ -1199,7 +1199,7 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                         continue;
                                     }
                                     if let Some(handle) =
-                                        active_provider.acquire_connection_for_download(&input_name, priority).await
+                                        active_provider.acquire_connection_for_download(&input_name, priority)
                                     {
                                         break ProviderAcquireResult::Acquired(Some(handle));
                                     }
@@ -1266,12 +1266,12 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                         broadcast_download_queue_update(&event_manager, &dq).await;
                                     }
                                     Ok(None) => {
-                                        connection_manager.release_provider_handle(handle).await;
+                                        connection_manager.release_provider_handle(handle);
                                         error!("Download worker active task changed after provider acquire");
                                         break 'worker;
                                     }
                                     Err(err) => {
-                                        connection_manager.release_provider_handle(handle).await;
+                                        connection_manager.release_provider_handle(handle);
                                         error!("Download worker commit failed after provider acquire: {err}");
                                         break 'worker;
                                     }
@@ -1321,7 +1321,7 @@ pub(in crate::api) async fn ensure_download_worker_running(
                         let execution_result = {
                             let Some(download) = active_download_snapshot_for_worker(&dq.active, &worker_uuid).await
                             else {
-                                connection_manager.release_provider_handle(provider_handle).await;
+                                connection_manager.release_provider_handle(provider_handle);
                                 break 'worker;
                             };
                             match download.kind.clone() {
@@ -1406,7 +1406,7 @@ pub(in crate::api) async fn ensure_download_worker_running(
 
                         match execution_result {
                             DownloadExecutionResult::Completed => {
-                                connection_manager.release_provider_handle(provider_handle).await;
+                                connection_manager.release_provider_handle(provider_handle);
                                 let measured_bytes = {
                                     let active = dq.active.read().await;
                                     match active.as_ref() {
@@ -1455,7 +1455,7 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                 }
                             }
                             DownloadExecutionResult::Paused => {
-                                connection_manager.release_provider_handle(provider_handle).await;
+                                connection_manager.release_provider_handle(provider_handle);
                                 if let Err(err) = broadcast_required_worker_mutation(
                                     &event_manager,
                                     &dq,
@@ -1471,7 +1471,7 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                 break;
                             }
                             DownloadExecutionResult::Cancelled => {
-                                connection_manager.release_provider_handle(provider_handle).await;
+                                connection_manager.release_provider_handle(provider_handle);
                                 if let Err(err) = broadcast_required_worker_mutation(
                                     &event_manager,
                                     &dq,
@@ -1485,7 +1485,7 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                 }
                             }
                             DownloadExecutionResult::Preempted => {
-                                connection_manager.release_provider_handle(provider_handle).await;
+                                connection_manager.release_provider_handle(provider_handle);
                                 let control = *control_signal.read().await;
                                 match control {
                                     DownloadControl::Restart => warn!(
@@ -1524,7 +1524,7 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                 }
                             }
                             DownloadExecutionResult::Retryable(_err) => {
-                                connection_manager.release_provider_handle(provider_handle).await;
+                                connection_manager.release_provider_handle(provider_handle);
                                 warn!("Retrying active download after transient failure");
                                 let retry_commit = prepare_active_retry(&dq, &worker_uuid, &download_cfg).await;
                                 let retry_delay_secs = match retry_commit {
@@ -1641,7 +1641,7 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                 }
                             }
                             DownloadExecutionResult::Failed(err) => {
-                                connection_manager.release_provider_handle(provider_handle).await;
+                                connection_manager.release_provider_handle(provider_handle);
                                 warn!("Download failed permanently: {err}");
                                 let committed = finish_active_and_promote(&dq, &worker_uuid, |fd| {
                                     fd.finished = true;
@@ -1729,7 +1729,7 @@ pub(in crate::api) fn start_download_scheduler(
                 let capacities = if let Some(capacities) = capacities_by_input.get(input_name) {
                     capacities.clone()
                 } else {
-                    let capacities = bridge_active_provider.provider_capacities_for_input(input_name).await;
+                    let capacities = bridge_active_provider.provider_capacities_for_input(input_name);
                     capacities_by_input.insert(Arc::clone(input_name), capacities.clone());
                     capacities
                 };

@@ -29,7 +29,7 @@ use crate::{
             hls_provisioning_discontinuity_sequence, hls_virtual_entry_redirect_response,
             is_custom_video_stream_enabled, start_hls_panel_provisioning_once,
             try_hls_panel_provisioning_manifest_response, AppState, ConnectionHistoryMode, CustomVideoStreamType,
-            GraceMode, HlsPanelProvisioningRedirectPaths, HlsProvisioningStatus, ProviderAllocation,
+            GraceMode, HlsPanelProvisioningRedirectPaths, HlsProvisioningStatus, PlaybackLeaseRef, ProviderAllocation,
             ProviderConfig as RuntimeProviderConfig, ProviderHandle, StreamMeterHandle, TransportStreamBuffer,
             UserSession,
         },
@@ -37,7 +37,7 @@ use crate::{
     },
     auth::{check_network_access_only, Fingerprint},
     model::{
-        ConfigInput, ConfigInputFlags, ConfigProvider, ConfigTarget, InputSource, ProxyUserCredentials,
+        ConfigInput, ConfigInputFlags, ConfigProvider, ConfigTarget, InputSource, PlaybackKind, ProxyUserCredentials,
         ReverseProxyDisabledHeaderConfig,
     },
     processing::parser::hls::{
@@ -115,9 +115,9 @@ use tuliprox_hls::{
         OriginSegmentKey, ProxySessionId, RetryPolicy, SegmentCacheKey, SegmentCacheStatus, SegmentDemandFetchOutcome,
         SegmentEntry, SegmentFetchContext, SegmentFetchPolicy, TransientManifestGeneration, TransientObjectFetchToken,
         TransientObjectUnavailableState, TransientPassthroughState, TransientResourceFile, TransientResourceId,
-        TransientResourceRef, HLS_ACCESS_LEASE_ID_PLACEHOLDER, HLS_PROVISIONING_GAP_ORIGIN_EPOCH,
-        HLS_PROVISIONING_ORIGIN_EPOCH, HLS_PROVISIONING_SEGMENT_DURATION_MS, HLS_PROVISIONING_TARGET_DURATION_SECS,
-        MAX_HLS_MANIFEST_BYTES,
+        TransientResourceKind, TransientResourceRef, HLS_ACCESS_LEASE_ID_PLACEHOLDER,
+        HLS_PROVISIONING_GAP_ORIGIN_EPOCH, HLS_PROVISIONING_ORIGIN_EPOCH, HLS_PROVISIONING_SEGMENT_DURATION_MS,
+        HLS_PROVISIONING_TARGET_DURATION_SECS, MAX_HLS_MANIFEST_BYTES,
     },
     HlsCtx, MAX_MANUAL_REDIRECTS,
 };

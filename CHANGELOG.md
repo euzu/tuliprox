@@ -985,6 +985,41 @@
 
 ## 🐛 Fixes
 
+- **Provider priority was ignored and a second concurrent client failed with a source error while capacity was free.**
+  Provider-slot reservations were granted as soon as a playback opened a provider, so an HLS/DASH entry that only ever
+  served a manifest — or a player that retried its manifest and gave up — still held a reservation for the whole
+  `hls_session_ttl_secs` window. Because HLS entry session tokens carry a per-attempt suffix, every retry created a
+  *separate* reservation under a *separate* owner. Those reservations were foreign to one another and to unrelated
+  clients, so a higher-priority provider was skipped as reserved even after the active connection counters had reached
+  zero and playback fell through to a lower-priority alias. Clients sharing one reverse-proxy socket hit this
+  constantly, which looked like exhausted capacity or socket-based reservation collisions.
+
+  Reservations are now provider slot leases with an explicit confirmation step. A lease starts unconfirmed, pins the
+  provider for its own playback, and blocks nobody else. Only real media delivery confirms it — the first provider media
+  byte forwarded to a client as an `OK`/`206` media response. Manifest, HEAD, key, map and error fetches never confirm a
+  lease — and only a confirmed lease with a configured reconnect
+  window reserves capacity against other playbacks. Unconfirmed leases expire after a short startup deadline regardless
+  of TTL, so abandoned starts and manifest-retry loops no longer accumulate. One owner holds at most one lease, so
+  repeated requests of the same playback reuse their slot instead of stacking a reservation per attempt.
+
+  Lease end is outcome-driven: a clean finish of a reconnect-capable playback (HLS, DASH, VOD, series, catchup) keeps the
+  slot as an idle lease for its window, while provider failure, preemption, kick and timeout release capacity
+  immediately. The `Skipping reserved provider ... for <SocketAddr>` message is replaced by a structured decision log
+  carrying the reason, current and maximum connections, foreign reserved slots, and the active/starting/idle slot split,
+  so a fallback decision can be audited without inferring it from a socket address.
+
+  Playback cleanup is now request-specific. Parallel segment, range and reconnect requests carry independent request
+  identities, while a provider-binding generation prevents delayed cleanup from releasing a newer successor binding.
+  Provider allocations are owned by drop guards until they are explicitly transferred, closing cancellation gaps during
+  provider open, grace handling and HLS origin refresh.
+
+  Shared MPEG-TS subscribers now have identities independent of their transport socket, so clients sharing one reverse
+  proxy connection cannot replace or cancel one another. Subscriber queues enforce byte and chunk budgets, slow clients
+  have progress deadlines, and incomplete burst replay ends only the affected subscriber instead of skipping into live
+  delivery. Cleanup admission is bounded by the new `reverse_proxy.stream.cleanup_queue_capacity` setting (default
+  `4096`); mandatory HLS cleanup uses a reserved control lane. Graceful shutdown closes admission, releases active
+  claims and provider leases, and waits for owned streaming and cleanup workers to finish.
+
 - **PTT title parsing: fixed panics on multi-byte UTF-8 character boundaries (e.g. en-dash `–`).** During title
   metadata parsing (such as background VOD/series metadata enrichment), previous match indices recorded from earlier
   handlers (e.g. `year`) could become stale after preceding handlers removed matched substrings in-place with

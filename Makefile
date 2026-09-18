@@ -3,6 +3,7 @@ OS := $(shell uname -s)
 ARCH := $(shell uname -m)
 
 # Paths
+PROJECT_DIR ?= $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 CARGO_HOME ?= $(HOME)/.cargo
 CARGO_BIN_DIR ?= $(CARGO_HOME)/bin
 
@@ -33,6 +34,21 @@ BOLD  := \033[1m
 # Number of CPUs (portable): try GNU `nproc`, then POSIX `getconf`, then macOS `sysctl`
 CPU_COUNT := $(shell nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
 CARGO_BUILD_JOBS := $(CPU_COUNT)
+
+# Support positional argument for serve: make serve <settings_folder>
+ifeq ($(firstword $(MAKECMDGOALS)),serve)
+  SETTINGS_ARG := $(word 2,$(MAKECMDGOALS))
+  ifneq ($(SETTINGS_ARG),)
+    SETTINGS_FOLDER ?= $(SETTINGS_ARG)
+    EXTRA_GOALS := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
+    $(eval .PHONY: $(EXTRA_GOALS))
+    $(eval $(EXTRA_GOALS):;@:)
+  endif
+endif
+SETTINGS_FOLDER ?= $(settings_folder)
+ifeq ($(SETTINGS_FOLDER),)
+  SETTINGS_FOLDER := $(TULIPROX_HOME)
+endif
 
 .PHONY: help
 help: ## Display this help
@@ -149,10 +165,41 @@ test: ## Run all workspace tests (Stable) — use detected CPU count for paralle
 	@echo "==> Running tests (stable) with $(CPU_COUNT) jobs/threads"
 	@TMPDIR="$${TMPDIR:-/tmp}" RUST_TEST_THREADS=$(CPU_COUNT) ./bin/test.sh -j$(CPU_COUNT) --workspace -- --test-threads=$(CPU_COUNT)
 
+.PHONY: admission-test
+admission-test: ## Verify admission, provider-slot, seek/reopen, shared-stream, and cleanup invariants
+	@echo "==> Running HTTP admission and provider lifecycle tests"
+	@$(CARGO_STABLE) test --package tuliprox api_utils::tests:: -- --test-threads=1
+	@echo "==> Running client stream lifecycle tests"
+	@$(CARGO_STABLE) test --package tuliprox api::model::streams::active_client_stream::tests:: -- --test-threads=1
+	@echo "==> Running session, eviction, and provider-slot lifecycle tests"
+	@$(CARGO_STABLE) test --package tuliprox-session -- --test-threads=1
+
+.PHONY: testkit-test
+testkit-test: ## Run unit tests in tuliprox-testkit
+	@echo "==> Running testkit unit tests"
+	@$(CARGO_STABLE) test --package tuliprox-testkit
+
+.PHONY: testkit-e2e
+testkit-e2e: ## Run testkit E2E scenario suite against freshly built SUT
+	@echo "==> Building tuliprox and tuliprox-testkit"
+	@$(CARGO_STABLE) build --package tuliprox --package tuliprox-testkit
+	@echo "==> Executing testkit scenario suite"
+	@./bin/run-testkit-scenarios.sh
+
 .PHONY: build
 build: ## Build the entire workspace in parallel using detected CPU count
 	@echo "==> Building workspace with $(CARGO_BUILD_JOBS) jobs"
 	@TMPDIR="$${TMPDIR:-/tmp}" $(CARGO_STABLE) build -j$(CARGO_BUILD_JOBS) --workspace
+
+.PHONY: serve
+serve: ## Run tuliprox server with settings folder: make serve <settings_folder>
+	@if [ -z "$(SETTINGS_FOLDER)" ]; then \
+		echo "❌ Error: Settings folder is required."; \
+		echo "Usage: make serve <settings_folder>  OR  make serve SETTINGS_FOLDER=<settings_folder>"; \
+		exit 1; \
+	fi
+	@echo "==> Starting tuliprox server with TULIPROX_HOME=$(SETTINGS_FOLDER)"
+	TULIPROX_HOME="$(SETTINGS_FOLDER)" $(CARGO) run --release --manifest-path $(PROJECT_DIR)/Cargo.toml --package tuliprox --bin tuliprox -- -s
 
 .PHONY: architecture-check
 architecture-check: ## Verify workspace dependency direction
@@ -180,6 +227,8 @@ fmt: ## Format all code using nightly rules (Compact)
 fmt-check: ## Check if code follows formatting rules (Nightly)
 	@echo "==> Checking formatting (nightly)"
 	$(CARGO_NIGHTLY) fmt --all -- --check
+	@echo "==> Checking git diff for whitespace errors"
+	git diff --check
 
 .PHONY: markdown-lint mdlint
 markdown-lint: ## Lint markdown files

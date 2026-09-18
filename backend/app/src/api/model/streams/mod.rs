@@ -45,4 +45,5 @@ pub use crate::utils::network::request::STREAM_IDLE_TIMEOUT;
 pub(crate) use shared::model::CustomVideoStreamType;
 // Shared-stream fan-out and its buffer moved to `tuliprox-session`;
 // re-exported so api call sites keep their names, module paths included.
+#[cfg(test)]
 pub(crate) use tuliprox_session::streams::buffered_stream;

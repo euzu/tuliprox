@@ -79,7 +79,14 @@ impl ManualClock {
 
     /// Move time forward, saturating rather than wrapping.
     pub fn advance(&self, delta_ms: u64) {
-        self.0.fetch_update(Ordering::Release, Ordering::Acquire, |now| Some(now.saturating_add(delta_ms))).ok();
+        let mut now = self.0.load(Ordering::Acquire);
+        loop {
+            match self.0.compare_exchange_weak(now, now.saturating_add(delta_ms), Ordering::Release, Ordering::Acquire)
+            {
+                Ok(_) => break,
+                Err(observed) => now = observed,
+            }
+        }
     }
 }
 

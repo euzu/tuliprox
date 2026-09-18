@@ -14,7 +14,12 @@ use crate::{
     utils::FileLockManager,
 };
 use arc_swap::{ArcSwap, ArcSwapOption};
-use axum::http::{HeaderMap, Response, StatusCode};
+use axum::{
+    extract::{ConnectInfo, State},
+    http::{HeaderMap, Response, StatusCode},
+    routing::get,
+    Router,
+};
 use bytes::Bytes;
 use futures::stream;
 use http_body_util::BodyExt;
@@ -23,14 +28,14 @@ use shared::{
     foundation::Filter,
     model::{
         AdmissionStrategy, ClusterFlags, ConfigPaths, ConfigProviderDto, ConfigTargetOptions, GeoIpUnavailablePolicy,
-        InputFetchMethod, InputType, PlaylistItemType, ProcessingOrder, ProviderUrlSelectionPolicy, ProxyType,
-        StreamChannel, XtreamCluster,
+        InputFetchMethod, InputType, PlaylistItem, PlaylistItemHeader, PlaylistItemType, ProcessingOrder,
+        ProviderUrlSelectionPolicy, ProxyType, StreamChannel, TargetType, XtreamCluster,
     },
     utils::Internable,
 };
 use std::{borrow::Cow, collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::{
-    io::AsyncWriteExt,
+    io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
     sync::{mpsc, RwLock},
 };
@@ -56,6 +61,22 @@ fn initial_stalker_playback_resolves_only_empty_urls() {
     assert!(!needs_initial_stalker_resolution(InputType::Stalker, "https://stream.example/live.ts"));
     assert!(!needs_initial_stalker_resolution(InputType::Xtream, ""));
     assert_eq!(stalker_stream_kind(XtreamCluster::Live, PlaylistItemType::Catchup), StalkerStreamKind::Archive);
+}
+
+#[test]
+fn stream_admission_rejection_is_503_without_upstream_headers() {
+    use crate::api::model::StreamAdmissionError;
+
+    for error in [
+        StreamAdmissionError::CleanupReceiverClosed,
+        StreamAdmissionError::CleanupAdmissionTimeout,
+        StreamAdmissionError::RegistrationRejected,
+    ] {
+        let response = stream_admission_rejected_response(error, "test-user");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(response.headers().get("content-length").is_none(), "must not leak upstream content-length");
+        assert!(response.headers().get("content-range").is_none(), "must not leak upstream content-range");
+    }
 }
 
 fn test_runtime_provider(url: &str, username: &str, password: &str) -> Arc<RuntimeProviderConfig> {
@@ -171,7 +192,7 @@ fn test_runtime_provider_with_type(
     };
     Arc::new(RuntimeProviderConfig::new(
         &input,
-        Arc::new(RwLock::new(ProviderConfigConnection::default())),
+        Arc::new(std::sync::RwLock::new(ProviderConfigConnection::default())),
         Arc::new(|_, _| {}),
     ))
 }
@@ -180,7 +201,7 @@ fn test_runtime_provider_without_credentials(url: &str, input_type: InputType) -
     let input = ConfigInput { name: "provider".intern(), url: url.to_string(), input_type, ..ConfigInput::default() };
     Arc::new(RuntimeProviderConfig::new(
         &input,
-        Arc::new(RwLock::new(ProviderConfigConnection::default())),
+        Arc::new(std::sync::RwLock::new(ProviderConfigConnection::default())),
         Arc::new(|_, _| {}),
     ))
 }
@@ -593,7 +614,7 @@ async fn select_provider_stream_url_uses_persisted_alias_url_for_independent_str
     };
     let alias = Arc::new(RuntimeProviderConfig::new(
         &alias_input,
-        Arc::new(RwLock::new(ProviderConfigConnection::default())),
+        Arc::new(std::sync::RwLock::new(ProviderConfigConnection::default())),
         Arc::new(|_, _| {}),
     ));
 
@@ -884,6 +905,139 @@ async fn spawn_legacy_hls_test_origin(
     (origin_addr, origin_task)
 }
 
+async fn spawn_range_aware_test_origin(
+    body: &'static [u8],
+    connections: usize,
+) -> (SocketAddr, tokio::task::JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("test origin binds");
+    let origin_addr = listener.local_addr().expect("test origin address");
+    let origin_task = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for _ in 0..connections {
+            let Ok((mut socket, _)) = listener.accept().await else { break };
+            let mut request = Vec::new();
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let mut chunk = [0_u8; 1024];
+                let read = socket.read(&mut chunk).await.expect("test origin reads request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let request_lower = String::from_utf8_lossy(&request).to_ascii_lowercase();
+            requests.push(request_lower.clone());
+
+            let range = request_lower
+                .lines()
+                .find_map(|line| line.strip_prefix("range: bytes="))
+                .and_then(|spec| spec.split_once('-'))
+                .and_then(|(start, end)| {
+                    let start: usize = start.trim().parse().ok()?;
+                    let end: usize =
+                        if end.trim().is_empty() { body.len().saturating_sub(1) } else { end.trim().parse().ok()? };
+                    Some((start, end.min(body.len().saturating_sub(1))))
+                })
+                .unwrap_or((0, body.len().saturating_sub(1)));
+
+            let slice = &body[range.0..=range.1];
+            let head = format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Type: video/mp2t\r\nContent-Range: bytes {}-{}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                range.0,
+                range.1,
+                body.len(),
+                slice.len()
+            );
+            socket.write_all(head.as_bytes()).await.expect("test origin writes response headers");
+            socket.write_all(slice).await.expect("test origin writes response body");
+        }
+        requests
+    });
+    (origin_addr, origin_task)
+}
+
+#[allow(dead_code)]
+#[derive(Clone)]
+enum FakeOriginMode {
+    EmptyBody,
+    BlockFirstChunk(Arc<tokio::sync::Notify>),
+    ErrorBeforeFirstChunk,
+    ErrorAfterFirstChunk(Vec<u8>),
+    FixedBytes(Vec<u8>),
+}
+
+async fn spawn_controlled_fake_origin(
+    mode: FakeOriginMode,
+    max_requests: usize,
+) -> (SocketAddr, tokio::task::JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("test origin binds");
+    let origin_addr = listener.local_addr().expect("test origin address");
+    let origin_task = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for _ in 0..max_requests {
+            let Ok((mut socket, _)) = listener.accept().await else { break };
+            let mut request = Vec::new();
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let mut chunk = [0_u8; 1024];
+                let Ok(read) = socket.read(&mut chunk).await else { break };
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            if request.is_empty() {
+                continue;
+            }
+            let request_lower = String::from_utf8_lossy(&request).to_ascii_lowercase();
+            requests.push(request_lower);
+
+            match &mode {
+                FakeOriginMode::EmptyBody => {
+                    let head =
+                        "HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = socket.write_all(head.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                }
+                FakeOriginMode::BlockFirstChunk(notify) => {
+                    let head = "HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+                    let _ = socket.write_all(head.as_bytes()).await;
+                    let mut probe = [0_u8; 1];
+                    tokio::select! {
+                        _ = notify.notified() => {},
+                        _ = socket.read(&mut probe) => {},
+                    }
+                    let _ = socket.shutdown().await;
+                }
+                FakeOriginMode::ErrorBeforeFirstChunk => {
+                    let head = "HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+                    let _ = socket.write_all(head.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                }
+                FakeOriginMode::ErrorAfterFirstChunk(chunk) => {
+                    let head = "HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+                    let _ = socket.write_all(head.as_bytes()).await;
+                    let chunk_hdr = format!("{:x}\r\n", chunk.len());
+                    let _ = socket.write_all(chunk_hdr.as_bytes()).await;
+                    let _ = socket.write_all(chunk).await;
+                    let _ = socket.write_all(b"\r\n").await;
+                    let _ = socket.flush().await;
+                    let _ = socket.shutdown().await;
+                }
+                FakeOriginMode::FixedBytes(bytes) => {
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        bytes.len()
+                    );
+                    let _ = socket.write_all(head.as_bytes()).await;
+                    let _ = socket.write_all(bytes).await;
+                    let _ = socket.shutdown().await;
+                }
+            }
+        }
+        requests
+    });
+    (origin_addr, origin_task)
+}
+
 async fn forced_legacy_hls_test_response(
     origin_addr: SocketAddr,
     request_headers: &HeaderMap,
@@ -1007,6 +1161,2583 @@ async fn forced_hls_unencoded_partial_response_preserves_range_and_disables_comp
     assert!(request.contains("\r\nrange: bytes=2-\r\n"));
 }
 
+#[tokio::test]
+async fn forced_reopen_stays_on_pinned_provider_account() {
+    const ACCOUNT_A_BODY: &[u8] = b"account-a-marker";
+    const ACCOUNT_B_BODY: &[u8] = b"account-b-marker";
+
+    let head_a = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        ACCOUNT_A_BODY.len()
+    );
+    let head_b = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        ACCOUNT_B_BODY.len()
+    );
+    let (origin_a, task_a) = spawn_legacy_hls_test_origin(head_a, ACCOUNT_A_BODY.to_vec()).await;
+    let (origin_b, task_b) = spawn_legacy_hls_test_origin(head_b, ACCOUNT_B_BODY.to_vec()).await;
+
+    let input = Arc::new(ConfigInput {
+        id: 1,
+        name: "provider_1".intern(),
+        input_type: InputType::Xtream,
+        headers: HashMap::default(),
+        url: format!("http://{origin_a}"),
+        username: Some("user-a".to_string()),
+        password: Some("pass-a".to_string()),
+        enabled: true,
+        priority: 0,
+        max_connections: 1,
+        method: InputFetchMethod::default(),
+        aliases: Some(vec![ConfigInputAlias {
+            id: 2,
+            name: "provider_2".intern(),
+            url: format!("http://{origin_b}"),
+            username: Some("user-b".to_string()),
+            password: Some("pass-b".to_string()),
+            priority: 1,
+            max_connections: 1,
+            exp_date: None,
+            enabled: true,
+            stalker: None,
+        }]),
+        ..ConfigInput::default()
+    });
+    let app_config = Arc::new(create_test_provider_app_config());
+    app_config.sources.store(Arc::new(SourcesConfig { inputs: vec![Arc::clone(&input)], ..SourcesConfig::default() }));
+    let app_state = create_test_app_state_for_config(app_config);
+
+    let client_addr = SocketAddr::from(([127, 0, 0, 1], 55_400));
+    let fingerprint = create_test_fingerprint(client_addr);
+    let mut user = ProxyUserCredentials::default();
+    user.username = "viewer".to_string();
+    let session = UserSession {
+        token: "stickiness-token".to_string(),
+        transition_version: 1,
+        virtual_id: 41,
+        provider: Arc::clone(&input.name),
+        stream_url: format!("http://{origin_a}/live/1.ts").intern(),
+        provider_session_headers: HashMap::new(),
+        user_agent_stream_index: None,
+        addr: client_addr,
+        socket_bound: false,
+        active_addrs: vec![client_addr],
+        ts: 1,
+        started_at: 1,
+        permission: UserConnectionPermission::Allowed,
+        connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+        lifecycle: crate::api::model::PlaybackLifecycle::Active,
+    };
+    let mut stream_channel = create_test_live_channel(&format!("http://{origin_a}/live/1.ts"));
+    stream_channel.provider_id = 1;
+    stream_channel.input_name = Arc::clone(&input.name);
+    stream_channel.item_type = PlaylistItemType::Catchup;
+    stream_channel.cluster = XtreamCluster::Live;
+    stream_channel.url = session.stream_url.clone();
+
+    let response = force_provider_stream_response(
+        &fingerprint,
+        &app_state,
+        &session,
+        stream_channel,
+        ForceStreamRequestContext {
+            req_headers: &HeaderMap::new(),
+            input: &input,
+            user: &user,
+            session_reservation_ttl_secs: 0,
+            content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+        },
+        None,
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.expect("stream body").to_bytes();
+    assert_eq!(body.as_ref(), ACCOUNT_A_BODY, "forced reopen must stay on the pinned provider account A");
+
+    let request_a = task_a.await.expect("origin A task completes").to_ascii_lowercase();
+    assert!(!request_a.is_empty(), "origin A must have received the seek request");
+
+    let request_b = tokio::time::timeout(std::time::Duration::from_millis(250), task_b).await;
+    assert!(request_b.is_err(), "origin B must not receive a seek from an A-affine session");
+}
+
+#[tokio::test]
+async fn overlapping_vod_range_requests_return_correct_account_bytes() {
+    const VOD_BODY: &[u8] = b"0123456789abcdefghij";
+
+    let (origin_addr, origin_task) = spawn_range_aware_test_origin(VOD_BODY, 2).await;
+
+    let input = Arc::new(ConfigInput {
+        id: 1,
+        name: "provider_1".intern(),
+        input_type: InputType::Xtream,
+        headers: HashMap::default(),
+        url: format!("http://{origin_addr}"),
+        enabled: true,
+        priority: 0,
+        max_connections: 2,
+        ..ConfigInput::default()
+    });
+    let mut config = create_test_provider_app_config();
+    config.sources =
+        Arc::new(ArcSwap::from_pointee(SourcesConfig { inputs: vec![Arc::clone(&input)], ..SourcesConfig::default() }));
+    let app_state = create_test_app_state_for_config(Arc::new(config));
+
+    let client_addr = SocketAddr::from(([127, 0, 0, 1], 55_500));
+    let fingerprint = create_test_fingerprint(client_addr);
+    let mut user = ProxyUserCredentials::default();
+    user.username = "viewer".to_string();
+
+    let make_session = |token: &str| UserSession {
+        token: token.to_string(),
+        transition_version: 1,
+        virtual_id: 42,
+        provider: Arc::clone(&input.name),
+        stream_url: format!("http://{origin_addr}/movie/1.ts").intern(),
+        provider_session_headers: HashMap::new(),
+        user_agent_stream_index: None,
+        addr: client_addr,
+        socket_bound: false,
+        active_addrs: vec![client_addr],
+        ts: 1,
+        started_at: 1,
+        permission: UserConnectionPermission::Allowed,
+        connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+        lifecycle: crate::api::model::PlaybackLifecycle::Active,
+    };
+
+    let make_channel = || {
+        let mut channel = create_test_local_channel(&format!("http://{origin_addr}/movie/1.ts"));
+        channel.provider_id = 1;
+        channel.input_name = Arc::clone(&input.name);
+        channel.item_type = PlaylistItemType::Video;
+        channel.cluster = XtreamCluster::Video;
+        channel.url = format!("http://{origin_addr}/movie/1.ts").intern();
+        channel
+    };
+
+    let build_request = |range: &'static str| {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RANGE, HeaderValue::from_static(range));
+        let session = make_session(match range {
+            "bytes=0-9" => "vod-range-1",
+            _ => "vod-range-2",
+        });
+        (headers, session)
+    };
+
+    let (first_headers, first_session) = build_request("bytes=0-9");
+    let first = force_provider_stream_response(
+        &fingerprint,
+        &app_state,
+        &first_session,
+        make_channel(),
+        ForceStreamRequestContext {
+            req_headers: &first_headers,
+            input: &input,
+            user: &user,
+            session_reservation_ttl_secs: 0,
+            content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+        },
+        None,
+    )
+    .await
+    .into_response();
+    assert_eq!(first.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(first.headers().get(header::CONTENT_RANGE).and_then(|value| value.to_str().ok()), Some("bytes 0-9/20"));
+    let first_body = first.into_body().collect().await.expect("first range body").to_bytes();
+    assert_eq!(first_body.as_ref(), &VOD_BODY[0..10]);
+
+    let (second_headers, second_session) = build_request("bytes=5-14");
+    let second = force_provider_stream_response(
+        &fingerprint,
+        &app_state,
+        &second_session,
+        make_channel(),
+        ForceStreamRequestContext {
+            req_headers: &second_headers,
+            input: &input,
+            user: &user,
+            session_reservation_ttl_secs: 0,
+            content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+        },
+        None,
+    )
+    .await
+    .into_response();
+    assert_eq!(second.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        second.headers().get(header::CONTENT_RANGE).and_then(|value| value.to_str().ok()),
+        Some("bytes 5-14/20")
+    );
+    let second_body = second.into_body().collect().await.expect("second range body").to_bytes();
+    assert_eq!(second_body.as_ref(), &VOD_BODY[5..15]);
+
+    let requests = origin_task.await.expect("origin task completes");
+    assert_eq!(requests.len(), 2, "both range requests must reach the same provider account");
+    assert!(requests[0].contains("range: bytes=0-9"));
+    assert!(requests[1].contains("range: bytes=5-14"));
+}
+
+#[tokio::test]
+async fn parallel_series_range_requests_keep_both_claims_active() {
+    const SERIES_BODY: &[u8] = b"0123456789abcdefghij";
+
+    let (origin_addr, origin_task) = spawn_range_aware_test_origin(SERIES_BODY, 2).await;
+
+    let input = Arc::new(ConfigInput {
+        id: 1,
+        name: "provider_1".intern(),
+        input_type: InputType::Xtream,
+        headers: HashMap::default(),
+        url: format!("http://{origin_addr}"),
+        enabled: true,
+        priority: 0,
+        max_connections: 2,
+        ..ConfigInput::default()
+    });
+    let mut config = create_test_provider_app_config();
+    config.sources =
+        Arc::new(ArcSwap::from_pointee(SourcesConfig { inputs: vec![Arc::clone(&input)], ..SourcesConfig::default() }));
+    let app_state = create_test_app_state_for_config(Arc::new(config));
+
+    let client_addr = SocketAddr::from(([127, 0, 0, 1], 55_501));
+    let fingerprint = create_test_fingerprint(client_addr);
+    let mut user = ProxyUserCredentials::default();
+    user.username = "viewer".to_string();
+
+    let make_session = |token: &str| UserSession {
+        token: token.to_string(),
+        transition_version: 1,
+        virtual_id: 43,
+        provider: Arc::clone(&input.name),
+        stream_url: format!("http://{origin_addr}/series/1.ts").intern(),
+        provider_session_headers: HashMap::new(),
+        user_agent_stream_index: None,
+        addr: client_addr,
+        socket_bound: false,
+        active_addrs: vec![client_addr],
+        ts: 1,
+        started_at: 1,
+        permission: UserConnectionPermission::Allowed,
+        connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+        lifecycle: crate::api::model::PlaybackLifecycle::Active,
+    };
+
+    let make_channel = || {
+        let mut channel = create_test_local_channel(&format!("http://{origin_addr}/series/1.ts"));
+        channel.provider_id = 1;
+        channel.input_name = Arc::clone(&input.name);
+        channel.item_type = PlaylistItemType::Series;
+        channel.cluster = XtreamCluster::Series;
+        channel.url = format!("http://{origin_addr}/series/1.ts").intern();
+        channel
+    };
+
+    let first_headers = {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RANGE, HeaderValue::from_static("bytes=0-9"));
+        headers
+    };
+    let second_headers = {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RANGE, HeaderValue::from_static("bytes=5-14"));
+        headers
+    };
+
+    // Open both range requests before consuming either body, so both claims are
+    // active at the same time. This exercises concurrent claims of one playback
+    // rather than a sequential request/consume cycle.
+    let first = force_provider_stream_response(
+        &fingerprint,
+        &app_state,
+        &make_session("series-range-1"),
+        make_channel(),
+        ForceStreamRequestContext {
+            req_headers: &first_headers,
+            input: &input,
+            user: &user,
+            session_reservation_ttl_secs: 0,
+            content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+        },
+        None,
+    )
+    .await
+    .into_response();
+
+    let second = force_provider_stream_response(
+        &fingerprint,
+        &app_state,
+        &make_session("series-range-2"),
+        make_channel(),
+        ForceStreamRequestContext {
+            req_headers: &second_headers,
+            input: &input,
+            user: &user,
+            session_reservation_ttl_secs: 0,
+            content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+        },
+        None,
+    )
+    .await
+    .into_response();
+
+    assert_eq!(first.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(second.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(app_state.active_users.active_streams().await.len(), 2, "both range claims must be active concurrently");
+
+    let first_body = first.into_body().collect().await.expect("first series range body").to_bytes();
+    assert_eq!(first_body.as_ref(), &SERIES_BODY[0..10]);
+
+    let second_body = second.into_body().collect().await.expect("second series range body").to_bytes();
+    assert_eq!(second_body.as_ref(), &SERIES_BODY[5..15]);
+
+    let requests = origin_task.await.expect("origin task completes");
+    assert_eq!(requests.len(), 2, "both series range requests must reach the same provider account");
+    assert!(requests[0].contains("range: bytes=0-9"));
+    assert!(requests[1].contains("range: bytes=5-14"));
+}
+
+async fn spawn_load_test_origin(body: &'static [u8]) -> SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("load origin binds");
+    let addr = listener.local_addr().expect("load origin address");
+    let app = axum::Router::new().fallback(move || async move {
+        ([(axum::http::header::CONTENT_TYPE, "video/mp2t")], Bytes::from_static(body))
+    });
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    addr
+}
+
+fn load_test_latency_percentile(sorted: &[u64], p: f64) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let index = ((sorted.len() as f64 - 1.0) * p).round() as usize;
+    sorted[index.min(sorted.len() - 1)]
+}
+
+fn validate_load_response(status: StatusCode, payload: &[u8], expected: &[u8]) -> Result<(), String> {
+    if status != StatusCode::OK {
+        return Err(format!("unexpected HTTP status {status}"));
+    }
+    if payload != expected {
+        return Err(format!("payload mismatch: expected {} bytes, received {}", expected.len(), payload.len()));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct SoakResourceSample {
+    elapsed_secs: f64,
+    rss_kib: Option<u64>,
+    provider_connections: usize,
+    lease_starting: usize,
+    lease_active: usize,
+    lease_idle: usize,
+    user_requests: usize,
+    user_sessions: usize,
+    shared_origins: usize,
+    shared_subscribers: usize,
+    shared_meters: usize,
+    running_tasks: usize,
+    completed: u64,
+    planned_aborted: u64,
+    unexpected_failed: u64,
+}
+
+fn median_u64(values: &mut [u64]) -> Option<u64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_unstable();
+    Some(values[values.len() / 2])
+}
+
+#[cfg(target_os = "linux")]
+fn load_test_rss_kib() -> Option<u64> {
+    let Ok(content) = std::fs::read_to_string("/proc/self/status") else {
+        return None;
+    };
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            return rest.split_whitespace().next().and_then(|v| v.parse::<u64>().ok());
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn load_test_rss_kib() -> Option<u64> { None }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "HTTP load test: cargo +stable test -p tuliprox --release --bin tuliprox -- --ignored --nocapture http_provider_lease_load_test"]
+async fn http_provider_lease_load_test() {
+    const TS_PACKET: [u8; 188] = [0x47; 188];
+    let origin_addr = spawn_load_test_origin(&TS_PACKET).await;
+
+    let input = Arc::new(ConfigInput {
+        id: 1,
+        name: "provider_1".intern(),
+        input_type: InputType::Xtream,
+        headers: HashMap::default(),
+        url: format!("http://{origin_addr}"),
+        enabled: true,
+        priority: 0,
+        max_connections: 0,
+        ..ConfigInput::default()
+    });
+    let mut config = create_test_provider_app_config();
+    config.sources =
+        Arc::new(ArcSwap::from_pointee(SourcesConfig { inputs: vec![Arc::clone(&input)], ..SourcesConfig::default() }));
+    let app = create_test_app_state_for_config(Arc::new(config));
+
+    // Warm-up so allocator and connection pools are exercised before measurement.
+    for index in 0..32u16 {
+        let addr = SocketAddr::from(([127, 0, 0, 1], 45_000 + index));
+        let fingerprint = create_test_fingerprint(addr);
+        let session = load_test_session(&input, origin_addr, &format!("warmup-{index}"), addr);
+        let channel = load_test_channel(&input, origin_addr);
+        let response = force_provider_stream_response(
+            &fingerprint,
+            &app,
+            &session,
+            channel,
+            ForceStreamRequestContext {
+                req_headers: &HeaderMap::new(),
+                input: &input,
+                user: &load_test_user(&format!("warmup-user-{index}")),
+                session_reservation_ttl_secs: 0,
+                content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+            },
+            None,
+        )
+        .await
+        .into_response();
+        let status = response.status();
+        let body = response.into_body().collect().await.expect("warm-up body collects").to_bytes();
+        validate_load_response(status, &body, &TS_PACKET).expect("warm-up response must match the fixture");
+    }
+
+    let baseline_rss_kib = load_test_rss_kib();
+    eprintln!("HTTP provider lease load test (unlimited provider, real HTTP body, 5 repetitions per concurrency)");
+    for concurrency in [1usize, 5, 50, 200] {
+        let rounds_per_task = 20;
+        let repetitions = 5;
+        let mut all_samples = Vec::<(u64, u64)>::new();
+        let mut total_ops = 0u64;
+        let mut total_elapsed_secs = 0f64;
+        for rep in 0..repetitions {
+            let samples = Arc::new(std::sync::Mutex::new(Vec::<(u64, u64)>::new()));
+            let started = std::time::Instant::now();
+            let mut tasks = tokio::task::JoinSet::new();
+            for task_index in 0..concurrency {
+                let app = Arc::clone(&app);
+                let input = Arc::clone(&input);
+                let samples = Arc::clone(&samples);
+                let username = format!("load-user-{rep}-{task_index}");
+                tasks.spawn(async move {
+                    for round in 0..rounds_per_task {
+                        let addr = SocketAddr::from(([127, 0, 0, 1], 46_000 + (task_index as u16)));
+                        let fingerprint = create_test_fingerprint(addr);
+                        let token = format!("load-{rep}-{task_index}-{round}");
+                        let session = load_test_session(&input, origin_addr, &token, addr);
+                        let channel = load_test_channel(&input, origin_addr);
+                        let user = load_test_user(&username);
+
+                        let acquire_at = std::time::Instant::now();
+                        let response = force_provider_stream_response(
+                            &fingerprint,
+                            &app,
+                            &session,
+                            channel,
+                            ForceStreamRequestContext {
+                                req_headers: &HeaderMap::new(),
+                                input: &input,
+                                user: &user,
+                                session_reservation_ttl_secs: 0,
+                                content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+                            },
+                            None,
+                        )
+                        .await
+                        .into_response();
+                        let acquire_us = acquire_at.elapsed().as_micros() as u64;
+
+                        let status = response.status();
+                        let body = response.into_body();
+                        let body_at = std::time::Instant::now();
+                        let collected = body.collect().await.expect("load body collects").to_bytes();
+                        validate_load_response(status, &collected, &TS_PACKET)
+                            .expect("load response must match the TS packet");
+                        let body_us = body_at.elapsed().as_micros() as u64;
+
+                        samples.lock().unwrap().push((acquire_us, body_us));
+                    }
+                });
+            }
+            while let Some(result) = tasks.join_next().await {
+                result.expect("load task must not fail");
+            }
+
+            total_elapsed_secs += started.elapsed().as_secs_f64();
+            let rep_samples = Arc::try_unwrap(samples).expect("samples unique").into_inner().unwrap();
+            total_ops += rep_samples.len() as u64;
+            all_samples.extend(rep_samples);
+        }
+
+        let mut acquire = Vec::with_capacity(all_samples.len());
+        let mut body = Vec::with_capacity(all_samples.len());
+        for (a, b) in all_samples {
+            acquire.push(a);
+            body.push(b);
+        }
+        acquire.sort_unstable();
+        body.sort_unstable();
+        let throughput = total_ops as f64 / total_elapsed_secs.max(f64::EPSILON);
+        let byte_throughput = total_ops as f64 * TS_PACKET.len() as f64 / total_elapsed_secs.max(f64::EPSILON);
+        let rss_delta_kib = load_test_rss_kib()
+            .zip(baseline_rss_kib)
+            .map(|(rss, baseline)| rss.saturating_sub(baseline).to_string())
+            .unwrap_or_else(|| "unsupported".to_string());
+        eprintln!(
+            "concurrency={concurrency:>3} ops={total_ops:>5} throughput={throughput:>9.1} ops/s {byte_throughput:>11.1} bytes/s | acquire p50/p95/p99={}/{}/{}us | body p50/p95/p99={}/{}/{}us | rss_delta_kib={rss_delta_kib}",
+            load_test_latency_percentile(&acquire, 0.50),
+            load_test_latency_percentile(&acquire, 0.95),
+            load_test_latency_percentile(&acquire, 0.99),
+            load_test_latency_percentile(&body, 0.50),
+            load_test_latency_percentile(&body, 0.95),
+            load_test_latency_percentile(&body, 0.99),
+        );
+        let (user_requests, user_sessions) = app.active_users.playback_resource_counts().await;
+        let (shared_origins, shared_subscribers) = app.shared_stream_manager.resource_counts().await;
+        let shared_meters = app.shared_stream_manager.meter_count();
+        let leases = app.active_provider.provider_lease_usage(&input.name);
+        eprintln!(
+            "[load resource] concurrency={concurrency} conns={} starting={} active={} idle={} user_requests={user_requests} user_sessions={user_sessions} shared_origins={shared_origins} shared_subscribers={shared_subscribers} shared_meters={shared_meters}",
+            app.active_provider.get_provider_connections_count(),
+            leases.starting,
+            leases.active,
+            leases.idle,
+        );
+    }
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let leases = app.active_provider.provider_lease_usage(&input.name);
+            let (user_requests, user_sessions) = app.active_users.playback_resource_counts().await;
+            let (shared_origins, shared_subscribers) = app.shared_stream_manager.resource_counts().await;
+            let shared_meters = app.shared_stream_manager.meter_count();
+            if app.active_provider.get_provider_connections_count() == 0
+                && leases.total() == 0
+                && user_requests == 0
+                && user_sessions == 0
+                && shared_origins == 0
+                && shared_subscribers == 0
+                && shared_meters == 0
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("load resources must drain to baseline");
+    assert_eq!(app.active_provider.get_provider_connections_count(), 0, "provider slots must return to baseline");
+    let usage = app.active_provider.provider_lease_usage(&input.name);
+    assert_eq!(usage.total(), 0, "lease table must return to baseline after HTTP churn");
+}
+
+fn load_test_user(username: &str) -> ProxyUserCredentials {
+    let mut user = ProxyUserCredentials::default();
+    user.username = username.to_string();
+    user
+}
+
+fn load_test_session(input: &ConfigInput, origin_addr: SocketAddr, token: &str, addr: SocketAddr) -> UserSession {
+    UserSession {
+        token: token.to_string(),
+        transition_version: 1,
+        virtual_id: 42,
+        provider: Arc::clone(&input.name),
+        stream_url: format!("http://{origin_addr}/live/42.ts").intern(),
+        provider_session_headers: HashMap::new(),
+        user_agent_stream_index: None,
+        addr,
+        socket_bound: false,
+        active_addrs: vec![addr],
+        ts: 1,
+        started_at: 1,
+        permission: UserConnectionPermission::Allowed,
+        connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+        lifecycle: crate::api::model::PlaybackLifecycle::Active,
+    }
+}
+
+fn load_test_channel(input: &ConfigInput, origin_addr: SocketAddr) -> StreamChannel {
+    let mut channel = create_test_live_channel(&format!("http://{origin_addr}/live/42.ts"));
+    channel.provider_id = u32::from(input.id);
+    channel.input_name = Arc::clone(&input.name);
+    channel.url = format!("http://{origin_addr}/live/42.ts").intern();
+    channel
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "30-minute soak: TULIPROX_SOAK_SECS=60 cargo +stable test -p tuliprox --release --bin tuliprox -- --ignored --nocapture http_provider_lease_soak_test"]
+async fn http_provider_lease_soak_test() {
+    let duration_secs: u64 = std::env::var("TULIPROX_SOAK_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(1800);
+    const SOAK_PACKET: [u8; 188] = [0x47; 188];
+    let origin_addr = spawn_load_test_origin(&SOAK_PACKET).await;
+
+    let input = Arc::new(ConfigInput {
+        id: 1,
+        name: "provider_1".intern(),
+        input_type: InputType::Xtream,
+        headers: HashMap::default(),
+        url: format!("http://{origin_addr}"),
+        enabled: true,
+        priority: 0,
+        max_connections: 0,
+        ..ConfigInput::default()
+    });
+    let mut config = create_test_provider_app_config();
+    config.sources =
+        Arc::new(ArcSwap::from_pointee(SourcesConfig { inputs: vec![Arc::clone(&input)], ..SourcesConfig::default() }));
+    let app = create_test_app_state_for_config(Arc::new(config));
+
+    let baseline_rss_kib = load_test_rss_kib();
+    let completed = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let aborted = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let unexpected_failed = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let peak_connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let running_tasks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let resource_samples = Arc::new(std::sync::Mutex::new(Vec::<SoakResourceSample>::new()));
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(duration_secs);
+    let sampler_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let sampler_stop_task = Arc::clone(&sampler_stop);
+    let app_sampler = Arc::clone(&app);
+    let sampler_input_name = Arc::clone(&input.name);
+    let sampler_completed = Arc::clone(&completed);
+    let sampler_aborted = Arc::clone(&aborted);
+    let sampler_failed = Arc::clone(&unexpected_failed);
+    let sampler_running = Arc::clone(&running_tasks);
+    let sampler_samples = Arc::clone(&resource_samples);
+    let sampler_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        let start_time = std::time::Instant::now();
+        while !sampler_stop_task.load(std::sync::atomic::Ordering::Relaxed) {
+            interval.tick().await;
+            let rss = load_test_rss_kib().map_or_else(|| "unsupported".to_string(), |rss| rss.to_string());
+            let conns = app_sampler.active_provider.get_provider_connections_count();
+            let leases = app_sampler.active_provider.provider_lease_usage(&sampler_input_name);
+            let (user_requests, user_sessions) = app_sampler.active_users.playback_resource_counts().await;
+            let (shared_origins, shared_subscribers) = app_sampler.shared_stream_manager.resource_counts().await;
+            let shared_meters = app_sampler.shared_stream_manager.meter_count();
+            let sample = SoakResourceSample {
+                elapsed_secs: start_time.elapsed().as_secs_f64(),
+                rss_kib: load_test_rss_kib(),
+                provider_connections: conns,
+                lease_starting: leases.starting,
+                lease_active: leases.active,
+                lease_idle: leases.idle,
+                user_requests,
+                user_sessions,
+                shared_origins,
+                shared_subscribers,
+                shared_meters,
+                running_tasks: sampler_running.load(std::sync::atomic::Ordering::Relaxed),
+                completed: sampler_completed.load(std::sync::atomic::Ordering::Relaxed),
+                planned_aborted: sampler_aborted.load(std::sync::atomic::Ordering::Relaxed),
+                unexpected_failed: sampler_failed.load(std::sync::atomic::Ordering::Relaxed),
+            };
+            eprintln!(
+                "[soak time_series] t={:4.1}s rss_kib={} conns={} starting={} active={} idle={} user_requests={} user_sessions={} shared_origins={} shared_subscribers={} shared_meters={} running_tasks={} completed={} planned_aborted={} unexpected_failed={}",
+                sample.elapsed_secs,
+                rss,
+                sample.provider_connections,
+                sample.lease_starting,
+                sample.lease_active,
+                sample.lease_idle,
+                sample.user_requests,
+                sample.user_sessions,
+                sample.shared_origins,
+                sample.shared_subscribers,
+                sample.shared_meters,
+                sample.running_tasks,
+                sample.completed,
+                sample.planned_aborted,
+                sample.unexpected_failed,
+            );
+            sampler_samples.lock().unwrap().push(sample);
+        }
+    });
+
+    let mut tasks = tokio::task::JoinSet::new();
+    for task_index in 0..16u16 {
+        let app = Arc::clone(&app);
+        let input = Arc::clone(&input);
+        let completed = Arc::clone(&completed);
+        let aborted = Arc::clone(&aborted);
+        let unexpected_failed = Arc::clone(&unexpected_failed);
+        let peak_connections = Arc::clone(&peak_connections);
+        let running_tasks = Arc::clone(&running_tasks);
+        tasks.spawn(async move {
+            running_tasks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let result = async {
+                let addr = SocketAddr::from(([127, 0, 0, 1], 47_000 + task_index));
+                let fingerprint = create_test_fingerprint(addr);
+                let username = format!("soak-user-{task_index}");
+                let user = load_test_user(&username);
+                let token = format!("soak-reconnect-family-{task_index}");
+                let mut round = 0u64;
+                while std::time::Instant::now() < deadline {
+                    round += 1;
+                    let session = load_test_session(&input, origin_addr, &token, addr);
+                    let channel = load_test_channel(&input, origin_addr);
+                    let response = force_provider_stream_response(
+                        &fingerprint,
+                        &app,
+                        &session,
+                        channel,
+                        ForceStreamRequestContext {
+                            req_headers: &HeaderMap::new(),
+                            input: &input,
+                            user: &user,
+                            session_reservation_ttl_secs: 2,
+                            content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+                        },
+                        None,
+                    )
+                    .await
+                    .into_response();
+
+                    let status = response.status();
+                    if status != StatusCode::OK {
+                        unexpected_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        return Err(format!("soak response status was {status}"));
+                    }
+                    // Alternate full playback (collect) and abort (drop without consuming).
+                    if round % 2 == 0 {
+                        let collected = match response.into_body().collect().await {
+                            Ok(body) => body.to_bytes(),
+                            Err(err) => {
+                                unexpected_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                return Err(format!("soak body collection failed: {err}"));
+                            }
+                        };
+                        if let Err(err) = validate_load_response(status, &collected, &SOAK_PACKET) {
+                            unexpected_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            return Err(err);
+                        }
+                        completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    } else {
+                        drop(response);
+                        aborted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+
+                    let current = app.active_provider.get_provider_connections_count();
+                    peak_connections.fetch_max(current, std::sync::atomic::Ordering::Relaxed);
+                }
+                Ok::<(), String>(())
+            }
+            .await;
+            running_tasks.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            result
+        });
+    }
+    while let Some(result) = tasks.join_next().await {
+        result.expect("soak task must join").unwrap_or_else(|err| panic!("soak task failed: {err}"));
+    }
+
+    sampler_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = sampler_task.await;
+
+    let completed = completed.load(std::sync::atomic::Ordering::Relaxed);
+    let aborted = aborted.load(std::sync::atomic::Ordering::Relaxed);
+    let peak = peak_connections.load(std::sync::atomic::Ordering::Relaxed);
+    let unexpected_failed = unexpected_failed.load(std::sync::atomic::Ordering::Relaxed);
+    let rss_delta_kib = load_test_rss_kib()
+        .zip(baseline_rss_kib)
+        .map(|(rss, baseline)| rss.saturating_sub(baseline).to_string())
+        .unwrap_or_else(|| "unsupported".to_string());
+    eprintln!(
+        "soak duration={duration_secs}s completed={completed} planned_aborted={aborted} unexpected_failed={unexpected_failed} peak_connections={peak} rss_delta_kib={rss_delta_kib}"
+    );
+
+    let samples = Arc::try_unwrap(resource_samples).expect("resource samples unique").into_inner().unwrap();
+    assert!(!samples.is_empty(), "soak must record at least one resource sample");
+    let third = (samples.len() / 3).max(1);
+    let middle_start = third.min(samples.len());
+    let middle_end = (third.saturating_mul(2)).min(samples.len());
+    let last_start = middle_end.min(samples.len());
+    let mut middle_rss =
+        samples[middle_start..middle_end].iter().filter_map(|sample| sample.rss_kib).collect::<Vec<_>>();
+    let mut last_rss = samples[last_start..].iter().filter_map(|sample| sample.rss_kib).collect::<Vec<_>>();
+    match (median_u64(&mut middle_rss), median_u64(&mut last_rss)) {
+        (Some(middle), Some(last)) => {
+            let delta = i128::from(last) - i128::from(middle);
+            eprintln!("soak rss rolling-median middle_third={middle}KiB last_third={last}KiB delta={delta}KiB");
+        }
+        _ => eprintln!("soak rss rolling-median unsupported on this platform"),
+    }
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let leases = app.active_provider.provider_lease_usage(&input.name);
+            let (user_requests, user_sessions) = app.active_users.playback_resource_counts().await;
+            let (shared_origins, shared_subscribers) = app.shared_stream_manager.resource_counts().await;
+            let shared_meters = app.shared_stream_manager.meter_count();
+            if app.active_provider.get_provider_connections_count() == 0
+                && leases.total() == 0
+                && user_requests == 0
+                && user_sessions == 0
+                && shared_origins == 0
+                && shared_subscribers == 0
+                && shared_meters == 0
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("soak resources must drain to baseline");
+
+    assert_eq!(
+        app.active_provider.get_provider_connections_count(),
+        0,
+        "provider slots must return to baseline after soak"
+    );
+    let usage = app.active_provider.provider_lease_usage(&input.name);
+    assert_eq!(usage.total(), 0, "lease table must return to baseline after soak");
+    assert_eq!(unexpected_failed, 0, "soak must not hide failed operations");
+    assert!(peak <= 16, "active connections must stay bounded by the churn workers, observed {peak}");
+}
+
+#[tokio::test]
+async fn direct_ts_eof_before_first_byte_releases_slot_without_idle_lease() {
+    let (origin_addr, origin_task) = spawn_controlled_fake_origin(FakeOriginMode::EmptyBody, 1).await;
+
+    let input = Arc::new(ConfigInput {
+        id: 1,
+        name: "provider_1".intern(),
+        input_type: InputType::Xtream,
+        headers: HashMap::default(),
+        url: format!("http://{origin_addr}"),
+        enabled: true,
+        priority: 0,
+        max_connections: 1,
+        ..ConfigInput::default()
+    });
+    let mut config = create_test_provider_app_config();
+    config.sources =
+        Arc::new(ArcSwap::from_pointee(SourcesConfig { inputs: vec![Arc::clone(&input)], ..SourcesConfig::default() }));
+    let app_state = create_test_app_state_for_config(Arc::new(config));
+
+    let client_addr = SocketAddr::from(([127, 0, 0, 1], 55_601));
+    let fingerprint = create_test_fingerprint(client_addr);
+    let mut user = ProxyUserCredentials::default();
+    user.username = "viewer_ts_eof".to_string();
+
+    let session = UserSession {
+        token: "session-eof".to_string(),
+        transition_version: 1,
+        virtual_id: 42,
+        provider: Arc::clone(&input.name),
+        stream_url: format!("http://{origin_addr}/live/42.ts").intern(),
+        provider_session_headers: HashMap::new(),
+        user_agent_stream_index: None,
+        addr: client_addr,
+        socket_bound: false,
+        active_addrs: vec![client_addr],
+        ts: 1,
+        started_at: 1,
+        permission: UserConnectionPermission::Allowed,
+        connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+        lifecycle: crate::api::model::PlaybackLifecycle::Active,
+    };
+
+    let channel = load_test_channel(&input, origin_addr);
+
+    let response = force_provider_stream_response(
+        &fingerprint,
+        &app_state,
+        &session,
+        channel,
+        ForceStreamRequestContext {
+            req_headers: &HeaderMap::new(),
+            input: &input,
+            user: &user,
+            session_reservation_ttl_secs: 15,
+            content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+        },
+        None,
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body_bytes = response.into_body().collect().await.expect("empty body collects").to_bytes();
+    assert!(body_bytes.is_empty(), "expected 0 payload bytes on immediate EOF");
+
+    let requests = origin_task.await.expect("origin finishes");
+    assert_eq!(requests.len(), 1);
+
+    for _ in 0..50 {
+        if app_state.active_provider.get_provider_connections_count() == 0
+            && app_state.active_provider.provider_lease_usage(&input.name).total() == 0
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    assert_eq!(app_state.active_provider.get_provider_connections_count(), 0, "physical slot must be released");
+    let lease_usage = app_state.active_provider.provider_lease_usage(&input.name);
+    assert_eq!(lease_usage.starting, 0, "no starting leases remaining");
+    assert_eq!(lease_usage.active, 0, "no active leases remaining");
+    assert_eq!(lease_usage.idle, 0, "unconfirmed stream must NOT transition to an idle lease");
+    assert_eq!(lease_usage.total(), 0, "total leases must be 0");
+    assert_eq!(app_state.active_users.active_streams().await.len(), 0, "active user stream must be cleaned up");
+}
+
+#[tokio::test]
+async fn direct_ts_abort_while_waiting_for_first_byte_releases_exact_request() {
+    let notify = Arc::new(tokio::sync::Notify::new());
+    let (origin_addr, origin_task) =
+        spawn_controlled_fake_origin(FakeOriginMode::BlockFirstChunk(Arc::clone(&notify)), 1).await;
+
+    let input = Arc::new(ConfigInput {
+        id: 1,
+        name: "provider_1".intern(),
+        input_type: InputType::Xtream,
+        headers: HashMap::default(),
+        url: format!("http://{origin_addr}"),
+        enabled: true,
+        priority: 0,
+        max_connections: 1,
+        ..ConfigInput::default()
+    });
+    let mut config = create_test_provider_app_config();
+    config.sources =
+        Arc::new(ArcSwap::from_pointee(SourcesConfig { inputs: vec![Arc::clone(&input)], ..SourcesConfig::default() }));
+    let app_state = create_test_app_state_for_config(Arc::new(config));
+
+    let client_addr = SocketAddr::from(([127, 0, 0, 1], 55_602));
+    let fingerprint = create_test_fingerprint(client_addr);
+    let mut user = ProxyUserCredentials::default();
+    user.username = "viewer_ts_abort".to_string();
+
+    let session = UserSession {
+        token: "session-abort-before-first-byte".to_string(),
+        transition_version: 1,
+        virtual_id: 42,
+        provider: Arc::clone(&input.name),
+        stream_url: format!("http://{origin_addr}/live/42.ts").intern(),
+        provider_session_headers: HashMap::new(),
+        user_agent_stream_index: None,
+        addr: client_addr,
+        socket_bound: false,
+        active_addrs: vec![client_addr],
+        ts: 1,
+        started_at: 1,
+        permission: UserConnectionPermission::Allowed,
+        connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+        lifecycle: crate::api::model::PlaybackLifecycle::Active,
+    };
+
+    let channel = load_test_channel(&input, origin_addr);
+
+    let response = force_provider_stream_response(
+        &fingerprint,
+        &app_state,
+        &session,
+        channel,
+        ForceStreamRequestContext {
+            req_headers: &HeaderMap::new(),
+            input: &input,
+            user: &user,
+            session_reservation_ttl_secs: 15,
+            content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+        },
+        None,
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(app_state.active_provider.get_provider_connections_count(), 1);
+
+    drop(response);
+    notify.notify_waiters();
+
+    let _ = origin_task.await;
+
+    for _ in 0..50 {
+        if app_state.active_provider.get_provider_connections_count() == 0
+            && app_state.active_provider.provider_lease_usage(&input.name).total() == 0
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    assert_eq!(
+        app_state.active_provider.get_provider_connections_count(),
+        0,
+        "physical slot must be released on abort"
+    );
+    let lease_usage = app_state.active_provider.provider_lease_usage(&input.name);
+    assert_eq!(lease_usage.total(), 0, "no residual lease claim after unconfirmed abort");
+    assert_eq!(app_state.active_users.active_streams().await.len(), 0, "active user stream must be cleaned up");
+}
+
+#[tokio::test]
+async fn provider_error_after_first_byte_finishes_only_matching_request() {
+    const TS_CHUNK_188: &[u8] = &[0x47; 188];
+    const SIBLING_CHUNK: &[u8] = &[0x47; 376];
+
+    let (origin_fail_addr, origin_fail_task) =
+        spawn_controlled_fake_origin(FakeOriginMode::ErrorAfterFirstChunk(TS_CHUNK_188.to_vec()), 1).await;
+    let (origin_ok_addr, origin_ok_task) =
+        spawn_controlled_fake_origin(FakeOriginMode::FixedBytes(SIBLING_CHUNK.to_vec()), 1).await;
+
+    let input_fail = Arc::new(ConfigInput {
+        id: 1,
+        name: "provider_fail".intern(),
+        input_type: InputType::Xtream,
+        headers: HashMap::default(),
+        url: format!("http://{origin_fail_addr}"),
+        enabled: true,
+        priority: 0,
+        max_connections: 2,
+        ..ConfigInput::default()
+    });
+    let input_ok = Arc::new(ConfigInput {
+        id: 2,
+        name: "provider_ok".intern(),
+        input_type: InputType::Xtream,
+        headers: HashMap::default(),
+        url: format!("http://{origin_ok_addr}"),
+        enabled: true,
+        priority: 1,
+        max_connections: 2,
+        ..ConfigInput::default()
+    });
+
+    let mut config = create_test_provider_app_config();
+    config.sources = Arc::new(ArcSwap::from_pointee(SourcesConfig {
+        inputs: vec![Arc::clone(&input_fail), Arc::clone(&input_ok)],
+        ..SourcesConfig::default()
+    }));
+    let app_state = create_test_app_state_for_config(Arc::new(config));
+
+    let addr_fail = SocketAddr::from(([127, 0, 0, 1], 55_603));
+    let addr_ok = SocketAddr::from(([127, 0, 0, 1], 55_604));
+
+    let user = load_test_user("viewer_multistream");
+    let session_fail = load_test_session(&input_fail, origin_fail_addr, "session-fail", addr_fail);
+    let session_ok = load_test_session(&input_ok, origin_ok_addr, "session-ok", addr_ok);
+
+    let channel_fail = load_test_channel(&input_fail, origin_fail_addr);
+    let channel_ok = load_test_channel(&input_ok, origin_ok_addr);
+
+    let resp_fail = force_provider_stream_response(
+        &create_test_fingerprint(addr_fail),
+        &app_state,
+        &session_fail,
+        channel_fail,
+        ForceStreamRequestContext {
+            req_headers: &HeaderMap::new(),
+            input: &input_fail,
+            user: &user,
+            session_reservation_ttl_secs: 15,
+            content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+        },
+        None,
+    )
+    .await
+    .into_response();
+
+    let resp_ok = force_provider_stream_response(
+        &create_test_fingerprint(addr_ok),
+        &app_state,
+        &session_ok,
+        channel_ok,
+        ForceStreamRequestContext {
+            req_headers: &HeaderMap::new(),
+            input: &input_ok,
+            user: &user,
+            session_reservation_ttl_secs: 15,
+            content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+        },
+        None,
+    )
+    .await
+    .into_response();
+
+    assert_eq!(resp_fail.status(), StatusCode::OK);
+    assert_eq!(resp_ok.status(), StatusCode::OK);
+    assert_eq!(
+        app_state.active_provider.get_provider_connections_count(),
+        2,
+        "both providers have an active connection"
+    );
+
+    let mut fail_body = resp_fail.into_body();
+    let first_frame = fail_body.frame().await.expect("first frame exists").expect("first frame is valid");
+    let first_chunk = first_frame.into_data().expect("data chunk exists");
+    assert_eq!(first_chunk.as_ref(), TS_CHUNK_188, "first byte was confirmed with exact chunk bytes");
+
+    let second_frame_res = fail_body.frame().await;
+    assert!(
+        second_frame_res.is_none() || second_frame_res.as_ref().is_some_and(Result::is_err),
+        "stream must terminate or error after first chunk"
+    );
+    drop(fail_body);
+
+    for _ in 0..50 {
+        if app_state.active_provider.provider_lease_usage(&input_fail.name).total() == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    assert_eq!(
+        app_state.active_provider.provider_lease_usage(&input_fail.name).total(),
+        0,
+        "failed provider leases cleaned up"
+    );
+    assert_eq!(
+        app_state.active_provider.provider_lease_usage(&input_ok.name).total(),
+        1,
+        "sibling provider lease remains intact"
+    );
+    assert_eq!(app_state.active_provider.get_provider_connections_count(), 1, "sibling connection still active");
+
+    let ok_bytes = resp_ok.into_body().collect().await.expect("sibling body collects").to_bytes();
+    assert_eq!(ok_bytes.as_ref(), SIBLING_CHUNK);
+
+    for _ in 0..50 {
+        if app_state.active_provider.get_provider_connections_count() == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    assert_eq!(app_state.active_provider.get_provider_connections_count(), 0, "all slots returned to baseline");
+    let _ = origin_fail_task.await;
+    let _ = origin_ok_task.await;
+}
+
+#[tokio::test]
+async fn no_first_byte_failure_allows_next_request_to_prefer_provider_a() {
+    const TS_CHUNK: &[u8] = &[0x47; 188];
+    let listener_a = TcpListener::bind("127.0.0.1:0").await.expect("origin A binds");
+    let origin_a_addr = listener_a.local_addr().expect("origin A address");
+    let task_a = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for round in 0..2 {
+            let Ok((mut socket, _)) = listener_a.accept().await else { break };
+            let mut req = Vec::new();
+            while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                let mut chunk = [0u8; 512];
+                let Ok(read) = socket.read(&mut chunk).await else { break };
+                if read == 0 {
+                    break;
+                }
+                req.extend_from_slice(&chunk[..read]);
+            }
+            requests.push(String::from_utf8_lossy(&req).to_ascii_lowercase());
+            if round == 0 {
+                let head =
+                    "HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            } else {
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    TS_CHUNK.len()
+                );
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket.write_all(TS_CHUNK).await;
+                let _ = socket.shutdown().await;
+            }
+        }
+        requests
+    });
+
+    let (origin_b_addr, _task_b) = spawn_controlled_fake_origin(FakeOriginMode::FixedBytes(TS_CHUNK.to_vec()), 1).await;
+
+    let input = Arc::new(ConfigInput {
+        id: 1,
+        name: "provider_A".intern(),
+        input_type: InputType::Xtream,
+        headers: HashMap::default(),
+        url: format!("http://{origin_a_addr}"),
+        enabled: true,
+        priority: 0,
+        max_connections: 1,
+        aliases: Some(vec![ConfigInputAlias {
+            id: 2,
+            name: "provider_B".intern(),
+            url: format!("http://{origin_b_addr}"),
+            username: None,
+            password: None,
+            priority: 1,
+            max_connections: 1,
+            exp_date: None,
+            enabled: true,
+            stalker: None,
+        }]),
+        ..ConfigInput::default()
+    });
+
+    let mut config = create_test_provider_app_config();
+    config.sources =
+        Arc::new(ArcSwap::from_pointee(SourcesConfig { inputs: vec![Arc::clone(&input)], ..SourcesConfig::default() }));
+    let app_state = create_test_app_state_for_config(Arc::new(config));
+
+    let client_addr = SocketAddr::from(([127, 0, 0, 1], 55_605));
+    let fingerprint = create_test_fingerprint(client_addr);
+    let user = load_test_user("viewer_prefer_a");
+
+    let session_1 = load_test_session(&input, origin_a_addr, "session-1", client_addr);
+    let channel_1 = load_test_channel(&input, origin_a_addr);
+
+    let resp_1 = force_provider_stream_response(
+        &fingerprint,
+        &app_state,
+        &session_1,
+        channel_1,
+        ForceStreamRequestContext {
+            req_headers: &HeaderMap::new(),
+            input: &input,
+            user: &user,
+            session_reservation_ttl_secs: 15,
+            content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+        },
+        None,
+    )
+    .await
+    .into_response();
+
+    assert_eq!(resp_1.status(), StatusCode::OK);
+    let b1 = resp_1.into_body().collect().await.expect("body 1 collects").to_bytes();
+    assert!(b1.is_empty(), "request 1 had early EOF");
+
+    for _ in 0..50 {
+        if app_state.active_provider.get_provider_connections_count() == 0
+            && app_state.active_provider.provider_lease_usage(&input.name).total() == 0
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    assert_eq!(app_state.active_provider.get_provider_connections_count(), 0, "slot on A must be free");
+    assert_eq!(app_state.active_provider.provider_lease_usage(&input.name).total(), 0, "no phantom lease on A");
+
+    let session_2 = load_test_session(&input, origin_a_addr, "session-2", client_addr);
+    let channel_2 = load_test_channel(&input, origin_a_addr);
+
+    let resp_2 = force_provider_stream_response(
+        &fingerprint,
+        &app_state,
+        &session_2,
+        channel_2,
+        ForceStreamRequestContext {
+            req_headers: &HeaderMap::new(),
+            input: &input,
+            user: &user,
+            session_reservation_ttl_secs: 15,
+            content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+        },
+        None,
+    )
+    .await
+    .into_response();
+
+    assert_eq!(resp_2.status(), StatusCode::OK);
+    let b2 = resp_2.into_body().collect().await.expect("body 2 collects").to_bytes();
+    assert_eq!(b2.as_ref(), TS_CHUNK, "request 2 successfully used Provider A and read payload");
+
+    let reqs_a = task_a.await.expect("task A completed");
+    assert_eq!(reqs_a.len(), 2, "both requests 1 and 2 were routed to Provider A!");
+}
+
+#[tokio::test]
+async fn parallel_vod_abort_preserves_sibling_claim_and_provider_stickiness() {
+    const VOD_BODY: &[u8] = b"0123456789abcdefghij";
+
+    let (origin_addr, origin_task) = spawn_range_aware_test_origin(VOD_BODY, 3).await;
+
+    let input = Arc::new(ConfigInput {
+        id: 1,
+        name: "provider_1".intern(),
+        input_type: InputType::Xtream,
+        headers: HashMap::default(),
+        url: format!("http://{origin_addr}"),
+        enabled: true,
+        priority: 0,
+        max_connections: 2,
+        ..ConfigInput::default()
+    });
+    let mut config = create_test_provider_app_config();
+    config.sources =
+        Arc::new(ArcSwap::from_pointee(SourcesConfig { inputs: vec![Arc::clone(&input)], ..SourcesConfig::default() }));
+    let app_state = create_test_app_state_for_config(Arc::new(config));
+
+    let client_addr = SocketAddr::from(([127, 0, 0, 1], 55_701));
+    let fingerprint = create_test_fingerprint(client_addr);
+    let mut user = ProxyUserCredentials::default();
+    user.username = "viewer_vod_parallel".to_string();
+
+    let make_session = |token: &str| UserSession {
+        token: token.to_string(),
+        transition_version: 1,
+        virtual_id: 42,
+        provider: Arc::clone(&input.name),
+        stream_url: format!("http://{origin_addr}/movie/1.ts").intern(),
+        provider_session_headers: HashMap::new(),
+        user_agent_stream_index: None,
+        addr: client_addr,
+        socket_bound: false,
+        active_addrs: vec![client_addr],
+        ts: 1,
+        started_at: 1,
+        permission: UserConnectionPermission::Allowed,
+        connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+        lifecycle: crate::api::model::PlaybackLifecycle::Active,
+    };
+
+    let make_channel = || {
+        let mut channel = create_test_local_channel(&format!("http://{origin_addr}/movie/1.ts"));
+        channel.provider_id = 1;
+        channel.input_name = Arc::clone(&input.name);
+        channel.item_type = PlaylistItemType::Video;
+        channel.cluster = XtreamCluster::Video;
+        channel.url = format!("http://{origin_addr}/movie/1.ts").intern();
+        channel
+    };
+
+    let build_request = |range: &'static str, token: &'static str| {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RANGE, HeaderValue::from_static(range));
+        let session = make_session(token);
+        (headers, session)
+    };
+
+    let (first_headers, first_session) = build_request("bytes=0-9", "vod-playback");
+    let first = force_provider_stream_response(
+        &fingerprint,
+        &app_state,
+        &first_session,
+        make_channel(),
+        ForceStreamRequestContext {
+            req_headers: &first_headers,
+            input: &input,
+            user: &user,
+            session_reservation_ttl_secs: 15,
+            content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+        },
+        None,
+    )
+    .await
+    .into_response();
+    assert_eq!(first.status(), StatusCode::PARTIAL_CONTENT);
+
+    let (second_headers, second_session) = build_request("bytes=5-14", "vod-playback");
+    let second = force_provider_stream_response(
+        &fingerprint,
+        &app_state,
+        &second_session,
+        make_channel(),
+        ForceStreamRequestContext {
+            req_headers: &second_headers,
+            input: &input,
+            user: &user,
+            session_reservation_ttl_secs: 15,
+            content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+        },
+        None,
+    )
+    .await
+    .into_response();
+    assert_eq!(second.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(app_state.active_users.active_streams().await.len(), 1, "affine claims share one playback row");
+    assert_eq!(app_state.active_users.playback_resource_counts().await.0, 2, "both request claims active");
+
+    drop(first);
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while app_state.active_users.playback_resource_counts().await.0 != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("aborted VOD body must release only its request claim");
+    assert_eq!(app_state.active_users.active_streams().await.len(), 1, "sibling playback row remains active");
+
+    let second_body = second.into_body().collect().await.expect("second body collects").to_bytes();
+    assert_eq!(second_body.as_ref(), &VOD_BODY[5..15]);
+
+    let (third_headers, third_session) = build_request("bytes=10-19", "vod-playback");
+    let third = force_provider_stream_response(
+        &fingerprint,
+        &app_state,
+        &third_session,
+        make_channel(),
+        ForceStreamRequestContext {
+            req_headers: &third_headers,
+            input: &input,
+            user: &user,
+            session_reservation_ttl_secs: 15,
+            content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+        },
+        None,
+    )
+    .await
+    .into_response();
+    assert_eq!(third.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        third.headers().get(header::CONTENT_RANGE).and_then(|value| value.to_str().ok()),
+        Some("bytes 10-19/20")
+    );
+    let third_body = third.into_body().collect().await.expect("third body collects").to_bytes();
+    assert_eq!(third_body.as_ref(), &VOD_BODY[10..20]);
+
+    let requests = origin_task.await.expect("origin task completes");
+    assert_eq!(requests.len(), 3, "all 3 range requests must reach the same provider account");
+    assert!(requests[0].contains("range: bytes=0-9"));
+    assert!(requests[1].contains("range: bytes=5-14"));
+    assert!(requests[2].contains("range: bytes=10-19"));
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while app_state.active_provider.get_provider_connections_count() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("VOD provider connections must drain");
+    assert_eq!(app_state.active_provider.get_provider_connections_count(), 0);
+    app_state.active_provider.clear_provider_reservation("vod-playback");
+    assert_eq!(app_state.active_provider.provider_lease_usage(&input.name).total(), 0);
+}
+
+#[tokio::test]
+async fn parallel_series_abort_then_seek_reuses_account_without_stale_claim() {
+    const SERIES_BODY: &[u8] = b"0123456789abcdefghij";
+
+    let (origin_addr, origin_task) = spawn_range_aware_test_origin(SERIES_BODY, 3).await;
+
+    let input = Arc::new(ConfigInput {
+        id: 1,
+        name: "provider_1".intern(),
+        input_type: InputType::Xtream,
+        headers: HashMap::default(),
+        url: format!("http://{origin_addr}"),
+        enabled: true,
+        priority: 0,
+        max_connections: 2,
+        ..ConfigInput::default()
+    });
+    let mut config = create_test_provider_app_config();
+    config.sources =
+        Arc::new(ArcSwap::from_pointee(SourcesConfig { inputs: vec![Arc::clone(&input)], ..SourcesConfig::default() }));
+    let app_state = create_test_app_state_for_config(Arc::new(config));
+
+    let client_addr = SocketAddr::from(([127, 0, 0, 1], 55_702));
+    let fingerprint = create_test_fingerprint(client_addr);
+    let mut user = ProxyUserCredentials::default();
+    user.username = "viewer_series_parallel".to_string();
+
+    let make_session = |token: &str| UserSession {
+        token: token.to_string(),
+        transition_version: 1,
+        virtual_id: 43,
+        provider: Arc::clone(&input.name),
+        stream_url: format!("http://{origin_addr}/series/1.ts").intern(),
+        provider_session_headers: HashMap::new(),
+        user_agent_stream_index: None,
+        addr: client_addr,
+        socket_bound: false,
+        active_addrs: vec![client_addr],
+        ts: 1,
+        started_at: 1,
+        permission: UserConnectionPermission::Allowed,
+        connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+        lifecycle: crate::api::model::PlaybackLifecycle::Active,
+    };
+
+    let make_channel = || {
+        let mut channel = create_test_local_channel(&format!("http://{origin_addr}/series/1.ts"));
+        channel.provider_id = 1;
+        channel.input_name = Arc::clone(&input.name);
+        channel.item_type = PlaylistItemType::Series;
+        channel.cluster = XtreamCluster::Series;
+        channel.url = format!("http://{origin_addr}/series/1.ts").intern();
+        channel
+    };
+
+    let build_request = |range: &'static str, token: &'static str| {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RANGE, HeaderValue::from_static(range));
+        let session = make_session(token);
+        (headers, session)
+    };
+
+    let (first_headers, first_session) = build_request("bytes=0-9", "series-playback");
+    let first = force_provider_stream_response(
+        &fingerprint,
+        &app_state,
+        &first_session,
+        make_channel(),
+        ForceStreamRequestContext {
+            req_headers: &first_headers,
+            input: &input,
+            user: &user,
+            session_reservation_ttl_secs: 15,
+            content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+        },
+        None,
+    )
+    .await
+    .into_response();
+    assert_eq!(first.status(), StatusCode::PARTIAL_CONTENT);
+
+    let (second_headers, second_session) = build_request("bytes=5-14", "series-playback");
+    let second = force_provider_stream_response(
+        &fingerprint,
+        &app_state,
+        &second_session,
+        make_channel(),
+        ForceStreamRequestContext {
+            req_headers: &second_headers,
+            input: &input,
+            user: &user,
+            session_reservation_ttl_secs: 15,
+            content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+        },
+        None,
+    )
+    .await
+    .into_response();
+    assert_eq!(second.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(app_state.active_users.active_streams().await.len(), 1, "affine claims share one playback row");
+    assert_eq!(app_state.active_users.playback_resource_counts().await.0, 2, "both request claims active");
+
+    drop(first);
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while app_state.active_users.playback_resource_counts().await.0 != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("aborted Series body must release only its request claim");
+    assert_eq!(app_state.active_users.active_streams().await.len(), 1, "sibling playback row remains active");
+
+    let second_body = second.into_body().collect().await.expect("second body collects").to_bytes();
+    assert_eq!(second_body.as_ref(), &SERIES_BODY[5..15]);
+
+    let (third_headers, third_session) = build_request("bytes=12-19", "series-playback");
+    let third = force_provider_stream_response(
+        &fingerprint,
+        &app_state,
+        &third_session,
+        make_channel(),
+        ForceStreamRequestContext {
+            req_headers: &third_headers,
+            input: &input,
+            user: &user,
+            session_reservation_ttl_secs: 15,
+            content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+        },
+        None,
+    )
+    .await
+    .into_response();
+    assert_eq!(third.status(), StatusCode::PARTIAL_CONTENT);
+    let third_body = third.into_body().collect().await.expect("third body collects").to_bytes();
+    assert_eq!(third_body.as_ref(), &SERIES_BODY[12..20]);
+
+    let requests = origin_task.await.expect("origin task completes");
+    assert_eq!(requests.len(), 3, "all series requests reach same provider");
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while app_state.active_provider.get_provider_connections_count() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("series provider connections must drain");
+    assert_eq!(app_state.active_provider.get_provider_connections_count(), 0);
+    app_state.active_provider.clear_provider_reservation("series-playback");
+    assert_eq!(app_state.active_provider.provider_lease_usage(&input.name).total(), 0);
+}
+
+#[tokio::test]
+async fn stale_direct_cleanup_after_rebind_preserves_successor_request() {
+    let app_state = create_test_provider_app_state();
+    let provider_name: Arc<str> = Arc::from("provider_1");
+    let owner = "test-rebind-owner";
+    let addr_x = SocketAddr::from(([127, 0, 0, 1], 55_631));
+    let addr_y = SocketAddr::from(([127, 0, 0, 1], 55_632));
+
+    let req_x = tuliprox_core::model::PlaybackRequestId::from_raw(101);
+    let lease_ref_x =
+        tuliprox_session::PlaybackLeaseRef { owner, kind: tuliprox_core::model::PlaybackKind::Vod, request_id: req_x };
+    let handle_x = app_state
+        .active_provider
+        .acquire_exact_connection_with_lease_for_session(
+            &provider_name,
+            &addr_x,
+            false,
+            0,
+            crate::api::model::ConnectionKind::Normal,
+            Some(lease_ref_x),
+        )
+        .expect("request X acquires provider");
+    let stale_tag = handle_x.binding_tag.expect("request X binding tag");
+    app_state.active_provider.refresh_playback_lease(&provider_name, &lease_ref_x, 30);
+    app_state.active_provider.confirm_identified_playback_activity(owner, req_x);
+    app_state.active_provider.release_handle(&handle_x);
+    app_state.active_provider.finish_identified_playback_request(
+        owner,
+        req_x,
+        tuliprox_core::model::PlaybackRequestOutcome::Completed,
+    );
+    assert_eq!(app_state.active_provider.provider_lease_usage(&provider_name).idle, 1);
+
+    let req_y = tuliprox_core::model::PlaybackRequestId::from_raw(102);
+    let lease_ref_y =
+        tuliprox_session::PlaybackLeaseRef { owner, kind: tuliprox_core::model::PlaybackKind::Vod, request_id: req_y };
+    let handle_y = app_state
+        .active_provider
+        .acquire_exact_connection_with_lease_for_session(
+            &provider_name,
+            &addr_y,
+            false,
+            0,
+            crate::api::model::ConnectionKind::Normal,
+            Some(lease_ref_y),
+        )
+        .expect("request Y reacquires provider");
+    app_state.active_provider.refresh_playback_lease(&provider_name, &lease_ref_y, 30);
+    app_state.active_provider.confirm_identified_playback_activity(owner, req_y);
+
+    app_state.active_provider.finish_identified_playback_request(
+        owner,
+        req_x,
+        tuliprox_core::model::PlaybackRequestOutcome::Completed,
+    );
+
+    let usage_after_stale_finish = app_state.active_provider.provider_lease_usage(&provider_name);
+    assert_eq!(usage_after_stale_finish.active, 1, "successor request Y must keep the active lease alive");
+
+    app_state.active_provider.clear_identified_provider_reservation(owner, &provider_name, Some(stale_tag));
+
+    let usage_after_stale_tag = app_state.active_provider.provider_lease_usage(&provider_name);
+    assert_eq!(usage_after_stale_tag.active, 1, "stale clear tag must not erase active successor lease");
+
+    app_state.active_provider.release_handle(&handle_y);
+    app_state.active_provider.finish_identified_playback_request(
+        owner,
+        req_y,
+        tuliprox_core::model::PlaybackRequestOutcome::ServerShutdown,
+    );
+
+    let final_usage = app_state.active_provider.provider_lease_usage(&provider_name);
+    assert_eq!(final_usage.total(), 0, "request Y has finished");
+}
+
+#[tokio::test]
+async fn stale_hls_cleanup_after_rebind_preserves_current_origin_and_segments() {
+    let app_state = create_test_provider_app_state();
+    let provider_name: Arc<str> = Arc::from("provider_1");
+    let owner = "test-hls-rebind-owner";
+    let addr_x = SocketAddr::from(([127, 0, 0, 1], 55_633));
+    let addr_y = SocketAddr::from(([127, 0, 0, 1], 55_634));
+
+    let req_x = tuliprox_core::model::PlaybackRequestId::from_raw(201);
+    let lease_ref_x = tuliprox_session::PlaybackLeaseRef {
+        owner,
+        kind: tuliprox_core::model::PlaybackKind::LiveHls,
+        request_id: req_x,
+    };
+    let handle_x = app_state
+        .active_provider
+        .acquire_exact_connection_with_lease_for_session(
+            &provider_name,
+            &addr_x,
+            false,
+            0,
+            crate::api::model::ConnectionKind::Normal,
+            Some(lease_ref_x),
+        )
+        .expect("request X acquires HLS provider");
+    let stale_tag = handle_x.binding_tag.expect("request X binding tag");
+    app_state.active_provider.refresh_playback_lease(&provider_name, &lease_ref_x, 30);
+    app_state.active_provider.confirm_identified_playback_activity(owner, req_x);
+    app_state.active_provider.release_handle(&handle_x);
+    app_state.active_provider.finish_identified_playback_request(
+        owner,
+        req_x,
+        tuliprox_core::model::PlaybackRequestOutcome::Completed,
+    );
+
+    let req_y = tuliprox_core::model::PlaybackRequestId::from_raw(202);
+    let lease_ref_y = tuliprox_session::PlaybackLeaseRef {
+        owner,
+        kind: tuliprox_core::model::PlaybackKind::LiveHls,
+        request_id: req_y,
+    };
+    let handle_y = app_state
+        .active_provider
+        .acquire_exact_connection_with_lease_for_session(
+            &provider_name,
+            &addr_y,
+            false,
+            0,
+            crate::api::model::ConnectionKind::Normal,
+            Some(lease_ref_y),
+        )
+        .expect("request Y reacquires HLS provider");
+    app_state.active_provider.refresh_playback_lease(&provider_name, &lease_ref_y, 30);
+    app_state.active_provider.confirm_identified_playback_activity(owner, req_y);
+
+    app_state.active_provider.finish_identified_playback_request(
+        owner,
+        req_x,
+        tuliprox_core::model::PlaybackRequestOutcome::Completed,
+    );
+
+    let usage = app_state.active_provider.provider_lease_usage(&provider_name);
+    assert!(usage.active >= 1 || usage.idle >= 1, "active/reconnect lease remains for successor");
+
+    app_state.active_provider.clear_identified_provider_reservation(owner, &provider_name, Some(stale_tag));
+
+    let usage2 = app_state.active_provider.provider_lease_usage(&provider_name);
+    assert_eq!(usage2.total(), usage.total(), "stale clear tag must not drop the HLS lease");
+
+    app_state.active_provider.release_handle(&handle_y);
+    app_state.active_provider.finish_identified_playback_request(
+        owner,
+        req_y,
+        tuliprox_core::model::PlaybackRequestOutcome::ServerShutdown,
+    );
+    assert_eq!(app_state.active_provider.provider_lease_usage(&provider_name).total(), 0);
+}
+
+#[tokio::test]
+async fn shared_proxy_clients_keep_independent_bodies_and_cleanup() {
+    let mut target = create_test_shared_target();
+    target.options.as_mut().unwrap().share_live_streams.mpeg_ts = true;
+    let target = Arc::new(target);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("shared origin binds");
+    let origin_addr = listener.local_addr().expect("shared origin addr");
+    let app = axum::Router::new().fallback(|| async {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(16);
+        tokio::spawn(async move {
+            for i in 0..10u8 {
+                let _ = tx.send(Ok(Bytes::from(vec![i; 188]))).await;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        });
+        let body_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        axum::response::Response::builder()
+            .header(axum::http::header::CONTENT_TYPE, "video/mp2t")
+            .body(axum::body::Body::from_stream(body_stream))
+            .unwrap()
+    });
+    let origin_task = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let input = Arc::new(ConfigInput {
+        id: 1,
+        name: "provider_shared_p".intern(),
+        input_type: InputType::Xtream,
+        headers: HashMap::default(),
+        url: format!("http://{origin_addr}"),
+        username: Some("user".to_string()),
+        password: Some("pass".to_string()),
+        enabled: true,
+        priority: 0,
+        max_connections: 5,
+        ..ConfigInput::default()
+    });
+    let mut config = create_test_provider_app_config();
+    config.sources =
+        Arc::new(ArcSwap::from_pointee(SourcesConfig { inputs: vec![Arc::clone(&input)], ..SourcesConfig::default() }));
+    let app_state = create_test_app_state_for_config(Arc::new(config));
+
+    let proxy_addr = SocketAddr::from(([127, 0, 0, 1], 55_190));
+    let fp1 = Fingerprint::new("client1|ua1".to_string(), "127.0.0.1".to_string(), proxy_addr);
+    let fp2 = Fingerprint::new("client2|ua2".to_string(), "127.0.0.1".to_string(), proxy_addr);
+
+    let user1 = load_test_user("user_shared_1");
+    let user2 = load_test_user("user_shared_2");
+    let stream_url = format!("http://{origin_addr}/live/user/pass/shared.ts");
+    let mut channel1 = load_test_channel(&input, origin_addr);
+    channel1.url = stream_url.as_str().intern();
+    let mut channel2 = load_test_channel(&input, origin_addr);
+    channel2.url = stream_url.as_str().intern();
+
+    let resp1 = stream_response(
+        &fp1,
+        &app_state,
+        "shared-session-1",
+        None,
+        channel1,
+        &stream_url,
+        None,
+        &HeaderMap::default(),
+        &input,
+        &target,
+        &user1,
+        UserConnectionPermission::Allowed,
+        crate::api::model::ConnectionKind::Normal,
+        false,
+        None,
+    )
+    .await
+    .into_response();
+    assert_eq!(resp1.status(), StatusCode::OK);
+
+    let resp2 = stream_response(
+        &fp2,
+        &app_state,
+        "shared-session-2",
+        None,
+        channel2,
+        &stream_url,
+        None,
+        &HeaderMap::default(),
+        &input,
+        &target,
+        &user2,
+        UserConnectionPermission::Allowed,
+        crate::api::model::ConnectionKind::Normal,
+        false,
+        None,
+    )
+    .await
+    .into_response();
+    assert_eq!(resp2.status(), StatusCode::OK);
+
+    assert_eq!(app_state.active_provider.get_provider_connections_count(), 1, "only 1 shared origin connection");
+
+    drop(resp1);
+
+    let body2 = resp2.into_body().collect().await.expect("client 2 body collects").to_bytes();
+    assert!(!body2.is_empty(), "client 2 receives stream bytes after client 1 dropped");
+    drop(body2);
+
+    for _ in 0..50 {
+        if app_state.active_provider.get_provider_connections_count() == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(app_state.active_provider.get_provider_connections_count(), 0);
+    origin_task.abort();
+}
+
+#[tokio::test]
+async fn shared_admission_rejection_does_not_leak_meter_registration() {
+    let mut target = create_test_shared_target();
+    target.options.as_mut().unwrap().share_live_streams.mpeg_ts = true;
+    let target = Arc::new(target);
+
+    let origin_addr = spawn_load_test_origin(b"adm-test-ts-chunk").await;
+    let input = Arc::new(ConfigInput {
+        id: 1,
+        name: "provider_shared_adm".intern(),
+        input_type: InputType::Xtream,
+        headers: HashMap::default(),
+        url: format!("http://{origin_addr}"),
+        username: Some("user".to_string()),
+        password: Some("pass".to_string()),
+        enabled: true,
+        priority: 0,
+        max_connections: 5,
+        ..ConfigInput::default()
+    });
+    let mut config = create_test_provider_app_config();
+    config.sources =
+        Arc::new(ArcSwap::from_pointee(SourcesConfig { inputs: vec![Arc::clone(&input)], ..SourcesConfig::default() }));
+    config.config = Arc::new(ArcSwap::from_pointee(Config {
+        reverse_proxy: Some(crate::model::ReverseProxyConfig {
+            resource_rewrite_disabled: false,
+            rewrite_secret: [0; 16],
+            resource_retry: crate::model::ResourceRetryConfig::default(),
+            disabled_header: None,
+            stream: Some(crate::model::StreamConfig { metrics_enabled: true, ..crate::model::StreamConfig::default() }),
+            cache: None,
+            rate_limit: None,
+            geoip: None,
+            stream_history: None,
+            qos_aggregation: None,
+            hls_cache: None,
+        }),
+        ..Config::default()
+    }));
+    let app_state = create_test_app_state_for_config(Arc::new(config));
+
+    let cleanup_tx = app_state.connection_manager.cleanup_tx();
+    let mut permits = Vec::new();
+    while let Ok(permit) = cleanup_tx.clone().try_reserve_owned() {
+        permits.push(permit);
+    }
+
+    let client_addr = SocketAddr::from(([127, 0, 0, 1], 55_195));
+    let fp = create_test_fingerprint(client_addr);
+    let user = load_test_user("user_adm_fail");
+    let stream_url = format!("http://{origin_addr}/live/user/pass/adm.ts");
+    let mut channel = load_test_channel(&input, origin_addr);
+    channel.url = stream_url.as_str().intern();
+
+    let resp = stream_response(
+        &fp,
+        &app_state,
+        "shared-session-adm",
+        None,
+        channel,
+        &stream_url,
+        None,
+        &HeaderMap::default(),
+        &input,
+        &target,
+        &user,
+        UserConnectionPermission::Allowed,
+        crate::api::model::ConnectionKind::Normal,
+        false,
+        None,
+    )
+    .await
+    .into_response();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "shared admission failure must yield 503 Service Unavailable"
+    );
+    assert_eq!(
+        app_state.active_provider.get_provider_connections_count(),
+        0,
+        "admission failure must NOT fall through to opening a provider connection"
+    );
+    assert_eq!(app_state.shared_stream_manager.meter_count(), 0, "rejected admission must not retain a meter ID");
+
+    drop(permits);
+}
+
+#[tokio::test]
+async fn shared_start_abort_does_not_leak_meter_registration() {
+    let mut target = create_test_shared_target();
+    target.options.as_mut().unwrap().share_live_streams.mpeg_ts = true;
+    let target = Arc::new(target);
+
+    let notify = Arc::new(tokio::sync::Notify::new());
+    let (origin_addr, origin_task) =
+        spawn_controlled_fake_origin(FakeOriginMode::BlockFirstChunk(Arc::clone(&notify)), 1).await;
+
+    let input = Arc::new(ConfigInput {
+        id: 1,
+        name: "provider_shared_abort".intern(),
+        input_type: InputType::Xtream,
+        headers: HashMap::default(),
+        url: format!("http://{origin_addr}"),
+        username: Some("user".to_string()),
+        password: Some("pass".to_string()),
+        enabled: true,
+        priority: 0,
+        max_connections: 2,
+        ..ConfigInput::default()
+    });
+    let mut config = create_test_provider_app_config();
+    config.sources =
+        Arc::new(ArcSwap::from_pointee(SourcesConfig { inputs: vec![Arc::clone(&input)], ..SourcesConfig::default() }));
+    config.config = Arc::new(ArcSwap::from_pointee(Config {
+        reverse_proxy: Some(crate::model::ReverseProxyConfig {
+            resource_rewrite_disabled: false,
+            rewrite_secret: [0; 16],
+            resource_retry: crate::model::ResourceRetryConfig::default(),
+            disabled_header: None,
+            stream: Some(crate::model::StreamConfig { metrics_enabled: true, ..crate::model::StreamConfig::default() }),
+            cache: None,
+            rate_limit: None,
+            geoip: None,
+            stream_history: None,
+            qos_aggregation: None,
+            hls_cache: None,
+        }),
+        ..Config::default()
+    }));
+    let app_state = create_test_app_state_for_config(Arc::new(config));
+
+    let client_addr = SocketAddr::from(([127, 0, 0, 1], 55_196));
+    let fp = create_test_fingerprint(client_addr);
+    let user = load_test_user("user_shared_abort");
+    let stream_url = format!("http://{origin_addr}/live/user/pass/shared_abort.ts");
+    let mut channel = load_test_channel(&input, origin_addr);
+    channel.url = stream_url.as_str().intern();
+
+    let resp = stream_response(
+        &fp,
+        &app_state,
+        "shared-session-abort",
+        None,
+        channel,
+        &stream_url,
+        None,
+        &HeaderMap::default(),
+        &input,
+        &target,
+        &user,
+        UserConnectionPermission::Allowed,
+        crate::api::model::ConnectionKind::Normal,
+        false,
+        None,
+    )
+    .await
+    .into_response();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    drop(resp);
+    notify.notify_waiters();
+    let _ = origin_task.await;
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while app_state.active_provider.get_provider_connections_count() != 0
+            || app_state.active_provider.provider_lease_usage(&input.name).total() != 0
+            || !app_state.active_users.active_streams().await.is_empty()
+            || app_state.shared_stream_manager.meter_count() != 0
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("shared abort resources must return to baseline");
+
+    assert_eq!(app_state.active_provider.get_provider_connections_count(), 0, "provider slot released");
+    assert_eq!(app_state.active_provider.provider_lease_usage(&input.name).total(), 0, "provider request released");
+    assert_eq!(app_state.active_users.active_streams().await.len(), 0, "user claim released");
+    assert_eq!(app_state.shared_stream_manager.meter_count(), 0, "aborted origin meter registration released");
+}
+
+#[tokio::test]
+async fn catchup_abort_seek_and_window_change_preserve_correct_affinity() {
+    const CATCHUP_BODY_A: &[u8] = b"catchup-origin-a-archive-payload";
+    const CATCHUP_BODY_B: &[u8] = b"catchup-origin-b-archive-payload";
+
+    let (origin_a, task_a) = spawn_range_aware_test_origin(CATCHUP_BODY_A, 2).await;
+    let (origin_b, task_b) = spawn_range_aware_test_origin(CATCHUP_BODY_B, 1).await;
+
+    let input = Arc::new(ConfigInput {
+        id: 1,
+        name: "provider_1".intern(),
+        input_type: InputType::Xtream,
+        headers: HashMap::default(),
+        url: format!("http://{origin_a}"),
+        enabled: true,
+        priority: 0,
+        max_connections: 2,
+        aliases: Some(vec![ConfigInputAlias {
+            id: 2,
+            name: "provider_2".intern(),
+            url: format!("http://{origin_b}"),
+            username: None,
+            password: None,
+            priority: 1,
+            max_connections: 2,
+            exp_date: None,
+            enabled: true,
+            stalker: None,
+        }]),
+        ..ConfigInput::default()
+    });
+    let mut config = create_test_provider_app_config();
+    config.sources =
+        Arc::new(ArcSwap::from_pointee(SourcesConfig { inputs: vec![Arc::clone(&input)], ..SourcesConfig::default() }));
+    let app_state = create_test_app_state_for_config(Arc::new(config));
+
+    let client_addr = SocketAddr::from(([127, 0, 0, 1], 55_620));
+    let fingerprint = create_test_fingerprint(client_addr);
+    let user = load_test_user("viewer_catchup");
+
+    let make_catchup_session = |token: &str, window: &str| UserSession {
+        token: token.to_string(),
+        transition_version: 1,
+        virtual_id: 41,
+        provider: Arc::clone(&input.name),
+        stream_url: format!("http://{origin_a}/timeshift/1.ts?window={window}").intern(),
+        provider_session_headers: HashMap::new(),
+        user_agent_stream_index: None,
+        addr: client_addr,
+        socket_bound: false,
+        active_addrs: vec![client_addr],
+        ts: 1,
+        started_at: 1,
+        permission: UserConnectionPermission::Allowed,
+        connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+        lifecycle: crate::api::model::PlaybackLifecycle::Active,
+    };
+
+    let make_catchup_channel = |window: &str| {
+        let mut channel = create_test_local_channel(&format!("http://{origin_a}/timeshift/1.ts?window={window}"));
+        channel.provider_id = 1;
+        channel.input_name = Arc::clone(&input.name);
+        channel.item_type = PlaylistItemType::Catchup;
+        channel.cluster = XtreamCluster::Live;
+        channel.url = format!("http://{origin_a}/timeshift/1.ts?window={window}").intern();
+        channel
+    };
+
+    let session_w1_1 = make_catchup_session("catchup-w1", "w1");
+    let session_w1_2 = make_catchup_session("catchup-w1", "w1");
+
+    let mut h1 = HeaderMap::new();
+    h1.insert(header::RANGE, HeaderValue::from_static("bytes=0-9"));
+    let mut h2 = HeaderMap::new();
+    h2.insert(header::RANGE, HeaderValue::from_static("bytes=5-14"));
+
+    let resp1 = force_provider_stream_response(
+        &fingerprint,
+        &app_state,
+        &session_w1_1,
+        make_catchup_channel("w1"),
+        ForceStreamRequestContext {
+            req_headers: &h1,
+            input: &input,
+            user: &user,
+            session_reservation_ttl_secs: 10,
+            content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+        },
+        None,
+    )
+    .await
+    .into_response();
+
+    let resp2 = force_provider_stream_response(
+        &fingerprint,
+        &app_state,
+        &session_w1_2,
+        make_catchup_channel("w1"),
+        ForceStreamRequestContext {
+            req_headers: &h2,
+            input: &input,
+            user: &user,
+            session_reservation_ttl_secs: 10,
+            content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+        },
+        None,
+    )
+    .await
+    .into_response();
+
+    assert_eq!(resp1.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(resp2.status(), StatusCode::PARTIAL_CONTENT);
+
+    let mut session_w2 = make_catchup_session("catchup-w2", "w2");
+    session_w2.provider = "provider_2".intern();
+    session_w2.stream_url = format!("http://{origin_b}/timeshift/1.ts?window=w2").intern();
+    let mut channel_w2 = make_catchup_channel("w2");
+    channel_w2.url = Arc::clone(&session_w2.stream_url);
+    let mut h_w2 = HeaderMap::new();
+    h_w2.insert(header::RANGE, HeaderValue::from_static("bytes=0-9"));
+    let resp_w2 = force_provider_stream_response(
+        &fingerprint,
+        &app_state,
+        &session_w2,
+        channel_w2,
+        ForceStreamRequestContext {
+            req_headers: &h_w2,
+            input: &input,
+            user: &user,
+            session_reservation_ttl_secs: 10,
+            content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+        },
+        None,
+    )
+    .await
+    .into_response();
+    assert_eq!(resp_w2.status(), StatusCode::PARTIAL_CONTENT);
+    let bytes_w2 = resp_w2.into_body().collect().await.expect("window w2 body").to_bytes();
+    assert_eq!(bytes_w2.as_ref(), &CATCHUP_BODY_B[..10], "independent window uses available provider B");
+
+    drop(resp1);
+    let bytes2 = resp2.into_body().collect().await.expect("resp2 body").to_bytes();
+    assert_eq!(bytes2.as_ref(), &CATCHUP_BODY_A[5..15]);
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while app_state.active_provider.get_provider_connections_count() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("parallel catchup requests must release their physical connections");
+
+    let reqs_a = task_a.await.expect("task A completes");
+    assert_eq!(reqs_a.len(), 2, "both requests in window w1 stayed on provider A");
+    let reqs_b = task_b.await.expect("task B completes");
+    assert_eq!(reqs_b.len(), 1, "the independent window used provider B while A was full");
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while app_state.active_provider.get_provider_connections_count() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("catchup provider connections must drain");
+    assert_eq!(app_state.active_provider.get_provider_connections_count(), 0);
+    app_state.active_provider.clear_provider_reservation("catchup-w1");
+    app_state.active_provider.clear_provider_reservation("catchup-w2");
+    assert_eq!(app_state.active_provider.provider_lease_usage(&input.name).total(), 0);
+    assert_eq!(app_state.active_provider.provider_lease_usage(&"provider_2".intern()).total(), 0);
+}
+
+#[tokio::test]
+async fn dash_stream_request_remains_redirect_and_preserves_provider_affinity() {
+    let input = Arc::new(ConfigInput {
+        id: 1,
+        name: "provider_dash".intern(),
+        input_type: InputType::Xtream,
+        headers: HashMap::default(),
+        url: "http://provider-dash.example".to_string(),
+        username: Some("dash-user".to_string()),
+        password: Some("dash-pass".to_string()),
+        enabled: true,
+        priority: 0,
+        max_connections: 2,
+        ..ConfigInput::default()
+    });
+    let target = Arc::new(ConfigTarget {
+        id: 1,
+        name: "target_dash".to_string(),
+        enabled: true,
+        options: None,
+        sort: None,
+        filter: Filter::default().into(),
+        output: Vec::new(),
+        rename: None,
+        mapping_ids: None,
+        mapping: Arc::new(ArcSwapOption::default()),
+        favourites: None,
+        processing_order: ProcessingOrder::default(),
+        execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
+        watch: None,
+        use_memory_cache: false,
+    });
+
+    let mut app_cfg = create_test_provider_app_config();
+    app_cfg.sources =
+        Arc::new(ArcSwap::from_pointee(SourcesConfig { inputs: vec![Arc::clone(&input)], ..SourcesConfig::default() }));
+    app_cfg.config = Arc::new(ArcSwap::from_pointee(Config {
+        reverse_proxy: Some(crate::model::ReverseProxyConfig {
+            resource_rewrite_disabled: false,
+            rewrite_secret: [0; 16],
+            resource_retry: crate::model::ResourceRetryConfig::default(),
+            disabled_header: None,
+            stream: None,
+            cache: None,
+            rate_limit: None,
+            geoip: None,
+            stream_history: None,
+            qos_aggregation: None,
+            hls_cache: None,
+        }),
+        ..Config::default()
+    }));
+    let app_state = create_test_app_state_for_config(Arc::new(app_cfg));
+
+    let pli = PlaylistItem {
+        header: PlaylistItemHeader {
+            id: "1".intern(),
+            name: "DASH Live".intern(),
+            group: "Live".intern(),
+            title: "DASH Live".intern(),
+            url: "http://provider-dash.example/live/dash-user/dash-pass/1.mpd".intern(),
+            item_type: PlaylistItemType::LiveDash,
+            xtream_cluster: XtreamCluster::Live,
+            virtual_id: shared::model::VirtualId(1),
+            ..PlaylistItemHeader::default()
+        },
+    };
+
+    let mut user = load_test_user("dash_viewer");
+    user.proxy = ProxyType::Reverse(None);
+    for target_type in [TargetType::M3u, TargetType::Xtream] {
+        let redirect_params = RedirectParams {
+            item: &pli,
+            provider_id: pli.get_provider_id(),
+            cluster: XtreamCluster::Live,
+            target_type,
+            target: &target,
+            input: &input,
+            user: &user,
+            stream_ext: Some(shared::defaults::DASH_EXT),
+            req_context: crate::api::endpoints::xtream_api::ApiStreamContext::Live,
+            action_path: "",
+        };
+
+        let resp = redirect_response(&app_state, &redirect_params)
+            .await
+            .expect("DASH must return a redirect response")
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::FOUND, "DASH request must be HTTP 302 Found redirect");
+        let location = resp.headers().get(axum::http::header::LOCATION).expect("location header present");
+        let location_str = location.to_str().expect("valid location string");
+        assert!(
+            location_str.contains("provider-dash.example"),
+            "redirect location must point to provider URL, got {location_str}"
+        );
+    }
+
+    let dash_ttl = get_session_reservation_ttl_secs(&app_state, PlaylistItemType::LiveDash);
+    assert_eq!(dash_ttl, default_hls_session_ttl_secs(), "DASH preserves provider affinity TTL");
+}
+
+#[tokio::test]
+async fn http_provider_lease_load_test_negative_control_detects_payload_corruption() {
+    const TS_PACKET_VALID: [u8; 188] = [0x47; 188];
+    const TS_PACKET_CORRUPT: [u8; 188] = [0; 188];
+
+    let (origin_addr, origin_task) =
+        spawn_controlled_fake_origin(FakeOriginMode::FixedBytes(TS_PACKET_CORRUPT.to_vec()), 1).await;
+
+    let input = Arc::new(ConfigInput {
+        id: 1,
+        name: "provider_neg_ctrl".intern(),
+        input_type: InputType::Xtream,
+        headers: HashMap::default(),
+        url: format!("http://{origin_addr}"),
+        enabled: true,
+        priority: 0,
+        max_connections: 1,
+        ..ConfigInput::default()
+    });
+    let mut config = create_test_provider_app_config();
+    config.sources =
+        Arc::new(ArcSwap::from_pointee(SourcesConfig { inputs: vec![Arc::clone(&input)], ..SourcesConfig::default() }));
+    let app = create_test_app_state_for_config(Arc::new(config));
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], 55_650));
+    let fingerprint = create_test_fingerprint(addr);
+    let session = load_test_session(&input, origin_addr, "neg-session", addr);
+    let channel = load_test_channel(&input, origin_addr);
+    let user = load_test_user("neg_ctrl_user");
+
+    let response = force_provider_stream_response(
+        &fingerprint,
+        &app,
+        &session,
+        channel,
+        ForceStreamRequestContext {
+            req_headers: &HeaderMap::new(),
+            input: &input,
+            user: &user,
+            session_reservation_ttl_secs: 0,
+            content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+        },
+        None,
+    )
+    .await
+    .into_response();
+
+    let status = response.status();
+    let body = response.into_body().collect().await.expect("body collects").to_bytes();
+    assert!(
+        validate_load_response(status, &body, &TS_PACKET_VALID).is_err(),
+        "negative control must be rejected by the same validator as the load harness"
+    );
+
+    let _ = origin_task.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn http_provider_lease_smoke_test() {
+    const TS_PACKET: [u8; 188] = [0x47; 188];
+    let origin_addr = spawn_load_test_origin(&TS_PACKET).await;
+
+    let input = Arc::new(ConfigInput {
+        id: 1,
+        name: "provider_smoke".intern(),
+        input_type: InputType::Xtream,
+        headers: HashMap::default(),
+        url: format!("http://{origin_addr}"),
+        enabled: true,
+        priority: 0,
+        max_connections: 0,
+        ..ConfigInput::default()
+    });
+    let mut config = create_test_provider_app_config();
+    config.sources =
+        Arc::new(ArcSwap::from_pointee(SourcesConfig { inputs: vec![Arc::clone(&input)], ..SourcesConfig::default() }));
+    let app = create_test_app_state_for_config(Arc::new(config));
+
+    for concurrency in [1usize, 2] {
+        let rounds = 5;
+        let mut tasks = tokio::task::JoinSet::new();
+        for task_idx in 0..concurrency {
+            let app = Arc::clone(&app);
+            let input = Arc::clone(&input);
+            let user = load_test_user(&format!("smoke-user-{task_idx}"));
+            tasks.spawn(async move {
+                for r in 0..rounds {
+                    let addr = SocketAddr::from(([127, 0, 0, 1], 48_000 + (task_idx as u16)));
+                    let fingerprint = create_test_fingerprint(addr);
+                    let token = format!("smoke-{task_idx}-{r}");
+                    let session = load_test_session(&input, origin_addr, &token, addr);
+                    let channel = load_test_channel(&input, origin_addr);
+
+                    let response = force_provider_stream_response(
+                        &fingerprint,
+                        &app,
+                        &session,
+                        channel,
+                        ForceStreamRequestContext {
+                            req_headers: &HeaderMap::new(),
+                            input: &input,
+                            user: &user,
+                            session_reservation_ttl_secs: 0,
+                            content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+                        },
+                        None,
+                    )
+                    .await
+                    .into_response();
+
+                    let status = response.status();
+                    let body = response.into_body().collect().await.expect("smoke body collects").to_bytes();
+                    validate_load_response(status, &body, &TS_PACKET).expect("smoke response must match the TS packet");
+                }
+            });
+        }
+        while let Some(res) = tasks.join_next().await {
+            res.expect("smoke task must succeed");
+        }
+    }
+
+    for _ in 0..50 {
+        if app.active_provider.get_provider_connections_count() == 0
+            && app.active_provider.provider_lease_usage(&input.name).total() == 0
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    assert_eq!(app.active_provider.get_provider_connections_count(), 0, "smoke slots baseline");
+    assert_eq!(app.active_provider.provider_lease_usage(&input.name).total(), 0, "smoke lease baseline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn http_provider_lease_downstream_smoke_test() {
+    const TS_PACKET: [u8; 188] = [0x47; 188];
+    let origin_addr = spawn_load_test_origin(&TS_PACKET).await;
+
+    let input = Arc::new(ConfigInput {
+        id: 1,
+        name: "provider_downstream".intern(),
+        input_type: InputType::Xtream,
+        headers: HashMap::default(),
+        url: format!("http://{origin_addr}"),
+        enabled: true,
+        priority: 0,
+        max_connections: 0,
+        ..ConfigInput::default()
+    });
+    let mut config = create_test_provider_app_config();
+    config.sources =
+        Arc::new(ArcSwap::from_pointee(SourcesConfig { inputs: vec![Arc::clone(&input)], ..SourcesConfig::default() }));
+    let app = create_test_app_state_for_config(Arc::new(config));
+
+    #[derive(Clone)]
+    struct DownstreamState {
+        app: Arc<AppState>,
+        input: Arc<ConfigInput>,
+        origin_addr: SocketAddr,
+    }
+
+    async fn stream_handler(
+        State(state): State<DownstreamState>,
+        ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    ) -> axum::response::Response {
+        let fingerprint = create_test_fingerprint(addr);
+        let user = load_test_user("downstream-user");
+        let session = load_test_session(&state.input, state.origin_addr, "downstream-token", addr);
+        let channel = load_test_channel(&state.input, state.origin_addr);
+        force_provider_stream_response(
+            &fingerprint,
+            &state.app,
+            &session,
+            channel,
+            ForceStreamRequestContext {
+                req_headers: &HeaderMap::new(),
+                input: &state.input,
+                user: &user,
+                session_reservation_ttl_secs: 0,
+                content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+            },
+            None,
+        )
+        .await
+        .into_response()
+    }
+
+    let router = Router::new().route("/stream", get(stream_handler)).with_state(DownstreamState {
+        app: Arc::clone(&app),
+        input: Arc::clone(&input),
+        origin_addr,
+    });
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("downstream listener binds");
+    let downstream_addr = listener.local_addr().expect("downstream address");
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await;
+    });
+
+    let client = reqwest::Client::new();
+    for concurrency in [1usize, 2] {
+        let mut tasks = tokio::task::JoinSet::new();
+        for task_idx in 0..concurrency {
+            let client = client.clone();
+            let url = format!("http://{downstream_addr}/stream");
+            tasks.spawn(async move {
+                for round in 0..3 {
+                    let response = client.get(&url).send().await.expect("downstream response");
+                    let status = response.status();
+                    let body = response.bytes().await.expect("downstream body");
+                    validate_load_response(status, &body, &TS_PACKET)
+                        .unwrap_or_else(|err| panic!("downstream task {task_idx} round {round}: {err}"));
+                }
+            });
+        }
+        while let Some(res) = tasks.join_next().await {
+            res.expect("downstream task must succeed");
+        }
+    }
+
+    for _ in 0..50 {
+        if app.active_provider.get_provider_connections_count() == 0
+            && app.active_provider.provider_lease_usage(&input.name).total() == 0
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(app.active_provider.get_provider_connections_count(), 0, "downstream slots baseline");
+    assert_eq!(app.active_provider.provider_lease_usage(&input.name).total(), 0, "downstream lease baseline");
+
+    server.abort();
+}
+
 #[test]
 fn test_regular_response_keeps_compression_enabled() {
     let response = Response::new(());
@@ -1058,16 +3789,13 @@ async fn resolve_streaming_strategy_honors_forced_provider_fallback_policy() {
     let fallback_addr: SocketAddr = "127.0.0.1:55303".parse().unwrap_or_else(|_| unreachable!());
     let stream_url = "http://provider-1.example/movie/user1/pass1/1.mkv";
 
-    let busy = app_state
-        .active_provider
-        .acquire_exact_connection_with_grace(
-            &pinned_provider,
-            &busy_addr,
-            false,
-            0,
-            crate::api::model::ConnectionKind::Normal,
-        )
-        .await;
+    let busy = app_state.active_provider.acquire_exact_connection_with_grace(
+        &pinned_provider,
+        &busy_addr,
+        false,
+        0,
+        crate::api::model::ConnectionKind::Normal,
+    );
     assert!(busy.is_some(), "setup should occupy the pinned provider");
 
     let strict = resolve_streaming_strategy(
@@ -1082,6 +3810,7 @@ async fn resolve_streaming_strategy_honors_forced_provider_fallback_policy() {
             user_priority: 0,
             connection_kind: crate::api::model::ConnectionKind::Normal,
             session_owner: Some("vod-session"),
+            playback_kind: crate::model::PlaybackKind::Vod,
             accept_requested_stream_url: false,
         },
     )
@@ -1107,6 +3836,7 @@ async fn resolve_streaming_strategy_honors_forced_provider_fallback_policy() {
             user_priority: 0,
             connection_kind: crate::api::model::ConnectionKind::Normal,
             session_owner: Some("live-session"),
+            playback_kind: crate::model::PlaybackKind::LiveTs,
             accept_requested_stream_url: false,
         },
     )
@@ -1118,9 +3848,9 @@ async fn resolve_streaming_strategy_honors_forced_provider_fallback_policy() {
     };
     assert_eq!(fallback_provider.as_ref(), "provider_2");
 
-    app_state.active_provider.release_connection(&busy_addr).await;
-    app_state.active_provider.release_connection(&strict_addr).await;
-    app_state.active_provider.release_connection(&fallback_addr).await;
+    app_state.active_provider.release_connection(&busy_addr);
+    app_state.active_provider.release_connection(&strict_addr);
+    app_state.active_provider.release_connection(&fallback_addr);
 }
 
 #[tokio::test]
@@ -1143,6 +3873,7 @@ async fn resolve_streaming_strategy_rewrites_stale_alias_url_to_selected_main_pr
             user_priority: 0,
             connection_kind: crate::api::model::ConnectionKind::Normal,
             session_owner: Some("live-session"),
+            playback_kind: crate::model::PlaybackKind::LiveTs,
             accept_requested_stream_url: false,
         },
     )
@@ -1154,7 +3885,7 @@ async fn resolve_streaming_strategy_rewrites_stale_alias_url_to_selected_main_pr
     assert_eq!(provider.as_ref(), "provider_1");
     assert_eq!(url.as_ref(), "http://provider-1.example/live/user1/pass1/100.ts");
 
-    app_state.active_provider.release_connection(&addr).await;
+    app_state.active_provider.release_connection(&addr);
 }
 
 #[tokio::test]
@@ -1187,16 +3918,13 @@ async fn resolve_streaming_strategy_rewrites_opaque_m3u_token_after_alias_alloca
     let busy_addr: SocketAddr = "127.0.0.1:55306".parse().unwrap_or_else(|_| unreachable!());
     let alias_addr: SocketAddr = "127.0.0.1:55307".parse().unwrap_or_else(|_| unreachable!());
 
-    let busy = app_state
-        .active_provider
-        .acquire_exact_connection_with_grace(
-            &provider_a,
-            &busy_addr,
-            false,
-            0,
-            crate::api::model::ConnectionKind::Normal,
-        )
-        .await;
+    let busy = app_state.active_provider.acquire_exact_connection_with_grace(
+        &provider_a,
+        &busy_addr,
+        false,
+        0,
+        crate::api::model::ConnectionKind::Normal,
+    );
     assert!(busy.is_some(), "setup should occupy provider A");
 
     let strategy = resolve_streaming_strategy(
@@ -1211,6 +3939,7 @@ async fn resolve_streaming_strategy_rewrites_opaque_m3u_token_after_alias_alloca
             user_priority: 0,
             connection_kind: crate::api::model::ConnectionKind::Normal,
             session_owner: Some("live-session"),
+            playback_kind: crate::model::PlaybackKind::LiveTs,
             accept_requested_stream_url: false,
         },
     )
@@ -1222,8 +3951,8 @@ async fn resolve_streaming_strategy_rewrites_opaque_m3u_token_after_alias_alloca
     assert_eq!(provider.as_ref(), "provider-b");
     assert_eq!(url.as_ref(), "http://stream.example/channel/segment.ts?token=provider-b-token");
 
-    app_state.active_provider.release_connection(&busy_addr).await;
-    app_state.active_provider.release_connection(&alias_addr).await;
+    app_state.active_provider.release_connection(&busy_addr);
+    app_state.active_provider.release_connection(&alias_addr);
 }
 
 #[tokio::test]
@@ -1246,6 +3975,7 @@ async fn resolve_streaming_strategy_rejects_unmapped_provider_url() {
             user_priority: 0,
             connection_kind: crate::api::model::ConnectionKind::Normal,
             session_owner: Some("live-session"),
+            playback_kind: crate::model::PlaybackKind::LiveTs,
             accept_requested_stream_url: false,
         },
     )
@@ -1257,7 +3987,7 @@ async fn resolve_streaming_strategy_rejects_unmapped_provider_url() {
         ProviderStreamState::Custom { reason: ProviderStreamCustomReason::UnmappedProviderUrl, .. }
     ));
 
-    app_state.active_provider.release_connection(&addr).await;
+    app_state.active_provider.release_connection(&addr);
 }
 
 #[tokio::test]
@@ -1290,6 +4020,7 @@ async fn resolve_streaming_strategy_accepts_stalker_portal_url() {
             user_priority: 0,
             connection_kind: crate::api::model::ConnectionKind::Normal,
             session_owner: Some("live-session"),
+            playback_kind: crate::model::PlaybackKind::LiveTs,
             accept_requested_stream_url: false,
         },
     )
@@ -1299,7 +4030,7 @@ async fn resolve_streaming_strategy_accepts_stalker_portal_url() {
     assert_eq!(provider.as_ref(), "provider_1");
     assert_eq!(url.as_ref(), stream_url);
 
-    app_state.active_provider.release_connection(&addr).await;
+    app_state.active_provider.release_connection(&addr);
 }
 
 #[tokio::test]
@@ -1322,6 +4053,7 @@ async fn resolve_streaming_strategy_accepts_session_requested_stream_url() {
             user_priority: 0,
             connection_kind: crate::api::model::ConnectionKind::Normal,
             session_owner: Some("live-session"),
+            playback_kind: crate::model::PlaybackKind::LiveTs,
             accept_requested_stream_url: true,
         },
     )
@@ -1333,7 +4065,7 @@ async fn resolve_streaming_strategy_accepts_session_requested_stream_url() {
     assert_eq!(provider.as_ref(), "provider_1");
     assert_eq!(url.as_ref(), trusted_url);
 
-    app_state.active_provider.release_connection(&addr).await;
+    app_state.active_provider.release_connection(&addr);
 }
 
 #[test]
@@ -1525,7 +4257,7 @@ fn create_test_app_state_for_config(app_cfg: Arc<AppConfig>) -> Arc<AppState> {
     let active_provider = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
     let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
     let history_config = Some(StreamHistoryConfig::default());
-    active_provider.set_shared_stream_manager(Arc::clone(&shared_stream_manager));
+    active_provider.set_shared_stream_manager(&shared_stream_manager);
 
     let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
     let config = app_cfg.config.load();
@@ -1898,6 +4630,7 @@ async fn activate_session_before_stream_open_skips_placeholder_for_follow_up_ses
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
+        cleanup_queue_capacity: 4096,
         admission_strategies: Some(vec![AdmissionStrategy::EvictUserSameIpOldest]),
     });
     let addr: SocketAddr = "127.0.0.1:55220".parse().unwrap_or_else(|_| unreachable!());
@@ -1985,6 +4718,7 @@ async fn activate_session_before_stream_open_revalidates_precomputed_follow_up_r
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
+        cleanup_queue_capacity: 4096,
         admission_strategies: Some(vec![AdmissionStrategy::EvictUserSameIpOldest]),
     });
     let addr: SocketAddr = "127.0.0.1:55221".parse().unwrap_or_else(|_| unreachable!());
@@ -2057,6 +4791,7 @@ async fn activate_session_before_stream_open_stale_follow_up_reclassified_on_cou
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
+        cleanup_queue_capacity: 4096,
         admission_strategies: Some(vec![AdmissionStrategy::EvictUserSameIpOldest]),
     });
     let addr: SocketAddr = "127.0.0.1:55230".parse().unwrap_or_else(|_| unreachable!());
@@ -2132,6 +4867,7 @@ async fn activate_session_before_stream_open_pre_resolved_grace_period_materiali
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
+        cleanup_queue_capacity: 4096,
         admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
     });
     let addr: SocketAddr = "127.0.0.1:55231".parse().unwrap_or_else(|_| unreachable!());
@@ -2205,6 +4941,7 @@ async fn activate_session_before_stream_open_skips_placeholder_for_prepare() {
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
+        cleanup_queue_capacity: 4096,
         admission_strategies: Some(vec![AdmissionStrategy::EvictUserSameIpOldest]),
     });
     let addr: SocketAddr = "127.0.0.1:55222".parse().unwrap_or_else(|_| unreachable!());
@@ -2258,6 +4995,7 @@ async fn resolve_playback_request_admission_prepare_only_returns_prepare_class()
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
+        cleanup_queue_capacity: 4096,
         admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
     });
     let addr: SocketAddr = "127.0.0.1:55223".parse().unwrap_or_else(|_| unreachable!());
@@ -2302,6 +5040,7 @@ async fn resolve_playback_request_admission_terminate_returns_terminate_class() 
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
+        cleanup_queue_capacity: 4096,
         admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
     });
     let addr: SocketAddr = "127.0.0.1:55224".parse().unwrap_or_else(|_| unreachable!());
@@ -2379,6 +5118,7 @@ async fn activate_session_before_stream_open_marks_pending_provider_for_grace_ho
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
+        cleanup_queue_capacity: 4096,
         admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
     };
     let mut app_cfg = create_test_app_config();
@@ -2485,6 +5225,7 @@ async fn activate_session_before_stream_open_does_not_commit_user_lease_before_p
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
+        cleanup_queue_capacity: 4096,
         admission_strategies: None,
     };
     let mut app_cfg = create_test_app_config();
@@ -2607,6 +5348,7 @@ async fn effective_admission_strategies_use_legacy_grace_when_field_missing() {
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
+        cleanup_queue_capacity: 4096,
         admission_strategies: None,
     });
 
@@ -2631,6 +5373,7 @@ async fn effective_admission_strategies_respect_explicit_empty_list() {
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
+        cleanup_queue_capacity: 4096,
         admission_strategies: Some(vec![]),
     });
 
@@ -2654,6 +5397,7 @@ async fn grace_context_is_populated_when_grace_strategy_is_actually_granted() {
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
+        cleanup_queue_capacity: 4096,
         admission_strategies: Some(vec![
             AdmissionStrategy::EvictUserSameIpOldest,
             AdmissionStrategy::GraceHoldStream,
@@ -2758,6 +5502,7 @@ async fn evaluate_remaining_strategies_evicts_after_used_grace() {
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
+        cleanup_queue_capacity: 4096,
         admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream, AdmissionStrategy::EvictUserOldest]),
     });
 
@@ -2856,6 +5601,7 @@ async fn evaluate_remaining_strategies_skips_no_match_and_uses_later_eviction() 
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
+        cleanup_queue_capacity: 4096,
         admission_strategies: Some(vec![
             AdmissionStrategy::GraceHoldStream,
             AdmissionStrategy::EvictUserSameIpOldest,
@@ -2955,6 +5701,7 @@ async fn evaluate_remaining_strategies_empty_slice_denies() {
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
+        cleanup_queue_capacity: 4096,
         admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
     });
 
@@ -3007,6 +5754,7 @@ async fn evaluate_remaining_strategies_preserves_soft_kind_on_exhausted() {
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
+        cleanup_queue_capacity: 4096,
         admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
     });
 
@@ -3066,6 +5814,7 @@ async fn evaluate_remaining_strategies_does_not_retry_used_prefix() {
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
+        cleanup_queue_capacity: 4096,
         admission_strategies: Some(strategies_for_config),
     });
 
@@ -3167,6 +5916,7 @@ async fn evaluate_remaining_strategies_empty_slice_uses_original_kind_not_contex
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
+        cleanup_queue_capacity: 4096,
         admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
     });
 
@@ -3228,6 +5978,7 @@ async fn evaluate_remaining_strategies_later_grace_uses_original_kind_not_contex
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
+        cleanup_queue_capacity: 4096,
         admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream, AdmissionStrategy::GraceInstantStream]),
     });
 
@@ -3325,6 +6076,7 @@ async fn resolve_admission_with_strategies_falls_through_after_failed_grace_gran
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
+        cleanup_queue_capacity: 4096,
         admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream, AdmissionStrategy::EvictUserOldest]),
     });
 
@@ -3524,6 +6276,7 @@ async fn resolve_admission_with_strategies_prevents_recently_evicted_playback_pi
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
+        cleanup_queue_capacity: 4096,
         admission_strategies: Some(vec![AdmissionStrategy::EvictUserOldest]),
     });
 
@@ -3605,6 +6358,53 @@ async fn resolve_admission_with_strategies_prevents_recently_evicted_playback_pi
     let active_streams = app_state.active_users.active_streams().await;
     assert_eq!(active_streams.len(), 1);
     assert_eq!(active_streams[0].channel.virtual_id, 9002);
+
+    // A player may retry the winning plain-TS stream on another socket before the
+    // previous HTTP body has drained. That is a replacement of the same playback,
+    // not the evicted channel trying to reclaim its slot.
+    app_state
+        .active_users
+        .mark_recent_eviction_guard_for_addr(&winner_addr, reconnect_addr, RECENT_EVICTION_REENTRY_TTL_SECS)
+        .await;
+    app_state.connection_manager.release_connection_as_kicked(&winner_addr).await;
+    app_state.connection_manager.add_connection(&reconnect_addr).await;
+    app_state
+        .connection_manager
+        .update_connection(crate::api::model::ConnectionParams {
+            meter_uid: 3,
+            username: "loop-user",
+            max_connections: 1,
+            soft_connections: 0,
+            connection_kind: crate::api::model::ConnectionKind::Normal,
+            priority: 0,
+            soft_priority: 0,
+            fingerprint: &reconnect_fingerprint,
+            provider: "provider-a".intern(),
+            stream_channel: &winner_channel,
+            user_agent: std::borrow::Cow::Borrowed("player/1.0"),
+            session_token: None,
+        })
+        .await;
+
+    let retry_addr: std::net::SocketAddr = "127.0.0.1:55184".parse().unwrap_or_else(|_| unreachable!());
+    let retry = resolve_admission_with_strategies(
+        &app_state.admission_ctx(),
+        AdmissionRequest {
+            username: "loop-user",
+            max_connections: 1,
+            soft_connections: 0,
+            client_ip: &reconnect_fingerprint.client_ip,
+            request_addr: &retry_addr,
+            use_session_admission: true,
+            session_token: Some("socket-retry"),
+            activate_unbound_session: false,
+            eviction_reentry_guard: EvictionReentryGuard::SocketPlayback { virtual_id: VirtualId::new(9002) },
+        },
+    )
+    .await;
+
+    assert_eq!(retry.admission.permission, UserConnectionPermission::Allowed);
+    assert!(app_state.active_users.active_streams().await.is_empty());
 }
 
 #[tokio::test]
@@ -3623,6 +6423,7 @@ async fn resolve_admission_with_strategies_allows_other_channel_after_recent_evi
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
+        cleanup_queue_capacity: 4096,
         admission_strategies: Some(vec![AdmissionStrategy::EvictUserOldest]),
     });
 
@@ -3750,6 +6551,7 @@ async fn resolve_admission_with_strategies_does_not_suppress_different_session_o
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
+        cleanup_queue_capacity: 4096,
         admission_strategies: Some(vec![AdmissionStrategy::EvictUserOldest]),
     });
 
@@ -3877,6 +6679,7 @@ async fn resolve_admission_with_strategies_allows_recently_evicted_playback_when
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
+        cleanup_queue_capacity: 4096,
         admission_strategies: Some(vec![AdmissionStrategy::EvictUserOldest]),
     });
 
@@ -4117,8 +6920,13 @@ async fn stream_response_preserves_soft_kind_for_shared_reuse() {
     let owner_handle = app_state
         .active_provider
         .acquire_connection(&input.name, &owner_addr, 0, crate::api::model::ConnectionKind::Normal)
-        .await
         .expect("owner allocation should exist");
+    let subscriber_id =
+        tuliprox_core::model::SharedSubscriberId::from_stream_uid(app_state.connection_manager.next_stream_uid());
+    let pending_cleanup =
+        SharedStreamManager::reserve_subscriber_cleanup(&app_state.connection_manager, subscriber_id, owner_addr)
+            .await
+            .expect("shared cleanup admission should succeed");
     let shared_stream = stream::pending::<Result<Bytes, std::io::Error>>();
     let registered = SharedStreamManager::register_shared_stream(
         SharedStreamCtx {
@@ -4130,9 +6938,11 @@ async fn stream_response_preserves_soft_kind_for_shared_reuse() {
         stream_url,
         shared_stream,
         &owner_addr,
+        subscriber_id,
         Vec::new(),
         1,
-        Some(owner_handle),
+        Some(tuliprox_session::ManagedProviderHandle::new(Arc::clone(&app_state.active_provider), owner_handle)),
+        pending_cleanup,
         0,
         crate::api::model::ConnectionKind::Normal,
     )
@@ -4203,6 +7013,139 @@ async fn stream_response_preserves_soft_kind_for_shared_reuse() {
         .connection_admission_for_session(&user.username, user.max_connections, user.soft_connections, "soft-session")
         .await;
     assert_eq!(session_admission.kind, Some(crate::api::model::ConnectionKind::Soft));
+}
+
+#[tokio::test]
+async fn failed_provider_open_preserves_other_allocation_on_same_socket() -> Result<(), Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let upstream = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await?;
+        socket.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await
+    });
+    let mut config = create_test_provider_app_config();
+    let input = Arc::new(ConfigInput {
+        id: 1,
+        name: "provider_1".intern(),
+        enabled: true,
+        input_type: InputType::Xtream,
+        url: format!("http://{upstream}"),
+        username: Some("user1".to_string()),
+        password: Some("pass1".to_string()),
+        max_connections: 2,
+        ..ConfigInput::default()
+    });
+    config.sources =
+        Arc::new(ArcSwap::from_pointee(SourcesConfig { inputs: vec![Arc::clone(&input)], ..SourcesConfig::default() }));
+    let app = create_test_app_state_for_config(Arc::new(config));
+    let addr = "127.0.0.1:55144".parse()?;
+    let live = app
+        .active_provider
+        .acquire_connection(&input.name, &addr, 0, crate::api::model::ConnectionKind::Normal)
+        .ok_or("live allocation missing")?;
+    let url = format!("http://{upstream}/live/user1/pass1/100.ts");
+    let channel = create_test_live_channel(&url);
+    let details = create_stream_response_details(
+        &app,
+        &get_stream_options(&app.app_config),
+        &url,
+        "failing-user",
+        &create_test_fingerprint(addr),
+        &HeaderMap::new(),
+        &input,
+        &channel,
+        PlaylistItemType::Live,
+        crate::api::model::ProviderContentRepresentationMode::PreserveOrigin,
+        false,
+        UserConnectionPermission::Allowed,
+        None,
+        true,
+        false,
+        VirtualId::new(channel.virtual_id),
+        0,
+        crate::api::model::ConnectionKind::Normal,
+        false,
+        Some("failed-session"),
+        None,
+        false,
+        None,
+        None,
+    )
+    .await?;
+    assert!(details.provider_handle.is_none());
+    assert_eq!(app.active_provider.get_provider_connections_count(), 1);
+    assert!(!live.cancel_token.as_ref().is_some_and(tokio_util::sync::CancellationToken::is_cancelled));
+    app.active_provider.release_handle(&live);
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn ts_direct_capacity_spreads_across_priority_groups_then_rejects_sixth() {
+    let input = Arc::new(ConfigInput {
+        id: 1,
+        name: "provider_a".intern(),
+        enabled: true,
+        input_type: InputType::Xtream,
+        url: "http://127.0.0.1:1".to_string(),
+        username: Some("user-a".to_string()),
+        password: Some("pass-a".to_string()),
+        priority: 0,
+        max_connections: 2,
+        aliases: Some(vec![ConfigInputAlias {
+            id: 2,
+            name: "provider_b".intern(),
+            url: "http://127.0.0.1:2".to_string(),
+            username: Some("user-b".to_string()),
+            password: Some("pass-b".to_string()),
+            priority: 1,
+            max_connections: 3,
+            exp_date: None,
+            enabled: true,
+            stalker: None,
+        }]),
+        ..ConfigInput::default()
+    });
+    let mut config = create_test_provider_app_config();
+    config.sources =
+        Arc::new(ArcSwap::from_pointee(SourcesConfig { inputs: vec![Arc::clone(&input)], ..SourcesConfig::default() }));
+    let app = create_test_app_state_for_config(Arc::new(config));
+
+    let addr: SocketAddr = "127.0.0.1:55120".parse().unwrap_or_else(|_| unreachable!());
+    let mut handles = Vec::new();
+    for _ in 0..5 {
+        let handle = app.active_provider.acquire_connection_with_grace(
+            &input.name,
+            &addr,
+            false,
+            0,
+            crate::api::model::ConnectionKind::Normal,
+        );
+        assert!(handle.is_some(), "five allocations must succeed against A(2)+B(3)");
+        handles.push(handle.expect("allocation present"));
+    }
+
+    let sixth = app.active_provider.acquire_connection_with_grace(
+        &input.name,
+        &addr,
+        false,
+        0,
+        crate::api::model::ConnectionKind::Normal,
+    );
+    assert!(sixth.is_none(), "sixth start must be rejected once A(2)+B(3) are exhausted");
+
+    let active = app.active_provider.active_connections().expect("active connection map present");
+    assert_eq!(active.get("provider_a").copied(), Some(5), "multi lineup must hold five allocations in total");
+
+    let capacities = app.active_provider.provider_capacities_for_input(&input.name);
+    let current_of = |name: &str| capacities.iter().find(|(n, _, _)| n.as_ref() == name).map(|(_, cur, _)| *cur);
+    assert_eq!(current_of("provider_a"), Some(2), "priority group A must hold two allocations");
+    assert_eq!(current_of("provider_b"), Some(3), "priority group B must hold three allocations");
+
+    for handle in &handles {
+        app.active_provider.release_handle(handle);
+    }
+    assert_eq!(app.active_provider.get_provider_connections_count(), 0);
 }
 
 #[tokio::test]
@@ -4289,6 +7232,7 @@ async fn stream_response_rolls_back_provisional_user_activation_when_provider_op
 async fn should_pin_provider_for_session_skips_reservation_on_failure_custom_video() {
     let app_state = create_test_app_state();
     let no_video_details = StreamDetails {
+        shared_subscriber_id: None,
         stream: None,
         stream_info: Some((Vec::new(), StatusCode::OK, None, None)),
         provider_name: Some("provider_1".intern()),
@@ -4303,6 +7247,7 @@ async fn should_pin_provider_for_session_skips_reservation_on_failure_custom_vid
         provider_handle: None,
         content_representation: crate::api::model::ProviderContentRepresentationMode::PreserveOrigin,
         grace_resolution_context: None,
+        custom_reason: None,
     };
     assert!(
         should_pin_provider_for_session(&no_video_details, &app_state, PlaylistItemType::Catchup),
@@ -4310,6 +7255,7 @@ async fn should_pin_provider_for_session_skips_reservation_on_failure_custom_vid
     );
 
     let provisioning_details = StreamDetails {
+        shared_subscriber_id: None,
         stream: None,
         stream_info: Some((Vec::new(), StatusCode::OK, None, Some(CustomVideoStreamType::Provisioning))),
         provider_name: Some("provider_1".intern()),
@@ -4324,6 +7270,7 @@ async fn should_pin_provider_for_session_skips_reservation_on_failure_custom_vid
         provider_handle: None,
         content_representation: crate::api::model::ProviderContentRepresentationMode::PreserveOrigin,
         grace_resolution_context: None,
+        custom_reason: None,
     };
     assert!(
         should_pin_provider_for_session(&provisioning_details, &app_state, PlaylistItemType::Catchup),
@@ -4338,6 +7285,7 @@ async fn should_pin_provider_for_session_skips_reservation_on_failure_custom_vid
         CustomVideoStreamType::LowPriorityPreempted,
     ] {
         let failure_details = StreamDetails {
+            shared_subscriber_id: None,
             stream: None,
             stream_info: Some((Vec::new(), StatusCode::BAD_REQUEST, None, Some(failure_type))),
             provider_name: Some("provider_1".intern()),
@@ -4352,6 +7300,7 @@ async fn should_pin_provider_for_session_skips_reservation_on_failure_custom_vid
             provider_handle: None,
             content_representation: crate::api::model::ProviderContentRepresentationMode::PreserveOrigin,
             grace_resolution_context: None,
+            custom_reason: None,
         };
         assert!(
             !should_pin_provider_for_session(&failure_details, &app_state, PlaylistItemType::Catchup),
@@ -4792,6 +7741,7 @@ async fn resolve_admission_with_strategies_evicts_preserved_hls_session_for_same
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
         shared_subscriber_idle_timeout_secs: 300,
+        cleanup_queue_capacity: 4096,
         admission_strategies: Some(vec![
             AdmissionStrategy::EvictUserSameIpOldest,
             AdmissionStrategy::EvictUserSameIpLatest,
@@ -5045,6 +7995,21 @@ fn playback_session_fingerprint_keeps_ts_socket_bound_but_vod_logical() {
     assert_eq!(first_vod, second_vod, "VOD remains logical across reopen/seek sockets");
 }
 
+#[test]
+fn catchup_session_key_is_sticky_only_within_the_same_archive_window() {
+    let addr: SocketAddr = "127.0.0.1:55181".parse().unwrap_or_else(|_| unreachable!());
+    let fingerprint = Fingerprint::new("10.0.0.8|player".to_string(), "10.0.0.8".to_string(), addr);
+
+    let first = create_catchup_session_key(&fingerprint, "user1", 7004, "/timeshift/3600/1700000000/");
+    let same = create_catchup_session_key(&fingerprint, "user1", 7004, "timeshift/3600/1700000000");
+    let seeked = create_catchup_session_key(&fingerprint, "user1", 7004, "timeshift/3600/1700000300");
+    let resized = create_catchup_session_key(&fingerprint, "user1", 7004, "timeshift/1800/1700000000");
+
+    assert_eq!(first, same, "cosmetic path separators must not break provider stickiness");
+    assert_ne!(first, seeked, "seeking must identify the new archive window");
+    assert_ne!(first, resized, "changing duration must identify the new archive window");
+}
+
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn xtream_hls_then_ts_uses_distinct_tokens_and_evicts_old_hls_session() {
@@ -5069,6 +8034,7 @@ async fn xtream_hls_then_ts_uses_distinct_tokens_and_evicts_old_hls_session() {
                 throttle_kbps: 0,
                 shared_burst_buffer_mb: 1,
                 shared_subscriber_idle_timeout_secs: 300,
+                cleanup_queue_capacity: 4096,
                 admission_strategies: Some(vec![
                     AdmissionStrategy::EvictUserSameIpOldest,
                     AdmissionStrategy::EvictUserSameIpLatest,
@@ -5300,7 +8266,6 @@ async fn intentional_deferred_open_retains_provider_grace_handle() {
             0,
             crate::api::model::ConnectionKind::Normal,
         )
-        .await
         .expect("holder occupies the provider slot");
     let input = app_state.app_config.get_input_by_name(&provider_name).expect("provider input");
     let stream_url = "http://provider-1.example/live/user1/pass1/100.m3u8";
@@ -5341,8 +8306,8 @@ async fn intentional_deferred_open_retains_provider_grace_handle() {
     assert!(details.has_deferred_provider_open());
     assert!(details.provider_handle.is_some(), "deferred open must retain its provider allocation");
 
-    app_state.connection_manager.release_provider_handle(details.provider_handle.take()).await;
-    app_state.connection_manager.release_provider_handle(Some(holder_handle)).await;
+    app_state.connection_manager.release_managed_provider_handle(details.provider_handle.take());
+    app_state.connection_manager.release_provider_handle(Some(holder_handle));
 }
 
 #[test]
@@ -5361,7 +8326,7 @@ async fn forced_reopen_cleanup_for_adaptive_streams_does_not_close_client_socket
     let addr: SocketAddr = "127.0.0.1:55220".parse().unwrap_or_else(|_| unreachable!());
     let mut close_rx = app_state.connection_manager.get_close_connection_channel();
 
-    cleanup_forced_reopen_addrs(&app_state, PlaylistItemType::LiveHls, &[addr]).await;
+    cleanup_forced_reopen_addrs(&app_state, "adaptive-owner", &[addr]).await;
 
     let signal =
         tokio::time::timeout(std::time::Duration::from_millis(50), close_rx.recv()).await.ok().and_then(Result::ok);
@@ -5369,19 +8334,16 @@ async fn forced_reopen_cleanup_for_adaptive_streams_does_not_close_client_socket
 }
 
 #[tokio::test]
-async fn forced_reopen_cleanup_for_non_adaptive_streams_closes_client_socket() {
+async fn forced_reopen_cleanup_for_non_adaptive_streams_preserves_client_socket() {
     let app_state = create_test_app_state();
     let addr: SocketAddr = "127.0.0.1:55221".parse().unwrap_or_else(|_| unreachable!());
     let mut close_rx = app_state.connection_manager.get_close_connection_channel();
 
-    cleanup_forced_reopen_addrs(&app_state, PlaylistItemType::Live, &[addr]).await;
+    cleanup_forced_reopen_addrs(&app_state, "live-owner", &[addr]).await;
 
     let signal =
         tokio::time::timeout(std::time::Duration::from_millis(50), close_rx.recv()).await.ok().and_then(Result::ok);
-    assert!(matches!(
-        signal,
-        Some(crate::api::model::CloseConnectionSignal::WithReason(signal_addr, _)) if signal_addr == addr
-    ));
+    assert!(signal.is_none(), "a reopen must not close unrelated requests on the same proxy socket");
 }
 
 #[tokio::test]
@@ -5780,4 +8742,146 @@ fn evaluate_network_access_respects_allow_policy() {
         evaluate_network_access(&user, "8.8.8.8", &geoip, GeoIpUnavailablePolicy::Allow),
         NetworkAccessDecision::AllowedGeoIpUnavailable
     );
+}
+
+#[tokio::test]
+async fn test_channel_unavailable_fallback_does_not_register_body_owner_or_leak_slot() {
+    let app_state = create_test_provider_app_state();
+    let provider_name = "provider_1".intern();
+    let mut cfg = (**app_state.app_config.config.load()).clone();
+    cfg.custom_stream_response_enabled = true;
+    app_state.app_config.config.store(std::sync::Arc::new(cfg));
+    let addr: std::net::SocketAddr = "127.0.0.1:49080".parse().unwrap();
+
+    let custom_video = crate::model::CustomStreamResponse {
+        channel_unavailable: Some(crate::api::model::TransportStreamBuffer::new(b"channel-unavailable-bytes".to_vec())),
+        user_connections_exhausted: None,
+        provider_connections_exhausted: None,
+        low_priority_preempted: None,
+        user_account_expired: None,
+        panel_api_provisioning: None,
+        hls_session_or_lease_expired: None,
+        panel_api_provisioning_hls_segments: Vec::new(),
+    };
+    app_state.app_config.custom_stream_response.store(Some(std::sync::Arc::new(custom_video)));
+
+    let handle = app_state
+        .active_provider
+        .acquire_connection(&provider_name, &addr, 0, tuliprox_session::ConnectionKind::Normal)
+        .expect("connection should be acquired");
+
+    assert_eq!(app_state.active_provider.get_provider_connections_count(), 1);
+
+    let (channel_unavail_stream, info) =
+        create_channel_unavailable_stream(&app_state.app_config, &[], axum::http::StatusCode::OK);
+    assert!(channel_unavail_stream.is_some());
+
+    let factory_response = tuliprox_session::ProviderStreamFactoryResponse {
+        stream: channel_unavail_stream.unwrap(),
+        info,
+        provider_session_headers: std::collections::HashMap::new(),
+        has_upstream_owner: false,
+    };
+
+    if factory_response.has_upstream_owner {
+        app_state.active_provider.register_body_owner(handle.allocation_id);
+    }
+
+    app_state.active_provider.release_handle(&handle);
+
+    assert_eq!(app_state.active_provider.get_provider_connections_count(), 0);
+    assert_eq!(app_state.active_provider.active_connections().map(|m| m.values().sum::<usize>()).unwrap_or(0), 0);
+}
+
+#[tokio::test]
+async fn test_provider_open_cancelled_during_header_wait_releases_slot_without_leak() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_addr = listener.local_addr().unwrap();
+
+    let accepted = std::sync::Arc::new(tokio::sync::Notify::new());
+    let accepted_clone = std::sync::Arc::clone(&accepted);
+
+    let server_task = tokio::spawn(async move {
+        if let Ok((mut socket, _)) = listener.accept().await {
+            accepted_clone.notify_waiters();
+            let mut buf = [0u8; 1024];
+            loop {
+                use tokio::io::AsyncReadExt;
+                match socket.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        }
+    });
+
+    let app_state = create_test_provider_app_state();
+    let provider_name = "provider_1".intern();
+    let client_addr: std::net::SocketAddr = "127.0.0.1:49081".parse().unwrap();
+
+    let handle = app_state
+        .active_provider
+        .acquire_connection(&provider_name, &client_addr, 0, tuliprox_session::ConnectionKind::Normal)
+        .expect("connection should be acquired");
+
+    assert_eq!(app_state.active_provider.get_provider_connections_count(), 1);
+
+    let url = url::Url::parse(&format!("http://{local_addr}/stream.ts")).unwrap();
+    let req_headers = axum::http::HeaderMap::new();
+    let stream_options = get_stream_options(&app_state.app_config);
+    let mut options =
+        crate::api::model::ProviderStreamFactoryOptions::new(&crate::api::model::ProviderStreamFactoryParams {
+            addr: client_addr,
+            item_type: PlaylistItemType::Live,
+            share_stream: false,
+            stream_options: &stream_options,
+            stream_url: &url,
+            req_headers: &req_headers,
+            input_headers: None,
+            session_headers: None,
+            disabled_headers: None,
+            default_user_agent: None,
+            username: None,
+            client_ip: None,
+            stream_channel: None,
+            connect_failure_stage: None,
+            content_representation: tuliprox_session::ProviderContentRepresentationMode::PreserveOrigin,
+        });
+    options.set_provider_handle_tokens(
+        handle.cancel_token.clone(),
+        handle.completion_token.clone(),
+        Some(handle.close_reason.clone()),
+    );
+    app_state.active_provider.mark_opening(handle.allocation_id);
+
+    let ctx = app_state.provider_stream_ctx();
+    let client = app_state.http_client.load().as_ref().clone();
+
+    let open_task =
+        tokio::spawn(async move { crate::api::model::create_provider_stream(&ctx, &client, options).await });
+
+    // Wait until TCP connection is accepted and waiting for response headers
+    accepted.notified().await;
+
+    // Now cancel the handle while it is waiting for response headers
+    handle.cancel_token.as_ref().unwrap().cancel();
+
+    // The open task should finish quickly because it is cancelled
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), open_task)
+        .await
+        .expect("open task should abort upon cancellation")
+        .expect("task join");
+    assert!(outcome.is_none());
+
+    // Release the handle
+    app_state.active_provider.release_handle(&handle);
+
+    // Yield to allow background completion tasks to process
+    tokio::task::yield_now().await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    assert_eq!(app_state.active_provider.get_provider_connections_count(), 0);
+    assert_eq!(app_state.active_provider.active_connections().map(|m| m.values().sum::<usize>()).unwrap_or(0), 0);
+
+    let _ = server_task.await;
 }

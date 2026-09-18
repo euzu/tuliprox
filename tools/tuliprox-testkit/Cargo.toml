@@ -1,0 +1,34 @@
+[package]
+name = "tuliprox-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+axum = { version = "0.8.9", features = ["macros", "default", "ws"] }
+base64.workspace = true
+blake3.workspace = true
+bytes.workspace = true
+clap = { version = "4.6.6", features = ["derive"] }
+crc32fast = "1.5.1"
+futures.workspace = true
+reqwest = { version = "0.13.4", features = ["json", "stream", "rustls"] }
+serde.workspace = true
+serde_json.workspace = true
+serde-saphyr.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "process", "signal", "sync", "time"] }
+tokio-stream = "0.1.19"
+tokio-tungstenite = "0.29.0"
+tempfile = "3.27.0"
+pin-project-lite = "0.2.17"
+url.workspace = true
+hyper = { version = "1.11.0", features = ["server", "http1"] }
+hyper-util = { version = "0.1.20", features = ["server", "server-auto", "tokio"] }
+tower-service = "0.3.3"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

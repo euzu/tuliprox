@@ -8,6 +8,12 @@
 //! kinds are an open set too - see [`shared::model::notification`]. Adding
 //! either no longer means editing a match in this file.
 
+// The notification outbox spawns a generic async worker whose `Send` proof makes the
+// trait solver recurse deeply; the default recursion limit overflows on newer
+// nightlies (recursion_depth_exceeding_limit). Raise it rather than restructure the
+// worker's generic bounds.
+#![recursion_limit = "256"]
+
 pub mod channel;
 pub mod channels;
 pub mod outbox;

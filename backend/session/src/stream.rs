@@ -1,3 +1,4 @@
+use crate::{ManagedProviderHandle, SharedCleanupCapability};
 use axum::http::StatusCode;
 use bytes::Bytes;
 use futures::stream::BoxStream;
@@ -7,7 +8,7 @@ use shared::{
 };
 use std::{collections::HashMap, sync::Arc};
 use tokio_util::sync::CancellationToken;
-use tuliprox_core::model::{GracePeriodOptions, ProviderHandle, StreamError};
+use tuliprox_core::model::{GracePeriodOptions, StreamError};
 use url::Url;
 
 pub type BoxedProviderStream = BoxStream<'static, Result<Bytes, StreamError>>;
@@ -20,6 +21,7 @@ pub struct ProviderStreamFactoryResponse {
     pub stream: BoxedProviderStream,
     pub info: ProviderStreamInfo,
     pub provider_session_headers: HashMap<String, String>,
+    pub has_upstream_owner: bool,
 }
 
 /// Controls whether a provider stream preserves its origin representation or normalizes it to identity bytes.
@@ -67,6 +69,7 @@ pub enum ProviderStreamState {
 }
 
 pub struct StreamDetails {
+    pub shared_subscriber_id: Option<SharedCleanupCapability>,
     pub stream: Option<BoxedProviderStream>,
     pub stream_info: ProviderStreamInfo,
     pub provider_name: Option<Arc<str>>,
@@ -78,19 +81,20 @@ pub struct StreamDetails {
     pub provider_grace_active: bool,
     pub disable_provider_grace: bool,
     pub reconnect_flag: Option<CancellationToken>,
-    pub provider_handle: Option<ProviderHandle>,
+    pub provider_handle: Option<ManagedProviderHandle>,
     pub content_representation: ProviderContentRepresentationMode,
     /// Set when the stream was admitted via a user-grace strategy. Carried through to
     /// `stream_grace_period` so remaining strategies can be evaluated if the grace fails.
     pub grace_resolution_context: Option<crate::GraceResolutionContext>,
+    pub custom_reason: Option<ProviderStreamCustomReason>,
 }
 
-/// Manual Clone: stream cannot be cloned so we set it to None on the clone.
-/// This is safe because `StreamDetails` is only cloned in contexts where the
-/// stream has already been moved out (e.g., constructing grace params).
+/// Manual Clone: stream and `provider_handle` cannot be duplicated so we set them to None on the clone.
+/// This preserves singular handle ownership so grace snapshots do not duplicate releases.
 impl Clone for StreamDetails {
     fn clone(&self) -> Self {
         Self {
+            shared_subscriber_id: None,
             stream: None,
             stream_info: self.stream_info.clone(),
             provider_name: self.provider_name.clone(),
@@ -102,9 +106,10 @@ impl Clone for StreamDetails {
             provider_grace_active: self.provider_grace_active,
             disable_provider_grace: self.disable_provider_grace,
             reconnect_flag: self.reconnect_flag.clone(),
-            provider_handle: self.provider_handle.clone(),
+            provider_handle: None,
             content_representation: self.content_representation,
             grace_resolution_context: self.grace_resolution_context.clone(),
+            custom_reason: self.custom_reason,
         }
     }
 }
@@ -112,6 +117,7 @@ impl Clone for StreamDetails {
 impl StreamDetails {
     pub fn from_stream(stream: BoxedProviderStream, grace_period_options: GracePeriodOptions) -> Self {
         Self {
+            shared_subscriber_id: None,
             stream: Some(stream),
             stream_info: None,
             provider_name: None,
@@ -126,6 +132,7 @@ impl StreamDetails {
             provider_handle: None,
             content_representation: ProviderContentRepresentationMode::PreserveOrigin,
             grace_resolution_context: None,
+            custom_reason: None,
         }
     }
     #[inline]
@@ -146,7 +153,7 @@ impl StreamDetails {
 }
 
 pub struct StreamingStrategy {
-    pub provider_handle: Option<ProviderHandle>,
+    pub provider_handle: Option<ManagedProviderHandle>,
     pub provider_stream_state: ProviderStreamState,
     pub input_headers: Option<HashMap<String, String>>,
 }

@@ -315,7 +315,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
             );
         }
 
-        if app_state.active_provider.is_over_limit(&session.provider).await {
+        if app_state.active_provider.is_over_limit(&session.provider) {
             if extension == HLS_EXT {
                 return hls_admission_failure_manifest_response(
                     app_state,

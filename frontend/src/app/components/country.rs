@@ -30,7 +30,7 @@ pub fn Country(props: &CountryProps) -> Html {
         <span class={classes!("tp__country", props.classes.as_ref())}>
             if let Some(svg) = flag_svg.as_ref() {
                 <span class="tp__country__flag" aria-hidden="true">
-                    // SAFETY: flags.dat is built offline by flags_builder from a trusted flag directory.
+                    // SAFETY: flags.dat is built offline by flags-builder from a trusted flag directory.
                     // If this source ever becomes user-controlled, replace this with sanitized SVG rendering.
                     {Html::from_html_unchecked(AttrValue::from(svg.clone()))}
                     </span>

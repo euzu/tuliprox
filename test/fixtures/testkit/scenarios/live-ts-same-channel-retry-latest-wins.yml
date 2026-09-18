@@ -1,0 +1,58 @@
+schema_version: 1
+name: live-ts-same-channel-retry-latest-wins
+tuliprox:
+  base_url: http://fixture.invalid
+  execution_mode: isolated_fixture
+  playback_endpoint: xtream
+  fixture_stream:
+    share_live_hls: true
+    share_live_mpeg_ts: false
+  bootstrap:
+    command: "${env:TULIPROX_TESTKIT_SUT_BINARY}"
+    arguments: ["-s", "-c", "{config_file}", "-i", "{source_file}", "-a", "{api_proxy_file}"]
+    readiness_url: "{base_url}/healthcheck"
+origin:
+  run_id: live-ts-same-channel-retry-latest-wins
+  account_limit: 1
+  limit_mode: reject_new
+actors:
+  - id: tivimate
+    agent: local
+    username: admission-user
+    user_agent: TiviMate/5.1.0-testkit
+    client_ip: { mode: forwarded, value: 10.20.0.10 }
+channels:
+  live-17: { origin_marker: 17, protocol: xtream_ts }
+steps:
+  - command_id: start-a
+    start: { actor: tivimate, playback_id: playback-a, session_group: playback-a, channel: live-17 }
+    await: { valid_frames: 1 }
+  - command_id: start-b
+    start: { actor: tivimate, playback_id: playback-b, session_group: playback-b, channel: live-17 }
+    await: { valid_frames: 1 }
+  - command_id: start-c
+    start: { actor: tivimate, playback_id: playback-c, session_group: playback-c, channel: live-17 }
+    await: { valid_frames: 5 }
+    assert_origin:
+      active_body: 1
+      max_active_body: 1
+      no_limit_rejections: true
+  - command_id: stop-c
+    stop: { playback_id: playback-c }
+    assert_origin:
+      active_body: 0
+      max_active_body: 1
+      no_limit_rejections: true
+policy_contract:
+  user_access_control: true
+  users:
+    admission-user: { max_connections: 1, soft_connections: 0 }
+  admission_strategies:
+    - evict_user_same_ip_latest
+    - evict_user_same_ip_oldest
+    - evict_user_latest
+    - evict_user_oldest
+    - grace_hold_stream
+  grace: { mode: hold_stream, timeout_millis: 2000 }
+  provider_max_connections: 1
+  expected_provider_slots: 1

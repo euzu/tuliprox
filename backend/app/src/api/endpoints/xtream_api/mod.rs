@@ -470,7 +470,7 @@ async fn xtream_player_api_stream(
     let session_key = if let Some(resolved) = m3u_timeshift.as_ref() {
         create_m3u_catchup_session_key(fingerprint, &user.username, virtual_id.get(), &resolved.discriminator)
     } else if item_type == PlaylistItemType::Catchup {
-        create_catchup_session_key(fingerprint, &user.username, virtual_id.get())
+        create_catchup_session_key(fingerprint, &user.username, virtual_id.get(), stream_req.action_path)
     } else {
         create_playback_session_fingerprint(
             fingerprint,
@@ -515,7 +515,7 @@ async fn xtream_player_api_stream(
             );
         }
 
-        if app_state.active_provider.is_over_limit(&session.provider).await {
+        if app_state.active_provider.is_over_limit(&session.provider) {
             let stream_channel = create_stream_channel_with_type(target.id, &pli, item_type);
             if playback_ext == HLS_EXT {
                 return hls_admission_failure_manifest_response(

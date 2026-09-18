@@ -1,0 +1,26 @@
+schema_version: 1
+name: evict-same-ip-oldest
+tuliprox:
+  base_url: http://fixture.invalid
+  execution_mode: isolated_fixture
+  bootstrap:
+    command: "${env:TULIPROX_TESTKIT_SUT_BINARY}"
+    arguments: ["-s", "-c", "{config_file}", "-i", "{source_file}", "-a", "{api_proxy_file}"]
+    readiness_url: "{base_url}/healthcheck"
+origin: { run_id: evict-same-ip-oldest }
+actors:
+  - { id: tv-a, agent: local, username: admission-user, user_agent: tuliprox-testkit/oldest-a, client_ip: { mode: forwarded, value: 10.20.0.10 } }
+  - { id: tv-b, agent: local, username: admission-user, user_agent: tuliprox-testkit/oldest-b, client_ip: { mode: forwarded, value: 10.20.0.10 } }
+  - { id: tv-c, agent: local, username: admission-user, user_agent: tuliprox-testkit/oldest-c, client_ip: { mode: forwarded, value: 10.20.0.10 } }
+channels:
+  live-17: { origin_marker: 17, protocol: xtream_ts }
+  live-18: { origin_marker: 18, protocol: xtream_ts }
+  live-19: { origin_marker: 19, protocol: xtream_ts }
+steps:
+  - { command_id: start-a, start: { actor: tv-a, playback_id: playback-a, session_group: playback-a, channel: live-17 }, await: { valid_frames: 5 } }
+  - { command_id: start-b, start: { actor: tv-b, playback_id: playback-b, session_group: playback-b, channel: live-18 }, await: { valid_frames: 5 } }
+  - { command_id: start-c, start: { actor: tv-c, playback_id: playback-c, session_group: playback-c, channel: live-19 }, await: { valid_frames: 5 } }
+policy_contract:
+  user_access_control: true
+  users: { admission-user: { max_connections: 2 } }
+  admission_strategies: [evict_user_same_ip_oldest]

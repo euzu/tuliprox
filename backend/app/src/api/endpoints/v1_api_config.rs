@@ -475,7 +475,7 @@ async fn save_config_sources(
         .await;
     }
 
-    app_state.active_provider.update_config(&app_state.app_config).await;
+    app_state.active_provider.update_config(&app_state.app_config);
     let updated_revision = match read_file_revision(&sources_file_path).await {
         Ok(revision) => revision,
         Err(err) => {

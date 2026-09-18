@@ -115,7 +115,7 @@ impl HlsCtx {
         let event_manager = Arc::new(tuliprox_session::EventManager::new());
         let active_provider = Arc::new(ActiveProviderManager::new(&app_config, &event_manager));
         let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
-        active_provider.set_shared_stream_manager(Arc::clone(&shared_stream_manager));
+        active_provider.set_shared_stream_manager(&shared_stream_manager);
 
         let loaded = app_config.config.load();
         let geoip = Arc::new(ArcSwapOption::default());

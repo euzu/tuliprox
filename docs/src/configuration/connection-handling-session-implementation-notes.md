@@ -46,7 +46,8 @@ It is stable for follow-up requests of the same playback, but it is not always d
 
 - plain TS live uses a socket-scoped playback token
 - VOD, series, catchup, and local playback use a logical token suitable for reopen/seek/range workflows
-- HLS/DASH playlist starts use a token scoped to that initial adaptive playback start, and rewritten segment URLs carry that token forward
+- HLS playlist starts use a token scoped to that initial adaptive playback start, and rewritten segment URLs carry that token forward
+- DASH playlist starts use an equally scoped token, but the redirected player fetches DASH segments directly from the provider
 
 It is used to answer questions like:
 
@@ -117,6 +118,20 @@ Why:
 This means the same provider-affine HLS, VOD, series, or catchup stream must keep the same provider account for
 its follow-up requests, even though those requests may arrive on different sockets.
 
+### DASH delivery boundary (redirect only)
+
+Tuliprox treats DASH as **redirect-only**:
+
+- DASH requests (`PlaylistItemType::LiveDash` or requests with `.mpd` extension) always resolve to an HTTP redirect directly to
+  the upstream provider URL.
+- DASH reverse-proxying and segment caching are **not supported**. Enabling reverse-proxy mode for a user or target does not route
+  DASH streams through the HLS proxy handler or cache segments in Tuliprox.
+- DASH maintains provider-account affinity at the logical playback level (reusing session tokens and reserving the pinned
+  provider account across reopen/refresh within `hls_session_ttl_secs`).
+- Because segments are fetched directly between the player and the upstream provider, Tuliprox cannot count individual segment
+  requests or confirm first-byte delivery for DASH segments. Full segment lease guarantees apply only to streams proxied
+  directly through Tuliprox (TS, HLS, VOD, Series, Catchup).
+
 ### Adaptive preserved session
 
 Adaptive live playback (`LiveHls`, `LiveDash`) can stay logically alive for a short TTL even after the current socket disconnects.
@@ -127,22 +142,98 @@ That logic lives in `ActiveUserManager` and uses:
 - `build_preserved_stream_expiry(...)`
 - `process_due_adaptive_expiry_entries(...)`
 
-### Provider reservation
+### Provider slot lease
 
-Provider reservation is a provider-slot affinity mechanism, not a user admission mechanism.
+A provider reservation is now a *slot lease* owned by a playback identity, not by a socket. It is a provider-slot
+affinity mechanism, not a user admission mechanism. One owner holds at most one lease, so repeated requests of the same
+playback reuse the slot instead of stacking a reservation per attempt.
 
-Current TTL mapping:
+A lease has three states:
+
+- `Starting`: claimed when a provider allocation is acquired. It pins the provider for its own playback and blocks
+  nobody else. It expires after a short startup deadline regardless of the configured TTL, so an abandoned start or a
+  manifest-retry loop never accumulates reservations.
+- `Active`: reached only when real media delivery is confirmed — the first provider media byte forwarded to a client as
+  an `OK`/`206` media response. Manifest, HEAD, key, map and error fetches never confirm a lease. Only an `Active` lease
+  with a configured reconnect window reserves capacity against other playbacks.
+- `Idle`: a confirmed, reconnect-capable playback that ended cleanly keeps its slot for the reconnect window so it can
+  reattach to the same provider.
+
+TTL mapping (the reconnect window):
 
 - HLS/DASH use `hls_session_ttl_secs`
 - Catchup uses `catchup_session_ttl_secs`
 - other item types use `0`
 
-This affects provider reuse between short request gaps, not whether the session should use session admission.
+Lease end is outcome-driven: provider failure, preemption, kick and timeout release capacity immediately; a clean finish
+of a reconnect-capable playback keeps the idle window.
 
 Important:
 
 - VOD/movie/series still have strict provider affinity on follow-up requests
-- they just do not currently get an extra post-request reservation TTL like HLS/Catchup do
+- they just do not currently get an extra post-request reconnect window like HLS/Catchup do
+- An HTTP 200 manifest response is not playback and does not confirm a lease; neither do HEAD, key, map or error-video
+  responses. Only an `OK`/`206` media response confirms media delivery, which is what previously let entry
+  reservations block unrelated clients behind the same reverse proxy
+
+### Multi-user socket isolation and allocation-based provider connections
+
+When multiple users connect through the same reverse proxy socket:
+
+- `ActiveUserManager` tracks user sessions per user key and stream UID. `SocketRegistration` records all registered
+  usernames for each `SocketAddr`, ensuring concurrent users on the same socket never overwrite or prematurely evict
+  each other's session state.
+- `ActiveProviderManager` indexes single connections by unique `AllocationId` rather than grouping them under a single
+  socket address key (`ClientConnectionId`). Secondary socket indexes exist only for whole-transport close and kick
+  signals.
+- Stream details and QoS fallbacks are updated directly by `stream_uid` (`update_stream_detail_by_uid`) rather than
+  relying on ambiguous socket lookups.
+
+### Request ownership and binding generations
+
+The runtime uses separate identities for separate ownership scopes:
+
+| Identity | Scope |
+| :--- | :--- |
+| session token | one logical user playback |
+| `PlaybackLeaseId` | one logical provider-capacity lease |
+| `PlaybackRequestId` | one provider request attached to that lease |
+| `ProviderBindingTag` | one generation of the owner's provider-account binding |
+| `SharedSubscriberId` | one viewer attached to a shared MPEG-TS origin |
+
+Parallel range, segment and reconnect requests may belong to the same logical stream while retaining independent request
+claims. Completing one request removes only that claim. The logical stream and provider lease remain until their own
+terminal conditions are met.
+
+A provider binding increments its generation when the same playback moves to a different provider or reactivates an
+idle lease. Cleanup created for an older generation cannot clear the successor binding. This protects new playback from
+delayed body drops, provider errors and asynchronous HLS cleanup belonging to the preceding request.
+
+### Cleanup ownership and overload behavior
+
+Connection registration reserves a cleanup permit before publishing mutable user or provider state. Ownership then
+moves into the response body or shared-subscriber body. Dropping an unpolled body, cancelling an await, reaching EOF or
+reporting an error all converge on request-specific, idempotent cleanup.
+
+The regular cleanup queue is bounded by `reverse_proxy.stream.cleanup_queue_capacity`. Admission waits for a bounded
+interval when all permits are held and then rejects the request instead of registering a stream without guaranteed
+cleanup. HLS origin I/O uses a separate bounded control lane that is preferred over ordinary body cleanup, preventing a
+saturated subscriber workload from starving release of an origin provider handle.
+
+Graceful shutdown first closes the admission gate, then removes shared origins and active user claims, releases provider
+leases, flushes stream history and cancels and joins the owned background workers. Cleanup emitted by a later body drop
+is harmless because the terminal indices have already been emptied.
+
+### Shared MPEG-TS subscriber isolation
+
+A shared origin is keyed by stream URL, but its viewers are keyed by `SharedSubscriberId`, never by `SocketAddr`. This
+allows several users behind one reverse proxy connection to consume independent response bodies without replacing one
+another.
+
+Each subscriber has both a chunk limit and a byte semaphore for queued payload. Burst replay and live delivery use a
+progress deadline that is renewed only after a successful send. Timeout, cancellation and a closed receiver are distinct
+terminal outcomes; an incomplete replay never advances directly to the live tail. A pending-join guard also prevents
+the last existing subscriber from tearing down an origin while another subscriber is committing.
 
 ## Where session tokens come from
 
@@ -278,11 +369,13 @@ Main entry point:
 
 - `ActiveUserManager::update_connection(...)`
 
-This creates or reuses the tracked logical stream entry.
+This creates or reuses the tracked logical stream entry and attaches a request claim.
 
 Important behavior:
 
 - same `session_token` reuses the logical stream
+- every response receives its own request UID even when it reuses that stream
+- ending one response detaches only its request claim; the stream is removed when its final claim ends
 - stream metrics and duration stay tied to the logical session
 - for non-socket-bound sessions, the session remembers multiple active addresses
 
@@ -341,6 +434,10 @@ For non-socket-bound sessions:
 
 This is the key behavior that keeps VOD and local playback stable across multiple sockets.
 
+Queued provider cleanup carries the `PlaybackRequestId` and owner captured during acquire, while provider handles retain
+their `ProviderBindingTag`. The lease table validates both against the current binding, so cleanup does not need to
+rediscover ownership from a possibly reused socket address.
+
 ## URL persistence rules
 
 Session URL handling is intentionally different by stream type.
@@ -365,14 +462,16 @@ For live playback, following the redirected provider URL is still acceptable and
 
 Read these files together before changing session logic:
 
-- `backend/app/src/api/api_utils.rs`
-- `backend/app/src/api/endpoints/m3u_api.rs`
-- `backend/app/src/api/endpoints/xtream_api.rs`
-- `backend/app/src/api/endpoints/hls_api.rs`
-- `backend/app/src/api/model/active_user_manager.rs`
-- `backend/app/src/api/model/active_provider_manager.rs`
-- `backend/app/src/api/model/metadata_update_manager.rs`
-- `shared/src/model/playlist.rs`
+- `backend/core/src/model/playback.rs`
+- `backend/session/src/provider_leases.rs`
+- `backend/session/src/active_user_manager/mod.rs`
+- `backend/session/src/active_provider_manager.rs`
+- `backend/session/src/connection_manager.rs`
+- `backend/session/src/streams/shared_stream_manager.rs`
+- `backend/app/src/api/api_utils/mod.rs`
+- `backend/app/src/api/model/streams/active_client_stream.rs`
+- `backend/app/src/api/endpoints/hls_api/session.rs`
+- `backend/hls/src/origin.rs`
 
 ## Tests that should stay green
 
@@ -387,6 +486,12 @@ These tests cover the most fragile parts of the current logic:
 - `recently_evicted_vod_uses_session_reentry_guard`
 - `update_session_addr_prunes_previous_registration_for_socket_bound_session`
 - `test_adaptive_session_release_connection_preserves_logical_stream_and_start_time`
+- `stale_direct_cleanup_after_rebind_preserves_successor_request`
+- `subscribers_on_same_socket_do_not_replace_each_other`
+- `send_client_chunk_respects_byte_budget`
+- `control_cleanup_lane_precedes_a_ready_body_cleanup_backlog`
+- `shutdown_with_all_cleanup_permits_held_completes`
+- `http_provider_lease_downstream_smoke_test`
 
 If you change session code and one of these assumptions no longer holds, update the documentation and the tests in the same change.
 

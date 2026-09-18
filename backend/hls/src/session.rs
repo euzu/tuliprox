@@ -88,8 +88,10 @@ pub enum HlsSegmentFailureTransition {
 pub struct HlsSessionActivity {
     pub last_authorized_manifest_at_ms: Option<u64>,
     pub last_authorized_media_at_ms: Option<u64>,
+    /// Client media responses, excluding manifests and origin prefetches.
+    pub last_delivered_media_at_ms: Option<u64>,
     pub active_access_lease_count: usize,
-    pub active_origin_work_count: usize,
+    pub active_origin_work_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     pub origin_work_generation: u64,
     pub media_readiness_generation: u64,
 }
@@ -249,7 +251,7 @@ pub struct HlsSession {
     pub proxy_session_id: ProxySessionId,
     pub origin_source: HlsOriginSource,
     pub origin_account_binding: Option<HlsOriginAccountBinding>,
-    pub origin_account_io_lease: Option<HlsOriginAccountIoLease>,
+    pub origin_account_io_lease: Option<Arc<HlsOriginAccountIoLease>>,
     pub origin_account_rebind: HlsOriginAccountRebindState,
     pub effective_origin_acquire_policy: Option<HlsEffectiveOriginAcquirePolicyState>,
     pub mode: HlsSessionMode,
@@ -516,13 +518,13 @@ impl HlsSession {
         classify_account_binding_protection(
             self.activity.last_authorized_media_at_ms,
             now_ms,
-            self.account_overlap_timing(),
+            &self.account_overlap_timing(),
         )
     }
 
     pub fn should_refresh_origin_reservation(&self, now_ms: u64) -> bool {
         !matches!(self.account_binding_protection(now_ms), HlsAccountBindingProtection::Expired)
-            || self.activity.active_origin_work_count > 0
+            || self.activity.active_origin_work_count.load(std::sync::atomic::Ordering::Acquire) > 0
     }
 
     pub fn reconcile_effective_origin_acquire_policy(
@@ -587,7 +589,7 @@ impl HlsSession {
         if self.idle_expiry_due_at_ms(session_idle_timeout_ms) > now_ms {
             return false;
         }
-        self.activity.active_origin_work_count == 0
+        self.activity.active_origin_work_count.load(std::sync::atomic::Ordering::Acquire) == 0
             && self.active_segment_fetches == 0
             && self.active_map_fetches == 0
             && !self.origin_refresh.in_flight
@@ -753,12 +755,12 @@ impl HlsSession {
     }
 
     pub fn start_origin_work(&mut self) -> u64 {
-        self.activity.active_origin_work_count = self.activity.active_origin_work_count.saturating_add(1);
+        self.activity.active_origin_work_count.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         self.activity.origin_work_generation
     }
 
     pub fn finish_origin_work(&mut self, started_generation: u64) -> bool {
-        self.activity.active_origin_work_count = self.activity.active_origin_work_count.saturating_sub(1);
+        self.activity.active_origin_work_count.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
         started_generation == self.activity.origin_work_generation
     }
 
@@ -1394,7 +1396,7 @@ mod tests {
         session.invalidate_queued_origin_work();
 
         assert!(!session.finish_origin_work(started_generation));
-        assert_eq!(session.activity.active_origin_work_count, 0);
+        assert_eq!(session.activity.active_origin_work_count.load(std::sync::atomic::Ordering::Acquire), 0);
         assert_eq!(session.activity.origin_work_generation, 1);
     }
 

@@ -1,38 +1,22 @@
 use std::sync::Arc;
 use tuliprox_core::model::ProviderHandle;
-use tuliprox_session::ActiveProviderManager;
+use tuliprox_session::{ActiveProviderManager, ManagedProviderHandle};
 
-pub struct ProbeHandleGuard {
-    manager: Arc<ActiveProviderManager>,
-    handle: Option<ProviderHandle>,
-}
+/// Thin wrapper around `ManagedProviderHandle` for probe allocations. It preserves the
+/// same synchronous release contract without duplicating the release/drop logic.
+pub struct ProbeHandleGuard(ManagedProviderHandle);
 
 impl ProbeHandleGuard {
     pub fn new(manager: &Arc<ActiveProviderManager>, handle: ProviderHandle) -> Self {
-        Self { manager: Arc::clone(manager), handle: Some(handle) }
+        Self(ManagedProviderHandle::new(Arc::clone(manager), handle))
     }
 
     #[inline]
-    pub fn handle(&self) -> Option<&ProviderHandle> { self.handle.as_ref() }
+    pub fn handle(&self) -> Option<&ProviderHandle> { self.0.handle() }
 
-    pub async fn release(mut self) {
-        if let Some(handle) = self.handle.take() {
-            self.manager.release_handle(&handle).await;
-        }
-    }
-}
-
-impl Drop for ProbeHandleGuard {
-    fn drop(&mut self) {
-        let Some(handle) = self.handle.take() else {
-            return;
-        };
-        let manager = Arc::clone(&self.manager);
-        if let Ok(runtime_handle) = tokio::runtime::Handle::try_current() {
-            runtime_handle.spawn(async move {
-                manager.release_handle(&handle).await;
-            });
-        }
+    pub fn release(self) {
+        // The inner managed handle releases the slot synchronously on drop.
+        drop(self);
     }
 }
 
@@ -105,15 +89,37 @@ mod tests {
 
         let handle = manager
             .acquire_connection_for_probe(&input_name, default_probe_user_priority())
-            .await
             .expect("probe allocation should succeed");
-        assert_eq!(manager.get_provider_connections_count().await, 1);
+        assert_eq!(manager.get_provider_connections_count(), 1);
 
         let guard = ProbeHandleGuard::new(&manager, handle);
         drop(guard);
-        tokio::task::yield_now().await;
-        tokio::task::yield_now().await;
 
-        assert_eq!(manager.get_provider_connections_count().await, 0);
+        assert_eq!(manager.get_provider_connections_count(), 0);
+    }
+
+    #[test]
+    fn probe_handle_guard_releases_provider_slot_outside_tokio_runtime() {
+        let rt =
+            tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio runtime should build");
+
+        let (manager, guard) = rt.block_on(async {
+            let app_cfg = create_test_app_config();
+            let event_manager = Arc::new(EventManager::new());
+            let manager = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
+            let input_name = "provider_1".intern();
+
+            let handle = manager
+                .acquire_connection_for_probe(&input_name, default_probe_user_priority())
+                .expect("probe allocation should succeed");
+            assert_eq!(manager.get_provider_connections_count(), 1);
+
+            let guard = ProbeHandleGuard::new(&manager, handle);
+            (manager, guard)
+        });
+
+        // Drop outside of any tokio runtime context:
+        drop(guard);
+        assert_eq!(manager.get_provider_connections_count(), 0);
     }
 }

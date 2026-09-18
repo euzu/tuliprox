@@ -109,6 +109,7 @@ reverse_proxy:
     hls_session_ttl_secs: 15
     catchup_session_ttl_secs: 45
     shared_burst_buffer_mb: 12
+    cleanup_queue_capacity: 4096
     metrics_enabled: false
 ```
 
@@ -129,6 +130,7 @@ reverse_proxy:
 | `hls_session_ttl_secs` | Int | `15` | Keeps virtual provider slot open between HLS segment (`.ts`) requests to prevent provider bans for "Account Hopping". |
 | `catchup_session_ttl_secs` | Int | `45` | Same session-holding principle applied to Archive/Catchup TV. See notes on section [Session TTLs for HLS & Catchup](#session-ttls-for-hls-m3u8--catchup) for details. |
 | `shared_burst_buffer_mb` | Int | `12` | Minimum burst buffer size (in MB) used for shared live streams to immediately synchronize new clients without Keyframe dropouts. See notes on section [Shared Live Streams](#shared-live-streams) for details. |
+| `cleanup_queue_capacity` | Int | `4096` | Maximum number of concurrent cleanup permits available to active response bodies and shared subscribers. Must be at least `1`. If all permits remain held, new stream admission waits for a bounded interval and then returns `503 Service Unavailable` instead of growing memory without limit. |
 
 ### 1.1 `retry` & `buffer` (Deep Dive)
 
@@ -148,6 +150,10 @@ Stream-type provider behavior:
   reopen requests must stay on the provider account pinned in that session; if that account is unavailable, Tuliprox  
   fails the follow-up instead of silently migrating it.
 * `retry: false` disables stream-open retry/failover for stream requests.
+* **DASH delivery scope:** DASH streams (`LiveDash`, `.mpd`) are delivered exclusively via HTTP redirect to the upstream
+  provider. Tuliprox does not reverse-proxy or cache DASH segments. Even when reverse-proxy mode is active, DASH requests
+  are not routed into the HLS proxy pipeline. DASH sessions retain provider-account affinity during reopen/refresh within
+  `hls_session_ttl_secs`.
 
 #### Ring-Buffer Calculation
 
@@ -192,8 +198,23 @@ to maintain account affinity:
 Important boundary:
 
 * These TTLs are for HLS/catchup style session continuity.
-* Regular TS/VOD/local playback is socket-bound for admission and user-connection counting.
-* Opening the same TS/VOD stream on a second socket consumes another connection or soft slot.
+* Plain TS live playback is socket-bound. A new TS socket is a separate playback attempt.
+* VOD, series and local playback use logical session identities so size, range, seek and reopen requests can continue the
+  same playback across sockets. A genuinely separate playback still consumes another connection or soft slot.
+* A provider reservation becomes capacity-relevant only after Tuliprox forwards real media bytes. Manifests, HEAD
+  requests, keys, maps and error responses do not confirm a provider slot lease.
+
+### 1.5 Cleanup admission and overload behavior
+
+Every admitted streaming response must own a terminal cleanup permit before it can publish user or provider state. The
+permit follows the response body and releases the exact request when the body completes, is dropped without being
+polled, or fails while streaming. Shared subscribers use the same ownership rule without reserving a second permit for
+the same body.
+
+`cleanup_queue_capacity` bounds how many of these cleanup owners may exist at once. If the queue remains saturated for
+the admission deadline, Tuliprox rejects the new request with `503 Service Unavailable`; it does not admit an
+unprotected stream. HLS origin-control cleanup has reserved capacity so ordinary body churn cannot prevent a provider
+handle from being released. Changing the setting requires a server restart.
 
 ---
 
@@ -541,14 +562,14 @@ reverse_proxy:
 
 HLS streams do not consist of an endless TCP pipe. Instead, the player downloads small `.ts` segments every few seconds (e.g., `seg1.ts`, `seg2.ts`).
 
-If Tuliprox released and re-acquired the provider slot for every single segment,
-providers would block the account for "Account Hopping" or spam. Tuliprox simulates a continuous session:
+If Tuliprox selected a different provider account for every segment, providers could treat the traffic as account
+hopping. Tuliprox therefore keeps a logical, confirmed slot lease for the playback:
 
-* `hls_session_ttl_secs: 15`: After a `.ts` segment finishes downloading, the physical slot to the provider is closed,
-  but the "Virtual Slot" for this specific user remains reserved for 15 seconds. No other user can steal this slot
-  during this window. Channel switches from the same client can immediately take over the reservation.
-* The same principle applies to Archive/Catchup TV (`catchup_session_ttl_secs: 45`),
-  which shares the same fragmentation and seeking issues.
+* `hls_session_ttl_secs: 15`: After Tuliprox has forwarded actual media bytes, a cleanly finished HLS request may keep
+  its provider account reserved for this playback for up to 15 seconds. A manifest-only or abandoned start does not
+  create a capacity reservation.
+* Archive/Catchup playback uses the same confirmed-lease principle with `catchup_session_ttl_secs: 45`.
+* Provider errors, preemption, kicks and timeouts release the lease immediately rather than keeping the reconnect window.
 
 ---
 
@@ -572,6 +593,12 @@ If 5 users watch the same Live-TV channel, Tuliprox pulls the stream only 1x fro
 To ensure a user who tunes in 10 seconds later doesn't get player errors due to missing I-Frames/Keyframes,
 Tuliprox continuously keeps the last X Megabytes (`shared_burst_buffer_mb`, default `12`) in RAM.
 It fires this burst buffer at new subscribers so their decoders can instantly synchronize.
+
+Each viewer has a distinct subscriber identity even when several viewers arrive through the same reverse-proxy socket.
+The per-subscriber delivery queue is bounded by both chunk count and retained bytes. A client that stops making progress
+is disconnected after `shared_subscriber_idle_timeout_secs`; it cannot indefinitely retain the burst buffer or stall
+other viewers. If initial burst replay cannot complete, that subscriber ends instead of silently skipping missing data
+and continuing with the live tail.
 
 ---
 

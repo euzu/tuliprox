@@ -26,6 +26,8 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "macros", "sync", "process"] }
 tokio-util = { version = "0.7.19", features = ["io", "io-util"] }
 url.workspace = true
+
+[target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]

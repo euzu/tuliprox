@@ -177,13 +177,8 @@ mod tests {
     async fn publish_and_load_round_trip() {
         let temp_dir = TempDir::new().unwrap();
         let locks = FileLockManager::new();
-        let groups = vec![
-            "News".to_string(),
-            "Sports".to_string(),
-            "News".to_string(),
-            "".to_string(),
-            " Animation".to_string(),
-        ];
+        let groups =
+            vec!["News".to_string(), "Sports".to_string(), "News".to_string(), String::new(), " Animation".to_string()];
 
         publish_raw_group_catalog(temp_dir.path(), "provider_a", XtreamCluster::Live, groups, &locks).await.unwrap();
 

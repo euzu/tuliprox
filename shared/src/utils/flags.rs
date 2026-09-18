@@ -1,5 +1,5 @@
 ///////////
-// Create flags file with: > cargo run --bin flags_builder
+// Create flags file with: > cargo run --bin flags-builder
 //
 // Case-insensitive
 // ================
