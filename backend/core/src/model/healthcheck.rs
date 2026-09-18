@@ -32,4 +32,8 @@ pub struct RuntimeHealth {
     pub stall_episodes: u64,
     pub max_schedule_delay_ms: u64,
     pub uptime_ms: u64,
+    /// `true` when `TULIPROX_WATCHDOG=2` armed the watchdog to restart the
+    /// process on a confirmed stall.
+    #[serde(default)]
+    pub restart_on_stall: bool,
 }

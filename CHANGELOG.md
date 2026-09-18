@@ -112,10 +112,10 @@
 
 - **Runtime liveness watchdog and a tokio-console diagnostic build.** An optional heartbeat/watchdog detects a wedged
   async runtime (process alive, scheduler no longer making progress, logs stop) and logs a diagnostic snapshot with
-  runtime metrics and a per-thread `/proc/self/task` inventory. It is opt-in and off by default (`TULIPROX_WATCHDOG=1`),
-  never restarts the process, and exposes its state through the `/healthcheck` `runtime` object. For deeper task and lock
-  inspection, `make build-diagnostic` produces a separate `tokio-console` binary; normal release images contain neither
-  the subscriber nor `tokio_unstable`.
+  runtime metrics and a per-thread `/proc/self/task` inventory. It is opt-in and off by default (`TULIPROX_WATCHDOG=1`
+  to observe, `=2` to also restart the process on a confirmed stall), and exposes its state through the `/healthcheck`
+  `runtime` object. For deeper task and lock inspection, `make build-diagnostic` produces a separate `tokio-console`
+  binary; normal release images contain neither the subscriber nor `tokio_unstable`.
 
 - **`.env` file support for secrets and environment variables:** Tuliprox now automatically loads environment variables
   from a `.env` file at startup.
@@ -1338,9 +1338,11 @@
 ## ⚙️ New Settings
 
 - **Runtime diagnostics (environment variables)**:
-  - `TULIPROX_WATCHDOG` (default unset = disabled): set to `1`/`true`/`on`/`yes`/`enabled` to start the liveness watchdog.
-  - `TULIPROX_WATCHDOG_HEARTBEAT_MS` (default `1000`), `TULIPROX_WATCHDOG_STALL_MS` (default `10000`) and
-    `TULIPROX_WATCHDOG_RELOG_MS` (default `30000`): heartbeat cadence, stall threshold and re-log interval.
+  - `TULIPROX_WATCHDOG` (default unset = off) is a mode selector: `1` (`true`/`on`/`yes`/`enabled`) observes and logs
+    stalls, `2` (`restart`) additionally exits the process after the stall persists so a supervisor restarts it.
+  - `TULIPROX_WATCHDOG_HEARTBEAT_MS` (default `1000`), `TULIPROX_WATCHDOG_STALL_MS` (default `10000`),
+    `TULIPROX_WATCHDOG_RELOG_MS` (default `30000`) and `TULIPROX_WATCHDOG_RESTART_GRACE_MS` (default `30000`): heartbeat
+    cadence, stall threshold, re-log interval and restart grace.
   - `TULIPROX_TOKIO_CONSOLE` (default unset): set to `1` to start the console subscriber in a `tokio-console` build.
 
 - **source.yml (target `options`)**:

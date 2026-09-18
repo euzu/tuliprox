@@ -53,6 +53,11 @@ pub fn uses_direct_body_idle_timeout(stream_channel: &StreamChannel) -> bool {
         )
 }
 
+/// How long a direct VOD/series body may make no read progress before the stream is
+/// considered dead. The socket-expiry allowance for those streams must not be shorter,
+/// otherwise a player that pauses to drain its buffer is disconnected mid-playback.
+pub const DIRECT_BODY_IDLE_TIMEOUT_SECS: u64 = 90;
+
 type StreamUrl = Arc<str>;
 type ProviderName = Arc<str>;
 

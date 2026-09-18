@@ -437,24 +437,43 @@ The watchdog detects exactly that. It is **opt-in and off by default**.
   thread's id, name, state and waiting channel.
 * **On recovery** it logs that the heartbeat is back.
 
-The watchdog never restarts or interrupts the process. It only reports.
+The watchdog itself only reports. In mode `2` it can additionally exit the process so a supervisor restarts it (see below).
 
-### Enabling
+### Modes
 
-| Variable                         | Default         | Purpose                                                |
-|:---------------------------------|:----------------|:-------------------------------------------------------|
-| `TULIPROX_WATCHDOG`              | *(unset = off)* | Set to `1` (or `true`/`on`/`yes`/`enabled`) to enable. |
-| `TULIPROX_WATCHDOG_HEARTBEAT_MS` | `1000`          | Heartbeat interval.                                    |
-| `TULIPROX_WATCHDOG_STALL_MS`     | `10000`         | Heartbeat age above which a stall is reported.         |
-| `TULIPROX_WATCHDOG_RELOG_MS`     | `30000`         | Re-log interval while a stall continues.               |
+`TULIPROX_WATCHDOG` is a mode selector, not a boolean:
+
+| Value                               | Mode    | Behaviour                                                                          |
+|:------------------------------------|:--------|:-----------------------------------------------------------------------------------|
+| unset, `0`, anything else           | off     | No heartbeat task, no watchdog thread.                                             |
+| `1`, `true`, `on`, `yes`, `enabled` | observe | Detect and log stalls; never touches the process.                                  |
+| `2`, `restart`                      | restart | Like observe, and exit the process after the stall persists past the grace period. |
+
+In restart mode the process exits with code `75` (non-zero, so both `restart: unless-stopped` and `restart: on-failure`
+bring it back). This is a deliberate crash-and-restart, not an in-process recovery. Only enable it if a supervisor is
+actually configured; otherwise the container will stay down.
+
+### Settings
+
+| Variable                             | Default         | Purpose                                                                       |
+|:-------------------------------------|:----------------|:------------------------------------------------------------------------------|
+| `TULIPROX_WATCHDOG`                  | *(unset = off)* | Mode selector: `1` = observe, `2` = observe and restart on a confirmed stall. |
+| `TULIPROX_WATCHDOG_HEARTBEAT_MS`     | `1000`          | Heartbeat interval.                                                           |
+| `TULIPROX_WATCHDOG_STALL_MS`         | `10000`         | Heartbeat age above which a stall is reported.                                |
+| `TULIPROX_WATCHDOG_RELOG_MS`         | `30000`         | Re-log interval while a stall continues.                                      |
+| `TULIPROX_WATCHDOG_RESTART_GRACE_MS` | `30000`         | Mode `2` only: how long the stall must persist before the process exits.      |
 
 Docker example:
 
 ```yaml
 services:
   tuliprox:
+    restart: unless-stopped
     environment:
+      # observe only
       - TULIPROX_WATCHDOG=1
+      # ...or observe and restart on a confirmed stall (needs restart policy above)
+      # - TULIPROX_WATCHDOG=2
 ```
 
 ### Healthcheck
@@ -472,10 +491,13 @@ While the watchdog runs, `GET /healthcheck` gains a `runtime` object:
     "ticks": 8401,
     "stall_episodes": 0,
     "max_schedule_delay_ms": 3,
-    "uptime_ms": 8401000
+    "uptime_ms": 8401000,
+    "restart_on_stall": false
   }
 }
 ```
+
+`restart_on_stall` is `true` only in mode `2`, so an operator can see whether the process is armed to restart itself.
 
 `runtime.status` is `stalled` once the heartbeat stops. The top-level `status` intentionally stays `ok` for as long as the
 HTTP server answers, so no orchestrator restarts the process. If the whole runtime is wedged, the endpoint cannot answer

@@ -7,7 +7,7 @@ use crate::{
             open_provider_stream_with_lifecycle, uses_direct_body_idle_timeout, AppState, BoxedProviderStream,
             CleanupEvent, ConnectionManager, CustomVideoStreamType, EventManager, MeteringStream,
             PendingProviderWakeSource, ProviderStreamFactoryOptions, ProviderStreamOpenLifecycle, StreamDetails,
-            StreamError, StreamMeterHandle, TimedClientStream, TransportStreamBuffer,
+            StreamError, StreamMeterHandle, TimedClientStream, TransportStreamBuffer, DIRECT_BODY_IDLE_TIMEOUT_SECS,
         },
         panel_api::{can_provision_on_exhausted, find_input_by_provider_name, run_panel_api_provisioning_probe},
     },
@@ -36,7 +36,6 @@ use tokio::sync::Notify;
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 use tuliprox_session::{stream_options::get_stream_options, ConnectionRejectionReason};
 
-const DIRECT_BODY_IDLE_TIMEOUT_SECS: u64 = 90;
 const BODY_IDLE_TIMEOUT_ERROR_CLASS: &str = "body_idle_timeout";
 const DIRECT_BODY_SOCKET_ACTIVITY_TOUCH_SECS: u64 = 1;
 

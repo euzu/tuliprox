@@ -223,12 +223,17 @@ response).
 services:
   tuliprox:
     environment:
-      - TULIPROX_WATCHDOG=1
+      - TULIPROX_WATCHDOG=1   # observe only
+      # - TULIPROX_WATCHDOG=2 # observe and restart on a confirmed stall
 ```
 
 When the runtime stops making progress, the watchdog logs a `Runtime liveness stall` line with runtime metrics and a
-per-thread `/proc/self/task` inventory, and `GET /healthcheck` reports `runtime.status: stalled`. The watchdog never
-restarts the process.
+per-thread `/proc/self/task` inventory, and `GET /healthcheck` reports `runtime.status: stalled`.
+
+In mode `1` the watchdog only reports. In mode `2` it exits the process (code `75`) once the stall has persisted past
+the grace period (`TULIPROX_WATCHDOG_RESTART_GRACE_MS`, default 30 s), so a configured `restart: unless-stopped`
+brings the container back automatically. Use mode `1` while you are still investigating a cause, and mode `2` once a
+restart is the acceptable recovery.
 
 **How to find the exact task and lock:** use the `tokio-console` diagnostic build (see
 [Runtime Liveness Watchdog](./operations-debugging.md#8-runtime-liveness-watchdog)) or run the experimental image.

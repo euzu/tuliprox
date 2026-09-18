@@ -4061,7 +4061,7 @@ async fn clear_unbound_session_addr_prunes_touch_only_manifest_addr() {
 }
 
 #[tokio::test]
-async fn socket_expiry_deadline_does_not_refresh_active_vod_streams_without_activity() {
+async fn socket_expiry_deadline_extends_direct_body_streams_to_the_idle_timeout() {
     let config = Config::default();
     let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
     let event_manager = Arc::new(EventManager::new());
@@ -4112,10 +4112,13 @@ async fn socket_expiry_deadline_does_not_refresh_active_vod_streams_without_acti
         .await
         .expect("vod stream should be created");
 
+    // The player stops reading while draining its buffer. The pause already exceeds the
+    // short HLS session TTL but stays well within the direct-body idle timeout, so the
+    // socket must not be treated as expired yet.
     let previous_registration_ts = {
         let mut connections = manager.connections.write().await;
         let registration = connections.key_by_addr.get_mut(&addr).expect("registration should exist");
-        registration.ts = registration.ts.saturating_sub(DEFAULT_ACTIVE_SOCKET_TTL_SECS + 5);
+        registration.ts = registration.ts.saturating_sub(default_hls_session_ttl_secs() + 5);
         registration.ts
     };
 
@@ -4128,10 +4131,77 @@ async fn socket_expiry_deadline_does_not_refresh_active_vod_streams_without_acti
     };
 
     assert_eq!(unchanged_registration_ts, previous_registration_ts);
+    assert!(
+        deadline > current_time_secs(),
+        "a buffering direct-body stream must not be treated as expired after only the HLS session TTL"
+    );
     assert_eq!(
         deadline,
-        previous_registration_ts.saturating_add(manager.active_socket_ttl_secs()),
-        "deadline checks must not refresh VOD sockets without real body activity"
+        previous_registration_ts.saturating_add(DIRECT_BODY_IDLE_TIMEOUT_SECS),
+        "direct-body sockets must use the direct-body idle timeout as their expiry allowance"
+    );
+}
+
+#[tokio::test]
+async fn socket_expiry_deadline_keeps_hls_session_ttl_for_adaptive_streams() {
+    let config = Config::default();
+    let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+    let event_manager = Arc::new(EventManager::new());
+    let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+    let addr: SocketAddr = "127.0.0.1:55043".parse().unwrap();
+    let fingerprint = Fingerprint::new("fp-hls".to_string(), "127.0.0.1".to_string(), addr);
+    let mut user = ProxyUserCredentials::default();
+    user.username = "user-hls-expiry".to_string();
+    user.max_connections = 1;
+
+    manager.add_connection(&addr).await;
+    manager
+        .create_user_session(CreateUserSessionParams {
+            user: &user,
+            session_token: "tok-hls-expiry",
+            virtual_id: 8891,
+            provider: "provider-a",
+            stream_url: "http://localhost/live.m3u8",
+            addr: &addr,
+            connection_permission: UserConnectionPermission::Allowed,
+            connection_kind: Some(ConnectionKind::Normal),
+            socket_bound: false,
+        })
+        .await;
+
+    manager
+        .update_connection(ActiveUserConnectionParams {
+            uid: 605,
+            meter_uid: 705,
+            username: "user-hls-expiry",
+            max_connections: 1,
+            soft_connections: 0,
+            connection_kind: ConnectionKind::Normal,
+            priority: 0,
+            soft_priority: 0,
+            fingerprint: &fingerprint,
+            provider: "provider-a".intern(),
+            stream_channel: &test_adaptive_channel(8891),
+            user_agent: Cow::Borrowed("player/1.0"),
+            session_token: Some("tok-hls-expiry"),
+        })
+        .await
+        .expect("hls stream should be created");
+
+    let registration_ts = {
+        let mut connections = manager.connections.write().await;
+        let registration = connections.key_by_addr.get_mut(&addr).expect("registration should exist");
+        registration.ts = registration.ts.saturating_sub(default_hls_session_ttl_secs() + 5);
+        registration.ts
+    };
+
+    let deadline = manager.socket_expiry_deadline(&addr).await.expect("HLS streams should stay scheduled for expiry");
+
+    assert_eq!(
+        deadline,
+        registration_ts.saturating_add(manager.active_socket_ttl_secs()),
+        "adaptive sockets keep the short HLS session TTL"
     );
 }
 

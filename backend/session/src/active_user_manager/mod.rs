@@ -1,5 +1,8 @@
 use crate::{
-    active_provider_manager::ConnectionKind, connection_manager::CleanupEvent, ActiveProviderManager, EventManager,
+    active_provider_manager::ConnectionKind,
+    connection_manager::CleanupEvent,
+    stream::{uses_direct_body_idle_timeout, DIRECT_BODY_IDLE_TIMEOUT_SECS},
+    ActiveProviderManager, EventManager,
 };
 use arc_swap::ArcSwapOption;
 use jsonwebtoken::get_current_timestamp;
@@ -2964,14 +2967,40 @@ impl ActiveUserManager {
     }
 
     pub async fn socket_expiry_deadline(&self, addr: &SocketAddr) -> Option<u64> {
-        let ttl_secs = self.active_socket_ttl_secs();
         let connections = self.connections.read().await;
         let registration = connections.key_by_addr.get(addr)?;
         if registration.is_empty() {
             return None;
         }
 
+        let ttl_secs = self.effective_socket_ttl_secs(&connections, addr);
         Some(registration.ts.saturating_add(ttl_secs))
+    }
+
+    /// Direct VOD/series bodies may stop reading while the player drains its buffer.
+    /// Their socket expiry must not fire before the direct-body idle timeout, or a
+    /// buffering player is disconnected mid-playback even though the stream is alive.
+    fn effective_socket_ttl_secs(&self, connections: &UserConnections, addr: &SocketAddr) -> u64 {
+        let base_ttl = self.active_socket_ttl_secs();
+        if Self::addr_has_direct_body_stream(connections, addr) {
+            base_ttl.max(DIRECT_BODY_IDLE_TIMEOUT_SECS)
+        } else {
+            base_ttl
+        }
+    }
+
+    fn addr_has_direct_body_stream(connections: &UserConnections, addr: &SocketAddr) -> bool {
+        let Some(registration) = connections.key_by_addr.get(addr) else {
+            return false;
+        };
+        registration.usernames.iter().any(|username| {
+            connections.by_key.get(username).is_some_and(|connection_data| {
+                connection_data
+                    .streams
+                    .iter()
+                    .any(|stream| stream.addr == *addr && uses_direct_body_idle_timeout(&stream.channel))
+            })
+        })
     }
 
     pub async fn touch_socket_activity(&self, addr: &SocketAddr) {

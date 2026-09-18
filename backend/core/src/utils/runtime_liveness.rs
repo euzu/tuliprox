@@ -13,7 +13,7 @@
 //! The watchdog never restarts or interrupts anything. It only reports.
 
 use crate::model::RuntimeHealth;
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use std::{
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -26,6 +26,14 @@ pub const DEFAULT_HEARTBEAT_INTERVAL_MS: u64 = 1_000;
 pub const DEFAULT_STALL_THRESHOLD_MS: u64 = 10_000;
 pub const DEFAULT_STALL_RELOG_MS: u64 = 30_000;
 pub const DEFAULT_WATCHDOG_POLL_MS: u64 = 1_000;
+
+/// How long a confirmed stall must persist before `TULIPROX_WATCHDOG=2` exits
+/// the process. The grace gives a transient scheduler pause a chance to clear.
+pub const DEFAULT_RESTART_GRACE_MS: u64 = 30_000;
+
+/// Non-zero so `restart: on-failure` also restarts the container. A zero exit
+/// would be treated as a clean shutdown.
+const WATCHDOG_RESTART_EXIT_CODE: i32 = 75;
 
 /// The watchdog only sleeps and reads atomics outside a stall, so it does not
 /// need the default thread stack.
@@ -51,15 +59,33 @@ fn read_env_ms(name: &str, default_ms: u64) -> u64 {
         .unwrap_or(default_ms)
 }
 
-fn watchdog_flag_enabled(value: Option<&str>) -> bool {
-    value.is_some_and(|value| {
-        matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes" | "enabled")
-    })
+/// What the watchdog does once a stall is confirmed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatchdogMode {
+    /// No heartbeat task, no watchdog thread.
+    Off,
+    /// Report stalls through the log and `/healthcheck.runtime`.
+    Observe,
+    /// Like `Observe`, but exit the process after the stall persists so a
+    /// supervisor can restart it.
+    Restart,
 }
 
-/// The watchdog is opt-in: without `TULIPROX_WATCHDOG=1` (or `true`/`on`/`yes`/
-/// `enabled`) no heartbeat task and no watchdog thread are started.
-fn watchdog_enabled() -> bool { watchdog_flag_enabled(std::env::var("TULIPROX_WATCHDOG").ok().as_deref()) }
+fn watchdog_mode(value: Option<&str>) -> WatchdogMode {
+    match value.map(|value| value.trim().to_ascii_lowercase()) {
+        Some(value) => match value.as_str() {
+            "2" | "restart" => WatchdogMode::Restart,
+            "1" | "true" | "on" | "yes" | "enabled" => WatchdogMode::Observe,
+            _ => WatchdogMode::Off,
+        },
+        None => WatchdogMode::Off,
+    }
+}
+
+/// The watchdog is opt-in and off by default. `TULIPROX_WATCHDOG` selects the
+/// mode: `0`/unset off, `1` observe, `2` observe and restart on a confirmed
+/// stall.
+fn configured_watchdog_mode() -> WatchdogMode { watchdog_mode(std::env::var("TULIPROX_WATCHDOG").ok().as_deref()) }
 
 /// Progress shared between the in-runtime heartbeat and the watchdog thread.
 ///
@@ -69,6 +95,7 @@ pub struct RuntimeLiveness {
     started_ms: u64,
     heartbeat_interval_ms: u64,
     stall_threshold_ms: u64,
+    restart_on_stall: bool,
     last_tick_ms: AtomicU64,
     ticks: AtomicU64,
     stall_episodes: AtomicU64,
@@ -82,12 +109,23 @@ impl RuntimeLiveness {
             started_ms,
             heartbeat_interval_ms: heartbeat_interval_ms.max(1),
             stall_threshold_ms: stall_threshold_ms.max(1),
+            restart_on_stall: false,
             last_tick_ms: AtomicU64::new(started_ms),
             ticks: AtomicU64::new(0),
             stall_episodes: AtomicU64::new(0),
             max_schedule_delay_ms: AtomicU64::new(0),
         }
     }
+
+    /// Marks whether the watchdog is allowed to restart the process.
+    #[must_use]
+    pub const fn with_restart_on_stall(mut self, restart_on_stall: bool) -> Self {
+        self.restart_on_stall = restart_on_stall;
+        self
+    }
+
+    #[must_use]
+    pub const fn restart_on_stall(&self) -> bool { self.restart_on_stall }
 
     #[must_use]
     pub const fn heartbeat_interval_ms(&self) -> u64 { self.heartbeat_interval_ms }
@@ -127,6 +165,7 @@ impl RuntimeLiveness {
             stall_episodes: self.stall_episodes.load(Ordering::Relaxed),
             max_schedule_delay_ms: self.max_schedule_delay_ms.load(Ordering::Relaxed),
             uptime_ms: now_ms.saturating_sub(self.started_ms),
+            restart_on_stall: self.restart_on_stall,
         }
     }
 }
@@ -147,30 +186,36 @@ pub fn health_snapshot() -> Option<RuntimeHealth> {
 
 /// Starts the heartbeat task and the watchdog thread, unless already started.
 ///
-/// Returns the shared state on success. The watchdog is opt-in; without
-/// `TULIPROX_WATCHDOG=1` nothing is started. The interval and threshold can be
-/// overridden with `TULIPROX_WATCHDOG_HEARTBEAT_MS` and
-/// `TULIPROX_WATCHDOG_STALL_MS`; the relog interval with
-/// `TULIPROX_WATCHDOG_RELOG_MS`.
+/// `TULIPROX_WATCHDOG` selects the mode: `0`/unset off, `1` observe, `2` observe
+/// and restart the process on a confirmed stall. Returns the shared state when
+/// started. The interval and threshold can be overridden with
+/// `TULIPROX_WATCHDOG_HEARTBEAT_MS` and `TULIPROX_WATCHDOG_STALL_MS`; the relog
+/// interval with `TULIPROX_WATCHDOG_RELOG_MS`; the restart grace with
+/// `TULIPROX_WATCHDOG_RESTART_GRACE_MS`.
 pub fn start(runtime: &tokio::runtime::Handle) -> Option<Arc<RuntimeLiveness>> {
-    if !watchdog_enabled() {
-        debug!("Runtime liveness watchdog disabled (set TULIPROX_WATCHDOG=1 to enable)");
+    let mode = configured_watchdog_mode();
+    if mode == WatchdogMode::Off {
+        debug!("Runtime liveness watchdog disabled (set TULIPROX_WATCHDOG=1 to observe, =2 to also restart)");
         return None;
     }
 
     let heartbeat_interval_ms = read_env_ms("TULIPROX_WATCHDOG_HEARTBEAT_MS", DEFAULT_HEARTBEAT_INTERVAL_MS);
     let stall_threshold_ms = read_env_ms("TULIPROX_WATCHDOG_STALL_MS", DEFAULT_STALL_THRESHOLD_MS);
     let relog_ms = read_env_ms("TULIPROX_WATCHDOG_RELOG_MS", DEFAULT_STALL_RELOG_MS);
+    let restart_grace_ms = read_env_ms("TULIPROX_WATCHDOG_RESTART_GRACE_MS", DEFAULT_RESTART_GRACE_MS);
 
-    let liveness = Arc::new(RuntimeLiveness::new(monotonic_now_ms(), heartbeat_interval_ms, stall_threshold_ms));
+    let liveness = Arc::new(
+        RuntimeLiveness::new(monotonic_now_ms(), heartbeat_interval_ms, stall_threshold_ms)
+            .with_restart_on_stall(mode == WatchdogMode::Restart),
+    );
     if !install(Arc::clone(&liveness)) {
         return None;
     }
 
     spawn_heartbeat(Arc::clone(&liveness));
-    match spawn_watchdog(Arc::clone(&liveness), runtime.clone(), relog_ms) {
+    match spawn_watchdog(Arc::clone(&liveness), runtime.clone(), relog_ms, restart_grace_ms) {
         Ok(_) => info!(
-            "Runtime liveness watchdog started: heartbeat {heartbeat_interval_ms} ms, stall threshold {stall_threshold_ms} ms"
+            "Runtime liveness watchdog started: mode={mode:?}, heartbeat {heartbeat_interval_ms} ms, stall threshold {stall_threshold_ms} ms"
         ),
         Err(err) => warn!("Failed to start runtime liveness watchdog thread: {err}"),
     }
@@ -202,9 +247,10 @@ fn spawn_watchdog(
     liveness: Arc<RuntimeLiveness>,
     runtime: tokio::runtime::Handle,
     relog_ms: u64,
+    restart_grace_ms: u64,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new().name("tuliprox-watchdog".to_string()).stack_size(WATCHDOG_STACK_SIZE).spawn(move || {
-        run_watchdog(&liveness, &runtime, relog_ms);
+        run_watchdog(&liveness, &runtime, relog_ms, restart_grace_ms);
     })
 }
 
@@ -240,11 +286,18 @@ fn watchdog_verdict(
     }
 }
 
-fn run_watchdog(liveness: &RuntimeLiveness, runtime: &tokio::runtime::Handle, relog_ms: u64) {
+/// Whether `TULIPROX_WATCHDOG=2` should exit the process now.
+fn restart_due(restart_on_stall: bool, stall_started_ms: Option<u64>, now_ms: u64, grace_ms: u64) -> bool {
+    restart_on_stall && stall_started_ms.is_some_and(|started| now_ms.saturating_sub(started) >= grace_ms)
+}
+
+fn run_watchdog(liveness: &RuntimeLiveness, runtime: &tokio::runtime::Handle, relog_ms: u64, restart_grace_ms: u64) {
     let poll = Duration::from_millis(DEFAULT_WATCHDOG_POLL_MS);
     let threshold_ms = liveness.stall_threshold_ms();
+    let restart_on_stall = liveness.restart_on_stall();
     let mut in_stall = false;
     let mut last_log_ms = 0_u64;
+    let mut stall_started_ms: Option<u64> = None;
 
     loop {
         std::thread::sleep(poll);
@@ -256,6 +309,7 @@ fn run_watchdog(liveness: &RuntimeLiveness, runtime: &tokio::runtime::Handle, re
             WatchdogVerdict::LogStall => {
                 if !in_stall {
                     liveness.note_stall();
+                    stall_started_ms = Some(now);
                 }
                 let snapshot = liveness.snapshot(now);
                 warn!(
@@ -269,7 +323,17 @@ fn run_watchdog(liveness: &RuntimeLiveness, runtime: &tokio::runtime::Handle, re
             WatchdogVerdict::Recovered => {
                 info!("Runtime liveness recovered: heartbeat resumed after {age} ms of silence");
                 in_stall = false;
+                stall_started_ms = None;
             }
+        }
+
+        if restart_due(restart_on_stall, stall_started_ms, now, restart_grace_ms) {
+            error!(
+                "Runtime liveness restart: heartbeat silent for {age} ms (threshold {threshold_ms} ms) and the stall \
+                 persisted past the {restart_grace_ms} ms grace; exiting with code {WATCHDOG_RESTART_EXIT_CODE} so the \
+                 supervisor can restart the process"
+            );
+            std::process::exit(WATCHDOG_RESTART_EXIT_CODE);
         }
     }
 }
@@ -347,7 +411,8 @@ fn read_proc_state(stat_path: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        monotonic_now_ms, spawn_heartbeat, watchdog_flag_enabled, watchdog_verdict, RuntimeLiveness, WatchdogVerdict,
+        monotonic_now_ms, restart_due, spawn_heartbeat, watchdog_mode, watchdog_verdict, RuntimeLiveness, WatchdogMode,
+        WatchdogVerdict,
     };
     use std::{
         sync::Arc,
@@ -355,14 +420,34 @@ mod tests {
     };
 
     #[test]
-    fn watchdog_flag_is_off_by_default_and_accepts_conventional_on_values() {
-        assert!(!watchdog_flag_enabled(None));
-        for value in ["0", "false", "FALSE", " off ", "no", "disabled", ""] {
-            assert!(!watchdog_flag_enabled(Some(value)), "expected {value:?} to keep the watchdog off");
+    fn watchdog_mode_is_off_by_default_and_maps_the_supported_values() {
+        assert_eq!(watchdog_mode(None), WatchdogMode::Off);
+        for value in ["0", "false", "FALSE", " off ", "no", "disabled", "", "9"] {
+            assert_eq!(watchdog_mode(Some(value)), WatchdogMode::Off, "expected {value:?} to be off");
         }
         for value in ["1", "true", "TRUE", " on ", "yes", "enabled"] {
-            assert!(watchdog_flag_enabled(Some(value)), "expected {value:?} to enable the watchdog");
+            assert_eq!(watchdog_mode(Some(value)), WatchdogMode::Observe, "expected {value:?} to observe");
         }
+        for value in ["2", "RESTART", " restart "] {
+            assert_eq!(watchdog_mode(Some(value)), WatchdogMode::Restart, "expected {value:?} to restart");
+        }
+    }
+
+    #[test]
+    fn restart_is_due_only_in_restart_mode_after_the_grace() {
+        assert!(!restart_due(false, Some(1_000), 100_000, 30_000));
+        assert!(!restart_due(true, None, 100_000, 30_000));
+        assert!(!restart_due(true, Some(80_000), 100_000, 30_000));
+        assert!(restart_due(true, Some(70_000), 100_000, 30_000));
+        assert!(restart_due(true, Some(70_000), 100_000, 0));
+    }
+
+    #[test]
+    fn restart_arm_is_reported_in_the_snapshot() {
+        let liveness = RuntimeLiveness::new(0, 1_000, 5_000).with_restart_on_stall(true);
+        assert!(liveness.restart_on_stall());
+        assert!(liveness.snapshot(0).restart_on_stall);
+        assert!(!RuntimeLiveness::new(0, 1_000, 5_000).snapshot(0).restart_on_stall);
     }
 
     #[tokio::test]
