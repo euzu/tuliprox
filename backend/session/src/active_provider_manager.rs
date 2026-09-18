@@ -2301,7 +2301,7 @@ impl ActiveProviderManager {
         }
 
         let futures: Vec<_> = targets.iter().map(|(_, _, token, _, _, _, _, _)| token.cancelled()).collect();
-        let _ = tokio::time::timeout(Duration::from_millis(1000), futures::future::join_all(futures)).await;
+        let _ = tokio::time::timeout(Duration::from_secs(1), futures::future::join_all(futures)).await;
 
         for (alloc_id, _, completion_token, _, _, _, _, gen) in targets {
             if completion_token.is_cancelled() {
