@@ -235,9 +235,6 @@ the grace period (`TULIPROX_WATCHDOG_RESTART_GRACE_MS`, default 30 s), so a conf
 brings the container back automatically. Use mode `1` while you are still investigating a cause, and mode `2` once a
 restart is the acceptable recovery.
 
-**How to find the exact task and lock:** use the `tokio-console` diagnostic build (see
-[Runtime Liveness Watchdog](./operations-debugging.md#8-runtime-liveness-watchdog)) or run the experimental image.
-
 **Immediate mitigation:** restart the container. The watchdog log is what tells you the stall happened on its own and
 captures what every thread was doing at that moment.
 

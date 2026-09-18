@@ -215,12 +215,6 @@ build: ## Build the entire workspace in parallel using detected CPU count
 	@echo "==> Building workspace with $(CARGO_BUILD_JOBS) jobs"
 	@TMPDIR="$${TMPDIR:-/tmp}" $(CARGO_STABLE) build -j$(CARGO_BUILD_JOBS) --workspace
 
-.PHONY: build-diagnostic
-build-diagnostic: ## Build tuliprox with tokio-console (diagnostic only; requires tokio_unstable)
-	@echo "==> Building diagnostic binary (tokio-console, RUSTFLAGS=--cfg tokio_unstable)"
-	@RUSTFLAGS="--cfg tokio_unstable" TMPDIR="$${TMPDIR:-/tmp}" $(CARGO_STABLE) build -j$(CARGO_BUILD_JOBS) --package tuliprox --features tokio-console
-	@echo "==> Run with TULIPROX_TOKIO_CONSOLE=1, then connect with: tokio-console"
-
 .PHONY: serve
 serve: ## Run tuliprox server with settings folder: make serve <settings_folder>
 	@if [ -z "$(SETTINGS_FOLDER)" ]; then \

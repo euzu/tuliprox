@@ -502,30 +502,3 @@ While the watchdog runs, `GET /healthcheck` gains a `runtime` object:
 `runtime.status` is `stalled` once the heartbeat stops. The top-level `status` intentionally stays `ok` for as long as the
 HTTP server answers, so no orchestrator restarts the process. If the whole runtime is wedged, the endpoint cannot answer
 at all — in that case the watchdog log is the signal.
-
----
-
-## 9. tokio-console Diagnostic Build
-
-`tokio-console` shows live which tasks exist, where each one is waiting, and which lock it holds. It is the tool to
-identify an async deadlock. It needs a special build and is never part of the standard production image.
-
-```bash
-# Build the diagnostic binary (requires RUSTFLAGS="--cfg tokio_unstable" internally)
-make build-diagnostic
-
-# Run it with the subscriber enabled and attach the console
-TULIPROX_TOKIO_CONSOLE=1 ./target/release/tuliprox -s -p ./config
-tokio-console            # defaults to http://127.0.0.1:6669
-```
-
-The experimental Docker image (`ghcr.io/euzu/tuliprox:experimental`) already carries this build and enables it by default.
-
-Notes:
-
-* The default release build compiles none of this: no `tokio_unstable`, no `console-subscriber`. There is no runtime cost
-  in normal images.
-* The console gRPC server has no authentication. Keep it on loopback (the default) or, if you must publish a port,
-  publish it only on the host loopback (`-p 127.0.0.1:6669:6669`).
-
----

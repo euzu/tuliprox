@@ -63,8 +63,6 @@ blake3.workspace = true
 bytes.workspace = true
 tokio-stream = { version = "0.1.19", features = ["sync"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "parking_lot", "fs", "process", "signal", "time", "macros"] }
-# Diagnostic-only: built solely under the `tokio-console` feature.
-console-subscriber = { version = "0.5", optional = true }
 tokio-util =  { version = "0.7.19", features = ["io", "io-util"] }
 tempfile = "3.27.0"
 base64.workspace = true
@@ -118,9 +116,6 @@ tokio-rustls = "0.26.4"
 
 [features]
 proxy-auth-regression = []
-# Diagnostic build. Requires RUSTFLAGS="--cfg tokio_unstable" at compile time;
-# see `make build-diagnostic`. Inactive unless TULIPROX_TOKIO_CONSOLE=1.
-tokio-console = ["dep:console-subscriber"]
 
 
 [[bin]]

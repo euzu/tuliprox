@@ -30,20 +30,6 @@ esac
 
 echo "🚀 Building for branch: $BRANCH (tag: $TAG_SUFFIX)"
 
-# The experimental image is the diagnostic build: tokio-console is compiled in
-# and switched on inside the image. develop and master must stay uninstrumented,
-# so both the cargo feature and tokio_unstable are confined to this branch.
-CARGO_FEATURES=()
-DOCKER_BUILD_ARGS=()
-if [ "$BRANCH" = "experimental" ]; then
-    export RUSTFLAGS="${RUSTFLAGS} --cfg tokio_unstable"
-    CARGO_FEATURES=(--features tokio-console)
-    # 0.0.0.0 is required so a host-published port can reach the in-container
-    # gRPC server; publish it as 127.0.0.1:6669:6669 to keep it host-local.
-    DOCKER_BUILD_ARGS=(--build-arg TULIPROX_TOKIO_CONSOLE=1 --build-arg TOKIO_CONSOLE_BIND=0.0.0.0:6669)
-    echo "🔬 Experimental diagnostic build: tokio_unstable + --features tokio-console"
-fi
-
 # Directories
 WORKING_DIR=$(pwd)
 DOCKER_DIR="${WORKING_DIR}/docker"
@@ -118,7 +104,7 @@ for PLATFORM in "${!ARCHITECTURES[@]}"; do
     echo "🔨 Building for $ARCHITECTURE"
 
     # Using cross for compilation
-    cross build -p tuliprox --release --target "$ARCHITECTURE" --locked ${CARGO_FEATURES[@]+"${CARGO_FEATURES[@]}"}
+    cross build -p tuliprox --release --target "$ARCHITECTURE" --locked
 
     SOURCE_BIN_PATH="target/${ARCHITECTURE}/release/tuliprox"
     cp "${SOURCE_BIN_PATH}" "${DOCKER_DIR}/binaries/tuliprox-${ARCHITECTURE}"
@@ -164,7 +150,6 @@ for IMAGE_NAME in "${!MULTI_PLATFORM_IMAGES[@]}"; do
         --platform "linux/amd64,linux/arm64" \
         --cache-from "type=gha,scope=${IMAGE_NAME}-${TAG_SUFFIX}" \
         --cache-to "type=gha,mode=max,scope=${IMAGE_NAME}-${TAG_SUFFIX}" \
-        ${DOCKER_BUILD_ARGS[@]+"${DOCKER_BUILD_ARGS[@]}"} \
         --push \
         .
 done

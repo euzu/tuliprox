@@ -110,12 +110,11 @@
 
 ## 🌟 New Features
 
-- **Runtime liveness watchdog and a tokio-console diagnostic build.** An optional heartbeat/watchdog detects a wedged
+- **Runtime liveness watchdog.** An optional heartbeat/watchdog detects a wedged
   async runtime (process alive, scheduler no longer making progress, logs stop) and logs a diagnostic snapshot with
   runtime metrics and a per-thread `/proc/self/task` inventory. It is opt-in and off by default (`TULIPROX_WATCHDOG=1`
   to observe, `=2` to also restart the process on a confirmed stall), and exposes its state through the `/healthcheck`
-  `runtime` object. For deeper task and lock inspection, `make build-diagnostic` produces a separate `tokio-console`
-  binary; normal release images contain neither the subscriber nor `tokio_unstable`.
+  `runtime` object.
 
 - **`.env` file support for secrets and environment variables:** Tuliprox now automatically loads environment variables
   from a `.env` file at startup.
