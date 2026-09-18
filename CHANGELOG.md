@@ -110,6 +110,13 @@
 
 ## 🌟 New Features
 
+- **Runtime liveness watchdog and a tokio-console diagnostic build.** An optional heartbeat/watchdog detects a wedged
+  async runtime (process alive, scheduler no longer making progress, logs stop) and logs a diagnostic snapshot with
+  runtime metrics and a per-thread `/proc/self/task` inventory. It is opt-in and off by default (`TULIPROX_WATCHDOG=1`),
+  never restarts the process, and exposes its state through the `/healthcheck` `runtime` object. For deeper task and lock
+  inspection, `make build-diagnostic` produces a separate `tokio-console` binary; normal release images contain neither
+  the subscriber nor `tokio_unstable`.
+
 - **`.env` file support for secrets and environment variables:** Tuliprox now automatically loads environment variables
   from a `.env` file at startup.
   - **Discovery order:** searches `--env-file <PATH>` (or `-e`), `TULIPROX_ENV_FILE`, then `<config_file_dir>/.env`
@@ -1329,6 +1336,12 @@
   episodes are unchanged: their properties carry no provider URL at that layer.
 
 ## ⚙️ New Settings
+
+- **Runtime diagnostics (environment variables)**:
+  - `TULIPROX_WATCHDOG` (default unset = disabled): set to `1`/`true`/`on`/`yes`/`enabled` to start the liveness watchdog.
+  - `TULIPROX_WATCHDOG_HEARTBEAT_MS` (default `1000`), `TULIPROX_WATCHDOG_STALL_MS` (default `10000`) and
+    `TULIPROX_WATCHDOG_RELOG_MS` (default `30000`): heartbeat cadence, stall threshold and re-log interval.
+  - `TULIPROX_TOKIO_CONSOLE` (default unset): set to `1` to start the console subscriber in a `tokio-console` build.
 
 - **source.yml (target `options`)**:
   - Added optional `clear_invalid_epg_ids` (`bool`, default `false`) to clear unresolved live-channel EPG IDs after EPG

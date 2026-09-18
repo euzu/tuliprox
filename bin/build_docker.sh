@@ -30,6 +30,20 @@ esac
 
 echo "🚀 Building for branch: $BRANCH (tag: $TAG_SUFFIX)"
 
+# The experimental image is the diagnostic build: tokio-console is compiled in
+# and switched on inside the image. develop and master must stay uninstrumented,
+# so both the cargo feature and tokio_unstable are confined to this branch.
+CARGO_FEATURES=()
+DOCKER_BUILD_ARGS=()
+if [ "$BRANCH" = "experimental" ]; then
+    export RUSTFLAGS="${RUSTFLAGS} --cfg tokio_unstable"
+    CARGO_FEATURES=(--features tokio-console)
+    # 0.0.0.0 is required so a host-published port can reach the in-container
+    # gRPC server; publish it as 127.0.0.1:6669:6669 to keep it host-local.
+    DOCKER_BUILD_ARGS=(--build-arg TULIPROX_TOKIO_CONSOLE=1 --build-arg TOKIO_CONSOLE_BIND=0.0.0.0:6669)
+    echo "🔬 Experimental diagnostic build: tokio_unstable + --features tokio-console"
+fi
+
 # Directories
 WORKING_DIR=$(pwd)
 DOCKER_DIR="${WORKING_DIR}/docker"
@@ -104,7 +118,7 @@ for PLATFORM in "${!ARCHITECTURES[@]}"; do
     echo "🔨 Building for $ARCHITECTURE"
 
     # Using cross for compilation
-    cross build -p tuliprox --release --target "$ARCHITECTURE" --locked
+    cross build -p tuliprox --release --target "$ARCHITECTURE" --locked ${CARGO_FEATURES[@]+"${CARGO_FEATURES[@]}"}
 
     SOURCE_BIN_PATH="target/${ARCHITECTURE}/release/tuliprox"
     cp "${SOURCE_BIN_PATH}" "${DOCKER_DIR}/binaries/tuliprox-${ARCHITECTURE}"
@@ -131,20 +145,26 @@ REPO_OWNER_LC="${REPO_OWNER,,}"
 
 for IMAGE_NAME in "${!MULTI_PLATFORM_IMAGES[@]}"; do
     BUILD_TARGET="${MULTI_PLATFORM_IMAGES[$IMAGE_NAME]}"
-    TAG_VERSION="ghcr.io/${REPO_OWNER_LC}/${IMAGE_NAME}:${VERSION}"
     TAG_BRANCH="ghcr.io/${REPO_OWNER_LC}/${IMAGE_NAME}:${TAG_SUFFIX}"
+    if [ "$BRANCH" = "experimental" ]; then
+        # Experimental images must not overwrite official release version tags
+        TAG_VERSION="ghcr.io/${REPO_OWNER_LC}/${IMAGE_NAME}:experimental-${VERSION}"
+    else
+        TAG_VERSION="ghcr.io/${REPO_OWNER_LC}/${IMAGE_NAME}:${VERSION}"
+    fi
 
     echo "🎯 Building multi-platform image: ${IMAGE_NAME}"
 
     # THE FIX: Using type=gha for automatic GitHub Actions cache management.
-    # No more local files, no more leftover artifacts.
+    # Scoped per branch/tag_suffix to avoid cache pollution between develop and experimental.
     docker buildx build -f Dockerfile.manual \
         -t "${TAG_VERSION}" \
         -t "${TAG_BRANCH}" \
         --target "$BUILD_TARGET" \
         --platform "linux/amd64,linux/arm64" \
-        --cache-from "type=gha,scope=${IMAGE_NAME}" \
-        --cache-to "type=gha,mode=max,scope=${IMAGE_NAME}" \
+        --cache-from "type=gha,scope=${IMAGE_NAME}-${TAG_SUFFIX}" \
+        --cache-to "type=gha,mode=max,scope=${IMAGE_NAME}-${TAG_SUFFIX}" \
+        ${DOCKER_BUILD_ARGS[@]+"${DOCKER_BUILD_ARGS[@]}"} \
         --push \
         .
 done

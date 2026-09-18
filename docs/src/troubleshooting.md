@@ -205,3 +205,35 @@ any operation requiring a new descriptor (such as opening a file or creating a s
    ```
 
 ---
+
+## 5. Server Stops Responding While the Container Keeps Running
+
+**The Problem:** After running normally for a while (often hours), Tuliprox stops processing and logging. The container
+still shows `running` with `ExitCode: 0` and low CPU/memory; there is no panic, no shutdown message and no final log
+entry. Only a manual restart recovers it.
+
+**Root Cause:** A wedged async runtime. Every Tokio worker is parked on a futex and the I/O driver sits in `epoll_wait`,
+which the OS cannot distinguish from an idle process. This is consistent with a task holding a shared lock while waiting
+forever on a network operation that has no timeout (for example an upstream that accepts the connection but never sends a
+response).
+
+**How to confirm:** Enable the runtime liveness watchdog (off by default):
+
+```yaml
+services:
+  tuliprox:
+    environment:
+      - TULIPROX_WATCHDOG=1
+```
+
+When the runtime stops making progress, the watchdog logs a `Runtime liveness stall` line with runtime metrics and a
+per-thread `/proc/self/task` inventory, and `GET /healthcheck` reports `runtime.status: stalled`. The watchdog never
+restarts the process.
+
+**How to find the exact task and lock:** use the `tokio-console` diagnostic build (see
+[Runtime Liveness Watchdog](./operations-debugging.md#8-runtime-liveness-watchdog)) or run the experimental image.
+
+**Immediate mitigation:** restart the container. The watchdog log is what tells you the stall happened on its own and
+captures what every thread was doing at that moment.
+
+---

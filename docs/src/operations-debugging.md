@@ -417,3 +417,93 @@ If hot-reload fails to
 trigger, a container restart (`docker restart tuliprox`) is the safest fallback.
 
 ---
+
+## 8. Runtime Liveness Watchdog
+
+A reverse proxy can wedge without crashing: the process is still alive, but the async scheduler stops making progress and
+the logs simply stop. At the OS level this looks like an idle process, so `docker stats` and `ps` cannot tell it apart
+from a healthy one.
+
+The watchdog detects exactly that. It is **opt-in and off by default**.
+
+### What it does
+
+* **Heartbeat (inside the runtime):** a small task records a monotonic timestamp every second and measures how late it
+  was scheduled.
+* **Watchdog thread (outside the runtime):** a separate `std::thread` watches the heartbeat age. If the scheduler is
+  wedged, the heartbeat stops advancing and the thread logs a diagnostic snapshot.
+* **On a stall** it logs (once, then every 30 s while it continues) the heartbeat age, runtime metrics (worker count,
+  alive tasks, global queue depth, per-worker park counts) and, on Linux, a `/proc/self/task` inventory with each
+  thread's id, name, state and waiting channel.
+* **On recovery** it logs that the heartbeat is back.
+
+The watchdog never restarts or interrupts the process. It only reports.
+
+### Enabling
+
+| Variable                         | Default         | Purpose                                                |
+|:---------------------------------|:----------------|:-------------------------------------------------------|
+| `TULIPROX_WATCHDOG`              | *(unset = off)* | Set to `1` (or `true`/`on`/`yes`/`enabled`) to enable. |
+| `TULIPROX_WATCHDOG_HEARTBEAT_MS` | `1000`          | Heartbeat interval.                                    |
+| `TULIPROX_WATCHDOG_STALL_MS`     | `10000`         | Heartbeat age above which a stall is reported.         |
+| `TULIPROX_WATCHDOG_RELOG_MS`     | `30000`         | Re-log interval while a stall continues.               |
+
+Docker example:
+
+```yaml
+services:
+  tuliprox:
+    environment:
+      - TULIPROX_WATCHDOG=1
+```
+
+### Healthcheck
+
+While the watchdog runs, `GET /healthcheck` gains a `runtime` object:
+
+```json
+{
+  "status": "ok",
+  "runtime": {
+    "status": "alive",
+    "heartbeat_age_ms": 12,
+    "heartbeat_interval_ms": 1000,
+    "stall_threshold_ms": 10000,
+    "ticks": 8401,
+    "stall_episodes": 0,
+    "max_schedule_delay_ms": 3,
+    "uptime_ms": 8401000
+  }
+}
+```
+
+`runtime.status` is `stalled` once the heartbeat stops. The top-level `status` intentionally stays `ok` for as long as the
+HTTP server answers, so no orchestrator restarts the process. If the whole runtime is wedged, the endpoint cannot answer
+at all — in that case the watchdog log is the signal.
+
+---
+
+## 9. tokio-console Diagnostic Build
+
+`tokio-console` shows live which tasks exist, where each one is waiting, and which lock it holds. It is the tool to
+identify an async deadlock. It needs a special build and is never part of the standard production image.
+
+```bash
+# Build the diagnostic binary (requires RUSTFLAGS="--cfg tokio_unstable" internally)
+make build-diagnostic
+
+# Run it with the subscriber enabled and attach the console
+TULIPROX_TOKIO_CONSOLE=1 ./target/release/tuliprox -s -p ./config
+tokio-console            # defaults to http://127.0.0.1:6669
+```
+
+The experimental Docker image (`ghcr.io/euzu/tuliprox:experimental`) already carries this build and enables it by default.
+
+Notes:
+
+* The default release build compiles none of this: no `tokio_unstable`, no `console-subscriber`. There is no runtime cost
+  in normal images.
+* The console gRPC server has no authentication. Keep it on loopback (the default) or, if you must publish a port,
+  publish it only on the host loopback (`-p 127.0.0.1:6669:6669`).
+
+---

@@ -66,13 +66,14 @@ jobs:
           chmod +x ./bin/inc_version.sh
           if [[ "${{ github.event_name }}" == "push" ]]; then
             case "${{ github.ref_name }}" in
-              develop|experimental) ./bin/inc_version.sh ;;
+              develop) ./bin/inc_version.sh ;;
+              experimental) echo "🔬 Experimental builds do not bump versions; keeping version from develop." ;;
               master) echo "Master builds use the version already committed in the merged PR; skipping version bump." ;;
               *) echo "Unsupported push branch: ${{ github.ref_name }}" >&2; exit 1 ;;
             esac
           else
-            if [[ "${{ github.event.inputs.branch }}" == "master" ]]; then
-              echo "Manual master builds use the version already committed on master; skipping version bump."
+            if [[ "${{ github.event.inputs.branch }}" == "master" || "${{ github.event.inputs.branch }}" == "experimental" ]]; then
+              echo "Manual ${{ github.event.inputs.branch }} builds skip version bump."
             else
               case "${{ github.event.inputs.choice }}" in
                 major) ./bin/inc_version.sh m ;;
@@ -146,8 +147,8 @@ jobs:
           done
       - name: Commit version bump
         if: >-
-          (github.event_name == 'push' && (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/experimental')) ||
-          (github.event_name == 'workflow_dispatch' && github.event.inputs.branch != 'master')
+          (github.event_name == 'push' && github.ref == 'refs/heads/develop') ||
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.branch == 'develop' && github.event.inputs.choice != 'none')
         id: version_commit
         run: |
           git config user.name "euzu"
@@ -219,8 +220,8 @@ jobs:
         if: >-
           success() &&
           (
-            (github.event_name == 'push' && (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/experimental')) ||
-            (github.event_name == 'workflow_dispatch' && github.event.inputs.branch != 'master')
+            (github.event_name == 'push' && github.ref == 'refs/heads/develop') ||
+            (github.event_name == 'workflow_dispatch' && github.event.inputs.branch == 'develop')
           ) &&
           steps.version_commit.outputs.did_commit == 'true'
         run: |

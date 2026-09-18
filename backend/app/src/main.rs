@@ -277,8 +277,26 @@ fn handle_migrate_db(db_path: &Path, db_type: Option<&str>, no_backup: bool) {
     }
 }
 
+/// Installs the tokio-console subscriber when the diagnostic build is used and
+/// explicitly requested at runtime.
+///
+/// The subscriber is expensive: it records every task poll. It is therefore
+/// compiled in only under the `tokio-console` feature and stays inactive unless
+/// `TULIPROX_TOKIO_CONSOLE=1`. A production binary does not contain the code.
+#[cfg(feature = "tokio-console")]
+fn init_tokio_console() {
+    if std::env::var("TULIPROX_TOKIO_CONSOLE").is_ok_and(|value| value == "1") {
+        console_subscriber::init();
+        info!("tokio-console subscriber enabled (connect with `tokio-console`)");
+    }
+}
+
+#[cfg(not(feature = "tokio-console"))]
+const fn init_tokio_console() {}
+
 #[tokio::main]
 async fn main() {
+    init_tokio_console();
     api::api_utils::init_uptime_clock();
     let args = Args::parse();
 
@@ -531,6 +549,7 @@ async fn start_in_cli_mode(cfg: Arc<AppConfig>, targets: Arc<ProcessTargets>) {
 }
 
 async fn start_in_server_mode(cfg: Arc<AppConfig>, targets: Arc<ProcessTargets>) {
+    tuliprox_core::utils::runtime_liveness::start(&tokio::runtime::Handle::current());
     if let Err(err) = api::main_api::start_server(cfg, targets).await {
         exit!("Can't start server: {err}");
     }

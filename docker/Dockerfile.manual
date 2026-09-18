@@ -37,6 +37,15 @@ FROM scratch AS scratch-final
 ARG TZ=UTC
 ENV TZ=${TZ}
 
+# Non-zero only in the experimental diagnostic image; the binary ignores any
+# other value, and develop/master images do not contain the subscriber at all.
+ARG TULIPROX_TOKIO_CONSOLE=0
+ENV TULIPROX_TOKIO_CONSOLE=${TULIPROX_TOKIO_CONSOLE}
+# console-subscriber binds this address. Loopback by default; the experimental
+# image widens it to 0.0.0.0 so a published host port can reach the gRPC server.
+ARG TOKIO_CONSOLE_BIND=127.0.0.1:6669
+ENV TOKIO_CONSOLE_BIND=${TOKIO_CONSOLE_BIND}
+
 # Copy timezone data and localtime from tz-prep
 COPY --from=tz-prep /output/usr/share/zoneinfo /usr/share/zoneinfo
 COPY --from=tz-prep /output/etc/localtime /etc/localtime
@@ -62,6 +71,15 @@ FROM alpine:latest AS alpine-final
 
 ARG TZ=UTC
 ENV TZ=${TZ}
+
+# Non-zero only in the experimental diagnostic image; the binary ignores any
+# other value, and develop/master images do not contain the subscriber at all.
+ARG TULIPROX_TOKIO_CONSOLE=0
+ENV TULIPROX_TOKIO_CONSOLE=${TULIPROX_TOKIO_CONSOLE}
+# console-subscriber binds this address. Loopback by default; the experimental
+# image widens it to 0.0.0.0 so a published host port can reach the gRPC server.
+ARG TOKIO_CONSOLE_BIND=127.0.0.1:6669
+ENV TOKIO_CONSOLE_BIND=${TOKIO_CONSOLE_BIND}
 
 # Install dependencies including ffmpeg
 RUN apk add --no-cache bash curl strace tcpdump bind-tools nano ca-certificates tini ffmpeg

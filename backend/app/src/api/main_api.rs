@@ -281,11 +281,16 @@ fn get_web_dir_path(web_ui_enabled: bool, web_root: &str) -> Result<PathBuf, Tul
 }
 
 fn create_healthcheck() -> Healthcheck {
+    // `status` stays `ok` for as long as the server answers requests: the
+    // container healthcheck restarts on a non-ok body, and a wedged runtime is
+    // reported by the watchdog thread instead of by killing the process.
+    // Liveness is exposed separately in `runtime`.
     Healthcheck {
         status: "ok".to_string(),
         version: VERSION.to_string(),
         build_time: get_build_time(),
         server_time: get_server_time(),
+        runtime: tuliprox_core::utils::runtime_liveness::health_snapshot(),
     }
 }
 

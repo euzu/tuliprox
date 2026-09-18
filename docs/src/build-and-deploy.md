@@ -41,6 +41,7 @@ environment across different machines.
 * `make test`: Runs all workspace tests using the Stable toolchain.
 * `make lint`: Runs clippy to find common mistakes and improve code quality.
 * `make lint-fix`: Automatically applies clippy suggestions (where possible).
+* `make build-diagnostic`: Builds the backend with `tokio-console` support (diagnostic only, not part of normal releases).
 * `make markdown-lint`: Checks all .md files for formatting consistency.
 
 **Formatting**:
@@ -127,6 +128,22 @@ rustup target add x86_64-unknown-linux-musl
 
 cargo build -p tuliprox --target x86_64-unknown-linux-musl --release
 ```
+
+### Diagnostic Build (tokio-console)
+
+To diagnose async hangs (tasks that never complete, locks held across `.await`), build the diagnostic binary:
+
+```bash
+make build-diagnostic
+TULIPROX_TOKIO_CONSOLE=1 ./target/release/tuliprox -s -p ./config
+tokio-console            # defaults to http://127.0.0.1:6669
+```
+
+This build compiles `tokio` with `--cfg tokio_unstable` and enables the optional `console-subscriber`. It is a separate
+binary and normal release builds are unaffected. The experimental Docker image
+(`ghcr.io/euzu/tuliprox:experimental`) is built this way and enables the subscriber by default. See
+[Runtime Liveness Watchdog](./operations-debugging.md#8-runtime-liveness-watchdog) for the always-available (opt-in)
+watchdog that does not require a special build.
 
 ### Cross-Compilation (ARM / Windows)
 
