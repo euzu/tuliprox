@@ -131,9 +131,16 @@ impl ConfigService {
             return;
         }
 
-        let can_read_config =
-            self.auth.has_any_permissions(Permission::ConfigRead | Permission::SourceRead | Permission::UserRead);
-        let can_read_api_proxy = self.auth.has_any_permissions(Permission::ConfigRead | Permission::UserRead);
+        let can_read_config = self.auth.has_any_permissions(
+            Permission::ConfigRead
+                | Permission::SourceRead
+                | Permission::UserRead
+                | Permission::UserWrite
+                | Permission::PlaylistRead
+                | Permission::PlaylistWrite,
+        );
+        let can_read_api_proxy =
+            self.auth.has_any_permissions(Permission::ConfigRead | Permission::UserRead | Permission::UserWrite);
         let config_response = if can_read_config {
             Some(
                 request_get_meta::<AppConfigDto>(
