@@ -235,6 +235,7 @@ pub struct SourceEditorContext {
     pub on_form_change: Callback<(BlockId, BlockInstance)>,
     pub open_target_bouquet: Callback<String>,
     pub bouquet_revision: u64,
+    pub output_curation_managed: bool,
     pub edit_mode: UseStateHandle<EditMode>,
     pub allow_write: bool,
 }

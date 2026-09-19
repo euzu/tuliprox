@@ -1688,6 +1688,8 @@
     "TMDB": "TMDB",
     "TOKEN": "Token",
     "TOKEN_TTL_MINS": "Token ttl (mins)",
+    "CURATION": "Curation",
+    "CURATION_YAML_NOTICE": "Target curation is configured in YAML. These settings are preserved when editing other fields; legacy Trakt controls are unavailable for this target.",
     "TRAKT": "Trakt",
     "TRAKT_CATALOG_SELECTION": "VOD and series catalog",
     "TRAKT_CATALOG_SELECTION_FULL": "Full catalog",

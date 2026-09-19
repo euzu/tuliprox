@@ -2,21 +2,20 @@ mod client;
 mod errors;
 mod model;
 
-use crate::kernel::{
-    evaluate_selector, project_memberships, CuratedMediaReference, CurationCategorySpec, CurationEvaluation,
-    CurationFailure, CurationIncompleteReason, CurationMatchPolicy, CurationMediaScope, CurationProjectionCatalog,
-    CurationRunOutcome, CurationSelectorKey, CurationSelectorSpec, CurationSelectorSummary, CurationUnavailableReason,
-    ProjectionIdentityStrategy, SelectorOutcome,
+use crate::{
+    coordinator::LEGACY_CATEGORY_NAMESPACE,
+    kernel::{
+        evaluate_selector, project_memberships, CuratedMediaReference, CurationCategorySpec, CurationEvaluation,
+        CurationIncompleteReason, CurationMatchPolicy, CurationMediaScope, CurationProjectionCatalog,
+        CurationRunOutcome, CurationSelectorKey, CurationSelectorSpec, CurationUnavailableReason,
+        ProjectionIdentityStrategy, SelectorOutcome,
+    },
 };
 use client::{TraktClient, TraktFetchFailureKind};
 use log::{debug, info, warn};
 use model::TraktListItem;
 use shared::model::{PlaylistGroup, TraktContentType};
-use tuliprox_core::model::{TraktChartConfig, TraktConfig, TraktListConfig};
-
-// Compatibility policy for the current Xtream projection. This namespace is
-// deliberately supplied by the adapter rather than treated as canonical media identity.
-const LEGACY_TRAKT_CATEGORY_NAMESPACE: &str = "trakt-category";
+use tuliprox_core::model::{CurationConfig, TraktChartConfig, TraktConfig, TraktListConfig, TraktSourceConfig};
 
 /// Evaluate every configured Trakt selector into exact target memberships.
 ///
@@ -27,23 +26,26 @@ pub async fn evaluate_trakt_curation(
     target_name: &str,
     trakt_config: &TraktConfig,
 ) -> CurationRunOutcome {
-    if !trakt_config.enabled || (trakt_config.lists.is_empty() && trakt_config.charts.is_empty()) {
-        return CurationRunOutcome::NotConfigured;
-    }
+    crate::evaluate_curation(http_client, playlist, target_name, &CurationConfig::from(trakt_config)).await
+}
 
+pub(crate) async fn evaluate_selectors(
+    http_client: &reqwest::Client,
+    playlist: &[PlaylistGroup],
+    target_name: &str,
+    trakt_config: &TraktSourceConfig,
+    keys: &[CurationSelectorKey],
+) -> Vec<SelectorOutcome> {
     let selector_count = trakt_config.lists.len() + trakt_config.charts.len();
-    let processor = match TraktCategoriesProcessor::new(http_client, trakt_config) {
+    assert_eq!(selector_count, keys.len());
+    let processor = match TraktClient::new(http_client.clone(), trakt_config.api.clone()) {
         Ok(processor) => processor,
         Err(error) => {
             warn!("Trakt curation is unavailable for target '{target_name}': {}", error.message());
-            return CurationRunOutcome::Failed(CurationFailure {
-                selector_outcomes: (0..selector_count)
-                    .map(|ordinal| SelectorOutcome::Unavailable {
-                        key: selector_key(ordinal),
-                        reason: CurationUnavailableReason::Configuration,
-                    })
-                    .collect(),
-            });
+            return keys
+                .iter()
+                .map(|key| SelectorOutcome::Unavailable { key: *key, reason: CurationUnavailableReason::Configuration })
+                .collect();
         }
     };
 
@@ -55,9 +57,9 @@ pub async fn evaluate_trakt_curation(
     let mut selector_outcomes = Vec::with_capacity(selector_count);
 
     for (ordinal, list_config) in trakt_config.lists.iter().enumerate() {
-        let key = selector_key(ordinal);
+        let key = keys[ordinal];
         let source_label = format!("{}:{}", list_config.user, list_config.list_slug);
-        let outcome = match processor.client.get_list_items(list_config).await {
+        let outcome = match processor.get_list_items(list_config).await {
             Ok(items) => {
                 debug!("Evaluating Trakt list {source_label} with {} items", items.len());
                 let references = translate_items(items);
@@ -73,9 +75,9 @@ pub async fn evaluate_trakt_curation(
 
     for (chart_index, chart_config) in trakt_config.charts.iter().enumerate() {
         let ordinal = trakt_config.lists.len() + chart_index;
-        let key = selector_key(ordinal);
+        let key = keys[ordinal];
         let source_label = format!("{}:{}", chart_config.kind, chart_config.chart);
-        let outcome = match processor.client.get_chart_items(chart_config).await {
+        let outcome = match processor.get_chart_items(chart_config).await {
             Ok(items) => {
                 debug!("Evaluating Trakt chart {source_label} with {} items", items.len());
                 let references = translate_items(items);
@@ -89,10 +91,8 @@ pub async fn evaluate_trakt_curation(
         selector_outcomes.push(outcome);
     }
 
-    complete_evaluation(selector_outcomes)
+    selector_outcomes
 }
-
-const fn selector_key(ordinal: usize) -> CurationSelectorKey { CurationSelectorKey(ordinal) }
 
 fn failed_selector_outcome(key: CurationSelectorKey, failure: TraktFetchFailureKind) -> SelectorOutcome {
     match failure {
@@ -114,26 +114,35 @@ pub fn project_trakt_categories(
     playlist: &[PlaylistGroup],
     trakt_config: &TraktConfig,
 ) -> Vec<PlaylistGroup> {
+    crate::project_curation_categories(evaluation, playlist, &CurationConfig::from(trakt_config))
+}
+
+pub(crate) fn project_categories(
+    evaluation: &CurationEvaluation,
+    projection_catalog: &CurationProjectionCatalog<'_>,
+    trakt_config: &TraktSourceConfig,
+    keys: &[CurationSelectorKey],
+) -> Vec<PlaylistGroup> {
+    assert_eq!(keys.len(), trakt_config.lists.len() + trakt_config.charts.len());
     let mut categories = Vec::new();
-    let projection_catalog = CurationProjectionCatalog::new(playlist);
     for (ordinal, list_config) in trakt_config.lists.iter().enumerate() {
         append_selector_projection(
-            selector_key(ordinal),
+            keys[ordinal],
             list_config.category_name.as_deref(),
             list_config.create_xtream_category,
             evaluation,
-            &projection_catalog,
+            projection_catalog,
             &list_category_spec(list_config),
             &mut categories,
         );
     }
     for (chart_index, chart_config) in trakt_config.charts.iter().enumerate() {
         append_selector_projection(
-            selector_key(trakt_config.lists.len() + chart_index),
+            keys[trakt_config.lists.len() + chart_index],
             chart_config.category_name.as_deref(),
             chart_config.create_xtream_category,
             evaluation,
-            &projection_catalog,
+            projection_catalog,
             &chart_category_spec(chart_config),
             &mut categories,
         );
@@ -155,34 +164,6 @@ fn append_selector_projection(
     }
     let memberships = evaluation.memberships.iter().filter(|membership| membership.selector_key == key);
     categories.extend(project_memberships(memberships, projection_catalog, specification));
-}
-
-fn complete_evaluation(selector_outcomes: Vec<SelectorOutcome>) -> CurationRunOutcome {
-    if selector_outcomes.iter().any(|outcome| !matches!(outcome, SelectorOutcome::Complete { .. })) {
-        return CurationRunOutcome::Failed(CurationFailure { selector_outcomes });
-    }
-
-    let mut selectors = Vec::with_capacity(selector_outcomes.len());
-    let mut memberships = Vec::new();
-    for outcome in selector_outcomes {
-        let SelectorOutcome::Complete { key, reference_count, memberships: mut selector_memberships } = outcome else {
-            unreachable!("all selector outcomes were checked as complete")
-        };
-        selectors.push(CurationSelectorSummary { key, reference_count, membership_count: selector_memberships.len() });
-        memberships.append(&mut selector_memberships);
-    }
-    CurationRunOutcome::Complete(CurationEvaluation { selectors, memberships })
-}
-
-struct TraktCategoriesProcessor {
-    client: TraktClient,
-}
-
-impl TraktCategoriesProcessor {
-    fn new(http_client: &reqwest::Client, trakt_config: &TraktConfig) -> Result<Self, shared::error::TuliproxError> {
-        let client = TraktClient::new(http_client.clone(), trakt_config.api.clone())?;
-        Ok(Self { client })
-    }
 }
 
 fn translate_items(items: Vec<TraktListItem>) -> Vec<CuratedMediaReference> {
@@ -238,16 +219,17 @@ fn category_spec(
     CurationCategorySpec {
         name: category_name,
         selector: selector_spec(content_type, tmdb_only, fuzzy_match_threshold),
-        projection_identity: ProjectionIdentityStrategy::LegacyCategoryScoped {
-            namespace: LEGACY_TRAKT_CATEGORY_NAMESPACE,
-        },
+        projection_identity: ProjectionIdentityStrategy::LegacyCategoryScoped { namespace: LEGACY_CATEGORY_NAMESPACE },
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trakt::model::{TraktIds, TraktMovie, TraktShow};
+    use crate::{
+        coordinator::complete_evaluation,
+        trakt::model::{TraktIds, TraktMovie, TraktShow},
+    };
     use shared::{
         model::{
             EpisodeStreamProperties, FieldGet, HeaderField, PlaylistItem, PlaylistItemHeader, PlaylistItemType,

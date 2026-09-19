@@ -451,6 +451,9 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
     };
 
     let render_trakt = || {
+        if source_editor_ctx.output_curation_managed {
+            return html! { <Card class="tp__config-view__card"><p>{translate.t("LABEL.CURATION_YAML_NOTICE")}</p></Card> };
+        }
         let trakt_lists = trakt_lists_state.clone();
         let trakt_charts = trakt_charts_state.clone();
         let trakt_form = trakt_state.clone();
@@ -667,14 +670,16 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
 
             let trakt_lists = (*trakt_lists_state).clone();
             let trakt_charts = (*trakt_charts_state).clone();
-            output.trakt = build_trakt_output_config(
-                trakt_state.data().enabled,
-                trakt_state.data().catalog_selection,
-                trakt_state.data().include_xtream_base_categories,
-                trakt_api_state.data().clone(),
-                trakt_lists,
-                trakt_charts,
-            );
+            if !source_editor_ctx.output_curation_managed {
+                output.trakt = build_trakt_output_config(
+                    trakt_state.data().enabled,
+                    trakt_state.data().catalog_selection,
+                    trakt_state.data().include_xtream_base_categories,
+                    trakt_api_state.data().clone(),
+                    trakt_lists,
+                    trakt_charts,
+                );
+            }
 
             source_editor_ctx
                 .on_form_change

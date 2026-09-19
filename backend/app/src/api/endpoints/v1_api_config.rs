@@ -1183,6 +1183,12 @@ mod tests {
                         id: 1,
                         enabled: false,
                         name: String::from("Default"),
+                        curation: Some(
+                            serde_json::from_value(
+                                serde_json::json!({"tmdb": {"api": {"access_token": "discovery-secret"}}}),
+                            )
+                            .unwrap(),
+                        ),
                         output: vec![shared::model::TargetOutputDto::M3u(shared::model::M3uTargetOutputDto {
                             filename: Some(String::from("secret.m3u")),
                             ..Default::default()
@@ -1221,6 +1227,7 @@ mod tests {
         assert_eq!(target.id, 1);
         assert_eq!(target.enabled, shared::model::ConfigTargetDto::default().enabled);
         assert!(target.output.is_empty());
+        assert!(target.curation.is_none(), "identity-only access must not disclose discovery credentials");
         assert!(target.filter.is_empty());
         assert!(target.options.is_none());
         assert!(target.sort.is_none());
@@ -1324,6 +1331,7 @@ mod tests {
             url: "http://example.com/playlist.m3u".to_string(),
             ..Default::default()
         };
+        let curation: shared::model::CurationConfigDto = serde_json::from_value(serde_json::json!({"enabled": false, "catalog_selection": "curated", "tmdb": {"api": {"access_token": "discovery-test-token"}, "trending": [{"kind": "movie", "time_window": "week", "scope": "first_page", "create_xtream_category": false}]}})).unwrap();
         let initial_sources = SourcesConfigDto {
             inputs: vec![input_dto.clone()],
             sources: vec![shared::model::ConfigSourceDto {
@@ -1331,6 +1339,7 @@ mod tests {
                 targets: vec![shared::model::ConfigTargetDto {
                     id: 1,
                     name: "target_1".to_string(),
+                    curation: Some(curation.clone()),
                     output: vec![shared::model::TargetOutputDto::M3u(shared::model::M3uTargetOutputDto::default())],
                     ..Default::default()
                 }],
@@ -1382,6 +1391,7 @@ mod tests {
                 targets: vec![shared::model::ConfigTargetDto {
                     id: 1,
                     name: "target_renamed".to_string(),
+                    curation: Some(curation.clone()),
                     output: vec![shared::model::TargetOutputDto::M3u(shared::model::M3uTargetOutputDto::default())],
                     ..Default::default()
                 }],
@@ -1408,5 +1418,12 @@ mod tests {
         assert!(!tuliprox_repository::target_bouquet_exists(temp_dir.path(), "target_renamed").await);
         let runtime_sources = app_state.app_config.sources.load();
         assert_eq!(runtime_sources.sources[0].targets[0].name, "target_renamed");
+        assert_eq!(
+            shared::model::CurationConfigDto::from(runtime_sources.sources[0].targets[0].curation.as_ref().unwrap()),
+            curation
+        );
+        let saved: SourcesConfigDto =
+            serde_saphyr::from_str(&tokio::fs::read_to_string(&sources_file).await.unwrap()).unwrap();
+        assert_eq!(saved.sources[0].targets[0].curation.as_ref(), Some(&curation));
     }
 }

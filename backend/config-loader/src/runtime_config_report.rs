@@ -344,6 +344,18 @@ sources:
         assert_eq!(value["url"], "http://***/get.php?username=***&password=***");
     }
 
+    #[test]
+    fn runtime_config_report_redacts_curation_bearer_token_in_target_arrays() {
+        let sources: shared::model::SourcesConfigDto = serde_json::from_value(serde_json::json!({
+            "inputs": [],
+            "sources": [{"inputs": [], "targets": [{"name": "discovery", "curation": {"tmdb": {"api": {"access_token": "discovery-test-token"}}}}]}]
+        })).unwrap();
+        let mut value = serde_json::json!({"sources": sources});
+        redact_value(None, None, &mut value);
+        assert_eq!(value["sources"]["sources"][0]["targets"][0]["curation"]["tmdb"]["api"]["access_token"], "***");
+        assert!(!value.to_string().contains("discovery-test-token"));
+    }
+
     #[tokio::test]
     async fn runtime_config_report_formats_yaml() {
         let app_config = create_test_app_config().await;

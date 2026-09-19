@@ -3,7 +3,7 @@ name = "tuliprox-curation"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Source-neutral playlist curation with a Trakt edge adapter for tuliprox"
+description = "Source-neutral playlist curation with Trakt and TMDB Trending adapters for tuliprox"
 
 [lints]
 workspace = true
@@ -21,4 +21,4 @@ serde_json.workspace = true
 strsim = "0.11.1"
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }

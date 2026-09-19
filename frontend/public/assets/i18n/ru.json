@@ -1512,6 +1512,8 @@
     "TMDB": "TMDB",
     "TOKEN": "Токен",
     "TOKEN_TTL_MINS": "TTL токена (мин)",
+    "CURATION": "Подбор контента",
+    "CURATION_YAML_NOTICE": "Подбор контента для цели настроен в YAML. Эти настройки сохраняются при изменении других полей; прежние настройки Trakt для этой цели недоступны.",
     "TRAKT": "Trakt",
     "TRAKT_CATALOG_SELECTION": "Каталог VOD и сериалов",
     "TRAKT_CATALOG_SELECTION_FULL": "Полный каталог",

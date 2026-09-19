@@ -1409,6 +1409,7 @@ mod tests {
 
     fn target_with_options(name: &str, output: Vec<TargetOutput>, use_memory_cache: bool) -> ConfigTarget {
         ConfigTarget {
+            curation: None,
             id: 1,
             enabled: true,
             name: name.to_string(),

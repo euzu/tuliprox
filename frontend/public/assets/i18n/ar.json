@@ -1604,6 +1604,8 @@
     "TMDB": "TMDB",
     "TOKEN": "رمز",
     "TOKEN_TTL_MINS": "TTL الرمز (دقائق)",
+    "CURATION": "تنسيق المحتوى",
+    "CURATION_YAML_NOTICE": "تم إعداد تنسيق محتوى الهدف في YAML. تُحفظ هذه الإعدادات عند تعديل الحقول الأخرى؛ عناصر تحكم Trakt القديمة غير متاحة لهذا الهدف.",
     "TRAKT": "Trakt",
     "TRAKT_CATALOG_SELECTION": "كتالوج VOD والمسلسلات",
     "TRAKT_CATALOG_SELECTION_FULL": "الكتالوج الكامل",

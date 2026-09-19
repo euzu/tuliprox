@@ -594,6 +594,15 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
     let render_edit_mode = || {
         html! {
             <div class="tp__source-editor-form__body">
+            if let Some(curation) = &target_form_state.form.curation {
+                <Card class="tp__config-view__card">
+                    <p>{translate.t("LABEL.CURATION_YAML_NOTICE")}</p>
+                    { config_field_bool!(curation, translate.t(LABEL_ENABLED), enabled) }
+                    { config_field_custom!(translate.t("LABEL.CURATION"), format!("{} · Trakt: {} · TMDB: {}", curation.catalog_selection,
+                        curation.trakt.as_ref().map_or(0, |source| source.lists.len() + source.charts.len()),
+                        curation.tmdb.as_ref().map_or(0, |source| source.trending.len()))) }
+                </Card>
+            }
             <div class="tp__source-editor-form__body__pages">
                 <Panel value={TargetFormPage::Main.intern()} active={view_visible.intern()}>
                 {render_target()}
@@ -670,6 +679,15 @@ mod tests {
 
     fn default_options_state() -> Rc<ConfigTargetOptionsFormState> {
         ConfigTargetOptionsFormState { form: ConfigTargetOptions::default(), modified: false }.into()
+    }
+
+    #[test]
+    fn target_form_name_edits_preserve_yaml_curation() {
+        let dto: shared::model::ConfigTargetDto = serde_json::from_value(serde_json::json!({"name": "before", "curation": {"enabled": false, "tmdb": {"api": {"access_token": "test-token"}}}})).unwrap();
+        let state = Rc::new(super::ConfigTargetFormState { form: dto.clone(), modified: false });
+        let state = state.reduce(super::ConfigTargetFormAction::Name("after".to_string()));
+        assert_eq!(state.form.curation, dto.curation);
+        assert_eq!(state.form.name, "after");
     }
 
     #[test]

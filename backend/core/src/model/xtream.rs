@@ -184,6 +184,7 @@ mod tests {
     fn create_test_target() -> (ConfigTarget, XtreamTargetOutput) {
         let xtream_output = XtreamTargetOutput { flags: XtreamTargetFlagsSet::default(), trakt: None, filter: None };
         let target = ConfigTarget {
+            curation: None,
             id: 1,
             enabled: true,
             name: "xtream-target".to_string(),

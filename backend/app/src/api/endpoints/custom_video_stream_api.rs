@@ -605,6 +605,7 @@ mod tests {
             ..ConfigInput::default()
         });
         let target = Arc::new(ConfigTarget {
+            curation: None,
             id: 1,
             enabled: true,
             name: "target".to_string(),

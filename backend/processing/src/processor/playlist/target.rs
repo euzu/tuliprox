@@ -864,20 +864,24 @@ pub(crate) struct TargetPlaylistViews {
 pub(crate) fn build_curated_playlist_views(
     playlist: Vec<PlaylistGroup>,
     evaluation: &CurationEvaluation,
-    trakt_config: &TraktConfig,
+    config: &CurationConfig,
     appearance_filter_configured: bool,
+    has_xtream_output: bool,
 ) -> TargetPlaylistViews {
-    let curated_catalog = trakt_config.catalog_selection.is_curated();
-    let mut categories = project_trakt_categories(evaluation, &playlist, trakt_config);
+    let curated_catalog = config.catalog_selection.is_curated();
+    let categories = has_xtream_output.then(|| project_curation_categories(evaluation, &playlist, config));
     let base = select_target_catalog(playlist, evaluation, curated_catalog);
-    let mut xtream = if trakt_config.include_xtream_base_categories { base.clone() } else { live_only(&base) };
-    xtream.append(&mut categories);
+    let xtream = categories.map(|mut categories| {
+        let mut view = if config.include_xtream_base_categories { base.clone() } else { live_only(&base) };
+        view.append(&mut categories);
+        view
+    });
     TargetPlaylistViews {
         base,
-        xtream: Some(xtream),
+        xtream,
         publication_plan: PlaylistPublicationPlan::complete_curation_with_filter(
             curated_catalog,
-            !trakt_config.include_xtream_base_categories,
+            has_xtream_output && !config.include_xtream_base_categories,
             appearance_filter_configured,
         ),
     }
@@ -888,7 +892,7 @@ pub(crate) async fn prepare_target_playlist_views(
     target: &ConfigTarget,
     playlist: Vec<PlaylistGroup>,
 ) -> Result<TargetPlaylistViews, TuliproxError> {
-    let Some(trakt_config) = target.get_xtream_output().and_then(|xtream| xtream.trakt.as_ref()) else {
+    let Some(config) = target.effective_curation() else {
         return Ok(TargetPlaylistViews {
             base: playlist,
             xtream: None,
@@ -896,7 +900,17 @@ pub(crate) async fn prepare_target_playlist_views(
         });
     };
 
-    match evaluate_trakt_curation(client, &playlist, &target.name, trakt_config).await {
+    let outcome = evaluate_curation(client, &playlist, &target.name, &config).await;
+    curation_playlist_views(target, playlist, &config, outcome)
+}
+
+pub(super) fn curation_playlist_views(
+    target: &ConfigTarget,
+    playlist: Vec<PlaylistGroup>,
+    config: &CurationConfig,
+    outcome: CurationRunOutcome,
+) -> Result<TargetPlaylistViews, TuliproxError> {
+    match outcome {
         CurationRunOutcome::NotConfigured => Ok(TargetPlaylistViews {
             base: playlist,
             xtream: None,
@@ -904,8 +918,13 @@ pub(crate) async fn prepare_target_playlist_views(
         }),
         CurationRunOutcome::Failed(failure) => Err(curation_failure_error(&target.name, &failure)),
         CurationRunOutcome::Complete(evaluation) => {
-            let views =
-                build_curated_playlist_views(playlist, &evaluation, trakt_config, target.filter.persist.is_some());
+            let views = build_curated_playlist_views(
+                playlist,
+                &evaluation,
+                config,
+                target.filter.persist.is_some(),
+                target.get_xtream_output().is_some(),
+            );
             info!(
                 "Target '{}' curation completed with {} memberships and {} Xtream groups",
                 target.name,
