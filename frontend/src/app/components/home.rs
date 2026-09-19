@@ -592,7 +592,7 @@ pub fn Home() -> Html {
                                                 </ErrorBoundary>
                                             </Panel>
                                         })}
-                                       { html_if!(can_read_users, {
+                                       { html_if!(can_read_users || can_write_users, {
                                        <Panel class="tp__full-width" value={ViewType::Users.intern()} active={view_page.clone()}>
                                           <ErrorBoundary name={translate.t("LABEL.USER")}>
                                             <UserlistView/>

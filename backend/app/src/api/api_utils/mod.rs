@@ -3176,11 +3176,11 @@ async fn try_shared_stream_response_if_any(
         } else {
             (0, None)
         };
-        if let Some(registration) = pending_registration {
-            registration.commit();
-        }
         stream_channel.shared_stream_id = Some(u64::from(meter_uid));
-        let metering = StreamMeteringConfig { meter_uid, meter_stream: false, pending_shared_registration: None };
+        // The pending registration is carried through admission so its drop guard rolls
+        // the reservation back if the client stream is never created.
+        let mut metering =
+            StreamMeteringConfig { meter_uid, meter_stream: false, pending_shared_registration: pending_registration };
         let stream = match create_active_client_stream(crate::api::model::ActiveClientStreamParams {
             stream_details,
             app_state,
@@ -3197,8 +3197,22 @@ async fn try_shared_stream_response_if_any(
         })
         .await
         {
-            Ok(stream) => stream.boxed(),
-            Err(error) => return Some(stream_admission_rejected_response(error, &user.username)),
+            Ok(stream) => {
+                metering.commit_shared_registration();
+                stream.boxed()
+            }
+            Err(error) => {
+                app_state
+                    .active_users
+                    .release_unbound_session_reservation(
+                        &user.username,
+                        session_token,
+                        placeholder_transition_version,
+                        placeholder_transition_version.is_some(),
+                    )
+                    .await;
+                return Some(stream_admission_rejected_response(error, &user.username));
+            }
         };
         let mut response = axum::response::Response::builder().status(status_code);
         for (key, value) in &header_map {

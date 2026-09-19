@@ -465,6 +465,8 @@ trait HlsOriginReservationCandidate {
     fn account_name(&self) -> &Arc<str>;
     fn session_owner(&self) -> &str;
     fn reservation_ttl_secs(&self) -> u64;
+    fn proxy_session_id(&self) -> &ProxySessionId;
+    fn cleared_binding_tag(&self) -> Option<ProviderBindingTag>;
 }
 
 impl HlsOriginReservationCandidate for HlsAccountOverlapCandidate {
@@ -473,6 +475,10 @@ impl HlsOriginReservationCandidate for HlsAccountOverlapCandidate {
     fn session_owner(&self) -> &str { &self.session_owner }
 
     fn reservation_ttl_secs(&self) -> u64 { self.reservation_ttl_secs }
+
+    fn proxy_session_id(&self) -> &ProxySessionId { &self.proxy_session_id }
+
+    fn cleared_binding_tag(&self) -> Option<ProviderBindingTag> { self.provider_binding_tag }
 }
 
 impl HlsOriginReservationCandidate for HlsOriginPolicyPreemptCandidate {
@@ -481,6 +487,10 @@ impl HlsOriginReservationCandidate for HlsOriginPolicyPreemptCandidate {
     fn session_owner(&self) -> &str { &self.session_owner }
 
     fn reservation_ttl_secs(&self) -> u64 { self.reservation_ttl_secs }
+
+    fn proxy_session_id(&self) -> &ProxySessionId { &self.proxy_session_id }
+
+    fn cleared_binding_tag(&self) -> Option<ProviderBindingTag> { self.provider_binding_tag }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -612,6 +622,18 @@ pub(super) fn hls_soft_overlap_delay_ms(
     target_duration_ms.saturating_mul(numerator).saturating_add(origin.saturating_sub(1)) / origin
 }
 
+/// Playback kind used for provider leases of a shared HLS session.
+///
+/// Archive-backed sessions must keep catchup semantics instead of plain live HLS;
+/// live sessions keep the live HLS kind.
+async fn hls_session_origin_playback_kind(session: &HlsSessionHandle) -> PlaybackKind {
+    if session.read().await.key.archive_reference.is_some() {
+        PlaybackKind::Catchup
+    } else {
+        PlaybackKind::LiveHls
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) async fn prepare_hls_origin_runtime(
     app_state: &Arc<AppState>,
@@ -627,6 +649,7 @@ pub(super) async fn prepare_hls_origin_runtime(
     work_class: HlsOriginWorkClass,
     now_ms: u64,
 ) -> Result<PreparedHlsOriginRuntime, HlsOriginRuntimeAcquireError> {
+    let playback_kind = hls_session_origin_playback_kind(session).await;
     promote_elapsed_hls_account_overlaps(app_state, now_ms).await;
     detach_unprotected_hls_origin_account_bindings(app_state, now_ms).await;
     reclaim_hls_account_overlap_if_needed(app_state, session, now_ms).await;
@@ -651,6 +674,7 @@ pub(super) async fn prepare_hls_origin_runtime(
                         fingerprint,
                         connection_kind,
                         priority,
+                        playback_kind,
                         now_ms,
                     )
                     .await;
@@ -681,6 +705,7 @@ pub(super) async fn prepare_hls_origin_runtime(
         false,
         work_kind,
         work_class,
+        playback_kind,
         now_ms,
     )
     .await
@@ -708,6 +733,7 @@ pub(super) async fn prepare_hls_origin_runtime(
             fingerprint,
             connection_kind,
             priority,
+            playback_kind,
             now_ms,
         )
         .await
@@ -730,6 +756,7 @@ pub(super) async fn prepare_hls_origin_runtime(
             fingerprint,
             connection_kind,
             priority,
+            playback_kind,
             now_ms,
         )
         .await
@@ -758,6 +785,7 @@ pub(super) async fn prepare_hls_origin_runtime(
             true,
             work_kind,
             work_class,
+            playback_kind,
             now_ms,
         )
         .await
@@ -801,6 +829,7 @@ pub(super) async fn prepare_hls_origin_runtime_with_new_account(
     allow_grace: bool,
     work_kind: HlsOriginWorkKind,
     work_class: HlsOriginWorkClass,
+    playback_kind: PlaybackKind,
     now_ms: u64,
 ) -> Result<PreparedHlsOriginRuntime, HlsOriginRuntimeAcquireError> {
     let session_owner = build_hls_origin_session_owner(proxy_session_id);
@@ -810,7 +839,7 @@ pub(super) async fn prepare_hls_origin_runtime_with_new_account(
         allow_grace,
         priority,
         connection_kind,
-        Some(PlaybackLeaseRef::new(&session_owner, PlaybackKind::LiveHls)),
+        Some(PlaybackLeaseRef::new(&session_owner, playback_kind)),
     ) else {
         debug!(
             "HLS origin account acquire unavailable: work={} work_class={} grace={}",
@@ -1012,6 +1041,7 @@ pub(super) async fn prepare_hls_origin_policy_preempt_runtime(
     fingerprint: &Fingerprint,
     connection_kind: crate::api::model::ConnectionKind,
     priority: i8,
+    playback_kind: PlaybackKind,
     now_ms: u64,
 ) -> Result<PreparedHlsOriginRuntime, HlsOriginRuntimeAcquireError> {
     let request_policy = HlsEffectiveOriginAcquirePolicy::new(connection_kind, priority, now_ms);
@@ -1029,6 +1059,7 @@ pub(super) async fn prepare_hls_origin_policy_preempt_runtime(
         victim.origin_account_binding.as_ref().is_some_and(|b| {
             b.account_name == candidate.account_name
                 && b.session_owner == candidate.session_owner
+                && b.provider_binding_tag == candidate.provider_binding_tag
                 && matches!(b.binding_mode, HlsOriginAccountBindingMode::Active)
                 && has_no_active_origin_work
         })
@@ -1050,15 +1081,15 @@ pub(super) async fn prepare_hls_origin_policy_preempt_runtime(
         false,
         priority,
         connection_kind,
-        Some(PlaybackLeaseRef::new(&session_owner, PlaybackKind::LiveHls)),
+        Some(PlaybackLeaseRef::new(&session_owner, playback_kind)),
     ) else {
-        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate);
+        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate, playback_kind).await;
         debug!("HLS origin policy preemption denied: reason=exact-acquire-failed");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
     let Some(provider_config) = provider_handle.allocation.get_provider_config() else {
         app_state.connection_manager.release_provider_handle(Some(provider_handle));
-        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate);
+        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate, playback_kind).await;
         debug!("HLS origin policy preemption denied: reason=missing-provider-config");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
@@ -1072,7 +1103,7 @@ pub(super) async fn prepare_hls_origin_policy_preempt_runtime(
     .await
     else {
         app_state.connection_manager.release_provider_handle(Some(provider_handle));
-        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate);
+        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate, playback_kind).await;
         debug!("HLS origin policy preemption denied: reason=invalid-origin-url");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
@@ -1083,7 +1114,7 @@ pub(super) async fn prepare_hls_origin_policy_preempt_runtime(
         now_ms,
     ) else {
         app_state.connection_manager.release_provider_handle(Some(provider_handle));
-        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate);
+        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate, playback_kind).await;
         debug!("HLS origin policy preemption denied: reason=invalid-allocation");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
@@ -1096,6 +1127,7 @@ pub(super) async fn prepare_hls_origin_policy_preempt_runtime(
         if let Some(victim_binding) = victim.origin_account_binding.as_mut() {
             if victim_binding.account_name == candidate.account_name
                 && victim_binding.session_owner == candidate.session_owner
+                && victim_binding.provider_binding_tag == candidate.provider_binding_tag
                 && matches!(victim_binding.binding_mode, HlsOriginAccountBindingMode::Active)
                 && has_no_active_origin_work
             {
@@ -1109,7 +1141,7 @@ pub(super) async fn prepare_hls_origin_policy_preempt_runtime(
     }
     if !detached_victim {
         app_state.connection_manager.release_provider_handle(Some(provider_handle));
-        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate);
+        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate, playback_kind).await;
         debug!("HLS origin policy preemption denied: reason=stale-candidate");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     }
@@ -1149,16 +1181,39 @@ pub(super) async fn prepare_hls_origin_policy_preempt_runtime(
     })
 }
 
-fn restore_hls_origin_policy_preempt_candidate_reservation<C: HlsOriginReservationCandidate>(
+/// Restores a victim reservation that was cleared for a preemption that did not complete.
+///
+/// The lease is recreated rather than refreshed, because the clear already removed it and
+/// a plain refresh would be a no-op. The victim binding's tag is updated to the recreated
+/// incarnation so a later clear still matches it.
+async fn restore_hls_origin_policy_preempt_candidate_reservation<C: HlsOriginReservationCandidate>(
     app_state: &Arc<AppState>,
     candidate: &C,
+    playback_kind: PlaybackKind,
 ) {
-    app_state.active_provider.refresh_adaptive_playback_lease(
-        candidate.account_name(),
-        candidate.session_owner(),
-        PlaybackKind::LiveHls,
+    let account_name = candidate.account_name();
+    let session_owner = candidate.session_owner();
+    let cleared_tag = candidate.cleared_binding_tag();
+    app_state.active_provider.refresh_identified_provider_reservation(
+        account_name,
+        session_owner,
+        playback_kind,
         candidate.reservation_ttl_secs(),
     );
+    let new_tag = app_state.active_provider.binding_tag_for_owner(session_owner);
+    let Some(session) = app_state.hls_proxy.sessions().get_by_proxy_session_id(candidate.proxy_session_id()).await
+    else {
+        return;
+    };
+    let mut session_guard = session.write().await;
+    if let Some(binding) = session_guard.origin_account_binding.as_mut() {
+        if binding.account_name == *account_name
+            && binding.session_owner == session_owner
+            && binding.provider_binding_tag == cleared_tag
+        {
+            binding.provider_binding_tag = new_tag;
+        }
+    }
 }
 
 pub(super) async fn find_hls_origin_policy_preempt_candidate(
@@ -1236,6 +1291,7 @@ pub(super) async fn prepare_hls_speculative_origin_runtime(
     fingerprint: &Fingerprint,
     connection_kind: crate::api::model::ConnectionKind,
     priority: i8,
+    playback_kind: PlaybackKind,
     now_ms: u64,
 ) -> Result<PreparedHlsOriginRuntime, HlsOriginRuntimeAcquireError> {
     let Some(candidate) = find_hls_account_overlap_candidate(app_state, input, proxy_session_id, now_ms).await else {
@@ -1254,15 +1310,15 @@ pub(super) async fn prepare_hls_speculative_origin_runtime(
         false,
         priority,
         connection_kind,
-        Some(PlaybackLeaseRef::new(&session_owner, PlaybackKind::LiveHls)),
+        Some(PlaybackLeaseRef::new(&session_owner, playback_kind)),
     ) else {
-        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate);
+        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate, playback_kind).await;
         debug!("HLS account overlap denied: reason=speculative-acquire-failed");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
     let Some(provider_config) = provider_handle.allocation.get_provider_config() else {
         app_state.connection_manager.release_provider_handle(Some(provider_handle));
-        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate);
+        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate, playback_kind).await;
         debug!("HLS account overlap denied: reason=missing-provider-config");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
@@ -1276,7 +1332,7 @@ pub(super) async fn prepare_hls_speculative_origin_runtime(
     .await
     else {
         app_state.connection_manager.release_provider_handle(Some(provider_handle));
-        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate);
+        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate, playback_kind).await;
         debug!("HLS account overlap denied: reason=invalid-origin-url");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
@@ -1562,6 +1618,11 @@ pub(super) async fn promote_elapsed_hls_account_overlaps(app_state: &Arc<AppStat
         if let Some(displaced) = app_state.hls_proxy.sessions().get_by_proxy_session_id(&displaced_session_id).await {
             let mut detached = false;
             let mut displaced = displaced.write().await;
+            // The winner's speculative claim matured, so the displaced session must yield
+            // whatever it currently holds on this account. Matching on the account (and not
+            // on the binding tag used by the reclaim path) is deliberate: a same-account
+            // rebind of the displaced session is still the claim being superseded, and a
+            // tag guard here would let two Active claims coexist on one account.
             if displaced.origin_account_binding.as_ref().is_some_and(|binding| binding.account_name == account_name) {
                 if let Some(binding) = displaced.origin_account_binding.as_mut() {
                     binding.detach(HlsOriginAccountDetachedReason::SoftWindowElapsed, now_ms);
@@ -1599,6 +1660,7 @@ pub(super) async fn rebind_hls_origin_account(
     fingerprint: &Fingerprint,
     connection_kind: crate::api::model::ConnectionKind,
     priority: i8,
+    playback_kind: PlaybackKind,
     now_ms: u64,
 ) -> Result<PreparedHlsOriginRuntime, HlsOriginRuntimeAcquireError> {
     {
@@ -1631,7 +1693,9 @@ pub(super) async fn rebind_hls_origin_account(
     {
         let mut session_guard = session.write().await;
         if let Some(binding) = session_guard.origin_account_binding.as_mut().filter(|binding| {
-            binding.account_name == stale_binding.account_name && binding.session_owner == stale_binding.session_owner
+            binding.account_name == stale_binding.account_name
+                && binding.session_owner == stale_binding.session_owner
+                && binding.provider_binding_tag == stale_binding.provider_binding_tag
         }) {
             binding.detach(HlsOriginAccountDetachedReason::AccountMissingOrExpired, now_ms);
             debug!(
@@ -1650,7 +1714,7 @@ pub(super) async fn rebind_hls_origin_account(
         false,
         priority,
         connection_kind,
-        Some(PlaybackLeaseRef::new(&stale_binding.session_owner, PlaybackKind::LiveHls)),
+        Some(PlaybackLeaseRef::new(&stale_binding.session_owner, playback_kind)),
     ) else {
         mark_hls_origin_rebind_failed(session, stale_binding, now_ms, "no_account_available").await;
         return Err(HlsOriginRuntimeAcquireError::NoAccountAvailable {

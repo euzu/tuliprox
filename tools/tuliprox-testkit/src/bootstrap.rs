@@ -486,7 +486,25 @@ mod tests {
         assert!(config.contains(fixture.root.to_string_lossy().as_ref()));
         assert!(source.contains("fixture-run"));
         assert!(api_proxy.contains("fixture-user"));
-        assert!(!config.contains("/home/"));
+        let expected_paths = [
+            fixture.root.join("web"),
+            fixture.root.join("storage"),
+            fixture.root.join("backup"),
+            fixture.root.join("history"),
+        ];
+        for expected in &expected_paths {
+            assert!(
+                expected.starts_with(&fixture.root),
+                "fixture path {} must stay under the fixture root {}",
+                expected.display(),
+                fixture.root.display()
+            );
+            assert!(
+                config.contains(expected.to_string_lossy().as_ref()),
+                "rendered config must reference fixture path {}",
+                expected.display()
+            );
+        }
         Ok(())
     }
 

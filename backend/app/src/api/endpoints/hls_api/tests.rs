@@ -4779,6 +4779,7 @@ async fn hls_origin_policy_preemption_rejects_soft_request_against_active_normal
         &test_fingerprint_with_addr(test_addr_with_port(55232)),
         ConnectionKind::Soft,
         -100,
+        crate::model::PlaybackKind::LiveHls,
         10_500,
     )
     .await;

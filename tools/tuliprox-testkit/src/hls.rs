@@ -4,10 +4,12 @@ use crate::{
     TestkitError,
 };
 use futures::StreamExt;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use url::Url;
 
 const SEGMENT_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const MANIFEST_RELOAD_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+const MANIFEST_RELOAD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub async fn read_segments(
     manifest_url: &str,
@@ -17,33 +19,56 @@ pub async fn read_segments(
     headers: &BTreeMap<String, String>,
 ) -> Result<u64, TestkitError> {
     let client = reqwest::Client::builder().http1_only().build()?;
-    let manifest =
-        request_with_headers(client.get(manifest_url), headers).send().await?.error_for_status()?.text().await?;
     let base = Url::parse(manifest_url).map_err(|error| TestkitError::Configuration(error.to_string()))?;
-    let segments = manifest.lines().map(str::trim).filter(|line| !line.is_empty() && !line.starts_with('#'));
     let mut frames = 0;
     let mut validator = FrameValidator::new(expected_run_id, expected_marker);
-    for segment in segments {
-        let segment_url = base.join(segment).map_err(|error| TestkitError::Configuration(error.to_string()))?;
-        let response = request_with_headers(client.get(segment_url), headers).send().await?.error_for_status()?;
-        let mut decoder = FrameDecoder::default();
-        let mut body = response.bytes_stream();
-        loop {
-            let chunk = match tokio::time::timeout(SEGMENT_IDLE_TIMEOUT, body.next()).await {
-                Ok(Some(chunk)) => chunk?,
-                Ok(None) => break,
-                Err(_) => return Err(TestkitError::Protocol("HLS segment idle timeout".to_owned())),
-            };
-            for frame in decoder.push(&chunk)? {
-                validator.validate(&frame)?;
-                frames += 1;
+    // Live manifests are reloaded until enough frames were observed. Segment
+    // identities are remembered across snapshots so a reload never replays a
+    // segment that was already decoded.
+    let mut consumed: HashSet<String> = HashSet::new();
+    let deadline = tokio::time::Instant::now() + MANIFEST_RELOAD_DEADLINE;
+    loop {
+        let manifest =
+            request_with_headers(client.get(manifest_url), headers).send().await?.error_for_status()?.text().await?;
+        let segments = manifest
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        for segment in segments {
+            if !consumed.insert(segment.clone()) {
+                continue;
+            }
+            let segment_url = base.join(&segment).map_err(|error| TestkitError::Configuration(error.to_string()))?;
+            let response = request_with_headers(client.get(segment_url), headers).send().await?.error_for_status()?;
+            let mut decoder = FrameDecoder::default();
+            let mut body = response.bytes_stream();
+            loop {
+                let chunk = match tokio::time::timeout(SEGMENT_IDLE_TIMEOUT, body.next()).await {
+                    Ok(Some(chunk)) => chunk?,
+                    Ok(None) => break,
+                    Err(_) => return Err(TestkitError::Protocol("HLS segment idle timeout".to_owned())),
+                };
+                for frame in decoder.push(&chunk)? {
+                    validator.validate(&frame)?;
+                    frames += 1;
+                }
+            }
+            if frames >= minimum_frames {
+                return Ok(frames);
             }
         }
         if frames >= minimum_frames {
             return Ok(frames);
         }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(TestkitError::Protocol(format!(
+                "HLS produced {frames} valid frames, expected at least {minimum_frames}"
+            )));
+        }
+        tokio::time::sleep(MANIFEST_RELOAD_INTERVAL).await;
     }
-    Err(TestkitError::Protocol(format!("HLS produced {frames} valid frames, expected at least {minimum_frames}")))
 }
 
 fn request_with_headers(

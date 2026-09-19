@@ -26,14 +26,25 @@ use tokio_tungstenite::{connect_async, tungstenite::protocol::Message as ClientM
 
 pub type ControllerState = Arc<SharedControllerState>;
 
+/// One connected agent registration.
+///
+/// `token` identifies the exact websocket connection that registered the agent.
+/// A replacement connection for the same `AgentId` overwrites the registration
+/// with a new token, so the previous connection's cleanup cannot delete it.
+struct RegisteredAgent {
+    token: u64,
+    sender: mpsc::Sender<Envelope<Command>>,
+}
+
 pub struct SharedControllerState {
     run_id: RunId,
     generation: u64,
-    agents: Mutex<HashMap<AgentId, mpsc::Sender<Envelope<Command>>>>,
+    agents: Mutex<HashMap<AgentId, RegisteredAgent>>,
     ready_agents: Mutex<HashSet<AgentId>>,
     last_seen: Mutex<HashMap<AgentId, Instant>>,
     events: Mutex<Vec<Envelope<AgentMessage>>>,
     next_controller_sequence: AtomicU64,
+    next_connection_token: AtomicU64,
 }
 
 impl SharedControllerState {
@@ -47,11 +58,29 @@ impl SharedControllerState {
             last_seen: Mutex::new(HashMap::new()),
             events: Mutex::new(Vec::new()),
             next_controller_sequence: AtomicU64::new(1),
+            next_connection_token: AtomicU64::new(1),
         }
     }
 
     #[must_use]
     pub fn next_command_sequence(&self) -> u64 { self.next_controller_sequence.fetch_add(1, Ordering::Relaxed) }
+
+    fn next_connection_token(&self) -> u64 { self.next_connection_token.fetch_add(1, Ordering::Relaxed) }
+
+    async fn register_agent(&self, agent_id: AgentId, token: u64, sender: mpsc::Sender<Envelope<Command>>) {
+        let mut agents = self.agents.lock().await;
+        agents.insert(agent_id.clone(), RegisteredAgent { token, sender });
+        self.last_seen.lock().await.insert(agent_id, Instant::now());
+    }
+
+    async fn unregister_agent(&self, agent_id: &AgentId, token: u64) {
+        let mut agents = self.agents.lock().await;
+        if agents.get(agent_id).is_some_and(|registered| registered.token == token) {
+            agents.remove(agent_id);
+            self.ready_agents.lock().await.remove(agent_id);
+            self.last_seen.lock().await.remove(agent_id);
+        }
+    }
 
     #[must_use]
     pub fn run_id(&self) -> RunId { self.run_id.clone() }
@@ -66,7 +95,7 @@ impl SharedControllerState {
             .lock()
             .await
             .get(agent_id)
-            .cloned()
+            .map(|registered| registered.sender.clone())
             .ok_or_else(|| TestkitError::Protocol(format!("agent {} is not connected", agent_id.0)))?;
         sender.send(command).await.map_err(|_| TestkitError::Protocol("agent control channel closed".to_owned()))
     }
@@ -125,9 +154,9 @@ async fn serve_agent(socket: WebSocket, state: ControllerState) {
     }
     let AgentMessage::Hello { .. } = hello.payload else { return };
     let agent_id = hello.agent_id;
+    let connection_token = state.next_connection_token();
     let (tx, mut rx) = mpsc::channel(32);
-    state.agents.lock().await.insert(agent_id.clone(), tx);
-    state.last_seen.lock().await.insert(agent_id.clone(), Instant::now());
+    state.register_agent(agent_id.clone(), connection_token, tx).await;
     loop {
         tokio::select! {
             Some(command) = rx.recv() => {
@@ -158,9 +187,7 @@ async fn serve_agent(socket: WebSocket, state: ControllerState) {
             },
         }
     }
-    state.agents.lock().await.remove(&agent_id);
-    state.ready_agents.lock().await.remove(&agent_id);
-    state.last_seen.lock().await.remove(&agent_id);
+    state.unregister_agent(&agent_id, connection_token).await;
 }
 
 pub struct AgentControlConnection {
@@ -241,6 +268,28 @@ mod tests {
             payload: Command::StopAll,
         };
         assert!(state.dispatch(&AgentId::new("missing"), command).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn stale_connection_cleanup_does_not_remove_replacement_registration() {
+        let state = SharedControllerState::new(RunId::new("run"), 1);
+        let agent_id = AgentId::new("agent");
+
+        let (old_tx, _old_rx) = mpsc::channel(1);
+        let old_token = state.next_connection_token();
+        state.register_agent(agent_id.clone(), old_token, old_tx).await;
+        assert!(state.connected_agents().await.contains(&agent_id));
+
+        let (new_tx, _new_rx) = mpsc::channel(1);
+        let new_token = state.next_connection_token();
+        state.register_agent(agent_id.clone(), new_token, new_tx).await;
+
+        // The previous connection's cleanup must not delete the replacement.
+        state.unregister_agent(&agent_id, old_token).await;
+        assert!(state.connected_agents().await.contains(&agent_id));
+
+        state.unregister_agent(&agent_id, new_token).await;
+        assert!(!state.connected_agents().await.contains(&agent_id));
     }
 
     #[tokio::test]

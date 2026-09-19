@@ -752,6 +752,21 @@ impl ActiveProviderManager {
     }
 
     pub fn refresh_provider_reservation(&self, provider_name: &Arc<str>, session_owner: &str, ttl_secs: u64) {
+        self.refresh_identified_provider_reservation(provider_name, session_owner, PlaybackKind::LiveHls, ttl_secs);
+    }
+
+    /// Recreates or renews a provider reservation for an owner with an explicit kind.
+    ///
+    /// Unlike [`Self::refresh_adaptive_playback_lease`] this recreates the lease when it
+    /// no longer exists, which is what a failed preemption needs to restore a victim
+    /// reservation that [`Self::clear_identified_provider_reservation`] already removed.
+    pub fn refresh_identified_provider_reservation(
+        &self,
+        provider_name: &Arc<str>,
+        session_owner: &str,
+        kind: PlaybackKind,
+        ttl_secs: u64,
+    ) {
         let _transition = self.lock_capacity_transition();
         if self.is_shutting_down.load(Ordering::Acquire) {
             return;
@@ -763,10 +778,10 @@ impl ActiveProviderManager {
             leases.release_owner(session_owner);
             return;
         }
-        if leases.renew_current_owner(session_owner, provider_name, PlaybackKind::LiveHls, granted_ttl).is_none() {
+        if leases.renew_current_owner(session_owner, provider_name, kind, granted_ttl).is_none() {
             let req_id = PlaybackRequestId::next();
-            let _ = leases.begin_owner(session_owner, provider_name, PlaybackKind::LiveHls, req_id);
-            leases.renew_identified_owner(session_owner, provider_name, PlaybackKind::LiveHls, req_id, granted_ttl);
+            let _ = leases.begin_owner(session_owner, provider_name, kind, req_id);
+            leases.renew_identified_owner(session_owner, provider_name, kind, req_id, granted_ttl);
         }
     }
 
@@ -2902,6 +2917,50 @@ mod tests {
         tokio::time::advance(Duration::from_secs(6)).await;
         manager.prune_expired_leases_now();
         assert!(!manager.is_provider_reserved_for_other_session(&input_name, Some("other-client")));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn identified_reservation_recreates_a_cleared_lease() {
+        let app_cfg = create_test_app_config_with_pool(2, 3);
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+        let input_name = "provider_1".intern();
+        let owner = "hls-cache:restore-session";
+        let addr = SocketAddr::from(([172, 18, 0, 9], 53_000));
+
+        let handle = manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &addr,
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+                Some(owner),
+            )
+            .expect("allocate");
+        manager.refresh_identified_provider_reservation(
+            &input_name,
+            owner,
+            tuliprox_core::model::PlaybackKind::Catchup,
+            15,
+        );
+        assert_eq!(manager.provider_lease_usage(&input_name).starting, 1);
+
+        // Clearing removes the lease entirely; recreating must bring it back rather
+        // than silently no-op like a plain adaptive refresh would.
+        let binding_tag = manager.binding_tag_for_owner(owner);
+        manager.clear_identified_provider_reservation(owner, &input_name, binding_tag);
+        assert_eq!(manager.provider_lease_usage(&input_name).total(), 0);
+
+        manager.refresh_identified_provider_reservation(
+            &input_name,
+            owner,
+            tuliprox_core::model::PlaybackKind::Catchup,
+            15,
+        );
+        assert_eq!(manager.provider_lease_usage(&input_name).starting, 1);
+
+        manager.release_handle(&handle);
     }
 
     #[tokio::test(start_paused = true)]

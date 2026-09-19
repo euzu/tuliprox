@@ -22,7 +22,7 @@ use tokio::{
         mpsc::{channel, error::TrySendError, Sender},
         Semaphore,
     },
-    time::{sleep, Instant},
+    time::{sleep, Instant, Sleep},
 };
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
@@ -139,44 +139,17 @@ impl ProviderBodyOwner {
                     idle.as_mut().reset(Instant::now() + idle_timeout);
                     match chunk {
                         Some(Ok(bytes)) => {
-                            let chunk_len = bytes.len();
-                            let permits = chunk_len.min(config.max_buffer_bytes);
-                            if permits > 0 {
-                                let acquired = select! {
-                                    biased;
-                                    () = cancel_token.cancelled() => None,
-                                    permit = Arc::clone(&semaphore).acquire_many_owned(u32::try_from(permits).unwrap_or(u32::MAX)) => permit.ok(),
-                                };
-                                let Some(permit) = acquired else {
-                                    cancel_token.cancel();
-                                    break;
-                                };
-                                permit.forget();
-                            }
-                            let send_res = match tx.try_send(Ok(bytes)) {
-                                Ok(()) => Ok(()),
-                                Err(TrySendError::Full(item)) => {
-                                    select! {
-                                        biased;
-                                        () = cancel_token.cancelled() => Err(()),
-                                        res = tx.send(item) => res.map_err(|_| ()),
-                                    }
-                                }
-                                Err(TrySendError::Closed(_)) => Err(()),
-                            };
-                            if send_res.is_err() {
-                                if permits > 0 {
-                                    semaphore.add_permits(permits);
-                                }
-                                if let Some(reason) = &close_reason {
-                                    let _ = reason.compare_exchange(
-                                        ProviderCloseReason::Unspecified as u8,
-                                        ProviderCloseReason::ClientClosed as u8,
-                                        Ordering::AcqRel,
-                                        Ordering::Relaxed,
-                                    );
-                                }
-                                cancel_token.cancel();
+                            if !Self::forward_chunk(
+                                &tx,
+                                &cancel_token,
+                                &mut idle,
+                                &semaphore,
+                                close_reason.as_ref(),
+                                config.max_buffer_bytes,
+                                bytes,
+                            )
+                            .await
+                            {
                                 break;
                             }
                         }
@@ -213,6 +186,88 @@ impl ProviderBodyOwner {
             completion.cancel();
         }
     }
+
+    /// Forwards one upstream chunk into the channel.
+    ///
+    /// The chunk is split into pieces no larger than `max_buffer_bytes`, and each
+    /// piece acquires its own semaphore permits before it is queued. This keeps the
+    /// value held in the channel within the configured accounting budget instead of
+    /// enqueueing an unbounded `Bytes` that only reserved a capped amount.
+    ///
+    /// Returns `false` when the owner task must terminate: cancellation, an idle
+    /// timeout while blocked, or a closed client channel. The close reason and the
+    /// cancellation token are updated in that case.
+    async fn forward_chunk(
+        tx: &Sender<Result<Bytes, StreamError>>,
+        cancel_token: &CancellationToken,
+        idle: &mut Pin<&mut Sleep>,
+        semaphore: &Arc<Semaphore>,
+        close_reason: Option<&Arc<AtomicU8>>,
+        max_buffer_bytes: usize,
+        bytes: Bytes,
+    ) -> bool {
+        let piece_size = max_buffer_bytes.max(1);
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let end = (offset + piece_size).min(bytes.len());
+            let piece = bytes.slice(offset..end);
+            let permits = piece.len();
+            if permits > 0 {
+                let acquired = select! {
+                    biased;
+                    () = cancel_token.cancelled() => None,
+                    () = idle.as_mut() => {
+                        Self::set_close_reason(close_reason, ProviderCloseReason::IdleTimeout);
+                        cancel_token.cancel();
+                        return false;
+                    }
+                    permit = Arc::clone(semaphore).acquire_many_owned(u32::try_from(permits).unwrap_or(u32::MAX)) => permit.ok(),
+                };
+                let Some(permit) = acquired else {
+                    cancel_token.cancel();
+                    return false;
+                };
+                permit.forget();
+            }
+            let send_res = match tx.try_send(Ok(piece)) {
+                Ok(()) => Ok(()),
+                Err(TrySendError::Full(item)) => {
+                    select! {
+                        biased;
+                        () = cancel_token.cancelled() => Err(()),
+                        () = idle.as_mut() => {
+                            Self::set_close_reason(close_reason, ProviderCloseReason::IdleTimeout);
+                            cancel_token.cancel();
+                            return false;
+                        }
+                        res = tx.send(item) => res.map_err(|_| ()),
+                    }
+                }
+                Err(TrySendError::Closed(_)) => Err(()),
+            };
+            if send_res.is_err() {
+                if permits > 0 {
+                    semaphore.add_permits(permits);
+                }
+                Self::set_close_reason(close_reason, ProviderCloseReason::ClientClosed);
+                cancel_token.cancel();
+                return false;
+            }
+            offset = end;
+        }
+        true
+    }
+
+    fn set_close_reason(close_reason: Option<&Arc<AtomicU8>>, reason: ProviderCloseReason) {
+        if let Some(slot) = close_reason {
+            let _ = slot.compare_exchange(
+                ProviderCloseReason::Unspecified as u8,
+                reason as u8,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            );
+        }
+    }
 }
 
 impl Stream for ProviderBodyOwner {
@@ -245,7 +300,7 @@ impl Drop for ProviderBodyOwner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::Stream;
+    use futures::{Stream, StreamExt};
     use tokio::sync::oneshot;
 
     struct GatedDropProbeStream {
@@ -371,6 +426,86 @@ mod tests {
             .await
             .expect("upstream stream must be dropped")
             .expect("drop notification delivered");
+
+        drop(owner);
+    }
+
+    struct FixedChunksStream {
+        remaining: Vec<Bytes>,
+    }
+    impl Stream for FixedChunksStream {
+        type Item = Result<Bytes, StreamError>;
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if self.remaining.is_empty() {
+                Poll::Pending
+            } else {
+                Poll::Ready(Some(Ok(self.remaining.remove(0))))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_upstream_chunk_is_forwarded_in_bounded_pieces() {
+        let max = DEFAULT_DIRECT_BODY_MAX_BYTES;
+        let upstream = FixedChunksStream { remaining: vec![Bytes::from(vec![7u8; max + 10])] };
+        let mut owner = ProviderBodyOwner::new(
+            Box::pin(upstream),
+            ProviderBodyOwnerConfig {
+                channel_capacity: 2,
+                max_buffer_bytes: max,
+                idle_timeout: Duration::from_secs(60),
+            },
+            CancellationToken::new(),
+            None,
+            None,
+        );
+
+        let mut total = 0usize;
+        while total < max + 10 {
+            let piece = owner.next().await.expect("stream still open").expect("no stream error");
+            assert!(piece.len() <= max, "forwarded piece must respect max_buffer_bytes");
+            total += piece.len();
+        }
+        assert_eq!(total, max + 10);
+    }
+
+    struct EndlessChunkStream {
+        yielded: usize,
+    }
+    impl Stream for EndlessChunkStream {
+        type Item = Result<Bytes, StreamError>;
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if self.yielded >= 4 {
+                Poll::Pending
+            } else {
+                self.yielded += 1;
+                Poll::Ready(Some(Ok(Bytes::from_static(b"x"))))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_timeout_terminates_owner_blocked_on_full_channel() {
+        let cancel = CancellationToken::new();
+        let completion = CancellationToken::new();
+        let close_reason = Arc::new(AtomicU8::new(0));
+        let owner = ProviderBodyOwner::new(
+            Box::pin(EndlessChunkStream { yielded: 0 }),
+            ProviderBodyOwnerConfig {
+                channel_capacity: 1,
+                max_buffer_bytes: 1024,
+                idle_timeout: Duration::from_millis(50),
+            },
+            cancel.clone(),
+            Some(completion.clone()),
+            Some(close_reason.clone()),
+        );
+
+        // Never poll `owner`: the channel stays full and the owner blocks in its send path.
+        tokio::time::timeout(Duration::from_secs(2), completion.cancelled())
+            .await
+            .expect("owner must terminate after the idle timeout");
+        assert_eq!(close_reason.load(Ordering::Acquire), ProviderCloseReason::IdleTimeout as u8);
 
         drop(owner);
     }

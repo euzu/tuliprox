@@ -30,7 +30,9 @@ impl VirtualIdMap {
                 }
             }
             if let Some(name) = pending_name.take() {
-                named_urls.insert(name, line.to_owned());
+                if named_urls.insert(name.clone(), line.to_owned()).is_some() {
+                    return Err(TestkitError::Configuration(format!("duplicate named media {name} in playlist")));
+                }
             }
         }
         if urls.is_empty() && named_urls.is_empty() {
@@ -134,5 +136,11 @@ mod tests {
         let map = VirtualIdMap::from_m3u("#EXTM3U\n#EXTINF:-1 tvg-id=\"test-1\",Ch1\nhttp://tuliprox/m3u/user/abc\n")
             .unwrap();
         assert!(map.virtual_id_from_marker(1).is_err());
+    }
+
+    #[test]
+    fn duplicate_named_media_is_rejected() {
+        let playlist = "#EXTM3U\n#EXTINF:-1 tvg-id=\"test-vod-movie.mkv\",Movie\nhttp://tuliprox/movie/abc/def/1.mkv\n#EXTINF:-1 tvg-id=\"test-vod-movie.mkv\",Movie Again\nhttp://tuliprox/movie/abc/def/2.mkv\n";
+        assert!(matches!(VirtualIdMap::from_m3u(playlist), Err(TestkitError::Configuration(_))));
     }
 }

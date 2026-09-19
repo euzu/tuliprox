@@ -195,7 +195,20 @@ pub fn create_vod_stream_with_evicted(
         if !state.initial_stall_done {
             state.initial_stall_done = true;
             if let Some(stall) = state.options.stall_ms {
-                tokio::time::sleep(Duration::from_millis(stall)).await;
+                let stall = tokio::time::sleep(Duration::from_millis(stall));
+                tokio::pin!(stall);
+                tokio::select! {
+                    biased;
+                    res = &mut state.evict_rx => {
+                        if res.is_ok() {
+                            if let Some(flag) = state.evicted_flag.as_ref() {
+                                flag.store(true, std::sync::atomic::Ordering::Release);
+                            }
+                        }
+                        return None;
+                    }
+                    () = &mut stall => {}
+                }
             }
         }
 

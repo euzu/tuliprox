@@ -110,6 +110,16 @@ impl ProviderSlotLease {
 
     #[inline]
     pub fn contains_request(&self, request_id: PlaybackRequestId) -> bool { self.request_ids.contains(&request_id) }
+
+    /// True once the lease's deadline has passed.
+    ///
+    /// A running `Active` stream without a reconnect window is exempt: only an
+    /// explicit finish/release may end it, never wall-clock expiry.
+    #[inline]
+    fn is_expired(&self, now: TokioInstant) -> bool {
+        self.state.expires_at() <= now
+            && !matches!(self.state, ProviderLeaseState::Active { .. } if self.idle_ttl_secs == 0)
+    }
 }
 
 /// Capacity-relevant view of one provider's lease table.
@@ -220,6 +230,9 @@ impl ProviderLeaseTable {
     ) -> PlaybackLeaseId {
         let now = TokioInstant::now();
         if let Some(id) = self.by_owner.get(owner).copied() {
+            if self.leases.get(&id).is_some_and(|lease| lease.is_expired(now)) {
+                self.remove_lease(id);
+            }
             if let Some(lease) = self.leases.get_mut(&id) {
                 self.expirations.remove(&(lease.state.expires_at(), id));
                 if lease.provider_name != *provider_name {
@@ -290,6 +303,9 @@ impl ProviderLeaseTable {
         let now = TokioInstant::now();
         if let Some(id) = self.by_owner.get(owner).copied() {
             let lease = self.leases.get_mut(&id)?;
+            if lease.is_expired(now) {
+                return None;
+            }
             if lease.provider_name != *provider_name || !lease.contains_request(request_id) {
                 return None;
             }
@@ -386,10 +402,7 @@ impl ProviderLeaseTable {
 
     fn apply_confirmation(&mut self, id: PlaybackLeaseId, reserve: bool) -> Option<PlaybackLeaseId> {
         let now = TokioInstant::now();
-        let expired = self.leases.get(&id).is_some_and(|lease| {
-            lease.state.expires_at() <= now
-                && !(matches!(lease.state, ProviderLeaseState::Active { .. }) && lease.idle_ttl_secs == 0)
-        });
+        let expired = self.leases.get(&id).is_some_and(|lease| lease.is_expired(now));
         if expired {
             self.remove_lease(id);
             return None;
@@ -911,5 +924,31 @@ mod tests {
         assert!(table.renew_identified_owner("owner", &provider("A"), PlaybackKind::LiveHls, request, 0).is_some());
         assert_eq!(table.usage(&provider("A")).active, 1);
         assert_eq!(table.foreign_reserved_slots(&provider("A"), Some("other"), &HashSet::new()), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn begin_owner_replaces_expired_lease() {
+        let mut table = ProviderLeaseTable::default();
+        let first = table.begin_owner("owner", &provider("A"), PlaybackKind::LiveHls, PlaybackRequestId::from_raw(1));
+        tokio::time::advance(Duration::from_secs(STARTING_LEASE_TTL_SECS + 1)).await;
+
+        let second = table.begin_owner("owner", &provider("A"), PlaybackKind::LiveHls, PlaybackRequestId::from_raw(2));
+
+        assert_ne!(first, second, "an expired lease must not be reused");
+        assert_eq!(table.len(), 1);
+        assert_eq!(table.usage(&provider("A")).starting, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn renew_identified_owner_rejects_expired_lease() {
+        let mut table = ProviderLeaseTable::default();
+        let request = PlaybackRequestId::from_raw(1);
+        table.begin_owner("owner", &provider("A"), PlaybackKind::LiveHls, request);
+        table.renew_identified_owner("owner", &provider("A"), PlaybackKind::LiveHls, request, 15);
+        tokio::time::advance(Duration::from_secs(STARTING_LEASE_TTL_SECS + 1)).await;
+
+        assert!(table.renew_identified_owner("owner", &provider("A"), PlaybackKind::LiveHls, request, 15).is_none());
+        assert_eq!(table.prune(TokioInstant::now()).len(), 1);
+        assert!(table.is_empty());
     }
 }

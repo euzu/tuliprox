@@ -21,6 +21,7 @@ pub struct AdaptiveSessionTracker {
 
 impl AdaptiveSessionTracker {
     pub fn manifest(&mut self, session_group: String, ttl: Duration) -> Result<AdaptiveSessionState, TestkitError> {
+        self.reap_expired();
         if self.sessions.contains_key(&session_group) {
             return Err(TestkitError::Protocol("adaptive manifest created a duplicate logical session".to_owned()));
         }
@@ -44,6 +45,7 @@ impl AdaptiveSessionTracker {
     }
 
     pub fn preserve(&mut self, session_group: &str, ttl: Duration) -> Result<(), TestkitError> {
+        self.reap_expired();
         let session = self.sessions.get_mut(session_group).ok_or_else(|| {
             TestkitError::Configuration(format!("cannot preserve unknown adaptive session {session_group}"))
         })?;
@@ -76,5 +78,26 @@ mod tests {
         assert_eq!(tracker.segment("hls-a", Duration::from_secs(10)).unwrap(), AdaptiveSessionState::Active);
         tracker.preserve("hls-a", Duration::from_secs(10)).unwrap();
         assert_eq!(tracker.segment("hls-a", Duration::from_secs(10)).unwrap(), AdaptiveSessionState::Active);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn manifest_reaps_expired_session_before_duplicate_check() {
+        let mut tracker = AdaptiveSessionTracker::default();
+        tracker.manifest("hls-a".to_owned(), Duration::from_secs(5)).unwrap();
+        tokio::time::advance(Duration::from_secs(6)).await;
+
+        assert_eq!(
+            tracker.manifest("hls-a".to_owned(), Duration::from_secs(10)).unwrap(),
+            AdaptiveSessionState::Prepared
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn preserve_rejects_expired_unknown_session() {
+        let mut tracker = AdaptiveSessionTracker::default();
+        tracker.manifest("hls-a".to_owned(), Duration::from_secs(5)).unwrap();
+        tokio::time::advance(Duration::from_secs(6)).await;
+
+        assert!(matches!(tracker.preserve("hls-a", Duration::from_secs(10)), Err(TestkitError::Configuration(_))));
     }
 }

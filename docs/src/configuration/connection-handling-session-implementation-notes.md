@@ -126,8 +126,8 @@ Tuliprox treats DASH as **redirect-only**:
   the upstream provider URL.
 - DASH reverse-proxying and segment caching are **not supported**. Enabling reverse-proxy mode for a user or target does not route
   DASH streams through the HLS proxy handler or cache segments in Tuliprox.
-- DASH maintains provider-account affinity at the logical playback level (reusing session tokens and reserving the pinned
-  provider account across reopen/refresh within `hls_session_ttl_secs`).
+- DASH provides provider-account affinity only when it reuses an existing pinned session. Direct segment fetching does not
+  activate or renew an Active lease, and Tuliprox does not deliver DASH media through the proxy.
 - Because segments are fetched directly between the player and the upstream provider, Tuliprox cannot count individual segment
   requests or confirm first-byte delivery for DASH segments. Full segment lease guarantees apply only to streams proxied
   directly through Tuliprox (TS, HLS, VOD, Series, Catchup).
