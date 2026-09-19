@@ -218,6 +218,16 @@ mod tests {
         DemandPoint { task_id: task_id.into(), padded_start: start, padded_end: end, priority }
     }
 
+    fn check_preview_severity(
+        candidate: &DemandPoint,
+        others: &[DemandPoint],
+        background_slots: u32,
+        reserved_interactive_slots: u32,
+    ) -> ConflictSeverity {
+        preview_conflict(candidate, others, EffectiveCapacity { background_slots, reserved_interactive_slots }, None)
+            .severity
+    }
+
     #[test]
     fn empty_demand_means_no_known_conflict() {
         let candidate = cand(100, 200, 0);
@@ -233,13 +243,8 @@ mod tests {
         // `other` has priority 1 — well below the candidate's 5. The
         // analyzer must ignore it.
         let others = vec![other("o1", 100, 200, 1)];
-        let preview = preview_conflict(
-            &candidate,
-            &others,
-            EffectiveCapacity { background_slots: 1, reserved_interactive_slots: 0 },
-            None,
-        );
-        assert_eq!(preview.severity, ConflictSeverity::NoKnownConflict);
+        let sev = check_preview_severity(&candidate, &others, 1, 0);
+        assert_eq!(sev, ConflictSeverity::NoKnownConflict);
     }
 
     #[test]
@@ -250,13 +255,8 @@ mod tests {
         // the whole window over → LikelyMissedWindow.
         let candidate = cand(100, 200, 0);
         let others = vec![other("o1", 100, 200, 0)];
-        let preview = preview_conflict(
-            &candidate,
-            &others,
-            EffectiveCapacity { background_slots: 1, reserved_interactive_slots: 0 },
-            None,
-        );
-        assert_eq!(preview.severity, ConflictSeverity::LikelyMissedWindow);
+        let sev = check_preview_severity(&candidate, &others, 1, 0);
+        assert_eq!(sev, ConflictSeverity::LikelyMissedWindow);
     }
 
     #[test]
@@ -266,13 +266,8 @@ mod tests {
         // 150..200 is under-capacity. Mixed → PossibleCapacityWait.
         let candidate = cand(100, 200, 0);
         let others = vec![other("o1", 100, 150, 0)];
-        let preview = preview_conflict(
-            &candidate,
-            &others,
-            EffectiveCapacity { background_slots: 1, reserved_interactive_slots: 0 },
-            None,
-        );
-        assert_eq!(preview.severity, ConflictSeverity::PossibleCapacityWait);
+        let sev = check_preview_severity(&candidate, &others, 1, 0);
+        assert_eq!(sev, ConflictSeverity::PossibleCapacityWait);
     }
 
     #[test]
@@ -280,13 +275,8 @@ mod tests {
         // 3 simultaneous demands on a 1-slot headroom.
         let candidate = cand(100, 200, 0);
         let others = vec![other("o1", 100, 200, 0), other("o2", 100, 200, 0), other("o3", 100, 200, 0)];
-        let preview = preview_conflict(
-            &candidate,
-            &others,
-            EffectiveCapacity { background_slots: 1, reserved_interactive_slots: 0 },
-            None,
-        );
-        assert_eq!(preview.severity, ConflictSeverity::LikelyMissedWindow);
+        let sev = check_preview_severity(&candidate, &others, 1, 0);
+        assert_eq!(sev, ConflictSeverity::LikelyMissedWindow);
     }
 
     #[test]
@@ -294,13 +284,8 @@ mod tests {
         // 1 background slot, 1 reserved interactive → headroom 0.
         let candidate = cand(100, 200, 0);
         let others = vec![other("o1", 100, 200, 0)];
-        let preview = preview_conflict(
-            &candidate,
-            &others,
-            EffectiveCapacity { background_slots: 1, reserved_interactive_slots: 1 },
-            None,
-        );
-        assert_eq!(preview.severity, ConflictSeverity::LikelyMissedWindow);
+        let sev = check_preview_severity(&candidate, &others, 1, 1);
+        assert_eq!(sev, ConflictSeverity::LikelyMissedWindow);
     }
 
     #[test]
@@ -310,26 +295,16 @@ mod tests {
         // under-capacity → mixed.
         let candidate = cand(100, 200, 0);
         let others = vec![other("o1", 150, 250, 0)];
-        let preview = preview_conflict(
-            &candidate,
-            &others,
-            EffectiveCapacity { background_slots: 1, reserved_interactive_slots: 0 },
-            None,
-        );
-        assert_eq!(preview.severity, ConflictSeverity::PossibleCapacityWait);
+        let sev = check_preview_severity(&candidate, &others, 1, 0);
+        assert_eq!(sev, ConflictSeverity::PossibleCapacityWait);
     }
 
     #[test]
     fn no_overlap_means_no_known_conflict() {
         let candidate = cand(100, 200, 0);
         let others = vec![other("o1", 300, 400, 0)];
-        let preview = preview_conflict(
-            &candidate,
-            &others,
-            EffectiveCapacity { background_slots: 1, reserved_interactive_slots: 0 },
-            None,
-        );
-        assert_eq!(preview.severity, ConflictSeverity::NoKnownConflict);
+        let sev = check_preview_severity(&candidate, &others, 1, 0);
+        assert_eq!(sev, ConflictSeverity::NoKnownConflict);
     }
 
     #[test]

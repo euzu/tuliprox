@@ -3,7 +3,8 @@ use crate::{
         model::{
             load_target_into_memory_cache, recording_rule_scheduler::spawn_recording_rule_scheduler,
             ActiveProviderManager, ActiveUserManager, ConnectionManager, EventManager, HlsProvisioningState,
-            PlaylistStorage, PlaylistStorageState, RecordingQueue, SharedStreamManager, UpdateGuard,
+            PlaylistStorage, PlaylistStorageState, RecordingQueue, SharedStreamManager, StalkerResolveCoordinator,
+            UpdateGuard,
         },
         tasks::{exec_config_watch, exec_scheduler},
     },
@@ -24,7 +25,7 @@ use reqwest::Client;
 use shared::{
     create_bitset,
     error::TuliproxError,
-    model::{RecordingConfigDto, UserConnectionPermission, WebAuthConfigDto},
+    model::{PlaylistUpdateRunId, RecordingConfigDto, UserConnectionPermission, WebAuthConfigDto},
     utils::small_vecs_equal_unordered,
 };
 use std::{
@@ -32,14 +33,12 @@ use std::{
     sync::{atomic::AtomicI8, Arc},
     time::Duration,
 };
-use tokio::{
-    sync::{mpsc, RwLock},
-    task,
-};
+use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use tuliprox_dvr::recording::recording_transfer::{resume_recording_worker_if_needed, spawn_recording_services};
 use tuliprox_hls::api::HlsProxyManager;
 use tuliprox_metadata::manager::MetadataUpdateManager;
+use tuliprox_repository::{identity_registry::IdentityRegistry, token_revocations::TokenRevocations};
 use tuliprox_session::{provider_dns_manager::exec_provider_dns, qos_aggregation_manager::exec_qos_aggregation};
 
 macro_rules! cancel_service {
@@ -152,7 +151,7 @@ pub async fn update_app_state_sources(
         Arc::new(targets)
     };
     app_state.forced_targets.store(targets);
-    let updates = app_state.set_sources(sources).await?;
+    let updates = app_state.set_sources(sources)?;
     update_target_caches(app_state, updates.targets.as_ref()).await;
     restart_services(app_state, &updates);
     Ok(())
@@ -361,12 +360,15 @@ pub fn create_cache(config: &Config) -> Option<Arc<RwLock<LRUResourceCache>>> {
             let cache = Arc::new(RwLock::new(res_cache));
             let cache_scanner = Arc::clone(&cache);
             tokio::spawn(async move {
-                let scan_result = {
-                    let mut cache = cache_scanner.write().await;
-                    task::block_in_place(|| cache.scan())
-                };
-                if let Err(err) = scan_result {
-                    error!("Failed to scan cache {err}");
+                let scan_result = tokio::task::spawn_blocking(move || {
+                    let mut cache = cache_scanner.blocking_write();
+                    cache.scan()
+                })
+                .await;
+                match scan_result {
+                    Ok(Err(err)) => error!("Failed to scan cache {err}"),
+                    Err(err) => error!("Failed to join cache scan task: {err}"),
+                    Ok(Ok(())) => {}
                 }
             });
             return Some(cache);
@@ -416,7 +418,9 @@ fn recording_changed(a: &crate::model::RecordingConfig, b: &crate::model::Record
 
 #[derive(Clone)]
 pub struct ManualPlaylistUpdateRequest {
+    pub run_id: PlaylistUpdateRunId,
     pub targets: Arc<ProcessTargets>,
+    pub input_action: Option<shared::model::InputUpdateRequest>,
 }
 
 #[derive(Clone)]
@@ -431,6 +435,7 @@ pub struct AppState {
     pub shared_stream_manager: Arc<SharedStreamManager>,
     pub hls_proxy: Arc<HlsProxyManager>,
     pub hls_provisioning: Arc<HlsProvisioningState>,
+    pub(crate) stalker_resolve_coordinator: Arc<StalkerResolveCoordinator>,
     pub active_users: Arc<ActiveUserManager>,
     pub active_provider: Arc<ActiveProviderManager>,
     pub connection_manager: Arc<ConnectionManager>,
@@ -443,6 +448,22 @@ pub struct AppState {
     pub geoip: Arc<ArcSwapOption<GeoIp>>,
     pub update_guard: UpdateGuard,
     pub metadata_manager: Arc<MetadataUpdateManager>,
+    /// Stable subject identities for web and API users.
+    ///
+    /// The registry existed but was never wired in, so token minting derived
+    /// the subject from the username - `web:<name>` / `api:<name>` - and a
+    /// rename silently reassigned everything the old subject owned.
+    pub identity_registry: Arc<IdentityRegistry>,
+    /// Backoff for repeated failed sign-ins.
+    ///
+    /// `/auth/token` used to answer 401 and forget, so a password list could
+    /// be worked against it as fast as argon2 allows.
+    pub login_throttle: Arc<crate::auth::LoginThrottle>,
+    /// Revocation watermarks for already-issued tokens.
+    ///
+    /// The tokens this server mints are stateless, so nothing could take one
+    /// back: a leak stayed valid until it expired.
+    pub token_revocations: Arc<TokenRevocations>,
     /// Bounded channel (capacity 1) for manual playlist update requests.
     /// `try_send` deduplicates rapid clicks: if an update is already pending
     /// or the channel is full, the request is silently dropped so at most one
@@ -479,13 +500,25 @@ pub(crate) fn create_test_app_state(config: Config) -> Arc<AppState> {
     let event_manager = Arc::new(EventManager::new());
     let active_provider = Arc::new(ActiveProviderManager::new(&app_config, &event_manager));
     let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
-    active_provider.set_shared_stream_manager(Arc::clone(&shared_stream_manager));
+    active_provider.set_shared_stream_manager(&shared_stream_manager);
 
     let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
     let loaded_config = app_config.config.load();
     let active_users = Arc::new(ActiveUserManager::new(&loaded_config, &geoip, &event_manager));
-    let connection_manager =
-        Arc::new(ConnectionManager::new(&active_users, &active_provider, &shared_stream_manager, &event_manager, None));
+    let cleanup_capacity = loaded_config
+        .reverse_proxy
+        .as_ref()
+        .and_then(|reverse_proxy| reverse_proxy.stream.as_ref())
+        .map_or_else(shared::defaults::default_cleanup_queue_capacity, |stream| stream.cleanup_queue_capacity);
+    drop(loaded_config);
+    let connection_manager = Arc::new(ConnectionManager::new_with_capacity(
+        &active_users,
+        &active_provider,
+        &shared_stream_manager,
+        &event_manager,
+        None,
+        cleanup_capacity,
+    ));
     let tokens = CancelTokens::default();
     let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
     let (manual_update_sender, _) = mpsc::channel::<ManualPlaylistUpdateRequest>(1);
@@ -506,6 +539,7 @@ pub(crate) fn create_test_app_state(config: Config) -> Arc<AppState> {
         shared_stream_manager,
         hls_proxy: Arc::new(HlsProxyManager::new()),
         hls_provisioning: Arc::new(HlsProvisioningState::new()),
+        stalker_resolve_coordinator: Arc::default(),
         active_users,
         recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
             Arc::clone(&active_provider),
@@ -519,6 +553,13 @@ pub(crate) fn create_test_app_state(config: Config) -> Arc<AppState> {
         geoip,
         update_guard: UpdateGuard::new(),
         metadata_manager,
+        identity_registry: Arc::new(tuliprox_repository::identity_registry::IdentityRegistry::empty(
+            std::path::PathBuf::new(),
+        )),
+        login_throttle: Arc::new(crate::auth::LoginThrottle::new()),
+        token_revocations: Arc::new(tuliprox_repository::token_revocations::TokenRevocations::empty(
+            std::path::PathBuf::new(),
+        )),
         manual_update_sender,
     })
 }
@@ -544,7 +585,7 @@ impl AppState {
         self.active_users.update_config(&config);
         self.app_config.set_config(config)?;
         reload_logger(config_log_level.as_deref());
-        self.active_provider.update_config(&self.app_config).await;
+        self.active_provider.update_config(&self.app_config);
         self.hls_proxy.update_config(&self.app_config).await;
         self.update_config().await?;
 
@@ -596,10 +637,7 @@ impl AppState {
         Ok(())
     }
 
-    pub(in crate::api::model) async fn set_sources(
-        &self,
-        sources: SourcesConfig,
-    ) -> Result<UpdateChanges, TuliproxError> {
+    pub(in crate::api::model) fn set_sources(&self, sources: SourcesConfig) -> Result<UpdateChanges, TuliproxError> {
         let changes = self.detect_changes_for_sources(&sources);
         // Carry over DNS caches from old providers so resolved IPs survive hot-reloads
         // without waiting for the background resolver or the persisted-file seed.
@@ -618,7 +656,7 @@ impl AppState {
             }
         }
         self.app_config.set_sources(sources)?;
-        self.active_provider.update_config(&self.app_config).await;
+        self.active_provider.update_config(&self.app_config);
 
         shared::model::REGEX_CACHE.sweep();
         Ok(changes)
@@ -782,13 +820,7 @@ fn schedules_changed(a: &[ScheduleConfig], b: &[ScheduleConfig]) -> bool {
 }
 
 fn hdhomerun_changed(a: &HdHomeRunConfig, b: &HdHomeRunConfig) -> bool {
-    if a.flags != b.flags {
-        return true;
-    }
-    if !small_vecs_equal_unordered(a.devices.as_ref(), b.devices.as_ref()) {
-        return true;
-    }
-    false
+    a.flags != b.flags || !small_vecs_equal_unordered(a.devices.as_ref(), b.devices.as_ref())
 }
 
 fn string_changed(a: &str, b: &str) -> bool { a != b }
@@ -808,6 +840,21 @@ fn providers_changed(a: &[Arc<ConfigProvider>], b: &[Arc<ConfigProvider>]) -> bo
     false
 }
 
+fn stream_history_tuple(cfg: Option<&crate::model::StreamHistoryConfig>) -> Option<(bool, &str, u16, usize)> {
+    cfg.map(|history| {
+        (
+            history.stream_history_enabled,
+            history.stream_history_directory.as_str(),
+            history.stream_history_retention_days,
+            history.stream_history_batch_size,
+        )
+    })
+}
+
+fn qos_tuple(cfg: Option<&crate::model::QosAggregationConfig>) -> Option<(bool, u64, u64)> {
+    cfg.map(|qos| (qos.enabled, qos.interval_secs, qos.compaction_interval_secs))
+}
+
 fn qos_aggregation_changed(old_config: &Config, new_config: &Config) -> bool {
     let old_reverse_proxy = old_config.reverse_proxy.as_ref();
     let new_reverse_proxy = new_config.reverse_proxy.as_ref();
@@ -816,20 +863,6 @@ fn qos_aggregation_changed(old_config: &Config, new_config: &Config) -> bool {
     let new_stream_history = new_reverse_proxy.and_then(|rp| rp.stream_history.as_ref());
     let old_qos = old_reverse_proxy.and_then(|rp| rp.qos_aggregation.as_ref());
     let new_qos = new_reverse_proxy.and_then(|rp| rp.qos_aggregation.as_ref());
-
-    let stream_history_tuple = |cfg: Option<&crate::model::StreamHistoryConfig>| {
-        cfg.map(|history| {
-            (
-                history.stream_history_enabled,
-                history.stream_history_directory.clone(),
-                history.stream_history_retention_days,
-                history.stream_history_batch_size,
-            )
-        })
-    };
-    let qos_tuple = |cfg: Option<&crate::model::QosAggregationConfig>| {
-        cfg.map(|qos| (qos.enabled, qos.interval_secs, qos.compaction_interval_secs))
-    };
 
     stream_history_tuple(old_stream_history) != stream_history_tuple(new_stream_history)
         || qos_tuple(old_qos) != qos_tuple(new_qos)
@@ -873,7 +906,7 @@ mod tests {
 
         let result = state.set_config(config_with_web_auth("secret")).await;
 
-        assert!(matches!(result, Err(shared::error::TuliproxError::ConfigWebUi(_))));
+        assert!(matches!(&result, Err(err) if err.kind() == shared::error::ErrorKind::ConfigWebUi));
         assert!(state.app_config.config.load().web_ui.is_none());
     }
 
@@ -883,7 +916,7 @@ mod tests {
 
         let result = state.set_config(config_with_web_auth("new-secret")).await;
 
-        assert!(matches!(result, Err(shared::error::TuliproxError::ConfigWebUi(_))));
+        assert!(matches!(&result, Err(err) if err.kind() == shared::error::ErrorKind::ConfigWebUi));
         assert_eq!(
             state
                 .app_config

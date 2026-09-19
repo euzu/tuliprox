@@ -62,6 +62,7 @@
 @forward "components/userlist/proxy_user_credentials_form";
 @forward "components/userlist/user_table";
 @forward "components/radio_button_group";
+@forward "components/range_slider";
 @forward "components/no_content";
 @forward "components/search";
 @forward "components/loading_indicator";
@@ -101,3 +102,4 @@
 @forward "components/rbac/user_management";
 @forward "components/country";
 @forward "components/recording";
+@forward "components/target_bouquet_view";

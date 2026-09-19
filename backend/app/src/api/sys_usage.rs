@@ -1,11 +1,7 @@
 #[cfg(target_os = "linux")]
 use crate::utils::parse_ascii_u64_bytes;
-use crate::{
-    api::model::AppState,
-    messaging::send_message as send_messaging,
-    model::{DiskAlertConfig, MessageContent},
-};
-use shared::model::{DiskAlert, DiskAlertLevel, MsgKind, SystemInfo};
+use crate::{api::model::AppState, model::DiskAlertConfig};
+use shared::model::{DiskAlert, DiskAlertLevel, EventMessage, SystemInfo};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -174,7 +170,7 @@ pub fn exec_system_usage(app_state: &Arc<AppState>) -> tokio::task::JoinHandle<(
 
             let Some(info) = sampler.sample() else { continue };
             if has_receivers {
-                state.event_manager.send_system_info(info);
+                state.event_manager.send_event(EventMessage::SystemInfoUpdate(Arc::new(info)));
             }
 
             // Disk-alert check is gated on (1) disk info being available, and
@@ -186,12 +182,15 @@ pub fn exec_system_usage(app_state: &Arc<AppState>) -> tokio::task::JoinHandle<(
             // whether anyone is currently listening on the WS event stream,
             // so the monitor's hysteresis/rearm semantics stay correct across
             // transient disconnects.
+            // The thresholds live under `messaging.disk_alert`, so that
+            // config is still required to evaluate anything. The *subscription*
+            // check that used to sit here is gone: the notification layer
+            // already drops unsubscribed events, and gating here meant a
+            // plugin watching for disk pressure saw nothing unless an
+            // operator happened to subscribe to the same event by mail.
             let alert_cfg: DiskAlertConfig = {
                 let cfg = state.app_config.config.load();
                 let Some(messaging) = cfg.messaging.as_ref() else { continue };
-                if !messaging.notify_on.contains(&MsgKind::DiskAlert) {
-                    continue;
-                }
                 let Some(alert_cfg) = messaging.disk_alert.as_ref() else { continue };
                 alert_cfg.clone()
             };
@@ -199,8 +198,7 @@ pub fn exec_system_usage(app_state: &Arc<AppState>) -> tokio::task::JoinHandle<(
             else {
                 continue;
             };
-            let http_client = state.http_client.load();
-            send_messaging(&state.app_config, &http_client, MessageContent::DiskAlert(alert)).await;
+            state.event_manager.send_event(EventMessage::DiskAlert(alert));
         }
     })
 }

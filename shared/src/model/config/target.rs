@@ -5,13 +5,108 @@ use crate::{
     },
     error::TuliproxError,
     foundation::{get_filter, Filter},
-    handle_tuliprox_error_result_list,
     model::{
         ClusterFlags, ConfigFavouritesDto, ConfigRenameDto, ConfigSortDto, HdHomeRunDeviceOverview, PatternTemplate,
-        ProcessingOrder, StrmExportStyle, TargetType, TraktConfigDto,
+        Prepare, PrepareAll, ProcessingOrder, StrmExportStyle, TargetType, TraktConfigDto,
     },
     utils::is_blank_optional_string,
 };
+
+#[derive(Debug, Clone, Default)]
+pub struct ConfigTargetFilterDto {
+    pub processing: Option<String>,
+    pub persist: Option<String>,
+    pub t_processing: Option<Filter>,
+    pub t_persist: Option<Filter>,
+}
+
+impl PartialEq for ConfigTargetFilterDto {
+    fn eq(&self, other: &Self) -> bool { self.processing == other.processing && self.persist == other.persist }
+}
+
+impl From<String> for ConfigTargetFilterDto {
+    fn from(processing: String) -> Self { Self { processing: Some(processing), ..Self::default() } }
+}
+
+impl From<&str> for ConfigTargetFilterDto {
+    fn from(processing: &str) -> Self { processing.to_string().into() }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StagedTargetFilterDto {
+    #[serde(default)]
+    processing: Option<String>,
+    #[serde(default)]
+    persist: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum TargetFilterRepr {
+    Processing(String),
+    Staged(StagedTargetFilterDto),
+}
+
+impl<'de> serde::Deserialize<'de> for ConfigTargetFilterDto {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match <TargetFilterRepr as serde::Deserialize>::deserialize(deserializer)? {
+            TargetFilterRepr::Processing(processing) => Ok(processing.into()),
+            TargetFilterRepr::Staged(staged) => {
+                if staged.processing.is_none() && staged.persist.is_none() {
+                    return Err(serde::de::Error::custom("staged target filter requires at least one stage"));
+                }
+                Ok(Self { processing: staged.processing, persist: staged.persist, ..Self::default() })
+            }
+        }
+    }
+}
+
+impl ConfigTargetFilterDto {
+    pub const fn is_empty(&self) -> bool { self.processing.is_none() && self.persist.is_none() }
+
+    fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
+        fn compile_filter(
+            value: Option<&str>,
+            templates: Option<&[PatternTemplate]>,
+        ) -> Result<Option<Filter>, TuliproxError> {
+            value
+                .map(str::trim)
+                .filter(|filter| !filter.is_empty())
+                .map(|filter| get_filter(filter, templates))
+                .transpose()
+        }
+
+        self.t_processing = compile_filter(self.processing.as_deref(), templates)?;
+        self.t_persist = compile_filter(self.persist.as_deref(), templates)?;
+        Ok(())
+    }
+}
+
+impl serde::Serialize for ConfigTargetFilterDto {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        if self.persist.is_none() {
+            return serializer.serialize_str(self.processing.as_deref().unwrap_or_default());
+        }
+        let field_count = usize::from(self.processing.is_some()) + usize::from(self.persist.is_some());
+        let mut state = serializer.serialize_struct("ConfigTargetFilterDto", field_count)?;
+        if let Some(processing) = self.processing.as_ref() {
+            state.serialize_field("processing", processing)?;
+        }
+        if let Some(persist) = self.persist.as_ref() {
+            state.serialize_field("persist", persist)?;
+        }
+        state.end()
+    }
+}
 
 #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -95,6 +190,9 @@ pub struct DeduplicateConfig {
 pub struct ConfigTargetOptions {
     #[serde(default, skip_serializing_if = "is_false")]
     pub ignore_logo: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(alias = "required_epg")]
+    pub clear_invalid_epg_ids: bool,
     #[serde(
         default,
         deserialize_with = "deserialize_share_live_streams",
@@ -114,6 +212,7 @@ pub struct ConfigTargetOptions {
 impl ConfigTargetOptions {
     pub fn is_empty(&self) -> bool {
         !self.ignore_logo
+            && !self.clear_invalid_epg_ids
             && self.share_live_streams.is_empty()
             && !self.remove_duplicates
             && self.deduplicate.is_none()
@@ -124,6 +223,8 @@ impl ConfigTargetOptions {
     pub const fn lowercase_epg_ids(&self) -> bool { self.epg_output.lowercase_ids }
 
     pub const fn lowercase_xmltv_display_names(&self) -> bool { self.epg_output.lowercase_xmltv_display_names }
+
+    pub const fn clear_invalid_epg_ids(&self) -> bool { self.clear_invalid_epg_ids }
 
     pub fn share_live_hls_enabled(&self) -> bool { self.share_live_streams.hls }
 
@@ -164,7 +265,19 @@ impl Default for XtreamTargetOutputDto {
 }
 
 impl XtreamTargetOutputDto {
-    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
+    pub fn has_any_option(&self) -> bool {
+        self.skip_live_direct_source
+            || self.skip_video_direct_source
+            || self.skip_series_direct_source
+            || self.trakt.is_some()
+            || self.filter.is_some()
+    }
+}
+
+impl Prepare for XtreamTargetOutputDto {
+    type Ctx<'a> = Option<&'a [PatternTemplate]>;
+
+    fn prepare(&mut self, templates: Self::Ctx<'_>) -> Result<(), TuliproxError> {
         if let Some(raw_filter) = &self.filter {
             self.t_filter = Some(get_filter(raw_filter, templates)?);
         }
@@ -172,14 +285,6 @@ impl XtreamTargetOutputDto {
             trakt.prepare();
         }
         Ok(())
-    }
-
-    pub fn has_any_option(&self) -> bool {
-        self.skip_live_direct_source
-            || self.skip_video_direct_source
-            || self.skip_series_direct_source
-            || self.trakt.is_some()
-            || self.filter.is_some()
     }
 }
 
@@ -199,15 +304,19 @@ pub struct M3uTargetOutputDto {
 }
 
 impl M3uTargetOutputDto {
-    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
+    pub fn has_any_option(&self) -> bool {
+        self.filename.is_some() || self.include_type_in_url || self.mask_redirect_url || self.filter.is_some()
+    }
+}
+
+impl Prepare for M3uTargetOutputDto {
+    type Ctx<'a> = Option<&'a [PatternTemplate]>;
+
+    fn prepare(&mut self, templates: Self::Ctx<'_>) -> Result<(), TuliproxError> {
         if let Some(raw_filter) = &self.filter {
             self.t_filter = Some(get_filter(raw_filter, templates)?);
         }
         Ok(())
-    }
-
-    pub fn has_any_option(&self) -> bool {
-        self.filename.is_some() || self.include_type_in_url || self.mask_redirect_url || self.filter.is_some()
     }
 }
 
@@ -244,8 +353,10 @@ pub struct StrmTargetOutputDto {
     pub t_filter: Option<Filter>,
 }
 
-impl StrmTargetOutputDto {
-    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
+impl Prepare for StrmTargetOutputDto {
+    type Ctx<'a> = Option<&'a [PatternTemplate]>;
+
+    fn prepare(&mut self, templates: Self::Ctx<'_>) -> Result<(), TuliproxError> {
         if let Some(raw_filter) = &self.filter {
             self.t_filter = Some(get_filter(raw_filter, templates)?);
         }
@@ -275,8 +386,10 @@ pub enum TargetOutputDto {
     HdHomeRun(HdHomeRunTargetOutputDto),
 }
 
-impl TargetOutputDto {
-    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
+impl Prepare for TargetOutputDto {
+    type Ctx<'a> = Option<&'a [PatternTemplate]>;
+
+    fn prepare(&mut self, templates: Self::Ctx<'_>) -> Result<(), TuliproxError> {
         match self {
             TargetOutputDto::Xtream(output) => output.prepare(templates),
             TargetOutputDto::M3u(output) => output.prepare(templates),
@@ -299,7 +412,8 @@ pub struct ConfigTargetDto {
     pub options: Option<ConfigTargetOptions>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sort: Option<ConfigSortDto>,
-    pub filter: String,
+    #[serde(default, skip_serializing_if = "ConfigTargetFilterDto::is_empty")]
+    pub filter: ConfigTargetFilterDto,
     #[serde(default)]
     pub output: Vec<TargetOutputDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -314,8 +428,6 @@ pub struct ConfigTargetDto {
     pub watch: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub use_memory_cache: bool,
-    #[serde(skip)]
-    pub t_filter: Option<Filter>,
 }
 
 impl Default for ConfigTargetDto {
@@ -326,7 +438,7 @@ impl Default for ConfigTargetDto {
             name: default_as_default(),
             options: None,
             sort: None,
-            filter: String::new(),
+            filter: ConfigTargetFilterDto::default(),
             output: Vec::new(),
             rename: None,
             mapping: None,
@@ -334,7 +446,6 @@ impl Default for ConfigTargetDto {
             processing_order: ProcessingOrder::default(),
             watch: None,
             use_memory_cache: false,
-            t_filter: None,
         }
     }
 }
@@ -497,11 +608,7 @@ impl ConfigTargetDto {
             }
         }
 
-        if let Some(favourites) = self.favourites.as_mut() {
-            for favourite in favourites {
-                favourite.prepare(templates)?;
-            }
-        }
+        self.favourites.prepare(templates)?;
 
         if let Some(watch) = &self.watch {
             for pat in watch {
@@ -511,34 +618,26 @@ impl ConfigTargetDto {
             }
         }
 
-        match get_filter(&self.filter, templates) {
-            Ok(fltr) => {
-                // debug!("Filter: {}", fltr);
-                self.t_filter = Some(fltr);
-                if let Some(renames) = self.rename.as_mut() {
-                    handle_tuliprox_error_result_list!(renames.iter_mut().map(|cr| cr.prepare(templates)));
-                }
-                if let Some(sort) = self.sort.as_mut() {
-                    sort.prepare(templates)?;
-                }
-                Ok(())
-            }
-            Err(err) => Err(err),
+        self.filter.prepare(templates)?;
+        self.rename.prepare_all(templates)?;
+        if let Some(sort) = self.sort.as_mut() {
+            sort.prepare(templates)?;
         }
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfigTargetDto, ConfigTargetOptions, ConfigTargetShareLiveStreams, EpgOutputOptions, M3uTargetOutputDto,
-        StrmTargetOutputDto, TargetOutputDto, XtreamTargetOutputDto,
+        ConfigTargetDto, ConfigTargetFilterDto, ConfigTargetOptions, ConfigTargetShareLiveStreams, EpgOutputOptions,
+        M3uTargetOutputDto, StrmTargetOutputDto, TargetOutputDto, XtreamTargetOutputDto,
     };
 
     fn target_with_outputs(output: Vec<TargetOutputDto>) -> ConfigTargetDto {
         ConfigTargetDto {
             name: "target".to_string(),
-            filter: "Group ~ \".*\"".to_string(),
+            filter: "Group ~ \".*\"".into(),
             output,
             ..ConfigTargetDto::default()
         }
@@ -560,6 +659,125 @@ mod tests {
     }
 
     fn xtream_output() -> TargetOutputDto { TargetOutputDto::Xtream(XtreamTargetOutputDto::default()) }
+
+    #[test]
+    fn target_filter_string_roundtrips_as_string() {
+        let dto = serde_saphyr::from_str::<ConfigTargetDto>(
+            r#"
+name: target
+filter: 'Group ~ ".*"'
+output:
+  - type: m3u
+"#,
+        )
+        .expect("legacy target filter should deserialize");
+
+        assert_eq!(dto.filter.processing.as_deref(), Some(r#"Group ~ ".*""#));
+        assert_eq!(dto.filter.persist, None);
+        let serialized = serde_saphyr::to_string(&dto).expect("target should serialize");
+        assert!(serialized.contains("filter: Group ~"), "expected scalar filter, got: {serialized}");
+        assert!(!serialized.contains("processing:"), "processing-only filter must stay scalar: {serialized}");
+    }
+
+    #[test]
+    fn target_without_filter_defaults_to_no_stages_and_omits_filter() {
+        let dto = serde_saphyr::from_str::<ConfigTargetDto>(
+            r"
+name: target
+output:
+  - type: m3u
+",
+        )
+        .expect("target without filter should deserialize");
+
+        assert!(dto.filter.is_empty());
+        let serialized = serde_saphyr::to_string(&dto).expect("target should serialize");
+        assert!(!serialized.contains("filter:"), "empty filter should be omitted: {serialized}");
+    }
+
+    #[test]
+    fn target_filter_stages_roundtrip_as_mapping() {
+        let dto = serde_saphyr::from_str::<ConfigTargetDto>(
+            r#"
+name: target
+filter:
+  processing: 'Group ~ ".*"'
+  persist: 'EpgId ~ ".+"'
+output:
+  - type: m3u
+"#,
+        )
+        .expect("staged target filter should deserialize");
+
+        assert_eq!(dto.filter.processing.as_deref(), Some(r#"Group ~ ".*""#));
+        assert_eq!(dto.filter.persist.as_deref(), Some(r#"EpgId ~ ".+""#));
+        let serialized = serde_saphyr::to_string(&dto).expect("target should serialize");
+        assert!(serialized.contains("processing:"), "expected staged filter mapping: {serialized}");
+        assert!(serialized.contains("persist:"), "expected persist filter: {serialized}");
+    }
+
+    #[test]
+    fn staged_target_filter_rejects_empty_mapping() {
+        let result = serde_saphyr::from_str::<ConfigTargetFilterDto>("{}\n");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn staged_target_filter_accepts_missing_processing_stage() {
+        let filter = serde_saphyr::from_str::<ConfigTargetFilterDto>(
+            r#"persist: 'EpgId ~ ".+"'
+"#,
+        )
+        .expect("persist-only filter should deserialize");
+
+        assert_eq!(filter.processing, None);
+        assert_eq!(filter.persist.as_deref(), Some(r#"EpgId ~ ".+""#));
+    }
+
+    #[test]
+    fn target_filter_treats_empty_and_whitespace_stages_as_match_all() {
+        for value in ["", " \t\r\n "] {
+            let mut filter = ConfigTargetFilterDto {
+                processing: Some(value.to_string()),
+                persist: Some(value.to_string()),
+                ..ConfigTargetFilterDto::default()
+            };
+
+            filter.prepare(None).expect("blank filter stages should prepare");
+
+            assert!(filter.t_processing.is_none());
+            assert!(filter.t_persist.is_none());
+        }
+    }
+
+    #[test]
+    fn processing_only_mapping_serializes_as_scalar() {
+        let filter = serde_saphyr::from_str::<ConfigTargetFilterDto>(
+            r#"processing: 'Group ~ ".*"'
+"#,
+        )
+        .expect("processing-only mapping should deserialize");
+
+        let serialized = serde_saphyr::to_string(&filter).expect("processing filter should serialize");
+        assert!(!serialized.contains("processing:"), "processing-only filter must become scalar: {serialized}");
+        assert!(serialized.contains("Group ~"));
+    }
+
+    #[test]
+    fn target_filter_persist_roundtrips_as_mapping() {
+        let filter = ConfigTargetFilterDto {
+            processing: None,
+            persist: Some(r#"EpgId ~ ".+""#.to_string()),
+            ..ConfigTargetFilterDto::default()
+        };
+
+        let serialized = serde_saphyr::to_string(&filter).expect("target filter should serialize");
+        assert!(!serialized.contains("processing:"));
+        assert!(serialized.contains("persist:"));
+        let reparsed =
+            serde_saphyr::from_str::<ConfigTargetFilterDto>(&serialized).expect("target filter should deserialize");
+        assert_eq!(reparsed, filter);
+    }
 
     #[test]
     fn strm_with_username_is_allowed_with_m3u_output() {
@@ -649,6 +867,7 @@ share_live_streams: false
         let options = ConfigTargetOptions::default();
 
         assert!(options.is_empty());
+        assert!(!options.clear_invalid_epg_ids());
 
         let serialized = serde_saphyr::to_string(&options).expect("default options should serialize");
         assert!(
@@ -669,6 +888,19 @@ share_live_streams: false
             serde_saphyr::from_str(&serialized).expect("partial share_live_streams should deserialize");
 
         assert_eq!(reparsed.share_live_streams, options.share_live_streams);
+    }
+
+    #[test]
+    fn target_options_clear_invalid_epg_ids_roundtrips_and_accepts_legacy_alias() {
+        let options = serde_saphyr::from_str::<ConfigTargetOptions>("required_epg: true\n")
+            .expect("legacy required_epg should deserialize");
+
+        assert!(options.clear_invalid_epg_ids());
+        assert!(!options.is_empty());
+
+        let serialized = serde_saphyr::to_string(&options).expect("clear_invalid_epg_ids should serialize");
+        assert!(serialized.contains("clear_invalid_epg_ids: true"));
+        assert!(!serialized.contains("required_epg:"));
     }
 
     #[test]

@@ -1,9 +1,8 @@
 use crate::{
     api::model::{
         create_channel_unavailable_stream, get_header_filter_for_item_type, get_response_headers,
-        streams::{buffered_stream::BufferedStream, client_stream::ClientStream},
-        CustomVideoStreamType, ProviderContentRepresentationMode, ProviderStreamFactoryResponse, StreamError,
-        STREAM_IDLE_TIMEOUT,
+        streams::client_stream::ClientStream, CustomVideoStreamType, ProviderContentRepresentationMode,
+        ProviderStreamFactoryResponse, StreamError, STREAM_IDLE_TIMEOUT,
     },
     iptv::stalker::client::validate_public_playable_url,
     model::{AppConfig, ConfigProvider, ReverseProxyDisabledHeaderConfig},
@@ -36,11 +35,11 @@ use std::{
     error::Error as StdError,
     io,
     net::SocketAddr,
-    sync::Arc,
+    sync::{atomic::AtomicU8, Arc},
     time::{Duration, Instant},
 };
 use tokio_util::{io::ReaderStream, sync::CancellationToken};
-use tuliprox_core::utils::request_headers::get_headers_from_request;
+use tuliprox_core::{model::AllocationId, utils::request_headers::get_headers_from_request};
 use tuliprox_hls::api::{
     extract_hls_provider_session_headers, log_hls_origin_content_coding, HlsOriginContentCodingObjectKind,
     HlsOriginContentCodingSource,
@@ -49,6 +48,8 @@ use tuliprox_session::{
     response_headers::{provider_response_headers, ProviderResponseHeaderError},
     stream_ctx::ProviderStreamCtx,
     stream_options::StreamOptions,
+    streams::{ProviderBodyOwner, ProviderBodyOwnerConfig},
+    ActiveProviderManager, ManagedProviderHandle,
 };
 use url::Url;
 
@@ -103,6 +104,9 @@ pub struct ProviderStreamFactoryOptions {
     content_representation: ProviderContentRepresentationMode,
     response_head_availability: ProviderResponseHeadAvailability,
     hls_content_coding_object_kind: Option<HlsOriginContentCodingObjectKind>,
+    cancel_token: Option<CancellationToken>,
+    completion_token: Option<CancellationToken>,
+    close_reason: Option<Arc<AtomicU8>>,
 }
 
 pub(crate) struct ProviderStreamFactoryParams<'a> {
@@ -217,10 +221,34 @@ impl ProviderStreamFactoryOptions {
                 ProviderContentRepresentationMode::Identity => Some(HlsOriginContentCodingObjectKind::Other),
                 ProviderContentRepresentationMode::PreserveOrigin => None,
             },
+            cancel_token: None,
+            completion_token: None,
+            close_reason: None,
         }
     }
 
+    pub fn set_provider_handle_tokens(
+        &mut self,
+        cancel_token: Option<CancellationToken>,
+        completion_token: Option<CancellationToken>,
+        close_reason: Option<Arc<AtomicU8>>,
+    ) {
+        self.cancel_token = cancel_token;
+        self.completion_token = completion_token;
+        self.close_reason = close_reason;
+    }
+
+    pub fn get_cancel_token(&self) -> Option<CancellationToken> { self.cancel_token.clone() }
+
+    pub fn get_completion_token(&self) -> Option<CancellationToken> { self.completion_token.clone() }
+
+    pub fn get_close_reason(&self) -> Option<Arc<AtomicU8>> { self.close_reason.clone() }
+
     pub fn set_provider(&mut self, provider: Option<Arc<ConfigProvider>>) { self.provider = provider; }
+
+    pub fn apply_user_agent_stream_index(&mut self, stream_index: u64) {
+        crate::utils::request::append_user_agent_stream_index(&mut self.headers, stream_index);
+    }
 
     pub fn require_public_destination(&mut self) {
         self.flags.set(ProviderStreamFactoryFlags::PublicDestinationRequired);
@@ -744,7 +772,12 @@ async fn prepare_provider_stream_response_with_context(
             let headers = provider_response_headers(response.headers(), context.representation)?;
             let response_info = Some((headers, response.status(), Some(response.url().clone()), None));
             let stream = response.bytes_stream().map_err(|error| StreamError::reqwest(&error)).boxed();
-            Ok(ProviderStreamFactoryResponse { stream, info: response_info, provider_session_headers })
+            Ok(ProviderStreamFactoryResponse {
+                stream,
+                info: response_info,
+                provider_session_headers,
+                has_upstream_owner: false,
+            })
         }
         ProviderContentRepresentationMode::Identity => {
             let origin_status = response.status();
@@ -783,7 +816,12 @@ async fn prepare_provider_stream_response_with_context(
             let headers = provider_response_headers(&decoded.headers, context.representation)?;
             let response_info = Some((headers, decoded.status, Some(decoded.final_url), None));
             let stream = ReaderStream::new(decoded.body).map_err(|error| provider_decoded_body_error(&error)).boxed();
-            Ok(ProviderStreamFactoryResponse { stream, info: response_info, provider_session_headers })
+            Ok(ProviderStreamFactoryResponse {
+                stream,
+                info: response_info,
+                provider_session_headers,
+                has_upstream_owner: false,
+            })
         }
     }
 }
@@ -959,6 +997,7 @@ async fn provider_stream_request(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn get_provider_stream(
     ctx: &ProviderStreamCtx,
     client: &reqwest::Client,
@@ -969,8 +1008,29 @@ async fn get_provider_stream(
     let start = Instant::now();
     let mut connect_err: u32 = 1;
 
+    let handle_cancel = stream_options.get_cancel_token();
     while stream_options.should_continue() {
-        match provider_stream_request(ctx, client, stream_options).await {
+        let request_future = provider_stream_request(ctx, client, stream_options);
+        let request_res = if let Some(ref cancel) = handle_cancel {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => {
+                    debug!(
+                        "Provider stream request cancelled during open: {}",
+                        sanitize_sensitive_info(stream_options.get_log_url().as_ref())
+                    );
+                    return Err(ProviderStreamRequestFailure::Status {
+                        status: StatusCode::BAD_GATEWAY,
+                        provider_error_class: "cancelled",
+                        serve_channel_unavailable: false,
+                    });
+                }
+                res = request_future => res,
+            }
+        } else {
+            request_future.await
+        };
+        match request_res {
             Ok(Some(stream_response)) => {
                 return Ok(Some(stream_response));
             }
@@ -1026,17 +1086,39 @@ async fn get_provider_stream(
             break;
         }
         connect_err += 1;
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        if let Some(ref cancel) = handle_cancel {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => break,
+                () = tokio::time::sleep(Duration::from_millis(50)) => {},
+            }
+        } else {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
         debug_if_enabled!("Reconnecting stream {}", sanitize_sensitive_info(stream_options.get_log_url().as_ref()));
     }
     debug_if_enabled!("Stopped reconnecting stream {}", sanitize_sensitive_info(stream_options.get_log_url().as_ref()));
     stream_options.cancel_reconnect();
-    ctx.connection_manager.release_provider_connection(&stream_options.addr).await;
     Err(ProviderStreamRequestFailure::Status {
         status: StatusCode::SERVICE_UNAVAILABLE,
         provider_error_class: "service_unavailable",
         serve_channel_unavailable: true,
     })
+}
+
+struct ProviderOpenGuard {
+    token: Option<CancellationToken>,
+    handed_off: bool,
+}
+
+impl Drop for ProviderOpenGuard {
+    fn drop(&mut self) {
+        if !self.handed_off {
+            if let Some(token) = self.token.take() {
+                token.cancel();
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1045,8 +1127,10 @@ pub async fn create_provider_stream(
     client: &reqwest::Client,
     stream_options: ProviderStreamFactoryOptions,
 ) -> Option<ProviderStreamFactoryResponse> {
+    let mut open_guard = ProviderOpenGuard { token: stream_options.get_completion_token(), handed_off: false };
     match get_provider_stream(ctx, client, &stream_options).await {
-        Ok(Some(ProviderStreamFactoryResponse { stream: init_stream, info, provider_session_headers })) => {
+        Ok(Some(ProviderStreamFactoryResponse { stream: init_stream, info, provider_session_headers, .. })) => {
+            let continue_signal = stream_options.get_reconnect_flag_clone();
             if let Some((_headers, _status, _response_url, Some(custom_video_type))) = &info {
                 let reason = match custom_video_type {
                     CustomVideoStreamType::ChannelUnavailable => Some(ConnectFailureReason::ChannelUnavailable),
@@ -1059,32 +1143,71 @@ pub async fn create_provider_stream(
                 if let Some(reason) = reason {
                     record_provider_open_failure(ctx, &stream_options, reason, None, None);
                 }
+                return Some(ProviderStreamFactoryResponse {
+                    stream: ClientStream::new(init_stream, continue_signal, None, stream_options.get_url_as_str())
+                        .boxed(),
+                    info,
+                    provider_session_headers,
+                    has_upstream_owner: false,
+                });
             }
-            let continue_signal = stream_options.get_reconnect_flag_clone();
-            let stream = init_stream.boxed();
-            let stream = if should_wrap_provider_stream_in_buffer(&stream_options) {
-                BufferedStream::new(
-                    stream,
+            let handle_cancel = stream_options.get_cancel_token();
+            let completion_token = stream_options.get_completion_token();
+            let close_reason = stream_options.get_close_reason();
+
+            let cancel_token = if let Some(hc) = handle_cancel {
+                let combined = CancellationToken::new();
+                let c1 = combined.clone();
+                let c2 = combined.clone();
+                let hc_clone = hc.clone();
+                let cs_clone = continue_signal.clone();
+                tokio::spawn(async move {
+                    tokio::select! {
+                        biased;
+                        () = hc_clone.cancelled() => {
+                            cs_clone.cancel();
+                            c1.cancel();
+                        }
+                        () = cs_clone.cancelled() => {
+                            c2.cancel();
+                        }
+                    }
+                });
+                combined
+            } else {
+                continue_signal.clone()
+            };
+
+            let body_owner_config = if should_wrap_provider_stream_in_buffer(&stream_options) {
+                ProviderBodyOwnerConfig::for_buffered(
                     stream_options.get_buffer_size(),
                     stream_options.get_buffer_max_bytes(),
-                    stream_options.get_reconnect_flag_clone(),
-                    stream_options.get_url_as_str(),
                 )
-                .boxed()
             } else {
-                stream
+                ProviderBodyOwnerConfig::for_direct_body()
             };
+
+            open_guard.handed_off = true;
+            let stream = ProviderBodyOwner::new(
+                init_stream.boxed(),
+                body_owner_config,
+                cancel_token,
+                completion_token,
+                close_reason,
+            )
+            .boxed();
+
             Some(ProviderStreamFactoryResponse {
                 stream: ClientStream::new(stream, continue_signal.clone(), None, stream_options.get_url_as_str())
                     .boxed(),
                 info,
                 provider_session_headers,
+                has_upstream_owner: true,
             })
         }
         Ok(None) => None,
         Err(failure) => {
             let status = failure.status();
-            ctx.connection_manager.release_provider_connection(&stream_options.addr).await;
             record_provider_open_failure(
                 ctx,
                 &stream_options,
@@ -1101,11 +1224,63 @@ pub async fn create_provider_stream(
                     stream: boxed_provider_stream,
                     info: response_info,
                     provider_session_headers: HashMap::new(),
+                    has_upstream_owner: false,
                 });
             }
             None
         }
     }
+}
+
+#[derive(Clone)]
+pub struct ProviderStreamOpenLifecycle {
+    manager: Arc<ActiveProviderManager>,
+    allocation_id: AllocationId,
+    cancel_token: Option<CancellationToken>,
+    completion_token: Option<CancellationToken>,
+    close_reason: Option<Arc<AtomicU8>>,
+}
+
+impl ProviderStreamOpenLifecycle {
+    pub fn from_managed(managed: &ManagedProviderHandle) -> Option<Self> {
+        let handle = managed.handle()?;
+        Some(Self {
+            manager: Arc::clone(managed.manager()),
+            allocation_id: handle.allocation_id,
+            cancel_token: handle.cancel_token.clone(),
+            completion_token: handle.completion_token.clone(),
+            close_reason: Some(Arc::clone(&handle.close_reason)),
+        })
+    }
+
+    pub fn mark_opening(&self) { self.manager.mark_opening(self.allocation_id); }
+
+    pub fn register_body_owner(&self) -> bool { self.manager.register_body_owner(self.allocation_id) }
+}
+
+pub async fn open_provider_stream_with_lifecycle(
+    ctx: &ProviderStreamCtx,
+    client: &reqwest::Client,
+    mut stream_options: ProviderStreamFactoryOptions,
+    lifecycle: Option<ProviderStreamOpenLifecycle>,
+) -> Option<ProviderStreamFactoryResponse> {
+    if let Some(ref lc) = lifecycle {
+        lc.mark_opening();
+        stream_options.set_provider_handle_tokens(
+            lc.cancel_token.clone(),
+            lc.completion_token.clone(),
+            lc.close_reason.clone(),
+        );
+    }
+    let response = create_provider_stream(ctx, client, stream_options).await?;
+    if response.has_upstream_owner {
+        if let Some(ref lc) = lifecycle {
+            if !lc.register_body_owner() {
+                return None;
+            }
+        }
+    }
+    Some(response)
 }
 
 #[cfg(test)]

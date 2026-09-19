@@ -233,7 +233,11 @@ async fn cvs_api_response(context: CvsApiResponseContext<'_>) -> Response {
             let Some(token) = token.as_deref() else {
                 return app_state.app_config.get_auth_error_status().into_response();
             };
-            if !verify_access_token(token, &app_state.app_config.access_token_secret) {
+            if !verify_access_token(
+                token,
+                &app_state.app_config.access_token_secret,
+                crate::auth::scope::INTERNAL_PLAYER,
+            ) {
                 return app_state.app_config.get_auth_error_status().into_response();
             }
             return create_custom_video_stream_response(
@@ -325,7 +329,7 @@ async fn validate_hls_standalone_custom_access(
     resolve_hls_cvs_access_user(app_state, fingerprint, access.username.as_ref()).map(|_| ())
 }
 
-fn current_time_millis() -> u64 { chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default() }
+use tuliprox_core::utils::current_time_millis;
 
 fn parse_cvs_standalone_hls_segment_file(segment_file: &str) -> Option<u16> {
     let index = segment_file.strip_suffix(".ts")?;
@@ -607,7 +611,7 @@ mod tests {
             name: "target".to_string(),
             options: None,
             sort: None,
-            filter: Filter::default(),
+            filter: Filter::default().into(),
             output: vec![TargetOutput::Xtream(XtreamTargetOutput {
                 flags: XtreamTargetFlagsSet::default(),
                 trakt: None,
@@ -618,6 +622,7 @@ mod tests {
             mapping: Arc::new(ArcSwapOption::default()),
             favourites: None,
             processing_order: ProcessingOrder::default(),
+            execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
             watch: None,
             use_memory_cache: false,
         });
@@ -683,7 +688,7 @@ mod tests {
         let event_manager = Arc::new(EventManager::new());
         let active_provider = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
         let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
-        active_provider.set_shared_stream_manager(Arc::clone(&shared_stream_manager));
+        active_provider.set_shared_stream_manager(&shared_stream_manager);
 
         let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
         let config = app_cfg.config.load();
@@ -729,6 +734,7 @@ mod tests {
             shared_stream_manager,
             hls_proxy: Arc::new(HlsProxyManager::new()),
             hls_provisioning: Arc::new(HlsProvisioningState::new()),
+            stalker_resolve_coordinator: Arc::default(),
             active_users,
             active_provider,
             connection_manager,
@@ -738,8 +744,50 @@ mod tests {
             geoip,
             update_guard: UpdateGuard::new(),
             metadata_manager,
+            identity_registry: Arc::new(tuliprox_repository::identity_registry::IdentityRegistry::empty(
+                std::path::PathBuf::new(),
+            )),
+            login_throttle: Arc::new(crate::auth::LoginThrottle::new()),
+            token_revocations: Arc::new(tuliprox_repository::token_revocations::TokenRevocations::empty(
+                std::path::PathBuf::new(),
+            )),
             manual_update_sender,
         })
+    }
+
+    #[tokio::test]
+    async fn custom_video_response_preserves_other_provider_on_proxy_socket() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let app = create_test_app_state();
+        let addr = test_fingerprint().addr;
+        let input = app.app_config.sources.load().inputs.first().cloned().ok_or("input missing")?;
+        let handle = app
+            .active_provider
+            .acquire_connection(&input.name, &addr, 0, tuliprox_session::ConnectionKind::Normal)
+            .ok_or("allocation missing")?;
+        let response = crate::api::model::create_custom_video_stream_response(
+            &app.provider_stream_ctx(),
+            &addr,
+            crate::api::model::CustomVideoStreamType::ChannelUnavailable,
+        )
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        // Confirmation is a queue barrier for any cleanup emitted by the response.
+        app.active_provider.refresh_provider_reservation(&input.name, "cleanup-barrier", 30);
+        app.connection_manager.send_cleanup(tuliprox_session::CleanupEvent::ConfirmPlaybackLease {
+            owner: Arc::from("cleanup-barrier"),
+            request_id: None,
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while app.active_provider.provider_lease_usage(&input.name).active == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert_eq!(app.active_provider.get_provider_connections_count(), 1);
+        app.active_provider.clear_provider_reservation("cleanup-barrier");
+        app.active_provider.release_handle(&handle);
+        Ok(())
     }
 
     #[tokio::test]

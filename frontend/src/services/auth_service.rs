@@ -150,8 +150,8 @@ impl AuthService {
         }
 
         if let Some(claims) = decode_jwt_payload(token) {
-            for role in &claims.roles {
-                roles.push(role.clone());
+            for role in claims.roles.names() {
+                roles.push(role.to_string());
             }
             *permissions = claims.permissions;
             *self.token_exp.borrow_mut() = Some(claims.exp);

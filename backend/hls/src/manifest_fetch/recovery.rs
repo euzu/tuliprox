@@ -15,8 +15,8 @@ use super::{
         record_manifest_acceptance_landscape, update_manifest_acceptance_episode_state,
     },
     error::{
-        commit_error_to_retry_reason, is_hls_retryable_manifest_reject_fetch_error, HlsManifestCommitError,
-        HlsManifestRejectLogReason, OriginManifestFetchError,
+        is_hls_retryable_manifest_reject_fetch_error, HlsManifestCommitError, HlsManifestRejectLogReason,
+        OriginManifestFetchError,
     },
     fetch_hls_origin_manifest_request,
     fingerprint::{
@@ -296,6 +296,17 @@ where
             return HlsManifestRecoveryAttemptError::Committed(committed);
         }
         HlsSelectedManifestRecoveryCommit::Rejected(reason) => last_reject_reason = Some(reason),
+        HlsSelectedManifestRecoveryCommit::LocalRepresentationLimit(violation) => {
+            return HlsManifestRecoveryAttemptError::Fetch(OriginManifestFetchError::LocalRepresentationLimit(
+                violation,
+            ));
+        }
+        HlsSelectedManifestRecoveryCommit::MalformedTransientRepresentation => {
+            return HlsManifestRecoveryAttemptError::Fetch(OriginManifestFetchError::MalformedTransientRepresentation);
+        }
+        HlsSelectedManifestRecoveryCommit::CommitGenerationExhausted => {
+            return HlsManifestRecoveryAttemptError::Fetch(OriginManifestFetchError::CommitGenerationExhausted);
+        }
         HlsSelectedManifestRecoveryCommit::NotSelected => {}
     }
 
@@ -447,6 +458,9 @@ async fn evaluate_manifest_recovery_burst(
 enum HlsSelectedManifestRecoveryCommit<T> {
     Committed(T),
     Rejected(HlsManifestRejectLogReason),
+    LocalRepresentationLimit(crate::manifest_limits::HlsManifestLimitViolation),
+    MalformedTransientRepresentation,
+    CommitGenerationExhausted,
     NotSelected,
 }
 
@@ -500,8 +514,32 @@ where
             log_manifest_recovery_selected(context, candidate_index, burst_plan.total_candidates(), &report).await;
             HlsSelectedManifestRecoveryCommit::Committed(committed)
         }
-        Err(err) => {
-            let reason = commit_error_to_retry_reason(&err);
+        Err(HlsManifestCommitError::LocalRepresentationLimit(violation)) => {
+            complete_manifest_acceptance_episode(context, episode_generation).await;
+            HlsSelectedManifestRecoveryCommit::LocalRepresentationLimit(violation)
+        }
+        Err(HlsManifestCommitError::MalformedTransientRepresentation) => {
+            complete_manifest_acceptance_episode(context, episode_generation).await;
+            HlsSelectedManifestRecoveryCommit::MalformedTransientRepresentation
+        }
+        Err(HlsManifestCommitError::CommitGenerationExhausted) => {
+            complete_manifest_acceptance_episode(context, episode_generation).await;
+            HlsSelectedManifestRecoveryCommit::CommitGenerationExhausted
+        }
+        Err(HlsManifestCommitError::TimelineRejected { reason }) => {
+            log_manifest_recovery_candidate_rejected(
+                context,
+                candidate_index,
+                burst_plan.total_candidates(),
+                report.quality.effective_host.as_deref(),
+                report.quality.origin_highwater,
+                &reason,
+            )
+            .await;
+            HlsSelectedManifestRecoveryCommit::Rejected(reason)
+        }
+        Err(HlsManifestCommitError::RetryCurrentTarget) => {
+            let reason = HlsManifestRejectLogReason::PinnedHostRecoveryRejected;
             log_manifest_recovery_candidate_rejected(
                 context,
                 candidate_index,

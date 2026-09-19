@@ -19,7 +19,7 @@ pub fn MapperCounterView(props: &MapperCounterViewProps) -> Html {
      <div class={classes!("tp__mapper-counter", if props.inline {"tp__mapper-counter__inline"} else {""} )}>
         <div class="tp__mapper-counter__row">
             <label>{translate.t("LABEL.FIELD")}</label>
-            {props.counter.field.clone()}
+            {props.counter.field}
         </div>
         <div class="tp__mapper-counter__row">
           <label>{translate.t("LABEL.CONCAT")}</label>

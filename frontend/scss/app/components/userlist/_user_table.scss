@@ -1,11 +1,28 @@
 .tp__user-table {
   display: flex;
   flex-flow: column;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   box-sizing: border-box;
   overflow: hidden;
 
   .tp__icon-button {
     width: 2rem;
+  }
+
+  .tp__table__table {
+    th,
+    td {
+      white-space: nowrap;
+    }
+  }
+
+  .tp__table__container {
+    // Keep the header and at least two rows visible in height-constrained layouts.
+    min-height: 7.5rem;
+    max-height: calc(100vh - 17.5rem);
+    max-height: calc(100dvh - 17.5rem);
   }
 
   .tp__filter {

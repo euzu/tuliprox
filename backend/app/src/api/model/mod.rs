@@ -2,6 +2,7 @@ mod app_state;
 mod app_state_view;
 mod hls_provisioning;
 mod proxy;
+mod stalker_resolve_coordinator;
 mod streams;
 
 #[cfg(test)]
@@ -14,8 +15,8 @@ pub(in crate::api) use self::hls_provisioning::{
     parse_hls_panel_provisioning_segment_route_name, start_hls_panel_provisioning_once,
     try_hls_panel_provisioning_manifest_response, HlsPanelProvisioningRedirectPaths, HlsProvisioningStatus,
 };
-pub(crate) use self::streams::*;
 pub use self::{app_state::*, app_state_view::*, hls_provisioning::HlsProvisioningState, proxy::*};
+pub(crate) use self::{stalker_resolve_coordinator::StalkerResolveCoordinator, streams::*};
 // Provider value types moved to `model`; re-exported so `api` keeps its names.
 pub use crate::model::provider::*;
 // Update semaphores moved to `model`; re-exported so `api` keeps its names.
@@ -24,6 +25,13 @@ pub use crate::model::{stream_error::*, update_task::*};
 // In-memory playlist storage moved to `repository`; re-exported so `api` call
 // sites keep their names.
 pub use crate::repository::playlist_mem_cache::*;
+// Provider allocation and the streaming-session runtime moved to
+// `tuliprox-session`; re-exported so `api` call sites keep their names, module
+// paths included.
+// The event taxonomy itself lives in `shared` - every emitter crate already
+// sees it, and a metadata refresh has no business depending on the streaming
+// session runtime. Only the bus implementation stays in `tuliprox-session`.
+pub use shared::model::EventMessage;
 // Dependency-free model types moved to `tuliprox-core`, and the provider
 // response-header helpers to `tuliprox-session` beside the header types they
 // operate on. Re-exported so `api` call sites keep their names.
@@ -53,13 +61,13 @@ pub use tuliprox_hls::api::{
     HlsLifecycleEventKey, HlsManifestAcceptanceDirective, HlsManifestAcceptanceEvaluationOutcome,
     HlsManifestCommitRequirement, HlsOriginAccountBinding, HlsOriginAccountBindingMode, HlsOriginAccountDetachedReason,
     HlsOriginIoContext, HlsOriginSource, HlsOriginSourceKind, HlsPlaybackFamilyKey, HlsProxyManager,
-    HlsRuntimeCustomTailReason, HlsSegmentFile, HlsSession, HlsSessionHandle, HlsSessionKey, HlsSessionMode,
-    HlsSessionStoreOutcome, HlsStandaloneCustomAccess, HlsTerminalFailedClosedReason, HlsTerminalResolution,
-    HlsTerminalSegmentPath, HlsTerminalTailPlan, HlsTerminalTailProtection, LiveHlsOriginEntry, MapCacheStatus,
-    MapEntry, OriginMapKey, OriginRefreshRequest, OriginSegmentFetchRef, OriginSegmentKey, ProxyMapId, ProxySessionId,
-    RenderedManifest, RetryPolicy, SegmentCacheKey, SegmentCacheStatus, SegmentEntry, SegmentFetchPriority,
-    TransientObjectCacheKey, TransientObjectCacheStatus, TransientPassthroughReason, TransientResourceId,
-    TransientResourceKind, TransientResourceRef, HLS_ACCESS_LEASE_ID_PLACEHOLDER,
+    HlsPublishedTransientResourceIds, HlsRuntimeCustomTailReason, HlsSegmentFile, HlsSession, HlsSessionHandle,
+    HlsSessionKey, HlsSessionMode, HlsSessionStoreOutcome, HlsStandaloneCustomAccess, HlsTerminalFailedClosedReason,
+    HlsTerminalResolution, HlsTerminalSegmentPath, HlsTerminalTailPlan, HlsTerminalTailProtection, LiveHlsOriginEntry,
+    MapCacheStatus, MapEntry, OriginMapKey, OriginRefreshRequest, OriginSegmentFetchRef, OriginSegmentKey, ProxyMapId,
+    ProxySessionId, RenderedManifest, RetryPolicy, SegmentCacheKey, SegmentCacheStatus, SegmentEntry,
+    SegmentFetchPriority, TransientObjectCacheKey, TransientObjectCacheStatus, TransientPassthroughReason,
+    TransientResourceId, TransientResourceKind, TransientResourceRef, HLS_ACCESS_LEASE_ID_PLACEHOLDER,
 };
 #[cfg(test)]
 pub use tuliprox_hls::{
@@ -67,7 +75,7 @@ pub use tuliprox_hls::{
     snapshot_terminal_media_asset, HlsAcceptanceEpisodeTiming, HlsAcceptanceEpisodeTimingInput,
     HlsAvailabilityReevaluationFinishReason, HlsAvailabilityReevaluationMode, HlsBandwidthPersistenceState,
     HlsLeaseManifestSegment, HlsLeaseManifestSnapshot, HlsManifestAcceptanceExhaustionReason,
-    HlsManifestAcceptanceTrigger, HlsManifestDeliveryMode, HlsManifestSourceRenderMarker, HlsMapSignature,
+    HlsManifestAcceptanceTrigger, HlsManifestCommitIdentity, HlsManifestDeliveryMode, HlsMapSignature,
     HlsMediaContainer, HlsObservedRecoveryLatency, HlsOperationTimeoutMs, HlsOriginPathCondition,
     HlsPreparedTerminalBundleState, HlsRecoveryEtaMs, HlsRecoveryTimingPolicy, HlsRecoveryWorkload,
     HlsRuntimeCustomTailAssetIdentity, HlsTerminalAssetIdentity, HlsTerminalBaseMediaState, HlsTerminalBaseProtection,
@@ -82,17 +90,11 @@ pub use tuliprox_metadata::{ctx::MetadataUpdateCtx, manager::*};
 // aggregation to `tuliprox-session`, the playlist cache loader to
 // `tuliprox-repository`. Re-exported so `api` call sites keep their names.
 pub use tuliprox_repository::playlist_cache_loader::*;
-// Provider allocation and the streaming-session runtime moved to
-// `tuliprox-session`; re-exported so `api` call sites keep their names, module
-// paths included.
 pub use tuliprox_session::{
-    active_provider_manager, active_user_manager, admission_strategy, connection_manager, event_manager, meter,
-    provider_lineup_manager, stream,
-};
-pub use tuliprox_session::{
-    active_provider_manager::*, active_user_manager::*, admission_strategy::*, connection_manager::*, event_manager::*,
-    meter::*, provider_dns_manager::*, provider_lineup_manager::*, qos_aggregation_manager::*, response_headers::*,
-    stream::*, streams::*,
+    active_provider_manager, active_provider_manager::*, active_user_manager, active_user_manager::*,
+    admission_strategy, admission_strategy::*, connection_manager, connection_manager::*, event_manager,
+    event_manager::*, meter, meter::*, provider_dns_manager::*, provider_lineup_manager, provider_lineup_manager::*,
+    qos_aggregation_manager::*, response_headers::*, stream, stream::*, streams::*,
 };
 
 pub mod recording_runtime;

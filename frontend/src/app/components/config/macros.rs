@@ -200,6 +200,25 @@ macro_rules! config_field_child {
 }
 
 #[macro_export]
+macro_rules! config_field_tags {
+    ($config:expr, $label:expr, $field:ident, $field_id:expr) => {
+        $crate::config_field_child!($label, $field_id, {
+            html! {
+                <div class="tp__config-view__tags">
+                    {
+                        if $config.$field.is_empty() {
+                            html! {}
+                        } else {
+                            html! { for t in $config.$field.iter() { <$crate::app::components::Chip label={t.clone()} /> } }
+                        }
+                    }
+                </div>
+            }
+        })
+    };
+}
+
+#[macro_export]
 macro_rules! config_field_empty {
     ($label:expr, $field_id:expr) => {
         html! {

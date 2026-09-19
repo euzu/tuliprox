@@ -181,7 +181,7 @@ fn build_rule_cache_entry(
         return RuleCacheEntry { filter_pass: false, value: None, sequence_match: None };
     }
 
-    let value = provider.get(rule.rule.field.as_ref());
+    let value = provider.get_typed(rule.rule.field);
     let sequence_match = match (&rule.sequence_plan, value.as_deref()) {
         (Some(sequence_plan), Some(value)) => Some(evaluate_sequence(sequence_plan, value)),
         _ => None,
@@ -190,6 +190,7 @@ fn build_rule_cache_entry(
     RuleCacheEntry { filter_pass: true, value, sequence_match }
 }
 
+#[cfg(test)]
 fn build_group_rule_cache(rule: &PreparedRule, groups: &[PlaylistGroup], match_as_ascii: bool) -> Vec<RuleCacheEntry> {
     groups.iter().map(|group| build_rule_cache_entry(rule, group.channels.first(), match_as_ascii)).collect()
 }
@@ -203,38 +204,11 @@ fn build_channel_rule_cache(
 }
 
 fn reorder_by_indices<T>(items: &mut Vec<T>, indices: &[usize]) {
-    if items.len() != indices.len() {
-        log::error!(
-            "Invalid sort permutation: index length {} does not match item length {}",
-            indices.len(),
-            items.len()
-        );
-        return;
-    }
-
-    let mut seen = vec![false; items.len()];
-    for &idx in indices {
-        if idx >= items.len() {
-            log::error!("Invalid sort permutation: index {idx} out of bounds for {} items", items.len());
-            return;
-        }
-        if std::mem::replace(&mut seen[idx], true) {
-            log::error!("Invalid sort permutation: duplicate index {idx}");
-            return;
-        }
-    }
-
     let mut original: Vec<Option<T>> = std::mem::take(items).into_iter().map(Some).collect();
     items.reserve(indices.len());
 
     for &idx in indices {
-        if let Some(item) = original[idx].take() {
-            items.push(item);
-        } else {
-            log::error!("Invalid sort permutation: missing index {idx} after validation");
-            items.extend(original.into_iter().flatten());
-            return;
-        }
+        items.push(original[idx].take().expect("sort permutation was validated before application"));
     }
 }
 
@@ -259,6 +233,7 @@ fn playlist_comparator(
     }
 }
 
+#[cfg(test)]
 fn get_group_source_ordinal(group: &PlaylistGroup) -> u32 {
     group.channels.first().map_or(u32::MAX, |c| normalized_source_ordinal(c.header.source_ordinal))
 }
@@ -295,23 +270,136 @@ fn is_effective_rule(rule: &ConfigSortRule) -> bool {
     rule.order != SortOrder::None || rule.sequence.as_ref().is_some_and(|sequence| !sequence.is_empty())
 }
 
-pub(in crate::processor) fn sort_playlist(target: &ConfigTarget, playlist: &mut Vec<PlaylistGroup>) -> bool {
-    let Some(sort) = &target.sort else {
-        for group in &mut *playlist {
-            group.channels.sort_by_key(|a| normalized_source_ordinal(a.header.source_ordinal));
+#[derive(Debug)]
+pub(in crate::processor) struct SortPlan {
+    group_indices: Vec<usize>,
+    channel_indices: Vec<Vec<usize>>,
+}
+
+fn validate_permutation(indices: &[usize], item_count: usize, label: &str) -> Result<(), String> {
+    if indices.len() != item_count {
+        return Err(format!("Invalid {label} sort permutation: {} indices for {item_count} items", indices.len()));
+    }
+    let mut seen = vec![false; item_count];
+    for &index in indices {
+        if index >= item_count {
+            return Err(format!("Invalid {label} sort permutation: index {index} is out of bounds"));
         }
-        playlist.sort_by_key(get_group_source_ordinal);
-        return true;
+        if std::mem::replace(&mut seen[index], true) {
+            return Err(format!("Invalid {label} sort permutation: duplicate index {index}"));
+        }
+    }
+    Ok(())
+}
+
+impl SortPlan {
+    fn validate(&self, groups: &[PlaylistGroup]) -> Result<(), String> {
+        validate_permutation(&self.group_indices, groups.len(), "group")?;
+        if self.channel_indices.len() != groups.len() {
+            return Err(format!(
+                "Invalid channel sort plan: {} permutations for {} groups",
+                self.channel_indices.len(),
+                groups.len()
+            ));
+        }
+        for (group_index, (group, indices)) in groups.iter().zip(&self.channel_indices).enumerate() {
+            validate_permutation(indices, group.channels.len(), &format!("channel group {group_index}"))?;
+        }
+        Ok(())
+    }
+}
+
+fn planned_first_channel<'a>(group: &'a PlaylistGroup, indices: &[usize]) -> Option<&'a shared::model::PlaylistItem> {
+    indices.first().and_then(|index| group.channels.get(*index))
+}
+
+pub(in crate::processor) fn calculate_sort_plan(target: &ConfigTarget, groups: &[PlaylistGroup]) -> SortPlan {
+    let (rules, match_as_ascii) =
+        target.sort.as_ref().map_or((&[][..], false), |sort| (sort.rules.as_slice(), sort.match_as_ascii));
+    let channel_rules: Vec<_> = rules
+        .iter()
+        .filter(|rule| matches!(rule.target, SortTarget::Channel) && is_effective_rule(rule))
+        .map(PreparedRule::new)
+        .collect();
+    let channel_indices = groups
+        .iter()
+        .map(|group| {
+            let mut indices = (0..group.channels.len()).collect::<Vec<_>>();
+            if channel_rules.is_empty() {
+                indices.sort_by_key(|index| normalized_source_ordinal(group.channels[*index].header.source_ordinal));
+            } else {
+                let caches = channel_rules
+                    .iter()
+                    .map(|rule| build_channel_rule_cache(rule, &group.channels, match_as_ascii))
+                    .collect::<Vec<_>>();
+                indices.sort_by(|left, right| {
+                    compare_cached_rule_entries(&channel_rules, &caches, *left, *right).then_with(|| {
+                        normalized_source_ordinal(group.channels[*left].header.source_ordinal)
+                            .cmp(&normalized_source_ordinal(group.channels[*right].header.source_ordinal))
+                    })
+                });
+            }
+            indices
+        })
+        .collect::<Vec<_>>();
+
+    let group_rules: Vec<_> = rules
+        .iter()
+        .filter(|rule| matches!(rule.target, SortTarget::Group) && is_effective_rule(rule))
+        .map(PreparedRule::new)
+        .collect();
+    let planned_group_ordinal = |index: usize| {
+        planned_first_channel(&groups[index], &channel_indices[index])
+            .map_or(u32::MAX, |channel| normalized_source_ordinal(channel.header.source_ordinal))
     };
+    let mut group_indices = (0..groups.len()).collect::<Vec<_>>();
+    if group_rules.is_empty() {
+        group_indices.sort_by_key(|index| planned_group_ordinal(*index));
+    } else {
+        let caches = group_rules
+            .iter()
+            .map(|rule| {
+                groups
+                    .iter()
+                    .enumerate()
+                    .map(|(index, group)| {
+                        build_rule_cache_entry(
+                            rule,
+                            planned_first_channel(group, &channel_indices[index]),
+                            match_as_ascii,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        group_indices.sort_by(|left, right| {
+            compare_cached_rule_entries(&group_rules, &caches, *left, *right)
+                .then_with(|| planned_group_ordinal(*left).cmp(&planned_group_ordinal(*right)))
+        });
+    }
 
-    let rules = &sort.rules;
-    let match_as_ascii = sort.match_as_ascii;
-    sort_channels_in_groups(playlist.as_mut_slice(), rules, match_as_ascii);
-    sort_groups(playlist, rules, match_as_ascii);
+    SortPlan { group_indices, channel_indices }
+}
 
+pub(in crate::processor) fn apply_sort_plan(groups: &mut Vec<PlaylistGroup>, plan: &SortPlan) -> Result<(), String> {
+    plan.validate(groups)?;
+    for (group, indices) in groups.iter_mut().zip(&plan.channel_indices) {
+        reorder_by_indices(&mut group.channels, indices);
+    }
+    reorder_by_indices(groups, &plan.group_indices);
+    Ok(())
+}
+
+pub(in crate::processor) fn sort_playlist(target: &ConfigTarget, playlist: &mut Vec<PlaylistGroup>) -> bool {
+    let plan = calculate_sort_plan(target, playlist);
+    if let Err(error) = apply_sort_plan(playlist, &plan) {
+        log::error!("{error}");
+        return false;
+    }
     true
 }
 
+#[cfg(test)]
 fn sort_groups(groups: &mut Vec<PlaylistGroup>, rules: &[ConfigSortRule], match_as_ascii: bool) {
     let group_rules: Vec<_> = rules
         .iter()
@@ -341,6 +429,7 @@ fn sort_groups(groups: &mut Vec<PlaylistGroup>, rules: &[ConfigSortRule], match_
     reorder_by_indices(groups, &group_indices);
 }
 
+#[cfg(test)]
 fn sort_channels_in_groups(groups: &mut [PlaylistGroup], rules: &[ConfigSortRule], match_as_ascii: bool) {
     let channel_rules: Vec<_> = rules
         .iter()
@@ -378,7 +467,8 @@ fn sort_channels_in_groups(groups: &mut [PlaylistGroup], rules: &[ConfigSortRule
 #[cfg(test)]
 mod tests {
     use super::{
-        compare_rule_entries, playlist_comparator, sort_channels_in_groups, sort_groups, PreparedRule, RuleCacheEntry,
+        apply_sort_plan, compare_rule_entries, playlist_comparator, sort_channels_in_groups, sort_groups, PreparedRule,
+        RuleCacheEntry, SortPlan,
     };
     use shared::{
         foundation::Filter,
@@ -389,6 +479,27 @@ mod tests {
 
     fn make_group(id: u32, title: &str, channels: Vec<PlaylistItem>) -> PlaylistGroup {
         PlaylistGroup { id, title: title.into(), channels, xtream_cluster: XtreamCluster::Live }
+    }
+
+    #[test]
+    fn invalid_sort_plan_does_not_partially_reorder_playlist() {
+        let mut groups = vec![
+            make_group(
+                1,
+                "First",
+                vec![PlaylistItem { header: PlaylistItemHeader { name: "A".into(), ..Default::default() } }],
+            ),
+            make_group(
+                2,
+                "Second",
+                vec![PlaylistItem { header: PlaylistItemHeader { name: "B".into(), ..Default::default() } }],
+            ),
+        ];
+        let plan = SortPlan { group_indices: vec![1, 0], channel_indices: vec![vec![0], vec![1]] };
+
+        assert!(apply_sort_plan(&mut groups, &plan).is_err());
+        assert_eq!(groups[0].title.as_ref(), "First");
+        assert_eq!(groups[1].title.as_ref(), "Second");
     }
 
     #[test]

@@ -245,9 +245,11 @@ specific provider.
 | Parameter                                  | Type     | Default | Technical Impact & Background                                                                                                                                                                                                          |
 |:-------------------------------------------|:---------|:--------|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `skip_live` / `skip_vod` / `skip_series`   | Bool     | `false` | Immediately ignores entire categories during Xtream or Stalker ingestion. Saves massive amounts of RAM and runtime if you only want specific clusters from a provider.                                                                 |
+| `update_quality.live` / `.vod` / `.series` | Int      | `0`     | Rejects an Xtream, Stalker, or parsed M3U cluster when its item count differs too much from the last accepted cluster. Values are percentages from `0` through `100`; `0` disables the guard.                                          |
 | `xtream_live_stream_without_extension`     | Bool     | `false` | Strips `.ts` from generated stream URLs.                                                                                                                                                                                               |
 | `xtream_live_stream_use_prefix`            | Bool     | `true`  | Injects the `/live/` prefix into URLs.                                                                                                                                                                                                 |
 | `disable_hls_streaming`                    | Bool     | `false` | Rewrites live `.m3u8` requests to `.ts` and bypasses Tuliprox HLS handling.                                                                                                                                                            |
+| `user_agent_stream_index`                  | Bool     | `false` | Appends a process-local stream index to upstream `User-Agent` requests (e.g. `VLC/3.0 42`), keeping it stable for the session.                                                                                                         |
 | `resolve_tmdb`                             | Bool     | `false` | Enables TMDB queries for this specific input based on parsed titles to fill missing posters and release years.                                                                                                                         |
 | `probe_stream`                             | Bool     | `false` | Uses FFprobe to read A/V details (HDR, 4K). Respects `max_connections`.                                                                                                                                                                |
 | `resolve_background`                       | Bool     | `true`  | Metadata scans run asynchronously in the background so the general playlist update (which blocks clients) finishes instantly.                                                                                                          |
@@ -264,6 +266,40 @@ specific provider.
 > **Note:** For `resolve_vod` and `resolve_series`, data is cached per input and only new or changed entries are
 > updated.
 
+#### Update quality guard
+
+`update_quality` protects Live, VOD, and Series clusters from unexpectedly small or large provider responses. It is
+available for Xtream, expanded Xtream batch inputs, staged Xtream inputs, Stalker, expanded Stalker batch inputs, and
+M3U inputs. For M3U, the downloaded document is partitioned by the parsed content cluster before the guard is evaluated;
+accepted candidate clusters and retained previous clusters are combined before persistence.
+
+```yaml
+inputs:
+  - name: guarded-provider
+    type: xtream
+    url: https://provider.example
+    username: user
+    password: password
+    options:
+      update_quality:
+        live: 90
+        vod: 90
+        series: 100
+```
+
+Each value is a minimum percentage of similarity between the previous and candidate item counts:
+
+* `0` disables the additional check and preserves the behavior of existing configurations.
+* `90` accepts counts from 90% through 110% of the previous count, including both boundaries.
+* `100` accepts only an identical item count.
+
+With no previous cluster, the first non-empty candidate is accepted as the baseline; an empty candidate is not. A
+rejected Xtream cluster retains its active cluster database and associated categories. A rejected Stalker cluster keeps
+its previous active manifest entry and generation. Accepted clusters from the same update continue to publication, so
+target processing receives newly accepted clusters together with retained clusters. The input remains usable and the
+overall update is reported as partial. For Xtream, only the rejected cluster is marked for retry in the input cache;
+Stalker continues to use its existing requested selection and refresh lifecycle.
+
 #### Minimal Xtream MPEG-TS Example
 
 ```yaml
@@ -276,6 +312,25 @@ inputs:
     options:
       disable_hls_streaming: true
 ```
+
+#### Stable User-Agent Stream Index Example
+
+```yaml
+inputs:
+  - name: indexed-provider
+    type: xtream
+    url: http://provider.example
+    username: user
+    password: pass
+    headers:
+      User-Agent: VLC/3.0
+    options:
+      user_agent_stream_index: true
+```
+
+The resulting upstream requests use a value such as `User-Agent: VLC/3.0 42`. The counter is global to the running
+Tuliprox process and uses a 64-bit value to avoid reusing an index while an older session is still active. It starts
+again when the process restarts. Shared playback uses the identity of the shared upstream session.
 
 #### Stalker playback notes
 
@@ -1108,7 +1163,9 @@ sources:
       - my_provider
     targets:
       - name: my_target
-        filter: 'Group ~ ".*"'
+        filter:
+          processing: 'Group ~ "News"'
+          persist: 'EpgId IS NOT EMPTY'
         output:
           - type: m3u
 ```
@@ -1145,6 +1202,7 @@ sources:
         sort: { }
         options:
           ignore_logo: false
+          clear_invalid_epg_ids: false
           epg_output:
             lowercase_ids: false
             lowercase_xmltv_display_names: false
@@ -1174,20 +1232,20 @@ sources:
 
 #### Target Parameters
 
-| Parameter          | Type   | Required | Default   | Technical Impact & Background                                                                                                                                                                                                |
-|:-------------------|:-------|:--------:|:----------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `enabled`          | Bool   |    No    | `true`    | If set to `false`, Tuliprox skips building this target during normal processing. This reduces CPU, disk, and upstream workload, but the target can still be selected explicitly via CLI target execution if matched by `-t`. |
-| `name`             | String |    No    | `default` | Logical target name. If not `default`, it must be unique. Unique names are important for selective execution (`-t <target_name>`) and for clearly separating output identities in Tuliprox's processing pipeline.            |
-| `processing_order` | Enum   |    No    | `frm`     | Defines execution order for **F**ilter, **R**ename, and **M**ap. This directly changes which intermediate state downstream steps operate on and can therefore materially alter the final playlist result.                    |
-| `filter`           | String |   Yes    |           | Global filter DSL expression for the target. This determines which entries survive into the final target after the selected processing order has been applied.                                                               |
-| `rename`           | List   |    No    |           | Regex-based transformations applied to selected fields. This is commonly used to normalize channel/group labels before sorting, mapping, or export.                                                                          |
-| `mapping`          | List   |    No    |           | References mapping IDs from `mapping.yml` for advanced transformation logic. This is where deep structural rewriting and metadata normalization can be applied.                                                              |
-| `sort`             | Object |    No    |           | Defines ordering for groups and channels after transformations. This affects the final playlist structure seen by clients and can significantly improve navigation quality in IPTV players.                                  |
-| `options`          | Object |    No    |           | Target-level behavior switches such as logo suppression, duplicate removal, and shared live-stream handling. These options influence memory usage, playlist cleanliness, and reverse-proxy behavior.                         |
-| `output`           | List   |   Yes    |           | Mandatory list of output formats. A single target can generate multiple output representations (e.g., `xtream`, `m3u`, `strm`, `hdhomerun`) from the same transformed result set.                                            |
-| `favourites`       | List   |    No    |           | Duplicates final transformed channels into dedicated favorite groups after processing is complete. This adds curated views without changing the original group structure.                                                    |
-| `watch`            | List   |    No    |           | Defines watched group patterns. If matching groups change during updates, Tuliprox emits Messaging events so operational changes become observable automatically.                                                            |
-| `use_memory_cache` | Bool   |    No    | `false`   | If enabled, the final compiled playlist is cached in RAM. This reduces disk access and improves delivery speed, especially for M3U downloads, but increases memory consumption.                                              |
+| Parameter          | Type          | Required | Default   | Technical Impact & Background                                                                                                                                                                                                |
+|:-------------------|:--------------|:--------:|:----------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `enabled`          | Bool          |    No    | `true`    | If set to `false`, Tuliprox skips building this target during normal processing. This reduces CPU, disk, and upstream workload, but the target can still be selected explicitly via CLI target execution if matched by `-t`. |
+| `name`             | String        |    No    | `default` | Logical target name. If not `default`, it must be unique. Unique names are important for selective execution (`-t <target_name>`) and for clearly separating output identities in Tuliprox's processing pipeline.            |
+| `processing_order` | Enum          |    No    | `frm`     | Defines execution order for **F**ilter, **R**ename, and **M**ap. This directly changes which intermediate state downstream steps operate on and can therefore materially alter the final playlist result.                    |
+| `filter`           | String or Map |    No    |           | Optional target filter. A string is the backward-compatible `processing` filter. A map can define optional `processing` and `persist` stages.                                                                                |
+| `rename`           | List          |    No    |           | Regex-based transformations applied to selected fields. This is commonly used to normalize channel/group labels before sorting, mapping, or export.                                                                          |
+| `mapping`          | List          |    No    |           | References mapping IDs from `mapping.yml` for advanced transformation logic. This is where deep structural rewriting and metadata normalization can be applied.                                                              |
+| `sort`             | Object        |    No    |           | Defines ordering for groups and channels after transformations. This affects the final playlist structure seen by clients and can significantly improve navigation quality in IPTV players.                                  |
+| `options`          | Object        |    No    |           | Target-level behavior switches such as logo suppression, duplicate removal, and shared live-stream handling. These options influence memory usage, playlist cleanliness, and reverse-proxy behavior.                         |
+| `output`           | List          |   Yes    |           | Mandatory list of output formats. A single target can generate multiple output representations (e.g., `xtream`, `m3u`, `strm`, `hdhomerun`) from the same transformed result set.                                            |
+| `favourites`       | List          |    No    |           | Duplicates final transformed channels into dedicated favorite groups after processing is complete. This adds curated views without changing the original group structure.                                                    |
+| `watch`            | List          |    No    |           | Defines watched group patterns. If matching groups change during updates, Tuliprox emits Messaging events so operational changes become observable automatically.                                                            |
+| `use_memory_cache` | Bool          |    No    | `false`   | If enabled, the final compiled playlist is cached in RAM. This reduces disk access and improves delivery speed, especially for M3U downloads, but increases memory consumption.                                              |
 
 ---
 
@@ -1219,8 +1277,24 @@ opt into `stage: after_epg` always run once EPG enrichment has completed, regard
 
 ### 3.2.2 `filter`
 
-The target-level `filter` is a string-based expression using Tuliprox's filter DSL.
-It defines which entries remain in the final target after the selected processing stages have been applied.
+The target-level `filter` uses Tuliprox's filter DSL and is optional. The scalar form remains backward compatible and
+runs at the `F` position of `processing_order`:
+
+```yaml
+filter: 'Group ~ "Sports.*"'
+```
+
+To filter the final transformed state, use the staged form. Both fields are optional, but at least one must be present:
+
+```yaml
+filter:
+  processing: 'Type = live'
+  persist: 'EpgId IS NOT EMPTY'
+```
+
+`processing` runs at the normal `F` position. `persist` runs after EPG matching, smart matching, all mappings, merge,
+favourites/Trakt, deduplication, sorting, channel numbering, and counters, immediately before watch evaluation and target
+persistence. Output-level filters remain plain strings and have no configurable stage.
 
 You can define complex strings or regex patterns exactly once in [template.yml](./template.md)
 and call them by wrapping the template name in exclamation marks: `!MACRO_NAME!`.
@@ -1234,11 +1308,15 @@ Tuliprox supports the following filter expression types:
 * Regular expression comparison: `([fieldname]) ~ "regexp"` <br>
   The `[fieldname]` can be `Group`, `Title`, `Name`, `Caption`, `Url`, `Genre`, `Input`, `EpgId` or `Type`.
 * String comparison (case-insensitive, no regex needed):
-  * Exact: `Group = "Sports"` / negated: `Group != "Sports"`
+  * Equal (`=`): `Group = "Sports"` matches the complete text `Sports`.
+  * Not equal (`!=`): `Group != "Sports"` matches every other group name.
   * Substring: `Title CONTAINS "HD"`
   * Prefix: `Caption STARTSWITH "DE:"`
   * Case-insensitivity is ASCII-only: ASCII letters match regardless of case, non-ASCII characters must match
     exactly. `Title CONTAINS "cinéma"` matches `Cinéma` but not `CINÉMA`.
+* Presence comparison: `EpgId IS EMPTY` matches a missing or empty field; `EpgId IS NOT EMPTY` matches a populated field.
+  This is especially useful in a `persist` filter after `clear_invalid_epg_ids` has removed unresolved EPG IDs.
+  `EpgId = EMPTY` and `EpgId != EMPTY` are accepted as aliases and normalize to the `IS` forms.
 * Set membership (case-insensitive exact match against a list): `Group IN ["Sports", "News"]`
 * Numeric comparison on the channel number: `Chno = 5`, `Chno != 5`, `Chno > 100`, `Chno >= 100`, `Chno < 200`, `Chno <= 200`
 * Numeric comparison on the detected quality tier: `Quality >= 3` <br>
@@ -1272,6 +1350,46 @@ This example keeps:
 
 * entries from groups starting with `DE`, except titles containing `Shopping`
 * all entries from groups starting with `AU`
+
+#### Understanding filters without technical background
+
+Think of a filter as a set of questions that Tuliprox asks about every channel. `Group = "Sports"` asks whether the
+complete group name is `Sports`, while `Group != "Sports"` asks whether it is anything else. `CONTAINS` searches for a
+piece of text, `STARTSWITH` checks the beginning, and `IS EMPTY` checks whether a value is missing. Join questions with
+`AND` when all of them must be true, with `OR` when one is enough, and put `NOT` before a question to reverse it.
+Parentheses make clear which questions belong together. Text values always use quotes: `Group = "EMPTY"` searches for
+the literal group name `EMPTY`, whereas `EpgId = EMPTY` without quotes is the short form of `EpgId IS EMPTY` and checks
+for a missing EPG ID. In practice, start with one simple question and add further conditions only when needed.
+
+#### Target bouquet filter in the Web UI
+
+The Source Editor provides an additional **Bouquets** row below a target's regular filter settings. The row shows
+whether the target currently has no bouquet filter or summarizes the active mode and group count. Its action button
+opens the bouquet editor as a full-size stacked view; use the back button to return to the unchanged target form.
+The target shown in the title is informational because the editor always belongs to the target from which it was
+opened.
+
+The bouquet is an additional, target-specific group filter and supports two modes:
+
+* **Whitelist** keeps only the selected groups.
+* **Blacklist** removes the selected groups and keeps the others.
+
+Live, VOD, and Series selections are independent. One cluster may intentionally have an empty selection while groups
+remain selected in another cluster. If no group is selected in any cluster, the bouquet is unrestricted and the target
+keeps all groups; a completely empty selection never means "publish an empty playlist". Saving or resetting the
+bouquet takes effect during the next playlist update.
+
+The available groups are read from the raw catalogs produced by playlist processing. A new installation or deleted
+raw catalog therefore shows no available groups until a playlist update has completed. Missing catalogs and a missing
+saved bouquet are normal states, not configuration errors.
+
+Bouquet files are associated with the unique target name rather than the transient numeric target ID used by the Web
+UI. Renaming a target through the Source Editor removes the bouquet stored under the old name; no bouquet is created or
+moved under the new target name. Deleting a target removes its bouquet together with the target.
+
+> **Update safety:** Tuliprox treats a completely empty input or target playlist as a failed refresh and retains the
+> previously published data. This protects stable virtual IDs when a provider temporarily returns no data or a download
+> fails. Consequently, an intentionally empty playlist is not persisted through a normal update.
 
 ---
 
@@ -1438,6 +1556,7 @@ targets:
         use_output: xtream
     options:
       ignore_logo: false
+      clear_invalid_epg_ids: false
       epg_output:
         lowercase_ids: true
         lowercase_xmltv_display_names: false
@@ -1456,10 +1575,11 @@ targets:
 | Parameter                                  | Type | Required | Default | Technical Impact & Background                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 |:-------------------------------------------|:-----|:--------:|:--------|:--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `ignore_logo`                              | Bool |    No    | `false` | Ignores `tvg-logo` and `tvg-logo-small` attributes. This reduces downstream device-side logo caching and can keep generated M3U playlists leaner for clients with limited storage or poor cache invalidation behavior.                                                                                                                                                                                                                                                                                                                                                                            |
+| `clear_invalid_epg_ids`                    | Bool |    No    | `false` | Clears an EPG ID when it does not resolve to the processed EPG data. Playlist entries are never removed. Smart matching runs first, and IDs introduced or changed by later mappings are validated again before the `persist` filter. The legacy input name `required_epg` is still accepted, but configuration is serialized with the new name.                                                                                                                                                                                                                                                   |
 | `share_live_streams.hls`                   | Bool |    No    | `false` | Enables HLS live sharing for the new HLS cache proxy path. This is a configuration switch for the HLS cache feature and is independent from MPEG-TS stream sharing.                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `share_live_streams.mpeg_ts`               | Bool |    No    | `false` | Allows Tuliprox to share MPEG-TS live stream connections in reverse proxy mode. This can reduce upstream provider connection usage when multiple clients watch the same channel, but it increases memory usage per shared channel.                                                                                                                                                                                                                                                                                                                                                                |
-| `remove_duplicates`                        | Bool |    No    | `false` | Attempts to remove duplicate entries by `url`. This improves playlist cleanliness and reduces confusing duplicates in the client-facing output.                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `deduplicate`                              | Map  |    No    | -       | Quality-aware duplicate removal. Channels whose match value is identical after stripping quality tokens (`4K`, `UHD`, `2160p`, `QHD`, `1440p`, `FHD`, `1080p`, `HD`, `720p`, `SD`, `480p`, `576p`) collapse to a single entry. Sub-keys: `match_by` (`caption` (default), `name`, `title`), `keep` (`best_quality` (default) keeps the highest quality tier, `first` keeps the first occurrence) and `match_as_ascii` (default `false`, normalizes accented characters in match keys so `Café HD` matches `Cafe FHD`). Matching is per cluster across all groups; ties keep the first occurrence. |
+| `remove_duplicates`                        | Bool |    No    | `false` | Legacy pre-transform identity deduplication. It runs independently for each input before the F/R/M pipe and removes repeated source identities before mapping can emit additional items. The field remains supported for backward compatibility.                                                                                                                                                                                                                                                                                                                                                  |
+| `deduplicate`                              | Map  |    No    | -       | Post-merge, quality-aware content deduplication. It runs after all inputs have been transformed and merged. Channels whose match value is identical after stripping quality tokens (`4K`, `UHD`, `2160p`, `QHD`, `1440p`, `FHD`, `1080p`, `HD`, `720p`, `SD`, `480p`, `576p`) collapse to one entry. Sub-keys: `match_by` (`caption` (default), `name`, `title`), `keep` (`best_quality` (default), `first`) and `match_as_ascii` (default `false`). Matching is per cluster across all groups; ties keep the first occurrence. This lets mappings affect the final duplicate comparison results. |
 | `epg_output.lowercase_ids`                 | Bool |    No    | `false` | Canonicalizes visible technical EPG IDs with ASCII lowercase across M3U `tvg-id`, Xtream `epg_channel_id`, XMLTV channel/programme references, and EPG API responses. Changing this option requires a full target refresh.                                                                                                                                                                                                                                                                                                                                                                        |
 | `epg_output.lowercase_xmltv_display_names` | Bool |    No    | `false` | Applies Unicode lowercase exclusively to XMLTV `<display-name>` values during serialization. Playlist names, Xtream names, programme titles, and programme descriptions remain unchanged; persisted target data does not require rebuilding.                                                                                                                                                                                                                                                                                                                                                      |
 | `force_redirect`                           | Bool |    No    | `false` | Optional redirect-related behavior switch. This influences how Tuliprox serves final stream delivery where redirect-style output handling is required by the deployment model.                                                                                                                                                                                                                                                                                                                                                                                                                    |
@@ -1576,8 +1696,10 @@ output:
     skip_series_direct_source: true
     update_strategy: instant
     trakt:
+      enabled: true
       api:
-        api_key: "YOUR_API_KEY"
+        # Despite the compatible field name, this value is the Trakt Client ID.
+        api_key: "${env:TRAKT_CLIENT_ID}"
         version: "2"
         url: "https://api.trakt.tv"
         user_agent: "Mozilla/5.0"
@@ -1639,8 +1761,10 @@ sources:
             skip_video_direct_source: true
             skip_series_direct_source: true
             trakt:
+              enabled: true
               api:
-                api_key: "YOUR_API_KEY"
+                # Despite the compatible field name, this value is the Trakt Client ID.
+                api_key: "${env:TRAKT_CLIENT_ID}"
                 version: "2"
                 url: "https://api.trakt.tv"
                 user_agent: "Mozilla/5.0"
@@ -1667,28 +1791,40 @@ sources:
 ```
 
 This configuration creates additional virtual categories populated with matched entries from the configured Trakt user
-lists and public Trakt charts.
+lists and public Trakt charts. Define `TRAKT_CLIENT_ID` in the environment of the Tuliprox process before enabling the
+block.
+
+The serialized field remains `api.api_key` for configuration compatibility, but its value is the Client ID of your
+Trakt API application and is sent in the `trakt-api-key` header. Tuliprox does not bundle a Client ID and never falls
+back to another identity. Creating Trakt API applications currently requires active VIP membership. A `403 Forbidden`
+response only means that Trakt denied the request; check both the configured Client ID and access to the requested
+resource rather than assuming that every `403` proves a particular account state.
+
+If lists or charts are configured while the Client ID is blank or cannot be used as an HTTP header, Tuliprox makes no
+Trakt request, logs one target-scoped warning, and skips only optional Trakt curation. The rest of target processing
+continues. A disabled block, or a block with no lists or charts, remains a silent no-op.
 
 ##### Trakt Parameters
 
-| Parameter                        | Type    | Required | Default                | Technical Impact & Background                                                                                                              |
-| :------------------------------- | :------ | :------: | :--------------------- | :----------------------------------------------------------------------------------------------------------------------------------------- |
-| `api.api_key`                    | String  | Yes      |                        | Trakt API key used for authenticated access. Without a valid key, Tuliprox cannot fetch remote list content.                               |
-| `api.version`                    | String  | No       | `"2"`                  | API version header value. This ensures Tuliprox formats requests against the correct Trakt API version.                                    |
-| `api.url`                        | String  | No       | `https://api.trakt.tv` | Base API URL for Trakt requests. This defines the remote endpoint Tuliprox queries for list data.                                          |
-| `api.user_agent`                 | String  | No       |                        | Optional `User-Agent` used for Trakt API requests. This can help satisfy API gateway expectations or deployment-specific request policies. |
-| `lists[].user`                   | String  | Yes      |                        | Trakt username owning the list. This identifies which account namespace Tuliprox fetches list data from.                                   |
-| `lists[].list_slug`              | String  | Yes      |                        | Trakt list slug. Combined with `user`, this uniquely identifies the remote list to load.                                                   |
-| `lists[].category_name`          | String  | Yes      |                        | Name of the generated virtual category inside Tuliprox's Xtream output. This controls where matched entries appear to clients.             |
-| `lists[].content_type`           | Enum    | Yes      |                        | `vod` or `series`. This determines which class of playlist entries Tuliprox will attempt to match and inject into the generated category.  |
-| `lists[].tmdb_only`              | Bool    | No       | `false`                | If `true`, only exact TMDB-id matches are accepted for this list, disabling title/year fuzzy fallback and reducing false positives.        |
-| `lists[].fuzzy_match_threshold`  | Integer | No       |                        | Fuzzy matching threshold for title matching. Higher values reduce false positives but may miss loosely matching items.                     |
-| `charts[]`                       | List    | No       | `[]`                   | Public Trakt chart definitions. Unlike `lists[]`, these are system charts and do not have a user/list owner.                               |
-| `charts[].kind`                  | Enum    | Yes      |                        | `movies` or `shows`. Aliases such as `movie`, `vod`, `show`, `series`, and `tvshows` are accepted.                                         |
-| `charts[].chart`                 | Enum    | Yes      |                        | Public chart to fetch. MVP supports `trending` and `popular`.                                                                              |
-| `charts[].category_name`         | String  | Yes      |                        | Name of the generated virtual category inside Tuliprox's Xtream output.                                                                    |
-| `charts[].tmdb_only`             | Bool    | No       | `false`                | If `true`, only exact TMDB-id matches are accepted. This is recommended for dynamic charts to avoid fuzzy false positives.                 |
-| `charts[].fuzzy_match_threshold` | Integer | No       |                        | Fuzzy matching threshold for chart title matching when `tmdb_only` is not enabled.                                                         |
+| Parameter                        | Type    | Required | Default                | Technical Impact & Background                                                                                                                           |
+| :------------------------------- | :------ | :------: | :--------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `enabled`                        | Bool    | No       | `true`                 | Enables Trakt curation. Keep it `false` until an explicit Client ID is configured.                                                                      |
+| `api.api_key`                    | String  | Yes      |                        | Compatible field that stores the Trakt Client ID. There is no bundled fallback; use an explicit value such as `${env:TRAKT_CLIENT_ID}`.                 |
+| `api.version`                    | String  | No       | `"2"`                  | API version header value. This ensures Tuliprox formats requests against the correct Trakt API version.                                                 |
+| `api.url`                        | String  | No       | `https://api.trakt.tv` | Base API URL for Trakt requests. This defines the remote endpoint Tuliprox queries for list data.                                                       |
+| `api.user_agent`                 | String  | No       |                        | Optional `User-Agent` used for Trakt API requests. This can help satisfy API gateway expectations or deployment-specific request policies.              |
+| `lists[].user`                   | String  | Yes      |                        | Trakt username owning the list. This identifies which account namespace Tuliprox fetches list data from.                                                |
+| `lists[].list_slug`              | String  | Yes      |                        | Trakt list slug. Combined with `user`, this uniquely identifies the remote list to load.                                                                |
+| `lists[].category_name`          | String  | Yes      |                        | Name of the generated virtual category inside Tuliprox's Xtream output. This controls where matched entries appear to clients.                          |
+| `lists[].content_type`           | Enum    | Yes      |                        | `vod` or `series`. This determines which class of playlist entries Tuliprox will attempt to match and inject into the generated category.               |
+| `lists[].tmdb_only`              | Bool    | No       | `false`                | If `true`, only exact TMDB-id matches are accepted for this list, disabling title/year fuzzy fallback and reducing false positives.                     |
+| `lists[].fuzzy_match_threshold`  | Integer | No       |                        | Fuzzy matching threshold for title matching. Higher values reduce false positives but may miss loosely matching items.                                  |
+| `charts[]`                       | List    | No       | `[]`                   | Public Trakt chart definitions. Unlike `lists[]`, these are system charts and do not have a user/list owner.                                            |
+| `charts[].kind`                  | Enum    | Yes      |                        | `movies` or `shows`. Aliases such as `movie`, `vod`, `show`, `series`, and `tvshows` are accepted.                                                      |
+| `charts[].chart`                 | Enum    | Yes      |                        | Public chart to fetch. MVP supports `trending` and `popular`.                                                                                           |
+| `charts[].category_name`         | String  | Yes      |                        | Name of the generated virtual category inside Tuliprox's Xtream output.                                                                                 |
+| `charts[].tmdb_only`             | Bool    | No       | `false`                | If `true`, only exact TMDB-id matches are accepted. This is recommended for dynamic charts to avoid fuzzy false positives.                              |
+| `charts[].fuzzy_match_threshold` | Integer | No       |                        | Fuzzy matching threshold for chart title matching when `tmdb_only` is not enabled.                                                                      |
 
 The `charts[]` MVP intentionally supports only public, non-OAuth Trakt charts. User-specific recommendations and
 account-scoped history feeds are not fetched by this block.
@@ -1886,3 +2022,5 @@ watch:
 
 > **Note:** `watch` is especially useful for monitoring premium groups, VOD collections,
 > or unstable provider segments where additions and removals should generate operational alerts.
+> **Processing order:** watch evaluation runs only after `persist_playlist` succeeds. If persistence fails, watch
+> evaluation is skipped and no watch events are emitted for that target on that update.

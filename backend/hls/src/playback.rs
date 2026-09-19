@@ -6,7 +6,7 @@ use crate::{
     HlsPlaybackFamilyKey, ProxySessionId,
 };
 use log::warn;
-use shared::model::{PlaylistItemType, UserConnectionPermission};
+use shared::model::UserConnectionPermission;
 use std::sync::Arc;
 use tuliprox_core::model::{Fingerprint, ProxyUserCredentials};
 use tuliprox_session::{
@@ -93,7 +93,6 @@ async fn validate_hls_access_lease_admission(
         &ctx.admission_ctx(),
         &user,
         fingerprint,
-        PlaylistItemType::LiveHls,
         Some(&user_session),
         &lease.user_session_token,
         true,
@@ -102,8 +101,8 @@ async fn validate_hls_access_lease_admission(
         false,
     )
     .await;
-    if admission.permission == UserConnectionPermission::Exhausted
-        || (admission.permission == UserConnectionPermission::GracePeriod && admission.kind.is_none())
+    if admission.permission() == UserConnectionPermission::Exhausted
+        || (admission.permission() == UserConnectionPermission::GracePeriod && admission.kind().is_none())
     {
         let runtime_tail = begin_runtime_policy_denial(
             ctx,
@@ -134,7 +133,7 @@ async fn validate_hls_access_lease_admission(
             &lease.user_session_token,
         )
         .await
-        .or(admission.kind)
+        .or(admission.kind())
     else {
         let runtime_tail = begin_runtime_policy_denial(
             ctx,

@@ -25,6 +25,7 @@ pub fn UserlistList() -> Html {
     let handle_create = {
         let userlist_ctx = userlist_ctx.clone();
         Callback::from(move |_| {
+            userlist_ctx.selected_user.set(None);
             userlist_ctx.active_page.set(UserlistPage::Edit);
         })
     };

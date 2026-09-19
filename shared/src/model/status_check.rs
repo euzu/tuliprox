@@ -18,6 +18,10 @@ pub struct StatusCheck {
     pub active_user_streams: Vec<StreamInfo>,
     #[serde(default)]
     pub active_provider_connections: Option<BTreeMap<Arc<str>, usize>>,
+    /// Cumulative retries quietly suppressed by the recent-eviction reentry guard.
+    /// A diagnostic counter, not a connection-failure metric.
+    #[serde(default)]
+    pub reentry_suppressed_total: u64,
 }
 
 impl Default for StatusCheck {
@@ -33,6 +37,7 @@ impl Default for StatusCheck {
             active_user_connections: 0,
             active_provider_connections: None,
             active_user_streams: Vec::new(),
+            reentry_suppressed_total: 0,
         }
     }
 }

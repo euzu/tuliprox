@@ -12,7 +12,6 @@ use axum::{
     Json, Router,
 };
 use log::{info, warn};
-use rand::Rng;
 use serde::Deserialize;
 use serde_json::json;
 use shared::{
@@ -58,43 +57,8 @@ struct PermissionInfo {
     reserved: bool,
 }
 
-fn create_temp_path(file_path: &FsPath) -> PathBuf {
-    let file_name =
-        file_path.file_name().and_then(|value| value.to_str()).filter(|value| !value.is_empty()).unwrap_or("rbac");
-    let temp_name = format!(".{file_name}.tmp-{}-{}", std::process::id(), rand::rng().random::<u64>());
-    match file_path.parent() {
-        Some(parent) => parent.join(temp_name),
-        None => PathBuf::from(temp_name),
-    }
-}
-
-async fn replace_file_atomic(source: &FsPath, target: &FsPath) -> std::io::Result<()> {
-    match tokio::fs::rename(source, target).await {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            #[cfg(windows)]
-            {
-                if target.exists() {
-                    tokio::fs::remove_file(target).await?;
-                    return tokio::fs::rename(source, target).await;
-                }
-            }
-            Err(err)
-        }
-    }
-}
-
 async fn write_text_file_atomic(path: &FsPath, content: &str) -> Result<(), std::io::Error> {
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    let temp_path = create_temp_path(path);
-    tokio::fs::write(&temp_path, content).await?;
-    if let Err(err) = replace_file_atomic(&temp_path, path).await {
-        let _ = tokio::fs::remove_file(&temp_path).await;
-        return Err(err);
-    }
-    Ok(())
+    utils::write_text_file_atomic(path, content).await
 }
 
 fn serialize_users_file(users: &[WebUiUser]) -> String {
@@ -258,7 +222,7 @@ fn current_web_auth_snapshot(app_state: &AppState) -> Result<(WebAuthConfig, Str
 fn current_username(app_state: &AppState, token: &str) -> Option<String> {
     let config = app_state.app_config.config.load();
     let web_auth = config.web_ui.as_ref()?.auth.as_ref()?;
-    verify_token(token, web_auth.secret.as_bytes()).map(|token_data| token_data.claims.username)
+    verify_token(token, web_auth.secret.as_bytes(), &web_auth.issuer).map(|token_data| token_data.claims.username)
 }
 
 fn store_reprepared_web_auth(app_state: &AppState) -> Result<(), String> {
@@ -305,53 +269,29 @@ async fn save_and_reprepare_auth_file(
     Ok(())
 }
 
-fn token_from_extensions_or_headers(request: &mut axum::extract::Request) -> Result<AuthBearer, StatusCode> {
-    if let Some(token) = request.extensions().get::<AuthBearer>().cloned() {
-        return Ok(token);
-    }
-
-    let token = AuthBearer::from_headers(request.headers()).map_err(|(status, _)| status)?;
-    request.extensions_mut().insert(token.clone());
-    Ok(token)
-}
-
-async fn check_permission(
-    permission: Permission,
-    State(app_state): State<Arc<AppState>>,
-    mut request: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> Result<axum::response::Response, StatusCode> {
-    let token = token_from_extensions_or_headers(&mut request)?;
-    let config = app_state.app_config.config.load();
-    let Some(web_auth_config) = config.web_ui.as_ref().and_then(|web_ui| web_ui.auth.as_ref()) else {
-        return Err(StatusCode::UNAUTHORIZED);
-    };
-
-    let Some(token_data) = verify_token(&token.0, web_auth_config.secret.as_bytes()) else {
-        return Err(StatusCode::UNAUTHORIZED);
-    };
-
-    if token_data.claims.permissions.contains(permission) {
-        return Ok(next.run(request).await);
-    }
-
-    Err(StatusCode::FORBIDDEN)
-}
-
+// These two used to be a hand-rolled parallel permission check: it verified
+// the signature and read `claims.permissions` straight off the token, and so
+// skipped the schema-version gate, the subject-id gate, the password-version
+// gate and the live-permission intersection that `require_permission` applies.
+// They are now the same check as every other route, with the permission
+// crossing as a const generic.
 async fn validator_user_read(
     state: State<Arc<AppState>>,
+    auth: crate::auth::AuthBearer,
     request: axum::extract::Request,
     next: axum::middleware::Next,
-) -> Result<axum::response::Response, StatusCode> {
-    check_permission(Permission::UserRead, state, request, next).await
+) -> axum::response::Response {
+    crate::api::auth_middleware::require_permission::<{ Permission::UserRead as u32 }>(state, auth, request, next).await
 }
 
 async fn validator_user_write(
     state: State<Arc<AppState>>,
+    auth: crate::auth::AuthBearer,
     request: axum::extract::Request,
     next: axum::middleware::Next,
-) -> Result<axum::response::Response, StatusCode> {
-    check_permission(Permission::UserWrite, state, request, next).await
+) -> axum::response::Response {
+    crate::api::auth_middleware::require_permission::<{ Permission::UserWrite as u32 }>(state, auth, request, next)
+        .await
 }
 
 async fn list_users(State(app_state): State<Arc<AppState>>) -> impl IntoResponse {

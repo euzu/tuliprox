@@ -7,16 +7,17 @@ mod deduplicate;
 mod epg;
 mod library;
 mod probe_handle_guard;
+mod providers;
 mod resolve_options;
 mod sort;
 mod stream_probe;
-mod trakt;
 mod xtream_series;
 mod xtream_vod;
 pub use self::{
     epg::*,
     playlist::*,
     probe_handle_guard::*,
+    providers::*,
     resolve_options::*,
     stalker::{download_stalker_playlist, re_resolve_stalker_url, StalkerCluster},
     stalker_refresh::StalkerRefreshMode,

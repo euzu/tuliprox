@@ -1,9 +1,10 @@
-.tp__list-view  {
+.tp__list-view {
   display: flex;
   flex-flow: column;
   box-sizing: border-box;
   width: 100%;
-  //max-width: var(--max-view-width);
+  max-width: 100%;
+  min-width: 0;
   padding: var(--padding-default) 0;
   gap: var(--gap-default);
   overflow: hidden;
@@ -13,6 +14,8 @@
     flex-flow: column;
     box-sizing: border-box;
     width: 100%;
+    max-width: 100%;
+    min-width: 0;
     overflow: hidden;
   }
 }
@@ -24,7 +27,8 @@
   box-sizing: border-box;
   overflow: hidden;
   width: 100%;
-  //max-width: var(--max-view-width);
+  max-width: 100%;
+  min-width: 0;
   gap: var(--gap-default);
 
   &__header {
@@ -41,6 +45,8 @@
     flex-flow: column;
     box-sizing: border-box;
     width: 100%;
+    max-width: 100%;
+    min-width: 0;
     gap: var(--gap-default);
   }
 }
@@ -52,9 +58,10 @@
 }
 
 .tp__list-create {
-   &__body {
-     overflow: auto; pointer-events: auto;
-     touch-action: pan-x pan-y;
-     -webkit-overflow-scrolling: touch;
-   }
+  &__body {
+    overflow: auto;
+    pointer-events: auto;
+    touch-action: pan-x pan-y;
+    -webkit-overflow-scrolling: touch;
+  }
 }

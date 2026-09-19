@@ -1,7 +1,7 @@
 use crate::model::BusyStatus;
 use shared::model::{
-    ActiveUserConnectionChange, ConfigType, LibraryScanProgressEvent, PlaylistUpdateProgressEvent, PlaylistUpdateState,
-    RecordingTaskDto, StatusCheck, StreamMeterEntry, SystemInfo,
+    ActiveUserConnectionChange, ConfigType, LibraryScanProgressEvent, PlaylistUpdateProgressEvent,
+    PlaylistUpdateRunStateEvent, RecordingTaskDto, StatusCheck, StreamMeterEntry, SystemInfo,
 };
 use std::{rc::Rc, sync::Arc};
 
@@ -16,7 +16,7 @@ pub enum EventMessage {
     ActiveProviderCount(usize),      // all provider
     ConfigChange(ConfigType),
     Busy(BusyStatus),
-    PlaylistUpdate(PlaylistUpdateState),
+    PlaylistUpdate(PlaylistUpdateRunStateEvent),
     PlaylistUpdateProgress(PlaylistUpdateProgressEvent),
     WebSocketStatus(bool),
     SystemInfoUpdate(SystemInfo),

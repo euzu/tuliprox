@@ -347,16 +347,16 @@ behaviour they cover is asserted portably by the no-clobber tests.
 
 ## 8. Authorization matrix
 
-| Operation                    | Private recording                 | Shared recording                 | Orphan       |
-|------------------------------|-----------------------------------|----------------------------------|--------------|
-| Read / Playback / Download   | owner with `recording.read`       | anyone with `recording.read`     | admin only   |
-| Create private               | user with `recording.create`      | n/a                              | n/a          |
-| Create shared                | rejected (admin only)             | admin + `recording.create`       | n/a          |
-| Edit / Cancel                | owner + `recording.manage`        | admin + `recording.manage`       | n/a          |
-| Delete                       | owner + `recording.delete`        | admin + `recording.delete`       | n/a          |
-| Manage recurring rule        | owner + `recording.manage`        | admin + `recording.manage`       | admin only                      | n/a          |
-| `SystemRetentionDelete`      | ownership bypassed; state-gated   | ownership bypassed; state-gated  | ownership bypassed; state-gated | n/a          |
-| Orphan catalog               | n/a                               | n/a                              | n/a                             | admin only   |
+| Operation                    | Private recording                 | Shared recording                 | Orphan                          |
+|------------------------------|-----------------------------------|----------------------------------|---------------------------------|
+| Read / Playback / Download   | owner with `recording.read`       | anyone with `recording.read`     | admin only                      |
+| Create private               | user with `recording.create`      | n/a                              | n/a                             |
+| Create shared                | rejected (admin only)             | admin + `recording.create`       | n/a                             |
+| Edit / Cancel                | owner + `recording.manage`        | admin + `recording.manage`       | n/a                             |
+| Delete                       | owner + `recording.delete`        | admin + `recording.delete`       | n/a                             |
+| Manage recurring rule        | owner + `recording.manage`        | admin + `recording.manage`       | admin only                      |
+| `SystemRetentionDelete`      | ownership bypassed; state-gated   | ownership bypassed; state-gated  | ownership bypassed; state-gated |
+| Orphan catalog               | n/a                               | n/a                              | n/a                             |
 
 Administrators **do not** implicitly receive another regular user's private recording content. The
 private owner is the only non-administrator allowed to read it. Administrative access is read-only

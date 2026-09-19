@@ -1,6 +1,7 @@
 use crate::{
     fetched_playlist::FetchedPlaylist,
     input_cache::resolve_input_storage_path,
+    metadata_sink::MetadataUpdateSink,
     processor::{
         create_resolve_options_function_for_xtream_target, playlist::PlaylistProcessingContext,
         process_foreground_retry_once, select_cancel_token, ProbeHandleGuard, ResolveOptions, ResolveOptionsFlags,
@@ -16,12 +17,12 @@ use shared::{
     error::TuliproxError,
     foundation::ValueProvider,
     model::{
-        MediaQuality, PlaylistEntry, PlaylistItem, PlaylistItemType, StreamProperties, VideoStreamDetailProperties,
+        EventSink, MediaQuality, PlaylistItem, PlaylistItemType, StreamProperties, VideoStreamDetailProperties,
         VideoStreamProperties, XtreamCluster, XtreamPlaylistItem, XtreamVideoInfo,
     },
 };
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -56,8 +57,8 @@ use tuliprox_session::ActiveProviderManager;
 create_resolve_options_function_for_xtream_target!(vod);
 
 #[allow(clippy::too_many_lines)]
-pub async fn playlist_resolve_vod(
-    ctx: &PlaylistProcessingContext,
+pub async fn playlist_resolve_vod<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     target: &ConfigTarget,
     errors: &mut Vec<TuliproxError>,
     provider_fpl: &mut FetchedPlaylist<'_>,
@@ -95,62 +96,29 @@ pub async fn playlist_resolve_vod(
 }
 
 fn sync_resolved_vod_properties(provider_fpl: &mut FetchedPlaylist<'_>, processed_fpl: &mut FetchedPlaylist<'_>) {
-    let mut resolved_vod_by_provider_id: HashMap<u32, VideoStreamProperties> = HashMap::new();
-
-    for pli in processed_fpl.items() {
-        if pli.header.xtream_cluster != XtreamCluster::Video || pli.header.item_type != PlaylistItemType::Video {
-            continue;
-        }
-
-        let Some(provider_id) = pli.get_provider_id() else {
-            continue;
-        };
-        if provider_id == 0 {
-            continue;
-        }
-
-        if let Some(StreamProperties::Video(properties)) = pli.header.additional_properties.as_ref() {
-            resolved_vod_by_provider_id.entry(provider_id).or_insert_with(|| properties.as_ref().clone());
-        }
-    }
-
-    if resolved_vod_by_provider_id.is_empty() {
-        return;
-    }
-
-    for source_pli in provider_fpl.items_mut() {
-        if source_pli.header.xtream_cluster != XtreamCluster::Video
-            || source_pli.header.item_type != PlaylistItemType::Video
-        {
-            continue;
-        }
-
-        let Some(provider_id) = source_pli.get_provider_id() else {
-            continue;
-        };
-        if provider_id == 0 {
-            continue;
-        }
-
-        if let Some(resolved) = resolved_vod_by_provider_id.get(&provider_id) {
-            source_pli.header.additional_properties = Some(StreamProperties::Video(Box::new(resolved.clone())));
-        }
-    }
+    crate::processor::xtream::sync_resolved_xtream_properties(
+        provider_fpl,
+        processed_fpl,
+        XtreamCluster::Video,
+        PlaylistItemType::Video,
+        |props| match props {
+            StreamProperties::Video(v) => Some(v.as_ref()),
+            _ => None,
+        },
+        StreamProperties::Video,
+    );
 }
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-async fn playlist_resolve_vod_info(
-    ctx: &PlaylistProcessingContext,
+async fn playlist_resolve_vod_info<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     _errors: &mut Vec<TuliproxError>,
     fpl: &mut FetchedPlaylist<'_>,
     resolve_options: ResolveOptions,
     do_probe: bool,
 ) {
     let filter = |pli: &PlaylistItem| {
-        if pli.header.xtream_cluster != XtreamCluster::Video || pli.header.item_type != PlaylistItemType::Video {
-            return false;
-        }
-        true
+        pli.header.xtream_cluster == XtreamCluster::Video && pli.header.item_type == PlaylistItemType::Video
     };
 
     let resolve_tmdb_enabled = fpl.input.has_flag(ConfigInputFlags::ResolveTmdb);
@@ -163,8 +131,8 @@ async fn playlist_resolve_vod_info(
 }
 
 #[allow(clippy::too_many_lines)]
-async fn process_immediate_vod_info(
-    ctx: &PlaylistProcessingContext,
+async fn process_immediate_vod_info<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     fpl: &mut FetchedPlaylist<'_>,
     filter: impl Fn(&PlaylistItem) -> bool,
     resolve_options: ResolveOptions,
@@ -449,8 +417,8 @@ fn check_resolve_tmdb(
     }
 }
 
-fn queue_background_vod_info(
-    ctx: &PlaylistProcessingContext,
+fn queue_background_vod_info<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     fpl: &mut FetchedPlaylist<'_>,
     filter: impl Fn(&PlaylistItem) -> bool,
     resolve_options: &ResolveOptions,
@@ -537,8 +505,8 @@ fn queue_background_vod_info(
     }
 }
 
-async fn update_vod_info_immediate(
-    ctx: &PlaylistProcessingContext,
+async fn update_vod_info_immediate<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
     active_provider: &Arc<ActiveProviderManager>,
     input: &ConfigInput,
     pli: &PlaylistItem,
@@ -857,7 +825,7 @@ pub async fn update_vod_metadata(
                 true,
             );
             let probe_url = input.resolve_url(&stream_url).map_err(|err| {
-                if matches!(err, shared::error::TuliproxError::ConfigInput(_)) {
+                if err.kind() == shared::error::ErrorKind::ConfigInput {
                     shared::error::TuliproxError::ConfigInput(format!(
                         "Provider config resolution failed for VOD probe URL '{stream_url}': {err}"
                     ))
@@ -874,7 +842,7 @@ pub async fn update_vod_metadata(
                 let ffprobe_timeout = metadata_update.ffprobe.timeout.unwrap_or(60);
                 let user_agent = config.default_user_agent.clone();
                 let analyze_duration = metadata_update.ffprobe.analyze_duration_micros;
-                let probe_size = metadata_update.ffprobe.probe_size_bytes;
+                let probe_size = metadata_update.ffprobe.probe_size_bytes.get();
 
                 let probe_priority = config
                     .metadata_update
@@ -887,7 +855,6 @@ pub async fn update_vod_metadata(
                 } else {
                     active_provider
                         .acquire_connection_for_probe(&input.name, probe_priority)
-                        .await
                         .map(|handle| ProbeHandleGuard::new(active_provider, handle))
                 };
 
@@ -956,7 +923,7 @@ pub async fn update_vod_metadata(
                 }
 
                 if let Some(guard) = temp_handle {
-                    guard.release().await;
+                    guard.release();
                 }
             } else {
                 debug_if_enabled!(

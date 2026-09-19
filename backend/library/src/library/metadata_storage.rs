@@ -23,6 +23,16 @@ pub struct MetadataStorage {
 }
 
 impl MetadataStorage {
+    /// Loads a complete canonical catalog, preserving read errors for authoritative consumers.
+    pub async fn load_all_complete(&self) -> std::io::Result<Vec<MetadataCacheEntry>> {
+        let mut iter = super::MetadataAsyncIter::try_new(&self.storage_dir.join(LIBRARY_PATH)).await?;
+        let mut entries = Vec::new();
+        while let Some(entry) = iter.try_next().await? {
+            entries.push(entry);
+        }
+        Ok(entries)
+    }
+
     // Creates a new metadata storage instance
     pub fn new(storage_dir: PathBuf) -> Self { Self { storage_dir, mutation_guard: Arc::new(Mutex::new(())) } }
 

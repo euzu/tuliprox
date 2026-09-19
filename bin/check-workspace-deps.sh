@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
-# Architecture gate for the modularization plan.
+# Architecture gate for workspace dependencies.
 #
 # Cargo already rejects dependency cycles, so this script does not look for them.
-# What it enforces is the stricter rule the plan asks for: every edge between two
-# workspace packages must be listed here explicitly, with its dependency kind, so
+# It requires every edge between two workspace packages to be listed explicitly
+# with its dependency kind, so
 # that adding one - or promoting a dev-only edge to a build-time one - is a
 # deliberate, reviewed act rather than a side effect of an `use` statement.
 #
@@ -13,8 +13,7 @@
 #   * an edge listed here that no longer exists fails it too, so the list cannot
 #     rot into a record of dependencies the workspace has since dropped.
 #
-# Extend the allowlist below when a phase introduces a new package edge, in the
-# same change that introduces it.
+# Extend the allowlist in the same change that introduces a package edge.
 #
 # Usage:
 #   check-workspace-deps.sh
@@ -50,11 +49,9 @@ normal tuliprox -> tuliprox-library
 normal tuliprox -> tuliprox-iptv
 normal tuliprox-iptv -> shared
 normal tuliprox-iptv -> tuliprox-core
-normal tuliprox-iptv -> tuliprox-messaging
 normal tuliprox-iptv -> tuliprox-parser
 normal tuliprox-iptv -> tuliprox-repository
 normal tuliprox -> tuliprox-messaging
-normal tuliprox -> tuliprox-parser
 normal tuliprox -> tuliprox-repository
 normal tuliprox -> tuliprox-auth
 normal tuliprox -> tuliprox-session
@@ -69,15 +66,20 @@ normal tuliprox-metadata -> tuliprox-core
 normal tuliprox-metadata -> tuliprox-processing
 normal tuliprox-metadata -> tuliprox-repository
 normal tuliprox-metadata -> tuliprox-session
+# Playlist curation owns the source-neutral matching/projection kernel and
+# translates its concrete Trakt edge into that trusted representation.
+normal tuliprox-curation -> shared
+normal tuliprox-curation -> tuliprox-core
 # The playlist pipeline. It states what it needs from the background
 # metadata worker as a trait (`MetadataUpdateSink`) that the binary
-# implements, so it does not depend on the worker itself.
+# implements, so it does not depend on the worker itself. It delegates
+# optional category matching/projection to the curation capability.
 normal tuliprox-processing -> shared
 normal tuliprox-processing -> tuliprox-core
+normal tuliprox-processing -> tuliprox-curation
 normal tuliprox-processing -> tuliprox-iptv
 normal tuliprox-processing -> tuliprox-library
 normal tuliprox-processing -> tuliprox-media-server
-normal tuliprox-processing -> tuliprox-messaging
 normal tuliprox-processing -> tuliprox-parser
 normal tuliprox-processing -> tuliprox-repository
 normal tuliprox-processing -> tuliprox-session
@@ -89,14 +91,14 @@ normal tuliprox-hls -> tuliprox-core
 normal tuliprox-hls -> tuliprox-mpegts
 normal tuliprox-hls -> tuliprox-parser
 normal tuliprox-hls -> tuliprox-session
-# The DVR. Reads the running server through `RecordingCtx`; needs
-# `session` for the event bus it publishes recording changes on.
+# The DVR. Reads the running server through `RecordingCtx`. It publishes
+# recording changes through `shared`'s `EventSink`, so it does not depend on
+# the streaming-session runtime that happens to implement that trait.
 normal tuliprox-dvr -> shared
 normal tuliprox-dvr -> tuliprox-auth
 normal tuliprox-dvr -> tuliprox-core
 normal tuliprox-dvr -> tuliprox-messaging
 normal tuliprox-dvr -> tuliprox-repository
-normal tuliprox-dvr -> tuliprox-session
 # Provider allocation and the streaming-session runtime. Reaches
 # `repository` to persist stream history and resolve GeoIP, and `mpegts`
 # for the transport-stream buffer it hands to preempted clients.

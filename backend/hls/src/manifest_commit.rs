@@ -2,18 +2,19 @@ use super::{
     HlsAccountBindingProtection, HlsFreshManifestRequiredReason, HlsManifestCommitRequirement, HlsOriginAccountBinding,
     HlsSession, HlsSessionHandle, HlsSessionMode, HlsSessionStoreOutcome,
 };
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 #[derive(Clone)]
 pub enum HlsCommittedManifestBody {
     Normal(String),
-    Transient(String),
+    Transient(Arc<str>),
 }
 
 struct HlsCommittedManifestCandidate {
     body: HlsCommittedManifestBody,
     rendered_at_ms: u64,
     valid_until_ms: Option<u64>,
+    finalized: bool,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -146,13 +147,15 @@ fn hls_committed_manifest_candidate(session: &HlsSession) -> Option<HlsCommitted
                 body: HlsCommittedManifestBody::Normal(rendered.body.clone()),
                 rendered_at_ms: rendered.rendered_at_ms,
                 valid_until_ms: Some(rendered.valid_until_ms),
+                finalized: false,
             })
         }
         HlsSessionMode::TransientPassthrough { .. } => {
             session.transient.last_manifest_body.as_ref().map(|body| HlsCommittedManifestCandidate {
                 body: HlsCommittedManifestBody::Transient(body.clone()),
                 rendered_at_ms: session.transient.last_manifest_rendered_at_ms.unwrap_or_default(),
-                valid_until_ms: session.transient.last_manifest_valid_until_ms,
+                valid_until_ms: session.transient.last_manifest_valid_until_ms(),
+                finalized: session.transient.last_manifest_finalized(),
             })
         }
     }
@@ -189,5 +192,42 @@ fn can_serve_committed_manifest(
 }
 
 fn committed_manifest_valid_at(candidate: &HlsCommittedManifestCandidate, now_ms: u64) -> bool {
-    candidate.valid_until_ms.is_some_and(|valid_until_ms| now_ms <= valid_until_ms)
+    candidate.finalized || candidate.valid_until_ms.is_some_and(|valid_until_ms| now_ms <= valid_until_ms)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{committed_manifest_valid_at, hls_committed_manifest_candidate};
+    use crate::{HlsSession, HlsSessionKey, HlsSessionMode, TransientPassthroughReason};
+
+    fn transient_session(body: &str) -> HlsSession {
+        let mut session = HlsSession::new(HlsSessionKey::new(1, "manifest-validity"), b"secret", 0);
+        session.mode = HlsSessionMode::TransientPassthrough {
+            reason: TransientPassthroughReason::UnsupportedTag { tag: "#EXT-X-ENDLIST".to_string() },
+        };
+        session.transient.replace_manifest_with_semantics(body.to_string(), 100, Some(1_000));
+        session
+    }
+
+    #[test]
+    fn finalized_transient_manifest_remains_current_after_playlist_duration() {
+        let session = transient_session("#EXTM3U\n#EXTINF:1,\n/r/resource.ts\n#EXT-X-ENDLIST\n");
+        let candidate = hls_committed_manifest_candidate(&session).expect("finalized committed manifest");
+
+        assert!(candidate.finalized);
+        assert_eq!(candidate.valid_until_ms, None);
+        assert!(committed_manifest_valid_at(&candidate, u64::MAX));
+        assert_eq!(session.transient.last_manifest_playlist_duration_ms, Some(1_000));
+    }
+
+    #[test]
+    fn rolling_transient_manifest_remains_time_bounded() {
+        let session = transient_session("#EXTM3U\n#EXTINF:1,\n/r/resource.ts\n");
+        let candidate = hls_committed_manifest_candidate(&session).expect("rolling committed manifest");
+
+        assert!(!candidate.finalized);
+        assert_eq!(candidate.valid_until_ms, Some(1_100));
+        assert!(committed_manifest_valid_at(&candidate, 1_100));
+        assert!(!committed_manifest_valid_at(&candidate, 1_101));
+    }
 }

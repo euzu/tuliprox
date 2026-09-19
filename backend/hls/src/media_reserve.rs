@@ -1,17 +1,18 @@
 use super::{
     recovery_timing::{HlsRecoveryTriggerBudgetMs, HlsTransitionMarginMs},
     terminal_tail::{HlsEncryptionSignature, HlsMapSignature, HlsMediaContainer},
+    HlsAccessLeaseId, TransientManifestGeneration, HLS_ACCESS_LEASE_ID_PLACEHOLDER,
 };
-use std::{collections::BTreeSet, sync::Arc};
+use std::{borrow::Cow, collections::BTreeSet, sync::Arc};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HlsLeaseManifestSegment {
     pub proxy_seq: u64,
     pub duration_ms: u64,
-    pub uri: String,
+    pub uri: Arc<str>,
     pub discontinuity_before: bool,
     pub map_ref_ready: bool,
-    pub encryption: Option<HlsEncryptionSignature>,
+    pub encryption: Option<Arc<HlsEncryptionSignature>>,
 }
 
 /// Identifies which delivery path produced the exact manifest advertised to a lease.
@@ -25,25 +26,66 @@ pub enum HlsManifestDeliveryMode {
     TransientPassthrough,
 }
 
-/// Immutable ordering marker of the shared manifest render used to build a lease snapshot.
-///
-/// This is deliberately distinct from the lease-local snapshot generation. Concurrent
-/// requests may publish snapshots from different shared renders, while every successful
-/// lease publication receives its own monotonically increasing snapshot generation.
+/// Total session-local ordering identity of the committed manifest body used by a lease snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct HlsManifestSourceRenderMarker(u64);
+pub struct HlsManifestCommitIdentity {
+    commit_generation: u64,
+    rendered_at_ms: u64,
+}
 
-impl HlsManifestSourceRenderMarker {
-    pub const fn new(rendered_at_ms: u64) -> Self { Self(rendered_at_ms) }
+/// Small lease-local substitution context for canonical shared-HLS template URIs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HlsLeaseManifestUriMaterialization {
+    lease_id: Arc<str>,
+    public_path_prefix: Option<Arc<str>>,
+}
+
+impl HlsLeaseManifestUriMaterialization {
+    pub fn new(lease_id: &HlsAccessLeaseId, public_path_prefix: Option<Arc<str>>) -> Self {
+        Self { lease_id: Arc::from(lease_id.0.as_str()), public_path_prefix }
+    }
+
+    fn materialize<'a>(&self, uri: &'a str) -> Cow<'a, str> {
+        let has_lease_placeholder = uri.contains(HLS_ACCESS_LEASE_ID_PLACEHOLDER);
+        let has_public_route = uri.starts_with("/hls/shared/live/");
+        if !has_lease_placeholder && (!has_public_route || self.public_path_prefix.is_none()) {
+            return Cow::Borrowed(uri);
+        }
+        let materialized = if has_lease_placeholder {
+            uri.replace(HLS_ACCESS_LEASE_ID_PLACEHOLDER, &self.lease_id)
+        } else {
+            uri.to_string()
+        };
+        if has_public_route {
+            if let Some(prefix) = self.public_path_prefix.as_deref() {
+                return Cow::Owned(format!("{prefix}{materialized}"));
+            }
+        }
+        Cow::Owned(materialized)
+    }
+}
+
+impl HlsManifestCommitIdentity {
+    pub const fn committed(commit_generation: u64, rendered_at_ms: u64) -> Self {
+        Self { commit_generation, rendered_at_ms }
+    }
+
+    /// Compatibility constructor for focused fixtures whose render marker is already monotonic.
+    #[cfg(any(test, feature = "test-support"))]
+    pub const fn new(rendered_at_ms: u64) -> Self { Self { commit_generation: rendered_at_ms, rendered_at_ms } }
+
+    pub const fn commit_generation(self) -> u64 { self.commit_generation }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub const fn rendered_at_ms(self) -> u64 { self.0 }
+    pub const fn rendered_at_ms(self) -> u64 { self.rendered_at_ms }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HlsLeaseManifestSnapshot {
     pub delivery_mode: HlsManifestDeliveryMode,
-    pub source_render_marker: HlsManifestSourceRenderMarker,
+    pub source_commit_identity: HlsManifestCommitIdentity,
+    pub uri_materialization: Option<HlsLeaseManifestUriMaterialization>,
+    pub finalized_transient_manifest_generation: Option<TransientManifestGeneration>,
     pub snapshot_generation: u64,
     pub delivered_at_ms: u64,
     pub first_proxy_seq: u64,
@@ -54,13 +96,17 @@ pub struct HlsLeaseManifestSnapshot {
     pub playlist_duration_ms: u64,
     pub last_visible_media_end_ms: u64,
     pub active_map: Option<HlsMapSignature>,
-    pub active_encryption: Option<HlsEncryptionSignature>,
+    pub active_encryption: Option<Arc<HlsEncryptionSignature>>,
     pub container: HlsMediaContainer,
 }
 
 impl HlsLeaseManifestSnapshot {
     pub fn visible_proxy_seqs(&self) -> impl Iterator<Item = u64> + '_ {
         self.visible_segments.iter().map(|segment| segment.proxy_seq)
+    }
+
+    pub(crate) fn materialize_uri<'a>(&self, uri: &'a str) -> Cow<'a, str> {
+        self.uri_materialization.as_ref().map_or(Cow::Borrowed(uri), |context| context.materialize(uri))
     }
 }
 
@@ -527,7 +573,9 @@ mod tests {
     fn manifest() -> HlsLeaseManifestSnapshot {
         HlsLeaseManifestSnapshot {
             delivery_mode: HlsManifestDeliveryMode::NormalCacheTimeline,
-            source_render_marker: HlsManifestSourceRenderMarker::new(1),
+            source_commit_identity: HlsManifestCommitIdentity::new(1),
+            uri_materialization: None,
+            finalized_transient_manifest_generation: None,
             snapshot_generation: 1,
             delivered_at_ms: 0,
             first_proxy_seq: 0,
@@ -996,7 +1044,7 @@ mod tests {
                 .map(|proxy_seq| HlsLeaseManifestSegment {
                     proxy_seq,
                     duration_ms: 1_000,
-                    uri: format!("{proxy_seq}.ts"),
+                    uri: format!("{proxy_seq}.ts").into(),
                     discontinuity_before: false,
                     map_ref_ready: true,
                     encryption: None,

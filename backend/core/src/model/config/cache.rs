@@ -39,7 +39,7 @@ fn get_size(dto: &CacheConfigDto) -> usize {
         None => return 1024,
         Some(val) => {
             if let Ok(size) = val.parse_bytes() {
-                if let Ok(value) = usize::try_from(size) {
+                if let Ok(value) = usize::try_from(size.get()) {
                     return value;
                 }
             }

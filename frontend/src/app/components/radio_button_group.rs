@@ -13,6 +13,12 @@ pub struct RadioButtonGroupProps {
     pub multi_select: bool,
     #[prop_or(false)]
     pub none_allowed: bool,
+    #[prop_or(false)]
+    pub wrap: bool,
+}
+
+fn radio_button_group_classes(wrap: bool) -> Classes {
+    classes!("tp__radio-button-group", wrap.then_some("tp__radio-button-group--wrap"),)
 }
 
 #[component]
@@ -75,8 +81,10 @@ pub fn RadioButtonGroup(props: &RadioButtonGroupProps) -> Html {
         option.clone()
     };
 
+    let class = radio_button_group_classes(props.wrap);
+
     html! {
-        <div class="tp__radio-button-group">
+        <div {class}>
             { for props.options.iter().map(|option| {
                 let is_selected = (*selections).contains(option);
                 let class = if is_selected { "tp__radio-button-group__selected" } else { "" };
@@ -87,5 +95,22 @@ pub fn RadioButtonGroup(props: &RadioButtonGroupProps) -> Html {
                 }
             }) }
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::radio_button_group_classes;
+
+    #[test]
+    fn radio_button_group_classes_default_layout() {
+        let classes = radio_button_group_classes(false);
+        assert_eq!(classes.to_string(), "tp__radio-button-group");
+    }
+
+    #[test]
+    fn radio_button_group_classes_wrap_layout() {
+        let classes = radio_button_group_classes(true);
+        assert_eq!(classes.to_string(), "tp__radio-button-group tp__radio-button-group--wrap");
     }
 }

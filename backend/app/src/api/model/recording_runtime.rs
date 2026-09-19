@@ -27,15 +27,16 @@ impl ProviderCapacityAdapter {
 
 impl RecordingCapacityPort for ProviderCapacityAdapter {
     fn capacities_for_input<'a>(&'a self, input_name: &'a Arc<str>) -> BoxFuture<'a, Vec<ProviderCapacity>> {
-        Box::pin(self.active_provider.provider_capacities_for_input(input_name))
+        Box::pin(std::future::ready(self.active_provider.provider_capacities_for_input(input_name)))
     }
 
     fn acquire<'a>(&'a self, input_name: &'a Arc<str>, priority: i8) -> BoxFuture<'a, Option<ProviderHandle>> {
-        Box::pin(self.active_provider.acquire_connection_for_download(input_name, priority))
+        Box::pin(std::future::ready(self.active_provider.acquire_connection_for_download(input_name, priority)))
     }
 
     fn release(&self, handle: Option<ProviderHandle>) -> BoxFuture<'_, ()> {
-        Box::pin(self.connection_manager.release_provider_handle(handle))
+        self.connection_manager.release_provider_handle(handle);
+        Box::pin(std::future::ready(()))
     }
 
     fn capacity_changed(&self) -> Arc<Notify> { self.connection_manager.capacity_notified() }

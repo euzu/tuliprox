@@ -8,19 +8,19 @@
 use crate::recording::{recording_capacity::RecordingCapacityPort, recording_queue::RecordingQueue};
 use arc_swap::ArcSwap;
 use reqwest::Client;
+use shared::model::EventSink;
 use std::sync::Arc;
 use tuliprox_core::model::AppConfig;
-use tuliprox_session::EventManager;
 
 /// Everything the DVR reads from the running server.
 #[derive(Clone)]
-pub struct RecordingCtx {
+pub struct RecordingCtx<E: EventSink> {
     /// Resolved configuration; re-read on each use because it is hot-swapped.
     pub app_config: Arc<AppConfig>,
     /// The recording queue: scheduled, active and finished tasks.
     pub recordings: Arc<RecordingQueue>,
     /// Where `RecordingChanged` and `RecordingRulesChanged` are published.
-    pub event_manager: Arc<EventManager>,
+    pub events: E,
     /// Shared HTTP client, swapped when the proxy configuration changes.
     pub http_client: Arc<ArcSwap<Client>>,
     /// Provider capacity: acquiring a connection slot before a recording
@@ -29,7 +29,7 @@ pub struct RecordingCtx {
     pub recording_capacity: Arc<dyn RecordingCapacityPort>,
 }
 
-impl RecordingCtx {
+impl<E: EventSink + Clone + 'static> RecordingCtx<E> {
     /// The configured storage directory.
     pub fn storage_dir(&self) -> String { self.app_config.config.load().storage_dir.clone() }
 }

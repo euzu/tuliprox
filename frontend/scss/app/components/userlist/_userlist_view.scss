@@ -1,7 +1,10 @@
 .tp__userlist-view {
   display: flex;
   flex-flow: column;
+  width: 100%;
   max-width: 100%;
+  min-width: 0;
+  flex-shrink: 0;
   box-sizing: border-box;
   overflow: hidden;
   gap: var(--gap-default);
@@ -22,7 +25,9 @@
     &__user {
       display: flex;
       flex-flow: column;
+      width: 100%;
       max-width: 100%;
+      min-width: 0;
       max-height: 100%;
       box-sizing: border-box;
       overflow: hidden;

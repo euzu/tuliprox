@@ -47,6 +47,7 @@ struct HomeViewAccess {
     can_read_system_status: bool,
     can_read_config: bool,
     can_read_users: bool,
+    can_write_users: bool,
     can_read_sources: bool,
     can_write_playlist: bool,
     can_read_playlist: bool,
@@ -84,12 +85,13 @@ fn is_allowed_home_view(view: ViewType, access: HomeViewAccess) -> bool {
         ViewType::Dashboard => true,
         ViewType::Stats | ViewType::StreamHistory => access.can_read_system_status,
         ViewType::Streams => access.show_streams_page && access.can_read_system_status,
-        ViewType::Users => access.can_read_users,
+        ViewType::Users => access.can_read_users || access.can_write_users,
         ViewType::Plans => access.can_read_config,
         ViewType::Config => access.can_read_config,
         ViewType::SourceEditor => access.can_read_sources,
         ViewType::PlaylistUpdate => access.can_write_playlist,
-        ViewType::PlaylistSettings | ViewType::PlaylistExplorer => access.can_read_playlist,
+        ViewType::PlaylistSettings => access.can_read_sources || access.can_read_playlist,
+        ViewType::PlaylistExplorer => access.can_read_playlist,
         ViewType::PlaylistEpg => access.can_read_epg,
         ViewType::Rbac => access.is_admin,
         ViewType::RecordingLibrary | ViewType::RecordingRules | ViewType::RecordingRuleForm => {
@@ -216,7 +218,7 @@ pub fn Home() -> Html {
                         ToastOptions { close_mode: ToastCloseMode::Manual },
                     );
                 }
-                EventMessage::PlaylistUpdate(update_state) => match update_state {
+                EventMessage::PlaylistUpdate(update) => match update.state {
                     PlaylistUpdateState::Success => {
                         services_ctx_clone.toastr.success(translate_clone.t("MESSAGES.PLAYLIST_UPDATE.SUCCESS_FINISH"));
                     }
@@ -240,6 +242,7 @@ pub fn Home() -> Html {
     let can_read_system_status = services.auth.has_permission(Permission::SystemRead);
     let can_read_config = services.auth.has_permission(Permission::ConfigRead);
     let can_read_users = services.auth.has_permission(Permission::UserRead);
+    let can_write_users = services.auth.has_permission(Permission::UserWrite);
     let can_read_sources = services.auth.has_permission(Permission::SourceRead);
     let can_write_playlist = services.auth.has_permission(Permission::PlaylistWrite);
     let can_read_playlist = services.auth.has_permission(Permission::PlaylistRead);
@@ -304,6 +307,7 @@ pub fn Home() -> Html {
         can_read_system_status,
         can_read_config,
         can_read_users,
+        can_write_users,
         can_read_sources,
         can_write_playlist,
         can_read_playlist,
@@ -576,7 +580,7 @@ pub fn Home() -> Html {
                                                 </ErrorBoundary>
                                             </Panel>
                                         })}
-                                       { html_if!(can_read_users, {
+                                       { html_if!(can_read_users || can_write_users, {
                                        <Panel class="tp__full-width" value={ViewType::Users.intern()} active={view_page.clone()}>
                                           <ErrorBoundary name={translate.t("LABEL.USER")}>
                                             <UserlistView/>
@@ -590,13 +594,13 @@ pub fn Home() -> Html {
                                           </ErrorBoundary>
                                        </Panel>
                                        })}
-                                       { html_if!(can_read_sources, {
-                                       <Panel class="tp__full-width tp__full-height" value={ViewType::SourceEditor.intern()} active={view_page.clone()}>
-                                          <ErrorBoundary name={translate.t("LABEL.SOURCE_EDITOR")}>
-                                            <SourceEditor/>
-                                          </ErrorBoundary>
-                                       </Panel>
-                                       })}
+                                        { html_if!(can_read_sources, {
+                                        <Panel class="tp__full-width tp__full-height" value={ViewType::SourceEditor.intern()} active={view_page.clone()}>
+                                           <ErrorBoundary name={translate.t("LABEL.SOURCE_EDITOR")}>
+                                             <SourceEditor/>
+                                           </ErrorBoundary>
+                                        </Panel>
+                                        })}
                                        { html_if!(can_write_playlist, {
                                        <Panel class="tp__full-width" value={ViewType::PlaylistUpdate.intern()} active={view_page.clone()}>
                                          <ErrorBoundary name={translate.t("LABEL.UPDATE")}>
@@ -604,19 +608,19 @@ pub fn Home() -> Html {
                                          </ErrorBoundary>
                                        </Panel>
                                        })}
-                                       { html_if!(can_read_playlist, {
-                                       <>
+                                       { html_if!(can_read_sources || can_read_playlist, {
                                        <Panel class="tp__full-width" value={ViewType::PlaylistSettings.intern()} active={view_page.clone()}>
                                          <ErrorBoundary name={translate.t("LABEL.PLAYLIST")}>
                                            <PlaylistSettingsView/>
                                          </ErrorBoundary>
                                        </Panel>
+                                       })}
+                                       { html_if!(can_read_playlist, {
                                        <Panel class="tp__full-width" value={ViewType::PlaylistExplorer.intern()} active={view_page.clone()}>
                                          <ErrorBoundary name={translate.t("LABEL.PLAYLIST_VIEWER")}>
                                            <PlaylistExplorerView/>
                                          </ErrorBoundary>
                                        </Panel>
-                                       </>
                                        })}
                                        { html_if!(can_read_epg, {
                                        <Panel class="tp__full-width" value={ViewType::PlaylistEpg.intern()} active={view_page.clone()}>
@@ -672,6 +676,7 @@ mod tests {
             can_read_system_status: true,
             can_read_config: true,
             can_read_users: true,
+            can_write_users: true,
             can_read_sources: true,
             can_write_playlist: true,
             can_read_playlist: true,
@@ -716,6 +721,7 @@ mod tests {
             ViewType::Dashboard,
             super::HomeViewAccess {
                 can_read_users: false,
+                can_write_users: false,
                 can_read_config: false,
                 can_read_sources: false,
                 can_write_playlist: false,
@@ -738,6 +744,7 @@ mod tests {
             super::HomeViewAccess {
                 show_streams_page: false,
                 can_read_users: false,
+                can_write_users: false,
                 can_read_config: false,
                 can_read_sources: false,
                 can_write_playlist: false,

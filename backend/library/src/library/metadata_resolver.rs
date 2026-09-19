@@ -51,11 +51,11 @@ impl MetadataResolver {
         Self { tmdb_client, fallback_to_filename: library_config.is_some_and(|c| c.metadata.fallback_to_filename) }
     }
 
-    // Resolves metadata for a video file using multiple sources (Main entry point for Library Scanner)
+    /// Resolves metadata for a video file using the available sources.
     pub async fn resolve(&self, group: &MediaGroup) -> Option<MediaMetadata> {
         debug!("Resolving metadata for: {group}");
 
-        // Step 1: Classify the file
+        // Select the representative file and any metadata already attached to it.
         let (is_movie, Some(file), metadata) = (match group {
             MediaGroup::Movie { file, metadata } => (true, Some(file), metadata.as_ref()),
             MediaGroup::Series { show_key: _, episodes } => {
@@ -134,16 +134,16 @@ impl MetadataResolver {
             }
         }
 
-        // TODO series implementation missing for NFO
+        // TODO: Add NFO support for series.
         // if classification == MediaClassification::Movie {
-        //     // Step 3: Try to read existing NFO file
+        //     // Prefer metadata from an existing NFO file.
         //     if let Some(metadata) = NfoReader::read_metadata(&file.path).await {
         //         info!("Found NFO metadata for: {}", file.file_path);
         //         return Some(metadata);
         //     }
         // }
 
-        // Step 4: Fallback to filename parsing
+        // Fall back to filename parsing when configured.
         if self.fallback_to_filename {
             if let Some(f) = file {
                 debug!("Using filename-based metadata for: {}", f.file_path);

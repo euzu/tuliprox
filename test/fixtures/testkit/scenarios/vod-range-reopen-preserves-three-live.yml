@@ -1,0 +1,99 @@
+schema_version: 1
+name: vod-range-reopen-preserves-three-live
+tuliprox:
+  base_url: http://fixture.invalid
+  execution_mode: isolated_fixture
+  bootstrap:
+    command: "${env:TULIPROX_TESTKIT_SUT_BINARY}"
+    arguments: ["-s", "-c", "{config_file}", "-i", "{source_file}", "-a", "{api_proxy_file}"]
+    readiness_url: "{base_url}/healthcheck"
+origin:
+  run_id: vod-range-reopen-preserves-three-live
+  account_limit: 5
+  limit_mode: reject_new
+actors:
+  - id: live-viewer-1
+    agent: local
+    username: admission-user
+    user_agent: tuliprox-testkit/live-1
+    client_ip: { mode: forwarded, value: 10.20.0.10 }
+  - id: live-viewer-2
+    agent: local
+    username: admission-user
+    user_agent: tuliprox-testkit/live-2
+    client_ip: { mode: forwarded, value: 10.20.0.11 }
+  - id: live-viewer-3
+    agent: local
+    username: admission-user
+    user_agent: tuliprox-testkit/live-3
+    client_ip: { mode: forwarded, value: 10.20.0.12 }
+  - id: vod-viewer-ua1
+    agent: local
+    username: admission-user
+    user_agent: tuliprox-testkit/vod-player-ua1
+    client_ip: { mode: forwarded, value: 10.20.0.13 }
+  - id: vod-viewer-ua2
+    agent: local
+    username: admission-user
+    user_agent: tuliprox-testkit/vod-player-ua2
+    client_ip: { mode: forwarded, value: 10.20.0.13 }
+channels:
+  live-17: { origin_marker: 17, protocol: xtream_ts }
+  live-18: { origin_marker: 18, protocol: xtream_ts }
+  live-19: { origin_marker: 19, protocol: xtream_ts }
+steps:
+  - command_id: start-live-1
+    start: { actor: live-viewer-1, playback_id: live-1, session_group: live-1, channel: live-17 }
+    await: { valid_frames: 3 }
+  - command_id: start-live-2
+    start: { actor: live-viewer-2, playback_id: live-2, session_group: live-2, channel: live-18 }
+    await: { valid_frames: 3 }
+  - command_id: start-live-3
+    start: { actor: live-viewer-3, playback_id: live-3, session_group: live-3, channel: live-19 }
+    await: { valid_frames: 3 }
+    assert_origin:
+      active_body: 3
+      max_active_body: 3
+      max_active_tcp: 3
+  - command_id: start-vod-probe-1
+    start:
+      actor: vod-viewer-ua1
+      playback_id: vod-probe-1
+      session_group: vod-movie
+      vod_object: movie.mkv
+      range: "bytes=0-524287"
+      read_limit_bytes: 32768
+      post_read_action: pause
+    assert_origin:
+      active_body: 4
+      max_active_body: 4
+      max_active_tcp: 4
+  - command_id: start-vod-probe-2
+    start:
+      actor: vod-viewer-ua1
+      playback_id: vod-probe-2
+      session_group: vod-movie
+      vod_object: movie.mkv
+      range: "bytes=1048576-1572863"
+      read_limit_bytes: 32768
+      post_read_action: pause
+    assert_origin:
+      active_body: 4
+      max_active_body: 4
+      max_active_tcp: 4
+      no_limit_rejections: true
+      no_evictions: true
+  - command_id: stop-vod-probe-2
+    stop: { playback_id: vod-probe-2 }
+  - command_id: stop-vod-probe-1
+    stop: { playback_id: vod-probe-1 }
+    assert_origin:
+      active_body: 3
+      max_active_body: 4
+      max_active_tcp: 4
+policy_contract:
+  user_access_control: true
+  users:
+    admission-user: { max_connections: 10 }
+  admission_strategies: []
+  provider_max_connections: 4

@@ -266,12 +266,12 @@ pub async fn parse_xtream(
                                     &stream.get_stream_id().to_string(),
                                     item_type,
                                 ),
-                                name: Arc::clone(&stream.get_name()),
-                                logo: Arc::clone(&stream.get_stream_icon()),
+                                name: stream.get_name(),
+                                logo: stream.get_stream_icon(),
                                 group: Arc::clone(category_name),
-                                title: Arc::clone(&stream.get_name()),
+                                title: stream.get_name(),
                                 url: stream_url.clone(),
-                                epg_channel_id: stream.get_epg_channel_id().clone(),
+                                epg_channel_id: stream.get_epg_channel_id(),
                                 item_type,
                                 xtream_cluster,
                                 category_id: stream.get_category_id(),
@@ -844,5 +844,18 @@ mod tests {
         assert_ne!(groups[1].id, 0);
         assert_eq!(groups[1].channels[0].header.name.as_ref(), "unknown-1");
         assert_eq!(groups[1].channels[0].header.source_ordinal, 2);
+    }
+
+    #[test]
+    fn xtream_episode_collapses_literal_null_container_extension_to_empty() {
+        let parsed: SeriesStreamDetailEpisodeProperties = serde_json::from_str(
+            r#"{"id":101,"episode_num":1,"season":1,"title":"S01E01","container_extension":"null"}"#,
+        )
+        .unwrap();
+        assert!(
+            parsed.container_extension.is_empty(),
+            "literal \"null\" must not survive as an extension, got {:?}",
+            parsed.container_extension
+        );
     }
 }

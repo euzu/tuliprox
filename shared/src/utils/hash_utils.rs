@@ -18,12 +18,12 @@ pub fn short_hash(text: &str) -> String {
 pub fn hex_encode(bytes: &[u8]) -> String { hex::encode_upper(bytes) }
 
 #[inline]
-fn hex_nibble(b: u8) -> Result<u8, ()> {
+pub fn hex_digit(b: u8) -> Option<u8> {
     match b {
-        b'0'..=b'9' => Ok(b - b'0'),
-        b'a'..=b'f' => Ok(b - b'a' + 10),
-        b'A'..=b'F' => Ok(b - b'A' + 10),
-        _ => Err(()),
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -36,8 +36,8 @@ pub fn hex_decode(hex_str: &str) -> Result<Vec<u8>, String> {
     let mut out = Vec::with_capacity(bytes.len() / 2);
     let mut i = 0;
     while i < bytes.len() {
-        let hi = hex_nibble(bytes[i]).map_err(|()| format!("invalid hex at position {i}"))?;
-        let lo = hex_nibble(bytes[i + 1]).map_err(|()| format!("invalid hex at position {}", i + 1))?;
+        let hi = hex_digit(bytes[i]).ok_or_else(|| format!("invalid hex at position {i}"))?;
+        let lo = hex_digit(bytes[i + 1]).ok_or_else(|| format!("invalid hex at position {}", i + 1))?;
         out.push((hi << 4) | lo);
         i += 2;
     }
@@ -189,8 +189,8 @@ pub fn parse_uuid_hex(s: &str) -> Option<[u8; 16]> {
         if di >= 16 || si + 1 >= src.len() {
             return None;
         }
-        let hi = hex_nibble(src[si]).ok()?;
-        let lo = hex_nibble(src[si + 1]).ok()?;
+        let hi = hex_digit(src[si])?;
+        let lo = hex_digit(src[si + 1])?;
         out[di] = (hi << 4) | lo;
         si += 2;
         di += 1;

@@ -1,30 +1,50 @@
 use crate::{
     error::TuliproxError,
     foundation::{apply_templates_to_pattern_single, get_filter, prepare_templates, Filter, MapperScript},
-    model::PatternTemplate,
+    model::{HeaderField, PatternTemplate, Prepare},
 };
 use log::trace;
 use strum_macros::{AsRefStr, Display, EnumIter, EnumString};
 
-pub const COUNTER_FIELDS: &[&str] = &["name", "title", "caption", "chno"];
+/// Header fields a counter rule may target.
+pub const COUNTER_FIELDS: &[HeaderField] =
+    &[HeaderField::Name, HeaderField::Title, HeaderField::Caption, HeaderField::Chno];
 
-pub const MAPPER_FIELDS: &[&str] = &[
-    "name",
-    "title",
-    "caption",
-    "group",
-    "id",
-    "chno",
-    "logo",
-    "logo_small",
-    "parent_code",
-    "audio_track",
-    "time_shift",
-    "rec",
-    "url",
-    "epg_channel_id",
-    "epg_id",
+/// Header fields a mapper operation may read or write.
+///
+/// One entry shorter than the string list it replaces, because that list spelled
+/// the EPG channel id twice -- `epg_channel_id` and `epg_id` -- to cover both
+/// accepted names. Aliases now resolve in `HeaderField::parse`, so the allow-list
+/// names the *field* and each spelling is handled in exactly one place.
+pub const MAPPER_FIELDS: &[HeaderField] = &[
+    HeaderField::Name,
+    HeaderField::Title,
+    HeaderField::Caption,
+    HeaderField::Group,
+    HeaderField::Id,
+    HeaderField::Chno,
+    HeaderField::Logo,
+    HeaderField::LogoSmall,
+    HeaderField::ParentCode,
+    HeaderField::AudioTrack,
+    HeaderField::TimeShift,
+    HeaderField::Rec,
+    HeaderField::Url,
+    HeaderField::EpgChannelId,
 ];
+
+/// Whether `name` resolves to one of `allowed`.
+///
+/// Note this is deliberately more permissive than the case-sensitive string
+/// `contains` it replaces: validation used to reject `NAME` even though
+/// `set_field` would have accepted it, because the accessor compared
+/// case-insensitively while the allow-list did not. Resolving through
+/// `HeaderField::parse` makes the two agree. Every previously valid config stays
+/// valid; some previously rejected ones are now accepted and behave correctly.
+#[must_use]
+pub fn is_allowed_field(name: &str, allowed: &[HeaderField]) -> bool {
+    HeaderField::parse(name).is_some_and(|field| allowed.contains(&field))
+}
 
 #[derive(
     Debug,
@@ -51,14 +71,6 @@ pub enum MappingStage {
 impl MappingStage {
     pub fn is_processing(&self) -> bool { *self == Self::Processing }
 }
-
-#[macro_export]
-macro_rules! valid_property {
-    ($key:expr, $array:expr) => {{
-        $array.contains(&$key)
-    }};
-}
-pub use valid_property;
 
 #[derive(
     Debug,
@@ -100,7 +112,8 @@ pub struct MappingCounterDefinition {
 #[derive(Debug, Clone)]
 pub struct MappingCounter {
     pub filter: Filter,
-    pub field: String,
+    /// Parsed once here rather than re-parsed per channel in the counter loop.
+    pub field: HeaderField,
     pub concat: String,
     pub modifier: CounterModifier,
     pub start: u32,
@@ -131,22 +144,24 @@ pub enum MapperOperation {
     Copy { field: String, source: String },
 }
 
-impl MapperOperation {
-    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
+impl Prepare for MapperOperation {
+    type Ctx<'a> = Option<&'a [PatternTemplate]>;
+
+    fn prepare(&mut self, templates: Self::Ctx<'_>) -> Result<(), TuliproxError> {
         match self {
             MapperOperation::Lowercase { ref field }
             | MapperOperation::Uppercase { ref field }
             | MapperOperation::Capitalize { ref field } => {
-                if !valid_property!(field.as_str(), MAPPER_FIELDS) {
+                if !is_allowed_field(field, MAPPER_FIELDS) {
                     return Err(TuliproxError::Mapper(format!("Invalid mapper attribute field {field}")));
                 }
             }
 
             MapperOperation::Copy { ref field, ref source } => {
-                if !valid_property!(field.as_str(), MAPPER_FIELDS) {
+                if !is_allowed_field(field, MAPPER_FIELDS) {
                     return Err(TuliproxError::Mapper(format!("Invalid mapper attribute field {field}")));
                 }
-                if !valid_property!(source.as_str(), MAPPER_FIELDS) {
+                if !is_allowed_field(source, MAPPER_FIELDS) {
                     return Err(TuliproxError::Mapper(format!("Invalid mapper source field {source}")));
                 }
             }
@@ -155,7 +170,7 @@ impl MapperOperation {
             | MapperOperation::Suffix { ref field, ref mut value }
             | MapperOperation::Prefix { ref field, ref mut value }
             | MapperOperation::Set { ref field, ref mut value } => {
-                if !valid_property!(field.as_str(), MAPPER_FIELDS) {
+                if !is_allowed_field(field, MAPPER_FIELDS) {
                     return Err(TuliproxError::Mapper(format!("Invalid mapper attribute field {field}")));
                 }
 
@@ -171,6 +186,8 @@ impl MapperOperation {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 pub struct MapperDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub filter: String,
     pub script: String,
     #[serde(skip_serializing, skip_deserializing)]
@@ -179,11 +196,13 @@ pub struct MapperDto {
     pub t_script: Option<MapperScript>,
 }
 
-impl MapperDto {
+impl Prepare for MapperDto {
+    type Ctx<'a> = Option<&'a [PatternTemplate]>;
+
     /// # Panics
     ///
     /// Will panic if default `RegEx` gets invalid
-    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
+    fn prepare(&mut self, templates: Self::Ctx<'_>) -> Result<(), TuliproxError> {
         self.t_filter = Some(get_filter(&self.filter, templates)?);
         let script = if templates.is_some() {
             apply_templates_to_pattern_single(&self.script, templates)?
@@ -211,26 +230,27 @@ pub struct MappingDto {
     pub templates: Option<Vec<PatternTemplate>>,
 }
 
-impl MappingDto {
-    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
+impl Prepare for MappingDto {
+    type Ctx<'a> = Option<&'a [PatternTemplate]>;
+
+    fn prepare(&mut self, templates: Self::Ctx<'_>) -> Result<(), TuliproxError> {
         self.templates = templates.map(|t| t.iter().map(PatternTemplate::clone).collect::<Vec<_>>());
-        if let Some(mapper_list) = &mut self.mapper {
-            for mapper in mapper_list {
-                mapper.prepare(templates)?;
-            }
-        }
+        // Option<Vec<MapperDto>>: the blanket impls nest, so the walk is gone.
+        self.mapper.prepare(templates)?;
 
         if let Some(counter_def_list) = &self.counter {
             let mut counters = vec![];
             for def in counter_def_list {
-                if !valid_property!(def.field.as_str(), COUNTER_FIELDS) {
+                // Resolve and check membership in one step; these used to be a
+                // string `contains` followed by a separate parse of the same name.
+                let Some(field) = HeaderField::parse(&def.field).filter(|field| COUNTER_FIELDS.contains(field)) else {
                     return Err(TuliproxError::Config(format!("Invalid counter field {}", def.field)));
-                }
+                };
                 {
                     let flt = get_filter(&def.filter, templates)?;
                     counters.push(MappingCounter {
                         filter: flt,
-                        field: def.field.clone(),
+                        field,
                         concat: def.concat.clone(),
                         modifier: def.modifier,
                         start: def.value,
@@ -251,8 +271,10 @@ pub struct MappingDefinitionDto {
     pub mapping: Vec<MappingDto>,
 }
 
-impl MappingDefinitionDto {
-    pub fn prepare(&mut self, prepared_templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
+impl Prepare for MappingDefinitionDto {
+    type Ctx<'a> = Option<&'a [PatternTemplate]>;
+
+    fn prepare(&mut self, prepared_templates: Self::Ctx<'_>) -> Result<(), TuliproxError> {
         let local_prepared_templates = if prepared_templates.is_none() {
             self.templates
                 .as_ref()
@@ -278,8 +300,10 @@ pub struct MappingsDto {
     pub mappings: MappingDefinitionDto,
 }
 
-impl MappingsDto {
-    pub fn prepare(&mut self, prepared_templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
+impl Prepare for MappingsDto {
+    type Ctx<'a> = Option<&'a [PatternTemplate]>;
+
+    fn prepare(&mut self, prepared_templates: Self::Ctx<'_>) -> Result<(), TuliproxError> {
         self.mappings.prepare(prepared_templates)
     }
 }
@@ -288,6 +312,37 @@ impl MappingsDto {
 mod tests {
     use super::*;
     use crate::model::TemplateValue;
+
+    #[test]
+    fn allow_lists_accept_both_epg_spellings_through_one_entry() {
+        // The string list needed `epg_channel_id` and `epg_id` as separate
+        // entries; the typed list has one, and parse resolves both spellings.
+        assert!(is_allowed_field("epg_channel_id", MAPPER_FIELDS));
+        assert!(is_allowed_field("epg_id", MAPPER_FIELDS));
+        assert_eq!(MAPPER_FIELDS.iter().filter(|f| **f == HeaderField::EpgChannelId).count(), 1);
+    }
+
+    #[test]
+    fn allow_lists_reject_fields_that_are_not_listed() {
+        // Valid header fields that are simply not mapper-writable.
+        assert!(!is_allowed_field("input", MAPPER_FIELDS));
+        assert!(!is_allowed_field("type", MAPPER_FIELDS));
+        // Not a header field at all.
+        assert!(!is_allowed_field("nonsense", MAPPER_FIELDS));
+        assert!(!is_allowed_field("", MAPPER_FIELDS));
+        // Counter fields are a strict subset of mapper fields.
+        assert!(is_allowed_field("chno", COUNTER_FIELDS));
+        assert!(!is_allowed_field("url", COUNTER_FIELDS));
+        assert!(COUNTER_FIELDS.iter().all(|field| MAPPER_FIELDS.contains(field)));
+    }
+
+    #[test]
+    fn allow_lists_agree_with_the_accessor_on_casing() {
+        // Previously the allow-list was case-sensitive while set_field was not,
+        // so `NAME` failed validation despite being writable. They now agree.
+        assert!(is_allowed_field("NAME", MAPPER_FIELDS));
+        assert!(is_allowed_field("Logo_Small", MAPPER_FIELDS));
+    }
 
     #[test]
     fn mapper_operation_prepare_resolves_value() {

@@ -20,7 +20,7 @@
 use shared::model::{
     permission::Permission,
     recording::{RecordingMetadata, RecordingVisibility},
-    Claims, UserId, ROLE_ADMIN,
+    Claims, UserId,
 };
 
 /// Actions the recording system distinguishes. Each action maps to one
@@ -170,8 +170,6 @@ impl RecordingDecision {
     pub fn is_allow(&self) -> bool { matches!(self, Self::Allow) }
 }
 
-fn is_admin(claims: &Claims) -> bool { claims.roles.iter().any(|r| r == ROLE_ADMIN) }
-
 /// The `username` of the synthetic `Claims` the retention worker
 /// builds to act on shared / orphan / legacy-owned recordings.
 ///
@@ -214,7 +212,7 @@ fn check_create(claims: &Claims, action: RecordingAction) -> RecordingDecision {
             if !has(claims, Permission::RecordingCreate) {
                 return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingCreate));
             }
-            if !is_admin(claims) {
+            if !claims.is_admin() {
                 return RecordingDecision::Deny(DenyReason::NotAdministrator);
             }
             RecordingDecision::Allow
@@ -265,7 +263,7 @@ pub fn authorize(
         if !has(claims, Permission::RecordingDelete) {
             return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingDelete));
         }
-        if !is_admin(claims) {
+        if !claims.is_admin() {
             // The system-retention path bypasses user ownership only
             // for eligible completed recording deletion. Operators
             // without the
@@ -289,7 +287,7 @@ pub fn authorize(
             if !has(claims, Permission::RecordingManage) {
                 return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingManage));
             }
-            if !is_admin(claims) {
+            if !claims.is_admin() {
                 return RecordingDecision::Deny(DenyReason::NotAdministrator);
             }
             return RecordingDecision::Allow;
@@ -317,7 +315,7 @@ pub fn authorize(
             if !has(claims, Permission::RecordingManage) {
                 return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingManage));
             }
-            if !is_admin(claims) {
+            if !claims.is_admin() {
                 return RecordingDecision::Deny(DenyReason::NotAdministrator);
             }
             RecordingDecision::Allow
@@ -356,7 +354,7 @@ fn check_mutate_action(
         return RecordingDecision::Deny(DenyReason::NotOwner);
     }
     // Shared visibility: only administrators may mutate.
-    if !is_admin(claims) {
+    if !claims.is_admin() {
         return RecordingDecision::Deny(DenyReason::NotAdministrator);
     }
     RecordingDecision::Allow
@@ -376,7 +374,7 @@ pub fn authorize_orphan(claims: &Claims) -> RecordingDecision {
     if is_system_principal(claims) {
         return RecordingDecision::Allow;
     }
-    if !is_admin(claims) {
+    if !claims.is_admin() {
         return RecordingDecision::Deny(DenyReason::NotAdministrator);
     }
     if !has_recording_read(claims) {
@@ -392,16 +390,15 @@ mod tests {
     use super::*;
     use shared::model::{
         recording::{AiringStatus, EpgEpisodeMetadata, RecordingOwner},
-        Claims, UserId, CURRENT_PERMISSION_SCHEMA_VERSION,
+        Claims, RoleSet, UserId, CURRENT_PERMISSION_SCHEMA_VERSION,
     };
 
     fn make_claims(
         username: &str,
         subject: Option<UserId>,
-        roles: Vec<&str>,
+        roles: RoleSet,
         perms: shared::model::permission::PermissionSet,
     ) -> Claims {
-        let roles: Vec<String> = roles.into_iter().map(String::from).collect();
         Claims {
             username: username.to_string(),
             iss: "tuliprox".to_string(),
@@ -473,7 +470,7 @@ mod tests {
 
     #[test]
     fn read_private_owner_is_allowed() {
-        let claims = make_claims("alice", Some(subject("web:alice")), vec!["WEB"], read_perms());
+        let claims = make_claims("alice", Some(subject("web:alice")), RoleSet::new(), read_perms());
         let meta = owner_meta("web:alice", RecordingVisibility::Private);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Completed, true);
         let d = authorize(
@@ -487,7 +484,7 @@ mod tests {
 
     #[test]
     fn read_private_non_owner_is_denied() {
-        let claims = make_claims("bob", Some(subject("web:bob")), vec!["WEB"], read_perms());
+        let claims = make_claims("bob", Some(subject("web:bob")), RoleSet::new(), read_perms());
         let meta = owner_meta("web:alice", RecordingVisibility::Private);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Completed, true);
         let d = authorize(
@@ -501,7 +498,7 @@ mod tests {
 
     #[test]
     fn read_shared_with_read_perm_is_allowed() {
-        let claims = make_claims("bob", Some(subject("web:bob")), vec!["WEB"], read_perms());
+        let claims = make_claims("bob", Some(subject("web:bob")), RoleSet::new(), read_perms());
         let meta = owner_meta("web:alice", RecordingVisibility::Shared);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Completed, true);
         let d = authorize(
@@ -515,7 +512,7 @@ mod tests {
 
     #[test]
     fn read_without_recording_read_perm_is_denied() {
-        let claims = make_claims("alice", Some(subject("web:alice")), vec!["WEB"], config_read_perms());
+        let claims = make_claims("alice", Some(subject("web:alice")), RoleSet::new(), config_read_perms());
         let meta = owner_meta("web:alice", RecordingVisibility::Private);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Completed, true);
         let d = authorize(
@@ -529,7 +526,7 @@ mod tests {
 
     #[test]
     fn read_private_recording_of_another_owner_is_denied() {
-        let claims = make_claims("alice", Some(subject("web:alice")), vec!["WEB"], read_perms());
+        let claims = make_claims("alice", Some(subject("web:alice")), RoleSet::new(), read_perms());
         let meta = owner_meta("web:bob", RecordingVisibility::Private);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Completed, true);
         let d = authorize(
@@ -545,7 +542,7 @@ mod tests {
 
     #[test]
     fn create_private_with_recording_create_is_allowed() {
-        let claims = make_claims("alice", Some(subject("web:alice")), vec!["WEB"], write_perms());
+        let claims = make_claims("alice", Some(subject("web:alice")), RoleSet::new(), write_perms());
         let sub = RecordingSubject::new(None, TerminalState::Active, true);
         let d = authorize(
             &claims,
@@ -558,7 +555,7 @@ mod tests {
 
     #[test]
     fn create_shared_requires_administrator_role() {
-        let claims = make_claims("alice", Some(subject("web:alice")), vec!["WEB"], read_write_perms());
+        let claims = make_claims("alice", Some(subject("web:alice")), RoleSet::new(), read_write_perms());
         let sub = RecordingSubject::new(None, TerminalState::Active, true);
         let d = authorize(
             &claims,
@@ -571,7 +568,7 @@ mod tests {
 
     #[test]
     fn create_shared_with_admin_role_and_recording_create_is_allowed() {
-        let claims = make_claims("admin", Some(UserId::builtin_admin()), vec!["ADMIN"], read_write_perms());
+        let claims = make_claims("admin", Some(UserId::builtin_admin()), RoleSet::ADMIN, read_write_perms());
         let sub = RecordingSubject::new(None, TerminalState::Active, true);
         let d = authorize(
             &claims,
@@ -586,7 +583,7 @@ mod tests {
 
     #[test]
     fn edit_private_owner_with_recording_manage_is_allowed() {
-        let claims = make_claims("alice", Some(subject("web:alice")), vec!["WEB"], write_perms());
+        let claims = make_claims("alice", Some(subject("web:alice")), RoleSet::new(), write_perms());
         let meta = owner_meta("web:alice", RecordingVisibility::Private);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Scheduled, true);
         let d = authorize(
@@ -600,7 +597,7 @@ mod tests {
 
     #[test]
     fn edit_private_non_owner_is_denied() {
-        let claims = make_claims("bob", Some(subject("web:bob")), vec!["WEB"], write_perms());
+        let claims = make_claims("bob", Some(subject("web:bob")), RoleSet::new(), write_perms());
         let meta = owner_meta("web:alice", RecordingVisibility::Private);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Scheduled, true);
         let d = authorize(
@@ -614,7 +611,7 @@ mod tests {
 
     #[test]
     fn edit_shared_requires_administrator() {
-        let claims = make_claims("alice", Some(subject("web:alice")), vec!["WEB"], write_perms());
+        let claims = make_claims("alice", Some(subject("web:alice")), RoleSet::new(), write_perms());
         let meta = owner_meta("web:alice", RecordingVisibility::Shared);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Scheduled, true);
         let d = authorize(
@@ -628,7 +625,7 @@ mod tests {
 
     #[test]
     fn delete_shared_administrator_is_allowed() {
-        let claims = make_claims("admin", Some(UserId::builtin_admin()), vec!["ADMIN"], write_perms());
+        let claims = make_claims("admin", Some(UserId::builtin_admin()), RoleSet::ADMIN, write_perms());
         let meta = make_meta(RecordingOwner::User(UserId::from("web:alice")), RecordingVisibility::Shared);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Completed, true);
         let d = authorize(
@@ -644,7 +641,7 @@ mod tests {
 
     #[test]
     fn manage_rule_requires_administrator_and_recording_manage() {
-        let claims = make_claims("alice", Some(subject("web:alice")), vec!["WEB"], write_perms());
+        let claims = make_claims("alice", Some(subject("web:alice")), RoleSet::new(), write_perms());
         let sub = RecordingSubject::new(None, TerminalState::Active, true);
         let d = authorize(
             &claims,
@@ -654,7 +651,7 @@ mod tests {
         );
         assert!(matches!(d, RecordingDecision::Deny(DenyReason::NotAdministrator)));
 
-        let admin = make_claims("admin", Some(UserId::builtin_admin()), vec!["ADMIN"], write_perms());
+        let admin = make_claims("admin", Some(UserId::builtin_admin()), RoleSet::ADMIN, write_perms());
         let d = authorize(
             &admin,
             admin.subject_id.as_ref().expect("test subject_id present"),
@@ -668,7 +665,7 @@ mod tests {
 
     #[test]
     fn system_retention_delete_requires_completed_or_failed_or_cancelled_state() {
-        let claims = make_claims("admin", Some(UserId::builtin_admin()), vec!["ADMIN"], write_perms());
+        let claims = make_claims("admin", Some(UserId::builtin_admin()), RoleSet::ADMIN, write_perms());
         let meta = owner_meta("web:alice", RecordingVisibility::Private);
         let sub_active = RecordingSubject::new(Some(&meta), TerminalState::Active, true);
         let d = authorize(
@@ -694,7 +691,7 @@ mod tests {
         // built-in admin). The policy must allow the delete even
         // though the caller is not the owner — this is the
         // owner-bypass.
-        let claims = make_claims("admin", Some(UserId::builtin_admin()), vec!["ADMIN"], write_perms());
+        let claims = make_claims("admin", Some(UserId::builtin_admin()), RoleSet::ADMIN, write_perms());
         let meta = owner_meta("web:alice", RecordingVisibility::Private);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Completed, true);
         let d = authorize(
@@ -708,7 +705,7 @@ mod tests {
 
     #[test]
     fn system_retention_delete_requires_recording_delete() {
-        let claims = make_claims("admin", Some(UserId::builtin_admin()), vec!["ADMIN"], read_perms());
+        let claims = make_claims("admin", Some(UserId::builtin_admin()), RoleSet::ADMIN, read_perms());
         let meta = owner_meta("web:alice", RecordingVisibility::Private);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Completed, true);
         let d = authorize(
@@ -722,7 +719,7 @@ mod tests {
 
     #[test]
     fn system_retention_delete_requires_administrator_role() {
-        let claims = make_claims("alice", Some(subject("web:alice")), vec!["WEB"], write_perms());
+        let claims = make_claims("alice", Some(subject("web:alice")), RoleSet::new(), write_perms());
         let meta = owner_meta("web:alice", RecordingVisibility::Private);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Completed, true);
         let d = authorize(
@@ -736,7 +733,7 @@ mod tests {
 
     #[test]
     fn system_retention_delete_fails_closed_on_invalid_path() {
-        let claims = make_claims("admin", Some(UserId::builtin_admin()), vec!["ADMIN"], write_perms());
+        let claims = make_claims("admin", Some(UserId::builtin_admin()), RoleSet::ADMIN, write_perms());
         let meta = owner_meta("web:alice", RecordingVisibility::Private);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Completed, false);
         let d = authorize(
@@ -758,7 +755,7 @@ mod tests {
         // the claims carry no subject_id; the resolved subject is the
         // argument the caller provides. The test confirms the policy
         // honors the resolved subject (the caller is the owner → Allow).
-        let claims = make_claims("alice", None, vec!["WEB"], read_perms());
+        let claims = make_claims("alice", None, RoleSet::new(), read_perms());
         let meta = owner_meta("web:alice", RecordingVisibility::Private);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Completed, true);
         let d = authorize(&claims, &subject("web:alice"), RecordingAction::Read, &sub);
@@ -769,16 +766,16 @@ mod tests {
 
     #[test]
     fn orphan_visibility_requires_administrator_and_recording_read() {
-        let web = make_claims("alice", Some(subject("web:alice")), vec!["WEB"], read_perms());
+        let web = make_claims("alice", Some(subject("web:alice")), RoleSet::new(), read_perms());
         assert!(matches!(authorize_orphan(&web), RecordingDecision::Deny(DenyReason::NotAdministrator)));
 
-        let admin = make_claims("admin", Some(UserId::builtin_admin()), vec!["ADMIN"], config_read_perms());
+        let admin = make_claims("admin", Some(UserId::builtin_admin()), RoleSet::ADMIN, config_read_perms());
         assert!(matches!(
             authorize_orphan(&admin),
             RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingRead))
         ));
 
-        let admin_ok = make_claims("admin", Some(UserId::builtin_admin()), vec!["ADMIN"], read_perms());
+        let admin_ok = make_claims("admin", Some(UserId::builtin_admin()), RoleSet::ADMIN, read_perms());
         assert!(authorize_orphan(&admin_ok).is_allow());
     }
 
@@ -805,7 +802,7 @@ mod tests {
         perms.set(Permission::RecordingManage);
         perms.set(Permission::RecordingDelete);
         perms.set(Permission::RecordingRead);
-        let claims = make_claims(SYSTEM_PRINCIPAL_USERNAME, Some(UserId::builtin_admin()), vec![ROLE_ADMIN], perms);
+        let claims = make_claims(SYSTEM_PRINCIPAL_USERNAME, Some(UserId::builtin_admin()), RoleSet::ADMIN, perms);
         assert!(is_system_principal(&claims));
     }
 
@@ -819,7 +816,7 @@ mod tests {
         perms.set(Permission::RecordingManage);
         perms.set(Permission::RecordingDelete);
         perms.set(Permission::RecordingRead);
-        let claims = make_claims("alice", Some(UserId::builtin_admin()), vec![ROLE_ADMIN], perms);
+        let claims = make_claims("alice", Some(UserId::builtin_admin()), RoleSet::ADMIN, perms);
         assert!(!is_system_principal(&claims));
     }
 
@@ -835,7 +832,7 @@ mod tests {
         perms.set(Permission::RecordingManage);
         perms.set(Permission::RecordingDelete);
         perms.set(Permission::RecordingRead);
-        let claims = make_claims(SYSTEM_PRINCIPAL_USERNAME, Some(UserId::builtin_admin()), vec![ROLE_ADMIN], perms);
+        let claims = make_claims(SYSTEM_PRINCIPAL_USERNAME, Some(UserId::builtin_admin()), RoleSet::ADMIN, perms);
         let meta = make_meta(RecordingOwner::User(UserId::from("web:alice")), RecordingVisibility::Private);
         let subject = RecordingSubject::new(Some(&meta), TerminalState::Active, false);
         assert_eq!(
@@ -850,7 +847,7 @@ mod tests {
         // lock the retention worker out of the orphan catalog. Lock in
         // the behaviour with a no-permission / no-admin system caller.
         let perms = shared::model::permission::PermissionSet::new();
-        let claims = make_claims(SYSTEM_PRINCIPAL_USERNAME, Some(UserId::builtin_admin()), vec![], perms);
+        let claims = make_claims(SYSTEM_PRINCIPAL_USERNAME, Some(UserId::builtin_admin()), RoleSet::new(), perms);
         assert_eq!(authorize_orphan(&claims), RecordingDecision::Allow);
     }
 }

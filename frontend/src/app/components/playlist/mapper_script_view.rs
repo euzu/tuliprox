@@ -123,21 +123,16 @@ fn render_null_value() -> Html {
     html! { <span class="null-value">{ "null" }</span> }
 }
 
-fn render_map_case(case: &MapCase, script: &MapperScript, format_params: &mut FormatParams) -> Html {
-    let keys_html = html! {
+fn render_joined_keys<T, F>(keys: &[T], render_key: F) -> Html
+where
+    F: Fn(&T) -> Html,
+{
+    html! {
         <>
             {
-                for case.keys.iter().enumerate().map(|(i, key)| {
-                    let item = match key {
-                        MapCaseKey::Text(text) => render_literal(text),
-                        MapCaseKey::RangeFrom(from) => html! { <span class="range">{format!("{from}..")}</span> },
-                        MapCaseKey::RangeTo(to) => html! { <span class="range">{format!("..{to}")}</span> },
-                        MapCaseKey::RangeFull(from, to) => html! { <span class="range">{format!("{from}..{to}")}</span> },
-                        MapCaseKey::RangeEq(val) => html! { <span class="range">{val.to_string()}</span> },
-                        MapCaseKey::AnyMatch => html! { <span class="any-match">{"_"}</span> },
-                    };
-
-                    if i < case.keys.len() - 1 {
+                for keys.iter().enumerate().map(|(i, key)| {
+                    let item = render_key(key);
+                    if i < keys.len() - 1 {
                         html! { <> { item } { ", " } </> }
                     } else {
                         html! { { item } }
@@ -145,18 +140,38 @@ fn render_map_case(case: &MapCase, script: &MapperScript, format_params: &mut Fo
                 })
             }
         </>
-    };
-    let has_bracket = case.keys.len() > 1;
+    }
+}
+
+fn render_case_clause(
+    keys_html: Html,
+    has_bracket: bool,
+    expression_html: Html,
+    format_params: &mut FormatParams,
+) -> Html {
     html! {
         <>
             {indent(format_params.level, true)}
             {if has_bracket {"("} else {""}}
             {keys_html}
             {if has_bracket {")"} else {""}}
-            {" => "} {render_expression(&case.expression, script, format_params)}{","}
+            {" => "} {expression_html}{","}
             {newline(format_params)}
         </>
     }
+}
+
+fn render_map_case(case: &MapCase, script: &MapperScript, format_params: &mut FormatParams) -> Html {
+    let keys_html = render_joined_keys(&case.keys, |key| match key {
+        MapCaseKey::Text(text) => render_literal(text),
+        MapCaseKey::RangeFrom(from) => html! { <span class="range">{format!("{from}..")}</span> },
+        MapCaseKey::RangeTo(to) => html! { <span class="range">{format!("..{to}")}</span> },
+        MapCaseKey::RangeFull(from, to) => html! { <span class="range">{format!("{from}..{to}")}</span> },
+        MapCaseKey::RangeEq(val) => html! { <span class="range">{val.to_string()}</span> },
+        MapCaseKey::AnyMatch => html! { <span class="any-match">{"_"}</span> },
+    });
+    let expr_html = render_expression(&case.expression, script, format_params);
+    render_case_clause(keys_html, case.keys.len() > 1, expr_html, format_params)
 }
 
 fn render_map_cases(cases: &[MapCase], script: &MapperScript, format_params: &mut FormatParams) -> Html {
@@ -266,35 +281,12 @@ fn render_assignment(
 }
 
 fn render_match_case(case: &MatchCase, script: &MapperScript, format_params: &mut FormatParams) -> Html {
-    let keys_html = html! {
-        <>
-            {
-                for case.keys.iter().enumerate().map(|(i, key)| {
-                    let item = match key {
-                        MatchCaseKey::Identifier(text) => render_identifier(text),
-                        MatchCaseKey::AnyMatch => html! { <span class="any-match">{"_"}</span> },
-                    };
-
-                    if i < case.keys.len() - 1 {
-                        html! { <> { item } { ", " } </> }
-                    } else {
-                        html! { { item } }
-                    }
-                })
-            }
-        </>
-    };
-    let has_bracket = case.keys.len() > 1;
-    html! {
-        <>
-            {indent(format_params.level, true)}
-            {if has_bracket {"("} else {""}}
-            {keys_html}
-            {if has_bracket {")"} else {""}}
-            {" => "} {render_expression(&case.expression, script, format_params)}{","}
-            {newline(format_params)}
-        </>
-    }
+    let keys_html = render_joined_keys(&case.keys, |key| match key {
+        MatchCaseKey::Identifier(text) => render_identifier(text),
+        MatchCaseKey::AnyMatch => html! { <span class="any-match">{"_"}</span> },
+    });
+    let expr_html = render_expression(&case.expression, script, format_params);
+    render_case_clause(keys_html, case.keys.len() > 1, expr_html, format_params)
 }
 
 fn render_match_cases(cases: &[MatchCase], script: &MapperScript, format_params: &mut FormatParams) -> Html {

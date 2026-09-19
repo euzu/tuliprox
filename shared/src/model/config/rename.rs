@@ -1,7 +1,7 @@
 use crate::{
     error::TuliproxError,
     foundation::apply_templates_to_pattern_single,
-    model::{ItemField, PatternTemplate},
+    model::{ItemField, PatternTemplate, Prepare},
 };
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -20,8 +20,10 @@ impl PartialEq for ConfigRenameDto {
     }
 }
 
-impl ConfigRenameDto {
-    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
+impl Prepare for ConfigRenameDto {
+    type Ctx<'a> = Option<&'a [PatternTemplate]>;
+
+    fn prepare(&mut self, templates: Self::Ctx<'_>) -> Result<(), TuliproxError> {
         if templates.is_none()
             && self.pattern.len() >= 2
             && self.pattern.starts_with('!')

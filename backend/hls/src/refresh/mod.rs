@@ -15,13 +15,13 @@
 
 use super::{
     availability_reevaluation::HlsRecoveryPressureGuardAccess,
-    begin_hls_origin_account_io,
+    begin_hls_origin_account_io_bounded,
     critical_handoff::{critical_handoff_terminal_response_is_current, retry_critical_handoff_state_access},
     deterministic_conflict::HlsDeterministicTimelineConflict,
     finish_hls_origin_account_io,
     hls_ctx::WeakHlsCtx,
-    hls_manifest_recovery_log_fields, hls_origin_headers_with_provider_session, hls_origin_log_value,
-    hls_recovery_timing_policy,
+    hls_manifest_recovery_log_fields, hls_object_body_deadline, hls_origin_headers_with_provider_session,
+    hls_origin_log_value, hls_recovery_timing_policy,
     manifest_acceptance::{HlsManifestAcceptanceState, HlsManifestAcceptanceTrigger},
     manifest_fetch::{
         deterministic_conflict_receipt_is_current, deterministic_conflict_receipt_matches,
@@ -415,7 +415,14 @@ async fn refresh_and_commit(mut request: OriginRefreshRequest, fetch_started_at_
     let provider_lease = if let Some(origin_io) = request.origin_io.as_ref() {
         let binding = request.session.read().await.origin_account_binding.clone();
         if let Some(binding) = binding {
-            match begin_hls_origin_account_io(origin_io, &request.session, &binding).await {
+            match begin_hls_origin_account_io_bounded(
+                origin_io,
+                &request.session,
+                &binding,
+                hls_object_body_deadline(request.origin_manifest_timeout_ms),
+            )
+            .await
+            {
                 Ok(guard) => {
                     debug!(
                         "HLS provider session lease joined for manifest refresh: provider={}",
@@ -799,19 +806,19 @@ async fn release_preacquired_origin_provider_handle(request: &OriginRefreshReque
     let Some(origin_io) = request.origin_io.as_ref() else {
         return;
     };
-    let Some(handle) = origin_io.take_preacquired_provider_handle().await else {
+    let Some(managed) = origin_io.take_preacquired_provider_handle() else {
         return;
     };
     let binding = request.session.read().await.origin_account_binding.clone();
     if let Some(binding) = binding {
-        origin_io.ctx.connection_manager.release_provider_handle(Some(handle)).await;
         debug!(
             "HLS provider handle released after manifest refresh: provider={} reason=refresh-not-started",
             sanitize_sensitive_info(binding.account_name.as_ref())
         );
-    } else {
-        origin_io.ctx.connection_manager.release_provider_handle(Some(handle)).await;
     }
+    // Drop the managed owner synchronously: the provider slot is released without a
+    // lossy cleanup message.
+    drop(managed);
 }
 
 async fn touch_refresh_origin_account_binding(request: &OriginRefreshRequest, reservation_refreshed: bool) {
@@ -1123,6 +1130,15 @@ async fn commit_initial_fetched_manifest(
             ))
             .await
         }
+        Err(HlsManifestCommitError::LocalRepresentationLimit(violation)) => {
+            Err(OriginManifestFetchError::LocalRepresentationLimit(violation))
+        }
+        Err(HlsManifestCommitError::MalformedTransientRepresentation) => {
+            Err(OriginManifestFetchError::MalformedTransientRepresentation)
+        }
+        Err(HlsManifestCommitError::CommitGenerationExhausted) => {
+            Err(OriginManifestFetchError::CommitGenerationExhausted)
+        }
     }
 }
 
@@ -1265,7 +1281,7 @@ async fn cancel_superseded_terminal_work_after_media_progress(
     request.hls_proxy.cancel_superseded_terminal_work_for_session(&proxy_session_id);
 }
 
-fn current_time_millis() -> u64 { chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default() }
+use tuliprox_core::utils::current_time_millis;
 
 #[cfg(test)]
 mod tests;

@@ -4,7 +4,7 @@ use crate::{
         prepare_sources_batch, read_sources_file, read_sources_file_from_path_with_templates, read_templates,
         resolve_template_and_mapping_paths,
     },
-    model::{Config, Mappings, ProcessTargets, SourcesConfig},
+    model::{CompiledMappings, Config, ProcessTargets, SourcesConfig},
     utils,
     utils::{read_mappings_file_unprepared, read_mappings_file_with_templates},
 };
@@ -32,7 +32,7 @@ pub enum ConfigFile {
 struct PreparedMappingsReload {
     mapping_file_path: String,
     mapping_files: Vec<PathBuf>,
-    mappings: Mappings,
+    mappings: CompiledMappings,
 }
 
 /// Fully prepared sources + mappings data, ready to apply without any I/O or fallible work.
@@ -143,11 +143,14 @@ impl ConfigFile {
         };
 
         match read_mappings_file_with_templates(mapping_file_path, true, prepared_templates) {
-            Ok(Some((mapping_files, mappings_cfg))) => Ok(Some(PreparedMappingsReload {
-                mapping_file_path: mapping_file_path.to_string(),
-                mapping_files,
-                mappings: Mappings::from(&mappings_cfg),
-            })),
+            Ok(Some((mapping_files, mappings_cfg))) => {
+                let mappings = CompiledMappings::try_from(&mappings_cfg)?;
+                Ok(Some(PreparedMappingsReload {
+                    mapping_file_path: mapping_file_path.to_string(),
+                    mapping_files,
+                    mappings,
+                }))
+            }
             Ok(None) => {
                 info!("No mapping file loaded {mapping_file_path}");
                 Ok(None)
@@ -292,16 +295,12 @@ impl ConfigFile {
         let mut config: Config = Config::from(config_dto);
         config.prepare(paths.config_path.as_str(), paths.home_path.as_str())?;
 
-        // Compute effective runtime paths for the NEW config before apply.
-        // This ensures prepare-phase reads/validates against the same files that will be active after apply.
+        // Resolve the paths that will be active if this configuration is applied.
         let mut effective_paths = paths.as_ref().clone();
         effective_paths.mapping_file_path = Some(next_mapping_path.clone());
         effective_paths.template_file_path = Some(next_template_path.clone());
 
-        // ── PREPARE PHASE ────────────────────────────────────────────
-        // All dependent data is loaded/validated here, using the NEW config values
-        // but without touching any live state. If anything fails, we return an error
-        // and the currently-running state remains completely unchanged.
+        // Load and validate dependent data without changing live state.
         let follow_up: PreparedFollowUp = if template_changed {
             // Template path changed -> sources depend on new templates, reload everything.
             let prepared = Self::prepare_sources_reload_with_config(&config, &effective_paths).await?;
@@ -323,8 +322,7 @@ impl ConfigFile {
         let previous_sources: SourcesConfig = (*app_state.app_config.sources.load_full()).clone();
         let previous_forced_targets = app_state.forced_targets.load_full();
 
-        // ── APPLY PHASE ──────────────────────────────────────────────
-        // All preparation succeeded — safe to update live state now.
+        // Update live state only after every dependent value has been prepared.
         if let Err(err) = update_app_state_config(app_state, config).await {
             error!("Failed to apply config reload: {err}. Attempting config rollback.");
             if let Err(rollback_err) = update_app_state_config(app_state, previous_config).await {
@@ -382,6 +380,11 @@ impl ConfigFile {
 
     pub(crate) async fn reload(&self, file_path: &Path, app_state: &Arc<AppState>) -> Result<(), TuliproxError> {
         debug!("File change detected {}", file_path.display());
+        // Channels and templates are built once and cached, so an edited
+        // token, URL or template would otherwise not take effect until a
+        // restart.
+        tuliprox_messaging::channels::invalidate();
+        tuliprox_messaging::render::invalidate_cache();
         match self {
             ConfigFile::ApiProxy => {
                 ConfigFile::load_api_proxy(app_state).await?;
@@ -414,7 +417,7 @@ impl ConfigFile {
 mod tests {
     use super::refresh_forced_targets;
     use crate::model::{ConfigSource, ConfigTarget, ProcessTargets, SourcesConfig};
-    use shared::{foundation::Filter, model::ProcessingOrder};
+    use shared::model::ProcessingOrder;
     use std::sync::Arc;
 
     fn target(id: u16, name: &str) -> Arc<ConfigTarget> {
@@ -424,13 +427,14 @@ mod tests {
             name: name.to_string(),
             options: None,
             sort: None,
-            filter: Filter::default(),
+            filter: crate::model::StagedFilter::default(),
             output: vec![],
             rename: None,
             mapping_ids: None,
             mapping: Arc::default(),
             favourites: None,
             processing_order: ProcessingOrder::default(),
+            execution_plan: crate::model::TargetExecutionPlan::default(),
             watch: None,
             use_memory_cache: false,
         })

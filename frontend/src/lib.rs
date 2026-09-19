@@ -1,13 +1,9 @@
 // Shared clippy policy: see [workspace.lints.clippy] in the root Cargo.toml.
 //
-// `clippy::all` + `clippy::pedantic` reach this crate for the first time. Everything
-// with a machine-applicable fix has already been applied via `cargo clippy --fix`.
-// What remains needs hand edits inside Yew `html!` macro bodies and view state,
-// which this policy must not touch: it is a behaviour-preserving lint-policy
-// change, not a frontend rewrite.
-//
-// The list below is tracked debt, not workspace policy — the backend is held
-// to the full policy without any such list.
+// Machine-applicable fixes have already been applied. The remaining allowances
+// cover established Yew view and callback patterns that require deliberate UI
+// changes rather than mechanical rewrites. They are local to this crate; other
+// workspace crates inherit the strict policy without this list.
 #![allow(clippy::cast_precision_loss)] // integer -> f64 for chart/layout maths
 #![allow(clippy::cast_possible_truncation)] // f64 -> integer pixel coordinates
 #![allow(clippy::cast_sign_loss)] // clamped non-negative pixel/scroll values

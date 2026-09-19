@@ -24,6 +24,7 @@ BRANCH="$1"
 case "$BRANCH" in
     master)  TAG_SUFFIX="latest" ;;
     develop) TAG_SUFFIX="dev"    ;;
+    experimental) TAG_SUFFIX="experimental" ;;
     *) echo "🧨 Error: Branch '$BRANCH' not supported"; exit 1 ;;
 esac
 
@@ -130,20 +131,25 @@ REPO_OWNER_LC="${REPO_OWNER,,}"
 
 for IMAGE_NAME in "${!MULTI_PLATFORM_IMAGES[@]}"; do
     BUILD_TARGET="${MULTI_PLATFORM_IMAGES[$IMAGE_NAME]}"
-    TAG_VERSION="ghcr.io/${REPO_OWNER_LC}/${IMAGE_NAME}:${VERSION}"
     TAG_BRANCH="ghcr.io/${REPO_OWNER_LC}/${IMAGE_NAME}:${TAG_SUFFIX}"
+    if [ "$BRANCH" = "experimental" ]; then
+        # Experimental images must not overwrite official release version tags
+        TAG_VERSION="ghcr.io/${REPO_OWNER_LC}/${IMAGE_NAME}:experimental-${VERSION}"
+    else
+        TAG_VERSION="ghcr.io/${REPO_OWNER_LC}/${IMAGE_NAME}:${VERSION}"
+    fi
 
     echo "🎯 Building multi-platform image: ${IMAGE_NAME}"
 
     # THE FIX: Using type=gha for automatic GitHub Actions cache management.
-    # No more local files, no more leftover artifacts.
+    # Scoped per branch/tag_suffix to avoid cache pollution between develop and experimental.
     docker buildx build -f Dockerfile.manual \
         -t "${TAG_VERSION}" \
         -t "${TAG_BRANCH}" \
         --target "$BUILD_TARGET" \
         --platform "linux/amd64,linux/arm64" \
-        --cache-from "type=gha,scope=${IMAGE_NAME}" \
-        --cache-to "type=gha,mode=max,scope=${IMAGE_NAME}" \
+        --cache-from "type=gha,scope=${IMAGE_NAME}-${TAG_SUFFIX}" \
+        --cache-to "type=gha,mode=max,scope=${IMAGE_NAME}-${TAG_SUFFIX}" \
         --push \
         .
 done

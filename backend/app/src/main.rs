@@ -28,8 +28,8 @@ extern crate pest;
 // `api` used to be declared by an `include_modules!()` macro. rustfmt does not
 // expand macros, so it never walked into this module and silently skipped every
 // file under `api/` - `cargo fmt --all -- --check` passed on unformatted code.
-// Declaring the module directly is what puts that subtree back under the gate.
 pub mod api;
+mod env_loader;
 
 // The media-server anti-corruption layer is its own package; aliased under its
 // historical module name so `crate::media_server::X` paths keep resolving.
@@ -38,7 +38,7 @@ use crate::{
     auth::generate_password,
     library::{LibraryProcessor, MediaToolProbes},
     model::{AppConfig, Config, Healthcheck, HealthcheckConfig, ProcessTargets, SourcesConfig},
-    processing::processor::exec_processing,
+    processing::processor::{exec_processing, ProcessingRun},
     repository::{db_viewer, run_startup_migrations},
     utils::{config_file_reader, init_logger, request::create_client, resolve_env_var},
 };
@@ -64,7 +64,6 @@ use tuliprox_core::{model, utils};
 use tuliprox_iptv as iptv;
 use tuliprox_library::library;
 use tuliprox_media_server as media_server;
-use tuliprox_messaging as messaging;
 use tuliprox_mpegts as mpegts;
 use tuliprox_processing as processing;
 use tuliprox_repository as repository;
@@ -76,6 +75,10 @@ use tuliprox_repository as repository;
 #[command(version)]
 #[command(about = "Extended playlist proxy", long_about = None)]
 struct Args {
+    /// Path to .env file for environment variable overrides
+    #[arg(short = 'e', long = "env-file")]
+    env_file: Option<String>,
+
     /// The home directory (base for config, storage, backup, downloads)
     #[arg(short = 'H', long = "home")]
     home: Option<String>,
@@ -151,6 +154,22 @@ struct Args {
     /// Query stream history (inline JSON or @file.json)
     #[arg(long = "sh")]
     stream_history: Option<String>,
+
+    /// Migrate a single B+Tree database file to V3 format
+    #[arg(long = "migrate-db")]
+    migrate_db: Option<PathBuf>,
+
+    /// Inspect a B+Tree database file (version, entries, corruption detection)
+    #[arg(long = "inspect-db")]
+    inspect_db: Option<PathBuf>,
+
+    /// Explicit database type for migrate-db or inspect-db (series, xtream, m3u, epg, etc.)
+    #[arg(long = "db-type")]
+    db_type: Option<String>,
+
+    /// Skip creating a backup file before migration
+    #[arg(long = "no-backup", default_value_t = false)]
+    no_backup: bool,
 }
 
 impl Args {
@@ -166,7 +185,7 @@ impl Args {
     }
 }
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD_TIMESTAMP: &str = env!("VERGEN_BUILD_TIMESTAMP");
 
 // #[cfg(not(target_env = "msvc"))]
@@ -177,10 +196,112 @@ const BUILD_TIMESTAMP: &str = env!("VERGEN_BUILD_TIMESTAMP");
 // #[export_name = "malloc_conf"]
 // pub static malloc_conf: &[u8] = b"lg_prof_interval:25,prof:true,prof_leak:true,prof_active:true,prof_prefix:/tmp/jeprof\0";
 
+fn format_hex_id(id: &[u8; 16]) -> String {
+    use std::fmt::Write;
+    let mut hex = String::with_capacity(32);
+    for b in id {
+        let _ = write!(hex, "{b:02x}");
+    }
+    hex
+}
+
+fn handle_inspect_db(db_path: &Path, db_type: Option<&str>) {
+    match repository::inspect_single_database(db_path, db_type) {
+        Ok(report) => {
+            println!("=== B+Tree Database Inspection ===");
+            println!("Path:              {}", report.path.display());
+            println!("File Size:         {} bytes", report.file_size);
+            if let Some(v) = report.version {
+                println!("Storage Version:   V{v}");
+            } else {
+                println!("Storage Version:   Not a B+Tree file");
+            }
+            println!("Database Type:     {}", report.kind);
+            println!("Healthy Entries:   {}", report.live_entries);
+            if report.corrupted_entries > 0 {
+                println!(
+                    "Corrupted Entries: {} (corrupted LZ4 blocks or deserialization errors)",
+                    report.corrupted_entries
+                );
+            } else {
+                println!("Corrupted Entries: 0");
+            }
+            if let Some(id) = report.database_id {
+                println!("Database ID:       {}", format_hex_id(&id));
+            }
+            if let Some(gen) = report.generation {
+                println!("Generation:        {gen}");
+            }
+            std::process::exit(0);
+        }
+        Err(err) => {
+            eprintln!("Error inspecting database: {err}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn handle_migrate_db(db_path: &Path, db_type: Option<&str>, no_backup: bool) {
+    let make_backup = !no_backup;
+    match repository::migrate_single_database(db_path, db_type, make_backup) {
+        Ok(report) => {
+            if report.already_current {
+                println!(
+                    "Database is already at storage version 3 (current). No migration needed: {}",
+                    report.path.display()
+                );
+                std::process::exit(0);
+            }
+            println!("=== B+Tree Database Migration Complete ===");
+            println!("Path:              {}", report.path.display());
+            println!("Version:           V{} -> V{}", report.original_version, report.target_version);
+            println!("Database Type:     {}", report.kind);
+            if let Some(ref bp) = report.backup_path {
+                println!("Backup Created:    {}", bp.display());
+            }
+            println!("Recovered Entries: {}", report.live_entries);
+            if report.corrupted_entries > 0 {
+                println!("Corrupted Skipped: {} (unreadable records safely bypassed)", report.corrupted_entries);
+            } else {
+                println!("Corrupted Skipped: 0");
+            }
+            println!("Database ID:       {}", format_hex_id(&report.database_id));
+            println!("Generation:        {}", report.generation);
+            println!("Status:            SUCCESS (valid V3 database)");
+            std::process::exit(0);
+        }
+        Err(err) => {
+            eprintln!("Error migrating database: {err}");
+            std::process::exit(1);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     api::api_utils::init_uptime_clock();
     let args = Args::parse();
+
+    let loaded_env = match env_loader::load_env_file(
+        args.env_file.as_deref(),
+        args.config_file.as_deref(),
+        args.config_path.as_deref(),
+        args.home.as_deref(),
+    ) {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(1);
+        }
+    };
+
+    if let Some(ref db_path) = args.inspect_db {
+        handle_inspect_db(db_path, args.db_type.as_deref());
+    }
+
+    if let Some(ref db_path) = args.migrate_db {
+        handle_migrate_db(db_path, args.db_type.as_deref(), args.no_backup);
+    }
 
     db_viewer(&args.db_viewer_args());
 
@@ -199,6 +320,9 @@ async fn main() {
     let mut config_paths = get_file_paths(&args);
 
     init_logger(args.log_level.as_deref(), config_paths.config_file_path.as_str());
+    if let Some(ref env_path) = loaded_env {
+        info!("Loaded environment from: {}", env_path.display());
+    }
 
     if args.healthcheck {
         let healthy = healthcheck(config_paths.config_file_path.as_str()).await;
@@ -246,7 +370,7 @@ async fn main() {
     let app_config = crate::config_loader::read_initial_app_config(&mut config_paths, true, true, args.server)
         .await
         .unwrap_or_else(|err| exit!("{err}"));
-    print_info(&app_config).await;
+    print_info(&app_config, loaded_env.as_deref()).await;
 
     let sources = <Arc<ArcSwap<SourcesConfig>> as Access<SourcesConfig>>::load(&app_config.sources);
     let targets = sources.validate_targets(args.target.as_ref()).unwrap_or_else(|err| exit!("{err}"));
@@ -258,12 +382,15 @@ async fn main() {
     }
 }
 
-async fn print_info(app_config: &AppConfig) {
+async fn print_info(app_config: &AppConfig, loaded_env: Option<&Path>) {
     let config = <Arc<ArcSwap<Config>> as Access<Config>>::load(&app_config.config);
     let paths = <Arc<ArcSwap<ConfigPaths>> as Access<ConfigPaths>>::load(&app_config.paths);
     info!("Current time: {}", chrono::offset::Local::now().format("%Y-%m-%d %H:%M:%S"));
     info!("Temp dir: {}", tempfile::env::temp_dir().display());
     info!("Storage dir: {}", config.storage_dir);
+    if let Some(env_path) = loaded_env {
+        info!("Environment file: {}", env_path.display());
+    }
     info!("Config dir: {}", paths.config_path);
     info!("Config file: {}", paths.config_file_path);
     info!("Source file: {}", paths.sources_file_path);
@@ -400,10 +527,11 @@ async fn start_in_cli_mode(cfg: Arc<AppConfig>, targets: Arc<ProcessTargets>) {
         reqwest::Client::new()
     });
     // In CLI mode, we don't start background managers for events or providers
-    exec_processing(&client, cfg, targets, None, None, None, None, None, None, None, None, None).await;
+    exec_processing(ProcessingRun::new(client, cfg, targets, shared::model::NoopSink)).await;
 }
 
 async fn start_in_server_mode(cfg: Arc<AppConfig>, targets: Arc<ProcessTargets>) {
+    tuliprox_core::utils::runtime_liveness::start(&tokio::runtime::Handle::current());
     if let Err(err) = api::main_api::start_server(cfg, targets).await {
         exit!("Can't start server: {err}");
     }

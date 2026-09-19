@@ -1,17 +1,22 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::fmt;
 
 // Enum for Video Resolution
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default, strum_macros::Display)]
 pub enum VideoResolution {
     #[default]
+    #[strum(to_string = "")]
     Unknown,
     SD,
+    #[strum(to_string = "720p HD")]
     P720,
+    #[strum(to_string = "1080p FHD")]
     P1080,
+    #[strum(to_string = "1440p QHD")]
     P1440,
+    #[strum(to_string = "2160p 4K")]
     P2160, // 4K
+    #[strum(to_string = "4320p 8K")]
     P4320, // 8K
 }
 
@@ -48,49 +53,27 @@ impl VideoResolution {
     }
 }
 
-impl fmt::Display for VideoResolution {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            VideoResolution::SD => write!(f, "SD"),
-            VideoResolution::P720 => write!(f, "720p HD"),
-            VideoResolution::P1080 => write!(f, "1080p FHD"),
-            VideoResolution::P1440 => write!(f, "1440p QHD"),
-            VideoResolution::P2160 => write!(f, "2160p 4K"),
-            VideoResolution::P4320 => write!(f, "4320p 8K"),
-            VideoResolution::Unknown => write!(f, ""),
-        }
-    }
-}
-
 // Enum for Video Codec
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, strum_macros::Display)]
 pub enum VideoCodec {
     #[default]
+    #[strum(to_string = "")]
     Other,
+    #[strum(to_string = "H.264")]
     H264,
+    #[strum(to_string = "HEVC")]
     H265,
     MPEG4,
+    #[strum(to_string = "VC-1")]
     VC1,
     AV1,
 }
 
-impl fmt::Display for VideoCodec {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            VideoCodec::H264 => write!(f, "H.264"), // or AVC
-            VideoCodec::H265 => write!(f, "HEVC"),  // or x265
-            VideoCodec::MPEG4 => write!(f, "MPEG4"),
-            VideoCodec::VC1 => write!(f, "VC-1"),
-            VideoCodec::AV1 => write!(f, "AV1"),
-            VideoCodec::Other => write!(f, ""),
-        }
-    }
-}
-
 // Enum for Audio Codec
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, strum_macros::Display)]
 pub enum AudioCodec {
     #[default]
+    #[strum(to_string = "")]
     Other,
     AAC,
     AC3,
@@ -100,47 +83,27 @@ pub enum AudioCodec {
     FLAC,
 }
 
-impl fmt::Display for AudioCodec {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            AudioCodec::AAC => write!(f, "AAC"),
-            AudioCodec::AC3 => write!(f, "AC3"),
-            AudioCodec::EAC3 => write!(f, "EAC3"),
-            AudioCodec::DTS => write!(f, "DTS"),
-            AudioCodec::TrueHD => write!(f, "TrueHD"),
-            AudioCodec::FLAC => write!(f, "FLAC"),
-            AudioCodec::Other => write!(f, ""),
-        }
-    }
-}
-
 // Enum for Audio Channels
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, strum_macros::Display)]
 pub enum AudioChannels {
     #[default]
+    #[strum(to_string = "")]
     Unknown,
+    #[strum(to_string = "1.0")]
     Mono,
+    #[strum(to_string = "2.0")]
     Stereo,
+    #[strum(to_string = "5.1")]
     Surround51,
+    #[strum(to_string = "7.1")]
     Surround71,
 }
 
-impl fmt::Display for AudioChannels {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            AudioChannels::Mono => write!(f, "1.0"),
-            AudioChannels::Stereo => write!(f, "2.0"),
-            AudioChannels::Surround51 => write!(f, "5.1"),
-            AudioChannels::Surround71 => write!(f, "7.1"),
-            AudioChannels::Unknown => write!(f, ""),
-        }
-    }
-}
-
 // Enum for Video Dynamic Range
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, strum_macros::Display)]
 pub enum VideoDynamicRange {
     #[default]
+    #[strum(to_string = "")]
     SDR,
     HDR,
     HDR10,
@@ -148,32 +111,13 @@ pub enum VideoDynamicRange {
     DV, // Dolby Vision
 }
 
-impl fmt::Display for VideoDynamicRange {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            VideoDynamicRange::SDR => write!(f, ""), // Don't explicitly tag SDR
-            VideoDynamicRange::HDR => write!(f, "HDR"),
-            VideoDynamicRange::HDR10 => write!(f, "HDR10"),
-            VideoDynamicRange::HLG => write!(f, "HLG"),
-            VideoDynamicRange::DV => write!(f, "DV"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, strum_macros::Display)]
 pub enum VideoBitDepth {
     #[default]
+    #[strum(to_string = "")]
     Eight,
+    #[strum(to_string = "10bit")]
     Ten,
-}
-
-impl fmt::Display for VideoBitDepth {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            VideoBitDepth::Eight => write!(f, ""),
-            VideoBitDepth::Ten => write!(f, "10bit"),
-        }
-    }
 }
 
 /// A struct that holds all classified media quality features.

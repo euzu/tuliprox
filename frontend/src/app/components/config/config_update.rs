@@ -164,7 +164,7 @@ mod tests {
     use shared::model::{
         view_type::ViewType, ConfigDto, ContentSecurityPolicyConfigDto, DiskAlertConfigDto, HdHomeRunConfigDto,
         HdHomeRunDeviceConfigDto, LibraryConfigDto, LibraryScanDirectoryDto, MessagingConfigDto,
-        MetadataUpdateConfigDto, MsgKind, ProxyConfigDto, RecordingConfigDto, RecordingDiskConfigDto,
+        MetadataUpdateConfigDto, ProxyConfigDto, RecordingConfigDto, RecordingDiskConfigDto,
         RecordingNotificationConfigDto, RecordingQuotaConfigDto, RecordingRetentionConfigDto, StreamInfoConfigDto,
         VideoConfigDto, WebAuthConfigDto, WebUiConfigDto,
     };
@@ -545,7 +545,7 @@ mod tests {
             vec![ConfigForm::Messaging(
                 true,
                 MessagingConfigDto {
-                    notify_on: vec![MsgKind::DiskAlert],
+                    notify_on: vec!["system.disk.alert".to_string()],
                     disk_alert: Some(DiskAlertConfigDto::default()),
                     ..Default::default()
                 },
@@ -568,7 +568,7 @@ mod tests {
             vec![ConfigForm::Messaging(
                 true,
                 MessagingConfigDto {
-                    notify_on: vec![MsgKind::DiskAlert],
+                    notify_on: vec!["system.disk.alert".to_string()],
                     disk_alert: Some(disk_alert.clone()),
                     ..Default::default()
                 },

@@ -13,6 +13,7 @@ shared = { workspace = true }
 tuliprox-core = { workspace = true }
 tuliprox-repository = { workspace = true }
 arc-swap.workspace = true
+blake3.workspace = true
 chrono.workspace = true
 log.workspace = true
 serde.workspace = true

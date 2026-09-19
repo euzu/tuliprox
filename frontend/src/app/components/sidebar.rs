@@ -205,7 +205,13 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                 <MenuItem class={if active_menu == ViewType::StreamHistory { "active" } else {""}} icon="Log" name={ViewType::StreamHistory.to_string()} label={translate.t("LABEL.STREAM_HISTORY")} onclick={&handle_menu_click}></MenuItem>
             })}
             {html_if!(
-                auth.has_any_permissions(Permission::ConfigRead | Permission::SourceRead | Permission::UserRead),
+                auth.has_any_permissions(
+                    Permission::ConfigRead
+                        | Permission::SourceRead
+                        | Permission::UserRead
+                        | Permission::UserWrite
+                        | Permission::PlaylistRead,
+                ),
                 {
                     <CollapsePanel title={translate.t("LABEL.SETTINGS")}>
                       {html_if!(auth.is_admin(), {
@@ -214,17 +220,17 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                       {html_if!(auth.has_permission(Permission::ConfigRead), {
                           <MenuItem class={if active_menu == ViewType::Config { "active" } else {""}} icon="Config" name={ViewType::Config.to_string()} label={translate.t("LABEL.CONFIG")}  onclick={&handle_menu_click}></MenuItem>
                       })}
-                      {html_if!(auth.has_permission(Permission::UserRead), {
+                      {html_if!(auth.has_any_permissions(Permission::UserRead | Permission::UserWrite), {
                           <MenuItem class={if active_menu == ViewType::Users { "active" } else {""}} icon="UserOutline" name={ViewType::Users.to_string()} label={translate.t("LABEL.USER")} onclick={&handle_menu_click}></MenuItem>
                       })}
                       {html_if!(auth.has_permission(Permission::ConfigRead), {
                           <MenuItem class={if active_menu == ViewType::Plans { "active" } else {""}} icon="Group" name={ViewType::Plans.to_string()} label={translate.t("LABEL.PLANS")} onclick={&handle_menu_click}></MenuItem>
                       })}
                       {html_if!(auth.has_permission(Permission::SourceRead), {
-                          <>
                           <MenuItem class={if active_menu == ViewType::SourceEditor { "active" } else {""}} icon="SourceEditor" name={ViewType::SourceEditor.to_string()} label={translate.t("LABEL.SOURCE_EDITOR")}  onclick={&handle_menu_click}></MenuItem>
+                      })}
+                      {html_if!(auth.has_any_permissions(Permission::SourceRead | Permission::PlaylistRead), {
                           <MenuItem class={if active_menu == ViewType::PlaylistSettings { "active" } else {""}} icon="PlayArrowOutline" name={ViewType::PlaylistSettings.to_string()} label={translate.t("LABEL.PLAYLIST")} onclick={&handle_menu_click}></MenuItem>
-                          </>
                       })}
                     </CollapsePanel>
                 }
@@ -237,7 +243,9 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                           <MenuItem class={if active_menu == ViewType::PlaylistUpdate { "active" } else {""}} icon="Refresh" name={ViewType::PlaylistUpdate.to_string()} label={translate.t("LABEL.UPDATE")} onclick={&handle_menu_click}></MenuItem>
                       })}
                       {html_if!(auth.has_permission(Permission::PlaylistRead), {
+                          <>
                           <MenuItem class={if active_menu == ViewType::PlaylistExplorer { "active" } else {""}} icon="Live" name={ViewType::PlaylistExplorer.to_string()} label={translate.t("LABEL.PLAYLIST_VIEWER")} onclick={&handle_menu_click}></MenuItem>
+                          </>
                       })}
                       {html_if!(auth.has_permission(Permission::EpgRead), {
                           <MenuItem class={if active_menu == ViewType::PlaylistEpg { "active" } else {""}} icon="Epg" name={ViewType::PlaylistEpg.to_string()} label={translate.t("LABEL.PLAYLIST_EPG")} onclick={&handle_menu_click}></MenuItem>
@@ -273,7 +281,13 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                 <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::StreamHistory, if active_menu == ViewType::StreamHistory { " active" } else {""})} icon="Log" name={ViewType::StreamHistory.to_string()} hint={translate.t("LABEL.STREAM_HISTORY")} aria_label={translate.t("LABEL.STREAM_HISTORY")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(
-                auth.has_any_permissions(Permission::ConfigRead | Permission::SourceRead | Permission::UserRead),
+                auth.has_any_permissions(
+                    Permission::ConfigRead
+                        | Permission::SourceRead
+                        | Permission::UserRead
+                        | Permission::UserWrite
+                        | Permission::PlaylistRead,
+                ),
                 {
                     <span class="tp__app-sidebar__content-space"></span>
                 }
@@ -284,17 +298,17 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
             {html_if!(auth.has_permission(Permission::ConfigRead), {
                 <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Config, if active_menu == ViewType::Config { " active" } else {""})} icon="Config" name={ViewType::Config.to_string()} hint={translate.t("LABEL.CONFIG")} aria_label={translate.t("LABEL.CONFIG")} onclick={&handle_menu_click}></IconButton>
             })}
-            {html_if!(auth.has_permission(Permission::UserRead), {
+            {html_if!(auth.has_any_permissions(Permission::UserRead | Permission::UserWrite), {
                 <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Users, if active_menu == ViewType::Users { " active" } else {""})} icon="UserOutline" name={ViewType::Users.to_string()} hint={translate.t("LABEL.USER")} aria_label={translate.t("LABEL.USER")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(auth.has_permission(Permission::ConfigRead), {
                 <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Plans, if active_menu == ViewType::Plans { " active" } else {""})} icon="Group" name={ViewType::Plans.to_string()} hint={translate.t("LABEL.PLANS")} aria_label={translate.t("LABEL.PLANS")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(auth.has_permission(Permission::SourceRead), {
-                <>
                 <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::SourceEditor, if active_menu == ViewType::SourceEditor { " active" } else {""})} icon="SourceEditor" name={ViewType::SourceEditor.to_string()} hint={translate.t("LABEL.SOURCE_EDITOR")} aria_label={translate.t("LABEL.SOURCE_EDITOR")} onclick={&handle_menu_click}></IconButton>
+            })}
+            {html_if!(auth.has_any_permissions(Permission::SourceRead | Permission::PlaylistRead), {
                 <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistSettings, if active_menu == ViewType::PlaylistSettings { " active" } else {""})} icon="PlayArrowOutline" name={ViewType::PlaylistSettings.to_string()} hint={translate.t("LABEL.PLAYLIST")} aria_label={translate.t("LABEL.PLAYLIST")} onclick={&handle_menu_click}></IconButton>
-                </>
             })}
             {html_if!(
                 auth.has_any_permissions(Permission::PlaylistRead | Permission::PlaylistWrite | Permission::EpgRead),
@@ -306,7 +320,9 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                 <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistUpdate, if active_menu == ViewType::PlaylistUpdate { " active" } else {""})} icon="Refresh" name={ViewType::PlaylistUpdate.to_string()} hint={translate.t("LABEL.UPDATE")} aria_label={translate.t("LABEL.UPDATE")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(auth.has_permission(Permission::PlaylistRead), {
+               <>
                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistExplorer, if active_menu == ViewType::PlaylistExplorer { " active" } else {""})} icon="Live" name={ViewType::PlaylistExplorer.to_string()} hint={translate.t("LABEL.PLAYLIST_VIEWER")} aria_label={translate.t("LABEL.PLAYLIST_VIEWER")} onclick={&handle_menu_click}></IconButton>
+               </>
             })}
             {html_if!(auth.has_permission(Permission::EpgRead), {
                 <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistEpg, if active_menu == ViewType::PlaylistEpg { " active" } else {""})} icon="Epg" name={ViewType::PlaylistEpg.to_string()} hint={translate.t("LABEL.PLAYLIST_EPG")} aria_label={translate.t("LABEL.PLAYLIST_EPG")} onclick={&handle_menu_click}></IconButton>

@@ -44,11 +44,14 @@ field_comparison_value = _{ regexp }
 field_comparison = { field ~ "~" ~ field_comparison_value }
 str_op = { "!=" | "=" | ^"contains" | ^"startswith" }
 string_comparison = { field ~ str_op ~ regexp }
+presence_negation = { ^"not" }
+presence_op = { (^"is" ~ presence_negation?) | "!=" | "=" }
+presence_comparison = { field ~ presence_op ~ ^"empty" }
 num_op = { ">=" | "<=" | "!=" | ">" | "<" | "=" }
 numeric_comparison = { numeric_field ~ num_op ~ number }
 set_values = { regexp ~ ("," ~ regexp)* }
 set_comparison = { field ~ ^"in" ~ "[" ~ set_values ~ "]" }
-comparison = { field_comparison | type_comparison | numeric_comparison | set_comparison | string_comparison }
+comparison = { field_comparison | type_comparison | numeric_comparison | set_comparison | presence_comparison | string_comparison }
 bool_op = { and | or }
 expr_group = { "(" ~ expr ~ ")" }
 basic_expr = _{ comparison | expr_group }
@@ -73,6 +76,21 @@ pub enum StringOperator {
     NotEq,
     Contains,
     StartsWith,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PresenceOperator {
+    IsEmpty,
+    IsNotEmpty,
+}
+
+impl std::fmt::Display for PresenceOperator {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::IsEmpty => "IS EMPTY",
+            Self::IsNotEmpty => "IS NOT EMPTY",
+        })
+    }
 }
 
 impl std::fmt::Display for StringOperator {
@@ -139,6 +157,7 @@ pub enum Filter {
     FieldComparison(ItemField, CompiledRegex),
     TypeComparison(ItemField, PlaylistItemType),
     StringComparison(ItemField, StringOperator, String),
+    PresenceComparison(ItemField, PresenceOperator),
     NumericComparison(ItemField, NumericOperator, u32),
     SetComparison(ItemField, Vec<String>),
     UnaryExpression(UnaryOperator, Box<Filter>),
@@ -263,6 +282,13 @@ impl Filter {
                 }
                 is_match
             }
+            Self::PresenceComparison(field, op) => {
+                let is_empty = provider.get_filter_value(*field).is_none_or(|value| value.is_empty());
+                match op {
+                    PresenceOperator::IsEmpty => is_empty,
+                    PresenceOperator::IsNotEmpty => !is_empty,
+                }
+            }
             Self::NumericComparison(field, op, value) => {
                 let actual = match field {
                     ItemField::Chno => provider.pli.header.chno,
@@ -336,6 +362,7 @@ impl std::fmt::Display for Filter {
             Self::StringComparison(field, op, value) => {
                 write!(f, "{field} {op} \"{}\"", value.replace('"', "\\\""))
             }
+            Self::PresenceComparison(field, op) => write!(f, "{field} {op}"),
             Self::NumericComparison(field, op, value) => {
                 write!(f, "{field} {op} {value}")
             }
@@ -449,6 +476,24 @@ fn get_parser_string_comparison(
     Ok(Filter::StringComparison(field, op, value))
 }
 
+fn get_parser_presence_comparison(expr: Pair<Rule>) -> Result<Filter, TuliproxError> {
+    let mut expr_inner = expr.into_inner();
+    let field = get_parser_item_field(
+        &expr_inner
+            .next()
+            .ok_or_else(|| TuliproxError::FilterParse("presence comparison is missing a field".to_string()))?,
+    )?;
+    let operator = expr_inner
+        .next()
+        .ok_or_else(|| TuliproxError::FilterParse("presence comparison is missing an operator".to_string()))?;
+    let op = if operator.as_str() == "!=" || operator.as_str().split_whitespace().count() > 1 {
+        PresenceOperator::IsNotEmpty
+    } else {
+        PresenceOperator::IsEmpty
+    };
+    Ok(Filter::PresenceComparison(field, op))
+}
+
 fn get_parser_numeric_comparison(expr: Pair<Rule>) -> Result<Filter, TuliproxError> {
     let mut expr_inner = expr.into_inner();
     let field_pair = expr_inner.next().unwrap();
@@ -559,6 +604,10 @@ fn get_parser_expression(
                 }
             }
             Rule::string_comparison => match get_parser_string_comparison(pair, templates) {
+                Ok(comp) => handle_expr!(bop, uop, stmts, comp),
+                Err(err) => errors.push(err.to_string()),
+            },
+            Rule::presence_comparison => match get_parser_presence_comparison(pair) {
                 Ok(comp) => handle_expr!(bop, uop, stmts, comp),
                 Err(err) => errors.push(err.to_string()),
             },
@@ -961,6 +1010,35 @@ mod tests {
     #[test]
     fn test_filter_set_round_trip() {
         assert_filter_round_trip(r#"Group IN ["Sports", "News"] AND NOT (Name IN ["A"])"#);
+    }
+
+    #[test]
+    fn test_filter_presence_round_trip_and_aliases() {
+        assert_filter_round_trip("EpgId IS EMPTY");
+        assert_filter_round_trip("EpgId IS NOT EMPTY");
+
+        assert_eq!(get_filter("EpgId = EMPTY", None).expect("alias parses").to_string(), "EpgId IS EMPTY");
+        assert_eq!(get_filter("EpgId != EMPTY", None).expect("alias parses").to_string(), "EpgId IS NOT EMPTY");
+    }
+
+    #[test]
+    fn test_filter_presence_eval() {
+        let empty = get_filter("EpgId IS EMPTY", None).expect("empty filter parses");
+        let populated = get_filter("EpgId IS NOT EMPTY", None).expect("populated filter parses");
+        let mut item = create_mock_pli("Channel", "Group");
+        let provider = ValueProvider { pli: &item, match_as_ascii: false };
+        assert!(empty.filter(&provider));
+        assert!(!populated.filter(&provider));
+
+        item.header.epg_channel_id = Some("channel.epg".intern());
+        let provider = ValueProvider { pli: &item, match_as_ascii: false };
+        assert!(!empty.filter(&provider));
+        assert!(populated.filter(&provider));
+
+        item.header.epg_channel_id = Some("".intern());
+        let provider = ValueProvider { pli: &item, match_as_ascii: false };
+        assert!(empty.filter(&provider));
+        assert!(!populated.filter(&provider));
     }
 
     #[test]

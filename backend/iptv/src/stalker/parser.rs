@@ -293,7 +293,7 @@ fn map_stalker_episode(
     let season_number = episode.season_number.or(season.number).unwrap_or(0);
     let cmd = episode.cmd.clone().unwrap_or_default();
     let info = episode.info.clone();
-    let container_extension = episode.container_extension.clone().filter(|s| !s.is_empty());
+    let container_extension = episode.container_extension.clone().filter(|s| !shared::utils::is_nullish(s.as_str()));
     let logo = info.as_ref().and_then(|i| i.movie_image.clone()).filter(|s| !s.is_empty());
 
     let descriptor = if cmd.is_empty() {

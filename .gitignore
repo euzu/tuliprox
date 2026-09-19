@@ -15,6 +15,7 @@ dist
 /dataSources.local.xml
 /dev/
 /debug/
+/testkit-report
 
 # ignore everything inside docs
 docs/**/*
@@ -71,3 +72,12 @@ backend/app/Cargo.lock
 # Scratch directory some backend tests create relative to the crate root.
 # Test output must never become tracked source.
 /backend/app/tmp/
+
+# Local secret environment files
+.env
+.env.*
+!.env.example
+
+# Testkit report artifacts
+/testkit-report/
+

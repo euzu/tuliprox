@@ -32,7 +32,6 @@ mod stream;
 mod stream_history;
 mod target;
 mod trakt;
-mod trakt_api;
 mod web_auth;
 mod web_ui;
 
@@ -68,6 +67,5 @@ pub use stream::*;
 pub use stream_history::*;
 pub use target::*;
 pub use trakt::*;
-pub use trakt_api::*;
 pub use web_auth::*;
 pub use web_ui::*;

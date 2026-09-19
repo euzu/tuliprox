@@ -1,11 +1,11 @@
 use crate::parser::xmltv::TVGuide;
 use shared::{
     error::TuliproxError,
-    model::{PlaylistGroup, PlaylistItem, UUIDType},
+    model::{PlaylistGroup, UUIDType},
 };
 use std::collections::HashSet;
 use tuliprox_core::model::ConfigInput;
-use tuliprox_repository::PlaylistSource;
+use tuliprox_repository::{ClusterFiltered, PlaylistSource, SourceCowItems, SourceItemsMut};
 
 pub struct FetchedPlaylist<'a> {
     pub input: &'a ConfigInput,
@@ -29,11 +29,9 @@ impl FetchedPlaylist<'_> {
 
     pub fn get_group_count(&mut self) -> usize { self.source.get_group_count() }
 
-    pub fn items_mut(&mut self) -> Box<dyn Iterator<Item = &mut PlaylistItem> + Send + '_> { self.source.items_mut() }
+    pub fn items_mut(&mut self) -> ClusterFiltered<SourceItemsMut<'_>> { self.source.items_mut() }
 
-    pub fn items<'a>(&'a mut self) -> Box<dyn Iterator<Item = std::borrow::Cow<'a, PlaylistItem>> + Send + 'a> {
-        self.source.items()
-    }
+    pub fn items(&mut self) -> ClusterFiltered<SourceCowItems<'_>> { self.source.items() }
 
     pub fn deduplicate(&mut self, duplicates: &mut HashSet<UUIDType>) { self.source.deduplicate(duplicates); }
 

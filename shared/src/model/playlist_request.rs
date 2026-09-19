@@ -1,5 +1,5 @@
 use crate::{
-    model::{PlaylistItemType, SearchRequest, StreamProperties, UiPlaylistItem, XtreamCluster},
+    model::{PlaylistItemType, SearchRequest, StreamProperties, UiPlaylistItem, VirtualId, XtreamCluster},
     utils::{arc_str_option_serde, arc_str_serde},
 };
 use serde::{Deserialize, Serialize};
@@ -33,7 +33,7 @@ pub enum PlaylistUrlResolveRequest {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct CommonPlaylistItem {
-    pub virtual_id: u32,
+    pub virtual_id: VirtualId,
     #[serde(with = "arc_str_serde")]
     pub provider_id: Arc<str>,
     #[serde(with = "arc_str_serde")]

@@ -9,6 +9,7 @@ use super::{
         estimate_hls_peak_bandwidth_bps, HlsBandwidthPersistenceOutcome, HlsBandwidthPersistenceState,
         HlsBandwidthSample, HLS_BANDWIDTH_PERSISTENCE_RETRY_MS,
     },
+    media_reserve::HlsManifestCommitIdentity,
     origin_progress::{HlsBoundedRecoverySamples, HlsOriginPathCondition, HlsOriginProgressPhase},
     recovery_timing::HlsAcceptanceEpisodeTiming,
     resource_identity::HlsPublishedResourceHistory,
@@ -87,8 +88,10 @@ pub enum HlsSegmentFailureTransition {
 pub struct HlsSessionActivity {
     pub last_authorized_manifest_at_ms: Option<u64>,
     pub last_authorized_media_at_ms: Option<u64>,
+    /// Client media responses, excluding manifests and origin prefetches.
+    pub last_delivered_media_at_ms: Option<u64>,
     pub active_access_lease_count: usize,
-    pub active_origin_work_count: usize,
+    pub active_origin_work_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     pub origin_work_generation: u64,
     pub media_readiness_generation: u64,
 }
@@ -248,7 +251,7 @@ pub struct HlsSession {
     pub proxy_session_id: ProxySessionId,
     pub origin_source: HlsOriginSource,
     pub origin_account_binding: Option<HlsOriginAccountBinding>,
-    pub origin_account_io_lease: Option<HlsOriginAccountIoLease>,
+    pub origin_account_io_lease: Option<Arc<HlsOriginAccountIoLease>>,
     pub origin_account_rebind: HlsOriginAccountRebindState,
     pub effective_origin_acquire_policy: Option<HlsEffectiveOriginAcquirePolicyState>,
     pub mode: HlsSessionMode,
@@ -259,13 +262,17 @@ pub struct HlsSession {
     pub origin_control: HlsSessionOriginControl,
     pub render_policy: RenderPolicy,
     pub last_rendered_manifest: Option<RenderedManifest>,
-    pub published_live_origin_baseline: Option<HlsPublishedLiveOriginBaseline>,
+    manifest_commit_generation: u64,
+    last_normal_manifest_commit_identity: Option<HlsManifestCommitIdentity>,
+    pub(crate) published_live_origin_baseline: Option<HlsPublishedLiveOriginBaseline>,
     pub longest_rendered_playlist_duration_ms: u64,
     pub initial_prefetch_gap_segments: usize,
     pub segment_prefetch_queue: SegmentPrefetchQueue,
     pub active_segment_fetches: usize,
     pub segment_fetch_notifiers: HashMap<u64, Arc<Notify>>,
     pub origin_request_headers: HeaderMap,
+    /// Stable playback-session suffix used by all origin requests in this session.
+    pub user_agent_stream_index: Option<u64>,
     pub origin_provider_session_headers: HeaderMap,
     pub activity: HlsSessionActivity,
     pub origin_epoch: u64,
@@ -326,6 +333,8 @@ impl HlsSession {
             origin_control: HlsSessionOriginControl::default(),
             render_policy: RenderPolicy::default(),
             last_rendered_manifest: None,
+            manifest_commit_generation: 0,
+            last_normal_manifest_commit_identity: None,
             published_live_origin_baseline: None,
             longest_rendered_playlist_duration_ms: 0,
             initial_prefetch_gap_segments: 0,
@@ -333,6 +342,7 @@ impl HlsSession {
             active_segment_fetches: 0,
             segment_fetch_notifiers: HashMap::new(),
             origin_request_headers: HeaderMap::new(),
+            user_agent_stream_index: None,
             origin_provider_session_headers: HeaderMap::new(),
             activity: HlsSessionActivity::default(),
             origin_epoch: 0,
@@ -363,6 +373,33 @@ impl HlsSession {
             terminal_tail_protections: HashMap::new(),
             gc_marked_for_removal: false,
         }
+    }
+
+    pub fn next_manifest_commit_identity(&self, rendered_at_ms: u64) -> Option<HlsManifestCommitIdentity> {
+        self.manifest_commit_generation
+            .checked_add(1)
+            .map(|generation| HlsManifestCommitIdentity::committed(generation, rendered_at_ms))
+    }
+
+    pub fn record_manifest_commit_identity(&mut self, identity: HlsManifestCommitIdentity) {
+        // Invariant: identities recorded here are allocated exclusively by
+        // `next_manifest_commit_identity` and only after a successful manifest commit.
+        debug_assert_eq!(identity.commit_generation(), self.manifest_commit_generation.saturating_add(1));
+        self.manifest_commit_generation = identity.commit_generation();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_manifest_commit_generation_for_test(&mut self, generation: u64) {
+        self.manifest_commit_generation = generation;
+    }
+
+    pub const fn last_normal_manifest_commit_identity(&self) -> Option<HlsManifestCommitIdentity> {
+        self.last_normal_manifest_commit_identity
+    }
+
+    pub fn record_normal_manifest_commit_identity(&mut self, identity: HlsManifestCommitIdentity) {
+        self.record_manifest_commit_identity(identity);
+        self.last_normal_manifest_commit_identity = Some(identity);
     }
 
     pub fn established_manifest_recovery_binding(&self) -> Option<HlsManifestOriginBinding> {
@@ -481,13 +518,13 @@ impl HlsSession {
         classify_account_binding_protection(
             self.activity.last_authorized_media_at_ms,
             now_ms,
-            self.account_overlap_timing(),
+            &self.account_overlap_timing(),
         )
     }
 
     pub fn should_refresh_origin_reservation(&self, now_ms: u64) -> bool {
         !matches!(self.account_binding_protection(now_ms), HlsAccountBindingProtection::Expired)
-            || self.activity.active_origin_work_count > 0
+            || self.activity.active_origin_work_count.load(std::sync::atomic::Ordering::Acquire) > 0
     }
 
     pub fn reconcile_effective_origin_acquire_policy(
@@ -552,7 +589,7 @@ impl HlsSession {
         if self.idle_expiry_due_at_ms(session_idle_timeout_ms) > now_ms {
             return false;
         }
-        self.activity.active_origin_work_count == 0
+        self.activity.active_origin_work_count.load(std::sync::atomic::Ordering::Acquire) == 0
             && self.active_segment_fetches == 0
             && self.active_map_fetches == 0
             && !self.origin_refresh.in_flight
@@ -718,12 +755,12 @@ impl HlsSession {
     }
 
     pub fn start_origin_work(&mut self) -> u64 {
-        self.activity.active_origin_work_count = self.activity.active_origin_work_count.saturating_add(1);
+        self.activity.active_origin_work_count.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         self.activity.origin_work_generation
     }
 
     pub fn finish_origin_work(&mut self, started_generation: u64) -> bool {
-        self.activity.active_origin_work_count = self.activity.active_origin_work_count.saturating_sub(1);
+        self.activity.active_origin_work_count.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
         started_generation == self.activity.origin_work_generation
     }
 
@@ -775,6 +812,8 @@ impl fmt::Debug for HlsSession {
             .field("origin_refresh", &self.origin_refresh)
             .field("render_policy", &self.render_policy)
             .field("last_rendered_manifest", &self.last_rendered_manifest)
+            .field("manifest_commit_generation", &self.manifest_commit_generation)
+            .field("last_normal_manifest_commit_identity", &self.last_normal_manifest_commit_identity)
             .field("published_live_origin_baseline", &self.published_live_origin_baseline)
             .field("longest_rendered_playlist_duration_ms", &self.longest_rendered_playlist_duration_ms)
             .field("initial_prefetch_gap_segments", &self.initial_prefetch_gap_segments)
@@ -782,6 +821,7 @@ impl fmt::Debug for HlsSession {
             .field("active_segment_fetches", &self.active_segment_fetches)
             .field("segment_fetch_notifiers_len", &self.segment_fetch_notifiers.len())
             .field("origin_request_headers_len", &self.origin_request_headers.len())
+            .field("user_agent_stream_index", &self.user_agent_stream_index)
             .field("origin_provider_session_headers_len", &self.origin_provider_session_headers.len())
             .field("activity", &self.activity)
             .field("origin_control", &self.origin_control)
@@ -1356,7 +1396,7 @@ mod tests {
         session.invalidate_queued_origin_work();
 
         assert!(!session.finish_origin_work(started_generation));
-        assert_eq!(session.activity.active_origin_work_count, 0);
+        assert_eq!(session.activity.active_origin_work_count.load(std::sync::atomic::Ordering::Acquire), 0);
         assert_eq!(session.activity.origin_work_generation, 1);
     }
 

@@ -198,12 +198,6 @@ fn apply_logger_with_context(context: &LoggerContext, config_log_level: Option<&
 }
 
 pub fn init_logger(user_log_level: Option<&str>, config_file: &str) {
-    // tracing_subscriber::registry()
-    //     .with(console_subscriber::spawn()) // Console layer
-    //     .with(EnvFilter::from_default_env())
-    //     .with(fmt::layer()) // stdout logging
-    //     .init();
-
     let context = LoggerContext {
         cli_log_level: user_log_level.map(std::string::ToString::to_string),
         env_log_level: std::env::var("TULIPROX_LOG").ok(),

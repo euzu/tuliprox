@@ -1,36 +1,40 @@
 use crate::{
     defaults::{
-        default_as_true, default_catchup_session_ttl_secs, default_grace_period_millis,
-        default_grace_period_timeout_secs, default_hls_session_ttl_secs, default_shared_burst_buffer_mb,
-        default_shared_subscriber_idle_timeout_secs, default_stream_buffer_max_bytes_mb,
-        is_default_catchup_session_ttl_secs, is_default_grace_period_millis, is_default_grace_period_timeout_secs,
-        is_default_hls_session_ttl_secs, is_default_shared_burst_buffer_mb,
+        default_as_true, default_catchup_session_ttl_secs, default_cleanup_queue_capacity, default_grace_period_millis,
+        default_grace_period_timeout_secs, default_hls_session_ttl_secs, default_recent_eviction_reentry_ttl_ms,
+        default_shared_burst_buffer_mb, default_shared_subscriber_idle_timeout_secs,
+        default_stream_buffer_max_bytes_mb, is_default_catchup_session_ttl_secs, is_default_cleanup_queue_capacity,
+        is_default_grace_period_millis, is_default_grace_period_timeout_secs, is_default_hls_session_ttl_secs,
+        is_default_recent_eviction_reentry_ttl_ms, is_default_shared_burst_buffer_mb,
         is_default_shared_subscriber_idle_timeout_secs, is_default_stream_buffer_max_bytes_mb, is_false, is_true,
     },
     error::TuliproxError,
     utils::{is_blank_optional_string, parse_to_kbps},
 };
-use std::{
-    fmt::{Display, Formatter},
-    str::FromStr,
-};
 
 const STREAM_QUEUE_SIZE: usize = 1024; // mpsc channel holding messages. with 8192byte chunks and 2Mbit/s approx 8MB
 const MIN_SHARED_BURST_BUFFER_MB: u64 = 1;
 
-#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    PartialEq,
+    Eq,
+    Hash,
+    strum_macros::Display,
+    strum_macros::EnumString,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case", ascii_case_insensitive)]
 pub enum AdmissionStrategy {
-    #[serde(rename = "evict_user_same_ip_oldest")]
     EvictUserSameIpOldest,
-    #[serde(rename = "evict_user_same_ip_latest")]
     EvictUserSameIpLatest,
-    #[serde(rename = "evict_user_oldest")]
     EvictUserOldest,
-    #[serde(rename = "evict_user_latest")]
     EvictUserLatest,
-    #[serde(rename = "grace_instant_stream")]
     GraceInstantStream,
-    #[serde(rename = "grace_hold_stream")]
     GraceHoldStream,
 }
 
@@ -38,39 +42,6 @@ impl AdmissionStrategy {
     pub fn is_grace(&self) -> bool { matches!(self, Self::GraceInstantStream | Self::GraceHoldStream) }
 
     pub fn is_grace_hold(&self) -> bool { matches!(self, Self::GraceHoldStream) }
-}
-
-impl Display for AdmissionStrategy {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                AdmissionStrategy::EvictUserSameIpOldest => "evict_user_same_ip_oldest",
-                AdmissionStrategy::EvictUserSameIpLatest => "evict_user_same_ip_latest",
-                AdmissionStrategy::EvictUserOldest => "evict_user_oldest",
-                AdmissionStrategy::EvictUserLatest => "evict_user_latest",
-                AdmissionStrategy::GraceInstantStream => "grace_instant_stream",
-                AdmissionStrategy::GraceHoldStream => "grace_hold_stream",
-            }
-        )
-    }
-}
-
-impl FromStr for AdmissionStrategy {
-    type Err = TuliproxError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim() {
-            "evict_user_same_ip_oldest" => Ok(AdmissionStrategy::EvictUserSameIpOldest),
-            "evict_user_same_ip_latest" => Ok(AdmissionStrategy::EvictUserSameIpLatest),
-            "evict_user_oldest" => Ok(AdmissionStrategy::EvictUserOldest),
-            "evict_user_latest" => Ok(AdmissionStrategy::EvictUserLatest),
-            "grace_instant_stream" => Ok(AdmissionStrategy::GraceInstantStream),
-            "grace_hold_stream" => Ok(AdmissionStrategy::GraceHoldStream),
-            _ => Err(TuliproxError::Config(format!("Unknown admission strategy: {s}"))),
-        }
-    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -142,6 +113,16 @@ pub struct StreamConfigDto {
         skip_serializing_if = "is_default_shared_subscriber_idle_timeout_secs"
     )]
     pub shared_subscriber_idle_timeout_secs: u64,
+    /// Upper bound on concurrently living cleanup owners (open request bodies and shared
+    /// subscribers). Requests beyond this are rejected with a bounded error instead of
+    /// growing memory without limit.
+    #[serde(default = "default_cleanup_queue_capacity", skip_serializing_if = "is_default_cleanup_queue_capacity")]
+    pub cleanup_queue_capacity: usize,
+    #[serde(
+        default = "default_recent_eviction_reentry_ttl_ms",
+        skip_serializing_if = "is_default_recent_eviction_reentry_ttl_ms"
+    )]
+    pub recent_eviction_reentry_ttl_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admission_strategies: Option<Vec<AdmissionStrategy>>,
 }
@@ -158,6 +139,8 @@ impl Default for StreamConfigDto {
             throttle_kbps: 0,
             shared_burst_buffer_mb: default_shared_burst_buffer_mb(),
             shared_subscriber_idle_timeout_secs: default_shared_subscriber_idle_timeout_secs(),
+            cleanup_queue_capacity: default_cleanup_queue_capacity(),
+            recent_eviction_reentry_ttl_ms: default_recent_eviction_reentry_ttl_ms(),
             grace_period_hold_stream: true,
             hls_session_ttl_secs: default_hls_session_ttl_secs(),
             catchup_session_ttl_secs: default_catchup_session_ttl_secs(),
@@ -177,6 +160,8 @@ impl StreamConfigDto {
             && self.throttle_kbps == 0
             && self.shared_burst_buffer_mb == default_shared_burst_buffer_mb()
             && self.shared_subscriber_idle_timeout_secs == default_shared_subscriber_idle_timeout_secs()
+            && self.cleanup_queue_capacity == default_cleanup_queue_capacity()
+            && self.recent_eviction_reentry_ttl_ms == default_recent_eviction_reentry_ttl_ms()
             && self.grace_period_hold_stream
             && self.hls_session_ttl_secs == default_hls_session_ttl_secs()
             && self.catchup_session_ttl_secs == default_catchup_session_ttl_secs()
@@ -215,6 +200,10 @@ impl StreamConfigDto {
             return Err(TuliproxError::ConfigStream(
                 "`shared_subscriber_idle_timeout_secs` must be at least 1 second".to_string(),
             ));
+        }
+
+        if self.cleanup_queue_capacity == 0 {
+            return Err(TuliproxError::ConfigStream("`cleanup_queue_capacity` must be at least 1".to_string()));
         }
 
         if let Some(strategies) = &self.admission_strategies {

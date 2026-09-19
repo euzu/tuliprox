@@ -138,7 +138,7 @@ where
                         url,
                         &credentials.username,
                         &credentials.password,
-                        item.virtual_id,
+                        item.virtual_id.get(),
                         container_extension.as_deref(),
                         live_stream_use_prefix,
                         live_stream_without_extension,

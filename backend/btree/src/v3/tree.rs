@@ -2441,7 +2441,7 @@ impl<K, V> BPlusTreeQuery<K, V> {
     /// The metadata carried in the database header of this snapshot.
     pub fn metadata(&self) -> &BPlusTreeMetadata { &self.header.metadata }
 
-    pub(crate) fn snapshot_identity(&self) -> ([u8; 16], u64) { (self.header.database_id, self.header.generation) }
+    pub fn snapshot_identity(&self) -> ([u8; 16], u64) { (self.header.database_id, self.header.generation) }
 
     pub(crate) fn snapshot_metadata(&self) -> &BPlusTreeMetadata { &self.header.metadata }
 
@@ -3577,7 +3577,6 @@ mod tests {
             page::{encode_free_page, encode_overflow_page, page_open_count, reset_page_open_count, SlottedPage},
         },
     };
-    use fs2::FileExt as _;
     use std::{
         fs, io,
         path::{Path, PathBuf},
@@ -4898,13 +4897,13 @@ mod tests {
             .create(true)
             .truncate(false)
             .open(crate::common::sidecar_lock_path(database))?;
-        match file.try_lock_exclusive() {
+        match file.try_lock() {
             Ok(()) => {
-                fs2::FileExt::unlock(&file)?;
+                file.unlock()?;
                 Ok(true)
             }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
-            Err(error) => Err(error),
+            Err(fs::TryLockError::WouldBlock) => Ok(false),
+            Err(fs::TryLockError::Error(error)) => Err(error),
         }
     }
 

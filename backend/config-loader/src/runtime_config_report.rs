@@ -89,6 +89,7 @@ fn runtime_config_to_dto(config: &Config) -> ConfigDto {
         user_access_control: config.user_access_control,
         connect_timeout_secs: config.connect_timeout_secs,
         interner_gc_interval_secs: config.interner_gc_interval_secs,
+        event_channel_capacity: config.event_channel_capacity,
         interner_gc_min_pool_size: config.interner_gc_min_pool_size,
         sleep_timer_mins: config.sleep_timer_mins,
         update_on_boot: config.update_on_boot,

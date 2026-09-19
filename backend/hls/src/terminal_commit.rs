@@ -1283,7 +1283,7 @@ const fn terminal_commit_outcome_label(outcome: HlsTerminalCommitOutcome) -> &'s
     }
 }
 
-fn current_time_millis() -> u64 { chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default() }
+use tuliprox_core::utils::current_time_millis;
 
 #[cfg(test)]
 mod tests {
@@ -1303,7 +1303,7 @@ mod tests {
         manifest_acceptance::HlsManifestAcceptanceGeneration,
         media_reserve::{
             HlsLeaseManifestSnapshot, HlsLeaseReserveAvailabilityBasis, HlsLeaseReserveSnapshot,
-            HlsManifestDeliveryMode, HlsManifestSourceRenderMarker,
+            HlsManifestCommitIdentity, HlsManifestDeliveryMode,
         },
         recovery_timing::{
             HlsLeaseCutoverTiming, HlsTerminalCommitWindow, HlsTerminalMediaPreparationState, HlsTransitionMarginMs,
@@ -1363,7 +1363,9 @@ mod tests {
             reserve,
             manifest_snapshot: HlsLeaseManifestSnapshot {
                 delivery_mode: HlsManifestDeliveryMode::NormalCacheTimeline,
-                source_render_marker: HlsManifestSourceRenderMarker::new(1),
+                source_commit_identity: HlsManifestCommitIdentity::new(1),
+                uri_materialization: None,
+                finalized_transient_manifest_generation: None,
                 snapshot_generation: evidence_generation,
                 delivered_at_ms: 1,
                 first_proxy_seq: 0,

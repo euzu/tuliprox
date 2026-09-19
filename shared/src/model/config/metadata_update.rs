@@ -412,8 +412,8 @@ impl FfprobeConfigDto {
             .map_err(|err| {
                 TuliproxError::ConfigMetadataUpdate(format!("Invalid size for `ffprobe.probe_size`: {err}"))
             })?
-            .max(1);
-        self.probe_size = ByteSize::new(MetadataUpdateConfigDto::canonicalize_size_bytes(probe_size_bytes));
+            .at_least_1();
+        self.probe_size = ByteSize::new(MetadataUpdateConfigDto::canonicalize_size_bytes(probe_size_bytes.get()));
 
         let live_analyze_duration_secs = MetadataUpdateConfigDto::parse_and_clamp_duration_with_required_unit(
             &self.live_analyze_duration,
@@ -428,8 +428,9 @@ impl FfprobeConfigDto {
             .map_err(|err| {
                 TuliproxError::ConfigMetadataUpdate(format!("Invalid size for `ffprobe.live_probe_size`: {err}"))
             })?
-            .max(1);
-        self.live_probe_size = ByteSize::new(MetadataUpdateConfigDto::canonicalize_size_bytes(live_probe_size_bytes));
+            .at_least_1();
+        self.live_probe_size =
+            ByteSize::new(MetadataUpdateConfigDto::canonicalize_size_bytes(live_probe_size_bytes.get()));
 
         Ok(())
     }

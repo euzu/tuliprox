@@ -1,6 +1,6 @@
 use crate::{
     model::stalker::{StalkerPlaybackDescriptorDto, StalkerPortalCapabilitiesDto, StalkerStreamKind},
-    utils::{arc_str_serde, arc_str_vec_serde, Internable},
+    utils::{arc_str_null_is_none_option_serde, arc_str_serde, arc_str_vec_serde, Internable},
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -37,7 +37,7 @@ pub struct StalkerPlaylistItem {
     /// Raw `cmd` string returned by the portal (`ffmpeg <url> <ext>`).
     #[serde(with = "arc_str_serde")]
     pub cmd: Arc<str>,
-    #[serde(default)]
+    #[serde(default, with = "arc_str_null_is_none_option_serde")]
     pub container_extension: Option<Arc<str>>,
     #[serde(default)]
     pub plot: Option<Arc<str>>,
@@ -181,7 +181,7 @@ pub struct StalkerEpisodeIndex {
     pub episode_number: i32,
     #[serde(with = "arc_str_serde")]
     pub title: Arc<str>,
-    #[serde(default)]
+    #[serde(default, with = "arc_str_null_is_none_option_serde")]
     pub container_extension: Option<Arc<str>>,
     #[serde(default)]
     pub added_at: i64,

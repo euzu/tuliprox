@@ -11,8 +11,7 @@ use crate::{
     },
 };
 use log::warn;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::{fmt, str::FromStr, sync::Arc};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -94,7 +93,11 @@ pub struct PanelApiAliasPoolDto {
     pub remove_expired: bool,
 }
 
-#[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(
+    Default, Debug, Copy, Clone, PartialEq, Eq, serde::Serialize, strum_macros::Display, strum_macros::EnumString,
+)]
+#[serde(rename_all = "UPPERCASE")]
+#[strum(serialize_all = "UPPERCASE", ascii_case_insensitive)]
 pub enum PanelApiProvisioningMethod {
     #[default]
     Head,
@@ -102,46 +105,13 @@ pub enum PanelApiProvisioningMethod {
     Post,
 }
 
-impl fmt::Display for PanelApiProvisioningMethod {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            Self::Head => "HEAD",
-            Self::Get => "GET",
-            Self::Post => "POST",
-        };
-        write!(f, "{s}")
-    }
-}
-
-impl FromStr for PanelApiProvisioningMethod {
-    type Err = TuliproxError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim().to_ascii_uppercase().as_str() {
-            "HEAD" => Ok(Self::Head),
-            "GET" => Ok(Self::Get),
-            "POST" => Ok(Self::Post),
-            _ => Err(TuliproxError::Config(format!("Unknown provisioning method: {s}"))),
-        }
-    }
-}
-
-impl Serialize for PanelApiProvisioningMethod {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.to_string())
-    }
-}
-
-impl<'de> Deserialize<'de> for PanelApiProvisioningMethod {
+impl<'de> serde::Deserialize<'de> for PanelApiProvisioningMethod {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: Deserializer<'de>,
+        D: serde::Deserializer<'de>,
     {
-        let s = String::deserialize(deserializer)?;
-        Self::from_str(&s).map_err(serde::de::Error::custom)
+        let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+        value.trim().parse().map_err(serde::de::Error::custom)
     }
 }
 
@@ -244,5 +214,28 @@ impl PanelApiConfigDto {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PanelApiProvisioningMethod;
+
+    #[test]
+    fn provisioning_method_deserialization_remains_trimmed_and_case_insensitive() {
+        for (yaml, expected) in [
+            ("head\n", PanelApiProvisioningMethod::Head),
+            ("' get '\n", PanelApiProvisioningMethod::Get),
+            ("Post\n", PanelApiProvisioningMethod::Post),
+        ] {
+            let parsed = serde_saphyr::from_str::<PanelApiProvisioningMethod>(yaml).expect("method should parse");
+            assert_eq!(parsed, expected);
+        }
+    }
+
+    #[test]
+    fn provisioning_method_serializes_as_uppercase() {
+        let serialized = serde_saphyr::to_string(&PanelApiProvisioningMethod::Get).expect("method should serialize");
+        assert_eq!(serialized.trim(), "GET");
     }
 }

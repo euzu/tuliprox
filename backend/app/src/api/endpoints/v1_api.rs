@@ -8,6 +8,9 @@ use crate::{
             rbac_api::{rbac_api_register, rbac_api_register_unprotected},
             recording_api::{recording_api_register, recording_availability_register, recording_enabled_layer},
             recording_media_api::recording_media_api_register,
+            target_bouquet_api::{
+                target_bouquet_api_register_unprotected, target_bouquet_api_register_with_permissions,
+            },
             user_api::user_api_register,
             v1_api_config::{v1_api_config_register, v1_api_config_register_with_permissions},
             v1_api_playlist::{
@@ -28,6 +31,7 @@ use shared::{
     utils::concat_path_leading_slash,
 };
 use std::{collections::BTreeMap, sync::Arc};
+use tuliprox_session::EmitOutcome;
 
 pub const API_V1_PATH: &str = "api/v1";
 
@@ -53,7 +57,7 @@ pub async fn create_status_check(app_state: &Arc<AppState>) -> StatusCheck {
     };
 
     let active_provider_connections =
-        app_state.active_provider.active_connections().await.map(|c| c.into_iter().collect::<BTreeMap<_, _>>());
+        app_state.active_provider.active_connections().map(|c| c.into_iter().collect::<BTreeMap<_, _>>());
 
     StatusCheck {
         status: "ok".to_string(),
@@ -66,6 +70,7 @@ pub async fn create_status_check(app_state: &Arc<AppState>) -> StatusCheck {
         active_provider_connections,
         active_user_streams,
         cache,
+        reentry_suppressed_total: app_state.active_users.reentry_suppressed_total(),
     }
 }
 async fn status(axum::extract::State(app_state): axum::extract::State<Arc<AppState>>) -> axum::response::Response {
@@ -77,6 +82,51 @@ async fn status(axum::extract::State(app_state): axum::extract::State<Arc<AppSta
             .body(pretty_json)),
         Err(_) => axum::Json(status).into_response(),
     }
+}
+
+/// Diagnostics for the in-process event bus.
+///
+/// Answers "did that event actually fire, and was anything listening?" -
+/// otherwise unanswerable without a debug build, and the first question
+/// asked whenever a notification does not arrive. Behind `system.read`,
+/// like `/status`.
+async fn event_bus(axum::extract::State(app_state): axum::extract::State<Arc<AppState>>) -> axum::response::Response {
+    let manager = &app_state.event_manager;
+    let stats = manager.stats();
+
+    let emitted: Vec<_> = stats
+        .emitted()
+        .into_iter()
+        .filter(|(_, count)| *count > 0)
+        .map(|(kind, count)| serde_json::json!({ "event": kind.as_wire_name(), "count": count }))
+        .collect();
+
+    let recent: Vec<_> = manager
+        .recent_events()
+        .into_iter()
+        .map(|entry| {
+            serde_json::json!({
+                "event": entry.kind.as_wire_name(),
+                "uptime_millis": entry.uptime_millis,
+                "outcome": match entry.outcome {
+                    EmitOutcome::Delivered { receivers } => serde_json::json!({ "delivered": receivers }),
+                    EmitOutcome::NoSubscribers => serde_json::json!("no_subscribers"),
+                    EmitOutcome::Coalesced => serde_json::json!("coalesced"),
+                },
+            })
+        })
+        .collect();
+
+    let body = serde_json::json!({
+        "total_emitted": stats.total_emitted(),
+        "no_subscribers": stats.no_subscribers(),
+        "coalesced": stats.coalesced(),
+        "lagged": stats.lagged(),
+        "emitted": emitted,
+        "recent": recent,
+    });
+
+    axum::Json(body).into_response()
 }
 
 async fn streams(
@@ -127,6 +177,7 @@ pub fn v1_api_register(
         .route("/status", axum::routing::get(status))
         .route("/streams", axum::routing::get(streams))
         .route("/ipinfo", axum::routing::get(ipinfo))
+        .route("/events/stats", axum::routing::get(event_bus))
         .route("/stream-history", axum::routing::get(super::stream_history_api::stream_history_page_query))
         .route("/stream-history/summary", axum::routing::get(super::stream_history_api::stream_history_summary_query))
         .route("/qos-snapshots", axum::routing::get(super::stream_history_api::qos_snapshot_query))
@@ -147,6 +198,7 @@ pub fn v1_api_register(
             .merge(v1_api_user_register_with_permissions(axum::routing::Router::new(), app_state))
             .merge(v1_api_playlist_register_with_permissions(axum::routing::Router::new(), app_state))
             .merge(library_api_register(axum::routing::Router::new(), Some(app_state)))
+            .merge(target_bouquet_api_register_with_permissions(app_state))
             .merge(rbac_api_register(Arc::clone(app_state)))
             .merge(recording_availability_register(axum::routing::Router::new()))
             // `recording.enabled: false` turns the DVR off end to end:
@@ -166,6 +218,7 @@ pub fn v1_api_register(
             .merge(v1_api_user_register(axum::routing::Router::new()))
             .merge(v1_api_playlist_register_protected(axum::routing::Router::new()))
             .merge(library_api_register(axum::routing::Router::new(), None))
+            .merge(target_bouquet_api_register_unprotected())
             .merge(rbac_api_register_unprotected(Arc::clone(app_state)))
             .merge(recording_availability_register(axum::routing::Router::new()))
             .merge(
@@ -320,7 +373,13 @@ mod tests {
         let Some(web_auth) = config.web_ui.as_ref().and_then(|web_ui| web_ui.auth.as_ref()) else {
             return Err("missing test web auth".into());
         };
-        let token = create_jwt_web_user(web_auth, "alice", Permission::RecordingRead.into(), 0)?;
+        let token = create_jwt_web_user(
+            web_auth,
+            "alice",
+            Permission::RecordingRead.into(),
+            0,
+            shared::model::UserId::from("web:alice"),
+        )?;
         let app_state = create_test_app_state(config);
         let router = v1_api_register(true, &app_state, "").with_state(app_state);
 

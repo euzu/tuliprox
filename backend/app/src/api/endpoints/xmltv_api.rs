@@ -3,20 +3,20 @@ use crate::{
         api_utils::{
             coalesce_byte_stream, create_api_proxy_user, empty_json_response_as_array, get_user_target,
             get_user_target_by_credentials, internal_server_error, resource_response,
-            stream_json_or_bin_response_try_stream, try_unwrap_body,
+            stream_json_or_bin_response_try_stream, try_unwrap_body, ResourceFetchPolicy,
         },
         model::{AppState, UserApiRequest, UserApiRequestQueryOrBody},
         static_headers::CT_XML,
     },
     auth::{resolve_api_user_context, Fingerprint},
     model::{
-        ApiProxyServerInfo, Config, ConfigTarget, ProxyUserCredentials, EPG_ATTRIB_ID, EPG_ATTRIB_LANG,
-        EPG_TAG_CATEGORY, EPG_TAG_CHANNEL, EPG_TAG_LIVE, EPG_TAG_NEW,
+        ApiProxyServerInfo, Config, ConfigTarget, ProxyUserCredentials, EPG_ATTRIB_ID, EPG_ATTRIB_LANG, EPG_ATTRIB_SRC,
+        EPG_TAG_CATEGORY, EPG_TAG_CHANNEL, EPG_TAG_ICON, EPG_TAG_LIVE, EPG_TAG_NEW,
     },
     repository::{
-        epg_query_channels_by_storage_key, get_target_storage_path, m3u_get_epg_file_path_for_target, storage_const,
-        xtream_get_epg_file_path_for_target, xtream_get_storage_path, BPlusTreeQuery, LockedReceiverStream,
-        XML_PREAMBLE,
+        epg_query_channels_by_storage_key, get_file_path_for_db_index, get_target_storage_path,
+        m3u_get_epg_file_path_for_target, open_playlist_reader, storage_const, xtream_get_epg_file_path_for_target,
+        xtream_get_storage_path, BPlusTreeQuery, LockedReceiverStream, XML_PREAMBLE,
     },
     utils,
     utils::{
@@ -38,6 +38,7 @@ use shared::{
     utils::{concat_path, concat_path_leading_slash, obfuscate_text, Internable},
 };
 use std::{
+    borrow::Cow,
     collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
@@ -142,8 +143,9 @@ pub async fn serve_epg_web_ui(
         let join_error_tx = tx.clone();
         let handle = task::spawn_blocking(move || {
             let _guard = bg_lock;
-            let query = match BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(&epg_path) {
-                Ok(query) => query,
+            let index_path = get_file_path_for_db_index(&epg_path);
+            let reader = match open_playlist_reader::<Arc<str>, EpgChannel, u64>(&epg_path, &index_path, None) {
+                Ok(reader) => reader,
                 Err(error) => {
                     let message =
                         format!("Failed to open epg db for target {target_name} {}: {error}", epg_path.display());
@@ -152,7 +154,7 @@ pub async fn serve_epg_web_ui(
                     return;
                 }
             };
-            for entry in query.disk_iter() {
+            for entry in reader {
                 let (_, channel) = match entry {
                     Ok(entry) => entry,
                     Err(error) => {
@@ -215,9 +217,11 @@ macro_rules! continue_on_err {
     };
 }
 
-async fn write_programme_classification_tags<W: AsyncWrite + Unpin>(
+async fn write_programme_metadata_tags<W: AsyncWrite + Unpin>(
     writer: &mut quick_xml::Writer<W>,
     programme: &EpgProgramme,
+    epg_processing_options: &EpgProcessingOptions,
+    base_url: Option<&str>,
 ) -> Result<(), quick_xml::Error> {
     for category in &programme.categories {
         let mut elem = BytesStart::new(EPG_TAG_CATEGORY);
@@ -229,6 +233,13 @@ async fn write_programme_classification_tags<W: AsyncWrite + Unpin>(
         writer.write_event_async(Event::End(BytesEnd::new(EPG_TAG_CATEGORY))).await?;
     }
 
+    if let Some(icon_url) = programme.icon.as_deref() {
+        let icon = rewrite_xmltv_icon_url(epg_processing_options, base_url, icon_url);
+        let mut elem = BytesStart::new(EPG_TAG_ICON);
+        elem.push_attribute((EPG_ATTRIB_SRC, icon.as_ref()));
+        writer.write_event_async(Event::Empty(elem)).await?;
+    }
+
     if programme.is_live {
         writer.write_event_async(Event::Empty(BytesStart::new(EPG_TAG_LIVE))).await?;
     }
@@ -236,6 +247,21 @@ async fn write_programme_classification_tags<W: AsyncWrite + Unpin>(
         writer.write_event_async(Event::Empty(BytesStart::new(EPG_TAG_NEW))).await?;
     }
     Ok(())
+}
+
+fn rewrite_xmltv_icon_url<'a>(
+    epg_processing_options: &EpgProcessingOptions,
+    base_url: Option<&str>,
+    icon_url: &'a str,
+) -> Cow<'a, str> {
+    if epg_processing_options.rewrite_urls {
+        if let Some(base) = base_url {
+            if let Ok(enc) = obscure_text(&epg_processing_options.encrypt_secret, icon_url) {
+                return Cow::Owned(concat_string!(base, "/", &enc));
+            }
+        }
+    }
+    Cow::Borrowed(icon_url)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -289,8 +315,9 @@ async fn serve_epg_with_rewrites(
     let join_error_tx = channel_tx.clone();
     let spawn_handle = task::spawn_blocking(move || {
         let _guard = bg_lock;
-        let mut query = match BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(&epg_path) {
-            Ok(query) => query,
+        let index_path = get_file_path_for_db_index(&epg_path);
+        let reader = match open_playlist_reader::<Arc<str>, EpgChannel, u64>(&epg_path, &index_path, None) {
+            Ok(reader) => reader,
             Err(error) => {
                 let message = format!("Failed to open BPlusTreeQuery {}: {error}", epg_path.display());
                 error!("{message}");
@@ -299,7 +326,7 @@ async fn serve_epg_with_rewrites(
             }
         };
 
-        for entry in query.iter() {
+        for entry in reader {
             let (_, channel) = match entry {
                 Ok(entry) => entry,
                 Err(error) => {
@@ -373,14 +400,7 @@ async fn serve_epg_with_rewrites(
                 continue_on_err!(writer.write_event_async(Event::End(elem)).await);
 
                 if let Some(icon_url) = &channel.icon {
-                    let icon = match (
-                        epg_processing_options.rewrite_urls,
-                        base_url.as_ref(),
-                        obscure_text(&epg_processing_options.encrypt_secret, icon_url),
-                    ) {
-                        (true, Some(base), Ok(enc)) => concat_string!(base, "/", &enc),
-                        _ => icon_url.to_string(),
-                    };
+                    let icon = rewrite_xmltv_icon_url(&epg_processing_options, base_url.as_deref(), icon_url.as_ref());
 
                     let mut elem = BytesStart::new("icon");
                     elem.push_attribute(("src", icon.as_ref()));
@@ -423,8 +443,15 @@ async fn serve_epg_with_rewrites(
                         continue_on_err!(writer.write_event_async(Event::End(BytesEnd::new("desc"))).await);
                     }
 
-                    if let Err(err) = write_programme_classification_tags(&mut writer, programme).await {
-                        error!("EPG classification tags write failed: {err}");
+                    if let Err(err) = write_programme_metadata_tags(
+                        &mut writer,
+                        programme,
+                        &epg_processing_options,
+                        base_url.as_deref(),
+                    )
+                    .await
+                    {
+                        error!("EPG programme metadata write failed: {err}");
                     }
 
                     let _ = writer.write_event_async(Event::End(BytesEnd::new("programme"))).await;
@@ -890,7 +917,9 @@ async fn epg_api_resource(
 
     let encrypt_secret = app_state.get_encrypt_secret();
     if let Ok(resource_url) = deobscure_text(&encrypt_secret, &resource) {
-        resource_response(&app_state, &resource_url, &req_headers, None).await.into_response()
+        resource_response(&app_state, ResourceFetchPolicy::PublicNoRedirect, &resource_url, &req_headers, None)
+            .await
+            .into_response()
     } else {
         axum::http::StatusCode::BAD_REQUEST.into_response()
     }
@@ -922,8 +951,8 @@ mod tests {
     use super::{
         empty_stream_epg_entries, from_programme, get_epg_path_for_target, get_epg_path_for_target_by_type,
         group_stream_epg_items, prepare_stream_epg_request, rewrite_epg_channel_resource_url, serve_epg,
-        serve_short_epg, serve_stream_epg, stream_epg_api, stream_epg_programmes_for_channel,
-        write_programme_classification_tags, MAX_STREAM_EPG_CHANNEL_ID_BYTES, MAX_STREAM_EPG_ITEMS,
+        serve_epg_web_ui, serve_short_epg, serve_stream_epg, stream_epg_api, stream_epg_programmes_for_channel,
+        write_programme_metadata_tags, MAX_STREAM_EPG_CHANNEL_ID_BYTES, MAX_STREAM_EPG_ITEMS,
     };
     use crate::{
         api::model::{create_test_app_state, AppState},
@@ -933,7 +962,7 @@ mod tests {
         },
         processing::parser::ics::parse_ics_file_to_channel,
         repository::{epg_write_file, BPlusTree},
-        utils::{lowercase_xmltv_text, EpgIdOutputCase, EpgProcessingOptions, EpgTimeShift},
+        utils::{deobscure_text, lowercase_xmltv_text, EpgIdOutputCase, EpgProcessingOptions, EpgTimeShift},
     };
     use arc_swap::ArcSwapOption;
     use axum::response::IntoResponse;
@@ -979,7 +1008,7 @@ mod tests {
             name: "mixed-target".to_string(),
             options: None,
             sort: None,
-            filter: Filter::default(),
+            filter: Filter::default().into(),
             output: vec![
                 TargetOutput::Xtream(XtreamTargetOutput {
                     flags: XtreamTargetFlagsSet::new(),
@@ -998,6 +1027,7 @@ mod tests {
             mapping: Arc::new(ArcSwapOption::new(None)),
             favourites: None,
             processing_order: ProcessingOrder::default(),
+            execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
             watch: None,
             use_memory_cache: false,
         }
@@ -1010,7 +1040,7 @@ mod tests {
             name: "xtream-only".to_string(),
             options: None,
             sort: None,
-            filter: Filter::default(),
+            filter: Filter::default().into(),
             output: vec![TargetOutput::Xtream(XtreamTargetOutput {
                 flags: XtreamTargetFlagsSet::new(),
                 trakt: None,
@@ -1021,6 +1051,7 @@ mod tests {
             mapping: Arc::new(ArcSwapOption::new(None)),
             favourites: None,
             processing_order: ProcessingOrder::default(),
+            execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
             watch: None,
             use_memory_cache: false,
         }
@@ -1097,6 +1128,7 @@ mod tests {
             &Epg { priority: 0, logo_override: false, attributes: None, children: vec![Arc::new(channel)] },
             &epg_path,
             &HashMap::<Arc<str>, Arc<str>>::new(),
+            None,
             &EpgOutputOptions::default(),
         )
         .expect("write EPG database");
@@ -1426,6 +1458,7 @@ mod tests {
         ];
         programme.is_live = true;
         programme.is_new = true;
+        programme.icon = Some("https://example.com/programme.jpg".intern());
         write_test_epg_db(
             &epg_path,
             EpgChannel {
@@ -1451,6 +1484,7 @@ mod tests {
         assert!(!xml.contains("<title>news &amp; updates</title>"));
         assert!(xml.contains(r#"<category lang="en">News &amp; Analysis</category>"#));
         assert!(xml.contains("<category>Sports</category>"));
+        assert!(xml.contains(r#"<icon src="https://example.com/programme.jpg"/>"#));
         assert!(xml.contains("<live/>"));
         assert!(xml.contains("<new/>"));
 
@@ -1468,12 +1502,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn programme_classification_writer_propagates_io_errors() {
+    async fn programme_metadata_writer_propagates_io_errors() {
         let mut programme = EpgProgramme::new(100, 200, "channel".intern());
         programme.categories = vec![EpgCategory { value: "Sports".intern(), lang: None }];
         let mut writer = quick_xml::Writer::new(ErroringWriter);
+        let options =
+            EpgProcessingOptions { rewrite_urls: false, time_shift: EpgTimeShift::None, encrypt_secret: [0; 16] };
 
-        assert!(write_programme_classification_tags(&mut writer, &programme).await.is_err());
+        assert!(write_programme_metadata_tags(&mut writer, &programme, &options, None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn programme_metadata_writer_uses_rewritten_icon_url() -> Result<(), Box<dyn std::error::Error>> {
+        let secret = [7; 16];
+        let options =
+            EpgProcessingOptions { rewrite_urls: true, time_shift: EpgTimeShift::None, encrypt_secret: secret };
+        let base_url = "http://localhost/epg/user/password";
+        let original_url = "https://example.com/programme.jpg";
+        let mut programme = EpgProgramme::new(100, 200, "channel".intern());
+        programme.icon = Some(original_url.intern());
+        let mut writer = quick_xml::Writer::new(Vec::new());
+        write_programme_metadata_tags(&mut writer, &programme, &options, Some(base_url)).await?;
+        let xml = String::from_utf8(writer.into_inner())?;
+        let resource = xml
+            .strip_prefix(&format!(r#"<icon src="{base_url}/"#))
+            .and_then(|value| value.strip_suffix(r#""/>"#))
+            .unwrap_or_default();
+
+        assert_eq!(deobscure_text(&secret, resource)?, original_url);
+        Ok(())
     }
 
     #[tokio::test]
@@ -1856,5 +1913,60 @@ mod tests {
         );
         assert_eq!(filtered[0].start_timestamp, window_start + 7_260);
         assert_eq!(filtered[0].stop_timestamp, window_start + 7_800);
+    }
+
+    #[tokio::test]
+    async fn serve_epg_web_ui_preserves_sorted_index_order() {
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let epg_path = dir.path().join("epg.db");
+
+        let epg = Epg {
+            priority: 0,
+            logo_override: false,
+            attributes: None,
+            children: vec![
+                Arc::new(EpgChannel {
+                    id: "Z.Channel".intern(),
+                    title: Some("Z Channel".intern()),
+                    icon: None,
+                    programmes: vec![EpgProgramme::new(10, 20, "Z.Channel".intern())],
+                }),
+                Arc::new(EpgChannel {
+                    id: "a.channel".intern(),
+                    title: Some("A Channel".intern()),
+                    icon: None,
+                    programmes: vec![EpgProgramme::new(10, 20, "a.channel".intern())],
+                }),
+            ],
+        };
+
+        // In playlist order: "a.channel" is ordinal 1, "Z.Channel" is ordinal 2
+        let mut order_map = HashMap::new();
+        order_map.insert("a.channel".intern(), 1u64);
+        order_map.insert("Z.Channel".intern(), 2u64);
+
+        epg_write_file(
+            "test-target",
+            &epg,
+            &epg_path,
+            &HashMap::<Arc<str>, Arc<str>>::new(),
+            Some(&order_map),
+            &EpgOutputOptions::default(),
+        )
+        .expect("write EPG database with sorted index");
+
+        let config = test_config_with_storage(dir.path().to_string_lossy().as_ref());
+        let app_state = create_test_app_state(config);
+        let target = Arc::new(test_target_with_xtream_and_m3u());
+
+        let response = serve_epg_web_ui(&app_state, None, &epg_path, &target).await;
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("read web UI response body");
+        let channels: Vec<EpgChannel> = serde_json::from_slice(&body).expect("parse JSON response");
+
+        assert_eq!(
+            channels.iter().map(|c| c.id.as_ref()).collect::<Vec<_>>(),
+            vec!["a.channel", "Z.Channel"],
+            "serve_epg_web_ui must stream channels in sorted index order"
+        );
     }
 }

@@ -11,15 +11,15 @@ use crate::{
         ConfigContext,
     },
     config_field, config_field_bool, config_field_bool_empty, config_field_child, config_field_custom,
-    config_field_empty, config_field_hide, config_field_optional, edit_field_bool, edit_field_list,
+    config_field_empty, config_field_hide, config_field_optional, config_field_tags, edit_field_bool, edit_field_list,
     edit_field_number_f64, edit_field_number_u64, edit_field_text, edit_field_text_option, generate_form_reducer,
     i18n::use_translation,
 };
 use shared::model::{
-    DiscordMessagingConfigDto, DiskAlertConfigDto, MessagingConfigDto, MsgKind, PushoverMessagingConfigDto,
+    DiscordMessagingConfigDto, DiskAlertConfigDto, MessagingConfigDto, PushoverMessagingConfigDto,
     RestMessagingConfigDto, TelegramMessagingConfigDto,
 };
-use std::{rc::Rc, str::FromStr};
+use std::rc::Rc;
 use yew::prelude::*;
 
 const LABEL_NOTIFY_ON: &str = "LABEL.NOTIFY_ON";
@@ -49,7 +49,7 @@ generate_form_reducer!(
         BotToken => bot_token: String,
         ChatIds => chat_ids: Vec<String>,
         Markdown => markdown: bool,
-        Templates => templates: std::collections::HashMap<MsgKind, String>,
+        Templates => templates: std::collections::HashMap<String, String>,
     }
 );
 
@@ -60,7 +60,7 @@ generate_form_reducer!(
         Url => url: String,
         Method => method: Option<String>,
         Headers => headers: Vec<String>,
-        Templates => templates: std::collections::HashMap<MsgKind, String>,
+        Templates => templates: std::collections::HashMap<String, String>,
     }
 );
 
@@ -69,7 +69,7 @@ generate_form_reducer!(
     action_name: DiscordMessagingConfigFormAction,
     fields {
         Url => url: String,
-        Templates => templates: std::collections::HashMap<MsgKind, String>,
+        Templates => templates: std::collections::HashMap<String, String>,
     }
 );
 
@@ -97,9 +97,16 @@ generate_form_reducer!(
     state: MessagingConfigFormState { form: MessagingConfigDto },
     action_name: MessagingConfigFormAction,
     fields {
-        NotifyOn => notify_on: Vec<MsgKind>,
+        NotifyOn => notify_on: Vec<String>,
     }
 );
+
+/// Uppercased, underscore-separated form of an event id, for i18n keys and
+/// field ids. `recording.completed` becomes `RECORDING_COMPLETED`, which is
+/// also the legacy `MsgKind` suffix - so existing translations still resolve.
+fn event_label_suffix(event: &str) -> String { event.replace('.', "_").to_uppercase() }
+
+fn event_label_key(event: &str) -> String { format!("LABEL.MSG_KIND_{}", event_label_suffix(event)) }
 
 #[component]
 pub fn MessagingConfigView() -> Html {
@@ -128,12 +135,20 @@ pub fn MessagingConfigView() -> Html {
     let messaging_state =
         use_reducer(|| MessagingConfigFormState { form: MessagingConfigDto::default(), modified: false });
 
-    let notify_on_options =
-        use_memo((), |()| vec![MsgKind::Info, MsgKind::Stats, MsgKind::Error, MsgKind::Watch, MsgKind::DiskAlert]);
-
-    let notify_on_options_text = use_memo((*notify_on_options).clone(), |options: &Vec<MsgKind>| {
-        options.iter().map(ToString::to_string).collect::<Vec<String>>()
+    // Driven by the event registry rather than a hardcoded list, so an
+    // event added in the backend shows up here without a frontend change.
+    let notify_on_options = use_memo((), |()| {
+        shared::model::notification::registry::ALL
+            .iter()
+            .map(|descriptor| descriptor.id.as_str().to_string())
+            .collect::<Vec<String>>()
     });
+
+    let notify_on_labels = use_memo((notify_on_options.clone(), translate.clone()), |(options, tr)| {
+        options.iter().map(|t| tr.t(&event_label_key(t))).collect::<Vec<String>>()
+    });
+
+    let notify_on_options_text = notify_on_options.clone();
 
     {
         let dependencies = (
@@ -165,7 +180,9 @@ pub fn MessagingConfigView() -> Html {
                 // exists. Keep both in sync so checking the chip enables
                 // alerts (default thresholds when untouched) and unchecking
                 // removes the block.
-                form.disk_alert = if form.notify_on.contains(&MsgKind::DiskAlert) { Some(da) } else { None };
+                let subscribed = shared::model::notification::EventSubscription::parse(form.notify_on.iter())
+                    .matches(shared::model::notification::registry::SYSTEM_DISK_ALERT);
+                form.disk_alert = if subscribed { Some(da) } else { None };
 
                 let modified = mm || tm || rm || pm || dm || dam;
                 ConfigForm::Messaging(modified, form)
@@ -227,18 +244,13 @@ pub fn MessagingConfigView() -> Html {
         });
     }
 
-    let render_templates_view = |templates: &std::collections::HashMap<MsgKind, String>| {
+    let render_templates_view = |templates: &std::collections::HashMap<String, String>| {
         if templates.is_empty() {
             html! {}
         } else {
             let template_fields = templates
                 .iter()
-                .map(|(kind, template)| {
-                    config_field_custom!(
-                        translate.t(&format!("LABEL.MSG_KIND_{}", kind.wire_name().to_uppercase())),
-                        template.clone()
-                    )
-                })
+                .map(|(kind, template)| config_field_custom!(translate.t(&event_label_key(kind)), template.clone()))
                 .collect::<Html>();
             html! {
                 <div class="tp__messaging-config__templates-view">
@@ -254,19 +266,7 @@ pub fn MessagingConfigView() -> Html {
           <Card class="tp__config-view__card">
               <h1>{translate.t("LABEL.TELEGRAM")}</h1>
               { config_field_hide!(entry, translate.t(LABEL_BOT_TOKEN), bot_token) }
-              { config_field_child!(translate.t(LABEL_CHAT_IDS), "MESSAGING_CONFIG.TELEGRAM_CHAT_IDS", {
-                  html! {
-                      <div class="tp__config-view__tags">
-                          {
-                              if entry.chat_ids.is_empty() {
-                                  html! {}
-                              } else {
-                                  html! { for t in entry.chat_ids.iter() { <Chip label={t.clone()} /> } }
-                              }
-                          }
-                      </div>
-                  }
-              })}
+              { config_field_tags!(entry, translate.t(LABEL_CHAT_IDS), chat_ids, "MESSAGING_CONFIG.TELEGRAM_CHAT_IDS") }
              { config_field_bool!(entry, translate.t(LABEL_MARKDOWN), markdown) }
              { render_templates_view(&entry.templates) }
           </Card>
@@ -287,19 +287,7 @@ pub fn MessagingConfigView() -> Html {
               <h1>{translate.t(LABEL_REST)}</h1>
               { config_field!(entry, translate.t(LABEL_URL), url) }
               { config_field_optional!(entry, translate.t(LABEL_METHOD), method) }
-              { config_field_child!(translate.t(LABEL_HEADERS), "MESSAGING_CONFIG.REST_HEADERS", {
-                  html! {
-                      <div class="tp__config-view__tags">
-                          {
-                              if entry.headers.is_empty() {
-                                  html! {}
-                              } else {
-                                  html! { for h in entry.headers.iter() { <Chip label={h.clone()} /> } }
-                              }
-                          }
-                      </div>
-                  }
-              })}
+              { config_field_tags!(entry, translate.t(LABEL_HEADERS), headers, "MESSAGING_CONFIG.REST_HEADERS") }
               { render_templates_view(&entry.templates) }
           </Card>
         },
@@ -365,7 +353,8 @@ pub fn MessagingConfigView() -> Html {
             .map(|t| {
                 let is_selected = msg_state.form.notify_on.contains(t);
                 let class = if is_selected { "tp__text-button primary" } else { "tp__text-button" };
-                html! { <Chip label={t.to_string()} class={class}/> }
+                let label = translate.t(&event_label_key(t));
+                html! { <Chip {label} class={class}/> }
             })
             .collect::<Html>();
         html! {
@@ -391,18 +380,18 @@ pub fn MessagingConfigView() -> Html {
 
     let render_edit_mode = || {
         let msg_state = messaging_state.clone();
-        let notify_on_selections = Rc::new(msg_state.form.notify_on.iter().map(ToString::to_string).collect());
+        let notify_on_selections = Rc::new(msg_state.form.notify_on.clone());
         let telegram_template_fields = notify_on_options
             .iter()
             .map(|kind| {
-                let kind_str = translate.t(&format!("LABEL.MSG_KIND_{}", kind.wire_name().to_uppercase()));
+                let kind_str = translate.t(&event_label_key(kind));
                 let current_val = telegram_state.form.templates.get(kind).cloned().unwrap_or_default();
                 let telegram_state = telegram_state.clone();
-                let kind = *kind;
+                let kind = kind.clone();
                 html! {
                     <TextArea
                         label={kind_str}
-                        field_id={Some(format!("TELEGRAM_CONFIG.TEMPLATES.{}", kind.wire_name().to_uppercase()))}
+                        field_id={Some(format!("TELEGRAM_CONFIG.TEMPLATES.{}", event_label_suffix(&kind)))}
                         value={current_val}
                         collapse_on_empty={true}
                         on_change={Callback::from(move |val: String| {
@@ -410,7 +399,7 @@ pub fn MessagingConfigView() -> Html {
                             if val.is_empty() {
                                 updated.remove(&kind);
                             } else {
-                                updated.insert(kind, val);
+                                updated.insert(kind.clone(), val);
                             }
                             telegram_state.dispatch(TelegramMessagingConfigFormAction::Templates(updated));
                         })}
@@ -421,14 +410,14 @@ pub fn MessagingConfigView() -> Html {
         let rest_template_fields = notify_on_options
             .iter()
             .map(|kind| {
-                let kind_str = translate.t(&format!("LABEL.MSG_KIND_{}", kind.wire_name().to_uppercase()));
+                let kind_str = translate.t(&event_label_key(kind));
                 let current_val = rest_state.form.templates.get(kind).cloned().unwrap_or_default();
                 let rest_state = rest_state.clone();
-                let kind = *kind;
+                let kind = kind.clone();
                 html! {
                     <TextArea
                         label={kind_str}
-                        field_id={Some(format!("REST_MESSAGING_CONFIG.TEMPLATES.{}", kind.wire_name().to_uppercase()))}
+                        field_id={Some(format!("REST_MESSAGING_CONFIG.TEMPLATES.{}", event_label_suffix(&kind)))}
                         value={current_val}
                         collapse_on_empty={true}
                         on_change={Callback::from(move |val: String| {
@@ -436,7 +425,7 @@ pub fn MessagingConfigView() -> Html {
                             if val.is_empty() {
                                 updated.remove(&kind);
                             } else {
-                                updated.insert(kind, val);
+                                updated.insert(kind.clone(), val);
                             }
                             rest_state.dispatch(RestMessagingConfigFormAction::Templates(updated));
                         })}
@@ -447,14 +436,14 @@ pub fn MessagingConfigView() -> Html {
         let discord_template_fields = notify_on_options
             .iter()
             .map(|kind| {
-                let kind_str = translate.t(&format!("LABEL.MSG_KIND_{}", kind.wire_name().to_uppercase()));
+                let kind_str = translate.t(&event_label_key(kind));
                 let current_val = discord_state.form.templates.get(kind).cloned().unwrap_or_default();
                 let discord_state = discord_state.clone();
-                let kind = *kind;
+                let kind = kind.clone();
                 html! {
                     <TextArea
                         label={kind_str}
-                        field_id={Some(format!("DISCORD_MESSAGING_CONFIG.TEMPLATES.{}", kind.wire_name().to_uppercase()))}
+                        field_id={Some(format!("DISCORD_MESSAGING_CONFIG.TEMPLATES.{}", event_label_suffix(&kind)))}
                         value={current_val}
                         collapse_on_empty={true}
                         on_change={Callback::from(move |val: String| {
@@ -462,7 +451,7 @@ pub fn MessagingConfigView() -> Html {
                             if val.is_empty() {
                                 updated.remove(&kind);
                             } else {
-                                updated.insert(kind, val);
+                                updated.insert(kind.clone(), val);
                             }
                             discord_state.dispatch(DiscordMessagingConfigFormAction::Templates(updated));
                         })}
@@ -473,13 +462,14 @@ pub fn MessagingConfigView() -> Html {
         html! {
             <>
             <div class="tp__messaging-config-view__header tp__config-view-page__header">
-                { config_field_child!(translate.t("LABEL.NOTIFY_ON"), "MESSAGING_CONFIG.NOTIFY_ON", {
+                { config_field_child!(translate.t(LABEL_NOTIFY_ON), "MESSAGING_CONFIG.NOTIFY_ON", {
                    let dispatch_handle = msg_state.clone();
                    html! { <RadioButtonGroup
-                        multi_select={true} none_allowed={true}
+                        multi_select={true} none_allowed={true} wrap={true}
+                        labels={Some(notify_on_labels.clone())}
                         on_select={Callback::from(move |selections: Rc<Vec<String>>| {
                             dispatch_handle.dispatch(MessagingConfigFormAction::NotifyOn(
-                                selections.iter().filter_map(|s| MsgKind::from_str(s).ok()).collect()));
+                                selections.as_ref().clone()));
                         })}
                         options={notify_on_options_text.clone()}
                         selected={notify_on_selections}
@@ -541,5 +531,42 @@ pub fn MessagingConfigView() -> Html {
            <div class="tp__config-view-page__title">{translate.t(LABEL_MESSAGING_CONFIG)}</div>
             { if *config_view_ctx.edit_mode { render_edit_mode() } else { render_view_mode() } }
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{event_label_key, event_label_suffix};
+    use shared::model::notification::registry;
+
+    #[test]
+    fn event_label_suffix_formats_dotted_ids_to_upper_snake() {
+        assert_eq!(event_label_suffix("system.info"), "SYSTEM_INFO");
+        assert_eq!(event_label_suffix("recording.completed"), "RECORDING_COMPLETED");
+        assert_eq!(event_label_suffix("provider.account.status_changed"), "PROVIDER_ACCOUNT_STATUS_CHANGED");
+    }
+
+    #[test]
+    fn all_notification_event_keys_exist_in_every_locale() {
+        const LOCALES: [(&str, &str); 3] = [
+            ("en", include_str!("../../../../public/assets/i18n/en.json")),
+            ("ar", include_str!("../../../../public/assets/i18n/ar.json")),
+            ("ru", include_str!("../../../../public/assets/i18n/ru.json")),
+        ];
+
+        for (locale, json) in LOCALES {
+            let parsed = serde_json::from_str::<serde_json::Value>(json);
+            assert!(parsed.is_ok(), "{locale} locale must be valid JSON");
+            let Ok(parsed) = parsed else { continue };
+
+            for descriptor in registry::ALL {
+                let full_key = event_label_key(descriptor.id.as_str());
+                let value = full_key.split('.').try_fold(&parsed, |value, segment| value.get(segment));
+                assert!(
+                    value.and_then(serde_json::Value::as_str).is_some_and(|text| !text.trim().is_empty()),
+                    "{locale} locale is missing non-empty translation key {full_key}"
+                );
+            }
+        }
     }
 }

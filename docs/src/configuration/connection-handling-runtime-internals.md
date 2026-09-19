@@ -277,10 +277,14 @@ Playback becomes visible/active when the runtime updates connection state throug
 That is the point where:
 
 - logical playback
+- the individual HTTP request claim
 - stream visibility
 - socket/provider tracking
 
 become externally visible as an active running stream.
+
+The visible stream and the request claim are deliberately separate. Segment, range and reconnect requests can reuse one
+logical playback without allowing completion of one body to remove its siblings.
 
 ## 9. Cleanup paths
 
@@ -294,9 +298,14 @@ When the stream ends or is kicked, cleanup may:
 
 Important cleanup behaviors:
 
+- registration reserves a bounded cleanup permit before publishing mutable state
+- the response body owns that permit and releases the exact request on EOF, error, cancellation or drop
+- provider cleanup uses the request identity and binding incarnation captured during acquire instead of rediscovering
+  ownership from the socket address
 - kicked cleanup can terminate the associated session immediately
 - adaptive/HLS-style playback may remain preserved for a TTL
 - preserved does not mean counted
+- server shutdown closes new admission, drains active state directly and joins its owned workers
 
 ## 10. Background probe and resolve tasks
 

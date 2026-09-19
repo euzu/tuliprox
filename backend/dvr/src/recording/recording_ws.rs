@@ -148,7 +148,7 @@ mod tests {
             iss: "tuliprox".to_string(),
             iat: 0,
             exp: 0,
-            roles: if admin { vec!["ADMIN".to_string()] } else { Vec::new() },
+            roles: if admin { shared::model::RoleSet::ADMIN } else { shared::model::RoleSet::new() },
             permissions: Permission::RecordingRead.into(),
             pwd_version: 0,
             subject_id: subject,

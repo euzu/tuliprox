@@ -1,6 +1,6 @@
 use crate::{
     api::model::AppState,
-    auth::verify_token,
+    auth::TokenVerifier,
     utils::{get_log_history, subscribe_logs},
 };
 use axum::{
@@ -13,7 +13,7 @@ use axum::{
 use log::{trace, warn};
 use serde::Deserialize;
 use shared::{
-    model::{LogLevel, LogWsMessage, Permission, WsCloseCode, ROLE_ADMIN},
+    model::{LogLevel, LogWsMessage, Permission, WsCloseCode},
     utils::concat_path_leading_slash,
 };
 use std::sync::Arc;
@@ -24,29 +24,24 @@ pub struct LogWsQuery {
     pub min_level: Option<String>,
 }
 
-fn get_secret_key(app_state: &AppState, auth_required: bool) -> Option<Vec<u8>> {
+/// The verifier this socket authenticates against.
+///
+/// This used to hand a bare `Vec<u8>` secret around, which is precisely why
+/// the WebSocket paths could not check the token's issuer.
+fn get_token_verifier(app_state: &AppState, auth_required: bool) -> Option<TokenVerifier> {
     if !auth_required {
         return None;
     }
-    app_state.app_config.config.load().web_ui.as_ref().and_then(|c| c.auth.as_ref()).map(|c| {
-        let secret_key: &[u8] = c.secret.as_ref();
-        secret_key.to_vec()
+    app_state.app_config.config.load().web_ui.as_ref().and_then(|c| c.auth.as_ref()).map(TokenVerifier::from_config)
+}
+
+fn check_token_auth(token: &str, verifier: Option<&TokenVerifier>) -> bool {
+    verifier.and_then(|verifier| verifier.verify(token)).is_some_and(|token_data| {
+        token_data.claims.permissions.contains(Permission::SystemRead) || token_data.claims.is_admin()
     })
 }
 
-fn check_token_auth(token: &str, secret_key: Option<&[u8]>) -> bool {
-    let Some(secret_key) = secret_key else {
-        return false;
-    };
-    if let Some(token_data) = verify_token(token, secret_key) {
-        token_data.claims.permissions.contains(Permission::SystemRead)
-            || token_data.claims.roles.iter().any(|r| r == ROLE_ADMIN)
-    } else {
-        false
-    }
-}
-
-async fn wait_for_socket_auth(socket: &mut WebSocket, secret_key: Option<&[u8]>) -> bool {
+async fn wait_for_socket_auth(socket: &mut WebSocket, verifier: Option<&TokenVerifier>) -> bool {
     let auth_timeout = tokio::time::sleep(tokio::time::Duration::from_secs(10));
     tokio::pin!(auth_timeout);
 
@@ -66,7 +61,7 @@ async fn wait_for_socket_auth(socket: &mut WebSocket, secret_key: Option<&[u8]>)
                 match msg {
                     Message::Text(text) => {
                         if let Ok(LogWsMessage::Auth(token)) = serde_json::from_str::<LogWsMessage>(&text) {
-                            if check_token_auth(&token, secret_key) {
+                            if check_token_auth(&token, verifier) {
                                 let auth_ok = serde_json::to_string(&LogWsMessage::Authorized).unwrap_or_default();
                                 let _ = socket.send(Message::Text(auth_ok.into())).await;
                                 return true;
@@ -92,19 +87,19 @@ async fn wait_for_socket_auth(socket: &mut WebSocket, secret_key: Option<&[u8]>)
 }
 
 async fn handle_socket(mut socket: WebSocket, app_state: Arc<AppState>, auth_required: bool, query: LogWsQuery) {
-    let secret_key = get_secret_key(&app_state, auth_required);
+    let verifier = get_token_verifier(&app_state, auth_required);
     let mut is_authorized = !auth_required;
     let mut min_level: Option<LogLevel> = query.min_level.as_deref().and_then(|s| s.parse().ok());
 
     if !is_authorized {
         if let Some(token) = query.token.as_deref() {
-            if check_token_auth(token, secret_key.as_deref()) {
+            if check_token_auth(token, verifier.as_ref()) {
                 is_authorized = true;
             }
         }
     }
 
-    if !is_authorized && !wait_for_socket_auth(&mut socket, secret_key.as_deref()).await {
+    if !is_authorized && !wait_for_socket_auth(&mut socket, verifier.as_ref()).await {
         return;
     }
 
@@ -220,22 +215,30 @@ mod tests {
             t_users: None,
             t_groups: None,
         };
-        let secret = auth_config.secret.as_bytes();
+        let verifier = TokenVerifier::from_config(&auth_config);
 
         let admin_token = create_jwt_admin(&auth_config, "admin", 0).unwrap();
-        assert!(check_token_auth(&admin_token, Some(secret)));
+        assert!(check_token_auth(&admin_token, Some(&verifier)));
 
         let mut perms = PermissionSet::new();
         perms.set(Permission::SystemRead);
-        let user_token = create_jwt_web_user(&auth_config, "user", perms, 0).unwrap();
-        assert!(check_token_auth(&user_token, Some(secret)));
+        let user_token =
+            create_jwt_web_user(&auth_config, "user", perms, 0, shared::model::UserId::from("web:user")).unwrap();
+        assert!(check_token_auth(&user_token, Some(&verifier)));
 
         // Missing system read
         let empty_perms = PermissionSet::new();
-        let token_no_perm = create_jwt_web_user(&auth_config, "user2", empty_perms, 0).unwrap();
-        assert!(!check_token_auth(&token_no_perm, Some(secret)));
+        let token_no_perm =
+            create_jwt_web_user(&auth_config, "user2", empty_perms, 0, shared::model::UserId::from("web:user2"))
+                .unwrap();
+        assert!(!check_token_auth(&token_no_perm, Some(&verifier)));
 
         // Invalid secret
-        assert!(!check_token_auth(&admin_token, Some(b"wrongsecretwrongsecretwrongsecret")));
+        let wrong_secret = TokenVerifier::new(&b"wrongsecretwrongsecretwrongsecret"[..], "tuliprox");
+        assert!(!check_token_auth(&admin_token, Some(&wrong_secret)));
+
+        // Right secret, wrong issuer: the token must not verify.
+        let wrong_issuer = TokenVerifier::new(auth_config.secret.as_bytes(), "somebody-else");
+        assert!(!check_token_auth(&admin_token, Some(&wrong_issuer)));
     }
 }

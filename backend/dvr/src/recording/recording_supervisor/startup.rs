@@ -34,13 +34,15 @@ use crate::{
     recording_service::recording_identity_key,
 };
 use log::{debug, error, info, warn};
-use shared::model::recording_rule::{RecordingRulesFile, RecordingTombstone, TombstoneKind};
+use shared::model::{
+    recording_rule::{RecordingRulesFile, RecordingTombstone, TombstoneKind},
+    EventMessage, EventSink,
+};
 use std::{collections::HashSet, path::PathBuf};
 use tuliprox_repository::recording_rule_repository::RecordingRuleRepository;
-use tuliprox_session::EventMessage;
 
 /// Repair the DVR state left behind by the previous process.
-pub async fn run_startup_reconciliation(ctx: &RecordingCtx) {
+pub async fn run_startup_reconciliation<E: EventSink + Clone + 'static>(ctx: &RecordingCtx<E>) {
     if !recording_enabled(&ctx.app_config) {
         debug!("Recording disabled; skipping DVR startup reconciliation");
         return;
@@ -51,7 +53,7 @@ pub async fn run_startup_reconciliation(ctx: &RecordingCtx) {
     SupervisorHealth::stamp(&supervisor_health().reconciliation_last_run, now_ts());
     if stuck > 0 || drift > 0 {
         info!("DVR startup reconciliation: repaired {stuck} interrupted deletion(s), {drift} rule drift item(s)");
-        let _ = ctx.event_manager.send_event(EventMessage::RecordingChanged);
+        ctx.events.emit(EventMessage::RecordingChanged);
     }
 }
 
@@ -73,7 +75,7 @@ fn media_is_still_referenced(all_tasks: &[RecordingTask], subject: &RecordingTas
 /// Reporting only. A sidecar describes a file; it is not evidence that anyone
 /// was ever entitled to play it, so rediscovering one must never put it back in
 /// somebody's library. Access comes from the repository or not at all.
-async fn report_orphan_recordings(ctx: &RecordingCtx) {
+async fn report_orphan_recordings<E: EventSink + Clone + 'static>(ctx: &RecordingCtx<E>) {
     let Some(root) = recording_config(&ctx.app_config)
         .map(|cfg| PathBuf::from(cfg.directory))
         .filter(|dir| !dir.as_os_str().is_empty())
@@ -103,7 +105,7 @@ async fn report_orphan_recordings(ctx: &RecordingCtx) {
 }
 
 /// Finish or undo every deletion the previous process left half-done.
-async fn recover_stuck_deletions(ctx: &RecordingCtx) -> usize {
+async fn recover_stuck_deletions<E: EventSink + Clone + 'static>(ctx: &RecordingCtx<E>) -> usize {
     let (_revision, all_tasks) = ctx.recordings.committed_snapshot().await;
     let pending: Vec<RecordingTask> =
         all_tasks.iter().filter(|task| task.recording.deleting_previous_state.is_some()).cloned().collect();
@@ -160,7 +162,7 @@ async fn recover_stuck_deletions(ctx: &RecordingCtx) -> usize {
 }
 
 /// Apply the reconciliation plan for queue/rule drift.
-async fn reconcile_rule_drift(ctx: &RecordingCtx) -> usize {
+async fn reconcile_rule_drift<E: EventSink + Clone + 'static>(ctx: &RecordingCtx<E>) -> usize {
     let storage_dir = ctx.app_config.config.load().storage_dir.clone();
     let repo = RecordingRuleRepository::new(storage_dir);
     let mut file = match repo.load().await {
@@ -189,7 +191,7 @@ async fn reconcile_rule_drift(ctx: &RecordingCtx) -> usize {
             error!("DVR reconciliation could not persist repaired tombstones: {err}");
             return applied;
         }
-        let _ = ctx.event_manager.send_event(EventMessage::RecordingRulesChanged);
+        ctx.events.emit(EventMessage::RecordingRulesChanged);
     }
     applied
 }

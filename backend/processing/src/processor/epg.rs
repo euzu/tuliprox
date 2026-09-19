@@ -2,7 +2,7 @@ use crate::{fetched_playlist::FetchedPlaylist, parser::xmltv::normalize_channel_
 use log::{debug, trace, warn};
 use rphonetic::{DoubleMetaphone, Encoder};
 use shared::{
-    model::{EpgNamePrefix, EpgSmartMatchConfigDto, PlaylistItem, XtreamCluster},
+    model::{EpgNamePrefix, EpgSmartMatchConfigDto, PlaylistGroup, PlaylistItem, XtreamCluster},
     utils::{Internable, CONSTANTS},
 };
 use std::{
@@ -728,16 +728,84 @@ fn assign_epg_icon(
     });
 }
 
+fn is_live_epg_item(item: &PlaylistItem) -> bool {
+    item.header.xtream_cluster == XtreamCluster::Live && item.header.item_type.is_live()
+}
+
+fn has_processed_epg(item: &PlaylistItem, id_cache: &EpgIdCache) -> bool {
+    item.header.epg_channel_id.as_deref().is_some_and(|id| id_cache.contains_processed_epg_id(id))
+}
+
+fn assign_live_channel_epg(
+    channel: &mut PlaylistItem,
+    id_cache: &EpgIdCache,
+    icon_tags: &HashMap<Arc<str>, &Arc<str>>,
+    icon_override_channels: &HashSet<Arc<str>>,
+    icon_assigned: &mut HashSet<Arc<str>>,
+    stats: &mut EpgAssignmentStats,
+    clear_invalid_epg_ids: bool,
+) {
+    if id_cache.smart_match_enabled {
+        stats.record(assign_smart_epg_id(channel, id_cache));
+    }
+    let has_epg = has_processed_epg(channel, id_cache);
+    assign_epg_icon(channel, icon_tags, icon_override_channels, icon_assigned);
+    if clear_invalid_epg_ids && !has_epg {
+        channel.header.epg_channel_id = None;
+    }
+}
+
 fn referenced_live_epg_ids(fp: &mut FetchedPlaylist<'_>) -> HashSet<Arc<str>> {
     fp.items()
-        .filter(|channel| channel.header.xtream_cluster == XtreamCluster::Live && channel.header.item_type.is_live())
+        .filter(|channel| is_live_epg_item(channel))
         .filter_map(|channel| {
             channel.header.epg_channel_id.as_ref().map(|id| with_folded_epg_id(id, |folded| folded.intern()))
         })
         .collect()
 }
 
+pub(crate) fn retain_epg_referenced_by_groups(groups: &[PlaylistGroup], epg: &mut [Epg]) {
+    let referenced_epg_ids = groups
+        .iter()
+        .flat_map(|group| &group.channels)
+        .filter(|channel| is_live_epg_item(channel))
+        .filter_map(|channel| {
+            channel.header.epg_channel_id.as_ref().map(|id| with_folded_epg_id(id, |folded| folded.intern()))
+        })
+        .collect::<HashSet<_>>();
+    for source in epg {
+        source.children.retain(|channel| with_folded_epg_id(&channel.id, |folded| referenced_epg_ids.contains(folded)));
+    }
+}
+
+pub(crate) fn clear_invalid_live_epg_ids(fp: &mut FetchedPlaylist<'_>, epg: &[Epg]) {
+    let processed_epg_ids = epg
+        .iter()
+        .flat_map(|source| &source.children)
+        .map(|channel| with_folded_epg_id(&channel.id, |folded| folded.intern()))
+        .collect::<HashSet<_>>();
+    let mut cleared = 0usize;
+    fp.source.retain_memory_items_mut(|item| {
+        if !is_live_epg_item(item) {
+            return true;
+        }
+        let has_epg = item
+            .header
+            .epg_channel_id
+            .as_deref()
+            .is_some_and(|id| with_folded_epg_id(id, |folded| processed_epg_ids.contains(folded)));
+        if !has_epg && item.header.epg_channel_id.take().is_some() {
+            cleared += 1;
+        }
+        true
+    });
+    if cleared > 0 {
+        debug!("Cleared {cleared} unmatched EPG IDs from input '{}'", fp.input.name);
+    }
+}
+
 /// Assigns EPG IDs and logos to live playlist channels by matching them with EPG data.
+/// Invalid EPG IDs are optionally cleared without removing playlist entries.
 ///
 /// For each live channel in the playlist missing an EPG ID, attempts to assign one using normalized name matching if smart matching is enabled. If a channel has an EPG ID but lacks logos, assigns logos from the corresponding EPG icon tags. Adds the matched EPG data to the provided vector.
 ///
@@ -747,68 +815,72 @@ fn referenced_live_epg_ids(fp: &mut FetchedPlaylist<'_>) -> HashSet<Arc<str>> {
 /// let mut new_epg = Vec::new();
 /// let mut playlist = FetchedPlaylist::default();
 /// let mut id_cache = EpgIdCache::new(None);
-/// assign_channel_epg(&mut new_epg, &mut playlist, &mut id_cache);
+/// assign_channel_epg(&mut new_epg, &mut playlist, &mut id_cache, false);
 /// ```
-async fn assign_channel_epg(new_epg: &mut Vec<Epg>, fp: &mut FetchedPlaylist<'_>, id_cache: &mut EpgIdCache) {
-    if let Some(tv_guide) = &fp.epg {
-        if let Some((mut epg_source, icon_override_channels)) =
-            tv_guide.filter_merged_with_icon_overrides(id_cache).await
-        {
-            let stats = {
-                let icon_tags = epg_source
-                    .children
-                    .iter()
-                    .filter_map(|tag| {
-                        tag.icon
-                            .as_ref()
-                            .filter(|icon| !icon.is_empty())
-                            .map(|icon| (with_folded_epg_id(&tag.id, |folded| folded.intern()), icon))
-                    })
-                    .collect::<HashMap<Arc<str>, &Arc<str>>>();
-                let icon_override_channels = icon_override_channels
-                    .into_iter()
-                    .map(|id| with_folded_epg_id(&id, |folded| folded.intern()))
-                    .collect::<HashSet<_>>();
-                let mut icon_assigned = HashSet::new();
-                let mut stats = EpgAssignmentStats::default();
+async fn assign_channel_epg(
+    new_epg: &mut Vec<Epg>,
+    fp: &mut FetchedPlaylist<'_>,
+    id_cache: &mut EpgIdCache,
+    clear_invalid_epg_ids: bool,
+) {
+    let Some(tv_guide) = &fp.epg else {
+        return;
+    };
+    let mut merged_epg = tv_guide.filter_merged_with_icon_overrides(id_cache).await;
 
-                if fp.is_memory() {
-                    fp.items_mut()
-                        .filter(|channel| {
-                            channel.header.xtream_cluster == XtreamCluster::Live && channel.header.item_type.is_live()
-                        })
-                        .for_each(|channel| {
-                            if id_cache.smart_match_enabled {
-                                stats.record(assign_smart_epg_id(channel, id_cache));
-                            }
-                            assign_epg_icon(channel, &icon_tags, &icon_override_channels, &mut icon_assigned);
-                        });
-                } else {
-                    warn!("Disk based playlist modification is not supported!");
-                }
-                stats
-            };
+    let mut stats = EpgAssignmentStats::default();
+    if fp.is_memory() {
+        let icon_tags = merged_epg
+            .as_ref()
+            .into_iter()
+            .flat_map(|(epg_source, _)| &epg_source.children)
+            .filter_map(|tag| {
+                tag.icon
+                    .as_ref()
+                    .filter(|icon| !icon.is_empty())
+                    .map(|icon| (with_folded_epg_id(&tag.id, |folded| folded.intern()), icon))
+            })
+            .collect::<HashMap<Arc<str>, &Arc<str>>>();
+        let icon_override_channels = merged_epg
+            .as_ref()
+            .into_iter()
+            .flat_map(|(_, channels)| channels)
+            .map(|id| with_folded_epg_id(id, |folded| folded.intern()))
+            .collect::<HashSet<_>>();
+        let mut icon_assigned = HashSet::with_capacity(icon_tags.len());
 
-            let referenced_epg_ids = referenced_live_epg_ids(fp);
-            epg_source
-                .children
-                .retain(|channel| with_folded_epg_id(&channel.id, |folded| referenced_epg_ids.contains(folded)));
-
-            if id_cache.smart_match_enabled {
-                debug!(
-                    "Smart EPG summary for input '{}': live={}, existing={}, exact={}, fuzzy={}, corrected={}, unresolved={}",
-                    fp.input.name,
-                    stats.live,
-                    stats.existing,
-                    stats.exact,
-                    stats.fuzzy,
-                    stats.corrected,
-                    stats.unresolved
-                );
+        let mut process_channel = |channel: &mut PlaylistItem| {
+            if !is_live_epg_item(channel) {
+                return;
             }
+            assign_live_channel_epg(
+                channel,
+                id_cache,
+                &icon_tags,
+                &icon_override_channels,
+                &mut icon_assigned,
+                &mut stats,
+                clear_invalid_epg_ids,
+            );
+        };
 
-            new_epg.push(epg_source);
-        }
+        fp.items_mut().for_each(&mut process_channel);
+    } else {
+        warn!("Disk based playlist modification is not supported!");
+    }
+
+    if id_cache.smart_match_enabled {
+        debug!(
+            "Smart EPG summary for input '{}': live={}, existing={}, exact={}, fuzzy={}, corrected={}, unresolved={}",
+            fp.input.name, stats.live, stats.existing, stats.exact, stats.fuzzy, stats.corrected, stats.unresolved
+        );
+    }
+    if let Some((mut epg_source, _)) = merged_epg.take() {
+        let referenced_epg_ids = referenced_live_epg_ids(fp);
+        epg_source
+            .children
+            .retain(|channel| with_folded_epg_id(&channel.id, |folded| referenced_epg_ids.contains(folded)));
+        new_epg.push(epg_source);
     }
 }
 
@@ -821,9 +893,9 @@ async fn assign_channel_epg(new_epg: &mut Vec<Epg>, fp: &mut FetchedPlaylist<'_>
 /// ```text
 /// let mut playlist = FetchedPlaylist::default();
 /// let mut epg_data = Vec::new();
-/// process_playlist_epg(&mut playlist, &mut epg_data);
+/// process_playlist_epg(&mut playlist, &mut epg_data, false);
 /// ```
-pub async fn process_playlist_epg(fp: &mut FetchedPlaylist<'_>, epg: &mut Vec<Epg>) {
+pub async fn process_playlist_epg(fp: &mut FetchedPlaylist<'_>, epg: &mut Vec<Epg>, clear_invalid_epg_ids: bool) {
     if fp.input.epg.is_none() {
         return;
     }
@@ -831,10 +903,10 @@ pub async fn process_playlist_epg(fp: &mut FetchedPlaylist<'_>, epg: &mut Vec<Ep
     let mut id_cache = EpgIdCache::new(fp.input.epg.as_ref());
     id_cache.collect_epg_id(fp);
 
-    if id_cache.is_empty() && !id_cache.smart_match_enabled {
+    if id_cache.is_empty() && !id_cache.smart_match_enabled && !clear_invalid_epg_ids {
         debug!("No epg ids found for input {}", fp.input.name);
     } else {
-        assign_channel_epg(epg, fp, &mut id_cache).await;
+        assign_channel_epg(epg, fp, &mut id_cache, clear_invalid_epg_ids).await;
     }
 }
 
@@ -844,10 +916,14 @@ mod tests {
     use rand::{distr::Alphanumeric, Rng};
     use rphonetic::{DoubleMetaphone, Encoder};
     use shared::{
-        model::{ConfigInputDto, PlaylistGroup, PlaylistItemHeader, PlaylistItemType},
+        model::{ConfigInputDto, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType},
         utils::Internable,
     };
-    use std::{collections::HashSet, fs, sync::Arc};
+    use std::{
+        collections::{HashMap, HashSet},
+        fs,
+        sync::Arc,
+    };
     use tempfile::tempdir;
     use tokio::time::Instant;
     use tuliprox_core::model::{
@@ -929,13 +1005,14 @@ mod tests {
         xmltv: &str,
         channels: &[(&str, Option<&str>)],
     ) -> (Vec<Option<Arc<str>>>, Vec<tuliprox_core::model::Epg>) {
-        run_xmltv_matches(xmltv, channels, true).await
+        run_xmltv_matches(xmltv, channels, true, false).await
     }
 
     async fn run_xmltv_matches(
         xmltv: &str,
         channels: &[(&str, Option<&str>)],
         smart_matching: bool,
+        clear_invalid_epg_ids: bool,
     ) -> (Vec<Option<Arc<str>>>, Vec<tuliprox_core::model::Epg>) {
         let dir = tempdir().unwrap();
         let epg_path = dir.path().join("smart-match.xml");
@@ -971,7 +1048,7 @@ mod tests {
         };
         let mut epg = Vec::new();
 
-        super::process_playlist_epg(&mut playlist, &mut epg).await;
+        super::process_playlist_epg(&mut playlist, &mut epg, clear_invalid_epg_ids).await;
         let assigned_ids = playlist.items_mut().map(|item| item.header.epg_channel_id.clone()).collect();
         (assigned_ids, epg)
     }
@@ -1185,13 +1262,246 @@ mod tests {
             };
             let mut epg = Vec::new();
 
-            super::process_playlist_epg(&mut playlist, &mut epg).await;
+            super::process_playlist_epg(&mut playlist, &mut epg, false).await;
 
             let updated = playlist.items_mut().next().unwrap();
             assert_eq!(updated.header.epg_channel_id.as_deref(), Some("demo.channel"));
             assert_eq!(updated.header.logo.as_ref(), "http://guide/icon.png");
             assert_eq!(updated.header.logo_small.as_ref(), "http://guide/icon.png");
             assert_eq!(epg[0].children[0].id.as_ref(), "Demo.Channel");
+        });
+    }
+
+    #[test]
+    fn clear_invalid_epg_ids_preserves_items_and_clears_only_unmatched_live_ids() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async move {
+            let dir = tempdir().unwrap();
+            let epg_path = dir.path().join("required-epg.xml");
+            fs::write(
+                &epg_path,
+                r#"<tv>
+  <channel id="matched.live"><display-name>Matched Live</display-name></channel>
+  <programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="matched.live">
+    <title>Programme</title>
+  </programme>
+</tv>"#,
+            )
+            .unwrap();
+
+            let mut input = ConfigInput::from(ConfigInputDto::default());
+            input.epg = Some(EpgConfig { sources: vec![], smart_match: None });
+            let item = |name: &str, epg_id: Option<&str>, item_type: PlaylistItemType| PlaylistItem {
+                header: PlaylistItemHeader {
+                    name: name.intern(),
+                    epg_channel_id: epg_id.map(Internable::intern),
+                    xtream_cluster: item_type.cluster(),
+                    item_type,
+                    ..PlaylistItemHeader::default()
+                },
+            };
+            let groups = vec![
+                PlaylistGroup {
+                    id: 1,
+                    title: "Live".intern(),
+                    channels: vec![
+                        item("Matched Live", Some("matched.live"), PlaylistItemType::Live),
+                        item("Unmatched Live", Some("missing.live"), PlaylistItemType::LiveHls),
+                    ],
+                    xtream_cluster: super::XtreamCluster::Live,
+                },
+                PlaylistGroup {
+                    id: 2,
+                    title: "Non-Live".intern(),
+                    channels: vec![
+                        item("VOD", None, PlaylistItemType::Video),
+                        item("Series", None, PlaylistItemType::Series),
+                        item("Local VOD", None, PlaylistItemType::LocalVideo),
+                        item("Local Series", None, PlaylistItemType::LocalSeries),
+                    ],
+                    xtream_cluster: super::XtreamCluster::Video,
+                },
+            ];
+            let tv_guide = TVGuide::new(vec![PersistedEpgSource {
+                file_path: epg_path,
+                priority: 0,
+                logo_override: false,
+                kind: PersistedEpgSourceKind::Xmltv,
+            }]);
+            let mut playlist = FetchedPlaylist {
+                input: &input,
+                source: MemoryPlaylistSource::new(groups).into_source(),
+                epg: Some(tv_guide),
+            };
+            let mut epg = Vec::new();
+
+            super::process_playlist_epg(&mut playlist, &mut epg, true).await;
+
+            let items = playlist
+                .items_mut()
+                .map(|item| (item.header.name.clone(), item.header.epg_channel_id.clone()))
+                .collect::<HashMap<_, _>>();
+            assert_eq!(items.get("Matched Live").and_then(Option::as_deref), Some("matched.live"));
+            assert_eq!(items.get("Unmatched Live"), Some(&None));
+            assert!(items.contains_key("VOD"));
+            assert!(items.contains_key("Series"));
+            assert!(items.contains_key("Local VOD"));
+            assert!(items.contains_key("Local Series"));
+        });
+    }
+
+    #[test]
+    fn default_epg_processing_preserves_unmatched_existing_id() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async move {
+            let (assigned_ids, _) = run_xmltv_matches(
+                r#"<tv>
+  <channel id="matched.live"><display-name>Matched Live</display-name></channel>
+  <programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="matched.live">
+    <title>Programme</title>
+  </programme>
+</tv>"#,
+                &[("Unmatched Live", Some("missing.live"))],
+                false,
+                false,
+            )
+            .await;
+
+            assert_eq!(assigned_ids, vec![Some("missing.live".intern())]);
+        });
+    }
+
+    #[test]
+    fn clear_invalid_epg_ids_is_ignored_without_a_materialized_epg_source() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async move {
+            let mut input = ConfigInput::from(ConfigInputDto::default());
+            input.epg = Some(EpgConfig { sources: vec![], smart_match: None });
+            let groups = vec![PlaylistGroup {
+                id: 1,
+                title: "Live".intern(),
+                channels: vec![live_playlist_item("Unmatched Live", Some("missing.live"))],
+                xtream_cluster: super::XtreamCluster::Live,
+            }];
+            let mut playlist =
+                FetchedPlaylist { input: &input, source: MemoryPlaylistSource::new(groups).into_source(), epg: None };
+
+            super::process_playlist_epg(&mut playlist, &mut Vec::new(), true).await;
+
+            assert_eq!(playlist.items_mut().count(), 1);
+            assert_eq!(
+                playlist.items_mut().next().and_then(|item| item.header.epg_channel_id.as_deref()),
+                Some("missing.live")
+            );
+        });
+    }
+
+    #[test]
+    fn optional_epg_preserves_existing_empty_groups() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async move {
+            let dir = tempdir().unwrap();
+            let epg_path = dir.path().join("optional-epg-empty-group.xml");
+            fs::write(
+                &epg_path,
+                r#"<tv>
+  <channel id="matched.live"><display-name>Matched Live</display-name></channel>
+  <programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="matched.live">
+    <title>Programme</title>
+  </programme>
+</tv>"#,
+            )
+            .unwrap();
+
+            let mut input = ConfigInput::from(ConfigInputDto::default());
+            input.epg = Some(EpgConfig { sources: vec![], smart_match: None });
+            let groups = vec![
+                PlaylistGroup {
+                    id: 1,
+                    title: "Empty".intern(),
+                    channels: vec![],
+                    xtream_cluster: super::XtreamCluster::Live,
+                },
+                PlaylistGroup {
+                    id: 2,
+                    title: "Live".intern(),
+                    channels: vec![live_playlist_item("Matched Live", Some("matched.live"))],
+                    xtream_cluster: super::XtreamCluster::Live,
+                },
+            ];
+            let tv_guide = TVGuide::new(vec![PersistedEpgSource {
+                file_path: epg_path,
+                priority: 0,
+                logo_override: false,
+                kind: PersistedEpgSourceKind::Xmltv,
+            }]);
+            let mut playlist = FetchedPlaylist {
+                input: &input,
+                source: MemoryPlaylistSource::new(groups).into_source(),
+                epg: Some(tv_guide),
+            };
+
+            super::process_playlist_epg(&mut playlist, &mut Vec::new(), false).await;
+
+            assert_eq!(playlist.get_group_count(), 2);
+        });
+    }
+
+    #[test]
+    fn clear_invalid_epg_ids_preserves_live_items_without_ids() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async move {
+            let dir = tempdir().unwrap();
+            let epg_path = dir.path().join("required-epg-no-ids.xml");
+            fs::write(&epg_path, "<tv></tv>").unwrap();
+
+            let mut input = ConfigInput::from(ConfigInputDto::default());
+            input.epg = Some(EpgConfig { sources: vec![], smart_match: None });
+            let groups = vec![PlaylistGroup {
+                id: 1,
+                title: "Live".intern(),
+                channels: vec![live_playlist_item("Live without ID", None)],
+                xtream_cluster: super::XtreamCluster::Live,
+            }];
+            let tv_guide = TVGuide::new(vec![PersistedEpgSource {
+                file_path: epg_path,
+                priority: 0,
+                logo_override: false,
+                kind: PersistedEpgSourceKind::Xmltv,
+            }]);
+            let mut playlist = FetchedPlaylist {
+                input: &input,
+                source: MemoryPlaylistSource::new(groups).into_source(),
+                epg: Some(tv_guide),
+            };
+
+            super::process_playlist_epg(&mut playlist, &mut Vec::new(), true).await;
+
+            assert_eq!(playlist.items_mut().count(), 1);
+            assert_eq!(playlist.get_group_count(), 1);
+        });
+    }
+
+    #[test]
+    fn clear_invalid_epg_ids_keeps_ids_assigned_by_smart_matching() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async move {
+            let (assigned_ids, epg) = run_xmltv_matches(
+                r#"<tv>
+  <channel id="tf1.fr"><display-name>TF1</display-name></channel>
+  <programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="tf1.fr">
+    <title>Programme TF1</title>
+  </programme>
+</tv>"#,
+                &[("TF1", None)],
+                true,
+                true,
+            )
+            .await;
+
+            assert_eq!(assigned_ids, vec![Some("tf1.fr".intern())]);
+            assert_eq!(epg[0].children.len(), 1);
+            assert_eq!(epg[0].children[0].id.as_ref(), "tf1.fr");
         });
     }
 
@@ -1228,7 +1538,7 @@ mod tests {
 </tv>"#;
             for smart_matching in [false, true] {
                 let (assigned_ids, epg) =
-                    run_xmltv_matches(xmltv, &[("Empty channel", Some("empty.fr"))], smart_matching).await;
+                    run_xmltv_matches(xmltv, &[("Empty channel", Some("empty.fr"))], smart_matching, false).await;
 
                 assert_eq!(assigned_ids, vec![Some("empty.fr".intern())]);
                 assert_eq!(epg[0].children.len(), 1);
@@ -1308,7 +1618,7 @@ mod tests {
             };
             let mut epg = Vec::new();
 
-            super::process_playlist_epg(&mut playlist, &mut epg).await;
+            super::process_playlist_epg(&mut playlist, &mut epg, false).await;
 
             assert_eq!(epg.len(), 1);
             assert_eq!(epg[0].children[0].id.as_ref(), "f1.calendar");
@@ -1346,7 +1656,7 @@ mod tests {
             };
             let mut epg = Vec::new();
 
-            super::process_playlist_epg(&mut playlist, &mut epg).await;
+            super::process_playlist_epg(&mut playlist, &mut epg, false).await;
 
             let updated = playlist.items_mut().next().unwrap();
             assert_eq!(updated.header.epg_channel_id.as_deref(), Some("f1.calendar"));

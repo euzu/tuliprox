@@ -953,12 +953,11 @@ pub async fn csv_patch_batch_sort_by_exp_date(
     if aliases.len() < 2 {
         return Ok(false);
     }
-    let mut sorted = aliases.clone();
-    sorted.sort_by(|a, b| compare_alias_exp_date_with_order(a, b, order));
-    if sorted == aliases {
+    let compare = |a: &ConfigInputAliasDto, b: &ConfigInputAliasDto| compare_alias_exp_date_with_order(a, b, order);
+    if aliases.windows(2).all(|pair| compare(&pair[0], &pair[1]) != std::cmp::Ordering::Greater) {
         return Ok(false);
     }
-    aliases = sorted;
+    aliases.sort_by(compare);
     csv_write_input_to_path(&file_path, &aliases).map_err(|err| TuliproxError::ConfigInput(format!("{err}"))).await?;
     Ok(true)
 }

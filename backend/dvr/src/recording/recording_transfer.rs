@@ -29,7 +29,7 @@ use futures::stream::TryStreamExt;
 use log::{debug, error, info, warn};
 use shared::{
     error::to_io_error,
-    model::{RecordingKind, RecordingMetadata},
+    model::{EventMessage, EventSink, RecordingKind, RecordingMetadata},
     utils::bytes_to_megabytes,
 };
 use std::{collections::HashMap, ops::Deref, path::Path, pin::Pin, sync::Arc};
@@ -44,8 +44,6 @@ use tuliprox_core::{
     model::{AppConfig, MessageContent, RecordingConfig},
     utils::{async_file_writer, request, request::create_client, IO_BUFFER_SIZE},
 };
-use tuliprox_messaging::send_message;
-use tuliprox_session::{EventManager, EventMessage};
 
 const DOWNLOAD_PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const DOWNLOAD_PROGRESS_LOG_BYTES: u64 = 16 * 1024 * 1024;
@@ -179,27 +177,17 @@ where
 /// Publish a queue change. Sessions answer it by pulling an owner-filtered
 /// snapshot; no task data is broadcast globally, so a session can never see
 /// another user's recording.
-fn publish_recording_change(event_manager: &Arc<EventManager>) {
-    if !event_manager.has_event_receivers() {
-        return;
-    }
-    let _ = event_manager.send_event(EventMessage::RecordingChanged);
-}
+fn publish_recording_change<E: EventSink>(event_manager: &E) { event_manager.emit(EventMessage::RecordingChanged); }
 
 /// Announce that a running recording has grown.
 ///
 /// A separate event from [`publish_recording_change`]: a capture can produce
 /// hundreds of these a second, and a session throttles them. A state
 /// transition must never be throttled, so it does not come through here.
-fn publish_recording_progress(event_manager: &Arc<EventManager>) {
-    if !event_manager.has_event_receivers() {
-        return;
-    }
-    let _ = event_manager.send_event(EventMessage::RecordingProgress);
-}
+fn publish_recording_progress<E: EventSink>(event_manager: &E) { event_manager.emit(EventMessage::RecordingProgress); }
 
-fn broadcast_worker_mutation(
-    event_manager: &Arc<EventManager>,
+fn broadcast_worker_mutation<E: EventSink>(
+    event_manager: &E,
     result: Result<bool, QueueMutationError>,
     action: &str,
 ) -> Result<bool, QueueMutationError> {
@@ -213,8 +201,8 @@ fn broadcast_worker_mutation(
     }
 }
 
-fn broadcast_required_worker_mutation(
-    event_manager: &Arc<EventManager>,
+fn broadcast_required_worker_mutation<E: EventSink>(
+    event_manager: &E,
     result: Result<bool, QueueMutationError>,
     action: &str,
 ) -> Result<(), QueueMutationError> {
@@ -225,11 +213,11 @@ fn broadcast_required_worker_mutation(
     }
 }
 
-async fn refresh_recording_progress(
+async fn refresh_recording_progress<E: EventSink>(
     active: &RwLock<Option<RecordingTask>>,
     worker_uuid: &str,
     file_path: &std::path::Path,
-    event_manager: &Arc<EventManager>,
+    event_manager: &E,
 ) {
     let current_size = tokio::fs::metadata(file_path).await.map_or(0, |metadata| metadata.len());
     let changed = update_active_download_for_worker(active, worker_uuid, |task| {
@@ -382,14 +370,14 @@ async fn finalize_http_transfer(final_path: &std::path::Path, transfer_path: &st
 }
 
 #[allow(clippy::too_many_lines)]
-async fn download_file(
+async fn download_file<E: EventSink>(
     active: Arc<RwLock<Option<RecordingTask>>>,
     file_download: RecordingTask,
     client: &reqwest::Client,
     control_signal: Arc<RwLock<RecordingControl>>,
     control_notify: Arc<Notify>,
     provider_cancel_token: Option<CancellationToken>,
-    event_manager: Option<&Arc<EventManager>>,
+    event_manager: Option<&E>,
 ) -> DownloadExecutionResult {
     let worker_uuid = file_download.uuid.as_str();
     let url = file_download.url.clone();
@@ -947,19 +935,20 @@ fn spawn_recording_notification_after_persist(
     let Some(message) = plan.message else {
         return;
     };
-    // A full or closed outbox hands the message back; fall through to the
+    let event = tuliprox_core::model::NotificationEvent::from_content(&message);
+    // A full or closed outbox hands the event back; fall through to the
     // direct send rather than dropping it outright.
-    let message = match crate::recording::recording_supervisor::notification_outbox() {
-        Some(outbox) => match outbox.enqueue(message) {
+    let event = match crate::recording::recording_supervisor::notification_outbox() {
+        Some(outbox) => match outbox.enqueue(event) {
             None => return,
             Some(rejected) => rejected,
         },
-        None => message,
+        None => event,
     };
     let app_config = Arc::clone(app_config);
     let client = client.clone();
     tokio::spawn(async move {
-        send_message(&app_config, &client, message).await;
+        tuliprox_messaging::send_event(&app_config, &client, event).await;
     });
 }
 
@@ -1262,11 +1251,11 @@ async fn refused_before_start(
 }
 
 #[allow(clippy::too_many_lines)]
-pub async fn ensure_recording_worker_running(
+pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
     cfg: &AppConfig,
     download_cfg: &RecordingConfig,
     download_queue: &Arc<RecordingQueue>,
-    event_manager: &Arc<EventManager>,
+    event_manager: &E,
     capacity: &Arc<dyn RecordingCapacityPort>,
     recording_binary: &Path,
 ) -> Result<(), String> {
@@ -1302,7 +1291,7 @@ pub async fn ensure_recording_worker_running(
         let dq = Arc::clone(download_queue);
         let control_signal = Arc::clone(&dq.control_signal);
         let control_notify = Arc::clone(&dq.control_notify);
-        let event_manager = Arc::clone(event_manager);
+        let event_manager = event_manager.clone();
         let capacity = Arc::clone(capacity);
         let download_cfg = download_cfg.clone();
         let recording_binary = recording_binary.to_path_buf();
@@ -1566,27 +1555,23 @@ pub async fn ensure_recording_worker_running(
                                         tokio::select! {
                                             recording_result = &mut recording_future => break recording_result,
                                             _ = progress_tick.tick() => {
-                                                if event_manager.has_event_receivers() {
-                                                    refresh_recording_progress(
-                                                        &dq.active,
-                                                        &worker_uuid,
-                                                        &progress_path,
-                                                        &event_manager,
-                                                    )
-                                                    .await;
-                                                }
+                                                refresh_recording_progress(
+                                                    &dq.active,
+                                                    &worker_uuid,
+                                                    &progress_path,
+                                                    &event_manager,
+                                                )
+                                                .await;
                                             }
                                         }
                                     };
-                                    if event_manager.has_event_receivers() {
-                                        refresh_recording_progress(
-                                            &dq.active,
-                                            &worker_uuid,
-                                            &progress_path,
-                                            &event_manager,
-                                        )
-                                        .await;
-                                    }
+                                    refresh_recording_progress(
+                                        &dq.active,
+                                        &worker_uuid,
+                                        &progress_path,
+                                        &event_manager,
+                                    )
+                                    .await;
 
                                     match result {
                                         RecordingExecutionResult::Completed => DownloadExecutionResult::Completed,
@@ -1868,7 +1853,10 @@ pub async fn ensure_recording_worker_running(
     Ok(())
 }
 
-pub fn spawn_recording_services(ctx: &RecordingCtx, cancel_token: &CancellationToken) {
+pub fn spawn_recording_services<E: EventSink + Clone + 'static>(
+    ctx: &RecordingCtx<E>,
+    cancel_token: &CancellationToken,
+) {
     let config = ctx.app_config.config.load();
     let Some(recording_cfg) = config.recording().cloned() else {
         return;
@@ -1878,14 +1866,14 @@ pub fn spawn_recording_services(ctx: &RecordingCtx, cancel_token: &CancellationT
         Arc::clone(&ctx.app_config),
         recording_cfg,
         &ctx.recordings,
-        Arc::clone(&ctx.event_manager),
+        ctx.events.clone(),
         Arc::clone(&ctx.recording_capacity),
         cancel_token.clone(),
     );
 }
 
-pub async fn resume_recording_worker_if_needed(
-    ctx: &RecordingCtx,
+pub async fn resume_recording_worker_if_needed<E: EventSink + Clone + 'static>(
+    ctx: &RecordingCtx<E>,
     recording_cfg: &RecordingConfig,
 ) -> Result<(), String> {
     if ctx.recordings.queue.lock().await.is_empty() && ctx.recordings.active.read().await.is_none() {
@@ -1896,18 +1884,18 @@ pub async fn resume_recording_worker_if_needed(
         &ctx.app_config,
         recording_cfg,
         &ctx.recordings,
-        &ctx.event_manager,
+        &ctx.events,
         &ctx.recording_capacity,
         Path::new(crate::recording::recording_worker::FFMPEG_BINARY),
     )
     .await
 }
 
-fn start_recording_scheduler(
+fn start_recording_scheduler<E: EventSink + Clone + 'static>(
     app_config: Arc<AppConfig>,
     recording_cfg: RecordingConfig,
     recordings: &Arc<RecordingQueue>,
-    event_manager: Arc<EventManager>,
+    event_manager: E,
     capacity: Arc<dyn RecordingCapacityPort>,
     cancel_token: CancellationToken,
 ) {
@@ -1998,8 +1986,8 @@ mod tests {
         },
     };
     use shared::model::{
-        RecordingKind, RecordingMetadata, RecordingOwner, RecordingSource, RecordingTaskState, RecordingVisibility,
-        UserId,
+        NoopSink, RecordingKind, RecordingMetadata, RecordingOwner, RecordingSource, RecordingTaskState,
+        RecordingVisibility, UserId,
     };
     use std::{
         path::{Path, PathBuf},
@@ -2009,7 +1997,6 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::{Notify, RwLock};
     use tuliprox_core::model::RecordingConfig;
-    use tuliprox_session::EventManager;
 
     /// A task whose Live window runs from `program_start` for `duration_secs`.
     fn scheduled_task(kind: RecordingKind, program_start: i64, duration_secs: i64) -> RecordingTask {
@@ -2334,7 +2321,7 @@ mod tests {
                 ..shared::model::RecordingConfigDto::default()
             }),
             &queue,
-            &Arc::new(EventManager::new()),
+            &NoopSink,
             &capacity,
             Path::new(crate::recording::recording_worker::FFMPEG_BINARY),
         )
@@ -2400,7 +2387,7 @@ mod tests {
                 ..shared::model::RecordingConfigDto::default()
             }),
             &queue,
-            &Arc::new(EventManager::new()),
+            &NoopSink,
             &capacity,
             &script,
         )
@@ -2497,16 +2484,9 @@ mod tests {
 
         let stub = StubCapacity::with_room();
         let capacity: Arc<dyn RecordingCapacityPort> = Arc::clone(&stub) as Arc<dyn RecordingCapacityPort>;
-        ensure_recording_worker_running(
-            &app_config,
-            &rec_cfg,
-            &queue,
-            &Arc::new(EventManager::new()),
-            &capacity,
-            &script,
-        )
-        .await
-        .expect("worker started");
+        ensure_recording_worker_running(&app_config, &rec_cfg, &queue, &NoopSink, &capacity, &script)
+            .await
+            .expect("worker started");
 
         let settled = tokio::time::timeout(Duration::from_secs(10), async {
             loop {

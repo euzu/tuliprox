@@ -44,7 +44,11 @@ pub fn build_stable_recording_url(
     virtual_id: u32,
     cluster: XtreamCluster,
 ) -> Option<String> {
-    let access_token = create_access_token(&app_config.access_token_secret, RECORDING_URL_TOKEN_TTL_SECS);
+    let access_token = create_access_token(
+        &app_config.access_token_secret,
+        RECORDING_URL_TOKEN_TTL_SECS,
+        tuliprox_auth::scope::INTERNAL_PLAYER,
+    );
     let config = app_config.config.load();
     let server_name = config
         .web_ui

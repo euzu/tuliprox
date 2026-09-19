@@ -35,6 +35,9 @@ pub(super) enum HlsManifestFetchFailureKind {
     ContentDecoding { coding: ContentCoding },
     DecodedBodyLimit,
     InvalidUtf8,
+    LocalRepresentationLimit,
+    MalformedTransientRepresentation,
+    CommitGenerationExhausted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,6 +233,15 @@ pub(super) fn classify_manifest_fetch_failure(err: &OriginManifestFetchError) ->
         }
         OriginManifestFetchError::InvalidUtf8 { .. } => {
             HlsManifestFetchFailureSignal::hard(Kind::InvalidUtf8, ValidResponse)
+        }
+        OriginManifestFetchError::LocalRepresentationLimit(_) => {
+            HlsManifestFetchFailureSignal::discarded(Kind::LocalRepresentationLimit)
+        }
+        OriginManifestFetchError::MalformedTransientRepresentation => {
+            HlsManifestFetchFailureSignal::discarded(Kind::MalformedTransientRepresentation)
+        }
+        OriginManifestFetchError::CommitGenerationExhausted => {
+            HlsManifestFetchFailureSignal::discarded(Kind::CommitGenerationExhausted)
         }
     }
 }

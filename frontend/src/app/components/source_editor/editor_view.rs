@@ -1,9 +1,10 @@
 use crate::{
     app::{
         components::{
-            can_connect, source_editor::layout::layout, Block, BlockId, BlockInstance, BlockType, BlockView,
-            Connection, EditMode, InputRow, PortStatus, SourceEditorContext, SourceEditorForm, SourceEditorSidebar,
-            TextButton, BLOCK_HEADER_HEIGHT, BLOCK_HEIGHT, BLOCK_PORT_HEIGHT, BLOCK_WIDTH,
+            bouquet_editor::TargetBouquetView, can_connect, source_editor::layout::layout, Block, BlockId,
+            BlockInstance, BlockType, BlockView, Connection, EditMode, InputRow, PortStatus, SourceEditorContext,
+            SourceEditorForm, SourceEditorSidebar, TextButton, BLOCK_HEADER_HEIGHT, BLOCK_HEIGHT, BLOCK_PORT_HEIGHT,
+            BLOCK_WIDTH,
         },
         ConfigContext, PlaylistContext,
     },
@@ -286,11 +287,7 @@ fn create_instance(block_type: BlockType) -> BlockInstance {
         BlockType::InputStalker => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Stalker))),
         BlockType::InputStaged => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Staged))),
         BlockType::Target => {
-            let dto = ConfigTargetDto {
-                name: String::new(),
-                filter: r#"Group ~ ".*""#.to_string(),
-                ..ConfigTargetDto::default()
-            };
+            let dto = ConfigTargetDto { name: String::new(), ..ConfigTargetDto::default() };
             BlockInstance::Target(Rc::new(dto))
         }
         BlockType::OutputM3u => BlockInstance::Output(Rc::new(TargetOutputDto::M3u(M3uTargetOutputDto::default()))),
@@ -2227,6 +2224,22 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
     };
 
     let edit_mode = use_state(|| EditMode::Inactive);
+    let target_bouquet = use_state(|| Option::<String>::None);
+    let bouquet_revision = use_state(|| 0_u64);
+
+    let open_target_bouquet = {
+        let target_bouquet = target_bouquet.clone();
+        Callback::from(move |target_name: String| target_bouquet.set(Some(target_name)))
+    };
+
+    let close_target_bouquet = {
+        let target_bouquet = target_bouquet.clone();
+        let bouquet_revision = bouquet_revision.clone();
+        Callback::from(move |()| {
+            target_bouquet.set(None);
+            bouquet_revision.set(bouquet_revision.wrapping_add(1));
+        })
+    };
 
     let handle_block_edit = {
         let edit_mode_set = edit_mode.clone();
@@ -2242,6 +2255,8 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
 
     let editor_context = SourceEditorContext {
         on_form_change: form_changed,
+        open_target_bouquet,
+        bouquet_revision: *bouquet_revision,
         edit_mode: edit_mode.clone(),
         allow_write: can_write_sources,
     };
@@ -2438,6 +2453,11 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
             </div>
             <SourceEditorForm />
           </div>
+          if let Some(target_name) = target_bouquet.as_ref() {
+              <div class="tp__source-editor__stack-layer">
+                  <TargetBouquetView target_name={target_name.clone()} on_back={close_target_bouquet} />
+              </div>
+          }
         </div>
         </ContextProvider<SourceEditorContext>>
     }

@@ -5,8 +5,8 @@ use super::{
     safe_proxy_session_id, CacheAccessState, HlsAccessLeaseId, HlsCacheMetrics, HlsLogIdentity, HlsMapFile,
     HlsMediaActivityCommitOutcome, HlsMediaLeaseIdentity, HlsPlaybackRequestToken, HlsProxyManager,
     HlsRepairRenderedObjectId, HlsSegmentCache, HlsSegmentFile, HlsSegmentRepairManager, HlsSegmentRepairObjectContext,
-    HlsSegmentRepairSource, HlsSessionHandle, HlsStartupBodyObservation, MapCacheKey, MapCacheStatus, ProtectedSet,
-    ProxyMapId, ProxySessionId, SegmentCacheKey, SegmentCacheStatus, TransientObjectCacheKey, TransientResourceFile,
+    HlsSegmentRepairSource, HlsSessionHandle, HlsStartupBodyObservation, MapCacheKey, MapCacheStatus, ProxyMapId,
+    ProxySessionId, SegmentCacheKey, SegmentCacheStatus, TransientObjectCacheKey, TransientResourceFile,
     TransientResourceKind,
 };
 use arc_swap::ArcSwapOption;
@@ -16,7 +16,7 @@ use axum::{
     response::IntoResponse,
 };
 use bytes::Bytes;
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use log::debug;
 use std::{
     future::Future,
@@ -225,6 +225,7 @@ pub fn finite_hls_media_head_response(
 
 #[derive(Clone)]
 struct CacheObject<K> {
+    is_media: bool,
     key: K,
     access: Arc<CacheAccessState>,
     content_type: String,
@@ -324,9 +325,47 @@ pub struct HlsMediaActivityMarker {
     lease_identity: HlsMediaLeaseIdentity,
     completed_segment: Option<HlsPlaybackRequestToken>,
     completion_scheduled: Option<Arc<AtomicBool>>,
+    active_provider: Option<Arc<tuliprox_session::ActiveProviderManager>>,
+    session_owner: Option<String>,
+    playback_request_id: Option<tuliprox_core::model::PlaybackRequestId>,
 }
 
 impl HlsMediaActivityMarker {
+    /// Confirms only a polled, non-empty media body. Bytes retain their shared
+    /// backing storage; no payload copy or detached per-chunk task is needed.
+    pub fn confirm_media_response(&self, response: Response<Body>) -> Response<Body> {
+        let (parts, body) = response.into_parts();
+        let mut marker = Some(self.clone());
+        let stream = body.into_data_stream().then(move |chunk| {
+            let confirmation = if chunk.as_ref().is_ok_and(|bytes| !bytes.is_empty()) { marker.take() } else { None };
+            async move {
+                if let Some(marker) = confirmation {
+                    let outcome = marker
+                        .manager
+                        .mark_delivered_media_for_lease(
+                            &marker.session,
+                            &marker.lease_id,
+                            &marker.proxy_session_id,
+                            marker.lease_identity,
+                            current_time_millis(),
+                        )
+                        .await;
+                    if matches!(outcome, HlsMediaActivityCommitOutcome::Committed) {
+                        if let (Some(active_provider), Some(owner), Some(request_id)) = (
+                            marker.active_provider.as_ref(),
+                            marker.session_owner.as_deref(),
+                            marker.playback_request_id,
+                        ) {
+                            active_provider.confirm_identified_playback_activity(owner, request_id);
+                        }
+                    }
+                    marker.log_uncommitted_activity(outcome, "media-delivery");
+                }
+                chunk
+            }
+        });
+        Response::from_parts(parts, Body::from_stream(stream))
+    }
     pub fn new(
         manager: Arc<HlsProxyManager>,
         session: HlsSessionHandle,
@@ -342,7 +381,22 @@ impl HlsMediaActivityMarker {
             lease_identity,
             completed_segment: None,
             completion_scheduled: None,
+            active_provider: None,
+            session_owner: None,
+            playback_request_id: None,
         }
+    }
+
+    pub fn with_active_provider(
+        mut self,
+        active_provider: Arc<tuliprox_session::ActiveProviderManager>,
+        session_owner: Option<String>,
+        playback_request_id: Option<tuliprox_core::model::PlaybackRequestId>,
+    ) -> Self {
+        self.active_provider = Some(active_provider);
+        self.session_owner = session_owner;
+        self.playback_request_id = playback_request_id;
+        self
     }
 
     async fn for_segment_request(mut self, proxy_seq: u64, requested_at_ms: u64) -> Option<Self> {
@@ -764,6 +818,11 @@ where
         insert_header_value(headers, header::CONTENT_RANGE, &format!("bytes {start}-{end}/{}", metadata.size));
     }
     mark_response_as_uncompressed(&mut response);
+    if object.is_media {
+        if let Some(marker) = &context.media_activity_marker {
+            response = marker.confirm_media_response(response);
+        }
+    }
     Ok(response)
 }
 
@@ -803,6 +862,7 @@ async fn lookup_segment_cache_object(
         }
     }
     CacheObjectLookup::Ready(CacheObject {
+        is_media: true,
         key: entry.cache_key.clone(),
         access: Arc::clone(&entry.access),
         content_type: entry.content_type.clone(),
@@ -869,6 +929,7 @@ async fn lookup_map_cache_object(
         }
     }
     CacheObjectLookup::Ready(CacheObject {
+        is_media: false,
         key: entry.cache_key.clone(),
         access: Arc::clone(&entry.access),
         content_type: entry.content_type.clone(),
@@ -899,7 +960,7 @@ async fn lookup_transient_object_cache_object(
         &resource_file.resource_id,
         resource_file.extension.clone(),
     );
-    let Some(resource) = session.transient.resources.get(&resource_file.resource_id) else {
+    let Some(resource) = session.transient.resolve_current_resource(&resource_file.resource_id, now_ms) else {
         return CacheObjectLookup::Failure(HlsResourceServeFailure::Missing);
     };
     if resource.file_ext_hint.as_deref() != Some(resource_file.extension.as_str()) {
@@ -907,8 +968,7 @@ async fn lookup_transient_object_cache_object(
     }
     let resource_state = (resource.kind, resource.encrypted_media);
     let resource_kind = Some(resource_state.0);
-    let protected = ProtectedSet::from_session(&session).key_resource_ids.contains(&resource_file.resource_id);
-    let Some(entry) = session.transient.ready_object(&key, resource_state.0, now_ms, protected) else {
+    let Some(entry) = session.transient.ready_object(&key, resource_state.0, now_ms) else {
         return match session.transient.object_cache.get(&key).map(|entry| &entry.status) {
             Some(super::TransientObjectCacheStatus::Fetching { .. }) => {
                 CacheObjectLookup::Failure(HlsResourceServeFailure::TemporaryUnavailable {
@@ -930,6 +990,7 @@ async fn lookup_transient_object_cache_object(
         };
     };
     CacheObjectLookup::Ready(CacheObject {
+        is_media: matches!(resource_state.0, TransientResourceKind::Segment | TransientResourceKind::Part),
         key: entry.key,
         access: Arc::clone(&entry.access),
         content_type: entry.content_type,
@@ -1220,7 +1281,7 @@ fn next_hls_body_log_id() -> String {
     format!("{value:08x}")
 }
 
-fn current_time_millis() -> u64 { chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default() }
+use tuliprox_core::utils::current_time_millis;
 
 #[cfg(test)]
 mod tests {
@@ -1638,6 +1699,7 @@ mod tests {
         segment_cache.write_bytes_and_commit(&key, b"0123456789").await.expect("commit should succeed");
         let access = Arc::new(CacheAccessState::new());
         let object = CacheObject {
+            is_media: true,
             key,
             access: Arc::clone(&access),
             content_type: "video/mp2t".to_string(),
@@ -1670,6 +1732,7 @@ mod tests {
         let second = serve_cache_object(
             segment_cache,
             CacheObject {
+                is_media: true,
                 log_context: CacheObjectLogContext {
                     lease: "lease-b".to_string(),
                     identity: test_log_identity(),
@@ -1857,6 +1920,7 @@ mod tests {
         let response = serve_cache_object(
             segment_cache,
             CacheObject {
+                is_media: true,
                 key,
                 access,
                 content_type: "video/mp2t".to_string(),

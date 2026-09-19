@@ -3,8 +3,8 @@ use crate::{
     error::TuliproxError,
     model::{
         stalker::StalkerStreamKind, stalker_item::StalkerPlaylistItem, xtream_const, CatchupAttribute,
-        CatchupProperties, ClusterFlags, CommonPlaylistItem, ConfigTargetOptions, EpisodeStreamProperties,
-        SeriesStreamProperties, StreamProperties, UUIDType, VideoStreamProperties, XtreamInfoDocument,
+        CatchupProperties, ClusterFlags, CommonPlaylistItem, ConfigTargetOptions, EpisodeStreamProperties, HeaderField,
+        SeriesStreamProperties, StreamProperties, UUIDType, VideoStreamProperties, VirtualId, XtreamInfoDocument,
     },
     utils::{
         arc_str_option_serde, arc_str_serde, concat_path, extract_extension_from_url, generate_provider_playlist_uuid,
@@ -20,8 +20,6 @@ use std::{
 use strum_macros::{AsRefStr, Display, EnumIter, EnumString};
 // https://de.wikipedia.org/wiki/M3U
 // https://siptv.eu/howto/playlist.html
-
-pub type VirtualId = u32;
 
 #[derive(Debug, Copy, Clone, Eq, Hash, PartialEq, Serialize, Deserialize, Default, Display, EnumString, AsRefStr)]
 #[repr(u8)]
@@ -66,21 +64,14 @@ impl XtreamCluster {
     }
 }
 
-impl TryFrom<PlaylistItemType> for XtreamCluster {
-    type Error = String;
-    fn try_from(item_type: PlaylistItemType) -> Result<Self, Self::Error> {
-        match item_type {
-            PlaylistItemType::Live
-            | PlaylistItemType::LiveHls
-            | PlaylistItemType::LiveDash
-            | PlaylistItemType::LiveUnknown => Ok(Self::Live),
-            PlaylistItemType::Catchup | PlaylistItemType::Video | PlaylistItemType::LocalVideo => Ok(Self::Video),
-            PlaylistItemType::Series
-            | PlaylistItemType::SeriesInfo
-            | PlaylistItemType::LocalSeries
-            | PlaylistItemType::LocalSeriesInfo => Ok(Self::Series),
-        }
-    }
+/// Every item type belongs to exactly one cluster, so this cannot fail.
+///
+/// This used to be a `TryFrom` whose every arm returned `Ok`, and the phantom
+/// error spread `.unwrap_or(Live)`, `.unwrap_or_default()` and `.ok()` across 17
+/// call sites in four crates. See [`PlaylistItemType::cluster`].
+impl From<PlaylistItemType> for XtreamCluster {
+    #[inline]
+    fn from(item_type: PlaylistItemType) -> Self { item_type.cluster() }
 }
 
 #[derive(Debug, Copy, Clone, Eq, Hash, PartialEq, Serialize, Deserialize, Default, EnumIter)]
@@ -226,15 +217,22 @@ impl PlaylistItemType {
         Arc::clone(CACHE[idx].get_or_init(|| self.as_str().intern()))
     }
 
-    pub fn is_cluster(&self, cluster: XtreamCluster) -> bool {
+    /// The cluster this item type belongs to.
+    ///
+    /// The one place the item-type-to-cluster relation is written down. It used
+    /// to be encoded twice -- here and in a `TryFrom` impl -- with nothing
+    /// keeping the two in agreement.
+    #[inline]
+    pub const fn cluster(self) -> XtreamCluster {
         match self {
-            Self::Live | Self::LiveHls | Self::LiveDash | Self::LiveUnknown => cluster == XtreamCluster::Live,
-            Self::Catchup | Self::Video | Self::LocalVideo => cluster == XtreamCluster::Video,
-            Self::Series | Self::LocalSeries | Self::SeriesInfo | Self::LocalSeriesInfo => {
-                cluster == XtreamCluster::Series
-            }
+            Self::Live | Self::LiveHls | Self::LiveDash | Self::LiveUnknown => XtreamCluster::Live,
+            Self::Catchup | Self::Video | Self::LocalVideo => XtreamCluster::Video,
+            Self::Series | Self::LocalSeries | Self::SeriesInfo | Self::LocalSeriesInfo => XtreamCluster::Series,
         }
     }
+
+    #[inline]
+    pub const fn is_cluster(&self, cluster: XtreamCluster) -> bool { self.cluster() as u8 == cluster as u8 }
 }
 
 impl Display for PlaylistItemType {
@@ -274,9 +272,65 @@ impl PlaylistItemTypeSet {
     pub fn bits(self) -> u16 { self.0 }
 }
 
+/// A field's value, borrowed where possible.
+///
+/// The point of the enum is that reading a field never forces an allocation:
+/// the `&str`-keyed accessor had to return `Arc<str>`, so `chno` and `type`
+/// went through `.to_string().intern()` — a heap allocation *and* an interner
+/// write lock — on every read, per item, per rule.
+pub enum FieldRef<'a> {
+    /// An interned field. Cloning is a refcount bump.
+    Shared(&'a Arc<str>),
+    /// A borrowed string that is not interned, e.g. `item_type.as_str()`.
+    Str(&'a str),
+    /// A numeric field, kept numeric.
+    Num(u32),
+}
+
+impl FieldRef<'_> {
+    /// Borrow as a string, formatting a numeric field into an owned buffer only
+    /// when there is one.
+    pub fn as_cow(&self) -> std::borrow::Cow<'_, str> {
+        match self {
+            Self::Shared(value) => std::borrow::Cow::Borrowed(value.as_ref()),
+            Self::Str(value) => std::borrow::Cow::Borrowed(value),
+            Self::Num(value) => std::borrow::Cow::Owned(value.to_string()),
+        }
+    }
+
+    /// Materialise as an interned `Arc<str>`.
+    ///
+    /// This is what the `&str` compatibility shims call, so their behaviour —
+    /// including interning numbers — is bit-for-bit what it was before.
+    pub fn to_arc(&self) -> Arc<str> {
+        match self {
+            Self::Shared(value) => Arc::clone(value),
+            Self::Str(value) => value.intern(),
+            Self::Num(value) => value.to_string().intern(),
+        }
+    }
+}
+
+/// Read a field by typed key. Matches on a discriminant rather than walking a
+/// chain of case-insensitive string comparisons.
+pub trait FieldGet {
+    fn get(&self, field: crate::model::HeaderField) -> Option<FieldRef<'_>>;
+}
+
+/// Write a field by typed key.
+pub trait FieldSet {
+    fn set(&mut self, field: crate::model::HeaderField, value: &str) -> bool;
+}
+
+/// Read a field by name.
+///
+/// Retained for callers whose field name genuinely arrives as a string (the M3U
+/// resource endpoint, for one). Implemented as a shim over [`FieldGet`].
 pub trait FieldGetAccessor {
     fn get_field(&self, field: &str) -> Option<Arc<str>>;
 }
+
+/// Write a field by name. Shim over [`FieldSet`].
 pub trait FieldSetAccessor {
     fn set_field(&mut self, field: &str, value: &str) -> bool;
 }
@@ -355,7 +409,7 @@ impl Default for PlaylistItemHeader {
         Self {
             uuid: UUIDType::default(),
             id: "".intern(),
-            virtual_id: 0,
+            virtual_id: VirtualId::default(),
             name: "".intern(),
             chno: 0,
             logo: "".intern(),
@@ -454,87 +508,83 @@ macro_rules! to_m3u_resource_non_empty_fields {
     };
 }
 
-macro_rules! generate_field_accessor_impl_for_playlist_item_header {
-    ($($prop:ident),*;) => {
-        impl crate::model::FieldGetAccessor for crate::model::PlaylistItemHeader {
-            fn get_field(&self, field: &str) -> Option<Arc<str>> {
-                let bytes = field.as_bytes();
-
-                $(
-                    {
-                        let target = stringify!($prop).as_bytes();
-                        if bytes.eq_ignore_ascii_case(target) {
-                            return Some(Arc::clone(&self.$prop));
-                        }
-                    }
-                )*
-
-                if bytes.eq_ignore_ascii_case(b"group") {
-                        Some(Arc::clone(&self.group))
-                } else if bytes.eq_ignore_ascii_case(b"caption") {
-                    Some(if self.title.is_empty() {
-                        Arc::clone(&self.name)
-                    } else {
-                        Arc::clone(&self.title)
-                    })
-                } else if bytes.eq_ignore_ascii_case(b"input") {
-                    Some(Arc::clone(&self.input_name))
-                } else if bytes.eq_ignore_ascii_case(b"type") {
-                    Some(self.item_type.as_str().intern())
-                } else if bytes.eq_ignore_ascii_case(b"epg_channel_id") || bytes.eq_ignore_ascii_case(b"epg_id") {
-                    self.epg_channel_id.as_ref().map(Arc::clone)
-                } else if bytes.eq_ignore_ascii_case(b"chno") {
-                    Some(self.chno.to_string().intern())
-                } else if bytes.eq_ignore_ascii_case(b"genre") {
-                    crate::get_genre!(self)
-                } else {
-                    None
-                }
+impl crate::model::FieldGet for crate::model::PlaylistItemHeader {
+    fn get(&self, field: HeaderField) -> Option<FieldRef<'_>> {
+        match field {
+            HeaderField::Id => Some(FieldRef::Shared(&self.id)),
+            HeaderField::Title => Some(FieldRef::Shared(&self.title)),
+            HeaderField::Name => Some(FieldRef::Shared(&self.name)),
+            HeaderField::Logo => Some(FieldRef::Shared(&self.logo)),
+            HeaderField::LogoSmall => Some(FieldRef::Shared(&self.logo_small)),
+            HeaderField::ParentCode => Some(FieldRef::Shared(&self.parent_code)),
+            HeaderField::AudioTrack => Some(FieldRef::Shared(&self.audio_track)),
+            HeaderField::TimeShift => Some(FieldRef::Shared(&self.time_shift)),
+            HeaderField::Rec => Some(FieldRef::Shared(&self.rec)),
+            HeaderField::Url => Some(FieldRef::Shared(&self.url)),
+            HeaderField::Group => Some(FieldRef::Shared(&self.group)),
+            HeaderField::Caption => {
+                Some(FieldRef::Shared(if self.title.is_empty() { &self.name } else { &self.title }))
             }
-         }
-
-         impl crate::model::FieldSetAccessor for crate::model::PlaylistItemHeader {
-            fn set_field(&mut self, field: &str, value: &str) -> bool {
-                let bytes = field.as_bytes();
-                $(
-                    {
-                        let target = stringify!($prop).as_bytes();
-                        if bytes.eq_ignore_ascii_case(target) {
-                            self.$prop = value.intern();
-                            return true;
-                        }
-                    }
-                )*
-
-                if bytes.eq_ignore_ascii_case(b"group") {
-                    self.group = value.intern();
-                    true
-                } else if bytes.eq_ignore_ascii_case(b"caption") {
-                    let interned = value.intern();
-                    self.title = Arc::clone(&interned);
-                    self.name = interned;
-                    true
-                } else if bytes.eq_ignore_ascii_case(b"epg_channel_id") || bytes.eq_ignore_ascii_case(b"epg_id") {
-                    self.epg_channel_id = Some(value.intern());
-                    true
-                } else if bytes.eq_ignore_ascii_case(b"chno") {
-                    if let Ok(parsed) = value.parse::<u32>() {
-                        self.chno = parsed;
-                        true
-                    } else {
-                        false
-                    }
-                } else if bytes.eq_ignore_ascii_case(b"genre") {
-                    return crate::set_genre!(self, value);
-                } else {
-                    false
-                }
+            HeaderField::Input => Some(FieldRef::Shared(&self.input_name)),
+            HeaderField::Type => Some(FieldRef::Str(self.item_type.as_str())),
+            HeaderField::EpgChannelId => self.epg_channel_id.as_ref().map(FieldRef::Shared),
+            HeaderField::Chno => Some(FieldRef::Num(self.chno)),
+            HeaderField::Genre => {
+                self.additional_properties.as_ref().and_then(StreamProperties::genre).map(FieldRef::Shared)
             }
+            // Not carried by the header.
+            HeaderField::ProviderId => None,
         }
     }
 }
 
-generate_field_accessor_impl_for_playlist_item_header!(id, /*virtual_id,*/ title, name, logo, logo_small, parent_code, audio_track, time_shift, rec, url;);
+impl crate::model::FieldSet for crate::model::PlaylistItemHeader {
+    fn set(&mut self, field: HeaderField, value: &str) -> bool {
+        match field {
+            HeaderField::Id => self.id = value.intern(),
+            HeaderField::Title => self.title = value.intern(),
+            HeaderField::Name => self.name = value.intern(),
+            HeaderField::Logo => self.logo = value.intern(),
+            HeaderField::LogoSmall => self.logo_small = value.intern(),
+            HeaderField::ParentCode => self.parent_code = value.intern(),
+            HeaderField::AudioTrack => self.audio_track = value.intern(),
+            HeaderField::TimeShift => self.time_shift = value.intern(),
+            HeaderField::Rec => self.rec = value.intern(),
+            HeaderField::Url => self.url = value.intern(),
+            HeaderField::Group => self.group = value.intern(),
+            HeaderField::Caption => {
+                let interned = value.intern();
+                self.title = Arc::clone(&interned);
+                self.name = interned;
+            }
+            HeaderField::EpgChannelId => self.epg_channel_id = Some(value.intern()),
+            HeaderField::Chno => match value.parse::<u32>() {
+                Ok(parsed) => self.chno = parsed,
+                Err(_) => return false,
+            },
+            HeaderField::Genre => return crate::set_genre!(self, value),
+            // Read-only, or not carried by the header.
+            HeaderField::Input | HeaderField::Type | HeaderField::ProviderId => return false,
+        }
+        true
+    }
+}
+
+impl crate::model::FieldGetAccessor for crate::model::PlaylistItemHeader {
+    #[inline]
+    fn get_field(&self, field: &str) -> Option<Arc<str>> {
+        use crate::model::FieldGet;
+        self.get(HeaderField::parse(field)?).map(|value| value.to_arc())
+    }
+}
+
+impl crate::model::FieldSetAccessor for crate::model::PlaylistItemHeader {
+    #[inline]
+    fn set_field(&mut self, field: &str, value: &str) -> bool {
+        use crate::model::FieldSet;
+        HeaderField::parse(field).is_some_and(|field| self.set(field, value))
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct M3uPlaylistItem {
@@ -752,7 +802,7 @@ impl M3uPlaylistItem {
             input_name: Arc::clone(&self.input_name),
             item_type: self.item_type,
             epg_channel_id: self.epg_channel_id.clone(),
-            xtream_cluster: XtreamCluster::try_from(self.item_type).ok(),
+            xtream_cluster: Some(self.item_type.cluster()),
             additional_properties: self.additional_properties.clone(),
             category_id: None,
         }
@@ -803,42 +853,42 @@ impl PlaylistEntry for M3uPlaylistItem {
     fn get_additional_properties_mut(&mut self) -> Option<&mut StreamProperties> { self.additional_properties.as_mut() }
 }
 
-macro_rules! generate_field_accessor_impl_for_m3u_playlist_item {
-    ($($prop:ident),*;) => {
-        impl crate::model::FieldGetAccessor for M3uPlaylistItem {
-            fn get_field(&self, field: &str) -> Option<Arc<str>> {
-                let bytes = field.as_bytes();
-                $(
-                    {
-                        let target = stringify!($prop).as_bytes();
-                        if bytes.len() == target.len() &&
-                           bytes.iter().zip(target).all(|(a, b)| a.to_ascii_lowercase() == *b)
-                        {
-                            return Some(Arc::clone(&self.$prop));
-                        }
-                    }
-                )*
-                if bytes.eq_ignore_ascii_case(b"group") {
-                    Some(Arc::clone(&self.group))
-                } else if bytes.eq_ignore_ascii_case(b"caption") {
-                    Some(if self.title.is_empty() {
-                        Arc::clone(&self.name)
-                    } else {
-                        Arc::clone(&self.title)
-                    })
-                } else if bytes.eq_ignore_ascii_case(b"epg_channel_id") || bytes.eq_ignore_ascii_case(b"epg_id") {
-                    self.epg_channel_id.as_ref().map(Arc::clone)
-                } else if bytes.eq_ignore_ascii_case(b"chno") {
-                    Some(self.chno.to_string().intern())
-                } else  {
-                    None
-                }
+impl crate::model::FieldGet for M3uPlaylistItem {
+    fn get(&self, field: HeaderField) -> Option<FieldRef<'_>> {
+        match field {
+            HeaderField::ProviderId => Some(FieldRef::Shared(&self.provider_id)),
+            HeaderField::Title => Some(FieldRef::Shared(&self.title)),
+            HeaderField::Name => Some(FieldRef::Shared(&self.name)),
+            HeaderField::Logo => Some(FieldRef::Shared(&self.logo)),
+            HeaderField::LogoSmall => Some(FieldRef::Shared(&self.logo_small)),
+            HeaderField::ParentCode => Some(FieldRef::Shared(&self.parent_code)),
+            HeaderField::AudioTrack => Some(FieldRef::Shared(&self.audio_track)),
+            HeaderField::TimeShift => Some(FieldRef::Shared(&self.time_shift)),
+            HeaderField::Rec => Some(FieldRef::Shared(&self.rec)),
+            HeaderField::Url => Some(FieldRef::Shared(&self.url)),
+            HeaderField::Group => Some(FieldRef::Shared(&self.group)),
+            HeaderField::Caption => {
+                Some(FieldRef::Shared(if self.title.is_empty() { &self.name } else { &self.title }))
             }
+            HeaderField::EpgChannelId => self.epg_channel_id.as_ref().map(FieldRef::Shared),
+            HeaderField::Chno => Some(FieldRef::Num(self.chno)),
+            // Deliberately not addressable by name on an M3U item, even though the
+            // struct carries input_name, item_type and additional_properties. The
+            // M3U resource endpoint resolves a URL path segment through
+            // `get_field`, so making these resolvable would turn a 404 into a
+            // response. Preserved from the string-keyed accessor this replaces.
+            HeaderField::Id | HeaderField::Input | HeaderField::Type | HeaderField::Genre => None,
         }
     }
 }
 
-generate_field_accessor_impl_for_m3u_playlist_item!(title, name, provider_id, logo, logo_small, parent_code, audio_track, time_shift, rec, url;);
+impl crate::model::FieldGetAccessor for M3uPlaylistItem {
+    #[inline]
+    fn get_field(&self, field: &str) -> Option<Arc<str>> {
+        use crate::model::FieldGet;
+        self.get(HeaderField::parse(field)?).map(|value| value.to_arc())
+    }
+}
 
 impl From<M3uPlaylistItem> for CommonPlaylistItem {
     fn from(item: M3uPlaylistItem) -> Self { item.to_common() }
@@ -1111,87 +1161,6 @@ impl PlaylistEntry for XtreamPlaylistItem {
     fn get_additional_properties_mut(&mut self) -> Option<&mut StreamProperties> { self.additional_properties.as_mut() }
 }
 
-macro_rules! generate_field_accessor_impl_for_xtream_playlist_item {
-    ($($prop:ident),*;) => {
-        impl crate::model::FieldGetAccessor for crate::model::XtreamPlaylistItem {
-            fn get_field(&self, field: &str) -> Option<Arc<str>> {
-                let bytes = field.as_bytes();
-
-                $(
-                    {
-                        let target = stringify!($prop).as_bytes();
-                        if bytes.len() == target.len() &&
-                           bytes.iter().zip(target).all(|(a, b)| a.to_ascii_lowercase() == *b)
-                        {
-                            return Some(Arc::clone(&self.$prop));
-                        }
-                    }
-                )*
-
-                // Caption
-                if bytes.eq_ignore_ascii_case(b"caption") {
-                    Some(if self.title.is_empty() {
-                        Arc::clone(&self.name)
-                    } else {
-                        Arc::clone(&self.title)
-                    })
-                }
-                // epg_channel_id / epg_id
-                else if bytes.eq_ignore_ascii_case(b"epg_channel_id") || bytes.eq_ignore_ascii_case(b"epg_id") {
-                    self.epg_channel_id.as_ref().map(Arc::clone)
-                }
-                // Additional Properties
-                else if field.starts_with(xtream_const::XC_PROP_BACKDROP_PATH)
-                     || bytes.eq_ignore_ascii_case(xtream_const::XC_PROP_COVER.as_bytes())
-                {
-                    match self.additional_properties.as_ref() {
-                        Some(additional_properties) => match additional_properties {
-                            StreamProperties::Live(_) => None,
-                            StreamProperties::Video(video) => {
-                                if bytes.eq_ignore_ascii_case(xtream_const::XC_PROP_COVER.as_bytes()) {
-                                    video.details.as_ref().and_then(|details| {
-                                        details.cover_big.as_ref()
-                                            .or(details.movie_image.as_ref())
-                                            .or_else(|| details.backdrop_path.as_ref().and_then(|p| p.first()))
-                                            .map(Arc::clone)
-                                    })
-                                } else {
-                                    video.details.as_ref().and_then(|details| {
-                                        details.backdrop_path.as_ref().and_then(|p| p.first())
-                                        .or(details.movie_image.as_ref())
-                                        .or(details.cover_big.as_ref())
-                                        .map(Arc::clone)
-                                    })
-                                }
-                            }
-                            StreamProperties::Series(series) => {
-                                if bytes.eq_ignore_ascii_case(xtream_const::XC_PROP_COVER.as_bytes()) {
-                                    if series.cover.is_empty() {
-                                        series.backdrop_path.as_ref().and_then(|p| p.first()).map(Arc::clone)
-                                    } else {
-                                        Some(Arc::clone(&series.cover))
-                                    }
-                                } else {
-                                    match series.backdrop_path.as_ref() {
-                                        None => if series.cover.is_empty() { None } else { Some(Arc::clone(&series.cover)) },
-                                        Some(p) => p.first().map(Arc::clone),
-                                    }
-                                }
-                            }
-                            StreamProperties::Episode(episode) => Some(Arc::clone(&episode.movie_image)),
-                        },
-                        None => None,
-                    }
-                }
-                // Default fallback
-                else {
-                    None
-                }
-            }
-        }
-    }
-}
-
 impl From<XtreamPlaylistItem> for CommonPlaylistItem {
     fn from(item: XtreamPlaylistItem) -> Self { item.to_common() }
 }
@@ -1201,8 +1170,6 @@ pub struct PlaylistItem {
     #[serde(flatten)]
     pub header: PlaylistItemHeader,
 }
-
-generate_field_accessor_impl_for_xtream_playlist_item!(group, title, name, logo, logo_small, parent_code, rec, url;);
 
 impl PlaylistItem {
     fn get_additional_properties(header: &PlaylistItemHeader) -> Option<StreamProperties> {
@@ -1218,7 +1185,7 @@ impl PlaylistItem {
                         Some(StreamProperties::Video(Box::new(VideoStreamProperties {
                             name: header.name.clone(),
                             category_id: header.category_id,
-                            stream_id: header.virtual_id,
+                            stream_id: header.virtual_id.get(),
                             stream_icon: "".intern(),
                             direct_source: "".intern(),
                             custom_sid: None,
@@ -1455,7 +1422,7 @@ impl From<&M3uPlaylistItem> for PlaylistItem {
             rec: item.rec.clone(),
             url: item.url.clone(),
             epg_channel_id: item.epg_channel_id.clone(),
-            xtream_cluster: XtreamCluster::try_from(item.item_type).unwrap_or(XtreamCluster::Live),
+            xtream_cluster: item.item_type.cluster(),
             item_type: item.item_type,
             category_id: 0,
             input_name: item.input_name.clone(),
@@ -1514,7 +1481,7 @@ impl PlaylistItem {
         };
         let header = PlaylistItemHeader {
             uuid: generate_provider_playlist_uuid(input_name, &stream_id_str, item_type),
-            virtual_id: item.stream_id,
+            virtual_id: VirtualId::new(item.stream_id),
             id: Arc::clone(&stream_id_str),
             name: Arc::clone(&item.name),
             title: Arc::clone(&item.name),
@@ -1636,6 +1603,75 @@ mod tests {
     };
 
     #[test]
+    fn cluster_is_the_single_source_of_truth_for_every_item_type() {
+        use strum::IntoEnumIterator;
+
+        for item_type in PlaylistItemType::iter() {
+            let cluster = item_type.cluster();
+
+            // `From` and the inherent method cannot disagree: one delegates.
+            assert_eq!(XtreamCluster::from(item_type), cluster, "{item_type:?}");
+
+            // is_cluster agrees with cluster() for the right one and rejects the
+            // other two. This is what used to be a separately written match.
+            assert!(item_type.is_cluster(cluster), "{item_type:?} should be in its own cluster");
+            for other in [XtreamCluster::Live, XtreamCluster::Video, XtreamCluster::Series] {
+                assert_eq!(item_type.is_cluster(other), other == cluster, "{item_type:?} vs {other:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn header_field_parse_round_trips_every_variant() {
+        for field in [
+            HeaderField::Id,
+            HeaderField::ProviderId,
+            HeaderField::Title,
+            HeaderField::Name,
+            HeaderField::Logo,
+            HeaderField::LogoSmall,
+            HeaderField::ParentCode,
+            HeaderField::AudioTrack,
+            HeaderField::TimeShift,
+            HeaderField::Rec,
+            HeaderField::Url,
+            HeaderField::Group,
+            HeaderField::Caption,
+            HeaderField::Input,
+            HeaderField::Type,
+            HeaderField::EpgChannelId,
+            HeaderField::Chno,
+            HeaderField::Genre,
+        ] {
+            assert_eq!(HeaderField::parse(field.as_str()), Some(field), "{field} did not round-trip");
+            // Lookup stayed case-insensitive.
+            assert_eq!(HeaderField::parse(&field.as_str().to_uppercase()), Some(field));
+        }
+        assert_eq!(HeaderField::parse("epg_id"), Some(HeaderField::EpgChannelId), "legacy alias must still parse");
+        assert_eq!(HeaderField::parse("input_stream_id"), None);
+        assert_eq!(HeaderField::parse(""), None);
+    }
+
+    #[test]
+    fn m3u_item_exposes_provider_id_but_not_the_header_only_fields() {
+        // The M3U resource endpoint resolves a URL path segment through
+        // `get_field`, so which names resolve is externally visible behaviour.
+        // M3uPlaylistItem carries input_name, item_type and additional_properties,
+        // but none of them were ever addressable by name and must stay that way.
+        let mut header = PlaylistItemHeader { chno: 7, ..PlaylistItemHeader::default() };
+        header.name = "Channel".intern();
+        let item = M3uPlaylistItem::from(&PlaylistItem { header });
+
+        assert_eq!(item.get_field("name").as_deref(), Some("Channel"));
+        assert_eq!(item.get_field("chno").as_deref(), Some("7"));
+        assert_eq!(item.get_field("caption").as_deref(), Some("Channel"));
+
+        for absent in ["id", "input", "type", "genre", "not_a_field"] {
+            assert!(item.get_field(absent).is_none(), "{absent} must not resolve on an M3U item");
+        }
+    }
+
+    #[test]
     fn from_stalker_uuid_is_seeded_with_input_name_not_category() {
         let mut item = StalkerPlaylistItem {
             stream_id: 42,
@@ -1702,7 +1738,7 @@ mod tests {
             options.get_resource_url(
                 XtreamCluster::Series,
                 PlaylistItemType::Series,
-                1,
+                VirtualId::new(1),
                 "/api/v1/library/thumbnail/abc",
                 "logo",
             ),
@@ -1718,7 +1754,7 @@ mod tests {
             options.get_bd_path_resource_url(
                 XtreamCluster::Series,
                 PlaylistItemType::Series,
-                1,
+                VirtualId::new(1),
                 "/api/v1/library/thumbnail/backdrop",
                 "backdrop_",
                 0,
@@ -1739,7 +1775,7 @@ mod tests {
             options.get_resource_url(
                 XtreamCluster::Series,
                 PlaylistItemType::LocalSeries,
-                1,
+                VirtualId::new(1),
                 "/api/v1/library/thumbnail/abc",
                 "logo",
             ),
@@ -1759,7 +1795,7 @@ mod tests {
             options.get_bd_path_resource_url(
                 XtreamCluster::Series,
                 PlaylistItemType::LocalSeries,
-                1,
+                VirtualId::new(1),
                 "/api/v1/library/thumbnail/backdrop",
                 "backdrop_",
                 0,
@@ -1774,7 +1810,13 @@ mod tests {
         let resource_url = "//cdn.example.com/poster.jpg";
 
         assert_eq!(
-            options.get_resource_url(XtreamCluster::Series, PlaylistItemType::Series, 1, resource_url, "logo",),
+            options.get_resource_url(
+                XtreamCluster::Series,
+                PlaylistItemType::Series,
+                VirtualId::new(1),
+                resource_url,
+                "logo",
+            ),
             concat_path(&options.base_url, &obfuscate_text(&options.encrypt_secret, resource_url)),
         );
     }
@@ -1791,7 +1833,7 @@ mod tests {
             options.get_resource_url(
                 XtreamCluster::Live,
                 PlaylistItemType::Live,
-                2017,
+                VirtualId::new(2017),
                 "https://provider.example/logo.png",
                 "logo",
             ),
@@ -1805,7 +1847,13 @@ mod tests {
         let resource_url = "/provider-controlled/poster.jpg";
 
         assert_eq!(
-            options.get_resource_url(XtreamCluster::Series, PlaylistItemType::Series, 1, resource_url, "logo",),
+            options.get_resource_url(
+                XtreamCluster::Series,
+                PlaylistItemType::Series,
+                VirtualId::new(1),
+                resource_url,
+                "logo",
+            ),
             concat_path(&options.base_url, &obfuscate_text(&options.encrypt_secret, resource_url)),
         );
     }
@@ -1816,7 +1864,13 @@ mod tests {
         let resource_url = "https://provider.example/api/v1/library/thumbnail/abc";
 
         assert_eq!(
-            options.get_resource_url(XtreamCluster::Series, PlaylistItemType::Series, 1, resource_url, "logo",),
+            options.get_resource_url(
+                XtreamCluster::Series,
+                PlaylistItemType::Series,
+                VirtualId::new(1),
+                resource_url,
+                "logo",
+            ),
             concat_path(&options.base_url, &obfuscate_text(&options.encrypt_secret, resource_url)),
         );
     }
@@ -1844,7 +1898,7 @@ mod tests {
         let mut item = PlaylistItem {
             header: PlaylistItemHeader {
                 id: "80510".intern(),
-                virtual_id: 1001,
+                virtual_id: VirtualId::new(1001),
                 url: "http://provider.example/live/user/pass/80510.ts".intern(),
                 input_name: "input".intern(),
                 item_type: PlaylistItemType::Live,
@@ -1918,7 +1972,7 @@ mod tests {
         let mut source = PlaylistItem {
             header: PlaylistItemHeader {
                 id: "legacy-alpha".intern(),
-                virtual_id: 7001,
+                virtual_id: VirtualId::new(7001),
                 url: "http://provider.example/live/user/pass/80510.ts".intern(),
                 ..PlaylistItemHeader::default()
             },
@@ -1966,7 +2020,7 @@ mod tests {
     #[test]
     fn m3u_to_m3u_emits_tvg_id_from_epg_channel_id() {
         let item = M3uPlaylistItem {
-            virtual_id: 0,
+            virtual_id: VirtualId::default(),
             provider_id: "prov1".intern(),
             input_stream_id: "prov1".intern(),
             upstream_user_agent: None,
@@ -2001,7 +2055,7 @@ mod tests {
         // EPG matching is case-insensitive, so ids are no longer lowercased when parsed.
         // The M3U tvg-id output must preserve the channel's original source case.
         let item = M3uPlaylistItem {
-            virtual_id: 0,
+            virtual_id: VirtualId::default(),
             provider_id: "prov1".intern(),
             input_stream_id: "prov1".intern(),
             upstream_user_agent: None,
@@ -2034,7 +2088,7 @@ mod tests {
     #[test]
     fn m3u_to_m3u_emits_tvg_chno_from_chno() {
         let item = M3uPlaylistItem {
-            virtual_id: 0,
+            virtual_id: VirtualId::default(),
             provider_id: "prov1".intern(),
             input_stream_id: "prov1".intern(),
             upstream_user_agent: None,
@@ -2067,7 +2121,7 @@ mod tests {
     #[test]
     fn m3u_to_m3u_omits_tvg_chno_when_chno_is_zero() {
         let item = M3uPlaylistItem {
-            virtual_id: 0,
+            virtual_id: VirtualId::default(),
             provider_id: "prov1".intern(),
             input_stream_id: "prov1".intern(),
             upstream_user_agent: None,
@@ -2100,7 +2154,7 @@ mod tests {
     #[test]
     fn m3u_to_m3u_preserves_catchup_attributes() {
         let item = M3uPlaylistItem {
-            virtual_id: 0,
+            virtual_id: VirtualId::default(),
             provider_id: "prov1".intern(),
             input_stream_id: "prov1".intern(),
             upstream_user_agent: None,
@@ -2149,7 +2203,7 @@ mod tests {
     #[test]
     fn m3u_to_m3u_unifies_append_to_catchup_type_only() {
         let item = M3uPlaylistItem {
-            virtual_id: 0,
+            virtual_id: VirtualId::default(),
             provider_id: "prov1".intern(),
             input_stream_id: "prov1".intern(),
             upstream_user_agent: None,
@@ -2192,7 +2246,7 @@ mod tests {
     #[test]
     fn m3u_to_m3u_uses_rewritten_catchup_mode_and_source() {
         let item = M3uPlaylistItem {
-            virtual_id: 0,
+            virtual_id: VirtualId::default(),
             provider_id: "prov1".intern(),
             input_stream_id: "prov1".intern(),
             upstream_user_agent: None,

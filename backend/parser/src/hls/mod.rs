@@ -223,30 +223,15 @@ mod test {
     }
 
     #[test]
-    fn rewrite_http_relative_segment() {
-        let base = "http://example.com/hls/playlist.m3u8";
-        let uri = "seg001.ts";
-
-        let out = rewrite_hls_url(base, uri);
-        assert_eq!(out, "http://example.com/hls/seg001.ts");
-    }
-
-    #[test]
-    fn rewrite_http_root_relative_segment() {
-        let base = "http://example.com/hls/playlist.m3u8";
-        let uri = "/media/seg001.ts";
-
-        let out = rewrite_hls_url(base, uri);
-        assert_eq!(out, "http://example.com/media/seg001.ts");
-    }
-
-    #[test]
-    fn rewrite_http_parent_directory() {
-        let base = "http://example.com/hls/level1/playlist.m3u8";
-        let uri = "../seg001.ts";
-
-        let out = rewrite_hls_url(base, uri);
-        assert_eq!(out, "http://example.com/hls/seg001.ts");
+    fn rewrite_http_relative_segments() {
+        let cases = [
+            ("http://example.com/hls/playlist.m3u8", "seg001.ts", "http://example.com/hls/seg001.ts"),
+            ("http://example.com/hls/playlist.m3u8", "/media/seg001.ts", "http://example.com/media/seg001.ts"),
+            ("http://example.com/hls/level1/playlist.m3u8", "../seg001.ts", "http://example.com/hls/seg001.ts"),
+        ];
+        for (base, uri, expected) in cases {
+            assert_eq!(rewrite_hls_url(base, uri), expected);
+        }
     }
 
     #[test]
@@ -288,55 +273,62 @@ mod test {
     }
 
     #[test]
-    fn rewrite_relative_variant_preserves_archive_start_query() {
-        let base = "https://cdn.example/hls/channel/index.m3u8?offset=-10752&utcstart=1785072000&useseq=t";
-        let uri = "variant/playlist.m3u8?offset=-10752&useseq=t";
+    fn rewrite_hls_url_cases() {
+        let cases = [
+            (
+                "https://cdn.example/hls/channel/index.m3u8?offset=-10752&utcstart=1785072000&useseq=t",
+                "variant/playlist.m3u8?offset=-10752&useseq=t",
+                "https://cdn.example/hls/channel/variant/playlist.m3u8?offset=-10752&useseq=t&utcstart=1785072000",
+            ),
+            (
+                "https://cdn.example/hls/channel/index.m3u8?utcstart=1785072000&offset=-3600&end=1785075600&duration=3600",
+                "variant/playlist.m3u8?offset=-1800",
+                "https://cdn.example/hls/channel/variant/playlist.m3u8?offset=-1800&utcstart=1785072000&end=1785075600&duration=3600",
+            ),
+            (
+                "https://cdn.example/hls/channel/index.m3u8?utcstart=1785072000",
+                "variant/playlist.m3u8?utc=1785071000",
+                "https://cdn.example/hls/channel/variant/playlist.m3u8?utc=1785071000",
+            ),
+            (
+                "https://cdn.example/hls/channel/index.m3u8?start=1785072000",
+                "variant/playlist.m3u8",
+                "https://cdn.example/hls/channel/variant/playlist.m3u8",
+            ),
+            (
+                "https://cdn.example/hls/channel/index.m3u8?utcstart=1785072000&offset=-3600",
+                "segment.ts?sig=abc",
+                "https://cdn.example/hls/channel/segment.ts?sig=abc",
+            ),
+            (
+                "https://cdn.example/hls/channel/index.m3u8?utcstart=1785072000&offset=-3600",
+                "key.bin?sig=def",
+                "https://cdn.example/hls/channel/key.bin?sig=def",
+            ),
+            (
+                "https://cdn.example/hls/channel/index.m3u8?utcstart=1785072000&offset=-3600",
+                "init.mp4?sig=ghi",
+                "https://cdn.example/hls/channel/init.mp4?sig=ghi",
+            ),
+            (
+                "http://example.com/hls/playlist.m3u8",
+                "https://cdn.example.org/video/seg.ts",
+                "https://cdn.example.org/video/seg.ts",
+            ),
+            ("file:///mnt/media/hls/playlist.m3u8", "seg001.ts", "file:///mnt/media/hls/seg001.ts"),
+            ("file:///mnt/media/hls/level1/playlist.m3u8", "../seg001.ts", "file:///mnt/media/hls/seg001.ts"),
+            (
+                "file:///mnt/media/hls/playlist.m3u8?utc=1785072000",
+                "child.m3u8",
+                "file:///mnt/media/hls/child.m3u8",
+            ),
+            ("file:///mnt/media/hls/playlist.m3u8", "file:///mnt/other/seg.ts", "file:///mnt/other/seg.ts"),
+            ("http://example.com/hls/playlist.m3u8", "seg.ts#t=10", "http://example.com/hls/seg.ts#t=10"),
+        ];
 
-        let out = rewrite_hls_url(base, uri);
-        assert_eq!(
-            out,
-            "https://cdn.example/hls/channel/variant/playlist.m3u8?offset=-10752&useseq=t&utcstart=1785072000"
-        );
-    }
-
-    #[test]
-    fn rewrite_relative_variant_preserves_all_archive_context_queries() {
-        let base =
-            "https://cdn.example/hls/channel/index.m3u8?utcstart=1785072000&offset=-3600&end=1785075600&duration=3600";
-        let uri = "variant/playlist.m3u8?offset=-1800";
-
-        let out = rewrite_hls_url(base, uri);
-        assert_eq!(
-            out,
-            "https://cdn.example/hls/channel/variant/playlist.m3u8?offset=-1800&utcstart=1785072000&end=1785075600&duration=3600"
-        );
-    }
-
-    #[test]
-    fn rewrite_keeps_child_archive_start_query() {
-        let base = "https://cdn.example/hls/channel/index.m3u8?utcstart=1785072000";
-        let uri = "variant/playlist.m3u8?utc=1785071000";
-
-        let out = rewrite_hls_url(base, uri);
-        assert_eq!(out, "https://cdn.example/hls/channel/variant/playlist.m3u8?utc=1785071000");
-    }
-
-    #[test]
-    fn rewrite_does_not_propagate_plain_start_query() {
-        let base = "https://cdn.example/hls/channel/index.m3u8?start=1785072000";
-        let uri = "variant/playlist.m3u8";
-
-        let out = rewrite_hls_url(base, uri);
-        assert_eq!(out, "https://cdn.example/hls/channel/variant/playlist.m3u8");
-    }
-
-    #[test]
-    fn rewrite_archive_playlist_does_not_modify_signed_media_urls() {
-        let base = "https://cdn.example/hls/channel/index.m3u8?utcstart=1785072000&offset=-3600";
-
-        assert_eq!(rewrite_hls_url(base, "segment.ts?sig=abc"), "https://cdn.example/hls/channel/segment.ts?sig=abc");
-        assert_eq!(rewrite_hls_url(base, "key.bin?sig=def"), "https://cdn.example/hls/channel/key.bin?sig=def");
-        assert_eq!(rewrite_hls_url(base, "init.mp4?sig=ghi"), "https://cdn.example/hls/channel/init.mp4?sig=ghi");
+        for (base, uri, expected) in cases {
+            assert_eq!(rewrite_hls_url(base, uri), expected, "failed for base: {base}, uri: {uri}");
+        }
     }
 
     #[test]
@@ -346,58 +338,6 @@ mod test {
 
         assert!(matches!(rewrite_hls_url(base, reference), std::borrow::Cow::Borrowed(_)));
         assert_eq!(rewrite_hls_url(base, reference), reference);
-    }
-
-    #[test]
-    fn rewrite_https_absolute_passthrough() {
-        let base = "http://example.com/hls/playlist.m3u8";
-        let uri = "https://cdn.example.org/video/seg.ts";
-
-        let out = rewrite_hls_url(base, uri);
-        assert_eq!(out, uri);
-    }
-
-    #[test]
-    fn rewrite_file_relative_segment() {
-        let base = "file:///mnt/media/hls/playlist.m3u8";
-        let uri = "seg001.ts";
-
-        let out = rewrite_hls_url(base, uri);
-        assert_eq!(out, "file:///mnt/media/hls/seg001.ts");
-    }
-
-    #[test]
-    fn rewrite_file_parent_directory() {
-        let base = "file:///mnt/media/hls/level1/playlist.m3u8";
-        let uri = "../seg001.ts";
-
-        let out = rewrite_hls_url(base, uri);
-        assert_eq!(out, "file:///mnt/media/hls/seg001.ts");
-    }
-
-    #[test]
-    fn rewrite_file_child_playlist_does_not_inherit_archive_query() {
-        let base = "file:///mnt/media/hls/playlist.m3u8?utc=1785072000";
-
-        assert_eq!(rewrite_hls_url(base, "child.m3u8"), "file:///mnt/media/hls/child.m3u8");
-    }
-
-    #[test]
-    fn rewrite_file_absolute_passthrough() {
-        let base = "file:///mnt/media/hls/playlist.m3u8";
-        let uri = "file:///mnt/other/seg.ts";
-
-        let out = rewrite_hls_url(base, uri);
-        assert_eq!(out, uri);
-    }
-
-    #[test]
-    fn rewrite_hls_fragment() {
-        let base = "http://example.com/hls/playlist.m3u8";
-        let fragment = "seg.ts#t=10";
-
-        let out = rewrite_hls_url(base, fragment);
-        assert_eq!(out, "http://example.com/hls/seg.ts#t=10");
     }
 
     #[test]

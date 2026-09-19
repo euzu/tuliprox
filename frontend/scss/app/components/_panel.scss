@@ -2,6 +2,8 @@
   display: flex;
   flex-flow: column;
   overflow: hidden;
+  max-width: 100%;
+  min-width: 0;
   background-color: transparent;
   box-sizing: border-box;
   gap: var(--gap-default);

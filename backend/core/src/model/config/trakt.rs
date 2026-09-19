@@ -1,7 +1,7 @@
-use crate::model::{config::trakt_api::TraktMatchItem, macros};
+use crate::model::macros;
 use shared::model::{
-    PlaylistItem, TraktApiConfigDto, TraktChartConfigDto, TraktChartKind, TraktChartType, TraktConfigDto,
-    TraktContentType, TraktListConfigDto,
+    TraktApiConfigDto, TraktChartConfigDto, TraktChartKind, TraktChartType, TraktConfigDto, TraktContentType,
+    TraktListConfigDto,
 };
 
 #[derive(Debug, Clone)]
@@ -107,36 +107,6 @@ impl From<&TraktChartConfig> for TraktChartConfigDto {
 }
 
 #[derive(Debug, Clone)]
-pub struct TraktCategoryConfig {
-    pub category_name: String,
-    pub content_type: TraktContentType,
-    pub tmdb_only: bool,
-    pub fuzzy_match_threshold: u8, // Percentage (0-100)
-}
-
-impl From<&TraktListConfig> for TraktCategoryConfig {
-    fn from(config: &TraktListConfig) -> Self {
-        Self {
-            category_name: config.category_name.clone(),
-            content_type: config.content_type,
-            tmdb_only: config.tmdb_only,
-            fuzzy_match_threshold: config.fuzzy_match_threshold,
-        }
-    }
-}
-
-impl From<&TraktChartConfig> for TraktCategoryConfig {
-    fn from(config: &TraktChartConfig) -> Self {
-        Self {
-            category_name: config.category_name.clone(),
-            content_type: config.kind.content_type(),
-            tmdb_only: config.tmdb_only,
-            fuzzy_match_threshold: config.fuzzy_match_threshold,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
 pub struct TraktConfig {
     pub enabled: bool,
     pub api: TraktApiConfig,
@@ -166,11 +136,39 @@ impl From<&TraktConfig> for TraktConfigDto {
     }
 }
 
-// Matching results
-#[derive(Debug, Clone)]
-pub struct TraktMatchResult<'a> {
-    pub playlist_item: &'a PlaylistItem,
-    pub trakt_item: &'a TraktMatchItem<'a>,
-    pub match_score: f64,
-    // pub match_type: MatchType,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolved_trakt_config_round_trips_through_the_compatible_dto() {
+        let dto = TraktConfigDto {
+            enabled: true,
+            api: TraktApiConfigDto {
+                api_key: "client-id".to_string(),
+                version: "2".to_string(),
+                url: "https://api.trakt.tv".to_string(),
+                user_agent: "agent".to_string(),
+            },
+            lists: vec![TraktListConfigDto {
+                user: "alice".to_string(),
+                list_slug: "watchlist".to_string(),
+                category_name: "Watchlist".to_string(),
+                content_type: TraktContentType::Vod,
+                tmdb_only: false,
+                fuzzy_match_threshold: 80,
+            }],
+            charts: vec![TraktChartConfigDto {
+                kind: TraktChartKind::Shows,
+                chart: TraktChartType::Popular,
+                category_name: "Popular Shows".to_string(),
+                tmdb_only: true,
+                fuzzy_match_threshold: 90,
+            }],
+        };
+
+        let resolved = TraktConfig::from(&dto);
+
+        assert_eq!(TraktConfigDto::from(&resolved), dto);
+    }
 }

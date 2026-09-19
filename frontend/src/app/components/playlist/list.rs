@@ -14,9 +14,15 @@ pub fn PlaylistList() -> Html {
             <>
                 { for data.iter().map(|(inputs, targets)| html! {
                     <div class="tp__playlist-list__source">
-                        <CollapsePanel class="tp__playlist-list__source-inputs" expanded={false} title_content={Some(html!{<><AppIcon name="Input"/>{translate.t("LABEL.INPUTS")}</>})}>
-                            <InputTable inputs={Some(inputs.clone())} />
-                        </CollapsePanel>
+                        { if inputs.is_empty() {
+                            html! {}
+                        } else {
+                            html! {
+                                <CollapsePanel class="tp__playlist-list__source-inputs" expanded={false} title_content={Some(html!{<><AppIcon name="Input"/>{translate.t("LABEL.INPUTS")}</>})}>
+                                    <InputTable inputs={Some(inputs.clone())} />
+                                </CollapsePanel>
+                            }
+                        } }
                         <span class="tp__playlist-list__source-label"><AppIcon name="Target" />{translate.t("LABEL.TARGETS")}</span>
                         <TargetTable targets={Some(targets.clone())} />
                     </div>

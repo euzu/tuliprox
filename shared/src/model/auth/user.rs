@@ -1,10 +1,11 @@
-use super::{super::identity_registry::UserId, permission::PermissionSet};
+use super::{
+    super::identity_registry::UserId,
+    permission::PermissionSet,
+    role::{role_names, Role, RoleSet},
+};
 use zeroize::Zeroize;
 
 pub const TOKEN_NO_AUTH: &str = "authorized";
-
-pub const ROLE_ADMIN: &str = "ADMIN";
-pub const ROLE_API_USER: &str = "API_USER";
 
 /// Current permission schema version. Bump this constant when the
 /// `Permission` enum or the permission bit layout changes. Tokens
@@ -25,16 +26,18 @@ pub struct Claims {
     pub iss: String,
     pub iat: i64,
     pub exp: i64,
-    pub roles: Vec<String>,
+    /// A bitset on the inside, the legacy `["ADMIN"]` string array on the
+    /// wire. See [`role_names`].
+    #[serde(default, with = "role_names")]
+    pub roles: RoleSet,
     #[serde(default)]
     pub permissions: PermissionSet,
     #[serde(default)]
     pub pwd_version: u32,
-    /// Stable subject identifier for the principal. `None` for
-    /// tokens issued before subject ids were introduced; tokens
-    /// missing this field are rejected by the validators. Built-in
-    /// admin tokens carry the reserved `builtin:admin` subject;
-    /// web/API tokens carry the registry-allocated `UserId`.
+    /// Stable subject identifier for the principal. Legacy tokens may omit
+    /// this field and are rejected by the validators. Built-in admin tokens carry the reserved
+    /// `builtin:admin` subject; web/API tokens carry the
+    /// registry-allocated `UserId`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject_id: Option<UserId>,
     /// Version of the permission schema at token issuance. Tokens
@@ -43,6 +46,20 @@ pub struct Claims {
     /// token-refresh-required response.
     #[serde(default)]
     pub permission_schema_version: u16,
+}
+
+impl Claims {
+    /// `true` when the principal carries the administrator role.
+    ///
+    /// This used to be open-coded at six call sites, five comparing role
+    /// strings with `==` and one with `eq_ignore_ascii_case`. One of those
+    /// six was therefore answering a different question from the other five.
+    #[inline]
+    pub fn is_admin(&self) -> bool { self.roles.contains(Role::Admin) }
+
+    /// `true` when the principal is a proxy API user rather than a web user.
+    #[inline]
+    pub fn is_api_user(&self) -> bool { self.roles.contains(Role::ApiUser) }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -77,7 +94,7 @@ pub struct TokenResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::auth::permission::Permission;
+    use crate::model::auth::{permission::Permission, role::ROLE_ADMIN};
 
     #[test]
     fn test_claims_deserialize_without_permissions_and_pwd_version() {
@@ -91,7 +108,9 @@ mod tests {
         }"#;
         let claims: Claims = serde_json::from_str(json).expect("deserialize failed");
         assert_eq!(claims.username, "admin");
-        assert_eq!(claims.roles, vec!["admin"]);
+        // "admin" parses case-insensitively into the Admin bit.
+        assert!(claims.is_admin());
+        assert_eq!(claims.roles.names(), vec![ROLE_ADMIN]);
         assert!(claims.permissions.is_empty());
         assert_eq!(claims.pwd_version, 0);
     }
@@ -124,7 +143,7 @@ mod tests {
             iss: "test".to_string(),
             iat: 100,
             exp: 200,
-            roles: vec!["user".to_string()],
+            roles: RoleSet::ADMIN,
             permissions: Permission::ConfigRead | Permission::SourceRead,
             pwd_version: 99,
             subject_id: Some(UserId::from("web:bob-uuid")),
@@ -133,6 +152,7 @@ mod tests {
         let json = serde_json::to_string(&claims).expect("serialize failed");
         let deserialized: Claims = serde_json::from_str(&json).expect("deserialize failed");
         assert_eq!(deserialized.username, "bob");
+        assert_eq!(deserialized.roles, claims.roles);
         assert_eq!(deserialized.permissions, claims.permissions);
         assert_eq!(deserialized.pwd_version, 99);
         assert_eq!(deserialized.subject_id, claims.subject_id);
@@ -166,7 +186,7 @@ mod tests {
             iss: "tuliprox".to_string(),
             iat: 1,
             exp: 2,
-            roles: vec![],
+            roles: RoleSet::new(),
             permissions: PermissionSet::new(),
             pwd_version: 0,
             subject_id: None,

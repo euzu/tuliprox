@@ -33,7 +33,7 @@ use crate::{
         },
     },
     model::{AppConfig, Config, HdHomeRunFlags, Healthcheck, ProcessTargets, RateLimitConfig},
-    processing::processor::exec_processing,
+    processing::processor::{exec_processing, next_playlist_update_run_order, ProcessingRun},
     repository::{get_geoip_path, GeoIp},
     utils::{exec_file_lock_prune, get_default_web_root_path},
     VERSION,
@@ -47,7 +47,9 @@ use axum::{
 use dashmap::DashSet;
 use log::{debug, error, info, warn};
 use shared::{
+    defaults::default_cleanup_queue_capacity,
     error::TuliproxError,
+    model::{PlaylistUpdateState, PlaylistUpdateSummary, ServerLifecycleEvent},
     utils::{concat_path_leading_slash, sanitize_sensitive_info},
 };
 use std::{
@@ -65,6 +67,10 @@ use tower_http::{
 };
 use tuliprox_dvr::recording::recording_transfer::{resume_recording_worker_if_needed, spawn_recording_services};
 use tuliprox_hls::api::{exec_hls_cache_gc, exec_hls_lifecycle, HlsProxyManager};
+use tuliprox_repository::{
+    identity_registry::{BootstrapOutcome, IdentityRegistry},
+    token_revocations::TokenRevocations,
+};
 
 const METADATA_TRIGGER_WAIT_CYCLE_LIMIT: u32 = 900;
 /// Load the canonical recording state. A malformed state file fails
@@ -168,25 +174,26 @@ fn spawn_metadata_trigger_update(
                 loop {
                     if let Some(lock) = update_guard.try_playlist() {
                         exec_processing(
-                            &client,
-                            Arc::clone(&app_config),
-                            proc_targets,
-                            Some(Arc::clone(&event_manager)),
-                            Some({
+                            ProcessingRun::new(
+                                client.clone(),
+                                Arc::clone(&app_config),
+                                proc_targets,
+                                Arc::clone(&event_manager),
+                            )
+                            .with_bootstrap({
                                 let state = Arc::clone(&app_state_clone);
-                                std::sync::Arc::new(move || {
+                                move || {
                                     let state = Arc::clone(&state);
-                                    Box::pin(async move { sync_panel_api_exp_dates(&state).await })
-                                        as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
-                                })
-                            }),
-                            Some(Arc::clone(&playlist_state)),
-                            Some(update_guard.clone()),
-                            disabled_headers.clone(),
-                            Some(app_state_clone.active_provider.clone()),
-                            Some(app_state_clone.metadata_manager.clone()),
-                            pre_processed_inputs.clone(),
-                            Some(lock),
+                                    async move { sync_panel_api_exp_dates(&state).await }
+                                }
+                            })
+                            .with_playlist_state(Arc::clone(&playlist_state))
+                            .with_update_guard(update_guard.clone())
+                            .with_disabled_headers(disabled_headers.clone())
+                            .with_provider_manager(app_state_clone.active_provider.clone())
+                            .with_metadata_manager(app_state_clone.metadata_manager.clone())
+                            .with_pre_processed_inputs(pre_processed_inputs.clone())
+                            .with_acquired_permit(lock),
                         )
                         .await;
                         break;
@@ -234,11 +241,16 @@ fn get_web_dir_path(web_ui_enabled: bool, web_root: &str) -> Result<PathBuf, Tul
 }
 
 fn create_healthcheck() -> Healthcheck {
+    // `status` stays `ok` for as long as the server answers requests: the
+    // container healthcheck restarts on a non-ok body, and a wedged runtime is
+    // reported by the watchdog thread instead of by killing the process.
+    // Liveness is exposed separately in `runtime`.
     Healthcheck {
         status: "ok".to_string(),
         version: VERSION.to_string(),
         build_time: get_build_time(),
         server_time: get_server_time(),
+        runtime: tuliprox_core::utils::runtime_liveness::health_snapshot(),
     }
 }
 
@@ -255,7 +267,7 @@ async fn ready(
     use crate::model::readiness::build_provider_slots;
     use shared::model::provider_saturation::is_exhausted;
     let sources = app_state.app_config.sources.load();
-    let Some(connections) = app_state.active_provider.active_connections().await else {
+    let Some(connections) = app_state.active_provider.active_connections() else {
         // No live connections yet: either the lineups are still warming up, or
         // there is no enabled input that could ever carry one.
         let status = if sources.inputs.iter().any(|input| input.enabled) { "initializing" } else { "exhausted" };
@@ -267,6 +279,58 @@ async fn ready(
     let status_label = if exhausted { "exhausted" } else { "ready" };
     let status_code = if exhausted { axum::http::StatusCode::SERVICE_UNAVAILABLE } else { axum::http::StatusCode::OK };
     (status_code, axum::Json(ReadyResponse { status: status_label }))
+}
+
+/// Load the stable-identity registry, or refuse to start.
+///
+/// A registry that is present loads; a registry that is absent with no
+/// persisted principals initialises fresh. A *corrupt* one fails closed - the
+/// registry deliberately does not invent replacement ids, because doing so
+/// would silently reassign every recording those principals own. The operator
+/// has to repair or remove the file.
+async fn bootstrap_identity_registry(
+    config: &Config,
+    app_config: &Arc<AppConfig>,
+) -> Result<Arc<IdentityRegistry>, TuliproxError> {
+    let path = std::path::PathBuf::from(&config.storage_dir).join("identity_registry.json");
+
+    let web_users: Vec<String> = config
+        .web_ui
+        .as_ref()
+        .and_then(|web_ui| web_ui.auth.as_ref())
+        .and_then(|auth| auth.t_users.as_ref())
+        .map(|users| users.iter().map(|user| user.username.clone()).collect())
+        .unwrap_or_default();
+
+    let api_users: Vec<String> = app_config.api_proxy.load().as_ref().as_ref().map_or_else(Vec::new, |api_proxy| {
+        api_proxy
+            .user
+            .iter()
+            .flat_map(|target_user| target_user.credentials.iter())
+            .map(|credential| credential.username.clone())
+            .collect()
+    });
+
+    // The fail-closed pre-scan - handing bootstrap the subject ids already
+    // referenced by persisted recordings - is not wired yet, so a *missing*
+    // registry alongside existing recordings still initialises fresh. A
+    // corrupt one fails closed regardless, which is the case that actually
+    // arises from a half-written file.
+    let (registry, outcome) = IdentityRegistry::bootstrap(path, Vec::new(), &web_users, &api_users).await;
+    match outcome {
+        BootstrapOutcome::FailClosed { reason, persisted_user_ids } => {
+            error!(
+                "Identity registry failed closed ({reason:?}); {} persisted subject ids are at risk. \
+                 Repair or remove the registry file before restarting.",
+                persisted_user_ids.len()
+            );
+            Err(TuliproxError::Server("identity registry is unusable".to_string()))
+        }
+        outcome => {
+            info!("Identity registry: {outcome:?}");
+            Ok(Arc::new(registry))
+        }
+    }
 }
 
 async fn create_shared_data(
@@ -301,7 +365,7 @@ async fn create_shared_data(
     };
 
     let cache = create_cache(&config);
-    let event_manager = Arc::new(EventManager::new());
+    let event_manager = Arc::new(EventManager::with_capacity(config.event_channel_capacity as usize));
     let active_provider = Arc::new(ActiveProviderManager::new(app_config, &event_manager));
     let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
     let rewrite_secret =
@@ -310,17 +374,23 @@ async fn create_shared_data(
         config.reverse_proxy.as_ref().and_then(|reverse_proxy| reverse_proxy.hls_cache.as_ref()),
         &rewrite_secret,
     ));
-    active_provider.set_shared_stream_manager(Arc::clone(&shared_stream_manager));
+    active_provider.set_shared_stream_manager(&shared_stream_manager);
     let active_users = Arc::new(ActiveUserManager::new(&config, &geoip, &event_manager));
     active_users.start_adaptive_expiry_worker();
 
     let history_config = config.reverse_proxy.as_ref().and_then(|r| r.stream_history.as_ref());
-    let connection_manager = Arc::new(ConnectionManager::new(
+    let cleanup_capacity = config
+        .reverse_proxy
+        .as_ref()
+        .and_then(|r| r.stream.as_ref())
+        .map_or_else(default_cleanup_queue_capacity, |stream| stream.cleanup_queue_capacity);
+    let connection_manager = Arc::new(ConnectionManager::new_with_capacity(
         &active_users,
         &active_provider,
         &shared_stream_manager,
         &event_manager,
         history_config,
+        cleanup_capacity,
     ));
 
     let client = create_http_client(app_config)?;
@@ -332,6 +402,13 @@ async fn create_shared_data(
     let cancel_tokens = Arc::new(ArcSwap::from_pointee(tokens));
 
     let (manual_update_sender, manual_update_rx) = mpsc::channel::<ManualPlaylistUpdateRequest>(1);
+    let identity_registry = bootstrap_identity_registry(&config, app_config).await?;
+    let revocations_path = std::path::PathBuf::from(&config.storage_dir).join("token_revocations.json");
+    let token_revocations = Arc::new(TokenRevocations::load(revocations_path).await.map_err(|err| {
+        // Reading a corrupt file as "nothing is revoked" would silently
+        // reinstate every revoked session.
+        TuliproxError::Server(format!("Cannot load token revocations: {err}"))
+    })?);
 
     let app_state = AppState {
         forced_targets: Arc::new(ArcSwap::new(Arc::clone(forced_targets))),
@@ -344,6 +421,7 @@ async fn create_shared_data(
         shared_stream_manager,
         hls_proxy,
         hls_provisioning: Arc::new(HlsProvisioningState::new()),
+        stalker_resolve_coordinator: Arc::default(),
         active_users,
         recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
             Arc::clone(&active_provider),
@@ -357,6 +435,9 @@ async fn create_shared_data(
         geoip,
         update_guard: UpdateGuard::new(),
         metadata_manager,
+        identity_registry,
+        login_throttle: Arc::new(crate::auth::LoginThrottle::new()),
+        token_revocations,
         manual_update_sender,
     };
 
@@ -372,29 +453,35 @@ async fn run_manual_update_worker(
 ) {
     while let Some(request) = rx.recv().await {
         let Some(permit) = app_state.update_guard.acquire_playlist_lock().await else {
+            app_state.event_manager.send_event(EventMessage::PlaylistUpdate(PlaylistUpdateSummary::for_run(
+                request.run_id,
+                next_playlist_update_run_order(),
+                PlaylistUpdateState::Failure,
+            )));
             break;
         };
         exec_processing(
-            &client,
-            Arc::clone(&app_state.app_config),
-            request.targets,
-            Some(Arc::clone(&app_state.event_manager)),
-            Some({
+            ProcessingRun::for_run(
+                request.run_id,
+                client.clone(),
+                Arc::clone(&app_state.app_config),
+                request.targets,
+                Arc::clone(&app_state.event_manager),
+            )
+            .with_manual_input_update(request.input_action)
+            .with_bootstrap({
                 let state = Arc::clone(&app_state);
-                std::sync::Arc::new(move || {
+                move || {
                     let state = Arc::clone(&state);
-                    Box::pin(async move { sync_panel_api_exp_dates(&state).await })
-                        as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
-                })
-            }),
-            Some(Arc::clone(&app_state.playlists)),
-            Some(app_state.update_guard.clone()),
-            app_state.get_disabled_headers(),
-            Some(Arc::clone(&app_state.active_provider)),
-            Some(Arc::clone(&app_state.metadata_manager)
-                as std::sync::Arc<dyn tuliprox_processing::metadata_sink::MetadataUpdateSink>),
-            None,
-            Some(permit),
+                    async move { sync_panel_api_exp_dates(&state).await }
+                }
+            })
+            .with_playlist_state(Arc::clone(&app_state.playlists))
+            .with_update_guard(app_state.update_guard.clone())
+            .with_disabled_headers(app_state.get_disabled_headers())
+            .with_provider_manager(Arc::clone(&app_state.active_provider))
+            .with_metadata_manager(Arc::clone(&app_state.metadata_manager))
+            .with_acquired_permit(permit),
         )
         .await;
     }
@@ -417,6 +504,10 @@ async fn cancel_all_service_tokens(app_state: &Arc<AppState>) {
     {
         warn!("Connection manager shutdown timed out after 30s, forcing exit");
     }
+    // After the connections are gone, so the final batch reports what the
+    // streams actually transferred. `Drop` cancels the sampler but cannot
+    // await, which left the last window's bytes unreported.
+    app_state.event_manager.shutdown().await;
 }
 
 #[cfg(unix)]
@@ -450,30 +541,24 @@ fn exec_update_on_boot(client: &reqwest::Client, app_state: &Arc<AppState>, targ
         let disabled_headers = app_state.get_disabled_headers();
         let provider_manager = Arc::clone(&app_state.active_provider);
         let metadata_manager = Arc::clone(&app_state.metadata_manager);
-        let event_manager = Some(Arc::clone(&app_state.event_manager));
+        let event_manager = Arc::clone(&app_state.event_manager);
         let app_state_clone = Arc::clone(app_state);
 
         tokio::spawn(async move {
             exec_processing(
-                &client,
-                app_config_clone,
-                targets_clone,
-                event_manager,
-                Some({
-                    let state = Arc::clone(&app_state_clone);
-                    std::sync::Arc::new(move || {
-                        let state = Arc::clone(&state);
-                        Box::pin(async move { sync_panel_api_exp_dates(&state).await })
-                            as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+                ProcessingRun::new(client, app_config_clone, targets_clone, event_manager)
+                    .with_bootstrap({
+                        let state = Arc::clone(&app_state_clone);
+                        move || {
+                            let state = Arc::clone(&state);
+                            async move { sync_panel_api_exp_dates(&state).await }
+                        }
                     })
-                }),
-                Some(playlist_state),
-                update_guard,
-                disabled_headers,
-                Some(provider_manager),
-                Some(metadata_manager),
-                None,
-                None,
+                    .with_playlist_state(playlist_state)
+                    .with_update_guard(update_guard)
+                    .with_disabled_headers(disabled_headers)
+                    .with_provider_manager(provider_manager)
+                    .with_metadata_manager(metadata_manager),
             )
             .await;
         });
@@ -731,6 +816,39 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
         .await
         .map_err(|err| TuliproxError::Server(format!("Failed to bind to {host}:{port}, {err}")))?;
 
+    // The notification outbox is started unconditionally: it now carries
+    // every notification, not just recording lifecycle ones, so gating it on
+    // the recording config would leave playlist, watch, disk and provider
+    // notifications on the old fire-and-forget path.
+    {
+        let notification_cfg =
+            cfg.recording().map_or_else(tuliprox_core::model::RecordingNotificationConfig::default, |recording| {
+                recording.notifications.clone()
+            });
+        tuliprox_messaging::outbox::spawn_notification_outbox(
+            &app_state.app_config,
+            app_state.http_client.load().as_ref().clone(),
+            notification_cfg,
+            &app_state.cancel_tokens.load().recordings,
+            Arc::clone(&app_state.event_manager),
+        );
+    }
+
+    // Bridge the in-process event bus onto the notification pipeline, so
+    // the fourteen `EventMessage` variants that previously reached only the
+    // Web UI can also reach a configured channel. Everything defaults to
+    // unsubscribed, so this is inert until `notify_on` asks for it.
+    crate::api::tasks::spawn_notification_bridge(&app_state, &app_state.cancel_tokens.load().recordings);
+
+    // Emitted here rather than at the top of `main`: the bridge above is what
+    // turns a bus event into a notification, and a `system.started` published
+    // before it subscribes reaches nobody. The listener is already bound at
+    // this point, so the address is real.
+    let _ = app_state.event_manager.send_event(EventMessage::ServerLifecycle(ServerLifecycleEvent::started(
+        crate::VERSION.into(),
+        format!("{host}:{port}").into(),
+    )));
+
     if let Some(recording_cfg) = cfg.recording() {
         resume_recordings_after_bind(&app_state, recording_cfg).await;
     }
@@ -743,6 +861,11 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
         match wait_for_shutdown_signal().await {
             Ok(signal_name) => {
                 info!("Received shutdown signal ({signal_name}), cancelling all background services");
+                // Before `cancel_all_service_tokens`, which stops the outbox
+                // that would carry this to a channel.
+                let _ = app_state_signal.event_manager.send_event(EventMessage::ServerLifecycle(
+                    ServerLifecycleEvent::shutting_down(crate::VERSION.into(), signal_name.into()),
+                ));
                 server_cancel_token_signal.cancel();
                 cancel_all_service_tokens(&app_state_signal).await;
             }
@@ -1047,7 +1170,7 @@ mod tests {
             let event_manager = Arc::new(EventManager::new());
             let active_provider = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
             let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
-            active_provider.set_shared_stream_manager(Arc::clone(&shared_stream_manager));
+            active_provider.set_shared_stream_manager(&shared_stream_manager);
             let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
             let config = app_cfg.config.load();
             let active_users = Arc::new(ActiveUserManager::new(&config, &geoip, &event_manager));
@@ -1090,6 +1213,7 @@ mod tests {
                 shared_stream_manager,
                 hls_proxy: Arc::new(HlsProxyManager::new()),
                 hls_provisioning: Arc::new(HlsProvisioningState::new()),
+                stalker_resolve_coordinator: Arc::default(),
                 active_users,
                 active_provider,
                 connection_manager,
@@ -1099,6 +1223,13 @@ mod tests {
                 geoip,
                 update_guard: UpdateGuard::new(),
                 metadata_manager,
+                identity_registry: Arc::new(tuliprox_repository::identity_registry::IdentityRegistry::empty(
+                    std::path::PathBuf::new(),
+                )),
+                login_throttle: Arc::new(crate::auth::LoginThrottle::new()),
+                token_revocations: Arc::new(tuliprox_repository::token_revocations::TokenRevocations::empty(
+                    std::path::PathBuf::new(),
+                )),
                 manual_update_sender,
             })
         }
@@ -1116,7 +1247,6 @@ mod tests {
             state
                 .active_provider
                 .acquire_connection(&input.into(), &addr, default_user_priority(), ConnectionKind::Normal)
-                .await
                 .expect("connection allocation")
         }
 

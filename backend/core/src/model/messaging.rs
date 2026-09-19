@@ -1,13 +1,9 @@
 use serde::{Deserialize, Serialize};
 use shared::model::{DiskAlert, InputStats, MsgKind, SourceStats};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WatchChanges {
-    pub target: String,
-    pub group: String,
-    pub added: Vec<String>,
-    pub removed: Vec<String>,
-}
+// `WatchChanges` and `RecordingLifecycleMessage` moved to `shared` so the
+// event taxonomy can name them; re-exported here because `MessageContent`
+// and every existing call site refer to them by this path.
+pub use shared::model::{RecordingLifecycleMessage, WatchChanges};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ProcessingStats {
@@ -21,25 +17,6 @@ impl ProcessingStats {
     pub fn new_stats(stats: Vec<SourceStats>) -> Self { Self { stats: Some(stats), errors: None } }
 
     pub fn new_error(error: String) -> Self { Self { stats: None, errors: Some(error) } }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RecordingLifecycleMessage {
-    pub event: MsgKind,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub programme_title: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub channel: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub effective_start: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub effective_end: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub visibility: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub output_filename: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub failure_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

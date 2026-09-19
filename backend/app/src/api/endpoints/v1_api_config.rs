@@ -28,7 +28,8 @@ use shared::{
     error::TuliproxError,
     model::{
         permission::{Permission, PermissionSet},
-        ApiProxyConfigDto, ConfigDto, InputFetchMethod, PlansConfigDto, SourcesConfigDto, XtreamLoginRequest,
+        ApiProxyConfigDto, ApiProxyServerInfoDto, ConfigDto, ConfigTargetDto, InputFetchMethod, PlansConfigDto,
+        SourcesConfigDto, XtreamLoginRequest,
     },
     utils::{
         parse_provider_scheme_url_parts, HEADER_CONFIG_API_PROXY_REVISION, HEADER_CONFIG_MAIN_REVISION,
@@ -38,6 +39,135 @@ use shared::{
 use std::{collections::HashMap, path::Path, sync::Arc};
 
 fn file_revision_from_bytes(bytes: &[u8]) -> String { blake3::hash(bytes).to_hex().to_string() }
+
+/// Target-bouquet file updates derived from a sources configuration change.
+struct BouquetMutationBatch {
+    deletions: Vec<String>,
+}
+
+/// Collects bouquet deletions required by the new configuration.
+/// Target IDs are runtime-local and therefore cannot establish persisted identity.
+fn build_bouquet_mutation_batch(app_state: &Arc<AppState>, sources: &SourcesConfigDto) -> BouquetMutationBatch {
+    let old_sources = app_state.app_config.sources.load();
+    let mut old_target_names = std::collections::HashSet::new();
+    for source in &old_sources.sources {
+        for target in &source.targets {
+            old_target_names.insert(target.name.clone());
+        }
+    }
+
+    let mut new_target_names = std::collections::HashSet::new();
+    for source_dto in &sources.sources {
+        for target_dto in &source_dto.targets {
+            new_target_names.insert(target_dto.name.trim().to_string());
+        }
+    }
+
+    let deletions: Vec<String> = old_target_names.difference(&new_target_names).cloned().collect();
+
+    BouquetMutationBatch { deletions }
+}
+
+/// Applies bouquet mutations under their shared lock.
+async fn apply_bouquet_mutation_batch(
+    app_state: &Arc<AppState>,
+    batch: &BouquetMutationBatch,
+) -> Result<(), TuliproxError> {
+    tuliprox_repository::apply_target_bouquet_mutations_locked(&app_state.app_config, &[], &batch.deletions).await
+}
+
+async fn restore_sources_file(path: &Path, content: Option<&[u8]>) -> Result<(), std::io::Error> {
+    if let Some(content) = content {
+        return tuliprox_core::utils::write_file_atomic(path, content).await;
+    }
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+async fn read_optional_file(path: &Path) -> Result<Option<Vec<u8>>, std::io::Error> {
+    match tokio::fs::read(path).await {
+        Ok(content) => Ok(Some(content)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+async fn snapshot_template_file(
+    app_state: &Arc<AppState>,
+    should_persist: bool,
+) -> Result<Option<(String, Option<Vec<u8>>)>, std::io::Error> {
+    if !should_persist {
+        return Ok(None);
+    }
+    let path = {
+        let config = app_state.app_config.config.load();
+        let paths = app_state.app_config.paths.load();
+        tuliprox_core::utils::resolve_template_persist_file_path(
+            paths.template_file_path.as_deref().or(config.template_path.as_deref()),
+            &paths.config_path,
+        )
+    };
+    let content = read_optional_file(Path::new(&path)).await?;
+    Ok(Some((path, content)))
+}
+
+async fn roll_back_sources_after_update_failure(
+    app_state: &Arc<AppState>,
+    sources_file_path: &Path,
+    original_sources_file: Option<&[u8]>,
+    template_snapshot: Option<(&Path, Option<&[u8]>)>,
+    update_err: &TuliproxError,
+) -> axum::response::Response {
+    error!("Failed to complete sources configuration update: {update_err}");
+    if let Err(rollback_err) = restore_sources_file(sources_file_path, original_sources_file).await {
+        error!("Failed to roll back source.yml after target bouquet mutation failure: {rollback_err}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(json!({
+                "error": format!(
+                    "Updating sources failed: {update_err}; rolling back source.yml also failed: {rollback_err}"
+                )
+            })),
+        )
+            .into_response();
+    }
+    if let Some((template_file_path, original_template_file)) = template_snapshot {
+        if let Err(rollback_err) = restore_sources_file(template_file_path, original_template_file).await {
+            error!("Failed to roll back template config after target bouquet mutation failure: {rollback_err}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(json!({
+                    "error": format!(
+                        "Updating sources failed: {update_err}; rolling back the template config also failed: {rollback_err}"
+                    )
+                })),
+            )
+                .into_response();
+        }
+    }
+    if let Err(reload_err) = ConfigFile::load_sources(app_state).await {
+        error!("source.yml was rolled back, but reloading the previous runtime configuration failed: {reload_err}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(json!({
+                "error": format!(
+                    "Updating sources failed: {update_err}; source.yml was restored but runtime reload failed: {reload_err}"
+                )
+            })),
+        )
+            .into_response();
+    }
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        axum::Json(json!({
+            "error": format!("Updating sources failed and persisted configuration was rolled back: {update_err}")
+        })),
+    )
+        .into_response()
+}
 
 async fn read_file_revision(path: &str) -> Result<String, std::io::Error> {
     match tokio::fs::read(path).await {
@@ -96,15 +226,39 @@ fn has_any_permission(permissions: PermissionSet, required: &[Permission]) -> bo
     required.iter().any(|permission| permissions.contains(*permission))
 }
 
+/// The permissions this token may act with *right now*.
+///
+/// The claim alone is a snapshot from mint time, so a revoked group permission
+/// kept filtering config in until the token expired. Intersecting with the live
+/// grant makes a revocation immediate without ever widening a token beyond what
+/// it was issued with.
 fn decode_permissions(app_state: &AppState, token: &str) -> Option<PermissionSet> {
     let config = app_state.app_config.config.load();
     let web_auth = config.web_ui.as_ref()?.auth.as_ref()?;
-    verify_token(token, web_auth.secret.as_bytes()).map(|token_data| token_data.claims.permissions)
+    let claims = verify_token(token, web_auth.secret.as_bytes(), &web_auth.issuer)?.claims;
+    Some(
+        web_auth
+            .resolve_permissions_if_known(&claims.username)
+            .map_or(claims.permissions, |live| claims.permissions & live),
+    )
+}
+
+/// Reduces a server entry to the name a user record may reference.
+///
+/// User records reference a server by name only, so this is all a caller
+/// handling users needs. Protocol, host, port, path and timezone describe
+/// internal infrastructure and must not leave the server without `ConfigRead`.
+fn sanitize_server_names_only(server: &ApiProxyServerInfoDto) -> ApiProxyServerInfoDto {
+    ApiProxyServerInfoDto { name: server.name.clone(), ..Default::default() }
 }
 
 fn filter_api_proxy_by_permissions(api_proxy: &mut ApiProxyConfigDto, permissions: PermissionSet) {
     if !permissions.contains(Permission::ConfigRead) {
-        api_proxy.server.clear();
+        if permissions.contains(Permission::UserRead) || permissions.contains(Permission::UserWrite) {
+            api_proxy.server = api_proxy.server.iter().map(sanitize_server_names_only).collect();
+        } else {
+            api_proxy.server.clear();
+        }
         api_proxy.use_user_db = false;
         api_proxy.auth_error_status = ApiProxyConfigDto::default().auth_error_status;
     }
@@ -113,27 +267,51 @@ fn filter_api_proxy_by_permissions(api_proxy: &mut ApiProxyConfigDto, permission
     }
 }
 
+/// Reduces a target to the identity a user record may reference.
+///
+/// User records reference a target by name; the id is kept so the UI can key
+/// rows. Every other field (filter, output, mappings, ...) is target
+/// configuration and must not leave the server without `SourceRead`.
+fn sanitize_target_identity_only(target: &ConfigTargetDto) -> ConfigTargetDto {
+    ConfigTargetDto { id: target.id, name: target.name.clone(), ..Default::default() }
+}
+
 fn filter_app_config_by_permissions(app_config: &mut shared::model::AppConfigDto, permissions: Option<PermissionSet>) {
+    // Unconditional: `config.yml` goes out in full to anyone with
+    // `ConfigRead`, which included the Telegram bot token, the Pushover
+    // credentials and any `Authorization` header on the REST channel.
+    // `save_config_main` puts a returned mask back, so the round-trip is
+    // lossless.
+    if let Some(messaging) = app_config.config.messaging.as_mut() {
+        messaging.redact_secrets();
+    }
     if let Some(permissions) = permissions {
         if !permissions.contains(Permission::ConfigRead) {
             app_config.config = ConfigDto::default();
-            if let Some(api_proxy) = app_config.api_proxy.as_mut() {
-                api_proxy.server.clear();
-                api_proxy.use_user_db = false;
-                api_proxy.auth_error_status = ApiProxyConfigDto::default().auth_error_status;
-            }
         }
 
         if !permissions.contains(Permission::SourceRead) {
-            app_config.sources = SourcesConfigDto::default();
             app_config.mappings = None;
             app_config.templates = None;
+            let can_read_targets = permissions.contains(Permission::UserRead)
+                || permissions.contains(Permission::UserWrite)
+                || permissions.contains(Permission::PlaylistRead)
+                || permissions.contains(Permission::PlaylistWrite);
+            if can_read_targets {
+                app_config.sources.inputs.clear();
+                app_config.sources.provider = None;
+                app_config.sources.templates = None;
+                for source in &mut app_config.sources.sources {
+                    source.inputs.clear();
+                    source.targets = source.targets.iter().map(sanitize_target_identity_only).collect();
+                }
+            } else {
+                app_config.sources = SourcesConfigDto::default();
+            }
         }
 
         if let Some(api_proxy) = app_config.api_proxy.as_mut() {
-            if !permissions.contains(Permission::UserRead) {
-                api_proxy.user.clear();
-            }
+            filter_api_proxy_by_permissions(api_proxy, permissions);
         }
     }
 }
@@ -207,6 +385,16 @@ async fn save_config_main(
         return response;
     }
 
+    // A client that echoes a redacted secret back means "keep what is
+    // stored". Without this the round-trip would write the mask over the
+    // real token and silently break the channel.
+    if let Some(incoming) = cfg.messaging.as_mut() {
+        let stored = app_state.app_config.config.load();
+        if let Some(current) = stored.messaging.as_ref() {
+            incoming.restore_redacted_secrets(&shared::model::MessagingConfigDto::from(current));
+        }
+    }
+
     if let Err(err) = cfg.prepare(false) {
         return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()}))).into_response();
     }
@@ -259,11 +447,10 @@ async fn save_config_sources(
     headers: HeaderMap,
     axum::extract::Json(sources): axum::extract::Json<SourcesConfigDto>,
 ) -> impl axum::response::IntoResponse + Send {
-    let sources_file_path = {
-        let paths = app_state.app_config.paths.load();
-        paths.sources_file_path.clone()
-    };
-    let _lock = app_state.app_config.file_locks.write_lock(Path::new(&sources_file_path)).await;
+    let sources_file_path = app_state.app_config.paths.load().sources_file_path.clone();
+    let _source_lock = app_state.app_config.file_locks.write_lock(Path::new(&sources_file_path)).await;
+    let _bouquet_mutation_lock =
+        app_state.app_config.file_locks.write_lock_str(tuliprox_repository::TARGET_BOUQUET_MUTATION_LOCK).await;
 
     let current_revision = match read_file_revision(&sources_file_path).await {
         Ok(revision) => revision,
@@ -277,6 +464,13 @@ async fn save_config_sources(
     {
         return response;
     }
+    let original_sources_file = match read_optional_file(Path::new(&sources_file_path)).await {
+        Ok(content) => content,
+        Err(err) => {
+            error!("Failed to snapshot source.yml '{sources_file_path}' before save: {err}");
+            return internal_server_error!();
+        }
+    };
 
     let templates_to_persist =
         match crate::config_loader::validate_source_config_for_persist(&app_state.app_config, &sources).await {
@@ -288,6 +482,14 @@ async fn save_config_sources(
             }
         };
 
+    let template_snapshot = match snapshot_template_file(&app_state, templates_to_persist.is_some()).await {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            error!("Failed to snapshot template config before save: {err}");
+            return internal_server_error!();
+        }
+    };
+
     if let Some(template_definition) = templates_to_persist.as_ref() {
         if let Err(err) =
             crate::config_loader::persist_templates_config(&app_state.app_config, template_definition).await
@@ -298,23 +500,51 @@ async fn save_config_sources(
         }
     }
 
-    match crate::config_loader::persist_source_config(&app_state.app_config, None, sources).await {
+    // Derive lifecycle changes from the currently loaded configuration before it is replaced.
+    let bouquet_mutations = build_bouquet_mutation_batch(&app_state, &sources);
+
+    match crate::config_loader::replace_source_config_from_user_edit(&app_state.app_config, None, sources).await {
         Ok(_) => {}
         Err(err) => {
             error!("Failed to persist source.yml {err}");
+            if let Some((template_file_path, original_template_file)) = template_snapshot.as_ref() {
+                if let Err(rollback_err) =
+                    restore_sources_file(Path::new(template_file_path), original_template_file.as_deref()).await
+                {
+                    error!("Failed to roll back template config after source.yml save failure: {rollback_err}");
+                }
+            }
             return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()})))
                 .into_response();
         }
     }
 
-    // Reload from disk so runtime always uses fully prepared sources/mappings/templates.
-    if let Err(err) = ConfigFile::load_sources(&app_state).await {
-        error!("Failed to reload prepared sources after save {err}");
-        return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()})))
-            .into_response();
+    // Reload before deleting bouquets so a failed reload can restore the persisted
+    // configuration without having touched target-local state.
+    if let Err(reload_err) = ConfigFile::load_sources(&app_state).await {
+        return roll_back_sources_after_update_failure(
+            &app_state,
+            Path::new(&sources_file_path),
+            original_sources_file.as_deref(),
+            template_snapshot.as_ref().map(|(path, content)| (Path::new(path), content.as_deref())),
+            &reload_err,
+        )
+        .await;
     }
 
-    app_state.active_provider.update_config(&app_state.app_config).await;
+    // The mutation lock prevents concurrent bouquet writes from observing a partial lifecycle update.
+    if let Err(mutation_err) = apply_bouquet_mutation_batch(&app_state, &bouquet_mutations).await {
+        return roll_back_sources_after_update_failure(
+            &app_state,
+            Path::new(&sources_file_path),
+            original_sources_file.as_deref(),
+            template_snapshot.as_ref().map(|(path, content)| (Path::new(path), content.as_deref())),
+            &mutation_err,
+        )
+        .await;
+    }
+
+    app_state.active_provider.update_config(&app_state.app_config);
     let updated_revision = match read_file_revision(&sources_file_path).await {
         Ok(revision) => revision,
         Err(err) => {
@@ -492,7 +722,17 @@ async fn config(
     let Some(permissions) = decode_permissions(&app_state, &token) else {
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     };
-    if !has_any_permission(permissions, &[Permission::ConfigRead, Permission::SourceRead, Permission::UserRead]) {
+    if !has_any_permission(
+        permissions,
+        &[
+            Permission::ConfigRead,
+            Permission::SourceRead,
+            Permission::UserRead,
+            Permission::UserWrite,
+            Permission::PlaylistRead,
+            Permission::PlaylistWrite,
+        ],
+    ) {
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
 
@@ -506,7 +746,7 @@ async fn get_config_api_proxy_config(
     let Some(permissions) = decode_permissions(&app_state, &token) else {
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     };
-    if !has_any_permission(permissions, &[Permission::ConfigRead, Permission::UserRead]) {
+    if !has_any_permission(permissions, &[Permission::ConfigRead, Permission::UserRead, Permission::UserWrite]) {
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
 
@@ -598,7 +838,9 @@ async fn get_xtream_login_info(
         }
     };
     let http_client = app_state.http_client.load();
-    match xtream_login(&app_state.app_config, &http_client, &input_source, &request.username).await {
+    match xtream_login(&app_state.app_config, &http_client, &app_state.event_manager, &input_source, &request.username)
+        .await
+    {
         Ok(login_info) => axum::Json(login_info.unwrap_or_default()).into_response(),
         Err(err) => {
             error!("Failed to get xtream login info: {err}");
@@ -645,21 +887,44 @@ fn build_xtream_login_input_source(
     })
 }
 
-async fn get_config_plans(
-    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
-) -> impl IntoResponse + Send {
+fn get_config_plans_dto(app_state: &Arc<AppState>) -> Result<PlansConfigDto, TuliproxError> {
     let plans_path = {
         let paths = app_state.app_config.paths.load();
         plans_file_path(paths.api_proxy_file_path.as_str())
     };
     let plans_path_str = plans_path.to_string_lossy().to_string();
     match read_plans_file(&plans_path_str, true) {
-        Ok(Some(dto)) => axum::response::Json(dto).into_response(),
-        Ok(None) => axum::response::Json(PlansConfigDto::default()).into_response(),
+        Ok(Some(dto)) => Ok(dto),
+        Ok(None) => Ok(PlansConfigDto::default()),
         Err(err) => {
             error!("Failed to read plans config: {err}");
-            internal_server_error!()
+            Err(err)
         }
+    }
+}
+
+async fn get_config_plans(
+    AuthBearer(token): AuthBearer,
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+) -> impl IntoResponse + Send {
+    let Some(permissions) = decode_permissions(&app_state, &token) else {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !has_any_permission(permissions, &[Permission::ConfigRead, Permission::UserRead, Permission::UserWrite]) {
+        return axum::http::StatusCode::FORBIDDEN.into_response();
+    }
+    match get_config_plans_dto(&app_state) {
+        Ok(dto) => axum::response::Json(dto).into_response(),
+        Err(_) => internal_server_error!(),
+    }
+}
+
+async fn get_config_plans_unprotected(
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+) -> impl IntoResponse + Send {
+    match get_config_plans_dto(&app_state) {
+        Ok(dto) => axum::response::Json(dto).into_response(),
+        Err(_) => internal_server_error!(),
     }
 }
 
@@ -703,15 +968,13 @@ pub fn v1_api_config_register(router: Router<Arc<AppState>>) -> axum::Router<Arc
             "/config/apiproxy",
             axum::routing::get(get_config_api_proxy_config_public).put(save_config_api_proxy_config),
         )
+        .route("/config/plans", axum::routing::get(get_config_plans_unprotected).put(save_config_plans))
 }
 pub fn v1_api_config_register_with_permissions(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
     let base_read = Router::new()
         .route("/config", axum::routing::get(config))
-        .route("/config/apiproxy", axum::routing::get(get_config_api_proxy_config));
-
-    let config_read = Router::new()
-        .route("/config/plans", axum::routing::get(get_config_plans))
-        .layer(permission_layer!(app_state, Permission::ConfigRead));
+        .route("/config/apiproxy", axum::routing::get(get_config_api_proxy_config))
+        .route("/config/plans", axum::routing::get(get_config_plans));
 
     // 2. Source Domain (Read & Write)
     let source_read = Router::new()
@@ -724,12 +987,98 @@ pub fn v1_api_config_register_with_permissions(app_state: &Arc<AppState>) -> Rou
         .layer(permission_layer!(app_state, Permission::SourceWrite));
 
     let config_write = Router::new()
+        .route("/config/messaging/test", axum::routing::post(test_messaging))
         .route("/config/main", axum::routing::post(save_config_main))
         .route("/config/apiproxy", axum::routing::put(save_config_api_proxy_config))
         .route("/config/plans", axum::routing::put(save_config_plans))
         .layer(permission_layer!(app_state, Permission::ConfigWrite));
 
-    Router::new().merge(base_read).merge(config_read).merge(source_read).merge(source_write).merge(config_write)
+    Router::new().merge(base_read).merge(source_read).merge(source_write).merge(config_write)
+}
+
+/// Request body for `POST /config/messaging/test`.
+#[derive(serde::Deserialize)]
+pub struct MessagingTestRequest {
+    /// Event id to simulate. Defaults to `system.info`.
+    #[serde(default)]
+    pub event: Option<String>,
+    /// Restrict to one channel by its stable id (`telegram`, `discord`, ...).
+    /// Absent means every configured channel.
+    #[serde(default)]
+    pub channel: Option<String>,
+    /// Render only, send nothing. Lets a template be iterated without
+    /// spamming a channel.
+    #[serde(default)]
+    pub preview: bool,
+}
+
+/// What one channel did with the test event.
+#[derive(serde::Serialize)]
+pub struct MessagingTestChannelResult {
+    pub channel: String,
+    /// `delivered`, `skipped`, `retry`, `permanent`, or `preview`.
+    pub outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Exactly what the channel was asked to send.
+    pub rendered: String,
+    /// Whether an operator template produced `rendered`.
+    pub templated: bool,
+}
+
+#[derive(serde::Serialize)]
+pub struct MessagingTestResponse {
+    pub event: String,
+    pub severity: String,
+    pub results: Vec<MessagingTestChannelResult>,
+}
+
+/// Send (or render) a test notification.
+///
+/// Messaging config previously had no feedback loop shorter than "save it
+/// and wait for something to break". `preview` renders without sending, so a
+/// template can be iterated safely.
+async fn test_messaging(
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    axum::Json(request): axum::Json<MessagingTestRequest>,
+) -> impl axum::response::IntoResponse {
+    let requested = request.event.as_deref().unwrap_or("system.info");
+    let Some(event_id) = shared::model::notification::EventId::from_wire(requested) else {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({
+                "error": format!("unknown event `{requested}`"),
+            })),
+        )
+            .into_response();
+    };
+
+    let event = tuliprox_messaging::test_event(event_id);
+    let client = app_state.http_client.load();
+    let results = tuliprox_messaging::render_and_send_test(
+        &app_state.app_config,
+        &client,
+        &event,
+        request.channel.as_deref(),
+        request.preview,
+    )
+    .await;
+
+    let response = MessagingTestResponse {
+        event: event.id.to_string(),
+        severity: event.severity.to_string(),
+        results: results
+            .into_iter()
+            .map(|outcome| MessagingTestChannelResult {
+                channel: outcome.channel,
+                outcome: outcome.outcome,
+                reason: outcome.reason,
+                rendered: outcome.rendered,
+                templated: outcome.templated,
+            })
+            .collect(),
+    };
+    (axum::http::StatusCode::OK, axum::Json(response)).into_response()
 }
 
 #[cfg(test)]
@@ -811,16 +1160,119 @@ mod tests {
     }
 
     #[test]
-    fn filter_api_proxy_keeps_user_section_only_with_user_read() {
+    fn filter_api_proxy_keeps_user_and_sanitized_server_section_with_user_read() {
         let permissions: PermissionSet = Permission::UserRead.into();
         let mut api_proxy = make_test_api_proxy();
 
         filter_api_proxy_by_permissions(&mut api_proxy, permissions);
 
-        assert_eq!(api_proxy.server, [] as [shared::model::ApiProxyServerInfoDto; 0]);
+        assert_eq!(api_proxy.server.len(), 1);
+        assert_eq!(api_proxy.server[0].name, "main");
+        assert!(api_proxy.server[0].protocol.is_empty());
+        assert!(api_proxy.server[0].host.is_empty());
+        assert!(api_proxy.server[0].port.is_none());
+        assert!(api_proxy.server[0].timezone.is_empty());
+        assert!(api_proxy.server[0].message.is_empty());
+        assert!(api_proxy.server[0].path.is_none());
         assert_eq!(api_proxy.user.len(), 1);
         assert!(!api_proxy.use_user_db);
         assert_eq!(api_proxy.auth_error_status, 403);
+    }
+
+    #[test]
+    fn filter_api_proxy_keeps_sanitized_server_section_with_user_write() {
+        let permissions: PermissionSet = Permission::UserWrite.into();
+        let mut api_proxy = make_test_api_proxy();
+
+        filter_api_proxy_by_permissions(&mut api_proxy, permissions);
+
+        assert_eq!(api_proxy.server.len(), 1);
+        assert_eq!(api_proxy.server[0].name, "main");
+        assert!(api_proxy.server[0].host.is_empty());
+        assert!(api_proxy.user.is_empty());
+    }
+
+    #[test]
+    fn filter_api_proxy_clears_all_for_unrelated_permission() {
+        let permissions: PermissionSet = Permission::SystemRead.into();
+        let mut api_proxy = make_test_api_proxy();
+
+        filter_api_proxy_by_permissions(&mut api_proxy, permissions);
+
+        assert!(api_proxy.server.is_empty());
+        assert!(api_proxy.user.is_empty());
+        assert!(!api_proxy.use_user_db);
+        assert_eq!(api_proxy.auth_error_status, 403);
+    }
+
+    #[test]
+    fn filter_app_config_keeps_targets_and_clears_sources_for_user_read_without_source_read() {
+        let permissions: PermissionSet = Permission::UserRead.into();
+        let mut app_config = AppConfigDto {
+            config: ConfigDto { storage_dir: Some(String::from("storage")), ..ConfigDto::default() },
+            sources: SourcesConfigDto {
+                inputs: vec![shared::model::ConfigInputDto {
+                    name: Arc::from("secret-provider"),
+                    url: String::from("http://secret-provider/get.php?username=foo&password=bar"),
+                    ..Default::default()
+                }],
+                sources: vec![shared::model::ConfigSourceDto {
+                    inputs: vec![Arc::from("secret-provider")],
+                    targets: vec![shared::model::ConfigTargetDto {
+                        id: 1,
+                        enabled: false,
+                        name: String::from("Default"),
+                        output: vec![shared::model::TargetOutputDto::M3u(shared::model::M3uTargetOutputDto {
+                            filename: Some(String::from("secret.m3u")),
+                            ..Default::default()
+                        })],
+                        filter: shared::model::ConfigTargetFilterDto {
+                            processing: Some(String::from("group ~ 'secret'")),
+                            ..Default::default()
+                        },
+                        watch: Some(vec![String::from("watch-expr")]),
+                        mapping: Some(vec![String::from("mapping-name")]),
+                        ..Default::default()
+                    }],
+                }],
+                provider: Some(vec![]),
+                templates: Some(vec![]),
+            },
+            mappings: None,
+            templates: Some(TemplateDefinitionDto::default()),
+            api_proxy: Some(make_test_api_proxy()),
+        };
+
+        filter_app_config_by_permissions(&mut app_config, Some(permissions));
+
+        assert_eq!(app_config.config.storage_dir, None);
+        assert!(app_config.sources.inputs.is_empty());
+        assert!(app_config.sources.provider.is_none());
+        assert!(app_config.sources.templates.is_none());
+        assert!(app_config.mappings.is_none());
+        assert!(app_config.templates.is_none());
+        assert_eq!(app_config.sources.sources.len(), 1);
+        assert!(app_config.sources.sources[0].inputs.is_empty());
+        assert_eq!(app_config.sources.sources[0].targets.len(), 1);
+
+        let target = &app_config.sources.sources[0].targets[0];
+        assert_eq!(target.name, "Default");
+        assert_eq!(target.id, 1);
+        assert_eq!(target.enabled, shared::model::ConfigTargetDto::default().enabled);
+        assert!(target.output.is_empty());
+        assert!(target.filter.is_empty());
+        assert!(target.options.is_none());
+        assert!(target.sort.is_none());
+        assert!(target.rename.is_none());
+        assert!(target.mapping.is_none());
+        assert!(target.favourites.is_none());
+        assert!(target.watch.is_none());
+
+        let api_proxy = app_config.api_proxy.expect("api proxy should remain present");
+        assert_eq!(api_proxy.server.len(), 1);
+        assert_eq!(api_proxy.server[0].name, "main");
+        assert!(api_proxy.server[0].host.is_empty());
+        assert_eq!(api_proxy.user.len(), 1);
     }
 
     #[test]
@@ -895,5 +1347,105 @@ mod tests {
             input_source.provider.as_ref().and_then(|provider| provider.urls.first()).map(std::convert::AsRef::as_ref),
             Some("http://request.example")
         );
+    }
+
+    #[tokio::test]
+    async fn save_config_sources_uses_names_and_does_not_deadlock_on_mutation_lock() {
+        use crate::api::model::create_test_app_state;
+        use std::time::Duration;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().to_string_lossy().to_string();
+        let sources_file = temp_dir.path().join("source.yml");
+        let input_dto = shared::model::ConfigInputDto {
+            name: "input1".into(),
+            url: "http://example.com/playlist.m3u".to_string(),
+            ..Default::default()
+        };
+        let initial_sources = SourcesConfigDto {
+            inputs: vec![input_dto.clone()],
+            sources: vec![shared::model::ConfigSourceDto {
+                inputs: vec!["input1".into()],
+                targets: vec![shared::model::ConfigTargetDto {
+                    id: 1,
+                    name: "target_1".to_string(),
+                    output: vec![shared::model::TargetOutputDto::M3u(shared::model::M3uTargetOutputDto::default())],
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+        let yaml = serde_saphyr::to_string(&initial_sources).unwrap();
+        tokio::fs::write(&sources_file, &yaml).await.unwrap();
+
+        let test_config = crate::model::Config {
+            backup_dir: Some(temp_dir.path().join("backup").to_string_lossy().to_string()),
+            ..crate::model::Config::default()
+        };
+        let app_state = create_test_app_state(test_config);
+        app_state.app_config.paths.store(Arc::new(shared::model::ConfigPaths {
+            home_path: config_path.clone(),
+            config_path: config_path.clone(),
+            storage_path: config_path.clone(),
+            config_file_path: String::new(),
+            sources_file_path: sources_file.to_string_lossy().to_string(),
+            mapping_file_path: None,
+            mapping_files_used: None,
+            template_file_path: None,
+            template_files_used: None,
+            api_proxy_file_path: String::new(),
+            custom_stream_response_path: None,
+        }));
+        super::ConfigFile::load_sources(&app_state).await.unwrap();
+
+        tuliprox_repository::save_target_bouquet(
+            &app_state.app_config,
+            "target_1",
+            shared::model::TargetBouquetDto::new(
+                shared::model::TargetBouquetMode::Whitelist,
+                shared::model::PlaylistClusterBouquetDto {
+                    live: Some(vec!["News".to_string()]),
+                    vod: None,
+                    series: None,
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        let updated_sources = SourcesConfigDto {
+            inputs: vec![input_dto],
+            sources: vec![shared::model::ConfigSourceDto {
+                inputs: vec!["input1".into()],
+                targets: vec![shared::model::ConfigTargetDto {
+                    id: 1,
+                    name: "target_renamed".to_string(),
+                    output: vec![shared::model::TargetOutputDto::M3u(shared::model::M3uTargetOutputDto::default())],
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+
+        let rev = super::read_file_revision(sources_file.to_str().unwrap()).await.unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_IF_MATCH, HeaderValue::from_str(&rev).unwrap());
+
+        let save_future = super::save_config_sources(
+            axum::extract::State(Arc::clone(&app_state)),
+            headers,
+            axum::Json(updated_sources),
+        );
+        let response = tokio::time::timeout(Duration::from_secs(5), save_future)
+            .await
+            .expect("save_config_sources must not deadlock");
+
+        use axum::response::IntoResponse;
+        assert_eq!(response.into_response().status(), StatusCode::OK);
+        assert!(!tuliprox_repository::target_bouquet_exists(temp_dir.path(), "target_1").await);
+        assert!(!tuliprox_repository::target_bouquet_exists(temp_dir.path(), "target_renamed").await);
+        let runtime_sources = app_state.app_config.sources.load();
+        assert_eq!(runtime_sources.sources[0].targets[0].name, "target_renamed");
     }
 }

@@ -236,6 +236,7 @@ impl TVGuide {
 
         let mut title = None;
         let mut desc = None;
+        let mut icon = None;
         let mut categories = Vec::new();
         let mut is_live = false;
         let mut is_new = false;
@@ -245,6 +246,16 @@ impl TVGuide {
                 match child.name.as_ref() {
                     EPG_TAG_TITLE => title.clone_from(&child.value),
                     EPG_TAG_DESC => desc.clone_from(&child.value),
+                    EPG_TAG_ICON => {
+                        if let Some(src) = child
+                            .attributes
+                            .as_ref()
+                            .and_then(|attributes| attributes.get("src"))
+                            .filter(|src| !src.is_empty())
+                        {
+                            icon = Some(Arc::clone(src));
+                        }
+                    }
                     EPG_TAG_CATEGORY => {
                         if let Some(value) = child.value.as_ref().filter(|value| !value.is_empty()) {
                             categories.push(EpgCategory {
@@ -268,6 +279,7 @@ impl TVGuide {
         let catchup_id = tag.attributes.as_ref().and_then(|attributes| attributes.get(catchup_id_attrib)).cloned();
 
         let mut programme = EpgProgramme::new_all(start_time, stop_time, Arc::clone(epg_id), title, desc, catchup_id);
+        programme.icon = icon;
         programme.categories = categories;
         programme.is_live = is_live;
         programme.is_new = is_new;
@@ -1126,6 +1138,9 @@ fn backfill_programme_metadata(existing: &mut EpgProgramme, incoming: EpgProgram
     if existing.desc.is_none() {
         existing.desc = incoming.desc;
     }
+    if existing.icon.is_none() {
+        existing.icon = incoming.icon;
+    }
     if existing.catchup_id.is_none() {
         existing.catchup_id = incoming.catchup_id;
     }
@@ -1450,6 +1465,7 @@ mod tests {
             EpgCategory { value: "Live".intern(), lang: Some("en".intern()) },
         ];
         let mut low_programme = epg_programme("demo.channel", 10, 20, None, None);
+        low_programme.icon = Some("https://example.com/programme.jpg".intern());
         low_programme.categories = low_priority_categories.clone();
         low_programme.is_live = true;
         low_programme.is_new = true;
@@ -1469,6 +1485,7 @@ mod tests {
 
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].programmes.len(), 1);
+        assert_eq!(merged[0].programmes[0].icon.as_deref(), Some("https://example.com/programme.jpg"));
         assert_eq!(merged[0].programmes[0].categories, low_priority_categories);
         assert!(merged[0].programmes[0].is_live);
         assert!(merged[0].programmes[0].is_new);
@@ -2064,6 +2081,8 @@ mod tests {
   <channel id="ESPN.us"><display-name>ESPN</display-name></channel>
   <programme start="20260718180000 +0000" stop="20260718200000 +0000" channel="ESPN.us">
     <title lang="en">Softball</title>
+    <icon src="https://example.com/softball.jpg"/>
+    <icon src=""/>
     <category lang="en">Softball</category>
     <category>Sports</category>
     <live/>
@@ -2086,6 +2105,7 @@ mod tests {
                     EpgCategory { value: "Sports".intern(), lang: None },
                 ],
             );
+            assert_eq!(programme.icon.as_deref(), Some("https://example.com/softball.jpg"));
             assert!(programme.is_live);
             assert!(programme.is_new);
         });

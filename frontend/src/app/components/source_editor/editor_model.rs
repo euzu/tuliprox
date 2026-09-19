@@ -233,6 +233,8 @@ pub enum EditMode {
 #[derive(Clone)]
 pub struct SourceEditorContext {
     pub on_form_change: Callback<(BlockId, BlockInstance)>,
+    pub open_target_bouquet: Callback<String>,
+    pub bouquet_revision: u64,
     pub edit_mode: UseStateHandle<EditMode>,
     pub allow_write: bool,
 }

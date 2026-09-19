@@ -5,7 +5,10 @@ use crate::{
         SeriesStreamDetailSeasonProperties, SeriesStreamProperties, StreamProperties, VideoStreamProperties, VirtualId,
         XtreamCluster, XtreamMappingFlags, XtreamMappingOptions,
     },
-    utils::{arc_str_option_null_if_empty_serde, arc_str_option_serde, arc_str_serde, arc_str_vec_serde, Internable},
+    utils::{
+        arc_str_null_is_none_serde, arc_str_option_null_if_empty_serde, arc_str_option_serde, arc_str_serde,
+        arc_str_vec_serde, Internable,
+    },
 };
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -107,7 +110,7 @@ pub struct XtreamVideoMovieData {
     #[serde(with = "arc_str_serde")]
     pub category_id: Arc<str>,
     pub category_ids: Vec<u32>,
-    #[serde(with = "arc_str_serde")]
+    #[serde(with = "arc_str_null_is_none_serde")]
     pub container_extension: Arc<str>,
     #[serde(default, with = "arc_str_option_null_if_empty_serde")]
     pub custom_sid: Option<Arc<str>>,
@@ -191,7 +194,7 @@ pub struct XtreamSeriesEpisodeInfoDoc {
     pub episode_num: u32,
     #[serde(with = "arc_str_serde")]
     pub title: Arc<str>,
-    #[serde(with = "arc_str_serde")]
+    #[serde(with = "arc_str_null_is_none_serde")]
     pub container_extension: Arc<str>,
     pub info: XtreamSeriesEpisodeInfoData,
     #[serde(default, with = "arc_str_option_null_if_empty_serde")]
@@ -416,7 +419,7 @@ impl StreamProperties {
         XtreamVideoInfoDoc {
             info,
             movie_data: XtreamVideoMovieData {
-                stream_id: virtual_id,
+                stream_id: virtual_id.get(),
                 name: Arc::clone(&video.name),
                 added: Arc::clone(&video.added),
                 category_id: category_id.to_string().intern(),
@@ -603,7 +606,7 @@ impl Default for XtreamVideoInfoDoc {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{PlaylistItemTypeSet, SeriesStreamDetailProperties};
+    use crate::model::{PlaylistItemTypeSet, SeriesStreamDetailProperties, VirtualId};
 
     fn sample_options() -> XtreamMappingOptions {
         XtreamMappingOptions {
@@ -654,7 +657,7 @@ mod tests {
         }));
 
         let XtreamInfoDocument::Series(doc) =
-            properties.to_info_document(&sample_options(), PlaylistItemType::SeriesInfo, 42, 7)
+            properties.to_info_document(&sample_options(), PlaylistItemType::SeriesInfo, VirtualId::new(42), 7)
         else {
             panic!("expected series info document");
         };

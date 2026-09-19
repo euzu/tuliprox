@@ -36,19 +36,12 @@ fn is_dns_writer_generation_current(generation: u64) -> bool {
 
 pub fn dns_resolved_file_path(storage_dir: &str) -> PathBuf { PathBuf::from(storage_dir).join(DNS_RESOLVED_FILE) }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum DnsResolvedStoreLoadError {
-    Read(std::io::Error),
-    Parse(serde_json::Error),
-}
-
-impl std::fmt::Display for DnsResolvedStoreLoadError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Read(err) => write!(f, "read failed: {err}"),
-            Self::Parse(err) => write!(f, "parse failed: {err}"),
-        }
-    }
+    #[error("read failed: {0}")]
+    Read(#[from] std::io::Error),
+    #[error("parse failed: {0}")]
+    Parse(#[from] serde_json::Error),
 }
 
 pub async fn load_dns_resolved_store_from_path(

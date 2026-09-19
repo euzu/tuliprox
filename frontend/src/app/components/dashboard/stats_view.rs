@@ -122,43 +122,45 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
 
         html! {
         <div class="tp__stats">
-            <CollapsePanel expanded={true} title_content={Some(html! {
+            <div class="tp__stats__body">
+                <CollapsePanel expanded={true} title_content={Some(html! {
+                    <div class="tp__stats__header">
+                     <h1>{ translate.t("LABEL.STATS")}</h1>
+                    </div>
+                    })}>
+                    <div class="tp__stats__body">
+                      { render_system_stats(cache) }
+                    </div>
+                </CollapsePanel>
+                <CollapsePanel expanded={true} title_content={Some(html! {
+                    <div class="tp__stats__header">
+                     <h1>{ translate.t("LABEL.STREAMS")}</h1>
+                    </div>
+                    })}>
+                    <div class="tp__stats__body">
+                      <div class="tp__stats__body-group">
+                         <StreamsView embedded={true} />
+                      </div>
+                    </div>
+                </CollapsePanel>
                 <div class="tp__stats__header">
-                 <h1>{ translate.t("LABEL.STATS")}</h1>
+                    <h1>{ translate.t("LABEL.PLAYLIST_UPDATE")}</h1>
                 </div>
-                })}>
-                <div class="tp__stats__body">
-                  { render_system_stats(cache) }
+                <div class="tp__stats__body-group">
+                    <Card><PlaylistProgressStatusCard /></Card>
                 </div>
-            </CollapsePanel>
-            <CollapsePanel expanded={true} title_content={Some(html! {
-                <div class="tp__stats__header">
-                 <h1>{ translate.t("LABEL.STREAMS")}</h1>
-                </div>
-                })}>
-                <div class="tp__stats__body">
-                  <div class="tp__stats__body-group">
-                     <StreamsView embedded={true} />
-                  </div>
-                </div>
-            </CollapsePanel>
-            <div class="tp__stats__header">
-                <h1>{ translate.t("LABEL.PLAYLIST_UPDATE")}</h1>
+                <CollapsePanel expanded={*logs_expanded} on_state_change={on_logs_toggle.clone()} title_content={Some(html! {
+                    <div class="tp__stats__header">
+                     <h1>{ translate.t("LABEL.LOGS")}</h1>
+                    </div>
+                    })}>
+                    <div class="tp__stats__body">
+                        <LogConsole active={*logs_expanded} />
+                    </div>
+                </CollapsePanel>
             </div>
-            <div class="tp__stats__body-group">
-                <Card><PlaylistProgressStatusCard /></Card>
-            </div>
-            <CollapsePanel expanded={*logs_expanded} on_state_change={on_logs_toggle.clone()} title_content={Some(html! {
-                <div class="tp__stats__header">
-                 <h1>{ translate.t("LABEL.LOGS")}</h1>
-                </div>
-                })}>
-                <div class="tp__stats__body">
-                    <LogConsole active={*logs_expanded} />
-                </div>
-            </CollapsePanel>
-            </div>
-            }
+        </div>
+        }
     };
 
     let render_stats_only = || {

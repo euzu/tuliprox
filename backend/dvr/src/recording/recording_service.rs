@@ -17,7 +17,7 @@ use crate::{
 };
 use shared::model::{
     recording::{RecordingMetadata, RecordingOwner, RecordingProvenance, RecordingSource, RecordingVisibility},
-    RecordingKind, UserId, XtreamCluster,
+    EventSink, RecordingKind, UserId, XtreamCluster,
 };
 use std::{
     collections::HashMap,
@@ -277,7 +277,9 @@ impl RecordingService {
     pub fn new(recordings: Arc<RecordingQueue>, app_config: Arc<AppConfig>) -> Self { Self { recordings, app_config } }
 
     /// Convenience constructor from the DVR's context.
-    pub fn from_ctx(ctx: &RecordingCtx) -> Self { Self::new(ctx.recordings.clone(), ctx.app_config.clone()) }
+    pub fn from_ctx<E: EventSink + Clone + 'static>(ctx: &RecordingCtx<E>) -> Self {
+        Self::new(ctx.recordings.clone(), ctx.app_config.clone())
+    }
 
     fn subject_id(claims: &shared::model::Claims) -> Result<UserId, ServiceError> {
         claims.subject_id.clone().ok_or(ServiceError::UnknownOwner)
@@ -1853,7 +1855,7 @@ mod tests {
             iss: "tuliprox".to_string(),
             iat: 0,
             exp: 0,
-            roles: Vec::new(),
+            roles: shared::model::RoleSet::new(),
             permissions: Permission::RecordingCreate | Permission::RecordingManage | Permission::RecordingDelete,
             pwd_version: 0,
             subject_id: Some(UserId::from("web:alice")),
@@ -1887,7 +1889,7 @@ mod tests {
             iss: "tuliprox".to_string(),
             iat: 0,
             exp: 0,
-            roles: Vec::new(),
+            roles: shared::model::RoleSet::new(),
             permissions: Permission::RecordingCreate | Permission::RecordingManage | Permission::RecordingDelete,
             pwd_version: 0,
             subject_id: Some(UserId::from("web:alice")),
@@ -1931,7 +1933,7 @@ mod tests {
             iss: "tuliprox".to_string(),
             iat: 0,
             exp: 0,
-            roles: Vec::new(),
+            roles: shared::model::RoleSet::new(),
             permissions: Permission::RecordingCreate | Permission::RecordingManage | Permission::RecordingDelete,
             pwd_version: 0,
             subject_id: Some(UserId::from("web:alice")),
@@ -2036,7 +2038,7 @@ mod tests {
             iss: "tuliprox".to_string(),
             iat: 0,
             exp: 0,
-            roles: Vec::new(),
+            roles: shared::model::RoleSet::new(),
             permissions: Permission::RecordingCreate | Permission::RecordingManage | Permission::RecordingDelete,
             pwd_version: 0,
             subject_id: Some(UserId::from("web:alice")),
@@ -2070,7 +2072,7 @@ mod tests {
             iss: "tuliprox".to_string(),
             iat: 0,
             exp: 0,
-            roles: Vec::new(),
+            roles: shared::model::RoleSet::new(),
             permissions: Permission::RecordingCreate | Permission::RecordingManage | Permission::RecordingDelete,
             pwd_version: 0,
             subject_id: Some(UserId::from("web:alice")),
@@ -2108,7 +2110,7 @@ mod tests {
             iss: "tuliprox".to_string(),
             iat: 0,
             exp: 0,
-            roles: Vec::new(),
+            roles: shared::model::RoleSet::new(),
             permissions: Permission::RecordingCreate | Permission::RecordingManage | Permission::RecordingDelete,
             pwd_version: 0,
             subject_id: Some(UserId::from("web:alice")),
@@ -2373,7 +2375,7 @@ mod tests {
             iss: "tuliprox".to_string(),
             iat: 0,
             exp: 0,
-            roles: Vec::new(),
+            roles: shared::model::RoleSet::new(),
             permissions: Permission::RecordingCreate | Permission::RecordingManage | Permission::RecordingDelete,
             pwd_version: 0,
             subject_id: Some(UserId::from("web:alice")),
@@ -2434,13 +2436,14 @@ mod tests {
             name: "1".to_string(),
             options: None,
             sort: None,
-            filter: shared::foundation::Filter::default(),
+            filter: tuliprox_core::model::StagedFilter::default(),
             output: vec![],
             rename: None,
             mapping_ids: None,
             mapping: Arc::default(),
             favourites: None,
             processing_order: shared::model::ProcessingOrder::default(),
+            execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
             watch: None,
             use_memory_cache: false,
         });
@@ -2462,7 +2465,7 @@ mod tests {
             iss: "tuliprox".to_string(),
             iat: 0,
             exp: 0,
-            roles: Vec::new(),
+            roles: shared::model::RoleSet::new(),
             permissions: Permission::RecordingCreate | Permission::RecordingManage | Permission::RecordingDelete,
             pwd_version: 0,
             subject_id: Some(UserId::from("web:alice")),

@@ -32,10 +32,6 @@ update_on_boot: true
 **2. `source.yml` (Inputs & Targets):**
 
 ```yaml
-templates:
-  - name: ALL_CHAN
-    value: 'Group ~ ".*"'
-
 inputs:
   - type: xtream
     name: my_provider
@@ -50,10 +46,10 @@ sources:
       - name: clean_list
         output:
           - type: xtream
-        filter: "!ALL_CHAN!" # Lets everything through
 ```
 
-*Here we define the input source based on the provider's information and create a 1:1 mapped target (`clean_list`).*
+*Here we define the input source based on the provider's information and create a 1:1 mapped target (`clean_list`).
+The optional target filter is omitted, so every entry passes the processing stage.*
 
 **3. `api-proxy.yml` (Servers & Users):**
 

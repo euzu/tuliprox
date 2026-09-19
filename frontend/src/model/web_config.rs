@@ -24,6 +24,8 @@ pub struct WebConfig {
     #[serde(default)]
     pub discord: String,
     #[serde(default)]
+    pub releases: String,
+    #[serde(default)]
     pub github: String,
     #[serde(default = "default_documentation_url")]
     pub documentation: String,

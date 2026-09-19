@@ -4,7 +4,6 @@ use crate::{
     api::{
         endpoints::recording_media_api::AuthClaims,
         model::{
-            event_manager::EventMessage,
             mutate,
             recording_rule_service::{DeleteFuture, RuleServiceError},
             recording_service::{
@@ -30,7 +29,7 @@ use shared::model::{
         RecordingSourceRequest, RecordingVisibility,
     },
     recording_rule::{RecordingRule, RuleBody, RuleSource, RuleVisibility},
-    Permission, RecordingKind, UserId, XtreamCluster, ROLE_ADMIN,
+    EventMessage, Permission, RecordingKind, UserId, XtreamCluster,
 };
 use std::sync::Arc;
 
@@ -527,7 +526,7 @@ pub async fn get_recording_health(
     State(app_state): State<Arc<AppState>>,
     AuthClaims(claims): AuthClaims,
 ) -> impl IntoResponse {
-    if !is_admin(&claims) {
+    if !claims.is_admin() {
         return error_response(StatusCode::FORBIDDEN, "recording_forbidden");
     }
     let health = crate::api::model::recording::recording_supervisor::supervisor_health();
@@ -540,7 +539,11 @@ pub async fn get_recording_health(
         retention_last_tick: health.retention_last_tick(),
         retention_sweep_interval_secs: recording.and_then(|cfg| cfg.retention.as_ref().map(|r| r.sweep_interval_secs)),
         notification_last_drain: health.notification_last_drain(),
-        notification_outbox_depth: health.notification_outbox_depth(),
+        // Read from the promoted outbox: the supervisor-local counter stopped
+        // being updated when the outbox moved into `tuliprox-messaging`.
+        notification_outbox_depth: tuliprox_messaging::outbox::health()
+            .outbox_depth
+            .load(std::sync::atomic::Ordering::Relaxed),
         notification_dead_lettered: health.notification_dead_lettered(),
         queue_revision: app_state.recordings.revision.load(std::sync::atomic::Ordering::SeqCst),
         recovery: app_state.recordings.recovery_health().await.map(Into::into),
@@ -645,7 +648,7 @@ fn recording_rule_repo(app_state: &AppState) -> RecordingRuleRepository {
 
 fn can_write_rules(claims: &shared::model::Claims) -> bool { claims.permissions.contains(Permission::RecordingManage) }
 
-fn is_admin(claims: &shared::model::Claims) -> bool { claims.roles.iter().any(|role| role == ROLE_ADMIN) }
+fn is_admin(claims: &shared::model::Claims) -> bool { claims.is_admin() }
 
 async fn resolve_recording_source(
     app_state: &Arc<AppState>,
@@ -741,7 +744,7 @@ pub async fn create_recording_rule(
     if let Err(err) = crate::api::model::recording_rule_service::validate_rule(&rule).and_then(|()| {
         crate::api::model::recording_rule_service::authorize_rule_action(
             can_write_rules(&claims),
-            is_admin(&claims),
+            claims.is_admin(),
             &rule.owner_id,
             &rule,
         )
@@ -869,7 +872,7 @@ fn authorize_and_apply_recording_rule_edit(
     let subject_id = claims.subject_id.as_ref().ok_or(EditRuleError::MissingSubject)?;
     crate::api::model::recording_rule_service::authorize_rule_action(
         can_write_rules(claims),
-        is_admin(claims),
+        claims.is_admin(),
         subject_id,
         rule,
     )
@@ -878,7 +881,7 @@ fn authorize_and_apply_recording_rule_edit(
     crate::api::model::recording_rule_service::validate_rule(rule).map_err(EditRuleError::Rule)?;
     crate::api::model::recording_rule_service::authorize_rule_action(
         can_write_rules(claims),
-        is_admin(claims),
+        claims.is_admin(),
         subject_id,
         rule,
     )
@@ -956,7 +959,7 @@ pub async fn delete_recording_rule(
     };
     if let Err(err) = crate::api::model::recording_rule_service::authorize_rule_action(
         can_write_rules(&claims),
-        is_admin(&claims),
+        claims.is_admin(),
         subject_id,
         &rule,
     ) {
@@ -1145,7 +1148,7 @@ mod tests {
             iss: "tuliprox".to_string(),
             iat: 0,
             exp: 0,
-            roles: admin.then(|| ROLE_ADMIN.to_string()).into_iter().collect(),
+            roles: if admin { shared::model::RoleSet::ADMIN } else { shared::model::RoleSet::new() },
             permissions: Permission::RecordingManage.into(),
             pwd_version: 0,
             subject_id,

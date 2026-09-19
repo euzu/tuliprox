@@ -8,6 +8,12 @@ description = "Authentication primitives and access control for tuliprox"
 [lints]
 workspace = true
 
+[package.metadata.cargo-machete]
+# `rust-argon2` is imported as `argon2::` (crate rename via `package` field is
+# not used, the crate name in code differs from the dependency name), so
+# cargo-machete does not recognise the usage.
+ignored = ["rust-argon2"]
+
 [dependencies]
 shared = { workspace = true }
 tuliprox-core = { workspace = true }
@@ -17,10 +23,12 @@ axum = { version = "0.8.9", features = ["macros", "default", "ws"] }
 base64.workspace = true
 blake3.workspace = true
 chrono.workspace = true
+dashmap.workspace = true
 jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }
 log.workspace = true
 rand = "0.9.5"
 rust-argon2 = "3.0.0"
 serde_json = { workspace = true, features = ["raw_value", "preserve_order"] }
+thiserror.workspace = true
 rpassword = "7.5.4"
 zeroize.workspace = true

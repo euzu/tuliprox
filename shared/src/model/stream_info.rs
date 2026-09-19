@@ -86,7 +86,7 @@ pub fn create_stream_channel_with_type(
 ) -> StreamChannel {
     let mut stream_channel = pli.to_stream_channel(target_id);
     stream_channel.item_type = item_type;
-    stream_channel.cluster = XtreamCluster::try_from(item_type).unwrap_or(stream_channel.cluster);
+    stream_channel.cluster = item_type.cluster();
     stream_channel
 }
 
@@ -95,7 +95,7 @@ impl XtreamPlaylistItem {
         let title = if self.title.is_empty() { Arc::clone(&self.name) } else { Arc::clone(&self.title) };
         StreamChannel {
             target_id,
-            virtual_id: self.virtual_id,
+            virtual_id: self.virtual_id.get(),
             provider_id: self.provider_id,
             input_name: Arc::clone(&self.input_name),
             item_type: self.item_type,
@@ -119,11 +119,11 @@ impl M3uPlaylistItem {
         let title = if self.title.is_empty() { Arc::clone(&self.name) } else { Arc::clone(&self.title) };
         StreamChannel {
             target_id,
-            virtual_id: self.virtual_id,
+            virtual_id: self.virtual_id.get(),
             provider_id: self.get_provider_id().unwrap_or_default(),
             input_name: Arc::clone(&self.input_name),
             item_type: self.item_type,
-            cluster: XtreamCluster::try_from(self.item_type).unwrap_or(XtreamCluster::Live),
+            cluster: self.item_type.cluster(),
             group: Arc::clone(&self.group),
             title,
             url: Arc::clone(&self.url),
@@ -362,14 +362,14 @@ impl StreamInfo {
 mod tests {
     use super::create_stream_channel_with_type;
     use crate::{
-        model::{M3uPlaylistItem, PlaylistItemType, XtreamCluster, XtreamPlaylistItem},
+        model::{M3uPlaylistItem, PlaylistItemType, VirtualId, XtreamCluster, XtreamPlaylistItem},
         utils::Internable,
     };
 
     #[test]
     fn create_stream_channel_with_type_keeps_cluster_consistent_with_item_type() {
         let playlist_item = XtreamPlaylistItem {
-            virtual_id: 93_995,
+            virtual_id: VirtualId::new(93_995),
             provider_id: 1,
             name: "Example".intern(),
             logo: "".intern(),
@@ -400,7 +400,7 @@ mod tests {
     #[test]
     fn to_stream_channel_preserves_input_name() {
         let playlist_item = XtreamPlaylistItem {
-            virtual_id: 93_995,
+            virtual_id: VirtualId::new(93_995),
             provider_id: 1,
             name: "Example".intern(),
             logo: "".intern(),
@@ -430,7 +430,7 @@ mod tests {
     #[test]
     fn stream_channel_keeps_upstream_user_agent_internal() {
         let mut playlist_item = XtreamPlaylistItem {
-            virtual_id: 1,
+            virtual_id: VirtualId::new(1),
             provider_id: 1,
             name: "Example".intern(),
             logo: "".intern(),
@@ -461,7 +461,7 @@ mod tests {
     #[test]
     fn m3u_to_stream_channel_with_epg_reference_ts_propagates_value() {
         let pli = M3uPlaylistItem {
-            virtual_id: 42,
+            virtual_id: VirtualId::new(42),
             provider_id: "42".intern(),
             name: "Channel".intern(),
             chno: 0,
@@ -498,7 +498,7 @@ mod tests {
     #[test]
     fn m3u_to_stream_channel_with_epg_reference_ts_explicit_none_matches_default() {
         let pli = M3uPlaylistItem {
-            virtual_id: 42,
+            virtual_id: VirtualId::new(42),
             provider_id: "42".intern(),
             name: "Channel".intern(),
             chno: 0,

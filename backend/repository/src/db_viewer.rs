@@ -256,7 +256,9 @@ mod tests {
     use lz4_flex::compress_prepend_size;
     use serde_json::{json, Value};
     use shared::{
-        model::{LiveStreamProperties, PlaylistItemType, StreamProperties, XtreamCluster, XtreamPlaylistItem},
+        model::{
+            LiveStreamProperties, PlaylistItemType, StreamProperties, VirtualId, XtreamCluster, XtreamPlaylistItem,
+        },
         utils::Internable,
     };
     use tempfile::tempdir;
@@ -298,7 +300,7 @@ mod tests {
     #[test]
     fn human_readable_dump_decodes_compressed_video_and_audio_fields() {
         let item = XtreamPlaylistItem {
-            virtual_id: 42,
+            virtual_id: VirtualId::new(42),
             provider_id: 52_568,
             name: "Example".intern(),
             logo: "".intern(),

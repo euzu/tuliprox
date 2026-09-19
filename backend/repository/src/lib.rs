@@ -1,3 +1,4 @@
+mod error_macros;
 mod storage;
 mod target_id_mapping;
 // A B+Tree-backed IPv4 lookup and a CLI dumper for the repository's databases.
@@ -15,7 +16,9 @@ mod m3u_playlist_iterator;
 mod m3u_repository;
 mod metadata_retry_record;
 mod network_access;
+mod playlist_backend;
 pub mod playlist_cache_loader;
+mod playlist_items;
 pub mod playlist_mem_cache;
 mod playlist_repository;
 mod playlist_scratch;
@@ -23,6 +26,7 @@ mod playlist_source;
 mod playlist_stream;
 mod provider_dns_repository;
 mod qos_snapshot_repository;
+pub mod raw_group_catalog_repository;
 pub mod recording_repository;
 pub mod recording_rule_repository;
 pub mod stalker_generation_repository;
@@ -31,6 +35,8 @@ mod startup_migration;
 pub mod storage_const;
 mod stream_history;
 mod strm_repository;
+pub mod target_bouquet_repository;
+pub mod token_revocations;
 mod user_repository;
 mod xtream_playlist_iterator;
 mod xtream_repository;
@@ -47,12 +53,15 @@ pub use m3u_playlist_iterator::*;
 pub use m3u_repository::*;
 pub use metadata_retry_record::*;
 pub use network_access::*;
+pub use playlist_backend::*;
+pub use playlist_items::*;
 pub use playlist_mem_cache::*;
 pub use playlist_repository::*;
 pub use playlist_source::*;
 pub use playlist_stream::*;
 pub use provider_dns_repository::*;
 pub use qos_snapshot_repository::*;
+pub use raw_group_catalog_repository::*;
 pub use recording_repository::{
     PersistedRecordingTask, RecordingPartition, RecordingRepository, RecordingRepositorySnapshot,
 };
@@ -62,6 +71,7 @@ pub use storage::*;
 pub use storage_const::*;
 pub use stream_history::*;
 pub use strm_repository::*;
+pub use target_bouquet_repository::*;
 pub use target_id_mapping::*;
 // The B+Tree storage engine is its own package. Aliased under its historical
 // module name so every `crate::bplustree::X` path keeps resolving.

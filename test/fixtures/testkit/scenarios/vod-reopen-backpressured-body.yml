@@ -1,0 +1,65 @@
+schema_version: 1
+name: vod-reopen-backpressured-body
+tuliprox:
+  base_url: http://fixture.invalid
+  execution_mode: isolated_fixture
+  bootstrap:
+    command: "${env:TULIPROX_TESTKIT_SUT_BINARY}"
+    arguments: ["-s", "-c", "{config_file}", "-i", "{source_file}", "-a", "{api_proxy_file}"]
+    readiness_url: "{base_url}/healthcheck"
+origin:
+  run_id: vod-reopen-backpressured-body
+  account_limit: 2
+  limit_mode: reject_new
+actors:
+  - id: vod-viewer
+    agent: local
+    username: admission-user
+    user_agent: tuliprox-testkit/backpressured-vod
+    client_ip: { mode: forwarded, value: 10.20.0.20 }
+channels: {}
+steps:
+  # First probe: read only 16 KiB out of 512 KiB, then pause to create downstream backpressure
+  - command_id: start-vod-backpressured
+    start:
+      actor: vod-viewer
+      playback_id: vod-bp-1
+      session_group: vod-bp
+      vod_object: movie.mkv
+      range: "bytes=0-524287"
+      read_limit_bytes: 16384
+      post_read_action: pause
+    assert_origin:
+      active_body: 1
+      max_active_body: 1
+      max_active_tcp: 1
+  # Second probe on the same session while first probe is still open and backpressured.
+  # Forced reopen must reclaim the single provider slot (max_connections: 1) without peak violations.
+  - command_id: start-vod-next
+    start:
+      actor: vod-viewer
+      playback_id: vod-bp-2
+      session_group: vod-bp
+      vod_object: movie.mkv
+      range: "bytes=1048576-1572863"
+      read_limit_bytes: 65536
+      post_read_action: pause
+    assert_origin:
+      active_body: 1
+      max_active_body: 1
+      max_active_tcp: 1
+      no_limit_rejections: true
+  - command_id: stop-vod-next
+    stop: { playback_id: vod-bp-2 }
+  - command_id: stop-vod-backpressured
+    stop: { playback_id: vod-bp-1 }
+    assert_origin:
+      active_body: 0
+      max_active_body: 1
+      max_active_tcp: 1
+policy_contract:
+  user_access_control: true
+  users:
+    admission-user: { max_connections: 2 }
+  admission_strategies: []
+  provider_max_connections: 1

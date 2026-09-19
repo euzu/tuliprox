@@ -1796,6 +1796,42 @@ pub fn overlay_upstream_user_agent(
     }
 }
 
+/// Appends a stable playback-session index to an already resolved User-Agent.
+pub fn append_user_agent_stream_index(headers: &mut HeaderMap, stream_index: u64) {
+    let Some(user_agent) = headers.get(axum::http::header::USER_AGENT).map(HeaderValue::as_bytes) else {
+        return;
+    };
+    let Some(first) = user_agent.iter().position(|byte| !byte.is_ascii_whitespace()) else {
+        return;
+    };
+    let last = user_agent.iter().rposition(|byte| !byte.is_ascii_whitespace()).map_or(first, |index| index + 1);
+    let user_agent = &user_agent[first..last];
+
+    let mut digits = [0_u8; 20];
+    let mut cursor = digits.len();
+    let mut remaining = stream_index;
+    loop {
+        cursor -= 1;
+        digits[cursor] = b'0' + (remaining % 10) as u8;
+        remaining /= 10;
+        if remaining == 0 {
+            break;
+        }
+    }
+    let suffix = &digits[cursor..];
+    if user_agent.strip_suffix(suffix).is_some_and(|prefix| prefix.ends_with(b" ")) {
+        return;
+    }
+
+    let mut indexed_user_agent = Vec::with_capacity(user_agent.len() + 1 + suffix.len());
+    indexed_user_agent.extend_from_slice(user_agent);
+    indexed_user_agent.push(b' ');
+    indexed_user_agent.extend_from_slice(suffix);
+    if let Ok(value) = HeaderValue::from_bytes(&indexed_user_agent) {
+        headers.insert(axum::http::header::USER_AGENT, value);
+    }
+}
+
 // read local file content and return it as a string.
 // Gzipped file content is supported.
 pub async fn get_local_file_content(file_path: &Path) -> Result<String, std::io::Error> {
@@ -3134,7 +3170,7 @@ mod tests {
 
     #[test]
     fn test_get_request_headers_prioritization() {
-        use super::{get_request_headers, overlay_upstream_user_agent};
+        use super::{append_user_agent_stream_index, get_request_headers, overlay_upstream_user_agent};
         use axum::http::header::USER_AGENT;
 
         // Case 1: No headers provided -> Default UA
@@ -3186,6 +3222,22 @@ mod tests {
         );
         overlay_upstream_user_agent(&mut headers, Some("Blocked-Channel-UA"), Some(&disabled));
         assert!(!headers.contains_key(USER_AGENT));
+
+        let mut headers =
+            get_request_headers::<std::collections::hash_map::RandomState>(None, None, None, Some("VLC/3.0"));
+        append_user_agent_stream_index(&mut headers, 42);
+        assert_eq!(headers.get(USER_AGENT).and_then(|value| value.to_str().ok()), Some("VLC/3.0 42"));
+        append_user_agent_stream_index(&mut headers, 42);
+        assert_eq!(headers.get(USER_AGENT).and_then(|value| value.to_str().ok()), Some("VLC/3.0 42"));
+
+        let mut headers = HeaderMap::new();
+        let extended_user_agent = HeaderValue::from_bytes(b"Receiver/1.0 \xE4");
+        assert!(extended_user_agent.is_ok());
+        if let Ok(value) = extended_user_agent {
+            headers.insert(USER_AGENT, value);
+        }
+        append_user_agent_stream_index(&mut headers, 7);
+        assert_eq!(headers.get(USER_AGENT).map(HeaderValue::as_bytes), Some(b"Receiver/1.0 \xE4 7".as_slice()));
     }
 
     #[test]

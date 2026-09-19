@@ -3,11 +3,13 @@ use super::transient_manifest::{
     MIN_HLS_INITIAL_VISIBLE_SEGMENTS,
 };
 use shared::model::HlsStripMode;
+use std::borrow::Cow;
 use tuliprox_core::model::StripConfig;
+use tuliprox_parser::hls::origin_manifest::HlsManifestWindowPolicy;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct HlsInitialStripView {
-    pub body: String,
+pub struct HlsInitialStripView<'a> {
+    pub body: Cow<'a, str>,
     pub outcome: HlsInitialStripOutcome,
 }
 
@@ -19,6 +21,7 @@ pub enum HlsInitialStripOutcome {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum HlsInitialStripSkipReason {
+    ManifestSemanticsPreserveFullManifest,
     StripDisabled,
     NotEnoughSegments,
 }
@@ -26,30 +29,45 @@ pub enum HlsInitialStripSkipReason {
 impl HlsInitialStripSkipReason {
     pub const fn as_log_reason(self) -> &'static str {
         match self {
+            Self::ManifestSemanticsPreserveFullManifest => "manifest-semantics-preserve-full-manifest",
             Self::StripDisabled => "strip-disabled",
             Self::NotEnoughSegments => "not-enough-segments",
         }
     }
 }
 
-pub fn materialize_initial_hls_strip_view(body: &str, strip: &StripConfig) -> HlsInitialStripView {
-    let lines = manifest_lines(body);
-    let units = media_segment_units(&lines);
-    let media_segment_count = units.len();
+pub fn materialize_initial_hls_strip_view<'a>(
+    body: &'a str,
+    strip: &StripConfig,
+    window_policy: HlsManifestWindowPolicy,
+) -> HlsInitialStripView<'a> {
+    if window_policy.preserves_full_manifest() {
+        return HlsInitialStripView {
+            body: Cow::Borrowed(body),
+            outcome: HlsInitialStripOutcome::Skipped {
+                reason: HlsInitialStripSkipReason::ManifestSemanticsPreserveFullManifest,
+                visible_segments: manifest_uri_line_count(body),
+            },
+        };
+    }
     if strip.value == 0 {
         return HlsInitialStripView {
-            body: body.to_string(),
+            body: Cow::Borrowed(body),
             outcome: HlsInitialStripOutcome::Skipped {
                 reason: HlsInitialStripSkipReason::StripDisabled,
-                visible_segments: media_segment_count,
+                visible_segments: manifest_uri_line_count(body),
             },
         };
     }
 
+    let lines = manifest_lines(body);
+    let units = media_segment_units(&lines);
+    let media_segment_count = units.len();
+
     let effective_strip_segments = effective_initial_hls_strip_segments(strip, &lines, &units);
     if effective_strip_segments == 0 {
         return HlsInitialStripView {
-            body: body.to_string(),
+            body: Cow::Borrowed(body),
             outcome: HlsInitialStripOutcome::Skipped {
                 reason: HlsInitialStripSkipReason::NotEnoughSegments,
                 visible_segments: media_segment_count,
@@ -70,7 +88,7 @@ pub fn materialize_initial_hls_strip_view(body: &str, strip: &StripConfig) -> Hl
     }
 
     HlsInitialStripView {
-        body: stripped,
+        body: Cow::Owned(stripped),
         outcome: HlsInitialStripOutcome::Applied {
             mode: strip_mode_log_value(strip.mode),
             configured: strip.value,
@@ -78,6 +96,10 @@ pub fn materialize_initial_hls_strip_view(body: &str, strip: &StripConfig) -> Hl
             visible_segments,
         },
     }
+}
+
+fn manifest_uri_line_count(body: &str) -> usize {
+    body.lines().map(str::trim).filter(|line| !line.is_empty() && !line.starts_with('#')).count()
 }
 
 pub fn initial_hls_strip_segments_for_durations(strip: &StripConfig, segment_durations_ms: &[u64]) -> usize {
@@ -120,8 +142,9 @@ fn configured_strip_segments_from_durations(strip_seconds: u64, segment_duration
 mod tests {
     use super::{materialize_initial_hls_strip_view, HlsInitialStripOutcome, HlsInitialStripSkipReason};
     use shared::model::HlsStripMode;
-    use std::fmt::Write as _;
+    use std::{borrow::Cow, fmt::Write as _};
     use tuliprox_core::model::StripConfig;
+    use tuliprox_parser::hls::origin_manifest::HlsManifestWindowPolicy;
 
     fn strip_segments(value: u64) -> StripConfig { StripConfig { mode: HlsStripMode::Segments, value } }
 
@@ -142,7 +165,9 @@ mod tests {
 
     #[test]
     fn pending_strip_segments_keeps_visible_head_window() {
-        let view = materialize_initial_hls_strip_view(&manifest_with_segments(6), &strip_segments(3));
+        let body = manifest_with_segments(6);
+        let view =
+            materialize_initial_hls_strip_view(&body, &strip_segments(3), HlsManifestWindowPolicy::ApplyLiveWindow);
 
         assert_eq!(media_segment_count(&view.body), 3);
         assert!(matches!(
@@ -153,8 +178,18 @@ mod tests {
 
     #[test]
     fn pending_strip_segments_never_keeps_less_than_three_segments() {
-        let four_segment_view = materialize_initial_hls_strip_view(&manifest_with_segments(4), &strip_segments(3));
-        let three_segment_view = materialize_initial_hls_strip_view(&manifest_with_segments(3), &strip_segments(3));
+        let four_segment_body = manifest_with_segments(4);
+        let four_segment_view = materialize_initial_hls_strip_view(
+            &four_segment_body,
+            &strip_segments(3),
+            HlsManifestWindowPolicy::ApplyLiveWindow,
+        );
+        let three_segment_body = manifest_with_segments(3);
+        let three_segment_view = materialize_initial_hls_strip_view(
+            &three_segment_body,
+            &strip_segments(3),
+            HlsManifestWindowPolicy::ApplyLiveWindow,
+        );
 
         assert_eq!(media_segment_count(&four_segment_view.body), 3);
         assert_eq!(media_segment_count(&three_segment_view.body), 3);
@@ -171,7 +206,8 @@ mod tests {
     fn pending_strip_seconds_counts_tail_extinf_durations() {
         let body = "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:100\n#EXTINF:10.0,\nseg100.ts\n#EXTINF:9.0,\nseg101.ts\n#EXTINF:9.0,\nseg102.ts\n#EXTINF:9.0,\nseg103.ts\n#EXTINF:9.0,\nseg104.ts\n#EXTINF:9.0,\nseg105.ts\n";
 
-        let view = materialize_initial_hls_strip_view(body, &strip_seconds(30));
+        let view =
+            materialize_initial_hls_strip_view(body, &strip_seconds(30), HlsManifestWindowPolicy::ApplyLiveWindow);
 
         assert_eq!(media_segment_count(&view.body), 3);
         assert!(matches!(
@@ -182,9 +218,12 @@ mod tests {
 
     #[test]
     fn pending_strip_disabled_keeps_full_body() {
-        let view = materialize_initial_hls_strip_view(&manifest_with_segments(4), &strip_segments(0));
+        let body = manifest_with_segments(4);
+        let view =
+            materialize_initial_hls_strip_view(&body, &strip_segments(0), HlsManifestWindowPolicy::ApplyLiveWindow);
 
         assert_eq!(media_segment_count(&view.body), 4);
+        assert!(matches!(&view.body, Cow::Borrowed(_)));
         assert!(matches!(
             view.outcome,
             HlsInitialStripOutcome::Skipped { reason: HlsInitialStripSkipReason::StripDisabled, visible_segments: 4 }
@@ -195,11 +234,37 @@ mod tests {
     fn pending_strip_preserves_media_sequence_and_byterange_semantics() {
         let body = "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:42\n#EXT-X-BYTERANGE:100@200\n#EXTINF:4.0,\nseg42.ts\n#EXT-X-BYTERANGE:100\n#EXTINF:4.0,\nseg43.ts\n#EXT-X-BYTERANGE:100\n#EXTINF:4.0,\nseg44.ts\n#EXT-X-BYTERANGE:100\n#EXTINF:4.0,\nseg45.ts\n";
 
-        let view = materialize_initial_hls_strip_view(body, &strip_segments(1));
+        let view =
+            materialize_initial_hls_strip_view(body, &strip_segments(1), HlsManifestWindowPolicy::ApplyLiveWindow);
 
         assert!(view.body.contains("#EXT-X-MEDIA-SEQUENCE:42"));
         assert!(view.body.contains("#EXT-X-BYTERANGE:100@200"));
         assert!(view.body.contains("#EXT-X-BYTERANGE:100\n#EXTINF:4.0,\nseg43.ts"));
         assert!(!view.body.contains("seg45.ts"));
+    }
+
+    #[test]
+    fn playlist_type_policy_ignores_three_to_six_window_and_configured_strip() {
+        for segment_count in [2, 8] {
+            let body =
+                manifest_with_segments(segment_count).replacen("#EXTM3U\n", "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n", 1);
+
+            let view = materialize_initial_hls_strip_view(
+                &body,
+                &strip_segments(5),
+                HlsManifestWindowPolicy::PreserveFullManifest,
+            );
+
+            assert_eq!(view.body, body);
+            assert!(matches!(&view.body, Cow::Borrowed(_)));
+            assert_eq!(media_segment_count(&view.body), segment_count);
+            assert_eq!(
+                view.outcome,
+                HlsInitialStripOutcome::Skipped {
+                    reason: HlsInitialStripSkipReason::ManifestSemanticsPreserveFullManifest,
+                    visible_segments: segment_count,
+                }
+            );
+        }
     }
 }

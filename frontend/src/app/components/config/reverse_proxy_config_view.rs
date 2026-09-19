@@ -14,7 +14,8 @@ use crate::{
             },
             dto_field_id,
             number_input::NumberInput,
-            Card, Chip, DropDownOption, DropDownSelection, IconButton, RadioButtonGroup, Select, TextButton,
+            Card, Chip, DropDownOption, DropDownSelection, IconButton, RadioButtonGroup, RangeSlider, Select,
+            TextButton,
         },
         context::ConfigContext,
     },
@@ -29,15 +30,14 @@ use shared::{
     model::{
         ByteSize, CacheConfigDto, GeoIpConfigDto, GeoIpUnavailablePolicy, HlsCacheConfigDto,
         HlsCorruptSegmentWatchdogMode, HlsManifestRecoveryBurstConfigDto, HlsManifestRecoveryBurstLevel,
-        HlsSegmentRepairConfigDto, HlsSegmentRepairMode, HlsStripConfigDto, HlsStripMode, QosAggregationConfigDto,
-        RateLimitConfigDto, ResourceRetryConfigDto, ReverseProxyConfigDto, ReverseProxyDisabledHeaderConfigDto,
-        StreamBufferConfigDto, StreamConfigDto, StreamHistoryConfigDto,
+        HlsSegmentRepairConfigDto, HlsSegmentRepairMode, HlsStripConfigDto, HlsStripMode, Millis,
+        QosAggregationConfigDto, RateLimitConfigDto, ResourceRetryConfigDto, ReverseProxyConfigDto,
+        ReverseProxyDisabledHeaderConfigDto, Secs, StreamBufferConfigDto, StreamConfigDto, StreamHistoryConfigDto,
     },
     utils::format_float_localized,
 };
 use std::{rc::Rc, str::FromStr};
 use strum::IntoEnumIterator;
-use web_sys::HtmlInputElement;
 use yew::prelude::*;
 
 const LABEL_CACHE: &str = "LABEL.CACHE";
@@ -224,16 +224,16 @@ generate_form_reducer!(
     action_name: HlsCacheConfigFormAction,
     fields {
         CachePath => cache_path: Option<String>,
-        CacheDuration => cache_duration: u64,
+        CacheDuration => cache_duration: Secs,
         CacheBytes => cache_bytes: ByteSize,
         CacheBytesPerSession => cache_bytes_per_session: ByteSize,
         MaxSegmentsPrefetch => max_segments_prefetch: usize,
         MaxConcurrentSegmentFetchesPerSession => max_concurrent_segment_fetches_per_session: usize,
         MaxConcurrentSegmentFetchesGlobal => max_concurrent_segment_fetches_global: usize,
-        OriginManifestTimeoutMs => origin_manifest_timeout_ms: u64,
+        OriginManifestTimeoutMs => origin_manifest_timeout_ms: Millis,
         ManifestRecoveryBurst => manifest_recovery_burst: HlsManifestRecoveryBurstConfigDto,
-        OriginSegmentTimeoutMs => origin_segment_timeout_ms: u64,
-        SessionIdleTimeout => session_idle_timeout: u64,
+        OriginSegmentTimeoutMs => origin_segment_timeout_ms: Millis,
+        SessionIdleTimeout => session_idle_timeout: Secs,
         SegmentRepair => segment_repair: HlsSegmentRepairConfigDto,
     }
 );
@@ -956,7 +956,7 @@ pub fn ReverseProxyConfigView() -> Html {
                         })}
                     />
                 </div>
-                { edit_hls_cache_u64_min(translate.t(LABEL_CACHE_DURATION), "cache_duration", hls_cache_state.form.cache_duration, HlsCacheConfigFormAction::CacheDuration) }
+                { edit_hls_cache_u64_min(translate.t(LABEL_CACHE_DURATION), "cache_duration", hls_cache_state.form.cache_duration.get(), |value| HlsCacheConfigFormAction::CacheDuration(Secs::new(value))) }
                 { edit_field_text!(hls_cache_state, translate.t(LABEL_CACHE_BYTES), cache_bytes, HlsCacheConfigFormAction::CacheBytes) }
                 { edit_field_text!(hls_cache_state, translate.t(LABEL_CACHE_BYTES_PER_SESSION), cache_bytes_per_session, HlsCacheConfigFormAction::CacheBytesPerSession) }
                 <div class="tp__form-field tp__form-field__number">
@@ -970,7 +970,7 @@ pub fn ReverseProxyConfigView() -> Html {
                 </div>
                 { edit_hls_cache_usize_min(translate.t(LABEL_MAX_CONCURRENT_SEGMENT_FETCHES_PER_SESSION), "max_concurrent_segment_fetches_per_session", hls_cache_state.form.max_concurrent_segment_fetches_per_session, HlsCacheConfigFormAction::MaxConcurrentSegmentFetchesPerSession) }
                 { edit_hls_cache_usize_min(translate.t(LABEL_MAX_CONCURRENT_SEGMENT_FETCHES_GLOBAL), "max_concurrent_segment_fetches_global", hls_cache_state.form.max_concurrent_segment_fetches_global, HlsCacheConfigFormAction::MaxConcurrentSegmentFetchesGlobal) }
-                { edit_hls_cache_u64_min(translate.t(LABEL_ORIGIN_MANIFEST_TIMEOUT_MS), "origin_manifest_timeout_ms", hls_cache_state.form.origin_manifest_timeout_ms, HlsCacheConfigFormAction::OriginManifestTimeoutMs) }
+                { edit_hls_cache_u64_min(translate.t(LABEL_ORIGIN_MANIFEST_TIMEOUT_MS), "origin_manifest_timeout_ms", hls_cache_state.form.origin_manifest_timeout_ms.get(), |value| HlsCacheConfigFormAction::OriginManifestTimeoutMs(Millis::new(value))) }
                 { config_field_child!(translate.t(LABEL_MANIFEST_RECOVERY_BURST), "HLS_CACHE_CONFIG.MANIFEST_RECOVERY_BURST", {
                     html! {
                         <Select
@@ -981,8 +981,8 @@ pub fn ReverseProxyConfigView() -> Html {
                         />
                     }
                 }) }
-                { edit_hls_cache_u64_min(translate.t(LABEL_ORIGIN_SEGMENT_TIMEOUT_MS), "origin_segment_timeout_ms", hls_cache_state.form.origin_segment_timeout_ms, HlsCacheConfigFormAction::OriginSegmentTimeoutMs) }
-                { edit_hls_cache_u64_min(translate.t(LABEL_SESSION_IDLE_TIMEOUT), "session_idle_timeout", hls_cache_state.form.session_idle_timeout, HlsCacheConfigFormAction::SessionIdleTimeout) }
+                { edit_hls_cache_u64_min(translate.t(LABEL_ORIGIN_SEGMENT_TIMEOUT_MS), "origin_segment_timeout_ms", hls_cache_state.form.origin_segment_timeout_ms.get(), |value| HlsCacheConfigFormAction::OriginSegmentTimeoutMs(Millis::new(value))) }
+                { edit_hls_cache_u64_min(translate.t(LABEL_SESSION_IDLE_TIMEOUT), "session_idle_timeout", hls_cache_state.form.session_idle_timeout.get(), |value| HlsCacheConfigFormAction::SessionIdleTimeout(Secs::new(value))) }
             </Card>
         }
     };
@@ -1024,7 +1024,7 @@ pub fn ReverseProxyConfigView() -> Html {
             let hls_cache_state = hls_cache_state.clone();
             Callback::from(move |value: Option<i64>| {
                 let mut segment_repair = hls_cache_state.form.segment_repair.clone();
-                segment_repair.postprocess_timeout_ms = clamp_u64_min(value, 100);
+                segment_repair.postprocess_timeout_ms = Millis::new(clamp_u64_min(value, 100));
                 hls_cache_state.dispatch(HlsCacheConfigFormAction::SegmentRepair(segment_repair));
             })
         };
@@ -1050,56 +1050,27 @@ pub fn ReverseProxyConfigView() -> Html {
                 hls_cache_state.dispatch(HlsCacheConfigFormAction::SegmentRepair(segment_repair));
             })
         };
-        let render_slider_control = |name: String, value: u8, max_value: u8, on_change: Callback<u8>| -> Html {
-            let value_string = value.to_string();
-            let max_string = max_value.to_string();
-            let fill = if max_value == 0 { 0 } else { (u16::from(value) * 100) / u16::from(max_value) };
-            let slider_style = format!("--tp-hls-repair-slider-fill: {fill}%;");
-            let oninput = Callback::from(move |event: InputEvent| {
-                let input: HtmlInputElement = event.target_unchecked_into();
-                if let Ok(value) = input.value().parse::<u8>() {
-                    on_change.emit(value.min(max_value));
-                }
-            });
-            html! {
-                <div class="tp__hls-repair-slider">
-                    <input
-                        class="tp__hls-repair-slider__range"
-                        type="range"
-                        name={name}
-                        min="0"
-                        max={max_string}
-                        value={value_string.clone()}
-                        style={slider_style}
-                        oninput={oninput}
-                    />
-                    <span class="tp__form-field__value tp__hls-repair-slider__value">{value_string}</span>
-                </div>
-            }
-        };
-        let render_slider =
-            |label: String, info_key: &'static str, name: String, value: u8, max_value: u8, on_change: Callback<u8>| {
-                let control = render_slider_control(name, value, max_value, on_change);
-                config_field_child!(label, info_key, {
-                    html! {
-                        { control }
-                    }
-                })
-            };
         let size_increase_editor =
             if let Some(size_increase_percent) = hls_segment_repair_size_increase_percent(&segment_repair) {
                 let hls_cache_state = hls_cache_state.clone();
-                render_slider(
+                let on_change = Callback::from(move |value| {
+                    let mut segment_repair = hls_cache_state.form.segment_repair.clone();
+                    set_hls_segment_repair_size_increase_percent(&mut segment_repair, value);
+                    hls_cache_state.dispatch(HlsCacheConfigFormAction::SegmentRepair(segment_repair));
+                });
+                config_field_child!(
                     hls_segment_repair_size_increase_label(&translate, segment_repair.max_level),
                     "HLS_CACHE_CONFIG.SEGMENT_REPAIR_SIZE_INCREASE",
-                    "hls_segment_repair_size_increase".to_string(),
-                    size_increase_percent,
-                    100,
-                    Callback::from(move |value| {
-                        let mut segment_repair = hls_cache_state.form.segment_repair.clone();
-                        set_hls_segment_repair_size_increase_percent(&mut segment_repair, value);
-                        hls_cache_state.dispatch(HlsCacheConfigFormAction::SegmentRepair(segment_repair));
-                    }),
+                    {
+                        html! {
+                            <RangeSlider
+                                name="hls_segment_repair_size_increase"
+                                value={size_increase_percent}
+                                max={100}
+                                {on_change}
+                            />
+                        }
+                    }
                 )
             } else {
                 config_field_child!(
@@ -1147,7 +1118,7 @@ pub fn ReverseProxyConfigView() -> Html {
                         label={translate.t(LABEL_POSTPROCESS_TIMEOUT_MS)}
                         name="hls_segment_repair_postprocess_timeout_ms"
                         field_id={Some("HLS_CACHE_CONFIG.SEGMENT_REPAIR_POSTPROCESS_TIMEOUT_MS".to_string())}
-                        value={segment_repair.postprocess_timeout_ms.min(i64::MAX as u64) as i64}
+                        value={segment_repair.postprocess_timeout_ms.get().min(i64::MAX as u64) as i64}
                         on_change={set_segment_repair_postprocess_timeout_ms}
                     />
                 </div>
@@ -1623,6 +1594,38 @@ mod tests {
             let parsed =
                 GeoIpUnavailablePolicy::from_str(policy.as_ref()).expect("failed to parse GeoIpUnavailablePolicy");
             assert_eq!(parsed, policy);
+        }
+    }
+
+    #[test]
+    fn range_slider_value_updates_only_the_active_segment_repair_mode() {
+        for (mode, expected) in [
+            (HlsSegmentRepairMode::Off, (11, 22, 33)),
+            (HlsSegmentRepairMode::Low, (100, 22, 33)),
+            (HlsSegmentRepairMode::Medium, (11, 100, 33)),
+            (HlsSegmentRepairMode::High, (11, 22, 100)),
+        ] {
+            let mut segment_repair = HlsSegmentRepairConfigDto {
+                max_level: mode,
+                size_increase: shared::model::HlsSegmentRepairSizeIncreaseConfigDto {
+                    low_percent: 11,
+                    medium_percent: 22,
+                    high_percent: 33,
+                },
+                ..HlsSegmentRepairConfigDto::default()
+            };
+
+            set_hls_segment_repair_size_increase_percent(&mut segment_repair, 100);
+
+            assert_eq!(
+                (
+                    segment_repair.size_increase.low_percent,
+                    segment_repair.size_increase.medium_percent,
+                    segment_repair.size_increase.high_percent,
+                ),
+                expected,
+                "mode: {mode:?}"
+            );
         }
     }
 }

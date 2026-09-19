@@ -10,6 +10,7 @@ mod requests;
 mod status_service;
 mod stream_history_service;
 mod streams_service;
+mod target_bouquet_service;
 mod toastr_service;
 mod user_api_service;
 mod user_service;
@@ -18,5 +19,6 @@ mod websocket_service;
 pub use self::{
     auth_service::*, config_service::*, dialog_service::*, event_service::*, flags_service::*, playlist_service::*,
     rbac_service::*, recording_service::*, requests::*, status_service::*, stream_history_service::*,
-    streams_service::*, toastr_service::*, user_api_service::*, user_service::*, websocket_service::*,
+    streams_service::*, target_bouquet_service::*, toastr_service::*, user_api_service::*, user_service::*,
+    websocket_service::*,
 };

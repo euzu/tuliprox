@@ -5,6 +5,7 @@ pub mod flags;
 mod hash_utils;
 mod hdhomerun_utils;
 mod json_utils;
+mod m3u_url;
 mod net_utils;
 mod number_utils;
 mod recording_filename;
@@ -25,6 +26,7 @@ pub use self::{
     hash_utils::*,
     hdhomerun_utils::*,
     json_utils::*,
+    m3u_url::*,
     net_utils::*,
     number_utils::*,
     recording_filename::*,

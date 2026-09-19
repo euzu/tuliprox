@@ -9,6 +9,7 @@
 5. [Streaming & Proxy](configuration/reverse-proxy.md)
 6. [Templates](configuration/template.md)
 7. [Mappings](configuration/mapping-dsl.md)
+8. [Secrets & Environment Variables](configuration/secrets.md) — inject provider and user credentials safely
 
 ## Run Tuliprox via docker compose
 

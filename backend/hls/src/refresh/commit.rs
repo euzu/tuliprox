@@ -28,25 +28,27 @@ use crate::{
         HlsManifestSequenceRelation, HlsOriginManifestFetchContext,
     },
     manifest_origin_binding::HlsManifestOriginBinding,
+    manifest_snapshot::HlsTransientManifestTemplate,
     safe_proxy_session_id, safe_session_key,
     timeline::effective_origin_host_id,
     transient_manifest::{
         apply_transient_discontinuity_sequence, materialize_transient_provisioning_handoff_view,
         transient_discontinuity_sequence, transient_visible_discontinuity_count, TransientManifestRewriter,
-        TransientRewriteOptions,
+        TransientRewriteOptions, TransientRewriteResult,
     },
     CacheAccessState, HlsManifestRenderer, HlsSessionMode, MapCacheStatus, RenderedManifestStoreOutcome,
     RenderedManifestStoreRejectReason, SegmentCacheStatus, TransientPassthroughReason, TransientResourceKind,
     TransientResourceRef,
 };
 use axum::http::HeaderMap;
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use shared::model::HlsStripMode;
 use std::sync::Arc;
 use tuliprox_core::model::StripConfig;
 use tuliprox_parser::hls::origin_manifest::{
-    parse_manifest_timing, parse_manifest_validity, parse_origin_manifest_timeline, parse_origin_media_manifest,
-    OriginManifestParseOutcome, OriginManifestTransientReason, ParsedOriginManifest, ParsedOriginManifestTimeline,
+    parse_manifest_semantics, parse_manifest_timing, parse_manifest_validity, parse_origin_manifest_timeline,
+    parse_origin_media_manifest, HlsPlaylistType, OriginManifestParseOutcome, OriginManifestTransientReason,
+    ParsedManifestSemantics, ParsedOriginManifest, ParsedOriginManifestTimeline,
 };
 use url::Url;
 
@@ -136,6 +138,7 @@ pub(super) fn commit_fetched_manifest_with_acceptance_mode(
         HlsSessionMode::TransientPassthrough { reason } => Some(reason.clone()),
         HlsSessionMode::NormalCacheTimeline => None,
     };
+    let manifest_semantics = parse_manifest_semantics(&fetched.body);
     let parsed = parse_origin_media_manifest(&fetched.body, &fetched.final_manifest_url);
     let result = match (existing_transient_reason, parsed) {
         (None, OriginManifestParseOutcome::Normal(manifest)) => commit_normal_fetched_manifest(
@@ -152,18 +155,24 @@ pub(super) fn commit_fetched_manifest_with_acceptance_mode(
             fetched,
             request,
             fetch_finished_at_ms,
-            acceptance_mode,
-            reason,
-            HlsTransientSwitchMetric::PreserveMode,
+            HlsTransientFetchedCommitOptions {
+                acceptance_mode,
+                reason,
+                manifest_semantics,
+                switch_metric: HlsTransientSwitchMetric::PreserveMode,
+            },
         ),
         (None, OriginManifestParseOutcome::TransientPassthrough { reason }) => commit_transient_fetched_manifest(
             session,
             fetched,
             request,
             fetch_finished_at_ms,
-            acceptance_mode,
-            map_transient_reason(reason),
-            HlsTransientSwitchMetric::RecordSwitch,
+            HlsTransientFetchedCommitOptions {
+                acceptance_mode,
+                reason: map_transient_reason(reason),
+                manifest_semantics,
+                switch_metric: HlsTransientSwitchMetric::RecordSwitch,
+            },
         ),
     };
     if result.is_ok() {
@@ -251,15 +260,21 @@ enum HlsTransientSwitchMetric {
     RecordSwitch,
 }
 
+struct HlsTransientFetchedCommitOptions {
+    acceptance_mode: HlsManifestCommitAcceptanceMode,
+    reason: TransientPassthroughReason,
+    manifest_semantics: ParsedManifestSemantics,
+    switch_metric: HlsTransientSwitchMetric,
+}
+
 fn commit_transient_fetched_manifest(
     session: &mut crate::HlsSession,
     fetched: &FetchedOriginManifest,
     request: &OriginRefreshRequest,
     fetch_finished_at_ms: u64,
-    acceptance_mode: HlsManifestCommitAcceptanceMode,
-    reason: TransientPassthroughReason,
-    switch_metric: HlsTransientSwitchMetric,
+    options: HlsTransientFetchedCommitOptions,
 ) -> Result<(HlsManifestCommitProgressEvidence, bool, bool), HlsManifestCommitError> {
+    let HlsTransientFetchedCommitOptions { acceptance_mode, reason, manifest_semantics, switch_metric } = options;
     let timeline = parse_transient_manifest_timeline_for_commit(session, &fetched.body)?;
     let quality = evaluate_manifest_acceptance_for_commit(
         session,
@@ -272,18 +287,14 @@ fn commit_transient_fetched_manifest(
     if quality.host_relation == HlsManifestOriginRelation::OtherRedirectHost {
         return Err(switch_staging_error(HlsManifestRejectLogReason::SwitchResourceUnavailable));
     }
-    match switch_metric {
-        HlsTransientSwitchMetric::PreserveMode => {}
-        HlsTransientSwitchMetric::RecordSwitch => request.segment_worker_pool.metrics().record_transient_switch(),
-    }
-    mark_manifest_handoff_discontinuity_if_needed(session, &quality);
-    let refresh_timing = commit_transient_manifest(
+    let (refresh_timing, footprint) = commit_transient_manifest(
         session,
         HlsTransientManifestCommitInput {
             body: &fetched.body,
             final_manifest_url: &fetched.final_manifest_url,
             request_headers: &request.headers,
             reason,
+            manifest_semantics,
             reverse_proxy_rewrite_secret: &request.reverse_proxy_rewrite_secret,
             transient_resource_ttl_ms: request.transient_resource_ttl_ms,
             rendered_at_ms: fetch_finished_at_ms,
@@ -291,7 +302,49 @@ fn commit_transient_fetched_manifest(
             quality: &quality,
             strip: &request.strip,
         },
-    );
+    )
+    .map_err(|error| match error {
+        crate::transient::HlsTransientManifestCommitError::LocalRepresentationLimit(violation) => {
+            request.segment_worker_pool.metrics().record_manifest_limit_rejection();
+            warn!(
+                "HLS transient manifest rejected: session={} proxy_session={} reason=manifest-representation-limit kind={} actual={} limit={}",
+                safe_session_key(&session.key),
+                safe_proxy_session_id(&session.proxy_session_id),
+                violation.kind.as_log_value(),
+                violation.actual,
+                violation.limit
+            );
+            HlsManifestCommitError::LocalRepresentationLimit(violation)
+        }
+        crate::transient::HlsTransientManifestCommitError::SnapshotUnavailable => {
+            warn!(
+                "HLS transient manifest rejected: session={} proxy_session={} reason=malformed-transient-representation",
+                safe_session_key(&session.key),
+                safe_proxy_session_id(&session.proxy_session_id)
+            );
+            HlsManifestCommitError::MalformedTransientRepresentation
+        }
+        crate::transient::HlsTransientManifestCommitError::CommitGenerationExhausted => {
+            error!(
+                "HLS transient manifest rejected: session={} proxy_session={} reason=commit-generation-exhausted",
+                safe_session_key(&session.key),
+                safe_proxy_session_id(&session.proxy_session_id)
+            );
+            HlsManifestCommitError::CommitGenerationExhausted
+        }
+    })?;
+    let metrics = request.segment_worker_pool.metrics();
+    metrics.record_transient_manifest_resources(footprint.resources);
+    metrics.record_transient_resource_entries(footprint.resource_entries);
+    metrics.record_transient_generation_memberships(footprint.finalized_generation_memberships);
+    metrics.record_transient_estimated_metadata_bytes(footprint.estimated_metadata_bytes);
+    metrics.record_transient_manifest_rewritten_bytes(footprint.rewritten_bytes);
+    metrics.record_transient_manifest_origin_uri_bytes(footprint.origin_uri_bytes);
+    metrics.record_finalized_generations_retained(footprint.retained_finalized_generations);
+    match switch_metric {
+        HlsTransientSwitchMetric::PreserveMode => {}
+        HlsTransientSwitchMetric::RecordSwitch => metrics.record_transient_switch(),
+    }
     update_origin_provider_session_headers(session, fetched);
     mark_manifest_acceptance_success(session, fetched, &quality, fetch_finished_at_ms);
     Ok((HlsManifestCommitProgressEvidence::Transient(refresh_timing), false, false))
@@ -474,6 +527,7 @@ struct HlsTransientManifestCommitInput<'a> {
     final_manifest_url: &'a str,
     request_headers: &'a HeaderMap,
     reason: TransientPassthroughReason,
+    manifest_semantics: ParsedManifestSemantics,
     reverse_proxy_rewrite_secret: &'a [u8],
     transient_resource_ttl_ms: u64,
     rendered_at_ms: u64,
@@ -482,37 +536,19 @@ struct HlsTransientManifestCommitInput<'a> {
     strip: &'a StripConfig,
 }
 
-fn commit_transient_manifest(
-    session: &mut crate::HlsSession,
-    input: HlsTransientManifestCommitInput<'_>,
-) -> HlsManifestRefreshTiming {
-    let HlsTransientManifestCommitInput {
-        body,
-        final_manifest_url,
-        request_headers,
-        reason,
-        reverse_proxy_rewrite_secret,
-        transient_resource_ttl_ms,
-        rendered_at_ms,
-        timeline,
-        quality,
-        strip,
-    } = input;
-    let was_normal = matches!(session.mode, HlsSessionMode::NormalCacheTimeline);
-    let reason_log_fields = transient_reason_log_fields(&reason);
-    session.mode = HlsSessionMode::TransientPassthrough { reason };
-    if was_normal {
-        info!(
-            "HLS session switched to transient passthrough: session={} proxy_session={} {}",
-            safe_session_key(&session.key),
-            safe_proxy_session_id(&session.proxy_session_id),
-            reason_log_fields
-        );
-    }
-    session.origin_request_headers = request_headers.clone();
-    session.transient.set_resource_ttl_ms(transient_resource_ttl_ms);
-    session.transient.prune_expired(rendered_at_ms);
+struct HlsPreparedTransientManifest {
+    rewritten: TransientRewriteResult,
+    incremental_template: Option<Arc<HlsTransientManifestTemplate>>,
+    incremental_rewrite: bool,
+    handoff_discontinuity_sequence: Option<u64>,
+    next_transient_discontinuity_sequence: Option<u64>,
+}
 
+#[allow(clippy::too_many_lines)]
+fn prepare_transient_manifest_rewrite(
+    session: &crate::HlsSession,
+    input: &HlsTransientManifestCommitInput<'_>,
+) -> Result<HlsPreparedTransientManifest, crate::manifest_limits::HlsManifestLimitViolation> {
     let previous_provisioning_manifest_body = session
         .last_rendered_manifest
         .as_ref()
@@ -523,50 +559,212 @@ fn commit_transient_manifest(
         .values()
         .find(|entry| is_hls_provisioning_segment(entry) || is_hls_provisioning_gap_segment(entry))
         .map_or(2_000, |entry| entry.duration_ms);
-    let handoff_discontinuity_sequence = session.take_pending_handoff_discontinuity_sequence();
-    let mut rewritten = if handoff_discontinuity_sequence.is_some() {
-        TransientManifestRewriter::rewrite_with_options(
-            body,
-            final_manifest_url,
+    let handoff_discontinuity_sequence = session
+        .pending_handoff_discontinuity_sequence
+        .or_else(|| input.quality.requires_handoff_discontinuity.then_some(0));
+    let append_context = (handoff_discontinuity_sequence.is_none()
+        && matches!(input.manifest_semantics.playlist_type, Some(HlsPlaylistType::Event)))
+    .then(|| {
+        session.transient.rolling_event_append_context(
+            input.body,
+            input.final_manifest_url,
+            input.reverse_proxy_rewrite_secret,
+        )
+    })
+    .flatten();
+    let mut incremental_template = None;
+    let mut incremental_rewrite = false;
+    let mut rewritten = if let Some(context) = append_context {
+        let suffix = &input.body[context.suffix_offset..];
+        let mut appended = TransientManifestRewriter::rewrite_append(
+            suffix,
+            input.final_manifest_url,
             &session.proxy_session_id,
-            reverse_proxy_rewrite_secret,
-            rendered_at_ms,
-            transient_resource_ttl_ms,
+            input.reverse_proxy_rewrite_secret,
+            input.rendered_at_ms,
+            input.transient_resource_ttl_ms,
+            context.checkpoint,
+        );
+        if let Some(template) = crate::transient::TransientPassthroughState::extend_rolling_event_template(
+            &context.template,
+            &appended.body,
+        )? {
+            let mut combined =
+                String::with_capacity(context.rewritten_prefix.len().saturating_add(appended.body.len()));
+            combined.push_str(&context.rewritten_prefix);
+            combined.push_str(&appended.body);
+            appended.body = combined;
+            incremental_template = Some(template);
+            incremental_rewrite = true;
+            appended
+        } else {
+            TransientManifestRewriter::rewrite(
+                input.body,
+                input.final_manifest_url,
+                &session.proxy_session_id,
+                input.reverse_proxy_rewrite_secret,
+                input.rendered_at_ms,
+                input.transient_resource_ttl_ms,
+            )
+        }
+    } else if handoff_discontinuity_sequence.is_some() {
+        TransientManifestRewriter::rewrite_with_options(
+            input.body,
+            input.final_manifest_url,
+            &session.proxy_session_id,
+            input.reverse_proxy_rewrite_secret,
+            input.rendered_at_ms,
+            input.transient_resource_ttl_ms,
             TransientRewriteOptions { handoff_discontinuity_sequence },
         )
     } else {
         TransientManifestRewriter::rewrite(
-            body,
-            final_manifest_url,
+            input.body,
+            input.final_manifest_url,
             &session.proxy_session_id,
-            reverse_proxy_rewrite_secret,
-            rendered_at_ms,
-            transient_resource_ttl_ms,
+            input.reverse_proxy_rewrite_secret,
+            input.rendered_at_ms,
+            input.transient_resource_ttl_ms,
         )
     };
-    if handoff_discontinuity_sequence.is_some() {
+    let next_transient_discontinuity_sequence = if handoff_discontinuity_sequence.is_some() {
         if let Some(handoff_body) = materialize_transient_provisioning_handoff_view(
             &rewritten.body,
             previous_provisioning_manifest_body.as_deref(),
-            strip,
+            input.manifest_semantics.window_policy(),
+            input.strip,
             provisioning_segment_duration_ms,
         ) {
             rewritten.body = handoff_body;
         }
         let current_discontinuity_sequence = transient_discontinuity_sequence(&rewritten.body)
             .unwrap_or(session.transient_discontinuity_sequence.unwrap_or(0));
-        session.transient_discontinuity_sequence =
-            Some(current_discontinuity_sequence.saturating_add(transient_visible_discontinuity_count(&rewritten.body)));
-    } else if let Some(discontinuity_sequence) = session.transient_discontinuity_sequence {
-        rewritten.body = apply_transient_discontinuity_sequence(&rewritten.body, discontinuity_sequence);
-    }
-    let manifest_validity = parse_manifest_validity(&rewritten.body);
-    session.transient.upsert_resources(rewritten.resources);
-    if let Some(validity) = manifest_validity {
-        session.transient.replace_manifest_with_validity(rewritten.body, rendered_at_ms, validity.playlist_duration_ms);
+        Some(current_discontinuity_sequence.saturating_add(transient_visible_discontinuity_count(&rewritten.body)))
+    } else if !incremental_rewrite {
+        if let Some(discontinuity_sequence) = session.transient_discontinuity_sequence {
+            rewritten.body = apply_transient_discontinuity_sequence(&rewritten.body, discontinuity_sequence);
+        }
+        None
     } else {
-        session.transient.replace_manifest(rewritten.body, rendered_at_ms);
+        None
+    };
+    Ok(HlsPreparedTransientManifest {
+        rewritten,
+        incremental_template,
+        incremental_rewrite,
+        handoff_discontinuity_sequence,
+        next_transient_discontinuity_sequence,
+    })
+}
+
+fn commit_transient_manifest(
+    session: &mut crate::HlsSession,
+    input: HlsTransientManifestCommitInput<'_>,
+) -> Result<
+    (HlsManifestRefreshTiming, crate::transient::HlsTransientManifestFootprint),
+    crate::transient::HlsTransientManifestCommitError,
+> {
+    let HlsPreparedTransientManifest {
+        rewritten,
+        incremental_template,
+        incremental_rewrite,
+        handoff_discontinuity_sequence,
+        next_transient_discontinuity_sequence,
+    } = prepare_transient_manifest_rewrite(session, &input)?;
+    let HlsTransientManifestCommitInput {
+        body,
+        final_manifest_url,
+        request_headers,
+        reason,
+        manifest_semantics,
+        reverse_proxy_rewrite_secret,
+        transient_resource_ttl_ms,
+        rendered_at_ms,
+        timeline,
+        quality,
+        strip: _,
+    } = input;
+    let was_normal = matches!(session.mode, HlsSessionMode::NormalCacheTimeline);
+    let reason_log_fields = transient_reason_log_fields(&reason);
+    let playlist_duration_ms = incremental_template.as_ref().map_or_else(
+        || parse_manifest_validity(&rewritten.body).map(|validity| validity.playlist_duration_ms),
+        |template| Some(template.playlist_duration_ms()),
+    );
+    let Some(commit_identity) = session.next_manifest_commit_identity(rendered_at_ms) else {
+        return Err(crate::transient::HlsTransientManifestCommitError::CommitGenerationExhausted);
+    };
+    let rewrite_checkpoint = rewritten.checkpoint.clone();
+    let processed_line_count = rewritten.processed_line_count;
+    let footprint = if let Some(template) = incremental_template {
+        session
+            .transient
+            .commit_incremental_rewritten_manifest_with_semantics(
+                rewritten.body,
+                rewritten.resources,
+                template,
+                rendered_at_ms,
+                transient_resource_ttl_ms,
+                manifest_semantics,
+            )
+            .map_err(crate::transient::HlsTransientManifestCommitError::from)?
+    } else {
+        session.transient.commit_rewritten_manifest_with_semantics(
+            rewritten.body,
+            rewritten.resources,
+            rendered_at_ms,
+            playlist_duration_ms,
+            manifest_semantics,
+        )?
+    };
+    session.transient.record_manifest_commit_identity(commit_identity);
+    session.record_manifest_commit_identity(commit_identity);
+    session.transient.record_rolling_event_rewrite_seed(
+        body,
+        final_manifest_url,
+        reverse_proxy_rewrite_secret,
+        rewrite_checkpoint,
+        footprint.estimated_metadata_bytes,
+        handoff_discontinuity_sequence.is_none()
+            && matches!(manifest_semantics.playlist_type, Some(HlsPlaylistType::Event))
+            && !manifest_semantics.lifecycle().is_finalized(),
+    );
+    if matches!(manifest_semantics.playlist_type, Some(HlsPlaylistType::Event)) {
+        debug!(
+            "HLS transient EVENT manifest rewrite: session={} proxy_session={} mode={} processed_lines={}",
+            safe_session_key(&session.key),
+            safe_proxy_session_id(&session.proxy_session_id),
+            if incremental_rewrite { "append" } else { "full" },
+            processed_line_count
+        );
     }
+    session.transient.prune_expired(rendered_at_ms);
+    if session.pending_handoff_discontinuity_sequence.is_some() {
+        let _consumed = session.take_pending_handoff_discontinuity_sequence();
+    }
+    if let Some(discontinuity_sequence) = next_transient_discontinuity_sequence {
+        session.transient_discontinuity_sequence = Some(discontinuity_sequence);
+    }
+    session.mode = HlsSessionMode::TransientPassthrough { reason };
+    session.origin_request_headers = request_headers.clone();
+    session.transient.set_resource_ttl_ms(transient_resource_ttl_ms);
+    if was_normal {
+        info!(
+            "HLS session switched to transient passthrough: session={} proxy_session={} manifest_lifecycle={} {}",
+            safe_session_key(&session.key),
+            safe_proxy_session_id(&session.proxy_session_id),
+            manifest_semantics.lifecycle().as_log_value(),
+            reason_log_fields
+        );
+    }
+    Ok((commit_transient_manifest_refresh_timing(session, body, &timeline, quality), footprint))
+}
+
+fn commit_transient_manifest_refresh_timing(
+    session: &mut crate::HlsSession,
+    body: &str,
+    timeline: &ParsedOriginManifestTimeline,
+    quality: &HlsManifestOriginQuality,
+) -> HlsManifestRefreshTiming {
     let previous_highwater = session.origin_seq_highwater;
     if let Some(highwater) = timeline.origin_highwater() {
         session.origin_seq_highwater =
@@ -740,6 +938,16 @@ fn queue_and_render_normal_manifest(
                         safe_proxy_session_id(&session.proxy_session_id),
                         existing_proxy_seq,
                         candidate_proxy_seq
+                    );
+                }
+                RenderedManifestStoreOutcome::Rejected(
+                    RenderedManifestStoreRejectReason::CommitGenerationExhausted,
+                ) => {
+                    request.segment_worker_pool.metrics().record_manifest_render_skipped();
+                    error!(
+                        "HLS manifest render rejected: session={} proxy_session={} reason=commit-generation-exhausted",
+                        safe_session_key(&session.key),
+                        safe_proxy_session_id(&session.proxy_session_id)
                     );
                 }
             }

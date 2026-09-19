@@ -1,6 +1,10 @@
 .tp__table {
   display: flex;
   flex-flow: column;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   gap: var(--gap-default);
   background-color: var(--card-background-color);
   border-radius: var(--border-radius);
@@ -11,6 +15,10 @@
   &__container {
     display: flex;
     flex-flow: column;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
     padding-right: 1px;
     overflow: auto; pointer-events: auto;
     touch-action: pan-x pan-y;
@@ -39,7 +47,6 @@
           line-height: 1.2;
           background-color: var(--table-header-background-color);
           box-shadow: inset 0 -1px 0 var(--border-color);
-
           &:not(:last-child) {
             border-right: 1px solid var(--border-color);
           }
@@ -114,6 +121,12 @@
 }
 
 .tp__paged-table {
+  display: flex;
+  flex-flow: column;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 
   &__controls {
     display: flex;

@@ -19,8 +19,10 @@ pub fn VersionActionCard(props: &VersionActionProps) -> Html {
     let services = use_service_context();
 
     let handle_url = {
+        let services = services.clone();
         Callback::from(move |_| {
-            let _ = window().open_with_url_and_target("https://github.com/euzu/tuliprox/tags", "_blank");
+            let releases_link = services.config.ui_config.releases.clone();
+            let _ = window().open_with_url_and_target(releases_link.as_ref(), "_blank");
         })
     };
 

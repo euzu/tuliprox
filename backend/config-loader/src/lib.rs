@@ -1,4 +1,5 @@
 pub mod runtime_config_report;
+pub mod source_patch;
 
 use arc_swap::{ArcSwap, ArcSwapAny};
 use chrono::Local;
@@ -11,7 +12,7 @@ use shared::{
     foundation::prepare_templates,
     model::{
         ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigInputAliasDto, ConfigPaths, HdHomeRunDeviceOverview,
-        InputType, MsgKind, PatternTemplate, PlansConfigDto, SourcesConfigDto, TargetUserDto, TemplateDefinitionDto,
+        InputType, PatternTemplate, PlansConfigDto, Prepare, SourcesConfigDto, TargetUserDto, TemplateDefinitionDto,
         UserPlanDto,
     },
     utils::PROVIDER_SCHEME_PREFIX,
@@ -405,12 +406,17 @@ fn apply_prepared_mappings(
     prepared_templates: Option<&[PatternTemplate]>,
 ) {
     match mapping.mappings.prepare(prepared_templates) {
-        Ok(()) => {
-            let mappings: tuliprox_core::model::Mappings = tuliprox_core::model::Mappings::from(&*mapping);
-            app_config.set_mappings(mappings_file, &mappings);
-            paths.mapping_files_used =
-                mapping_paths.map(|items| items.iter().map(|p| p.display().to_string()).collect::<Vec<String>>());
-        }
+        Ok(()) => match tuliprox_core::model::CompiledMappings::try_from(&*mapping) {
+            Ok(mappings) => {
+                app_config.set_mappings(mappings_file, &mappings);
+                paths.mapping_files_used =
+                    mapping_paths.map(|items| items.iter().map(|p| p.display().to_string()).collect::<Vec<String>>());
+            }
+            Err(err) => {
+                error!("Failed to compile mapping '{mappings_file}': {err}. Skipping mapping registration.");
+                paths.mapping_files_used = None;
+            }
+        },
         Err(err) => {
             error!("Failed to prepare mapping '{mappings_file}': {err}. Skipping mapping registration.");
             paths.mapping_files_used = None;
@@ -662,24 +668,64 @@ async fn write_config_file<T>(
 where
     T: ?Sized + Serialize,
 {
-    let path = PathBuf::from(file_path);
-    let filename = path.file_name().map_or(default_name.to_string(), |f| f.to_string_lossy().to_string());
-
     let mut serialized = String::new();
     let options = serde_saphyr::ser_options! {prefer_block_scalars: false};
     serde_saphyr::to_fmt_writer_with_options(&mut serialized, &config, options)
         .map_err(|err| TuliproxError::Config(format!("Could not serialize config: {err}")))?;
 
-    if file_exists_async(&path).await {
-        if let Ok(existing) = fs::read_to_string(&path).await {
-            if existing == serialized {
-                // info!("File {} unchanged, skipping write", path.display());
-                return Ok(());
-            }
-        }
-    }
+    write_config_text_file(file_path, backup_dir, &serialized, default_name, None).await?;
+    Ok(())
+}
 
-    if file_exists_async(&path).await {
+/// Atomically writes raw text content to a config file with backup.
+///
+/// Returns `Ok(true)` when the file was written, `Ok(false)` when the content was
+/// already identical to the existing file (no-op).
+///
+/// When `expected_revision` is provided, the destination file is re-read and its
+/// blake3 hash is compared before writing. A mismatch produces a conflict error
+/// and the file is left untouched.
+pub async fn write_config_text_file(
+    file_path: &str,
+    backup_dir: &str,
+    content: &str,
+    default_name: &str,
+    expected_revision: Option<blake3::Hash>,
+) -> Result<bool, TuliproxError> {
+    let path = PathBuf::from(file_path);
+    let filename = path.file_name().map_or(default_name.to_string(), |f| f.to_string_lossy().to_string());
+
+    let revision_content = if let Some(expected) = expected_revision {
+        let current = fs::read(&path).await.map_err(|err| {
+            TuliproxError::Config(format!(
+                "Could not re-read {} before applying an internal patch: {err}",
+                path.to_str().unwrap_or("?")
+            ))
+        })?;
+        if blake3::hash(&current) != expected {
+            return Err(TuliproxError::Config(
+                "source.yml changed while an internal patch was being prepared; retrying later".to_string(),
+            ));
+        }
+        Some(current)
+    } else {
+        None
+    };
+
+    let destination_exists = if let Some(current) = revision_content.as_deref() {
+        if current == content.as_bytes() {
+            return Ok(false);
+        }
+        true
+    } else {
+        let exists = file_exists_async(&path).await;
+        if exists && fs::read_to_string(&path).await.is_ok_and(|existing| existing == content) {
+            return Ok(false);
+        }
+        exists
+    };
+
+    if destination_exists {
         fs::create_dir_all(backup_dir)
             .await
             .map_err(|err| TuliproxError::Config(format!("Could not create backup directory {backup_dir}: {err}")))?;
@@ -708,18 +754,22 @@ where
         Local::now().timestamp_nanos_opt().unwrap_or_default()
     ));
 
-    fs::write(&tmp_path, serialized).await.map_err(|err| {
-        TuliproxError::Config(format!("Could not write temp file {}: {err}", tmp_path.to_str().unwrap_or("?")))
-    })?;
+    if let Err(err) = fs::write(&tmp_path, content).await {
+        let _ = fs::remove_file(&tmp_path).await;
+        return Err(TuliproxError::Config(format!(
+            "Could not write temp file {}: {err}",
+            tmp_path.to_str().unwrap_or("?")
+        )));
+    }
 
     match fs::rename(&tmp_path, &path).await {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(true),
         Err(err) => {
             // Windows doesn't allow overwriting an existing file via rename.
             #[cfg(windows)]
             {
                 if replace_file_windows(&tmp_path, &path).is_ok() {
-                    return Ok(());
+                    return Ok(true);
                 }
             }
 
@@ -865,7 +915,7 @@ pub async fn save_main_config(file_path: &str, backup_dir: &str, config: &Config
     write_config_file(file_path, backup_dir, config, "config.yml").await
 }
 
-pub async fn save_sources_config<T>(file_path: &str, backup_dir: &str, config: &T) -> Result<(), TuliproxError>
+async fn save_sources_config<T>(file_path: &str, backup_dir: &str, config: &T) -> Result<(), TuliproxError>
 where
     T: ?Sized + Serialize,
 {
@@ -951,10 +1001,27 @@ pub async fn persist_templates_config(
     save_templates_config(&template_file, config.get_backup_dir().as_ref(), template_definition).await
 }
 
-pub async fn persist_source_config(
+/// Canonicalizes and rewrites the entire `source.yml` document.
+///
+/// This performs a whole-file YAML serialization: comments, blank lines, key
+/// order and quoting are normalized away. It must only be used for an explicit
+/// user edit (Source Editor save) or a controlled migration — never by
+/// background tasks. Background mutations must go through the targeted
+/// lossless patch pipeline (`api::source_yml_patch::execute_source_yml_patches`).
+pub async fn replace_source_config_from_user_edit(
     app_config: &Arc<AppConfig>,
     source_file_path: Option<&Path>,
     doc: SourcesConfigDto,
+) -> Result<SourcesConfigDto, TuliproxError> {
+    let source_config = sanitize_sources_for_persist(doc.clone()).await;
+    persist_sanitized_source_config(app_config, source_file_path, doc, &source_config).await
+}
+
+async fn persist_sanitized_source_config(
+    app_config: &Arc<AppConfig>,
+    source_file_path: Option<&Path>,
+    doc: SourcesConfigDto,
+    source_config: &SourcesConfigDto,
 ) -> Result<SourcesConfigDto, TuliproxError> {
     let source_file = {
         source_file_path.and_then(|p| p.to_str()).map_or_else(
@@ -970,9 +1037,7 @@ pub async fn persist_source_config(
         config.get_backup_dir().to_string()
     };
 
-    let source_config = sanitize_sources_for_persist(doc.clone()).await;
-
-    save_sources_config(&source_file, &backup_dir, &source_config).await?;
+    save_sources_config(&source_file, &backup_dir, source_config).await?;
     Ok(doc)
 }
 
@@ -1013,19 +1078,6 @@ pub async fn sanitize_sources_for_persist(mut source_config: SourcesConfigDto) -
     source_config
 }
 
-pub async fn validate_and_persist_source_config(
-    app_config: &Arc<AppConfig>,
-    dto: SourcesConfigDto,
-) -> Result<SourcesConfigDto, TuliproxError> {
-    let templates_to_persist = validate_source_config_for_persist(app_config, &dto).await?;
-
-    if let Some(template_definition) = templates_to_persist.as_ref() {
-        persist_templates_config(app_config, template_definition).await?;
-    }
-
-    persist_source_config(app_config, None, dto).await
-}
-
 pub async fn persist_messaging_templates(
     app_config: &Arc<AppConfig>,
     cfg: &mut ConfigDto,
@@ -1039,19 +1091,25 @@ pub async fn persist_messaging_templates(
         // Discord
         if let Some(discord) = &mut messaging.discord {
             for (kind, template) in &mut discord.templates {
-                *template = persist_single_template("discord", Some(kind), template, &templates_dir).await?;
+                *template = persist_single_template("discord", Some(kind.as_str()), template, &templates_dir).await?;
             }
         }
         // Telegram
         if let Some(telegram) = &mut messaging.telegram {
             for (kind, template) in &mut telegram.templates {
-                *template = persist_single_template("telegram", Some(kind), template, &templates_dir).await?;
+                *template = persist_single_template("telegram", Some(kind.as_str()), template, &templates_dir).await?;
             }
         }
         // Rest
         if let Some(rest) = &mut messaging.rest {
             for (kind, template) in &mut rest.templates {
-                *template = persist_single_template("rest", Some(kind), template, &templates_dir).await?;
+                *template = persist_single_template("rest", Some(kind.as_str()), template, &templates_dir).await?;
+            }
+        }
+        // Pushover
+        if let Some(pushover) = &mut messaging.pushover {
+            for (kind, template) in &mut pushover.templates {
+                *template = persist_single_template("pushover", Some(kind.as_str()), template, &templates_dir).await?;
             }
         }
     }
@@ -1060,7 +1118,7 @@ pub async fn persist_messaging_templates(
 
 async fn persist_single_template(
     prefix: &str,
-    kind: Option<&MsgKind>,
+    event_key: Option<&str>,
     template: &str,
     templates_dir: &Path,
 ) -> Result<String, TuliproxError> {
@@ -1088,8 +1146,18 @@ async fn persist_single_template(
         })?;
     }
 
-    let filename =
-        if let Some(k) = kind { k.template_filename(prefix) } else { concat_string!(prefix, "_default.templ") };
+    // Persist under the canonical event id where the key resolves to one,
+    // so a config written with a legacy `MsgKind` name still lands on the
+    // filename the registry will look for.
+    let filename = event_key.map_or_else(
+        || concat_string!(prefix, "_default.templ"),
+        |key| {
+            shared::model::notification::EventId::from_wire(key).map_or_else(
+                || concat_string!(prefix, "_", &key.replace('.', "_"), ".templ"),
+                |id| id.template_filename(prefix),
+            )
+        },
+    );
 
     let file_path = templates_dir.join(filename);
     fs::write(&file_path, template)
@@ -1225,7 +1293,10 @@ pub async fn migrate_api_user(api_proxy: &mut ApiProxyConfig, cfg: &AppConfig, e
 
 #[cfg(test)]
 mod tests {
-    use super::{get_batch_aliases, prepare_sources_batch, sanitize_sources_for_persist, write_config_file};
+    use super::{
+        get_batch_aliases, prepare_sources_batch, sanitize_sources_for_persist, write_config_file,
+        write_config_text_file,
+    };
     use shared::{
         model::{ConfigInputAliasDto, ConfigInputDto, InputType, SourcesConfigDto},
         utils::Internable,
@@ -1318,6 +1389,178 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(tokio::fs::read_to_string(config_path).await?, "old");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn text_write_identical_content_is_noop() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempdir()?;
+        let path = dir.path().join("source.yml");
+        tokio::fs::write(&path, "same content").await?;
+
+        let written = write_config_text_file(
+            path.to_string_lossy().as_ref(),
+            dir.path().join("backup").to_string_lossy().as_ref(),
+            "same content",
+            "source.yml",
+            None,
+        )
+        .await?;
+
+        assert!(!written);
+        assert_eq!(tokio::fs::read_to_string(&path).await?, "same content");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn text_write_replaces_content_and_creates_backup() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempdir()?;
+        let path = dir.path().join("source.yml");
+        let backup_dir = dir.path().join("backup");
+        tokio::fs::write(&path, "old content").await?;
+
+        let written = write_config_text_file(
+            path.to_string_lossy().as_ref(),
+            backup_dir.to_string_lossy().as_ref(),
+            "new content",
+            "source.yml",
+            None,
+        )
+        .await?;
+
+        assert!(written);
+        assert_eq!(tokio::fs::read_to_string(&path).await?, "new content");
+        let mut backups: Vec<_> = std::fs::read_dir(&backup_dir)?
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("source.yml_"))
+            .map(|entry| entry.path())
+            .collect();
+        backups.sort();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(tokio::fs::read_to_string(&backups[0]).await?, "old content");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn text_write_preserves_crlf_and_unicode() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempdir()?;
+        let path = dir.path().join("source.yml");
+        let content = "key: \"héllo wörld\"\r\nother: value\r\n";
+        tokio::fs::write(&path, "placeholder").await?;
+
+        write_config_text_file(
+            path.to_string_lossy().as_ref(),
+            dir.path().join("backup").to_string_lossy().as_ref(),
+            content,
+            "source.yml",
+            None,
+        )
+        .await?;
+
+        assert_eq!(tokio::fs::read_to_string(&path).await?, content);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn text_write_revision_conflict_leaves_file_untouched() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempdir()?;
+        let path = dir.path().join("source.yml");
+        tokio::fs::write(&path, "original").await?;
+        let stale_revision = blake3::hash(b"different content");
+
+        let result = write_config_text_file(
+            path.to_string_lossy().as_ref(),
+            dir.path().join("backup").to_string_lossy().as_ref(),
+            "patched",
+            "source.yml",
+            Some(stale_revision),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("changed while an internal patch was being prepared"));
+        assert_eq!(tokio::fs::read_to_string(&path).await?, "original");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn text_write_matching_revision_succeeds() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempdir()?;
+        let path = dir.path().join("source.yml");
+        tokio::fs::write(&path, "original").await?;
+        let revision = blake3::hash(b"original");
+
+        let written = write_config_text_file(
+            path.to_string_lossy().as_ref(),
+            dir.path().join("backup").to_string_lossy().as_ref(),
+            "patched",
+            "source.yml",
+            Some(revision),
+        )
+        .await?;
+
+        assert!(written);
+        assert_eq!(tokio::fs::read_to_string(&path).await?, "patched");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn text_write_matching_revision_and_identical_content_is_noop() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempdir()?;
+        let path = dir.path().join("source.yml");
+        tokio::fs::write(&path, "original").await?;
+        let revision = blake3::hash(b"original");
+
+        let written = write_config_text_file(
+            path.to_string_lossy().as_ref(),
+            dir.path().join("backup").to_string_lossy().as_ref(),
+            "original",
+            "source.yml",
+            Some(revision),
+        )
+        .await?;
+
+        assert!(!written);
+        assert!(!dir.path().join("backup").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn text_write_missing_destination_is_a_revision_conflict() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempdir()?;
+        let path = dir.path().join("source.yml");
+        let revision = blake3::hash(b"original");
+
+        let result = write_config_text_file(
+            path.to_string_lossy().as_ref(),
+            dir.path().join("backup").to_string_lossy().as_ref(),
+            "patched",
+            "source.yml",
+            Some(revision),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(!path.exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn text_write_preserves_missing_final_newline() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempdir()?;
+        let path = dir.path().join("source.yml");
+        tokio::fs::write(&path, "old\n").await?;
+
+        write_config_text_file(
+            path.to_string_lossy().as_ref(),
+            dir.path().join("backup").to_string_lossy().as_ref(),
+            "key: value",
+            "source.yml",
+            None,
+        )
+        .await?;
+
+        assert_eq!(tokio::fs::read_to_string(&path).await?, "key: value");
         Ok(())
     }
 }

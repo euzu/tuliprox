@@ -8,20 +8,21 @@ use axum::http::{HeaderMap, StatusCode};
 use reqwest::Client;
 use shared::model::InputFetchMethod;
 use std::{collections::HashMap, fmt, sync::Arc};
-use tuliprox_core::model::{AppConfig, ConfigProvider, HlsManifestRecoveryBurstConfig, InputSource};
+use tuliprox_core::model::{AppConfig, ConfigProvider, HlsManifestRecoveryBurstConfig, InputSource, ProviderConfig};
 use url::Url;
 
 pub(super) const DEFAULT_HLS_TARGET_DURATION_SECS: u32 = 15;
 
 const DEFAULT_HLS_SESSION_IDLE_TIMEOUT_SECS: u64 = 300;
 pub(super) const HLS_COMMITTED_CONTENT_ANCHOR_PROBE_LIMIT: usize = 64;
-pub const MAX_HLS_MANIFEST_BYTES: usize = 2 * 1024 * 1024;
+pub use crate::manifest_limits::MAX_HLS_MANIFEST_BYTES;
 
 /// Origin manifest entrypoint snapshot for live HLS refreshes.
 #[derive(Clone)]
 pub struct LiveHlsOriginEntry {
     url: Url,
     url_failover_provider: Option<Arc<ConfigProvider>>,
+    runtime_provider_config: Option<Arc<ProviderConfig>>,
 }
 
 impl LiveHlsOriginEntry {
@@ -31,7 +32,15 @@ impl LiveHlsOriginEntry {
         url: &str,
         url_failover_provider: Option<Arc<ConfigProvider>>,
     ) -> Option<Self> {
-        Url::parse(url).ok().map(|url| Self { url, url_failover_provider })
+        Self::parse_with_provider_configs(url, url_failover_provider, None)
+    }
+
+    pub fn parse_with_provider_configs(
+        url: &str,
+        url_failover_provider: Option<Arc<ConfigProvider>>,
+        runtime_provider_config: Option<Arc<ProviderConfig>>,
+    ) -> Option<Self> {
+        Url::parse(url).ok().map(|url| Self { url, url_failover_provider, runtime_provider_config })
     }
 
     pub fn url(&self) -> &Url { &self.url }
@@ -39,14 +48,19 @@ impl LiveHlsOriginEntry {
     pub fn url_failover_provider(&self) -> Option<&Arc<ConfigProvider>> { self.url_failover_provider.as_ref() }
 
     pub fn to_input_source(&self) -> InputSource {
+        let user_info = if self.url.scheme() == "provider" {
+            self.runtime_provider_config.as_ref().and_then(|provider| provider.get_user_info())
+        } else {
+            None
+        };
         InputSource {
             name: Arc::<str>::from("hls-origin"),
             url: self.url.to_string(),
             // In this HLS context, InputSource.provider is the URL-failover provider from source.yml,
             // not a runtime origin-account provider.
             provider: self.url_failover_provider.clone(),
-            username: None,
-            password: None,
+            username: user_info.as_ref().map(|info| info.username.clone()),
+            password: user_info.map(|info| info.password),
             method: InputFetchMethod::GET,
             headers: HashMap::new(),
         }
@@ -60,6 +74,10 @@ impl fmt::Debug for LiveHlsOriginEntry {
             .field("host", &self.url.host_str().unwrap_or("<missing>"))
             .field("path", &"<redacted>")
             .field("url_failover_provider", &self.url_failover_provider.as_ref().map(|provider| provider.name.as_ref()))
+            .field(
+                "runtime_provider_config",
+                &self.runtime_provider_config.as_ref().map(|provider| provider.name.as_ref()),
+            )
             .finish()
     }
 }
@@ -316,7 +334,7 @@ pub(super) fn request_hls_session_idle_timeout_secs_from_config(app_config: &App
         .reverse_proxy
         .as_ref()
         .and_then(|reverse_proxy| reverse_proxy.hls_cache.as_ref())
-        .map_or(DEFAULT_HLS_SESSION_IDLE_TIMEOUT_SECS, |hls_cache| hls_cache.session_idle_timeout)
+        .map_or(DEFAULT_HLS_SESSION_IDLE_TIMEOUT_SECS, |hls_cache| hls_cache.session_idle_timeout.get())
         .max(1)
 }
 

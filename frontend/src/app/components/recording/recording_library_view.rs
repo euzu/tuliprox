@@ -6,7 +6,7 @@
 //! partial list can never be mistaken for the whole one.
 
 use crate::{
-    app::components::{IconButton, LoadingIndicator, Table, TableDefinition, TaskStatusBadge, TextButton},
+    app::components::{IconButton, LoadingIndicator, NoContent, Table, TableDefinition, TaskStatusBadge, TextButton},
     hooks::use_service_context,
     i18n::use_translation,
     model::DialogResult,
@@ -268,6 +268,10 @@ pub fn recording_library_view() -> Html {
     let sort_state = use_state(|| None::<(usize, SortOrder)>);
     // Distinguishes "still waiting for the first snapshot" from "nothing recorded"
     let initial_loaded = use_state(|| false);
+    // Set when the socket refuses to serve recordings (DVR disabled, stale
+    // token). Without it the view waited forever for a snapshot that the
+    // server deliberately does not send.
+    let unavailable_code = use_state(|| None::<String>);
     // The highest revision rendered so far. A `use_mut_ref` rather than
     // `use_state` because the subscription closure is created once and
     // would otherwise keep reading the value it captured.
@@ -288,6 +292,7 @@ pub fn recording_library_view() -> Html {
         let services = services.clone();
         let request_snapshot_effect = request_snapshot.clone();
         let initial_loaded = initial_loaded.clone();
+        let unavailable_code = unavailable_code.clone();
         let seen_revision = seen_revision.clone();
         let quota_state = quota_state.clone();
         let connected = connected.clone();
@@ -302,8 +307,15 @@ pub fn recording_library_view() -> Html {
                     *seen = Some(revision);
                     drop(seen);
                     initial_loaded.set(true);
+                    unavailable_code.set(None);
                     quota_state.set(quota);
                     tasks_state.set(tasks);
+                }
+                crate::model::EventMessage::RecordingUnavailable { code } => {
+                    // A refusal is an answer: stop loading and say why instead
+                    // of waiting for a snapshot the server will not send.
+                    unavailable_code.set(Some(code));
+                    initial_loaded.set(true);
                 }
                 crate::model::EventMessage::WebSocketStatus(online) => {
                     connected.set(online);
@@ -476,6 +488,12 @@ pub fn recording_library_view() -> Html {
         }
     };
 
+    let unavailable_hint = unavailable_code.as_deref().map_or_else(String::new, |code| match code {
+        "recording_disabled" => translate.t("LABEL.RECORDING_DISABLED_HINT"),
+        "recording_token_refresh_required" => translate.t("LABEL.RECORDING_TOKEN_REFRESH_HINT"),
+        _ => String::new(),
+    });
+
     html! {
         <div class="tp__recording-view tp__list-view">
             <div class="tp__recording-view__body tp__list-view__body">
@@ -504,7 +522,13 @@ pub fn recording_library_view() -> Html {
                     </div>
                     <div class="tp__recording-list__body tp__list-list__body">
                         if *initial_loaded {
-                            <Table::<RecordingTaskDto> definition={table_definition} />
+                            if unavailable_code.is_some() {
+                                <NoContent text={translate.t("LABEL.RECORDING_UNAVAILABLE")} hint={unavailable_hint} />
+                            } else if tasks_state.is_empty() {
+                                <NoContent text={translate.t("LABEL.RECORDING_EMPTY")} />
+                            } else {
+                                <Table::<RecordingTaskDto> definition={table_definition} />
+                            }
                         } else {
                             <LoadingIndicator loading={true} />
                         }

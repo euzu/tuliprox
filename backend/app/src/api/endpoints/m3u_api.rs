@@ -5,9 +5,10 @@ use crate::{
             create_playback_session_fingerprint, create_session_fingerprint, force_provider_stream_response,
             get_session_reservation_ttl_secs, get_user_target, get_user_target_by_credentials,
             is_seekable_media_request, is_session_based_playback, is_stream_share_enabled, local_stream_response,
-            redirect, redirect_response, resolve_initial_stalker_playback_url, resource_response,
-            separate_number_and_remainder, should_allow_exhausted_shared_reconnect, stream_response,
+            redirect, redirect_response, reentry_suppressed_response, resolve_initial_stalker_playback_url,
+            resource_response, separate_number_and_remainder, should_allow_exhausted_shared_reconnect, stream_response,
             try_option_bad_request, try_result_bad_request, try_result_not_found, try_unwrap_body, RedirectParams,
+            ResourceFetchPolicy,
         },
         endpoints::{
             hls_api::{
@@ -37,7 +38,7 @@ use shared::{
     error::TuliproxError,
     model::{
         CatchupProperties, ConnectFailureReason, FieldGetAccessor, PlaylistEntry, PlaylistItemType, StreamProperties,
-        TargetType, UserConnectionPermission, XtreamCluster,
+        TargetType, UserConnectionPermission,
     },
     utils::{concat_path, extract_extension_from_url, sanitize_sensitive_info},
 };
@@ -60,9 +61,10 @@ async fn m3u_api(
                 })
             });
 
-            let mut builder = axum::response::Response::builder()
-                .status(axum::http::StatusCode::OK)
-                .header(axum::http::header::CONTENT_TYPE, mime::TEXT_PLAIN_UTF_8.to_string());
+            let mut builder = axum::response::Response::builder().status(axum::http::StatusCode::OK).header(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("text/plain; charset=utf-8"),
+            );
             if content_type == "m3u_plus" {
                 builder =
                     builder.header(axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\"playlist.m3u\"");
@@ -209,14 +211,13 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
     }
 
     if pli.item_type.is_local() {
-        let playback_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id, false);
+        let playback_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id.get(), false);
         let user_session =
             app_state.active_users.get_and_update_user_session(&user.username, &playback_session_token).await;
         let (admission, _grace_mode, request_class) = crate::api::api_utils::resolve_playback_request_admission(
             &app_state.admission_ctx(),
             &user,
             fingerprint,
-            pli.item_type,
             user_session.as_ref(),
             playback_session_token.as_str(),
             false,
@@ -225,6 +226,9 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
             false,
         )
         .await;
+        if admission.is_reentry_suppressed() {
+            return reentry_suppressed_response();
+        }
         return local_stream_response(
             fingerprint,
             app_state,
@@ -233,8 +237,8 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
             &input,
             &target,
             &user,
-            admission.permission,
-            admission.kind.unwrap_or(crate::api::model::ConnectionKind::Normal),
+            admission.permission(),
+            admission.kind().unwrap_or(crate::api::model::ConnectionKind::Normal),
             Some(playback_session_token.as_str()),
             Some(request_class),
             true,
@@ -243,7 +247,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
         .into_response();
     }
 
-    let cluster = XtreamCluster::try_from(pli.item_type).unwrap_or(XtreamCluster::Live);
+    let cluster = pli.item_type.cluster();
     pli.url = match resolve_initial_stalker_playback_url(
         app_state,
         &input,
@@ -265,9 +269,20 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
     let effective_stream_ext = effective_playback_extension(pli.item_type, &pli.url, stream_ext);
     let extension = effective_stream_ext.unwrap_or_default();
     let session_key = if pli.item_type == PlaylistItemType::Catchup {
-        create_m3u_catchup_session_key(fingerprint, &user.username, virtual_id, archive_discriminator.unwrap_or("live"))
+        create_m3u_catchup_session_key(
+            fingerprint,
+            &user.username,
+            virtual_id.get(),
+            archive_discriminator.unwrap_or("live"),
+        )
     } else {
-        create_playback_session_fingerprint(fingerprint, &user.username, virtual_id, pli.item_type, Some(extension))
+        create_playback_session_fingerprint(
+            fingerprint,
+            &user.username,
+            virtual_id.get(),
+            pli.item_type,
+            Some(extension),
+        )
     };
     let eviction_reentry_guard = if pli.item_type == PlaylistItemType::Catchup
         || !crate::api::api_utils::is_socket_bound_playback_session(pli.item_type, Some(extension))
@@ -303,7 +318,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
             );
         }
 
-        if app_state.active_provider.is_over_limit(&session.provider).await {
+        if app_state.active_provider.is_over_limit(&session.provider) {
             if extension == HLS_EXT {
                 return hls_admission_failure_manifest_response(
                     app_state,
@@ -326,7 +341,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
                 ConnectFailureReason::ProviderConnectionsExhausted,
             );
         }
-        if session.virtual_id == virtual_id && is_seekable_media_request(cluster, req_headers, Some(extension)) {
+        if session.virtual_id == virtual_id.get() && is_seekable_media_request(cluster, req_headers, Some(extension)) {
             // partial request means we are in reverse proxy mode, seek happened
             return force_provider_stream_response(
                 fingerprint,
@@ -359,7 +374,6 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
         &app_state.admission_ctx(),
         &user,
         fingerprint,
-        pli.item_type,
         user_session.as_ref(),
         &session_key,
         false,
@@ -368,18 +382,21 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
         false,
     )
     .await;
-    let connection_permission = connection_admission.permission;
+    let connection_permission = connection_admission.permission();
     let connection_kind = connection_admission
-        .kind
+        .kind()
         .or(user_session.as_ref().and_then(|session| session.connection_kind))
         .unwrap_or(crate::api::model::ConnectionKind::Normal);
     let allow_exhausted_shared_reconnect = should_allow_exhausted_shared_reconnect(
         is_stream_share_enabled(pli.item_type, &target),
         user_session.as_ref(),
-        virtual_id,
+        virtual_id.get(),
         session_url.as_ref(),
     );
     if connection_permission == UserConnectionPermission::Exhausted && !allow_exhausted_shared_reconnect {
+        if connection_admission.is_reentry_suppressed() {
+            return reentry_suppressed_response();
+        }
         if extension == HLS_EXT {
             return hls_admission_failure_manifest_response(
                 app_state,
@@ -446,7 +463,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
             error!("HLS input stream identity missing for virtual_id={}; refresh target playlist", pli.virtual_id);
             return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
         };
-        let original_hls_entry_path = build_virtual_hls_entry_path(&target, &input, &user, pli.virtual_id);
+        let original_hls_entry_path = build_virtual_hls_entry_path(&target, &input, &user, pli.virtual_id.get());
         return handle_hls_stream_request(
             fingerprint,
             app_state,
@@ -932,7 +949,9 @@ async fn m3u_api_resource(
                     }
                 }
             } else {
-                resource_response(&app_state, &url, &req_headers, None).await.into_response()
+                resource_response(&app_state, ResourceFetchPolicy::Standard, &url, &req_headers, None)
+                    .await
+                    .into_response()
             }
         }
     }
@@ -1078,6 +1097,7 @@ mod tests {
     use shared::{
         model::{
             CatchupProperties, ClusterFlags, LiveStreamProperties, M3uPlaylistItem, PlaylistItemType, StreamProperties,
+            VirtualId,
         },
         utils::Internable,
     };
@@ -1187,7 +1207,7 @@ mod tests {
 
     fn native_flussonic_item(mode: &str, url: &str) -> M3uPlaylistItem {
         M3uPlaylistItem {
-            virtual_id: 59,
+            virtual_id: VirtualId::new(59),
             provider_id: "59".intern(),
             name: "Channel".intern(),
             chno: 0,
