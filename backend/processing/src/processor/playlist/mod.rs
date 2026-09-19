@@ -15,7 +15,7 @@ use crate::{
 };
 use futures::{FutureExt, StreamExt};
 use indexmap::IndexMap;
-use log::{debug, error, info, log_enabled, trace, warn, Level};
+use log::{debug, error, info, log_enabled, warn, Level};
 use path_clean::PathClean;
 use shared::{
     concat_string,
@@ -26,11 +26,12 @@ use shared::{
         ClusterFlags, ConfigTargetOptions, CounterModifier, EventMessage, EventSink, FieldGet, FieldSet,
         InputRefreshOverride, InputRefreshPolicy, InputStats, InputType, InputUpdateAction, InputUpdateRequest,
         MappingStage, PersistedPlaylistUpdateClusterSnapshot, PersistedPlaylistUpdateQualityDecision,
-        PersistedPlaylistUpdateQualitySnapshot, PersistedPlaylistUpdateTechnicalState, PipelineStats, PlaylistGroup,
-        PlaylistItem, PlaylistItemType, PlaylistStats, PlaylistUpdateClusterDecision, PlaylistUpdateClusterTelemetry,
-        PlaylistUpdateDataSource, PlaylistUpdateInputTelemetry, PlaylistUpdateProgressEvent, PlaylistUpdateRunId,
-        PlaylistUpdateRunOrder, PlaylistUpdateState, PlaylistUpdateSummary, ProviderFetchFailure, SourceStats,
-        StreamProperties, TargetStats, UUIDType, WatchDisabled, WatchDisabledReason, WatchUnmatched, XtreamCluster,
+        PersistedPlaylistUpdateQualitySnapshot, PersistedPlaylistUpdateTechnicalState, PipelineStats, PlaylistEntry,
+        PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistStats, PlaylistUpdateClusterDecision,
+        PlaylistUpdateClusterTelemetry, PlaylistUpdateDataSource, PlaylistUpdateInputTelemetry,
+        PlaylistUpdateProgressEvent, PlaylistUpdateRunId, PlaylistUpdateRunOrder, PlaylistUpdateState,
+        PlaylistUpdateSummary, ProviderFetchFailure, SourceStats, StreamProperties, TargetStats, UUIDType,
+        WatchDisabled, WatchDisabledReason, WatchUnmatched, XtreamCluster,
     },
     utils::{create_alias_uuid, interner_gc, sanitize_sensitive_info, Internable},
 };
@@ -50,11 +51,14 @@ use tuliprox_core::{
         is_valid, retain_filtered_playlist, AppConfig, ClusterForceUpdate, ClusterUpdateRejection, CompiledMapping,
         ConfigFavourites, ConfigInput, ConfigInputFlags, ConfigInputOptions, ConfigRename, ConfigTarget, Epg,
         FilterOutcome, MappingProgram, ProcessTargets, ProviderIdType, ResolveReason, ReverseProxyDisabledHeaderConfig,
-        TransformStage, UpdateGuard, UpdateTask,
+        TraktConfig, TransformStage, UpdateGuard, UpdateTask,
     },
     utils::{debug_if_enabled, log_memory_snapshot, trace_if_enabled, StepMeasure, StepMeasureCallback},
 };
-use tuliprox_curation::curate_trakt_categories;
+use tuliprox_curation::{
+    evaluate_trakt_curation, project_trakt_categories, CurationEvaluation, CurationFailure, CurationRunOutcome,
+    SelectorOutcome,
+};
 use tuliprox_iptv::{
     epg::{CountingEpgSink, EpgFetchRequest, EpgProvider},
     error::ProviderErrorKind,
@@ -65,8 +69,8 @@ use tuliprox_iptv::{
     xtream,
 };
 use tuliprox_repository::{
-    load_input_playlist, persist_input_playlist_with_options, persist_playlist, CategoryKey,
-    InputPlaylistPersistOptions, MemoryPlaylistSource, PlaylistSource, PlaylistStorageState,
+    load_input_playlist, persist_input_playlist_with_options, persist_playlist_views, CategoryKey,
+    InputPlaylistPersistOptions, MemoryPlaylistSource, PlaylistPublicationPlan, PlaylistSource, PlaylistStorageState,
     TargetPlaylistPersistOptions,
 };
 use tuliprox_session::ActiveProviderManager;
