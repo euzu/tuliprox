@@ -29,7 +29,7 @@ use tokio::{
 };
 use tuliprox_testkit::{
     bootstrap::{fixture_password, IsolatedFixture},
-    config::{ExpectedPlayback, PostReadAction, Scenario},
+    config::{ExpectedPlayback, PostReadAction, RuntimeAssertions, Scenario},
     control::{PlaybackRegistry, StartDisposition},
     custom_video::WireMarkerScanner,
     discovery::VirtualIdMap,
@@ -2110,6 +2110,51 @@ async fn check_origin_assertions<'a>(
     }
 }
 
+/// Verifies the SUT's user-side accounting (`active_users`, `active_user_connections`)
+/// after a step, polling briefly so an in-flight cleanup does not fail the check.
+async fn check_runtime_assertions<'a>(
+    step_id: &'a str,
+    assertions: &RuntimeAssertions,
+    observer: &TuliproxObserver,
+    events: &mut Vec<(&'a str, &'static str)>,
+    any_failed: &mut bool,
+    observations_incomplete: &mut bool,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Ok(status) = observer.status().await {
+            let users = status.get("active_users").and_then(serde_json::Value::as_u64);
+            let connections = status.get("active_user_connections").and_then(serde_json::Value::as_u64);
+            let (Some(users), Some(connections)) = (users, connections) else {
+                *observations_incomplete = true;
+                events.push((step_id, "runtime_user_counts_unavailable"));
+                return;
+            };
+            let users_ok = assertions.active_users.is_none_or(|expected| users == expected as u64);
+            let connections_ok =
+                assertions.active_user_connections.is_none_or(|expected| connections == expected as u64);
+            if (users_ok && connections_ok) || tokio::time::Instant::now() >= deadline {
+                if !users_ok {
+                    *any_failed = true;
+                    events.push((step_id, "runtime_active_users_mismatch"));
+                }
+                if !connections_ok {
+                    *any_failed = true;
+                    events.push((step_id, "runtime_active_user_connections_mismatch"));
+                }
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        } else if tokio::time::Instant::now() >= deadline {
+            *observations_incomplete = true;
+            events.push((step_id, "runtime_status_unavailable"));
+            return;
+        } else {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 async fn execute_scenario_steps<'a>(
     scenario: &'a Scenario,
@@ -2210,6 +2255,18 @@ async fn execute_scenario_steps<'a>(
                         observations_incomplete = true;
                         events.push((stop.playback_id.as_str(), "origin_observer_missing"));
                     }
+                }
+
+                if let Some(runtime) = &step.assert_runtime {
+                    check_runtime_assertions(
+                        stop.playback_id.as_str(),
+                        runtime,
+                        observer,
+                        &mut events,
+                        &mut any_failed,
+                        &mut observations_incomplete,
+                    )
+                    .await;
                 }
 
                 continue;
@@ -2470,6 +2527,17 @@ async fn execute_scenario_steps<'a>(
             } else {
                 observations_incomplete = true;
                 events.push((start.playback_id.as_str(), "runtime_observation_unavailable"));
+            }
+            if let Some(runtime) = &step.assert_runtime {
+                check_runtime_assertions(
+                    start.playback_id.as_str(),
+                    runtime,
+                    observer,
+                    &mut events,
+                    &mut any_failed,
+                    &mut observations_incomplete,
+                )
+                .await;
             }
         }
         Ok::<(), TestkitError>(())

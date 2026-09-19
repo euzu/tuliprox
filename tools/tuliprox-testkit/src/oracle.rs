@@ -199,6 +199,29 @@ mod tests {
     }
 
     #[test]
+    fn soft_slot_exhausts_before_deny() {
+        let mut oracle = AdmissionOracle::with_policy(1, 1, Vec::new(), None);
+        assert!(matches!(
+            oracle.admit(Request { playback_id: "a".to_owned(), client_ip: "10.0.0.1".to_owned(), started_order: 1 }),
+            Ok(Decision::Admit)
+        ));
+        assert!(matches!(
+            oracle.admit(Request { playback_id: "b".to_owned(), client_ip: "10.0.0.1".to_owned(), started_order: 2 }),
+            Ok(Decision::AdmitSoft)
+        ));
+        assert!(matches!(
+            oracle.admit(Request { playback_id: "c".to_owned(), client_ip: "10.0.0.1".to_owned(), started_order: 3 }),
+            Ok(Decision::Deny)
+        ));
+        // Releasing the soft slot frees the extra capacity again.
+        oracle.release("b").unwrap();
+        assert!(matches!(
+            oracle.admit(Request { playback_id: "d".to_owned(), client_ip: "10.0.0.1".to_owned(), started_order: 4 }),
+            Ok(Decision::AdmitSoft)
+        ));
+    }
+
+    #[test]
     fn grace_applies_when_capacity_has_no_eviction_strategy() {
         let mut oracle = AdmissionOracle::with_policy(1, 0, Vec::new(), Some(GraceMode::HoldStream));
         assert!(oracle

@@ -211,6 +211,8 @@ pub struct Step {
     pub await_condition: Option<AwaitCondition>,
     #[serde(default)]
     pub assert_origin: Option<AssertOrigin>,
+    #[serde(default)]
+    pub assert_runtime: Option<RuntimeAssertions>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -286,6 +288,20 @@ pub struct AssertOrigin {
     pub no_evictions: Option<bool>,
     #[serde(default)]
     pub no_limit_rejections: Option<bool>,
+}
+
+/// Per-step assertions against the SUT runtime status (`/api/v1/status`).
+///
+/// These verify the user-side accounting the operator sees in the Web UI, so a
+/// leaked or double-counted connection fails the scenario even when the origin
+/// and provider counters look correct.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeAssertions {
+    #[serde(default)]
+    pub active_users: Option<usize>,
+    #[serde(default)]
+    pub active_user_connections: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -559,6 +575,7 @@ mod tests {
                     await_frames: None,
                     await_condition: None,
                     assert_origin: None,
+                    assert_runtime: None,
                 })
                 .collect(),
         };
@@ -581,6 +598,8 @@ mod tests {
             "vod-reopen-backpressured-body.yml",
             "live-ts-same-channel-retry-latest-wins.yml",
             "reentry-suppresses-evicted-retry.yml",
+            "soft-slot-precedes-eviction.yml",
+            "soft-slot-exhausts-without-upstream-leak.yml",
         ] {
             assert!(Scenario::from_path(&root.join(filename)).is_ok(), "{filename}");
         }

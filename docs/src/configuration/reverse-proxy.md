@@ -95,6 +95,18 @@ Examples:
 * valid: `evict_user_same_ip_latest`, then `evict_user_latest`
 * invalid: `evict_user_latest`, then `evict_user_same_ip_latest`
 
+Several configuration details are easy to misread:
+
+* An omitted `admission_strategies` key is **not** the same as an empty list. When the key is absent
+  and `grace_period_millis > 0` (default `2000`), Tuliprox falls back to a single grace strategy selected
+  by `grace_period_hold_stream` (`grace_hold_stream` when `true`, otherwise `grace_instant_stream`).
+  Use `admission_strategies: []` to disable that fallback.
+* `admission_strategies: []` disables only the user-admission fallback. Provider-side grace is still
+  governed by `grace_period_millis`; set it to `0` if you want no grace or stream holding at all.
+* A grace strategy listed before an eviction strategy is resolved first, but it does not make the later
+  rules unreachable. If grace cannot be granted, the remaining strategies, including eviction, are still
+  evaluated.
+
 ```yaml
 reverse_proxy:
   stream:
