@@ -101,8 +101,8 @@ async fn validate_hls_access_lease_admission(
         false,
     )
     .await;
-    if admission.permission == UserConnectionPermission::Exhausted
-        || (admission.permission == UserConnectionPermission::GracePeriod && admission.kind.is_none())
+    if admission.permission() == UserConnectionPermission::Exhausted
+        || (admission.permission() == UserConnectionPermission::GracePeriod && admission.kind().is_none())
     {
         let runtime_tail = begin_runtime_policy_denial(
             ctx,
@@ -133,7 +133,7 @@ async fn validate_hls_access_lease_admission(
             &lease.user_session_token,
         )
         .await
-        .or(admission.kind)
+        .or(admission.kind())
     else {
         let runtime_tail = begin_runtime_policy_denial(
             ctx,

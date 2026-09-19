@@ -285,7 +285,7 @@ async fn handle_protocol_message(
                 None
             }
             Ok(ProtocolMessage::ActiveProviderCountRequest(auth_token)) => {
-                handle_active_provider_count_request(auth_token, mem, app_state, auth_required, verifier).await
+                Some(handle_active_provider_count_request(auth_token, mem, app_state, auth_required, verifier))
             }
             Ok(_) => {
                 trace!("Unexpected protocol message after handshake");
@@ -318,32 +318,32 @@ fn handle_stream_meter_unsubscribe(mem: &mut ProtocolHandlerMemory, app_state: &
     }
 }
 
-async fn handle_active_provider_count_request(
+fn handle_active_provider_count_request(
     auth_token: String,
     mem: &mut ProtocolHandlerMemory,
     app_state: &Arc<AppState>,
     auth_required: bool,
     verifier: Option<&TokenVerifier>,
-) -> Option<ProtocolMessage> {
+) -> ProtocolMessage {
     if auth_required {
         let Some(verifier) = verifier else {
-            return Some(ProtocolMessage::Unauthorized);
+            return ProtocolMessage::Unauthorized;
         };
         let Some(token_data) = verifier.verify(&auth_token) else {
-            return Some(ProtocolMessage::Unauthorized);
+            return ProtocolMessage::Unauthorized;
         };
         if token_data.claims.permissions.contains(Permission::SystemRead)
             && set_websocket_auth(mem, auth_token, &token_data.claims)
         {
-            let connections = app_state.active_provider.get_provider_connections_count().await;
-            Some(ProtocolMessage::ActiveProviderCountResponse(connections))
+            let connections = app_state.active_provider.get_provider_connections_count();
+            ProtocolMessage::ActiveProviderCountResponse(connections)
         } else {
-            Some(ProtocolMessage::Unauthorized)
+            ProtocolMessage::Unauthorized
         }
     } else {
         set_no_auth_websocket_identity(mem, Some(TOKEN_NO_AUTH.to_string()));
-        let connections = app_state.active_provider.get_provider_connections_count().await;
-        Some(ProtocolMessage::ActiveProviderCountResponse(connections))
+        let connections = app_state.active_provider.get_provider_connections_count();
+        ProtocolMessage::ActiveProviderCountResponse(connections)
     }
 }
 

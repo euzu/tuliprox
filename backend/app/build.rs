@@ -1,8 +1,8 @@
 use std::error::Error;
-use vergen::{BuildBuilder, Emitter};
+use vergen::{Build, Emitter};
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let build = BuildBuilder::all_build()?;
+    let build = Build::all_build();
     Emitter::default().add_instructions(&build)?.emit()?;
     Ok(())
 }

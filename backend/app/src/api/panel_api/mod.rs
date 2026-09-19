@@ -1242,10 +1242,7 @@ pub(crate) fn can_provision_on_exhausted(app_state: &AppState, input: &ConfigInp
         debug_if_enabled!("panel_api config invalid: {}", sanitize_sensitive_info(&err.to_string()));
         return false;
     }
-    if is_alias_pool_max_reached(app_state, input) {
-        return false;
-    }
-    true
+    !is_alias_pool_max_reached(app_state, input)
 }
 
 pub(crate) fn find_input_by_provider_name(app_state: &AppState, provider_name: &str) -> Option<Arc<ConfigInput>> {
@@ -3677,6 +3674,7 @@ pub fn create_panel_api_provisioning_stream_details(
         );
         let (stream, stream_info) = create_provider_connections_exhausted_stream(&app_state.app_config, &[]);
         return StreamDetails {
+            shared_subscriber_id: None,
             stream,
             stream_info,
             provider_name,
@@ -3691,6 +3689,7 @@ pub fn create_panel_api_provisioning_stream_details(
             provider_handle: None,
             content_representation: crate::api::model::ProviderContentRepresentationMode::PreserveOrigin,
             grace_resolution_context: None,
+            custom_reason: None,
         };
     }
 
@@ -3706,6 +3705,7 @@ pub fn create_panel_api_provisioning_stream_details(
     });
 
     StreamDetails {
+        shared_subscriber_id: None,
         stream,
         stream_info,
         provider_name,
@@ -3720,6 +3720,7 @@ pub fn create_panel_api_provisioning_stream_details(
         provider_handle: None,
         content_representation: crate::api::model::ProviderContentRepresentationMode::PreserveOrigin,
         grace_resolution_context: None,
+        custom_reason: None,
     }
 }
 

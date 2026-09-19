@@ -687,7 +687,7 @@ mod tests {
         let event_manager = Arc::new(EventManager::new());
         let active_provider = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
         let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
-        active_provider.set_shared_stream_manager(Arc::clone(&shared_stream_manager));
+        active_provider.set_shared_stream_manager(&shared_stream_manager);
 
         let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
         let config = app_cfg.config.load();
@@ -748,6 +748,41 @@ mod tests {
             )),
             manual_update_sender,
         })
+    }
+
+    #[tokio::test]
+    async fn custom_video_response_preserves_other_provider_on_proxy_socket() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let app = create_test_app_state();
+        let addr = test_fingerprint().addr;
+        let input = app.app_config.sources.load().inputs.first().cloned().ok_or("input missing")?;
+        let handle = app
+            .active_provider
+            .acquire_connection(&input.name, &addr, 0, tuliprox_session::ConnectionKind::Normal)
+            .ok_or("allocation missing")?;
+        let response = crate::api::model::create_custom_video_stream_response(
+            &app.provider_stream_ctx(),
+            &addr,
+            crate::api::model::CustomVideoStreamType::ChannelUnavailable,
+        )
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        // Confirmation is a queue barrier for any cleanup emitted by the response.
+        app.active_provider.refresh_provider_reservation(&input.name, "cleanup-barrier", 30);
+        app.connection_manager.send_cleanup(tuliprox_session::CleanupEvent::ConfirmPlaybackLease {
+            owner: Arc::from("cleanup-barrier"),
+            request_id: None,
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while app.active_provider.provider_lease_usage(&input.name).active == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert_eq!(app.active_provider.get_provider_connections_count(), 1);
+        app.active_provider.clear_provider_reservation("cleanup-barrier");
+        app.active_provider.release_handle(&handle);
+        Ok(())
     }
 
     #[tokio::test]

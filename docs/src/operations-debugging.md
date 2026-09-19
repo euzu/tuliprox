@@ -417,3 +417,88 @@ If hot-reload fails to
 trigger, a container restart (`docker restart tuliprox`) is the safest fallback.
 
 ---
+
+## 8. Runtime Liveness Watchdog
+
+A reverse proxy can wedge without crashing: the process is still alive, but the async scheduler stops making progress and
+the logs simply stop. At the OS level this looks like an idle process, so `docker stats` and `ps` cannot tell it apart
+from a healthy one.
+
+The watchdog detects exactly that. It is **opt-in and off by default**.
+
+### What it does
+
+* **Heartbeat (inside the runtime):** a small task records a monotonic timestamp every second and measures how late it
+  was scheduled.
+* **Watchdog thread (outside the runtime):** a separate `std::thread` watches the heartbeat age. If the scheduler is
+  wedged, the heartbeat stops advancing and the thread logs a diagnostic snapshot.
+* **On a stall** it logs (once, then every 30 s while it continues) the heartbeat age, runtime metrics (worker count,
+  alive tasks, global queue depth, per-worker park counts) and, on Linux, a `/proc/self/task` inventory with each
+  thread's id, name, state and waiting channel.
+* **On recovery** it logs that the heartbeat is back.
+
+The watchdog itself only reports. In mode `2` it can additionally exit the process so a supervisor restarts it (see below).
+
+### Modes
+
+`TULIPROX_WATCHDOG` is a mode selector, not a boolean:
+
+| Value                               | Mode    | Behaviour                                                                          |
+|:------------------------------------|:--------|:-----------------------------------------------------------------------------------|
+| unset, `0`, anything else           | off     | No heartbeat task, no watchdog thread.                                             |
+| `1`, `true`, `on`, `yes`, `enabled` | observe | Detect and log stalls; never touches the process.                                  |
+| `2`, `restart`                      | restart | Like observe, and exit the process after the stall persists past the grace period. |
+
+In restart mode the process exits with code `75` (non-zero, so both `restart: unless-stopped` and `restart: on-failure`
+bring it back). This is a deliberate crash-and-restart, not an in-process recovery. Only enable it if a supervisor is
+actually configured; otherwise the container will stay down.
+
+### Settings
+
+| Variable                             | Default         | Purpose                                                                       |
+|:-------------------------------------|:----------------|:------------------------------------------------------------------------------|
+| `TULIPROX_WATCHDOG`                  | *(unset = off)* | Mode selector: `1` = observe, `2` = observe and restart on a confirmed stall. |
+| `TULIPROX_WATCHDOG_HEARTBEAT_MS`     | `1000`          | Heartbeat interval.                                                           |
+| `TULIPROX_WATCHDOG_STALL_MS`         | `10000`         | Heartbeat age above which a stall is reported.                                |
+| `TULIPROX_WATCHDOG_RELOG_MS`         | `30000`         | Re-log interval while a stall continues.                                      |
+| `TULIPROX_WATCHDOG_RESTART_GRACE_MS` | `30000`         | Mode `2` only: how long the stall must persist before the process exits.      |
+
+Docker example:
+
+```yaml
+services:
+  tuliprox:
+    restart: unless-stopped
+    environment:
+      # observe only
+      - TULIPROX_WATCHDOG=1
+      # ...or observe and restart on a confirmed stall (needs restart policy above)
+      # - TULIPROX_WATCHDOG=2
+```
+
+### Healthcheck
+
+While the watchdog runs, `GET /healthcheck` gains a `runtime` object:
+
+```json
+{
+  "status": "ok",
+  "runtime": {
+    "status": "alive",
+    "heartbeat_age_ms": 12,
+    "heartbeat_interval_ms": 1000,
+    "stall_threshold_ms": 10000,
+    "ticks": 8401,
+    "stall_episodes": 0,
+    "max_schedule_delay_ms": 3,
+    "uptime_ms": 8401000,
+    "restart_on_stall": false
+  }
+}
+```
+
+`restart_on_stall` is `true` only in mode `2`, so an operator can see whether the process is armed to restart itself.
+
+`runtime.status` is `stalled` once the heartbeat stops. The top-level `status` intentionally stays `ok` for as long as the
+HTTP server answers, so no orchestrator restarts the process. If the whole runtime is wedged, the endpoint cannot answer
+at all — in that case the watchdog log is the signal.

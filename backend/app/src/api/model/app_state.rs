@@ -151,7 +151,7 @@ pub async fn update_app_state_sources(
         Arc::new(targets)
     };
     app_state.forced_targets.store(targets);
-    let updates = app_state.set_sources(sources).await?;
+    let updates = app_state.set_sources(sources)?;
     update_target_caches(app_state, updates.targets.as_ref()).await;
     restart_services(app_state, &updates);
     Ok(())
@@ -497,13 +497,25 @@ pub(crate) fn create_test_app_state(config: Config) -> Arc<AppState> {
     let event_manager = Arc::new(EventManager::new());
     let active_provider = Arc::new(ActiveProviderManager::new(&app_config, &event_manager));
     let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
-    active_provider.set_shared_stream_manager(Arc::clone(&shared_stream_manager));
+    active_provider.set_shared_stream_manager(&shared_stream_manager);
 
     let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
     let loaded_config = app_config.config.load();
     let active_users = Arc::new(ActiveUserManager::new(&loaded_config, &geoip, &event_manager));
-    let connection_manager =
-        Arc::new(ConnectionManager::new(&active_users, &active_provider, &shared_stream_manager, &event_manager, None));
+    let cleanup_capacity = loaded_config
+        .reverse_proxy
+        .as_ref()
+        .and_then(|reverse_proxy| reverse_proxy.stream.as_ref())
+        .map_or_else(shared::defaults::default_cleanup_queue_capacity, |stream| stream.cleanup_queue_capacity);
+    drop(loaded_config);
+    let connection_manager = Arc::new(ConnectionManager::new_with_capacity(
+        &active_users,
+        &active_provider,
+        &shared_stream_manager,
+        &event_manager,
+        None,
+        cleanup_capacity,
+    ));
     let tokens = CancelTokens::default();
     let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
     let (manual_update_sender, _) = mpsc::channel::<ManualPlaylistUpdateRequest>(1);
@@ -566,7 +578,7 @@ impl AppState {
         self.active_users.update_config(&config);
         self.app_config.set_config(config)?;
         reload_logger(config_log_level.as_deref());
-        self.active_provider.update_config(&self.app_config).await;
+        self.active_provider.update_config(&self.app_config);
         self.hls_proxy.update_config(&self.app_config).await;
         self.update_config().await?;
 
@@ -618,10 +630,7 @@ impl AppState {
         Ok(())
     }
 
-    pub(in crate::api::model) async fn set_sources(
-        &self,
-        sources: SourcesConfig,
-    ) -> Result<UpdateChanges, TuliproxError> {
+    pub(in crate::api::model) fn set_sources(&self, sources: SourcesConfig) -> Result<UpdateChanges, TuliproxError> {
         let changes = self.detect_changes_for_sources(&sources);
         // Carry over DNS caches from old providers so resolved IPs survive hot-reloads
         // without waiting for the background resolver or the persisted-file seed.
@@ -640,7 +649,7 @@ impl AppState {
             }
         }
         self.app_config.set_sources(sources)?;
-        self.active_provider.update_config(&self.app_config).await;
+        self.active_provider.update_config(&self.app_config);
 
         shared::model::REGEX_CACHE.sweep();
         Ok(changes)

@@ -1,8 +1,10 @@
 use crate::model::macros;
 use shared::{
+    defaults::DEFAULT_RECENT_EVICTION_REENTRY_TTL_MS,
     model::{AdmissionStrategy, StreamBufferConfigDto, StreamConfigDto},
     utils::parse_to_kbps,
 };
+use std::time::Duration;
 use tuliprox_mpegts::transport_stream_buffer::TransportStreamBuffer;
 
 #[derive(Debug, Clone)]
@@ -40,6 +42,8 @@ pub struct StreamConfig {
     pub throttle_kbps: u64,
     pub shared_burst_buffer_mb: u64,
     pub shared_subscriber_idle_timeout_secs: u64,
+    pub cleanup_queue_capacity: usize,
+    pub recent_eviction_reentry_ttl: Duration,
     pub admission_strategies: Option<Vec<AdmissionStrategy>>,
 }
 
@@ -59,6 +63,8 @@ impl Default for StreamConfig {
             throttle_kbps: 0,
             shared_burst_buffer_mb: 12,
             shared_subscriber_idle_timeout_secs: 300,
+            cleanup_queue_capacity: 4096,
+            recent_eviction_reentry_ttl: Duration::from_millis(DEFAULT_RECENT_EVICTION_REENTRY_TTL_MS),
             admission_strategies: None,
         }
     }
@@ -78,6 +84,8 @@ impl From<&StreamConfigDto> for StreamConfig {
             throttle_kbps: dto.throttle.as_ref().map_or(0u64, |throttle| parse_to_kbps(throttle).unwrap_or(0u64)),
             shared_burst_buffer_mb: dto.shared_burst_buffer_mb,
             shared_subscriber_idle_timeout_secs: dto.shared_subscriber_idle_timeout_secs,
+            cleanup_queue_capacity: dto.cleanup_queue_capacity,
+            recent_eviction_reentry_ttl: Duration::from_millis(dto.recent_eviction_reentry_ttl_ms),
             admission_strategies: dto.admission_strategies.clone(),
         }
     }
@@ -98,6 +106,12 @@ impl From<&StreamConfig> for StreamConfigDto {
             throttle_kbps: instance.throttle_kbps,
             shared_burst_buffer_mb: instance.shared_burst_buffer_mb,
             shared_subscriber_idle_timeout_secs: instance.shared_subscriber_idle_timeout_secs,
+            cleanup_queue_capacity: instance.cleanup_queue_capacity,
+            recent_eviction_reentry_ttl_ms: instance
+                .recent_eviction_reentry_ttl
+                .as_millis()
+                .try_into()
+                .unwrap_or(DEFAULT_RECENT_EVICTION_REENTRY_TTL_MS),
             admission_strategies: instance.admission_strategies.clone(),
         }
     }
@@ -107,6 +121,18 @@ impl From<&StreamConfig> for StreamConfigDto {
 mod tests {
     use super::StreamConfig;
     use shared::model::{AdmissionStrategy, StreamConfigDto};
+
+    #[test]
+    fn stream_config_defaults_reentry_ttl_to_the_shared_default() {
+        let config = StreamConfig::default();
+        assert_eq!(
+            config.recent_eviction_reentry_ttl,
+            std::time::Duration::from_millis(shared::defaults::DEFAULT_RECENT_EVICTION_REENTRY_TTL_MS)
+        );
+        // The documented default is 3000 ms for backward compatibility.
+        assert_eq!(shared::defaults::DEFAULT_RECENT_EVICTION_REENTRY_TTL_MS, 3000);
+        assert_eq!(shared::defaults::default_recent_eviction_reentry_ttl_ms(), 3000);
+    }
 
     #[test]
     fn stream_config_preserves_missing_admission_strategies() {
@@ -136,6 +162,8 @@ mod tests {
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
             shared_subscriber_idle_timeout_secs: 300,
+            cleanup_queue_capacity: 4096,
+            recent_eviction_reentry_ttl: std::time::Duration::from_millis(2_500),
             admission_strategies: Some(vec![
                 AdmissionStrategy::EvictUserOldest,
                 AdmissionStrategy::GraceHoldStream,
@@ -144,6 +172,7 @@ mod tests {
         };
 
         let dto = StreamConfigDto::from(&domain);
+        assert_eq!(dto.recent_eviction_reentry_ttl_ms, 2_500);
         assert_eq!(
             dto.admission_strategies,
             Some(vec![

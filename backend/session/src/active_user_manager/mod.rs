@@ -1,5 +1,8 @@
 use crate::{
-    active_provider_manager::ConnectionKind, connection_manager::CleanupEvent, ActiveProviderManager, EventManager,
+    active_provider_manager::ConnectionKind,
+    connection_manager::CleanupEvent,
+    stream::{uses_direct_body_idle_timeout, DIRECT_BODY_IDLE_TIMEOUT_SECS},
+    ActiveProviderManager, EventManager,
 };
 use arc_swap::ArcSwapOption;
 use jsonwebtoken::get_current_timestamp;
@@ -153,9 +156,53 @@ struct UserConnectionCounts {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionRejectionReason {
+    UserConnectionsExhausted,
+    RecentEvictionReentry,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConnectionAdmission {
-    pub permission: UserConnectionPermission,
-    pub kind: Option<ConnectionKind>,
+    permission: UserConnectionPermission,
+    kind: Option<ConnectionKind>,
+    rejection_reason: Option<AdmissionRejectionReason>,
+}
+
+impl ConnectionAdmission {
+    pub fn allowed(kind: Option<ConnectionKind>) -> Self {
+        Self { permission: UserConnectionPermission::Allowed, kind, rejection_reason: None }
+    }
+
+    pub fn grace_period(kind: Option<ConnectionKind>) -> Self {
+        Self { permission: UserConnectionPermission::GracePeriod, kind, rejection_reason: None }
+    }
+
+    pub fn exhausted(reason: AdmissionRejectionReason, kind: Option<ConnectionKind>) -> Self {
+        Self { permission: UserConnectionPermission::Exhausted, kind, rejection_reason: Some(reason) }
+    }
+
+    /// Maps a stored session permission onto an admission. An exhausted session is
+    /// classified as a genuine connection-limit rejection so the
+    /// `Exhausted ⇒ rejection_reason.is_some()` invariant always holds.
+    pub fn from_permission(permission: UserConnectionPermission, kind: Option<ConnectionKind>) -> Self {
+        match permission {
+            UserConnectionPermission::Allowed => Self::allowed(kind),
+            UserConnectionPermission::GracePeriod => Self::grace_period(kind),
+            UserConnectionPermission::Exhausted => {
+                Self::exhausted(AdmissionRejectionReason::UserConnectionsExhausted, kind)
+            }
+        }
+    }
+
+    pub fn permission(&self) -> UserConnectionPermission { self.permission }
+
+    pub fn kind(&self) -> Option<ConnectionKind> { self.kind }
+
+    pub fn rejection_reason(&self) -> Option<AdmissionRejectionReason> { self.rejection_reason }
+
+    pub fn is_reentry_suppressed(&self) -> bool {
+        self.rejection_reason == Some(AdmissionRejectionReason::RecentEvictionReentry)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -163,6 +210,38 @@ struct PromotionAction {
     addr: SocketAddr,
     uid: u32,
     new_priority: i8,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StreamRequestClaim {
+    stream_uid: u32,
+    addr: SocketAddr,
+}
+
+#[derive(Debug)]
+pub enum StreamRequestDetach {
+    NotFound,
+    Retained(StreamInfo),
+    Preserved(StreamInfo),
+    Removed(StreamInfo),
+}
+
+impl StreamRequestDetach {
+    pub fn request_was_detached(&self) -> bool { !matches!(self, Self::NotFound) }
+
+    pub fn stream_info(&self) -> Option<&StreamInfo> {
+        match self {
+            Self::NotFound => None,
+            Self::Retained(stream) | Self::Preserved(stream) | Self::Removed(stream) => Some(stream),
+        }
+    }
+
+    fn into_removed(self) -> Option<StreamInfo> {
+        match self {
+            Self::Removed(stream) => Some(stream),
+            Self::NotFound | Self::Retained(_) | Self::Preserved(_) => None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -175,6 +254,7 @@ struct UserConnectionData {
     grace_ts: u64,
     sessions: Vec<UserSession>,
     streams: Vec<StreamInfo>,
+    stream_request_claims: HashMap<u32, StreamRequestClaim>,
     stream_kinds: HashMap<u32, ConnectionKind>,
     stream_normal_priorities: HashMap<u32, i8>,
     ts: u64,
@@ -191,6 +271,7 @@ impl UserConnectionData {
             grace_ts: 0,
             sessions: Vec::new(),
             streams: Vec::new(),
+            stream_request_claims: HashMap::new(),
             stream_kinds: HashMap::new(),
             stream_normal_priorities: HashMap::new(),
             ts: current_time_secs(),
@@ -220,6 +301,40 @@ impl UserConnectionData {
             }
         }
         migrated_addrs
+    }
+
+    fn release_addr_from_stream_session(&mut self, addr: &SocketAddr, uid: u32) -> HashMap<String, Option<SocketAddr>> {
+        let Some(token) =
+            self.streams.iter().find(|stream| stream.uid == uid).and_then(|stream| stream.session_token.as_deref())
+        else {
+            return HashMap::new();
+        };
+        if self.streams.iter().any(|stream| {
+            stream.uid != uid
+                && !stream.preserved
+                && stream.addr == *addr
+                && stream.session_token.as_deref() == Some(token)
+        }) {
+            return HashMap::new();
+        }
+        let Some(session) = self.sessions.iter_mut().find(|session| session.token == token) else {
+            return HashMap::new();
+        };
+        HashMap::from([(session.token.clone(), release_session_addr(session, addr))])
+    }
+
+    fn attach_stream_request(&mut self, request_uid: u32, stream_uid: u32, addr: SocketAddr) {
+        self.stream_request_claims.insert(request_uid, StreamRequestClaim { stream_uid, addr });
+    }
+
+    fn detach_stream_request(&mut self, request_uid: u32) -> Option<(u32, bool)> {
+        let claim = self.stream_request_claims.remove(&request_uid)?;
+        let is_last = !self.stream_request_claims.values().any(|other| other.stream_uid == claim.stream_uid);
+        Some((claim.stream_uid, is_last))
+    }
+
+    fn remove_stream_request_claims(&mut self, stream_uid: u32) {
+        self.stream_request_claims.retain(|_, claim| claim.stream_uid != stream_uid);
     }
 
     fn increment_kind(&mut self, kind: ConnectionKind) {
@@ -268,6 +383,7 @@ impl UserConnectionData {
                 connection_changed = true;
             }
             self.stream_normal_priorities.remove(&uid);
+            self.remove_stream_request_claims(uid);
             self.streams.swap_remove(stream_idx);
             removed_count += 1;
         }
@@ -406,7 +522,7 @@ fn uses_session_reentry_guard(stream: &StreamInfo) -> bool {
 #[derive(Clone, Copy, Debug)]
 struct RecentWinnerProtection {
     protected_addr: SocketAddr,
-    expires_at: u64,
+    expires_at: Instant,
 }
 
 #[derive(Debug, Default)]
@@ -418,9 +534,9 @@ struct UserConnections {
     key_by_addr: HashMap<SocketAddr, SocketRegistration>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct SocketRegistration {
-    username: String,
+    usernames: HashSet<String>,
     ts: u64,
 }
 
@@ -520,7 +636,27 @@ fn clear_session_addr(session: &mut UserSession, addr: &SocketAddr) -> bool {
 }
 
 impl SocketRegistration {
-    fn anonymous() -> Self { Self { username: String::new(), ts: current_time_secs() } }
+    fn anonymous() -> Self { Self { usernames: HashSet::new(), ts: current_time_secs() } }
+
+    fn add_user(&mut self, username: &str, ts: u64) {
+        if !username.is_empty() && !self.usernames.contains(username) {
+            self.usernames.insert(username.to_string());
+        }
+        self.ts = ts;
+    }
+
+    fn remove_user(&mut self, username: &str) -> bool {
+        self.usernames.remove(username);
+        self.usernames.is_empty()
+    }
+
+    fn is_empty(&self) -> bool { self.usernames.is_empty() }
+
+    fn primary_username(&self) -> Option<&str> { self.usernames.iter().map(String::as_str).min() }
+
+    fn all_usernames(&self) -> Vec<String> { self.usernames.iter().cloned().collect() }
+
+    fn into_usernames(self) -> HashSet<String> { self.usernames }
 }
 
 struct UserSessionParams<'a> {
@@ -555,6 +691,7 @@ pub struct ActiveUserManager {
     provider_manager: tokio::sync::OnceCell<Arc<ActiveProviderManager>>,
     transition_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub dropped_cleanup_events: AtomicU64,
+    reentry_suppressed_total: AtomicU64,
     divergence_cache: Mutex<LruCache<String, DivergenceEntry>>,
     divergence_cooldown_secs: u64,
 }
@@ -655,10 +792,18 @@ impl ActiveUserManager {
             provider_manager: tokio::sync::OnceCell::new(),
             transition_gates: Mutex::new(HashMap::new()),
             dropped_cleanup_events: AtomicU64::new(0),
+            reentry_suppressed_total: AtomicU64::new(0),
             divergence_cache: Mutex::new(LruCache::new(DIVERGENCE_CACHE_CAPACITY)),
             divergence_cooldown_secs: 300,
         }
     }
+
+    /// Cumulative count of admission requests quietly suppressed by the recent-eviction
+    /// reentry guard. A diagnostic counter, not a failure metric.
+    pub fn reentry_suppressed_total(&self) -> u64 { self.reentry_suppressed_total.load(Ordering::Relaxed) }
+
+    /// Records one suppressed reentry retry.
+    pub fn record_reentry_suppressed(&self) { self.reentry_suppressed_total.fetch_add(1, Ordering::Relaxed); }
 
     fn transition_gate_key(username: &str, token: &str) -> String {
         let mut key = String::with_capacity(username.len() + token.len() + 1);
@@ -721,6 +866,19 @@ impl ActiveUserManager {
             .collect()
     }
 
+    /// Atomically removes all user requests and sessions during terminal shutdown.
+    pub async fn drain_for_shutdown(&self) -> Vec<shared::model::StreamInfo> {
+        let connections = std::mem::take(&mut *self.connections.write().await);
+        self.adaptive_expiry_queue.lock().await.clear();
+        self.adaptive_expiry_index.lock().await.clear();
+        self.transition_gates.lock().await.clear();
+        connections
+            .by_key
+            .into_values()
+            .flat_map(|data| data.streams.into_iter().filter(|stream| !stream.preserved))
+            .collect()
+    }
+
     async fn log_active_user(&self) {
         let is_log_user_enabled = self.is_log_user_enabled();
         let (user_count, user_connection_count) = { self.active_users_and_connections().await };
@@ -741,10 +899,6 @@ impl ActiveUserManager {
     }
 
     async fn emit_promotion_update(&self, username: &str, action: PromotionAction) {
-        if let Some(provider_manager) = self.provider_manager.get() {
-            provider_manager.reclassify_connection(&action.addr, ConnectionKind::Normal, action.new_priority).await;
-        }
-
         let maybe_stream = {
             let user_connections = self.connections.read().await;
             user_connections.by_key.get(username).and_then(|connection_data| {
@@ -752,6 +906,22 @@ impl ActiveUserManager {
             })
         };
         if let Some(stream_info) = maybe_stream {
+            if let Some(provider_manager) = self.provider_manager.get() {
+                if stream_info.channel.shared {
+                    provider_manager.reclassify_shared_connection(
+                        tuliprox_core::model::SharedSubscriberId::from_stream_uid(action.uid),
+                        ConnectionKind::Normal,
+                        action.new_priority,
+                    );
+                } else {
+                    provider_manager.reclassify_connection_for_owner(
+                        &action.addr,
+                        stream_info.session_token.as_deref(),
+                        ConnectionKind::Normal,
+                        action.new_priority,
+                    );
+                }
+            }
             self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info)));
         }
     }
@@ -761,16 +931,20 @@ impl ActiveUserManager {
     /// the underlying HTTP connection may still remain open.
     #[allow(clippy::too_many_lines)]
     pub async fn release_stream(&self, addr: &SocketAddr) -> Option<StreamInfo> {
-        self.release_stream_inner(addr, None).await
+        self.release_stream_inner(addr, None).await.into_removed()
     }
 
     #[allow(clippy::too_many_lines)]
     pub async fn release_stream_by_uid(&self, addr: &SocketAddr, stream_uid: u32) -> Option<StreamInfo> {
-        self.release_stream_inner(addr, Some(stream_uid)).await
+        self.release_stream_request_by_uid(addr, stream_uid).await.into_removed()
+    }
+
+    pub async fn release_stream_request_by_uid(&self, addr: &SocketAddr, request_uid: u32) -> StreamRequestDetach {
+        self.release_stream_inner(addr, Some(request_uid)).await
     }
 
     #[allow(clippy::too_many_lines)]
-    async fn release_stream_inner(&self, addr: &SocketAddr, stream_uid: Option<u32>) -> Option<StreamInfo> {
+    async fn release_stream_inner(&self, addr: &SocketAddr, stream_uid: Option<u32>) -> StreamRequestDetach {
         let (
             removed_stream,
             username,
@@ -782,29 +956,39 @@ impl ActiveUserManager {
         ) = {
             let mut user_connections = self.connections.write().await;
 
-            let username = match stream_uid {
-                Some(uid) => user_connections.by_key.iter().find_map(|(username, connection_data)| {
+            let username = if let Some(uid) = stream_uid {
+                user_connections.by_key.iter().find_map(|(username, connection_data)| {
                     connection_data
-                        .streams
-                        .iter()
-                        .any(|stream| !stream.preserved && stream.uid == uid && stream.addr == *addr)
-                        .then(|| username.clone())
-                }),
-                None => user_connections
-                    .key_by_addr
-                    .get(addr)
-                    .filter(|reg| !reg.username.is_empty())
-                    .map(|reg| reg.username.clone())
-                    .or_else(|| {
-                        user_connections.by_key.iter().find_map(|(username, connection_data)| {
-                            connection_data
-                                .streams
-                                .iter()
-                                .any(|stream| !stream.preserved && stream.addr == *addr)
-                                .then(|| username.clone())
+                        .stream_request_claims
+                        .get(&uid)
+                        .is_some_and(|claim| {
+                            claim.addr == *addr
+                                && connection_data
+                                    .streams
+                                    .iter()
+                                    .any(|stream| !stream.preserved && stream.uid == claim.stream_uid)
                         })
-                    }),
-            }?;
+                        .then(|| username.clone())
+                })
+            } else {
+                let mut matching_users = user_connections
+                    .by_key
+                    .iter()
+                    .filter(|(_, connection_data)| {
+                        connection_data.streams.iter().any(|stream| !stream.preserved && stream.addr == *addr)
+                    })
+                    .map(|(username, _)| username.clone());
+                let first = matching_users.next();
+                let second = matching_users.next();
+                if second.is_some() {
+                    None
+                } else {
+                    first
+                }
+            };
+            let Some(username) = username else {
+                return StreamRequestDetach::NotFound;
+            };
 
             let mut removed_stream = None;
             let mut expiry_entry = None;
@@ -812,7 +996,52 @@ impl ActiveUserManager {
             let mut connection_changed = false;
             let mut promotion = None;
             if let Some(connection_data) = user_connections.by_key.get_mut(&username) {
-                let migrated_session_addrs = connection_data.release_addr_from_sessions(addr);
+                let stream_uid = if let Some(request_uid) = stream_uid {
+                    let Some((display_uid, is_last)) = connection_data.detach_stream_request(request_uid) else {
+                        return StreamRequestDetach::NotFound;
+                    };
+                    if !is_last {
+                        let has_claim_on_addr = connection_data
+                            .stream_request_claims
+                            .values()
+                            .any(|claim| claim.stream_uid == display_uid && claim.addr == *addr);
+                        let migrated_session_addrs = if has_claim_on_addr {
+                            HashMap::new()
+                        } else {
+                            connection_data.release_addr_from_stream_session(addr, display_uid)
+                        };
+                        let next_addr = connection_data
+                            .stream_request_claims
+                            .values()
+                            .find(|claim| claim.stream_uid == display_uid)
+                            .map(|claim| claim.addr);
+                        if let Some(stream) =
+                            connection_data.streams.iter_mut().find(|stream| stream.uid == display_uid)
+                        {
+                            stream.addr = next_addr
+                                .or_else(|| {
+                                    stream
+                                        .session_token
+                                        .as_deref()
+                                        .and_then(|token| migrated_session_addrs.get(token))
+                                        .copied()
+                                        .flatten()
+                                })
+                                .unwrap_or(stream.addr);
+                            stream.ts = current_time_secs();
+                        }
+                        let retained = connection_data.streams.iter().find(|stream| stream.uid == display_uid).cloned();
+                        return retained.map_or(StreamRequestDetach::NotFound, StreamRequestDetach::Retained);
+                    }
+                    Some(display_uid)
+                } else {
+                    None
+                };
+                let migrated_session_addrs = if let Some(uid) = stream_uid {
+                    connection_data.release_addr_from_stream_session(addr, uid)
+                } else {
+                    connection_data.release_addr_from_sessions(addr)
+                };
                 if let Some(stream_idx) = connection_data.streams.iter().position(|stream| {
                     !stream.preserved
                         && stream_uid.map_or(stream.addr == *addr, |uid| stream.uid == uid && stream.addr == *addr)
@@ -853,6 +1082,7 @@ impl ActiveUserManager {
                         removed_stream = Some(connection_data.streams.swap_remove(stream_idx));
                     }
                     if let Some(removed_stream) = removed_stream.as_ref() {
+                        connection_data.remove_stream_request_claims(removed_stream.uid);
                         if let Some(kind) = connection_data.stream_kinds.remove(&removed_stream.uid) {
                             connection_data.decrement_kind(kind);
                         }
@@ -901,8 +1131,9 @@ impl ActiveUserManager {
             self.enqueue_adaptive_expiry(entry).await;
         }
 
-        if let Some(stream_info) = preserved_update {
-            self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info)));
+        if let Some(stream_info) = preserved_update.as_ref() {
+            self.event_manager
+                .send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info.clone())));
         }
 
         if connection_changed {
@@ -919,7 +1150,13 @@ impl ActiveUserManager {
             self.emit_promotion_update(&username, action).await;
         }
 
-        removed_stream
+        if let Some(stream_info) = removed_stream {
+            StreamRequestDetach::Removed(stream_info)
+        } else if let Some(stream_info) = preserved_update {
+            StreamRequestDetach::Preserved(stream_info)
+        } else {
+            StreamRequestDetach::NotFound
+        }
     }
 
     #[allow(clippy::too_many_lines)]
@@ -937,11 +1174,8 @@ impl ActiveUserManager {
 
             let registration = user_connections.key_by_addr.remove(addr);
             let had_registration = registration.is_some();
-            let mut disconnected_users = registration
-                .map(|registration| registration.username)
-                .filter(|username| !username.is_empty())
-                .into_iter()
-                .collect::<Vec<_>>();
+            let mut disconnected_users: HashSet<String> =
+                registration.map(SocketRegistration::into_usernames).unwrap_or_default();
             disconnected_users.extend(
                 user_connections
                     .by_key
@@ -952,8 +1186,6 @@ impl ActiveUserManager {
                     })
                     .map(|(username, _)| username.clone()),
             );
-            disconnected_users.sort_unstable();
-            disconnected_users.dedup();
 
             let mut removed_streams = Vec::new();
             let mut expiry_entries = Vec::new();
@@ -964,6 +1196,7 @@ impl ActiveUserManager {
                 if let Some(connection_data) = user_connections.by_key.get_mut(username) {
                     let previous_connection_count = connection_data.connections;
                     let migrated_session_addrs = connection_data.release_addr_from_sessions(addr);
+                    connection_data.stream_request_claims.retain(|_, claim| claim.addr != *addr);
                     let mut remaining_streams = Vec::with_capacity(connection_data.streams.len());
                     let mut released_kinds = Vec::new();
                     let mut removed_session_tokens = HashSet::new();
@@ -1025,6 +1258,10 @@ impl ActiveUserManager {
                         }
                     }
                     connection_data.streams = remaining_streams;
+                    let streams = &connection_data.streams;
+                    connection_data
+                        .stream_request_claims
+                        .retain(|_, claim| streams.iter().any(|stream| stream.uid == claim.stream_uid));
                     if !preserve_session_streams && !removed_session_tokens.is_empty() {
                         connection_data.sessions.retain(|session| !removed_session_tokens.contains(&session.token));
                     }
@@ -1091,7 +1328,11 @@ impl ActiveUserManager {
             }
         }
 
-        ReleasedConnection { addr_removed, removed_streams, disconnected_users }
+        ReleasedConnection {
+            addr_removed,
+            removed_streams,
+            disconnected_users: disconnected_users.into_iter().collect(),
+        }
     }
 
     pub async fn release_connection(&self, addr: &SocketAddr) -> ReleasedConnection {
@@ -1148,7 +1389,7 @@ impl ActiveUserManager {
                 connection_data.granted_grace = false;
                 connection_data.grace_ts = 0;
             }
-            return ConnectionAdmission { permission: UserConnectionPermission::Allowed, kind: Some(kind) };
+            return ConnectionAdmission::allowed(Some(kind));
         }
 
         let now = get_current_timestamp();
@@ -1159,7 +1400,7 @@ impl ActiveUserManager {
             {
                 // Grace timeout, still active, deny connection
                 debug!("User access denied, grace exhausted, too many connections: {username}");
-                return ConnectionAdmission { permission: UserConnectionPermission::Exhausted, kind: None };
+                return ConnectionAdmission::exhausted(AdmissionRejectionReason::UserConnectionsExhausted, None);
             }
             // Grace timeout expired, reset grace counters
             if effective_connections < connection_data.max_connections {
@@ -1169,7 +1410,7 @@ impl ActiveUserManager {
         }
 
         debug!("User access denied, too many connections: {username}");
-        ConnectionAdmission { permission: UserConnectionPermission::Exhausted, kind: None }
+        ConnectionAdmission::exhausted(AdmissionRejectionReason::UserConnectionsExhausted, None)
     }
 
     fn check_connection_admission(
@@ -1197,7 +1438,7 @@ impl ActiveUserManager {
                 return self.check_connection_admission(username, connection_data);
             }
         }
-        ConnectionAdmission { permission: UserConnectionPermission::Allowed, kind: Some(ConnectionKind::Normal) }
+        ConnectionAdmission::allowed(Some(ConnectionKind::Normal))
     }
 
     pub async fn connection_permission(
@@ -1217,18 +1458,12 @@ impl ActiveUserManager {
         session_token: &str,
     ) -> ConnectionAdmission {
         if max_connections == 0 && soft_connections == 0 {
-            return ConnectionAdmission {
-                permission: UserConnectionPermission::Allowed,
-                kind: Some(ConnectionKind::Normal),
-            };
+            return ConnectionAdmission::allowed(Some(ConnectionKind::Normal));
         }
 
         let mut connections = self.connections.write().await;
         let Some(connection_data) = connections.by_key.get_mut(username) else {
-            return ConnectionAdmission {
-                permission: UserConnectionPermission::Allowed,
-                kind: Some(ConnectionKind::Normal),
-            };
+            return ConnectionAdmission::allowed(Some(ConnectionKind::Normal));
         };
         connection_data.max_connections = max_connections;
         connection_data.soft_connections = soft_connections;
@@ -1239,10 +1474,9 @@ impl ActiveUserManager {
         };
 
         if connection_data.sessions[session_index].lifecycle.is_counted() {
-            return ConnectionAdmission {
-                permission: UserConnectionPermission::Allowed,
-                kind: connection_data.sessions[session_index].connection_kind.or(Some(ConnectionKind::Normal)),
-            };
+            return ConnectionAdmission::allowed(
+                connection_data.sessions[session_index].connection_kind.or(Some(ConnectionKind::Normal)),
+            );
         }
 
         self.check_connection_admission_with_counts(
@@ -1261,7 +1495,7 @@ impl ActiveUserManager {
     ) -> UserConnectionPermission {
         self.connection_admission_for_session(username, max_connections, soft_connections, session_token)
             .await
-            .permission
+            .permission()
     }
 
     pub async fn refresh_session_connection_kind_for_origin_policy(
@@ -1294,15 +1528,15 @@ impl ActiveUserManager {
                     connection_data,
                     connection_data.effective_counts_for_admission(Some(session_token)),
                 );
-                if admission.permission == UserConnectionPermission::Allowed {
-                    if let Some(kind) = admission.kind {
+                if admission.permission() == UserConnectionPermission::Allowed {
+                    if let Some(kind) = admission.kind() {
                         Self::update_session_admission(
                             &mut connection_data.sessions[session_index],
-                            admission.permission,
+                            admission.permission(),
                             Some(kind),
                         );
                     }
-                    admission.kind
+                    admission.kind()
                 } else {
                     None
                 }
@@ -1371,7 +1605,13 @@ impl ActiveUserManager {
                     addr_count == 1
                 }
             })
-            .map(|s| crate::EvictionCandidate { addr: s.addr, client_ip: s.client_ip.clone(), ts: s.ts })
+            .map(|s| crate::EvictionCandidate {
+                addr: s.addr,
+                client_ip: s.client_ip.clone(),
+                virtual_id: shared::model::VirtualId::new(s.channel.virtual_id),
+                ts: s.ts,
+                uid: s.uid,
+            })
             .collect();
         candidates
     }
@@ -1423,21 +1663,37 @@ impl ActiveUserManager {
             .fold((0usize, 0usize), |(user_count, conn_count), effective| (user_count + 1, conn_count + effective))
     }
 
+    pub async fn playback_resource_counts(&self) -> (usize, usize) {
+        self.gc();
+        let user_connections = self.connections.read().await;
+        user_connections.by_key.values().fold((0, 0), |(requests, sessions), connection| {
+            (requests + connection.stream_request_claims.len(), sessions + connection.sessions.len())
+        })
+    }
+
     pub async fn update_stream_detail(
         &self,
         addr: &SocketAddr,
         video_type: CustomVideoStreamType,
     ) -> Option<StreamInfo> {
-        let mut user_connections = self.connections.write().await;
-        let username = {
-            match user_connections.key_by_addr.get(addr) {
-                Some(registration) => registration.username.clone(),
-                None => return None,
+        let uid = {
+            let connections = self.connections.read().await;
+            let mut streams =
+                connections.by_key.values().flat_map(|data| &data.streams).filter(|stream| &stream.addr == addr);
+            let uid = streams.next()?.uid;
+            if streams.next().is_some() {
+                return None;
             }
+            uid
         };
-        if let Some(connection_data) = user_connections.by_key.get_mut(&username) {
+        self.update_stream_detail_by_uid(uid, video_type).await
+    }
+
+    pub async fn update_stream_detail_by_uid(&self, uid: u32, video_type: CustomVideoStreamType) -> Option<StreamInfo> {
+        let mut user_connections = self.connections.write().await;
+        for connection_data in user_connections.by_key.values_mut() {
             for stream in &mut connection_data.streams {
-                if &stream.addr == addr {
+                if stream.uid == uid {
                     // IMPORTANT: `resolve_disconnect_reason` in connection_manager.rs parses
                     // `channel.title` back via `CustomVideoStreamType::from_str` to determine QoS
                     // disconnect reasons. If these values change, update that function too.
@@ -1483,14 +1739,9 @@ impl ActiveUserManager {
             let mut user_connections = self.connections.write().await;
 
             let now = current_time_secs();
-            if let Some(registration) = user_connections.key_by_addr.get_mut(&fingerprint.addr) {
-                registration.username = username.to_string();
-                registration.ts = now;
-            } else {
-                user_connections
-                    .key_by_addr
-                    .insert(fingerprint.addr, SocketRegistration { username: username.to_string(), ts: now });
-            }
+            let registration =
+                user_connections.key_by_addr.entry(fingerprint.addr).or_insert_with(SocketRegistration::anonymous);
+            registration.add_user(username, now);
 
             let tracked_socket_count = user_connections.key_by_addr.len();
             let connection_data = user_connections
@@ -1521,12 +1772,15 @@ impl ActiveUserManager {
             let existing_stream_info = connection_data
                 .streams
                 .iter()
-                .position(|stream_info| match session_token {
-                    Some(token) => {
-                        stream_info.session_token.as_deref() == Some(token)
-                            && Self::should_reuse_stream_for_session(stream_info, stream_channel)
-                    }
-                    None => stream_info.addr == fingerprint.addr && stream_info.session_token.is_none(),
+                .position(|stream_info| {
+                    !stream_channel.shared
+                        && match session_token {
+                            Some(token) => {
+                                stream_info.session_token.as_deref() == Some(token)
+                                    && Self::should_reuse_stream_for_session(stream_info, stream_channel)
+                            }
+                            None => stream_info.uid == uid && stream_info.session_token.is_none(),
+                        }
                 })
                 .map(|stream_idx| {
                     let session_started_at = session_token.and_then(|token| {
@@ -1575,6 +1829,7 @@ impl ActiveUserManager {
                 });
             let (stream_info, divergence_snapshot) = if let Some((stream_info, was_preserved)) = existing_stream_info {
                 let effective_connection_kind = reserved_session_kind.unwrap_or(connection_kind);
+                connection_data.attach_stream_request(uid, stream_info.uid, fingerprint.addr);
                 if was_preserved {
                     connection_data.increment_kind(effective_connection_kind);
                 }
@@ -1614,6 +1869,7 @@ impl ActiveUserManager {
                     connection_data.increment_kind(effective_connection_kind);
                 }
                 connection_data.streams.push(stream_info.clone());
+                connection_data.attach_stream_request(uid, stream_info.uid, fingerprint.addr);
                 connection_data.stream_kinds.insert(stream_info.uid, effective_connection_kind);
                 connection_data.stream_normal_priorities.insert(stream_info.uid, priority);
                 if let Some(token) = session_token {
@@ -1868,18 +2124,12 @@ impl ActiveUserManager {
         session_token: &str,
     ) -> ConnectionAdmission {
         if max_connections == 0 && soft_connections == 0 {
-            return ConnectionAdmission {
-                permission: UserConnectionPermission::Allowed,
-                kind: Some(ConnectionKind::Normal),
-            };
+            return ConnectionAdmission::allowed(Some(ConnectionKind::Normal));
         }
 
         let mut connections = self.connections.write().await;
         let Some(connection_data) = connections.by_key.get_mut(username) else {
-            return ConnectionAdmission {
-                permission: UserConnectionPermission::Allowed,
-                kind: Some(ConnectionKind::Normal),
-            };
+            return ConnectionAdmission::allowed(Some(ConnectionKind::Normal));
         };
         connection_data.max_connections = max_connections;
         connection_data.soft_connections = soft_connections;
@@ -1896,10 +2146,9 @@ impl ActiveUserManager {
         if connection_data.sessions[session_index].lifecycle.is_counted()
             || Self::session_has_stream(connection_data, session_token)
         {
-            return ConnectionAdmission {
-                permission: UserConnectionPermission::Allowed,
-                kind: connection_data.sessions[session_index].connection_kind.or(Some(ConnectionKind::Normal)),
-            };
+            return ConnectionAdmission::allowed(
+                connection_data.sessions[session_index].connection_kind.or(Some(ConnectionKind::Normal)),
+            );
         }
 
         // Uncounted session with no stream row: run normal admission.
@@ -1910,9 +2159,9 @@ impl ActiveUserManager {
             connection_data,
             connection_data.effective_counts_for_admission(Some(session_token)),
         );
-        if admission.permission == UserConnectionPermission::Allowed {
+        if admission.permission() == UserConnectionPermission::Allowed {
             let session = &mut connection_data.sessions[session_index];
-            Self::update_session_admission(session, admission.permission, admission.kind);
+            Self::update_session_admission(session, admission.permission(), admission.kind());
         }
         admission
     }
@@ -2218,7 +2467,7 @@ impl ActiveUserManager {
                 session.ts = now;
                 Self::bump_session_transition_version(session);
                 for stream in &mut connection_data.streams {
-                    if stream.addr == previous_addr {
+                    if stream.addr == previous_addr && stream.session_token.as_deref() == Some(token) {
                         stream.addr = *addr;
                         stream.ts = now;
                     }
@@ -2232,19 +2481,14 @@ impl ActiveUserManager {
             };
 
             if let Some((previous_addr, prune_previous_registration)) = update_result {
-                if let Some(registration) = user_connections.key_by_addr.get_mut(addr) {
-                    registration.ts = now;
-                    registration.username = username.to_string();
-                } else {
-                    user_connections
-                        .key_by_addr
-                        .insert(*addr, SocketRegistration { username: username.to_string(), ts: now });
-                }
+                let registration =
+                    user_connections.key_by_addr.entry(*addr).or_insert_with(SocketRegistration::anonymous);
+                registration.add_user(username, now);
                 if prune_previous_registration {
                     let can_remove_previous = user_connections
                         .key_by_addr
-                        .get(&previous_addr)
-                        .is_some_and(|registration| registration.username == username);
+                        .get_mut(&previous_addr)
+                        .is_some_and(|registration| registration.remove_user(username));
                     if can_remove_previous {
                         user_connections.key_by_addr.remove(&previous_addr);
                     }
@@ -2282,33 +2526,20 @@ impl ActiveUserManager {
         } else {
             false
         };
-        if !cleared {
-            let can_remove_registration = !connection_data.has_session_addr(addr)
-                && !connection_data.streams.iter().any(|stream| stream.addr == *addr);
-            if can_remove_registration {
-                let can_remove = user_connections
-                    .key_by_addr
-                    .get(addr)
-                    .is_some_and(|registration| registration.username.is_empty() || registration.username == username);
-                if can_remove {
-                    user_connections.key_by_addr.remove(addr);
-                }
-            }
-            return;
-        }
-
         let can_remove_registration = !connection_data.has_session_addr(addr)
             && !connection_data.streams.iter().any(|stream| stream.addr == *addr);
         if can_remove_registration {
             let can_remove = user_connections
                 .key_by_addr
-                .get(addr)
-                .is_some_and(|registration| registration.username.is_empty() || registration.username == username);
+                .get_mut(addr)
+                .is_some_and(|registration| registration.remove_user(username));
             if can_remove {
                 user_connections.key_by_addr.remove(addr);
             }
-        } else if let Some(registration) = user_connections.key_by_addr.get_mut(addr) {
-            registration.ts = now;
+        } else if cleared {
+            if let Some(registration) = user_connections.key_by_addr.get_mut(addr) {
+                registration.ts = now;
+            }
         }
     }
 
@@ -2501,6 +2732,7 @@ impl ActiveUserManager {
                         connection_data.decrement_kind(kind);
                     }
                     connection_data.stream_normal_priorities.remove(&connection_data.streams[stream_idx].uid);
+                    connection_data.remove_stream_request_claims(connection_data.streams[stream_idx].uid);
                     connection_data.streams.swap_remove(stream_idx);
                     removed_count += 1;
                 }
@@ -2735,32 +2967,49 @@ impl ActiveUserManager {
     }
 
     pub async fn socket_expiry_deadline(&self, addr: &SocketAddr) -> Option<u64> {
-        let ttl_secs = self.active_socket_ttl_secs();
         let connections = self.connections.read().await;
         let registration = connections.key_by_addr.get(addr)?;
-        if registration.username.is_empty() {
+        if registration.is_empty() {
             return None;
         }
 
+        let ttl_secs = self.effective_socket_ttl_secs(&connections, addr);
         Some(registration.ts.saturating_add(ttl_secs))
+    }
+
+    /// Direct VOD/series bodies may stop reading while the player drains its buffer.
+    /// Their socket expiry must not fire before the direct-body idle timeout, or a
+    /// buffering player is disconnected mid-playback even though the stream is alive.
+    fn effective_socket_ttl_secs(&self, connections: &UserConnections, addr: &SocketAddr) -> u64 {
+        let base_ttl = self.active_socket_ttl_secs();
+        if Self::addr_has_direct_body_stream(connections, addr) {
+            base_ttl.max(DIRECT_BODY_IDLE_TIMEOUT_SECS)
+        } else {
+            base_ttl
+        }
+    }
+
+    fn addr_has_direct_body_stream(connections: &UserConnections, addr: &SocketAddr) -> bool {
+        let Some(registration) = connections.key_by_addr.get(addr) else {
+            return false;
+        };
+        registration.usernames.iter().any(|username| {
+            connections.by_key.get(username).is_some_and(|connection_data| {
+                connection_data
+                    .streams
+                    .iter()
+                    .any(|stream| stream.addr == *addr && uses_direct_body_idle_timeout(&stream.channel))
+            })
+        })
     }
 
     pub async fn touch_socket_activity(&self, addr: &SocketAddr) {
         let now = current_time_secs();
         let mut user_connections = self.connections.write().await;
-        let Some(username) = user_connections.key_by_addr.get_mut(addr).and_then(|registration| {
-            if registration.username.is_empty() {
-                None
-            } else {
-                registration.ts = now;
-                Some(registration.username.clone())
-            }
-        }) else {
-            return;
-        };
-
-        if let Some(connection_data) = user_connections.by_key.get_mut(&username) {
-            connection_data.ts = now;
+        // Transport activity keeps the transport alive, not every playback that
+        // has previously used it. Authenticated HTTP activity updates its own user.
+        if let Some(registration) = user_connections.key_by_addr.get_mut(addr) {
+            registration.ts = now;
         }
     }
 
@@ -2769,8 +3018,7 @@ impl ActiveUserManager {
         let mut user_connections = self.connections.write().await;
 
         let registration = user_connections.key_by_addr.entry(*addr).or_insert_with(SocketRegistration::anonymous);
-        registration.username = username.to_string();
-        registration.ts = now;
+        registration.add_user(username, now);
 
         let Some(connection_data) = user_connections.by_key.get_mut(username) else {
             return;
@@ -2852,11 +3100,19 @@ impl ActiveUserManager {
 
     /// Allocates the next process-local, globally unique User-Agent stream index.
     pub fn next_user_agent_stream_index(&self) -> u64 {
-        self.next_user_agent_stream_index
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(if current == 0 || current == u64::MAX { 1 } else { current + 1 })
-            })
-            .map_or(1, |val| if val == 0 { 1 } else { val })
+        let mut current = self.next_user_agent_stream_index.load(Ordering::Relaxed);
+        loop {
+            let next = if current == 0 || current == u64::MAX { 1 } else { current + 1 };
+            match self.next_user_agent_stream_index.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(previous) => return if previous == 0 { 1 } else { previous },
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     /// Persists a previously allocated index without replacing an existing session identity.
@@ -2900,9 +3156,9 @@ impl ActiveUserManager {
             && !matches!(connection_data.sessions[session_index].lifecycle, PlaybackLifecycle::PendingProvider { .. })
         {
             let admission = self.check_connection_admission(username, connection_data);
-            connection_data.sessions[session_index].permission = admission.permission;
-            if admission.kind.is_some() {
-                connection_data.sessions[session_index].connection_kind = admission.kind;
+            connection_data.sessions[session_index].permission = admission.permission();
+            if admission.kind().is_some() {
+                connection_data.sessions[session_index].connection_kind = admission.kind();
             }
         }
 
@@ -2987,9 +3243,8 @@ impl ActiveUserManager {
 
     pub async fn recently_evicted_session_protected_addr(&self, session_token: &str) -> Option<SocketAddr> {
         let connections = self.connections.read().await;
-        let now = current_time_secs();
         let protection = connections.recently_evicted_sessions.get(session_token)?;
-        if protection.expires_at > now {
+        if protection.expires_at > Instant::now() {
             return Some(protection.protected_addr);
         }
 
@@ -2999,7 +3254,7 @@ impl ActiveUserManager {
         connections
             .key_by_addr
             .get(&protection.protected_addr)
-            .filter(|registration| registration.username == username)
+            .filter(|registration| registration.usernames.contains(username))
             .map(|_| protection.protected_addr)
     }
 
@@ -3010,18 +3265,13 @@ impl ActiveUserManager {
         virtual_id: VirtualId,
     ) -> Option<SocketAddr> {
         let connections = self.connections.read().await;
-        let now = current_time_secs();
         let key = create_socket_reentry_guard_key(username, client_ip, virtual_id);
         let protection = connections.recent_socket_reentry_guards.get(&key)?;
-        if protection.expires_at > now {
-            return Some(protection.protected_addr);
+        if protection.expires_at > Instant::now() {
+            Some(protection.protected_addr)
+        } else {
+            None
         }
-
-        connections
-            .key_by_addr
-            .get(&protection.protected_addr)
-            .filter(|registration| registration.username == username)
-            .map(|_| protection.protected_addr)
     }
 
     pub async fn block_user_for_stream(&self, addr: &SocketAddr, virtual_id: VirtualId, blocked_secs: u64) {
@@ -3030,15 +3280,39 @@ impl ActiveUserManager {
             let mut connections = self.connections.write().await;
             let now = current_time_secs();
             connections.kicked.retain(|_, (expires_at, _)| *expires_at > now);
-            if let Some(username) = connections
+            let candidate_usernames: Vec<String> = connections
                 .key_by_addr
                 .get(addr)
-                .map(|registration| registration.username.clone())
-                .filter(|username| !username.is_empty())
-            {
-                let expires_at = now + block_for_secs;
-                connections.kicked.insert(username, (expires_at, virtual_id));
+                .map(|reg| reg.usernames.iter().cloned().collect())
+                .unwrap_or_default();
+            let target_vid = virtual_id.get();
+            let expires_at = now + block_for_secs;
+            for username in candidate_usernames {
+                // Only block users who are actually watching the target channel
+                // at this socket address. Behind reverse proxies / NAT, multiple
+                // distinct users share the same SocketAddr; blocking all of them
+                // would be a multi-tenant isolation violation.
+                let is_watching_target = connections.by_key.get(&username).is_some_and(|data| {
+                    data.streams.iter().any(|s| s.addr == *addr && s.channel.virtual_id == target_vid)
+                });
+                if is_watching_target {
+                    connections.kicked.insert(username, (expires_at, virtual_id));
+                }
             }
+        }
+    }
+
+    pub async fn block_user_for_stream_uid(&self, uid: u32, virtual_id: VirtualId, blocked_secs: u64) {
+        if blocked_secs == 0 {
+            return;
+        }
+        let mut connections = self.connections.write().await;
+        let username = connections
+            .by_key
+            .iter()
+            .find_map(|(username, data)| data.streams.iter().any(|stream| stream.uid == uid).then(|| username.clone()));
+        if let Some(username) = username {
+            connections.kicked.insert(username, (current_time_secs() + blocked_secs.min(86_400), virtual_id));
         }
     }
 
@@ -3046,46 +3320,42 @@ impl ActiveUserManager {
         &self,
         addr: &SocketAddr,
         protected_addr: SocketAddr,
-        ttl_secs: u64,
+        ttl: Duration,
     ) {
-        if ttl_secs == 0 {
+        if ttl.is_zero() {
             return;
         }
 
         let mut connections = self.connections.write().await;
-        let now = current_time_secs();
+        let now = Instant::now();
         connections.recently_evicted_sessions.retain(|_, protection| protection.expires_at > now);
         connections.recent_socket_reentry_guards.retain(|_, protection| protection.expires_at > now);
 
-        let Some(username) = connections
-            .key_by_addr
-            .get(addr)
-            .map(|registration| registration.username.clone())
-            .filter(|username| !username.is_empty())
-        else {
+        let usernames = connections.key_by_addr.get(addr).map(SocketRegistration::all_usernames).unwrap_or_default();
+        if usernames.is_empty() {
             return;
-        };
+        }
 
-        let Some(connection_data) = connections.by_key.get(&username) else {
-            return;
-        };
-
-        let protection = RecentWinnerProtection { protected_addr, expires_at: now + ttl_secs };
+        let protection = RecentWinnerProtection { protected_addr, expires_at: now + ttl };
         let mut session_tokens = Vec::new();
         let mut socket_guard_keys = Vec::new();
 
-        for stream in connection_data.streams.iter().filter(|stream| stream.addr == *addr) {
-            if uses_session_reentry_guard(stream) && stream.session_token.is_some() {
-                let Some(session_token) = stream.session_token.clone() else {
-                    continue;
-                };
-                session_tokens.push(session_token);
-            } else {
-                socket_guard_keys.push(create_socket_reentry_guard_key(
-                    &username,
-                    &stream.client_ip,
-                    shared::model::VirtualId::new(stream.channel.virtual_id),
-                ));
+        for username in &usernames {
+            if let Some(connection_data) = connections.by_key.get(username) {
+                for stream in connection_data.streams.iter().filter(|stream| stream.addr == *addr) {
+                    if uses_session_reentry_guard(stream) && stream.session_token.is_some() {
+                        let Some(session_token) = stream.session_token.clone() else {
+                            continue;
+                        };
+                        session_tokens.push(session_token);
+                    } else {
+                        socket_guard_keys.push(create_socket_reentry_guard_key(
+                            username,
+                            &stream.client_ip,
+                            shared::model::VirtualId::new(stream.channel.virtual_id),
+                        ));
+                    }
+                }
             }
         }
 
@@ -3098,7 +3368,17 @@ impl ActiveUserManager {
     }
 
     pub async fn get_username_for_addr(&self, addr: &SocketAddr) -> Option<String> {
-        self.connections.read().await.key_by_addr.get(addr).map(|registration| registration.username.clone())
+        self.connections
+            .read()
+            .await
+            .key_by_addr
+            .get(addr)
+            .and_then(SocketRegistration::primary_username)
+            .map(str::to_string)
+    }
+
+    pub async fn get_usernames_for_addr(&self, addr: &SocketAddr) -> Vec<String> {
+        self.connections.read().await.key_by_addr.get(addr).map(SocketRegistration::all_usernames).unwrap_or_default()
     }
 
     fn should_preserve_session_stream(stream: &StreamInfo) -> bool {
@@ -3311,6 +3591,7 @@ impl ActiveUserManager {
                                 removed_addrs.push(addr);
                             }
                             let removed_stream = connection_data.streams.swap_remove(stream_idx);
+                            connection_data.remove_stream_request_claims(removed_stream.uid);
                             if let Some(kind) = connection_data.stream_kinds.remove(&removed_stream.uid) {
                                 connection_data.decrement_kind(kind);
                             }
@@ -3400,8 +3681,13 @@ impl ActiveUserManager {
             {
                 if let Ok(mut user_connections) = self.connections.try_write() {
                     user_connections.kicked.retain(|_, (expires_at, _)| *expires_at > now);
-                    user_connections.recently_evicted_sessions.retain(|_, protection| protection.expires_at > now);
-                    user_connections.recent_socket_reentry_guards.retain(|_, protection| protection.expires_at > now);
+                    let now_instant = Instant::now();
+                    user_connections
+                        .recently_evicted_sessions
+                        .retain(|_, protection| protection.expires_at > now_instant);
+                    user_connections
+                        .recent_socket_reentry_guards
+                        .retain(|_, protection| protection.expires_at > now_instant);
                     for connection_data in user_connections.by_key.values_mut() {
                         Self::release_expired_session_reservations(connection_data, now);
                         connection_data.sessions.retain(|s| now.saturating_sub(s.ts) < USER_CON_TTL);
@@ -3409,8 +3695,14 @@ impl ActiveUserManager {
                     user_connections.by_key.retain(|_k, v| {
                         v.connections > 0 || !v.streams.is_empty() || now.saturating_sub(v.ts) < USER_CON_TTL
                     });
-                    user_connections.key_by_addr.retain(|_, registration| {
-                        !(registration.username.is_empty() && now.saturating_sub(registration.ts) >= ANON_SOCKET_TTL)
+                    let UserConnections { ref by_key, ref mut key_by_addr, .. } = *user_connections;
+                    key_by_addr.retain(|addr, registration| {
+                        registration.usernames.retain(|u| {
+                            by_key
+                                .get(u)
+                                .is_some_and(|d| d.has_session_addr(addr) || d.streams.iter().any(|s| s.addr == *addr))
+                        });
+                        !(registration.is_empty() && now.saturating_sub(registration.ts) >= ANON_SOCKET_TTL)
                     });
                 } else {
                     // Lock contention: release the GC claim so a subsequent caller can retry immediately.

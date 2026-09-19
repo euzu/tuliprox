@@ -184,6 +184,7 @@ pub enum HlsMediaActivityCommitOutcome {
 #[derive(Debug, Clone, Copy)]
 enum HlsMediaActivityCommitKind {
     Access,
+    Delivered,
     LiveSegmentCompletion(HlsPlaybackRequestToken),
 }
 
@@ -2327,6 +2328,25 @@ impl HlsProxyManager {
         .await
     }
 
+    pub async fn mark_delivered_media_for_lease(
+        &self,
+        session: &HlsSessionHandle,
+        lease_id: &HlsAccessLeaseId,
+        proxy_session_id: &ProxySessionId,
+        lease_identity: HlsMediaLeaseIdentity,
+        now_ms: u64,
+    ) -> HlsMediaActivityCommitOutcome {
+        self.commit_media_activity_if_identity_matches(
+            session,
+            lease_id,
+            proxy_session_id,
+            lease_identity,
+            now_ms,
+            HlsMediaActivityCommitKind::Delivered,
+        )
+        .await
+    }
+
     async fn commit_media_activity_if_identity_matches(
         &self,
         session: &HlsSessionHandle,
@@ -2468,7 +2488,7 @@ impl HlsProxyManager {
             };
         }
         let (current, capacity_protection_released) = match kind {
-            HlsMediaActivityCommitKind::Access => {
+            HlsMediaActivityCommitKind::Access | HlsMediaActivityCommitKind::Delivered => {
                 (leases.media_identity_is_current(lease_id, proxy_session_id, lease_identity, now_ms), false)
             }
             HlsMediaActivityCommitKind::LiveSegmentCompletion(token) => {
@@ -2489,6 +2509,9 @@ impl HlsProxyManager {
             };
         }
         session.mark_authorized_media_access(now_ms);
+        if lease_identity.is_live() && matches!(kind, HlsMediaActivityCommitKind::Delivered) {
+            session.activity.last_delivered_media_at_ms = Some(now_ms);
+        }
         HlsMediaActivityCommitAttempt::Completed {
             outcome: HlsMediaActivityCommitOutcome::Committed,
             evidence_changed: capacity_protection_released,
@@ -2635,7 +2658,8 @@ impl HlsProxyManager {
             maps = maps.saturating_add(session.maps.len());
             transient_resources = transient_resources.saturating_add(session.transient.resources.len());
             transient_objects = transient_objects.saturating_add(session.transient.object_cache.len());
-            active_origin_work = active_origin_work.saturating_add(session.activity.active_origin_work_count);
+            active_origin_work = active_origin_work
+                .saturating_add(session.activity.active_origin_work_count.load(std::sync::atomic::Ordering::Acquire));
             active_segment_fetches = active_segment_fetches.saturating_add(session.active_segment_fetches);
             active_map_fetches = active_map_fetches.saturating_add(session.active_map_fetches);
         }

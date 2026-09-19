@@ -105,10 +105,7 @@ fn prune_zapped_preserved_streams(streams: &mut Vec<StreamInfo>) {
             return true;
         }
         let user_ip = (stream.username.clone(), stream.client_ip.clone());
-        if !users_with_active.contains(&user_ip) {
-            return true;
-        }
-        false
+        !users_with_active.contains(&user_ip)
     });
 }
 

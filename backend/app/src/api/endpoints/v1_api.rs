@@ -58,7 +58,7 @@ pub async fn create_status_check(app_state: &Arc<AppState>) -> StatusCheck {
     };
 
     let active_provider_connections =
-        app_state.active_provider.active_connections().await.map(|c| c.into_iter().collect::<BTreeMap<_, _>>());
+        app_state.active_provider.active_connections().map(|c| c.into_iter().collect::<BTreeMap<_, _>>());
 
     StatusCheck {
         status: "ok".to_string(),
@@ -71,6 +71,7 @@ pub async fn create_status_check(app_state: &Arc<AppState>) -> StatusCheck {
         active_provider_connections,
         active_user_streams,
         cache,
+        reentry_suppressed_total: app_state.active_users.reentry_suppressed_total(),
     }
 }
 async fn status(axum::extract::State(app_state): axum::extract::State<Arc<AppState>>) -> axum::response::Response {

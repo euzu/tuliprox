@@ -25,7 +25,8 @@ use shared::{
     error::TuliproxError,
     model::{
         permission::{Permission, PermissionSet},
-        ApiProxyConfigDto, ConfigDto, InputFetchMethod, PlansConfigDto, SourcesConfigDto, XtreamLoginRequest,
+        ApiProxyConfigDto, ApiProxyServerInfoDto, ConfigDto, ConfigTargetDto, InputFetchMethod, PlansConfigDto,
+        SourcesConfigDto, XtreamLoginRequest,
     },
     utils::{
         parse_provider_scheme_url_parts, HEADER_CONFIG_API_PROXY_REVISION, HEADER_CONFIG_MAIN_REVISION,
@@ -239,15 +240,37 @@ fn decode_permissions(app_state: &AppState, token: &str) -> Option<PermissionSet
     )
 }
 
+/// Reduces a server entry to the name a user record may reference.
+///
+/// User records reference a server by name only, so this is all a caller
+/// handling users needs. Protocol, host, port, path and timezone describe
+/// internal infrastructure and must not leave the server without `ConfigRead`.
+fn sanitize_server_names_only(server: &ApiProxyServerInfoDto) -> ApiProxyServerInfoDto {
+    ApiProxyServerInfoDto { name: server.name.clone(), ..Default::default() }
+}
+
 fn filter_api_proxy_by_permissions(api_proxy: &mut ApiProxyConfigDto, permissions: PermissionSet) {
     if !permissions.contains(Permission::ConfigRead) {
-        api_proxy.server.clear();
+        if permissions.contains(Permission::UserRead) || permissions.contains(Permission::UserWrite) {
+            api_proxy.server = api_proxy.server.iter().map(sanitize_server_names_only).collect();
+        } else {
+            api_proxy.server.clear();
+        }
         api_proxy.use_user_db = false;
         api_proxy.auth_error_status = ApiProxyConfigDto::default().auth_error_status;
     }
     if !permissions.contains(Permission::UserRead) {
         api_proxy.user.clear();
     }
+}
+
+/// Reduces a target to the identity a user record may reference.
+///
+/// User records reference a target by name; the id is kept so the UI can key
+/// rows. Every other field (filter, output, mappings, ...) is target
+/// configuration and must not leave the server without `SourceRead`.
+fn sanitize_target_identity_only(target: &ConfigTargetDto) -> ConfigTargetDto {
+    ConfigTargetDto { id: target.id, name: target.name.clone(), ..Default::default() }
 }
 
 fn filter_app_config_by_permissions(app_config: &mut shared::model::AppConfigDto, permissions: Option<PermissionSet>) {
@@ -262,23 +285,30 @@ fn filter_app_config_by_permissions(app_config: &mut shared::model::AppConfigDto
     if let Some(permissions) = permissions {
         if !permissions.contains(Permission::ConfigRead) {
             app_config.config = ConfigDto::default();
-            if let Some(api_proxy) = app_config.api_proxy.as_mut() {
-                api_proxy.server.clear();
-                api_proxy.use_user_db = false;
-                api_proxy.auth_error_status = ApiProxyConfigDto::default().auth_error_status;
-            }
         }
 
         if !permissions.contains(Permission::SourceRead) {
-            app_config.sources = SourcesConfigDto::default();
             app_config.mappings = None;
             app_config.templates = None;
+            let can_read_targets = permissions.contains(Permission::UserRead)
+                || permissions.contains(Permission::UserWrite)
+                || permissions.contains(Permission::PlaylistRead)
+                || permissions.contains(Permission::PlaylistWrite);
+            if can_read_targets {
+                app_config.sources.inputs.clear();
+                app_config.sources.provider = None;
+                app_config.sources.templates = None;
+                for source in &mut app_config.sources.sources {
+                    source.inputs.clear();
+                    source.targets = source.targets.iter().map(sanitize_target_identity_only).collect();
+                }
+            } else {
+                app_config.sources = SourcesConfigDto::default();
+            }
         }
 
         if let Some(api_proxy) = app_config.api_proxy.as_mut() {
-            if !permissions.contains(Permission::UserRead) {
-                api_proxy.user.clear();
-            }
+            filter_api_proxy_by_permissions(api_proxy, permissions);
         }
     }
 }
@@ -475,7 +505,7 @@ async fn save_config_sources(
         .await;
     }
 
-    app_state.active_provider.update_config(&app_state.app_config).await;
+    app_state.active_provider.update_config(&app_state.app_config);
     let updated_revision = match read_file_revision(&sources_file_path).await {
         Ok(revision) => revision,
         Err(err) => {
@@ -653,7 +683,17 @@ async fn config(
     let Some(permissions) = decode_permissions(&app_state, &token) else {
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     };
-    if !has_any_permission(permissions, &[Permission::ConfigRead, Permission::SourceRead, Permission::UserRead]) {
+    if !has_any_permission(
+        permissions,
+        &[
+            Permission::ConfigRead,
+            Permission::SourceRead,
+            Permission::UserRead,
+            Permission::UserWrite,
+            Permission::PlaylistRead,
+            Permission::PlaylistWrite,
+        ],
+    ) {
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
 
@@ -667,7 +707,7 @@ async fn get_config_api_proxy_config(
     let Some(permissions) = decode_permissions(&app_state, &token) else {
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     };
-    if !has_any_permission(permissions, &[Permission::ConfigRead, Permission::UserRead]) {
+    if !has_any_permission(permissions, &[Permission::ConfigRead, Permission::UserRead, Permission::UserWrite]) {
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
 
@@ -808,21 +848,44 @@ fn build_xtream_login_input_source(
     })
 }
 
-async fn get_config_plans(
-    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
-) -> impl IntoResponse + Send {
+fn get_config_plans_dto(app_state: &Arc<AppState>) -> Result<PlansConfigDto, TuliproxError> {
     let plans_path = {
         let paths = app_state.app_config.paths.load();
         plans_file_path(paths.api_proxy_file_path.as_str())
     };
     let plans_path_str = plans_path.to_string_lossy().to_string();
     match read_plans_file(&plans_path_str, true) {
-        Ok(Some(dto)) => axum::response::Json(dto).into_response(),
-        Ok(None) => axum::response::Json(PlansConfigDto::default()).into_response(),
+        Ok(Some(dto)) => Ok(dto),
+        Ok(None) => Ok(PlansConfigDto::default()),
         Err(err) => {
             error!("Failed to read plans config: {err}");
-            internal_server_error!()
+            Err(err)
         }
+    }
+}
+
+async fn get_config_plans(
+    AuthBearer(token): AuthBearer,
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+) -> impl IntoResponse + Send {
+    let Some(permissions) = decode_permissions(&app_state, &token) else {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !has_any_permission(permissions, &[Permission::ConfigRead, Permission::UserRead, Permission::UserWrite]) {
+        return axum::http::StatusCode::FORBIDDEN.into_response();
+    }
+    match get_config_plans_dto(&app_state) {
+        Ok(dto) => axum::response::Json(dto).into_response(),
+        Err(_) => internal_server_error!(),
+    }
+}
+
+async fn get_config_plans_unprotected(
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+) -> impl IntoResponse + Send {
+    match get_config_plans_dto(&app_state) {
+        Ok(dto) => axum::response::Json(dto).into_response(),
+        Err(_) => internal_server_error!(),
     }
 }
 
@@ -866,15 +929,13 @@ pub fn v1_api_config_register(router: Router<Arc<AppState>>) -> axum::Router<Arc
             "/config/apiproxy",
             axum::routing::get(get_config_api_proxy_config_public).put(save_config_api_proxy_config),
         )
+        .route("/config/plans", axum::routing::get(get_config_plans_unprotected).put(save_config_plans))
 }
 pub fn v1_api_config_register_with_permissions(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
     let base_read = Router::new()
         .route("/config", axum::routing::get(config))
-        .route("/config/apiproxy", axum::routing::get(get_config_api_proxy_config));
-
-    let config_read = Router::new()
-        .route("/config/plans", axum::routing::get(get_config_plans))
-        .layer(permission_layer!(app_state, Permission::ConfigRead));
+        .route("/config/apiproxy", axum::routing::get(get_config_api_proxy_config))
+        .route("/config/plans", axum::routing::get(get_config_plans));
 
     // 2. Source Domain (Read & Write)
     let source_read = Router::new()
@@ -893,7 +954,7 @@ pub fn v1_api_config_register_with_permissions(app_state: &Arc<AppState>) -> Rou
         .route("/config/plans", axum::routing::put(save_config_plans))
         .layer(permission_layer!(app_state, Permission::ConfigWrite));
 
-    Router::new().merge(base_read).merge(config_read).merge(source_read).merge(source_write).merge(config_write)
+    Router::new().merge(base_read).merge(source_read).merge(source_write).merge(config_write)
 }
 
 /// Request body for `POST /config/messaging/test`.
@@ -1060,16 +1121,119 @@ mod tests {
     }
 
     #[test]
-    fn filter_api_proxy_keeps_user_section_only_with_user_read() {
+    fn filter_api_proxy_keeps_user_and_sanitized_server_section_with_user_read() {
         let permissions: PermissionSet = Permission::UserRead.into();
         let mut api_proxy = make_test_api_proxy();
 
         filter_api_proxy_by_permissions(&mut api_proxy, permissions);
 
-        assert!(api_proxy.server.is_empty());
+        assert_eq!(api_proxy.server.len(), 1);
+        assert_eq!(api_proxy.server[0].name, "main");
+        assert!(api_proxy.server[0].protocol.is_empty());
+        assert!(api_proxy.server[0].host.is_empty());
+        assert!(api_proxy.server[0].port.is_none());
+        assert!(api_proxy.server[0].timezone.is_empty());
+        assert!(api_proxy.server[0].message.is_empty());
+        assert!(api_proxy.server[0].path.is_none());
         assert_eq!(api_proxy.user.len(), 1);
         assert!(!api_proxy.use_user_db);
         assert_eq!(api_proxy.auth_error_status, 403);
+    }
+
+    #[test]
+    fn filter_api_proxy_keeps_sanitized_server_section_with_user_write() {
+        let permissions: PermissionSet = Permission::UserWrite.into();
+        let mut api_proxy = make_test_api_proxy();
+
+        filter_api_proxy_by_permissions(&mut api_proxy, permissions);
+
+        assert_eq!(api_proxy.server.len(), 1);
+        assert_eq!(api_proxy.server[0].name, "main");
+        assert!(api_proxy.server[0].host.is_empty());
+        assert!(api_proxy.user.is_empty());
+    }
+
+    #[test]
+    fn filter_api_proxy_clears_all_for_unrelated_permission() {
+        let permissions: PermissionSet = Permission::SystemRead.into();
+        let mut api_proxy = make_test_api_proxy();
+
+        filter_api_proxy_by_permissions(&mut api_proxy, permissions);
+
+        assert!(api_proxy.server.is_empty());
+        assert!(api_proxy.user.is_empty());
+        assert!(!api_proxy.use_user_db);
+        assert_eq!(api_proxy.auth_error_status, 403);
+    }
+
+    #[test]
+    fn filter_app_config_keeps_targets_and_clears_sources_for_user_read_without_source_read() {
+        let permissions: PermissionSet = Permission::UserRead.into();
+        let mut app_config = AppConfigDto {
+            config: ConfigDto { storage_dir: Some(String::from("storage")), ..ConfigDto::default() },
+            sources: SourcesConfigDto {
+                inputs: vec![shared::model::ConfigInputDto {
+                    name: Arc::from("secret-provider"),
+                    url: String::from("http://secret-provider/get.php?username=foo&password=bar"),
+                    ..Default::default()
+                }],
+                sources: vec![shared::model::ConfigSourceDto {
+                    inputs: vec![Arc::from("secret-provider")],
+                    targets: vec![shared::model::ConfigTargetDto {
+                        id: 1,
+                        enabled: false,
+                        name: String::from("Default"),
+                        output: vec![shared::model::TargetOutputDto::M3u(shared::model::M3uTargetOutputDto {
+                            filename: Some(String::from("secret.m3u")),
+                            ..Default::default()
+                        })],
+                        filter: shared::model::ConfigTargetFilterDto {
+                            processing: Some(String::from("group ~ 'secret'")),
+                            ..Default::default()
+                        },
+                        watch: Some(vec![String::from("watch-expr")]),
+                        mapping: Some(vec![String::from("mapping-name")]),
+                        ..Default::default()
+                    }],
+                }],
+                provider: Some(vec![]),
+                templates: Some(vec![]),
+            },
+            mappings: None,
+            templates: Some(TemplateDefinitionDto::default()),
+            api_proxy: Some(make_test_api_proxy()),
+        };
+
+        filter_app_config_by_permissions(&mut app_config, Some(permissions));
+
+        assert_eq!(app_config.config.storage_dir, None);
+        assert!(app_config.sources.inputs.is_empty());
+        assert!(app_config.sources.provider.is_none());
+        assert!(app_config.sources.templates.is_none());
+        assert!(app_config.mappings.is_none());
+        assert!(app_config.templates.is_none());
+        assert_eq!(app_config.sources.sources.len(), 1);
+        assert!(app_config.sources.sources[0].inputs.is_empty());
+        assert_eq!(app_config.sources.sources[0].targets.len(), 1);
+
+        let target = &app_config.sources.sources[0].targets[0];
+        assert_eq!(target.name, "Default");
+        assert_eq!(target.id, 1);
+        assert_eq!(target.enabled, shared::model::ConfigTargetDto::default().enabled);
+        assert!(target.output.is_empty());
+        assert!(target.filter.is_empty());
+        assert!(target.options.is_none());
+        assert!(target.sort.is_none());
+        assert!(target.rename.is_none());
+        assert!(target.mapping.is_none());
+        assert!(target.favourites.is_none());
+        assert!(target.watch.is_none());
+
+        let api_proxy = app_config.api_proxy.expect("api proxy should remain present");
+        assert_eq!(api_proxy.server.len(), 1);
+        assert_eq!(api_proxy.server[0].name, "main");
+        assert!(api_proxy.server[0].host.is_empty());
+        assert_eq!(api_proxy.user.len(), 1);
     }
 
     #[test]

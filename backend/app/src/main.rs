@@ -531,6 +531,7 @@ async fn start_in_cli_mode(cfg: Arc<AppConfig>, targets: Arc<ProcessTargets>) {
 }
 
 async fn start_in_server_mode(cfg: Arc<AppConfig>, targets: Arc<ProcessTargets>) {
+    tuliprox_core::utils::runtime_liveness::start(&tokio::runtime::Handle::current());
     if let Err(err) = api::main_api::start_server(cfg, targets).await {
         exit!("Can't start server: {err}");
     }

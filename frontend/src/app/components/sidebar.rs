@@ -208,7 +208,13 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                 <MenuItem class={if active_menu == ViewType::Downloads { "active" } else {""}} icon="Download" name={ViewType::Downloads.to_string()} label={translate.t("LABEL.DOWNLOADS")} onclick={&handle_menu_click}></MenuItem>
              })}
             {html_if!(
-                auth.has_any_permissions(Permission::ConfigRead | Permission::SourceRead | Permission::UserRead),
+                auth.has_any_permissions(
+                    Permission::ConfigRead
+                        | Permission::SourceRead
+                        | Permission::UserRead
+                        | Permission::UserWrite
+                        | Permission::PlaylistRead,
+                ),
                 {
                     <CollapsePanel title={translate.t("LABEL.SETTINGS")}>
                       {html_if!(auth.is_admin(), {
@@ -217,17 +223,17 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                       {html_if!(auth.has_permission(Permission::ConfigRead), {
                           <MenuItem class={if active_menu == ViewType::Config { "active" } else {""}} icon="Config" name={ViewType::Config.to_string()} label={translate.t("LABEL.CONFIG")}  onclick={&handle_menu_click}></MenuItem>
                       })}
-                      {html_if!(auth.has_permission(Permission::UserRead), {
+                      {html_if!(auth.has_any_permissions(Permission::UserRead | Permission::UserWrite), {
                           <MenuItem class={if active_menu == ViewType::Users { "active" } else {""}} icon="UserOutline" name={ViewType::Users.to_string()} label={translate.t("LABEL.USER")} onclick={&handle_menu_click}></MenuItem>
                       })}
                       {html_if!(auth.has_permission(Permission::ConfigRead), {
                           <MenuItem class={if active_menu == ViewType::Plans { "active" } else {""}} icon="Group" name={ViewType::Plans.to_string()} label={translate.t("LABEL.PLANS")} onclick={&handle_menu_click}></MenuItem>
                       })}
                       {html_if!(auth.has_permission(Permission::SourceRead), {
-                          <>
                           <MenuItem class={if active_menu == ViewType::SourceEditor { "active" } else {""}} icon="SourceEditor" name={ViewType::SourceEditor.to_string()} label={translate.t("LABEL.SOURCE_EDITOR")}  onclick={&handle_menu_click}></MenuItem>
+                      })}
+                      {html_if!(auth.has_any_permissions(Permission::SourceRead | Permission::PlaylistRead), {
                           <MenuItem class={if active_menu == ViewType::PlaylistSettings { "active" } else {""}} icon="PlayArrowOutline" name={ViewType::PlaylistSettings.to_string()} label={translate.t("LABEL.PLAYLIST")} onclick={&handle_menu_click}></MenuItem>
-                          </>
                       })}
                     </CollapsePanel>
                 }
@@ -281,7 +287,13 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                 <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Downloads, if active_menu == ViewType::Downloads { " active" } else {""})} icon="Download" name={ViewType::Downloads.to_string()} hint={translate.t("LABEL.DOWNLOADS")} aria_label={translate.t("LABEL.DOWNLOADS")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(
-                auth.has_any_permissions(Permission::ConfigRead | Permission::SourceRead | Permission::UserRead),
+                auth.has_any_permissions(
+                    Permission::ConfigRead
+                        | Permission::SourceRead
+                        | Permission::UserRead
+                        | Permission::UserWrite
+                        | Permission::PlaylistRead,
+                ),
                 {
                     <span class="tp__app-sidebar__content-space"></span>
                 }
@@ -292,17 +304,17 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
             {html_if!(auth.has_permission(Permission::ConfigRead), {
                 <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Config, if active_menu == ViewType::Config { " active" } else {""})} icon="Config" name={ViewType::Config.to_string()} hint={translate.t("LABEL.CONFIG")} aria_label={translate.t("LABEL.CONFIG")} onclick={&handle_menu_click}></IconButton>
             })}
-            {html_if!(auth.has_permission(Permission::UserRead), {
+            {html_if!(auth.has_any_permissions(Permission::UserRead | Permission::UserWrite), {
                 <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Users, if active_menu == ViewType::Users { " active" } else {""})} icon="UserOutline" name={ViewType::Users.to_string()} hint={translate.t("LABEL.USER")} aria_label={translate.t("LABEL.USER")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(auth.has_permission(Permission::ConfigRead), {
                 <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Plans, if active_menu == ViewType::Plans { " active" } else {""})} icon="Group" name={ViewType::Plans.to_string()} hint={translate.t("LABEL.PLANS")} aria_label={translate.t("LABEL.PLANS")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(auth.has_permission(Permission::SourceRead), {
-                <>
                 <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::SourceEditor, if active_menu == ViewType::SourceEditor { " active" } else {""})} icon="SourceEditor" name={ViewType::SourceEditor.to_string()} hint={translate.t("LABEL.SOURCE_EDITOR")} aria_label={translate.t("LABEL.SOURCE_EDITOR")} onclick={&handle_menu_click}></IconButton>
+            })}
+            {html_if!(auth.has_any_permissions(Permission::SourceRead | Permission::PlaylistRead), {
                 <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistSettings, if active_menu == ViewType::PlaylistSettings { " active" } else {""})} icon="PlayArrowOutline" name={ViewType::PlaylistSettings.to_string()} hint={translate.t("LABEL.PLAYLIST")} aria_label={translate.t("LABEL.PLAYLIST")} onclick={&handle_menu_click}></IconButton>
-                </>
             })}
             {html_if!(
                 auth.has_any_permissions(Permission::PlaylistRead | Permission::PlaylistWrite | Permission::EpgRead),

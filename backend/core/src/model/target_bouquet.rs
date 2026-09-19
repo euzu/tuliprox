@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn case_sensitive_exact_matching() {
         let filter = TargetBouquetFilter::from_dto(whitelist(PlaylistClusterBouquetDto {
-            live: Some(vec!["news".to_string(), "".to_string()]),
+            live: Some(vec!["news".to_string(), String::new()]),
             vod: None,
             series: None,
         }))

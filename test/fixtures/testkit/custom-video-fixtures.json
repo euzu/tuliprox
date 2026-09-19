@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "fixtures": {
+    "hls/channel_unavailable.ts": "afefcdbcf3749e4e7a89321239dfcb7d2c0bdc4d2d2fb1cf4c883962c837c92f",
+    "hls/hls_session_or_lease_expired.ts": "9fe61499c2080f4aa1e362dfb72ec7c0a4b283f08d7dcac1f21590bd4db2fe55",
+    "hls/low_priority_preempted.ts": "9cc3a7b63f02e8e0bc45fe3b59c18f52443ded43fa0c9121fb0ea676def412a9",
+    "hls/panel_api_provisioning.ts": "b481b7b85f79883b41f8a1436301257ee5cb5a45e30993233ec73a2a5824ff13",
+    "hls/provider_connections_exhausted.ts": "099181ddcf9e7edc5007db6d801348afb132e27382eb4e0d33589dbe07cee790",
+    "hls/user_account_expired.ts": "110ea30bdec0f4d6457dcbfd2c8fb8dc0b2f517d8dedb473de1191d6de369464",
+    "hls/user_connections_exhausted.ts": "6ab07858d03e19b68eea8cbaecb67ad4d276633c8b423253b7f39c585cab73fe"
+  }
+}

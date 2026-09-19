@@ -18,6 +18,7 @@ mod provider_resolve_token;
 mod recording_paths;
 pub mod request_headers;
 pub mod response_compression;
+pub mod runtime_liveness;
 mod step_measure;
 mod sys_utils;
 mod telegram;

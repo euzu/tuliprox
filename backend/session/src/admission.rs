@@ -32,9 +32,21 @@ pub struct AdmissionCtx {
     pub connection_manager: Arc<ConnectionManager>,
 }
 
-/// How long an eviction is remembered so the evicted client's immediate retry
-/// does not evict its own replacement.
-pub const RECENT_EVICTION_REENTRY_TTL_SECS: u64 = 3;
+/// Default duration an eviction is remembered if not configured.
+pub const DEFAULT_RECENT_EVICTION_REENTRY_TTL_MS: u64 = shared::defaults::DEFAULT_RECENT_EVICTION_REENTRY_TTL_MS;
+
+/// Reentry cooldown from a resolved stream config, falling back to the default when
+/// no `reverse_proxy.stream` block is configured.
+fn reentry_ttl_for_stream(stream: Option<&tuliprox_core::model::StreamConfig>) -> std::time::Duration {
+    stream.map_or(std::time::Duration::from_millis(DEFAULT_RECENT_EVICTION_REENTRY_TTL_MS), |stream| {
+        stream.recent_eviction_reentry_ttl
+    })
+}
+
+pub(crate) fn get_reentry_ttl(adm: &AdmissionCtx) -> std::time::Duration {
+    let config = adm.app_config.config.load();
+    reentry_ttl_for_stream(config.reverse_proxy.as_ref().and_then(|rp| rp.stream.as_ref()))
+}
 
 #[derive(Clone, Copy)]
 pub enum EvictionReentryGuard<'a> {
@@ -120,10 +132,10 @@ pub async fn resolve_playback_request_admission(
             adm.active_users.terminate_session(&user.username, session.token.as_str()).await;
         }
         return (
-            crate::ConnectionAdmission {
-                permission: UserConnectionPermission::Exhausted,
-                kind: user_session.and_then(|session| session.connection_kind).or(Some(crate::ConnectionKind::Normal)),
-            },
+            crate::ConnectionAdmission::exhausted(
+                crate::AdmissionRejectionReason::UserConnectionsExhausted,
+                user_session.and_then(|session| session.connection_kind).or(Some(crate::ConnectionKind::Normal)),
+            ),
             None,
             request_class,
         );
@@ -133,10 +145,9 @@ pub async fn resolve_playback_request_admission(
     // running strategies or modifying counted state. Caller handles the actual activation.
     if request_class == PlaybackRequestClass::Prepare {
         return (
-            crate::ConnectionAdmission {
-                permission: UserConnectionPermission::Allowed,
-                kind: user_session.and_then(|session| session.connection_kind).or(Some(crate::ConnectionKind::Normal)),
-            },
+            crate::ConnectionAdmission::allowed(
+                user_session.and_then(|session| session.connection_kind).or(Some(crate::ConnectionKind::Normal)),
+            ),
             None,
             request_class,
         );
@@ -144,10 +155,10 @@ pub async fn resolve_playback_request_admission(
 
     if request_class == PlaybackRequestClass::FollowUp || !limits_enabled {
         return (
-            crate::ConnectionAdmission {
-                permission: user_session.map_or(UserConnectionPermission::Allowed, |session| session.permission),
-                kind: user_session.and_then(|session| session.connection_kind).or(Some(crate::ConnectionKind::Normal)),
-            },
+            crate::ConnectionAdmission::from_permission(
+                user_session.map_or(UserConnectionPermission::Allowed, |session| session.permission),
+                user_session.and_then(|session| session.connection_kind).or(Some(crate::ConnectionKind::Normal)),
+            ),
             None,
             request_class,
         );
@@ -177,7 +188,12 @@ pub async fn resolve_playback_request_admission(
     //
     // Only the strategy path emits. An explicit `Terminate` also resolves to
     // `Exhausted`, but that is a requested teardown, not a denial.
-    if result.admission.permission == UserConnectionPermission::Exhausted {
+    //
+    // Background retry of a recently evicted stream is quietly suppressed to avoid
+    // playback ping-pong. Count it as a diagnostic, never as a connection denial.
+    if result.admission.is_reentry_suppressed() {
+        adm.active_users.record_reentry_suppressed();
+    } else if result.admission.permission() == UserConnectionPermission::Exhausted {
         adm.active_users.events().send_event(EventMessage::ConnectionDenied(ConnectionDenied::new(
             Arc::from(user.username.as_str()),
             Arc::from(fingerprint.client_ip.as_str()),
@@ -192,19 +208,22 @@ pub async fn resolve_playback_request_admission(
 async fn should_suppress_eviction_for_recent_request(
     adm: &AdmissionCtx,
     request: &AdmissionRequest<'_>,
-    target_addr: &std::net::SocketAddr,
+    target: &crate::EvictionTarget,
 ) -> bool {
     match request.eviction_reentry_guard {
         EvictionReentryGuard::Session(session_token) => adm
             .active_users
             .recently_evicted_session_protected_addr(session_token)
             .await
-            .is_some_and(|protected_addr| protected_addr == *target_addr),
-        EvictionReentryGuard::SocketPlayback { virtual_id } => adm
-            .active_users
-            .recent_socket_reentry_protected_addr(request.username, request.client_ip, virtual_id)
-            .await
-            .is_some_and(|protected_addr| protected_addr == *target_addr),
+            .is_some_and(|protected_addr| protected_addr == target.addr),
+        EvictionReentryGuard::SocketPlayback { virtual_id } => {
+            target.virtual_id != virtual_id
+                && adm
+                    .active_users
+                    .recent_socket_reentry_protected_addr(request.username, request.client_ip, virtual_id)
+                    .await
+                    .is_some_and(|protected_addr| protected_addr == target.addr)
+        }
     }
 }
 
@@ -263,14 +282,14 @@ pub fn get_effective_admission_strategies(adm: &AdmissionCtx) -> Arc<[AdmissionS
     }
 }
 
+enum StrategyLoopResult {
+    Admitted(AdmissionStrategyResolution),
+    Rejected(crate::AdmissionRejectionReason),
+}
+
 /// Shared strategy-evaluation loop used by both the initial admission path
 /// (`resolve_admission_with_strategies`) and the remaining-strategies path
 /// (`evaluate_remaining_strategies_after_grace`).
-///
-/// Returns `Some(resolution)` when a Grace or a successful Eviction+Retry is found.
-/// Returns `None` when every strategy in `strategies` returns `NoMatch` — the caller
-/// is then responsible for constructing the final exhausted result with the correct
-/// `kind` (preserved from the original admission).
 async fn evaluate_admission_strategy_loop<F>(
     adm: &AdmissionCtx,
     request: &AdmissionRequest<'_>,
@@ -278,7 +297,7 @@ async fn evaluate_admission_strategy_loop<F>(
     base_idx: usize,
     admission: crate::ConnectionAdmission,
     build_grace_ctx: F,
-) -> Option<AdmissionStrategyResolution>
+) -> StrategyLoopResult
 where
     F: Fn(usize) -> GraceResolutionContext,
 {
@@ -292,6 +311,12 @@ where
     // kick that frees nothing is taken as evidence that the next one would not
     // help either, and later eviction strategies are skipped.
     let mut evictions_ineffective = false;
+    // Set when a candidate was skipped because the reentry guard protects it.
+    let mut suppressed_candidate = false;
+    // Set only after a *non-protected* candidate was actually evicted. A genuine
+    // eviction means the final rejection is real resource exhaustion, not a
+    // reentry suppression, even if an earlier candidate was protected.
+    let mut performed_legitimate_eviction = false;
 
     // `enumerate` rather than a manual counter: the suppressed-eviction arm below
     // uses `continue`, which used to skip a trailing `idx += 1` and hand every
@@ -307,11 +332,8 @@ where
                     // Return a FRESH admission with GracePeriod permission (not the admission
                     // parameter, which may have Exhausted permission). The kind is preserved from
                     // the original admission.
-                    return Some(AdmissionStrategyResolution {
-                        admission: crate::ConnectionAdmission {
-                            permission: UserConnectionPermission::GracePeriod,
-                            kind: admission.kind,
-                        },
+                    return StrategyLoopResult::Admitted(AdmissionStrategyResolution {
+                        admission: crate::ConnectionAdmission::grace_period(admission.kind()),
                         grace_mode: Some(mode),
                         grace_context: Some(build_grace_ctx(base_idx + idx)),
                     });
@@ -325,22 +347,25 @@ where
                     );
                     continue;
                 }
-                if should_suppress_eviction_for_recent_request(adm, request, &target.addr).await {
+                if should_suppress_eviction_for_recent_request(adm, request, &target).await {
                     debug!(
                         "Skipping eviction strategy {strategy:?} for recently evicted request of user {username} targeting {}",
                         target.addr
                     );
+                    suppressed_candidate = true;
+                    // Exclude this specific stream candidate so subsequent strategies can evaluate other candidates
+                    candidates.retain(|c| c.uid != target.uid);
                     continue;
                 }
                 debug!("Evicting connection {} for user {username}", target.addr);
                 let connections_before = adm.active_users.user_connections(username).await;
-                adm.active_users
-                    .mark_recent_eviction_guard_for_addr(&target.addr, *request_addr, RECENT_EVICTION_REENTRY_TTL_SECS)
-                    .await;
+                let ttl = get_reentry_ttl(adm);
+                adm.active_users.mark_recent_eviction_guard_for_addr(&target.addr, *request_addr, ttl).await;
                 adm.connection_manager.release_connection_as_kicked(&target.addr).await;
+                performed_legitimate_eviction = true;
                 let retry_admission = get_admission_for_request(adm, request).await;
-                if retry_admission.permission == UserConnectionPermission::Allowed {
-                    return Some(AdmissionStrategyResolution {
+                if retry_admission.permission() == UserConnectionPermission::Allowed {
+                    return StrategyLoopResult::Admitted(AdmissionStrategyResolution {
                         admission: retry_admission,
                         grace_mode: None,
                         grace_context: None,
@@ -362,8 +387,24 @@ where
         }
     }
 
-    // All strategies returned NoMatch — caller constructs the final exhausted result.
-    None
+    StrategyLoopResult::Rejected(rejection_after_strategy_loop(suppressed_candidate, performed_legitimate_eviction))
+}
+
+/// Classifies the rejection after the strategy loop.
+///
+/// `RecentEvictionReentry` is only correct when the request failed *solely* because
+/// every candidate was reentry-protected and no legitimate eviction was performed.
+/// Once a non-protected candidate was evicted and admission still fails, the request
+/// hit genuine resource exhaustion and must be reported as such.
+fn rejection_after_strategy_loop(
+    suppressed_candidate: bool,
+    performed_legitimate_eviction: bool,
+) -> crate::AdmissionRejectionReason {
+    if suppressed_candidate && !performed_legitimate_eviction {
+        crate::AdmissionRejectionReason::RecentEvictionReentry
+    } else {
+        crate::AdmissionRejectionReason::UserConnectionsExhausted
+    }
 }
 
 pub async fn resolve_admission_with_strategies(
@@ -375,14 +416,21 @@ pub async fn resolve_admission_with_strategies(
     let username = request.username;
     let admission = get_admission_for_request(adm, &request).await;
 
-    if admission.permission != UserConnectionPermission::Exhausted {
+    if admission.permission() != UserConnectionPermission::Exhausted {
         return AdmissionStrategyResolution { admission, grace_mode: None, grace_context: None };
     }
 
     let strategies = get_effective_admission_strategies(adm);
     if strategies.is_empty() {
         debug!("No admission strategies configured, denying request for user {username}");
-        return AdmissionStrategyResolution { admission, grace_mode: None, grace_context: None };
+        return AdmissionStrategyResolution {
+            admission: crate::ConnectionAdmission::exhausted(
+                crate::AdmissionRejectionReason::UserConnectionsExhausted,
+                admission.kind(),
+            ),
+            grace_mode: None,
+            grace_context: None,
+        };
     }
 
     let _admission_guard = adm.active_users.acquire_user_admission(username).await;
@@ -394,7 +442,7 @@ pub async fn resolve_admission_with_strategies(
     // free.
     let admission = get_admission_for_request(adm, &request).await;
 
-    if admission.permission != UserConnectionPermission::Exhausted {
+    if admission.permission() != UserConnectionPermission::Exhausted {
         debug!("Admission became available while waiting on the admission gate for user {username}");
         return AdmissionStrategyResolution { admission, grace_mode: None, grace_context: None };
     }
@@ -402,17 +450,20 @@ pub async fn resolve_admission_with_strategies(
     let build_grace_ctx = |global_idx: usize| GraceResolutionContext {
         strategy_index: global_idx,
         strategies: strategies.clone(),
-        kind: admission.kind,
+        kind: admission.kind(),
     };
 
-    if let Some(resolution) =
-        evaluate_admission_strategy_loop(adm, &request, &strategies, 0, admission, build_grace_ctx).await
-    {
-        return resolution;
+    match evaluate_admission_strategy_loop(adm, &request, &strategies, 0, admission, build_grace_ctx).await {
+        StrategyLoopResult::Admitted(resolution) => resolution,
+        StrategyLoopResult::Rejected(reason) => {
+            debug!("No admission strategy could admit user {username}: {reason:?}");
+            AdmissionStrategyResolution {
+                admission: crate::ConnectionAdmission::exhausted(reason, admission.kind()),
+                grace_mode: None,
+                grace_context: None,
+            }
+        }
     }
-
-    debug!("No admission strategy could admit user {username}");
-    AdmissionStrategyResolution { admission, grace_mode: None, grace_context: None }
 }
 
 /// Evaluates only the strategies that come AFTER the already-used grace strategy.
@@ -433,18 +484,16 @@ pub async fn evaluate_remaining_strategies_after_grace(
     grace_context: &GraceResolutionContext,
     original_kind: Option<crate::ConnectionKind>,
 ) -> AdmissionStrategyResolution {
-    use shared::model::UserConnectionPermission;
-
     let username = request.username;
     let remaining = grace_context.strategy_index + 1;
     let strategies = &grace_context.strategies;
     if remaining >= strategies.len() {
         debug!("No remaining strategies after grace for user {username}");
         return AdmissionStrategyResolution {
-            admission: crate::ConnectionAdmission {
-                permission: UserConnectionPermission::Exhausted,
-                kind: original_kind,
-            },
+            admission: crate::ConnectionAdmission::exhausted(
+                crate::AdmissionRejectionReason::UserConnectionsExhausted,
+                original_kind,
+            ),
             grace_mode: None,
             grace_context: None,
         };
@@ -454,7 +503,8 @@ pub async fn evaluate_remaining_strategies_after_grace(
     // returned `ConnectionAdmission`, and `build_grace_ctx` copies it onto the
     // `GraceResolutionContext`. Seeding it with `original_kind` keeps every exit from this
     // function reporting the kind the original admission decided.
-    let admission = crate::ConnectionAdmission { permission: UserConnectionPermission::Exhausted, kind: original_kind };
+    let admission =
+        crate::ConnectionAdmission::exhausted(crate::AdmissionRejectionReason::UserConnectionsExhausted, original_kind);
     let build_grace_ctx = |global_idx: usize| GraceResolutionContext {
         strategy_index: global_idx,
         strategies: strategies.clone(),
@@ -463,17 +513,73 @@ pub async fn evaluate_remaining_strategies_after_grace(
 
     let _admission_guard = adm.active_users.acquire_user_admission(username).await;
 
-    if let Some(resolution) =
-        evaluate_admission_strategy_loop(adm, &request, &strategies[remaining..], remaining, admission, build_grace_ctx)
-            .await
+    match evaluate_admission_strategy_loop(
+        adm,
+        &request,
+        &strategies[remaining..],
+        remaining,
+        admission,
+        build_grace_ctx,
+    )
+    .await
     {
-        return resolution;
+        StrategyLoopResult::Admitted(resolution) => resolution,
+        StrategyLoopResult::Rejected(reason) => {
+            debug!("No remaining strategy could admit user {username}: {reason:?}");
+            AdmissionStrategyResolution {
+                admission: crate::ConnectionAdmission::exhausted(reason, original_kind),
+                grace_mode: None,
+                grace_context: None,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AdmissionRejectionReason, ConnectionAdmission};
+    use shared::model::UserConnectionPermission;
+
+    #[test]
+    fn reentry_ttl_uses_configured_value_and_falls_back_to_default() {
+        assert_eq!(
+            reentry_ttl_for_stream(None),
+            std::time::Duration::from_millis(DEFAULT_RECENT_EVICTION_REENTRY_TTL_MS)
+        );
+        let stream = tuliprox_core::model::StreamConfig {
+            recent_eviction_reentry_ttl: std::time::Duration::from_millis(2_500),
+            ..tuliprox_core::model::StreamConfig::default()
+        };
+        assert_eq!(reentry_ttl_for_stream(Some(&stream)), std::time::Duration::from_millis(2_500));
     }
 
-    debug!("No remaining strategy could admit user {username}");
-    AdmissionStrategyResolution {
-        admission: crate::ConnectionAdmission { permission: UserConnectionPermission::Exhausted, kind: original_kind },
-        grace_mode: None,
-        grace_context: None,
+    #[test]
+    fn rejection_classification_distinguishes_reentry_from_exhaustion() {
+        // Pure reentry: a protected candidate was skipped and nothing was evicted.
+        assert_eq!(rejection_after_strategy_loop(true, false), AdmissionRejectionReason::RecentEvictionReentry);
+        // Mixed case: a protected candidate was skipped, but a legitimate eviction was
+        // performed and admission still failed. That residual failure is genuine
+        // exhaustion, not a quiet suppression.
+        assert_eq!(rejection_after_strategy_loop(true, true), AdmissionRejectionReason::UserConnectionsExhausted);
+        assert_eq!(rejection_after_strategy_loop(false, true), AdmissionRejectionReason::UserConnectionsExhausted);
+        assert_eq!(rejection_after_strategy_loop(false, false), AdmissionRejectionReason::UserConnectionsExhausted);
+    }
+
+    #[test]
+    fn exhausted_admission_always_carries_a_reason() {
+        let exhausted = ConnectionAdmission::from_permission(UserConnectionPermission::Exhausted, None);
+        assert_eq!(exhausted.permission(), UserConnectionPermission::Exhausted);
+        assert_eq!(exhausted.rejection_reason(), Some(AdmissionRejectionReason::UserConnectionsExhausted));
+        assert!(!exhausted.is_reentry_suppressed());
+
+        assert_eq!(
+            ConnectionAdmission::from_permission(UserConnectionPermission::Allowed, None).rejection_reason(),
+            None
+        );
+        assert_eq!(
+            ConnectionAdmission::from_permission(UserConnectionPermission::GracePeriod, None).permission(),
+            UserConnectionPermission::GracePeriod
+        );
     }
 }

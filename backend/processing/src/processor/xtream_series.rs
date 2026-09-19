@@ -120,10 +120,7 @@ async fn playlist_resolve_series_info<E: EventSink + Clone + 'static, M: Metadat
     target: &ConfigTarget,
 ) {
     let filter = |pli: &PlaylistItem| {
-        if pli.header.xtream_cluster != XtreamCluster::Series || pli.header.item_type != PlaylistItemType::SeriesInfo {
-            return false;
-        }
-        true
+        pli.header.xtream_cluster == XtreamCluster::Series && pli.header.item_type == PlaylistItemType::SeriesInfo
     };
 
     // Skip if nothing to do
@@ -928,7 +925,6 @@ pub async fn update_series_metadata(
                         } else {
                             active_provider
                                 .acquire_connection_for_probe(&input.name, probe_priority)
-                                .await
                                 .map(|handle| ProbeHandleGuard::new(active_provider, handle))
                         };
 
@@ -957,7 +953,7 @@ pub async fn update_series_metadata(
                                         }
                                     }
                                     if let Some(guard) = temp_handle {
-                                        guard.release().await;
+                                        guard.release();
                                     }
                                     continue;
                                 }
@@ -971,7 +967,7 @@ pub async fn update_series_metadata(
                                     probe_url.as_ref()
                                 );
                                 if let Some(guard) = temp_handle {
-                                    guard.release().await;
+                                    guard.release();
                                 }
                                 continue;
                             }
@@ -1045,7 +1041,7 @@ pub async fn update_series_metadata(
                         }
 
                         if let Some(guard) = temp_handle {
-                            guard.release().await;
+                            guard.release();
                         }
                     }
                 }

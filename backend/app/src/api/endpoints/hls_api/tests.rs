@@ -2420,7 +2420,7 @@ async fn hls_terminal_response_serves_prepared_finite_full_and_range_bytes_per_i
     let segment_zero_uri = format!("/hls/shared/live/{proxy_session_id}/{lease_id}/terminal/{generation}/0.ts");
     let segment_one_uri = format!("/hls/shared/live/{proxy_session_id}/{lease_id}/terminal/{generation}/1.ts");
     let repair_before = app_state.hls_proxy.segment_repair().stats().await;
-    let provider_connections_before = app_state.active_provider.get_provider_connections_count().await;
+    let provider_connections_before = app_state.active_provider.get_provider_connections_count();
 
     let head_content_length = terminal_head_content_length(&app_state, &proxy_session_id, &segment_zero_uri).await;
 
@@ -2444,7 +2444,7 @@ async fn hls_terminal_response_serves_prepared_finite_full_and_range_bytes_per_i
     assert_hls_cache_stream_registered(&app_state, &proxy_session_id).await;
     assert!(hls_session_last_media_at_ms(&app_state, &proxy_session_id).await.is_some());
     assert_eq!(app_state.hls_proxy.segment_repair().stats().await, repair_before);
-    assert_eq!(app_state.active_provider.get_provider_connections_count().await, provider_connections_before);
+    assert_eq!(app_state.active_provider.get_provider_connections_count(), provider_connections_before);
 
     let segment_zero_again = response_body(get_response(Arc::clone(&app_state), &segment_zero_uri, None).await).await;
     let segment_one = response_body(get_response(Arc::clone(&app_state), &segment_one_uri, None).await).await;
@@ -3540,7 +3540,7 @@ fn hls_runtime_origin_fetch_url_uses_selected_provider_account() {
     };
     let provider = Arc::new(RuntimeProviderConfig::new(
         &provider_input,
-        Arc::new(tokio::sync::RwLock::new(ProviderConfigConnection::default())),
+        Arc::new(std::sync::RwLock::new(ProviderConfigConnection::default())),
         Arc::new(|_, _| {}),
     ));
 
@@ -4153,7 +4153,7 @@ fn test_app_state_with_hls_proxy_and_inputs(
     let event_manager = Arc::new(EventManager::new());
     let active_provider = Arc::new(ActiveProviderManager::new(&app_config, &event_manager));
     let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
-    active_provider.set_shared_stream_manager(Arc::clone(&shared_stream_manager));
+    active_provider.set_shared_stream_manager(&shared_stream_manager);
 
     let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
     let config = app_config.config.load();
@@ -4329,7 +4329,14 @@ async fn hls_origin_account_io_lease_allows_parallel_same_session_origin_work() 
         .expect("second same-session origin io joins session lease");
     wait_for_provider_connection_count(&app_state, 1).await;
     assert_eq!(
-        session.read().await.origin_account_io_lease.as_ref().expect("session provider lease exists").active_io_count,
+        session
+            .read()
+            .await
+            .origin_account_io_lease
+            .as_ref()
+            .expect("session provider lease exists")
+            .active_io_count
+            .load(std::sync::atomic::Ordering::Relaxed),
         2
     );
 
@@ -4342,18 +4349,16 @@ async fn hls_origin_account_io_lease_allows_parallel_same_session_origin_work() 
             .origin_account_io_lease
             .as_ref()
             .expect("session provider lease remains while second io is active")
-            .active_io_count,
+            .active_io_count
+            .load(std::sync::atomic::Ordering::Relaxed),
         1
     );
 
     finish_hls_origin_account_io(&origin_io, &session, second, true).await;
     wait_for_provider_connection_count(&app_state, 0).await;
-    assert!(
-        app_state
-            .active_provider
-            .is_provider_reserved_for_other_session(&binding.account_name, Some("other-hls-session"))
-            .await
-    );
+    assert!(!app_state
+        .active_provider
+        .is_provider_reserved_for_other_session(&binding.account_name, Some("other-hls-session")));
 }
 
 #[tokio::test]
@@ -4505,11 +4510,12 @@ async fn hls_account_overlap_promotes_speculative_session_after_soft_window() {
 async fn hls_account_binding_soft_expiry_retains_session_and_reacquires_on_authorized_manifest_work() {
     let input = overlap_provider_input();
     let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
-    let session = create_bound_hls_test_session(&app_state, &input, "12345", "account-a", 1_000).await;
+    let session = create_bound_hls_test_session(&app_state, &input, "12345", input.name.as_ref(), 1_000).await;
     {
         let mut session = session.write().await;
         session.target_duration = Some(1);
         session.mark_authorized_media_access(1_000);
+        session.activity.last_delivered_media_at_ms = Some(1_000);
     }
     let old_generation = session.read().await.activity.origin_work_generation;
 
@@ -4548,7 +4554,7 @@ async fn hls_account_binding_soft_expiry_retains_session_and_reacquires_on_autho
     assert_eq!(binding.account_name.as_ref(), "account-a");
     assert!(matches!(binding.binding_mode, HlsOriginAccountBindingMode::Active));
     assert_eq!(prepared_origin.fetch_url, "http://account.example.com/live/account-user/account-pass/12345.m3u8");
-    app_state.connection_manager.release_provider_handle(prepared_origin.preacquired_origin_account_handle).await;
+    app_state.connection_manager.release_provider_handle(prepared_origin.preacquired_origin_account_handle);
 }
 
 #[tokio::test]
@@ -4561,12 +4567,16 @@ async fn hls_origin_runtime_uses_soft_overlap_before_grace_for_interactive_work(
         let mut session = old_session.write().await;
         session.target_duration = Some(10);
         session.mark_authorized_media_access(1_000);
+        session.activity.last_delivered_media_at_ms = Some(1_000);
     }
     let old_binding = old_session.read().await.origin_account_binding.clone().expect("binding exists");
-    app_state
-        .active_provider
-        .refresh_provider_reservation(&old_binding.account_name, &old_binding.session_owner, 60)
-        .await;
+    app_state.active_provider.refresh_provider_reservation(&old_binding.account_name, &old_binding.session_owner, 60);
+    app_state.active_provider.confirm_playback_activity(&old_binding.session_owner);
+    // The binding acquired a reservation without a handle; capture its tag so the
+    // preempt path can prove it still targets this exact incarnation.
+    let binding_tag = app_state.active_provider.binding_tag_for_owner(&old_binding.session_owner);
+    old_session.write().await.origin_account_binding.as_mut().expect("binding exists").provider_binding_tag =
+        binding_tag;
 
     let new_session = create_unbound_hls_test_session(&app_state, &input, "new", 12_000).await;
     let new_proxy_session_id = new_session.read().await.proxy_session_id.clone();
@@ -4602,7 +4612,7 @@ async fn hls_origin_runtime_uses_soft_overlap_before_grace_for_interactive_work(
         Some(super::ProviderAllocation::Available(_))
     ));
 
-    app_state.connection_manager.release_provider_handle(prepared_origin.preacquired_origin_account_handle).await;
+    app_state.connection_manager.release_provider_handle(prepared_origin.preacquired_origin_account_handle);
 }
 
 #[tokio::test]
@@ -4614,6 +4624,7 @@ async fn hls_origin_runtime_normal_policy_preempts_active_soft_hls_binding() {
         let mut session = soft_session.write().await;
         session.target_duration = Some(10);
         session.mark_authorized_media_access(10_000);
+        session.activity.last_delivered_media_at_ms = Some(10_000);
         session.reconcile_effective_origin_acquire_policy(
             Some(HlsEffectiveOriginAcquirePolicy::new(ConnectionKind::Soft, 0, 10_000)),
             10_000,
@@ -4621,10 +4632,13 @@ async fn hls_origin_runtime_normal_policy_preempts_active_soft_hls_binding() {
         session.activity.origin_work_generation
     };
     let soft_binding = soft_session.read().await.origin_account_binding.clone().expect("soft binding exists");
-    app_state
-        .active_provider
-        .refresh_provider_reservation(&soft_binding.account_name, &soft_binding.session_owner, 60)
-        .await;
+    app_state.active_provider.refresh_provider_reservation(&soft_binding.account_name, &soft_binding.session_owner, 60);
+    app_state.active_provider.confirm_playback_activity(&soft_binding.session_owner);
+    // The binding acquired a reservation without a handle; capture its tag so the
+    // preempt path can prove it still targets this exact incarnation.
+    let binding_tag = app_state.active_provider.binding_tag_for_owner(&soft_binding.session_owner);
+    soft_session.write().await.origin_account_binding.as_mut().expect("binding exists").provider_binding_tag =
+        binding_tag;
 
     let normal_session = create_unbound_hls_test_session(&app_state, &input, "normal", 10_500).await;
     let normal_proxy_session_id = normal_session.read().await.proxy_session_id.clone();
@@ -4666,7 +4680,7 @@ async fn hls_origin_runtime_normal_policy_preempts_active_soft_hls_binding() {
     ));
     drop(soft_session);
 
-    app_state.connection_manager.release_provider_handle(prepared_origin.preacquired_origin_account_handle).await;
+    app_state.connection_manager.release_provider_handle(prepared_origin.preacquired_origin_account_handle);
 }
 
 #[tokio::test]
@@ -4746,10 +4760,12 @@ async fn hls_origin_policy_preemption_rejects_soft_request_against_active_normal
         );
     }
     let normal_binding = normal_session.read().await.origin_account_binding.clone().expect("normal binding exists");
-    app_state
-        .active_provider
-        .refresh_provider_reservation(&normal_binding.account_name, &normal_binding.session_owner, 60)
-        .await;
+    app_state.active_provider.refresh_provider_reservation(
+        &normal_binding.account_name,
+        &normal_binding.session_owner,
+        60,
+    );
+    app_state.active_provider.confirm_playback_activity(&normal_binding.session_owner);
     let soft_session = create_unbound_hls_test_session(&app_state, &input, "soft", 10_500).await;
     let soft_proxy_session_id = soft_session.read().await.proxy_session_id.clone();
 
@@ -4763,6 +4779,7 @@ async fn hls_origin_policy_preemption_rejects_soft_request_against_active_normal
         &test_fingerprint_with_addr(test_addr_with_port(55232)),
         ConnectionKind::Soft,
         -100,
+        crate::model::PlaybackKind::LiveHls,
         10_500,
     )
     .await;
@@ -4772,12 +4789,9 @@ async fn hls_origin_policy_preemption_rejects_soft_request_against_active_normal
         normal_session.read().await.origin_account_binding.as_ref().map(|binding| &binding.binding_mode),
         Some(HlsOriginAccountBindingMode::Active)
     ));
-    assert!(
-        app_state
-            .active_provider
-            .is_provider_reserved_for_other_session(&normal_binding.account_name, Some("unrelated-session"))
-            .await
-    );
+    assert!(app_state
+        .active_provider
+        .is_provider_reserved_for_other_session(&normal_binding.account_name, Some("unrelated-session")));
 }
 
 #[tokio::test]
@@ -4794,7 +4808,6 @@ async fn hls_origin_runtime_uses_grace_as_interactive_fallback_after_overlap_fai
             ConnectionKind::Normal,
             Some("external-owner"),
         )
-        .await
         .expect("test should occupy the only provider account");
     let session = create_unbound_hls_test_session(&app_state, &input, "12345", 2_000).await;
     let proxy_session_id = session.read().await.proxy_session_id.clone();
@@ -4830,8 +4843,8 @@ async fn hls_origin_runtime_uses_grace_as_interactive_fallback_after_overlap_fai
         input.name.as_ref()
     );
 
-    app_state.connection_manager.release_provider_handle(prepared_origin.preacquired_origin_account_handle).await;
-    app_state.connection_manager.release_provider_handle(Some(occupied)).await;
+    app_state.connection_manager.release_provider_handle(prepared_origin.preacquired_origin_account_handle);
+    app_state.connection_manager.release_provider_handle(Some(occupied));
 }
 
 #[tokio::test]
@@ -5005,9 +5018,11 @@ async fn provider_grace_expiry_commits_lease_bound_provider_exhausted_tail() {
 #[tokio::test]
 async fn shared_provisioning_timeline_manifest_uses_canonical_hls_session_segments() {
     let input = single_hls_provider_input("shared-provisioning-timeline-input");
-    let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let hls_proxy = Arc::new(HlsProxyManager::with_cache_settings(temp_dir.path(), 300));
+    let app_state = test_app_state_with_hls_proxy_and_inputs(hls_proxy, vec![Arc::new(input.clone())]);
     enable_hls_provisioning_custom_response(&app_state);
-    let session = create_unbound_hls_test_session(&app_state, &input, "12345", 1_000).await;
+    let session = create_unbound_hls_test_session(&app_state, &input, "shared-prov-timeline-12345", 1_000).await;
     let access_lease_id = HlsAccessLeaseId("timeline-lease".to_string());
     let proxy_session_id = session.read().await.proxy_session_id.clone();
     activate_test_hls_access_lease(
@@ -5072,9 +5087,11 @@ async fn shared_provisioning_timeline_manifest_uses_canonical_hls_session_segmen
 #[tokio::test]
 async fn stale_provisioning_segments_do_not_trigger_canonical_handoff() {
     let input = single_hls_provider_input("stale-provisioning-handoff-input");
-    let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let hls_proxy = Arc::new(HlsProxyManager::with_cache_settings(temp_dir.path(), 300));
+    let app_state = test_app_state_with_hls_proxy_and_inputs(hls_proxy, vec![Arc::new(input.clone())]);
     enable_hls_provisioning_custom_response(&app_state);
-    let session = create_unbound_hls_test_session(&app_state, &input, "12345", 1_000).await;
+    let session = create_unbound_hls_test_session(&app_state, &input, "54321", 1_000).await;
     let initial_lease_id = HlsAccessLeaseId("initial-provisioning-lease".to_string());
     let strip = app_state.hls_proxy.strip();
 
@@ -5100,7 +5117,7 @@ async fn stale_provisioning_segments_do_not_trigger_canonical_handoff() {
         &app_state,
         &session,
         &input,
-        12345,
+        54321,
         &new_lease_id,
         2_000,
     )
@@ -5132,9 +5149,11 @@ async fn provisioning_handoff_finds_shared_session_by_input_stream_id_not_virtua
 #[tokio::test]
 async fn shared_provisioning_handoff_continues_proxy_sequence_for_origin_segments() {
     let input = single_hls_provider_input("shared-provisioning-handoff-input");
-    let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let hls_proxy = Arc::new(HlsProxyManager::with_cache_settings(temp_dir.path(), 300));
+    let app_state = test_app_state_with_hls_proxy_and_inputs(hls_proxy, vec![Arc::new(input.clone())]);
     enable_hls_provisioning_custom_response(&app_state);
-    let session = create_unbound_hls_test_session(&app_state, &input, "12345", 1_000).await;
+    let session = create_unbound_hls_test_session(&app_state, &input, "shared-handoff-12345", 1_000).await;
     let access_lease_id = HlsAccessLeaseId("handoff-lease".to_string());
     let strip = app_state.hls_proxy.strip();
     super::hls_shared_provisioning_timeline_manifest_response(
@@ -5204,12 +5223,11 @@ async fn hls_origin_runtime_background_skips_soft_overlap_and_grace() {
         let mut session = old_session.write().await;
         session.target_duration = Some(10);
         session.mark_authorized_media_access(1_000);
+        session.activity.last_delivered_media_at_ms = Some(1_000);
     }
     let old_binding = old_session.read().await.origin_account_binding.clone().expect("binding exists");
-    app_state
-        .active_provider
-        .refresh_provider_reservation(&old_binding.account_name, &old_binding.session_owner, 60)
-        .await;
+    app_state.active_provider.refresh_provider_reservation(&old_binding.account_name, &old_binding.session_owner, 60);
+    app_state.active_provider.confirm_playback_activity(&old_binding.session_owner);
     let new_session = create_unbound_hls_test_session(&app_state, &input, "new", 12_000).await;
     let new_proxy_session_id = new_session.read().await.proxy_session_id.clone();
 
@@ -5270,7 +5288,7 @@ fn hls_detached_origin_binding_soft_window_elapsed_maps_to_exhausted_no_account_
 }
 
 #[tokio::test]
-async fn hls_account_binding_without_media_activity_is_not_detached() {
+async fn hls_account_binding_without_media_activity_expires_after_startup_window() {
     let input = overlap_provider_input();
     let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
     let session = create_bound_hls_test_session(&app_state, &input, "12345", "account-a", 1_000).await;
@@ -5281,12 +5299,17 @@ async fn hls_account_binding_without_media_activity_is_not_detached() {
     }
     let old_generation = session.read().await.activity.origin_work_generation;
 
+    super::detach_unprotected_hls_origin_account_bindings(&app_state, 5_000).await;
+    assert!(session.read().await.origin_account_binding.as_ref().is_some_and(|binding| binding.is_active()));
     super::detach_unprotected_hls_origin_account_bindings(&app_state, 60_000).await;
 
     let session = session.read().await;
     let binding = session.origin_account_binding.as_ref().expect("binding remains");
-    assert!(matches!(binding.binding_mode, HlsOriginAccountBindingMode::Active));
-    assert_eq!(session.activity.origin_work_generation, old_generation);
+    assert!(matches!(
+        binding.binding_mode,
+        HlsOriginAccountBindingMode::Detached { reason: HlsOriginAccountDetachedReason::SoftWindowElapsed, .. }
+    ));
+    assert_eq!(session.activity.origin_work_generation, old_generation + 1);
     assert_eq!(session.activity.last_authorized_media_at_ms, None);
     assert_eq!(session.account_overlap_timing().target_duration_ms, 12_000);
 }
@@ -5561,8 +5584,9 @@ async fn hls_access_lease_idle_releases_user_but_keeps_origin_binding_and_queues
     let proxy_session_id = session.read().await.proxy_session_id.clone();
     let binding = session.read().await.origin_account_binding.clone().expect("binding exists");
     let account_name = Arc::from("account-a");
-    app_state.active_provider.refresh_provider_reservation(&account_name, &binding.session_owner, 60).await;
-    assert!(app_state.active_provider.is_provider_reserved_for_other_session(&account_name, Some("other-owner")).await);
+    app_state.active_provider.refresh_provider_reservation(&account_name, &binding.session_owner, 60);
+    app_state.active_provider.confirm_playback_activity(&binding.session_owner);
+    assert!(app_state.active_provider.is_provider_reserved_for_other_session(&account_name, Some("other-owner")));
     activate_test_hls_access_lease(&app_state, &proxy_session_id, "detach-lease", 1_000, 1_000).await;
     register_test_hls_stream_for_lease_release(&app_state, &session, &proxy_session_id, input.name.as_ref()).await;
     assert_eq!(app_state.active_users.active_streams().await.len(), 1);
@@ -5633,7 +5657,7 @@ async fn hls_access_lease_idle_releases_user_but_keeps_origin_binding_and_queues
         ));
         assert!(matches!(session.maps.get(&ProxyMapId(1)).expect("map remains").status, MapCacheStatus::Queued { .. }));
     }
-    assert!(app_state.active_provider.is_provider_reserved_for_other_session(&account_name, Some("other-owner")).await);
+    assert!(app_state.active_provider.is_provider_reserved_for_other_session(&account_name, Some("other-owner")));
     assert!(app_state.active_users.active_streams().await.is_empty());
 }
 
@@ -7954,6 +7978,7 @@ async fn hls_entry_origin_reservation_requires_real_provider_handle() {
         "http://origin.example.com/live/source-user/source-pass/12345.m3u8",
         "hls-session-token",
         "hls-cache:test-session",
+        crate::model::PlaybackKind::LiveHls,
         super::hls_origin_account_reservation_ttl_secs_fallback(),
         UserConnectionPermission::Allowed,
         ConnectionKind::Normal,
@@ -7965,7 +7990,7 @@ async fn hls_entry_origin_reservation_requires_real_provider_handle() {
 }
 
 #[tokio::test]
-async fn hls_entry_origin_reservation_sets_owner_reservation_before_redirect() {
+async fn hls_entry_origin_reservation_blocks_foreign_sessions_only_after_media_confirmation() {
     let input = single_hls_provider_input("available-provider");
     let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
     let mut user = ProxyUserCredentials::default();
@@ -7981,6 +8006,7 @@ async fn hls_entry_origin_reservation_sets_owner_reservation_before_redirect() {
         "http://account.example.com/live/account-user/account-pass/12345.m3u8",
         "hls-session-token",
         session_owner,
+        crate::model::PlaybackKind::LiveHls,
         super::hls_origin_account_reservation_ttl_secs_fallback(),
         UserConnectionPermission::Allowed,
         ConnectionKind::Normal,
@@ -7992,37 +8018,50 @@ async fn hls_entry_origin_reservation_sets_owner_reservation_before_redirect() {
     assert_eq!(reservation.request_url, "http://account.example.com/live/account-user/account-pass/12345.m3u8");
     assert!(reservation.selected_provider_config.is_some());
     assert!(app_state.active_users.active_streams().await.is_empty());
-    app_state.connection_manager.release_provider_handle(reservation.provider_handle).await;
+    app_state.connection_manager.release_provider_handle(reservation.provider_handle);
 
+    // A manifest-only entry reservation is still unconfirmed, so it must not block a
+    // different HLS session: an abandoned start or a manifest retry has to leave the
+    // provider capacity free for unrelated clients behind the same reverse proxy.
+    let other_handle = app_state.active_provider.acquire_connection_with_grace_for_session(
+        &input.name,
+        &test_addr_with_port(55251),
+        false,
+        0,
+        ConnectionKind::Normal,
+        Some("other-owner"),
+    );
+    assert!(other_handle.is_some(), "an unconfirmed entry reservation must not block other HLS sessions");
+    app_state.connection_manager.release_provider_handle(other_handle);
+
+    let same_owner_handle = app_state.active_provider.acquire_connection_with_grace_for_session(
+        &input.name,
+        &test_addr_with_port(55252),
+        false,
+        0,
+        ConnectionKind::Normal,
+        Some(session_owner),
+    );
+    assert!(same_owner_handle.is_some(), "reserved provider must be reusable by the same HLS session owner");
+    app_state.connection_manager.release_provider_handle(same_owner_handle);
+
+    // Once real media activity confirms the lease, it reserves the provider slot and
+    // other sessions are routed away from it.
+    app_state.active_provider.confirm_playback_activity(session_owner);
     assert!(
         app_state
             .active_provider
             .acquire_connection_with_grace_for_session(
                 &input.name,
-                &test_addr_with_port(55251),
+                &test_addr_with_port(55253),
                 false,
                 0,
                 ConnectionKind::Normal,
                 Some("other-owner"),
             )
-            .await
             .is_none(),
-        "reserved provider must stay blocked for other HLS sessions"
+        "a confirmed reservation must stay blocked for other HLS sessions"
     );
-
-    let same_owner_handle = app_state
-        .active_provider
-        .acquire_connection_with_grace_for_session(
-            &input.name,
-            &test_addr_with_port(55252),
-            false,
-            0,
-            ConnectionKind::Normal,
-            Some(session_owner),
-        )
-        .await;
-    assert!(same_owner_handle.is_some(), "reserved provider must be reusable by the same HLS session owner");
-    app_state.connection_manager.release_provider_handle(same_owner_handle).await;
 }
 
 #[tokio::test]
@@ -8091,7 +8130,6 @@ async fn hls_entry_origin_reservation_uses_persisted_alias_manifest_url() {
             ConnectionKind::Normal,
             Some("primary-session"),
         )
-        .await
         .expect("primary account should be allocated");
 
     let reservation = super::try_reserve_hls_entry_origin_account_for_redirect(
@@ -8107,6 +8145,7 @@ async fn hls_entry_origin_reservation_uses_persisted_alias_manifest_url() {
         "http://stream.example:4000/news24hd/mono.m3u8?token=primary-stream-token",
         "alias-session-token",
         "alias-session-owner",
+        crate::model::PlaybackKind::LiveHls,
         super::hls_origin_account_reservation_ttl_secs_fallback(),
         UserConnectionPermission::Allowed,
         ConnectionKind::Normal,
@@ -8121,8 +8160,8 @@ async fn hls_entry_origin_reservation_uses_persisted_alias_manifest_url() {
     );
     assert_eq!(reservation.request_url, "http://stream.example:4000/news24hd/mono.m3u8?token=alias-stream-token");
 
-    app_state.connection_manager.release_provider_handle(reservation.provider_handle).await;
-    app_state.connection_manager.release_provider_handle(Some(primary_handle)).await;
+    app_state.connection_manager.release_provider_handle(reservation.provider_handle);
+    app_state.connection_manager.release_provider_handle(Some(primary_handle));
 }
 
 #[tokio::test]
@@ -8157,19 +8196,16 @@ async fn hls_virtual_entry_reservation_uses_input_stream_id_for_shared_session_o
     let expected_key = HlsSessionKey::new(input.id, "80510");
     let expected_proxy_session_id = build_proxy_session_id(&expected_key, &app_state.get_encrypt_secret());
     let expected_owner = crate::api::model::build_hls_origin_session_owner(&expected_proxy_session_id);
-    let same_owner_handle = app_state
-        .active_provider
-        .acquire_connection_with_grace_for_session(
-            &input.name,
-            &test_addr_with_port(55253),
-            false,
-            0,
-            ConnectionKind::Normal,
-            Some(&expected_owner),
-        )
-        .await;
+    let same_owner_handle = app_state.active_provider.acquire_connection_with_grace_for_session(
+        &input.name,
+        &test_addr_with_port(55253),
+        false,
+        0,
+        ConnectionKind::Normal,
+        Some(&expected_owner),
+    );
     assert!(same_owner_handle.is_some(), "reservation must be owned by input:1|hls|80510, not virtual_id=1001");
-    app_state.connection_manager.release_provider_handle(same_owner_handle).await;
+    app_state.connection_manager.release_provider_handle(same_owner_handle);
 }
 
 #[tokio::test]
@@ -10522,13 +10558,13 @@ async fn terminal_test_plan_shape(app_state: &Arc<AppState>, proxy_session_id: &
 
 async fn wait_for_provider_connection_count(app_state: &Arc<AppState>, expected: usize) {
     for _ in 0..50 {
-        let actual = app_state.active_provider.get_provider_connections_count().await;
+        let actual = app_state.active_provider.get_provider_connections_count();
         if actual == expected {
             return;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(app_state.active_provider.get_provider_connections_count().await, expected);
+    assert_eq!(app_state.active_provider.get_provider_connections_count(), expected);
 }
 
 fn normal_manifest(body: &str) -> crate::processing::parser::hls::origin_manifest::ParsedOriginManifest {
@@ -10654,9 +10690,12 @@ async fn map_transient_resource_with_kind(
     grant_lease: bool,
     kind: TransientResourceKind,
 ) -> (String, String) {
+    static TRANSIENT_STREAM_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let secret = b"rewrite-secret";
     let now_ms = super::current_time_millis();
-    let session = app_state.hls_proxy.get_or_create_session(HlsSessionKey::new(1, "12345"), secret, now_ms).await;
+    let stream_ref =
+        format!("transient-{}", TRANSIENT_STREAM_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let session = app_state.hls_proxy.get_or_create_session(HlsSessionKey::new(1, &stream_ref), secret, now_ms).await;
     let resource_id = build_transient_resource_id(origin_url, secret);
     let proxy_session_id = {
         let mut session = session.write().await;
@@ -12121,7 +12160,7 @@ async fn transient_decoder_failure_releases_origin_and_access_guards_once() {
     wait_for_provider_connection_count(&app_state, 0).await;
     assert_eq!(resource.active_readers(), 0);
     tokio::task::yield_now().await;
-    assert_eq!(app_state.active_provider.get_provider_connections_count().await, 0);
+    assert_eq!(app_state.active_provider.get_provider_connections_count(), 0);
     assert_eq!(origin.requests.lock().await.len(), 1, "body failure must not start another origin request");
 }
 

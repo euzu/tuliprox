@@ -10,8 +10,8 @@ use crate::{
             empty_json_response_as_array, empty_json_response_as_object, force_provider_stream_response,
             get_session_reservation_ttl_secs, get_user_target, get_user_target_by_credentials, internal_server_error,
             is_seekable_media_request, is_session_based_playback, is_stream_share_enabled, local_stream_response,
-            redirect, redirect_response, resolve_initial_stalker_playback_url, resource_response,
-            separate_number_and_remainder, should_allow_exhausted_shared_reconnect, stream_response,
+            redirect, redirect_response, reentry_suppressed_response, resolve_initial_stalker_playback_url,
+            resource_response, separate_number_and_remainder, should_allow_exhausted_shared_reconnect, stream_response,
             try_option_bad_request, try_result_bad_request, try_unwrap_body, RedirectParams, ResourceFetchPolicy,
         },
         endpoints::{
@@ -408,6 +408,9 @@ async fn xtream_player_api_stream(
             false,
         )
         .await;
+        if admission.is_reentry_suppressed() {
+            return reentry_suppressed_response();
+        }
         return local_stream_response(
             fingerprint,
             app_state,
@@ -416,8 +419,8 @@ async fn xtream_player_api_stream(
             &input,
             &target,
             &user,
-            admission.permission,
-            admission.kind.unwrap_or(crate::api::model::ConnectionKind::Normal),
+            admission.permission(),
+            admission.kind().unwrap_or(crate::api::model::ConnectionKind::Normal),
             Some(playback_session_token.as_str()),
             Some(request_class),
             true,
@@ -470,7 +473,7 @@ async fn xtream_player_api_stream(
     let session_key = if let Some(resolved) = m3u_timeshift.as_ref() {
         create_m3u_catchup_session_key(fingerprint, &user.username, virtual_id.get(), &resolved.discriminator)
     } else if item_type == PlaylistItemType::Catchup {
-        create_catchup_session_key(fingerprint, &user.username, virtual_id.get())
+        create_catchup_session_key(fingerprint, &user.username, virtual_id.get(), stream_req.action_path)
     } else {
         create_playback_session_fingerprint(
             fingerprint,
@@ -515,7 +518,7 @@ async fn xtream_player_api_stream(
             );
         }
 
-        if app_state.active_provider.is_over_limit(&session.provider).await {
+        if app_state.active_provider.is_over_limit(&session.provider) {
             let stream_channel = create_stream_channel_with_type(target.id, &pli, item_type);
             if playback_ext == HLS_EXT {
                 return hls_admission_failure_manifest_response(
@@ -581,9 +584,9 @@ async fn xtream_player_api_stream(
         false,
     )
     .await;
-    let connection_permission = connection_admission.permission;
+    let connection_permission = connection_admission.permission();
     let connection_kind = connection_admission
-        .kind
+        .kind()
         .or(user_session.as_ref().and_then(|session| session.connection_kind))
         .unwrap_or(crate::api::model::ConnectionKind::Normal);
     let allow_exhausted_shared_reconnect = should_allow_exhausted_shared_reconnect(
@@ -593,6 +596,9 @@ async fn xtream_player_api_stream(
         session_url.as_ref(),
     );
     if connection_permission == UserConnectionPermission::Exhausted && !allow_exhausted_shared_reconnect {
+        if connection_admission.is_reentry_suppressed() {
+            return reentry_suppressed_response();
+        }
         let stream_channel = create_stream_channel_with_type(target.id, &pli, item_type);
         if playback_ext == HLS_EXT {
             return hls_admission_failure_manifest_response(
@@ -671,7 +677,7 @@ async fn xtream_player_api_stream(
             &input,
             req_headers,
             connection_permission,
-            connection_admission.kind,
+            connection_admission.kind(),
             &original_hls_entry_path,
         )
         .await

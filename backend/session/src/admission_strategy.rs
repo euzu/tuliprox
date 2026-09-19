@@ -1,5 +1,5 @@
 use log::debug;
-use shared::model::AdmissionStrategy;
+use shared::model::{AdmissionStrategy, VirtualId};
 use std::{net::SocketAddr, sync::Arc};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,6 +18,8 @@ pub enum GraceMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EvictionTarget {
     pub addr: SocketAddr,
+    pub virtual_id: VirtualId,
+    pub uid: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -88,14 +90,22 @@ fn evaluate_evict_same_ip(
     }
 
     match selected {
-        Some(candidate) => AdmissionDecision::Evict(EvictionTarget { addr: candidate.addr }),
+        Some(candidate) => AdmissionDecision::Evict(EvictionTarget {
+            addr: candidate.addr,
+            virtual_id: candidate.virtual_id,
+            uid: candidate.uid,
+        }),
         None => AdmissionDecision::NoMatch,
     }
 }
 
 fn evaluate_evict_user(candidates: &[EvictionCandidate], order: EvictionOrder) -> AdmissionDecision {
     match select_candidate(candidates.iter(), order) {
-        Some(candidate) => AdmissionDecision::Evict(EvictionTarget { addr: candidate.addr }),
+        Some(candidate) => AdmissionDecision::Evict(EvictionTarget {
+            addr: candidate.addr,
+            virtual_id: candidate.virtual_id,
+            uid: candidate.uid,
+        }),
         None => AdmissionDecision::NoMatch,
     }
 }
@@ -109,8 +119,8 @@ fn select_candidate<'a>(
         let should_replace = match selected {
             None => true,
             Some(current) => match order {
-                EvictionOrder::Oldest => candidate.ts < current.ts,
-                EvictionOrder::Latest => candidate.ts > current.ts,
+                EvictionOrder::Oldest => (candidate.ts, candidate.uid) < (current.ts, current.uid),
+                EvictionOrder::Latest => (candidate.ts, candidate.uid) > (current.ts, current.uid),
             },
         };
         if should_replace {
@@ -124,7 +134,10 @@ fn select_candidate<'a>(
 pub struct EvictionCandidate {
     pub addr: SocketAddr,
     pub client_ip: String,
+    pub virtual_id: VirtualId,
     pub ts: u64,
+    /// Monotonic stream identity used to order streams created in the same second.
+    pub uid: u32,
 }
 
 #[cfg(test)]
@@ -135,7 +148,13 @@ mod tests {
     fn addr(port: u16) -> SocketAddr { SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port) }
 
     fn candidate(port: u16, ip: &str, ts: u64) -> EvictionCandidate {
-        EvictionCandidate { addr: addr(port), client_ip: ip.to_string(), ts }
+        EvictionCandidate {
+            addr: addr(port),
+            client_ip: ip.to_string(),
+            virtual_id: VirtualId::new(u32::from(port)),
+            ts,
+            uid: u32::from(port),
+        }
     }
 
     #[test]
@@ -181,6 +200,13 @@ mod tests {
         let candidates =
             vec![candidate(1000, "2.2.2.2", 300), candidate(1001, "1.1.1.1", 200), candidate(1002, "3.3.3.3", 100)];
         assert_evict(AdmissionStrategy::EvictUserLatest, &candidates, 1000);
+    }
+
+    #[test]
+    fn equal_timestamp_uses_monotonic_stream_identity() {
+        let candidates = vec![candidate(1000, "1.1.1.1", 100), candidate(1001, "1.1.1.1", 100)];
+        assert_evict(AdmissionStrategy::EvictUserSameIpOldest, &candidates, 1000);
+        assert_evict(AdmissionStrategy::EvictUserSameIpLatest, &candidates, 1001);
     }
 
     #[test]

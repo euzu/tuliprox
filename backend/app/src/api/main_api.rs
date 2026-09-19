@@ -48,6 +48,7 @@ use axum::{
 use dashmap::DashSet;
 use log::{debug, error, info, warn};
 use shared::{
+    defaults::default_cleanup_queue_capacity,
     error::TuliproxError,
     model::{PlaylistUpdateState, PlaylistUpdateSummary, ServerLifecycleEvent},
     utils::{concat_path_leading_slash, sanitize_sensitive_info},
@@ -280,11 +281,16 @@ fn get_web_dir_path(web_ui_enabled: bool, web_root: &str) -> Result<PathBuf, Tul
 }
 
 fn create_healthcheck() -> Healthcheck {
+    // `status` stays `ok` for as long as the server answers requests: the
+    // container healthcheck restarts on a non-ok body, and a wedged runtime is
+    // reported by the watchdog thread instead of by killing the process.
+    // Liveness is exposed separately in `runtime`.
     Healthcheck {
         status: "ok".to_string(),
         version: VERSION.to_string(),
         build_time: get_build_time(),
         server_time: get_server_time(),
+        runtime: tuliprox_core::utils::runtime_liveness::health_snapshot(),
     }
 }
 
@@ -301,7 +307,7 @@ async fn ready(
     use crate::model::readiness::build_provider_slots;
     use shared::model::provider_saturation::is_exhausted;
     let sources = app_state.app_config.sources.load();
-    let Some(connections) = app_state.active_provider.active_connections().await else {
+    let Some(connections) = app_state.active_provider.active_connections() else {
         // No live connections yet: either the lineups are still warming up, or
         // there is no enabled input that could ever carry one.
         let status = if sources.inputs.iter().any(|input| input.enabled) { "initializing" } else { "exhausted" };
@@ -402,17 +408,23 @@ async fn create_shared_data(
         config.reverse_proxy.as_ref().and_then(|reverse_proxy| reverse_proxy.hls_cache.as_ref()),
         &rewrite_secret,
     ));
-    active_provider.set_shared_stream_manager(Arc::clone(&shared_stream_manager));
+    active_provider.set_shared_stream_manager(&shared_stream_manager);
     let active_users = Arc::new(ActiveUserManager::new(&config, &geoip, &event_manager));
     active_users.start_adaptive_expiry_worker();
 
     let history_config = config.reverse_proxy.as_ref().and_then(|r| r.stream_history.as_ref());
-    let connection_manager = Arc::new(ConnectionManager::new(
+    let cleanup_capacity = config
+        .reverse_proxy
+        .as_ref()
+        .and_then(|r| r.stream.as_ref())
+        .map_or_else(default_cleanup_queue_capacity, |stream| stream.cleanup_queue_capacity);
+    let connection_manager = Arc::new(ConnectionManager::new_with_capacity(
         &active_users,
         &active_provider,
         &shared_stream_manager,
         &event_manager,
         history_config,
+        cleanup_capacity,
     ));
 
     let client = create_http_client(app_config)?;
@@ -1176,7 +1188,7 @@ mod tests {
             let event_manager = Arc::new(EventManager::new());
             let active_provider = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
             let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
-            active_provider.set_shared_stream_manager(Arc::clone(&shared_stream_manager));
+            active_provider.set_shared_stream_manager(&shared_stream_manager);
             let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
             let config = app_cfg.config.load();
             let active_users = Arc::new(ActiveUserManager::new(&config, &geoip, &event_manager));
@@ -1249,7 +1261,6 @@ mod tests {
             state
                 .active_provider
                 .acquire_connection(&input.into(), &addr, default_user_priority(), ConnectionKind::Normal)
-                .await
                 .expect("connection allocation")
         }
 

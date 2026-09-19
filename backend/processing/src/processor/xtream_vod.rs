@@ -118,10 +118,7 @@ async fn playlist_resolve_vod_info<E: EventSink + Clone + 'static, M: MetadataUp
     do_probe: bool,
 ) {
     let filter = |pli: &PlaylistItem| {
-        if pli.header.xtream_cluster != XtreamCluster::Video || pli.header.item_type != PlaylistItemType::Video {
-            return false;
-        }
-        true
+        pli.header.xtream_cluster == XtreamCluster::Video && pli.header.item_type == PlaylistItemType::Video
     };
 
     let resolve_tmdb_enabled = fpl.input.has_flag(ConfigInputFlags::ResolveTmdb);
@@ -858,7 +855,6 @@ pub async fn update_vod_metadata(
                 } else {
                     active_provider
                         .acquire_connection_for_probe(&input.name, probe_priority)
-                        .await
                         .map(|handle| ProbeHandleGuard::new(active_provider, handle))
                 };
 
@@ -927,7 +923,7 @@ pub async fn update_vod_metadata(
                 }
 
                 if let Some(guard) = temp_handle {
-                    guard.release().await;
+                    guard.release();
                 }
             } else {
                 debug_if_enabled!(

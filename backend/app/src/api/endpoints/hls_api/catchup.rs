@@ -189,7 +189,7 @@ pub(super) async fn admit_recovered_archive_stream(
             .await,
         ));
     }
-    if app_state.active_provider.is_over_limit(&session.provider).await {
+    if app_state.active_provider.is_over_limit(&session.provider) {
         return Err(Box::new(
             hls_admission_failure_manifest_response(
                 app_state,
@@ -215,8 +215,8 @@ pub(super) async fn admit_recovered_archive_stream(
         false,
     )
     .await;
-    let connection_permission = connection_admission.permission;
-    let connection_kind = connection_admission.kind.or(session.connection_kind);
+    let connection_permission = connection_admission.permission();
+    let connection_kind = connection_admission.kind().or(session.connection_kind);
     session.permission = connection_permission;
     if let Some(connection_kind) = connection_kind {
         session.connection_kind = Some(connection_kind);
@@ -224,6 +224,9 @@ pub(super) async fn admit_recovered_archive_stream(
     if connection_permission == UserConnectionPermission::Exhausted
         || (connection_permission == UserConnectionPermission::GracePeriod && connection_kind.is_none())
     {
+        if connection_admission.is_reentry_suppressed() {
+            return Err(Box::new(crate::api::api_utils::reentry_suppressed_response()));
+        }
         let provider = if session.provider.is_empty() { input.name.clone() } else { session.provider.clone() };
         return Err(Box::new(
             hls_admission_failure_manifest_response(

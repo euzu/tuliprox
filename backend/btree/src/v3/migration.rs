@@ -501,7 +501,7 @@ mod tests {
         let mut bytes = std::fs::read(&path)?;
         let serialized = crate::codec::binary_serialize(&large2)?;
         let mut pattern = vec![v2::COMPRESSION_FLAG_LZ4];
-        pattern.extend_from_slice(&(serialized.len() as u32).to_le_bytes());
+        pattern.extend_from_slice(&u32::try_from(serialized.len()).expect("test record length fits u32").to_le_bytes());
         // Find the second occurrence (key 2)
         let mut occurrences = Vec::new();
         for pos in 0..bytes.len().saturating_sub(pattern.len()) {

@@ -10,7 +10,7 @@ on:
       branch:
         type: choice
         description: Target branch
-        options: [develop, master]
+        options: [develop, experimental, master]
         default: develop
       choice:
         type: choice
@@ -18,7 +18,7 @@ on:
         options: [none, major, minor, patch]
         default: none
   push:
-    branches: [develop, master]
+    branches: [develop, experimental, master]
 
 # Avoid multiple parallel builds for the same branch to prevent race conditions
 concurrency:
@@ -29,7 +29,7 @@ jobs:
   docker-build:
     runs-on: ubuntu-latest
     if: >-
-      (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/master') &&
+      (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/experimental' || github.ref == 'refs/heads/master') &&
       (github.event_name != 'push' || github.actor != 'github-actions[bot]')
 
     steps:
@@ -67,12 +67,13 @@ jobs:
           if [[ "${{ github.event_name }}" == "push" ]]; then
             case "${{ github.ref_name }}" in
               develop) ./bin/inc_version.sh ;;
+              experimental) echo "🔬 Experimental builds do not bump versions; keeping version from develop." ;;
               master) echo "Master builds use the version already committed in the merged PR; skipping version bump." ;;
               *) echo "Unsupported push branch: ${{ github.ref_name }}" >&2; exit 1 ;;
             esac
           else
-            if [[ "${{ github.event.inputs.branch }}" == "master" ]]; then
-              echo "Manual master builds use the version already committed on master; skipping version bump."
+            if [[ "${{ github.event.inputs.branch }}" == "master" || "${{ github.event.inputs.branch }}" == "experimental" ]]; then
+              echo "Manual ${{ github.event.inputs.branch }} builds skip version bump."
             else
               case "${{ github.event.inputs.choice }}" in
                 major) ./bin/inc_version.sh m ;;
@@ -147,7 +148,7 @@ jobs:
       - name: Commit version bump
         if: >-
           (github.event_name == 'push' && github.ref == 'refs/heads/develop') ||
-          (github.event_name == 'workflow_dispatch' && github.event.inputs.branch != 'master')
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.branch == 'develop' && github.event.inputs.choice != 'none')
         id: version_commit
         run: |
           git config user.name "euzu"
@@ -220,7 +221,7 @@ jobs:
           success() &&
           (
             (github.event_name == 'push' && github.ref == 'refs/heads/develop') ||
-            (github.event_name == 'workflow_dispatch' && github.event.inputs.branch != 'master')
+            (github.event_name == 'workflow_dispatch' && github.event.inputs.branch == 'develop')
           ) &&
           steps.version_commit.outputs.did_commit == 'true'
         run: |

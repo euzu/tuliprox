@@ -2066,17 +2066,17 @@ async fn recently_evicted_session_guard_survives_ttl_while_protected_addr_is_sti
         })
         .await;
 
-    manager.mark_recent_eviction_guard_for_addr(&evicted_addr, protected_addr, 1).await;
+    manager.mark_recent_eviction_guard_for_addr(&evicted_addr, protected_addr, Duration::from_secs(1)).await;
     {
         let mut connections = manager.connections.write().await;
         if let Some(registration) = connections.key_by_addr.get_mut(&protected_addr) {
-            registration.username = user.username.clone();
+            registration.add_user(&user.username, current_time_secs());
         }
         let protection = connections
             .recently_evicted_sessions
             .get_mut("tok-guard-session")
             .expect("recent eviction guard should exist");
-        protection.expires_at = current_time_secs().saturating_sub(1);
+        protection.expires_at = Instant::now().checked_sub(Duration::from_secs(1)).unwrap_or_else(Instant::now);
     }
 
     assert_eq!(manager.recently_evicted_session_protected_addr("tok-guard-session").await, Some(protected_addr));
@@ -2133,7 +2133,7 @@ async fn recently_evicted_vod_uses_session_reentry_guard() {
         })
         .await;
 
-    manager.mark_recent_eviction_guard_for_addr(&evicted_addr, protected_addr, 10).await;
+    manager.mark_recent_eviction_guard_for_addr(&evicted_addr, protected_addr, Duration::from_secs(10)).await;
 
     assert_eq!(manager.recently_evicted_session_protected_addr("tok-guard-vod").await, Some(protected_addr));
     let connections = manager.connections.read().await;
@@ -2177,7 +2177,7 @@ async fn provider_affine_stream_without_session_token_uses_socket_reentry_fallba
         })
         .await;
 
-    manager.mark_recent_eviction_guard_for_addr(&evicted_addr, protected_addr, 10).await;
+    manager.mark_recent_eviction_guard_for_addr(&evicted_addr, protected_addr, Duration::from_secs(10)).await;
 
     assert_eq!(
         manager
@@ -2189,6 +2189,56 @@ async fn provider_affine_stream_without_session_token_uses_socket_reentry_fallba
             .await,
         Some(protected_addr)
     );
+}
+
+#[tokio::test]
+async fn socket_reentry_guard_expires_at_ttl() {
+    let config = Config::default();
+    let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+    let event_manager = Arc::new(EventManager::new());
+    let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+    let evicted_addr: SocketAddr = "127.0.0.1:55117".parse().unwrap();
+    let protected_addr: SocketAddr = "127.0.0.1:55118".parse().unwrap();
+    let fingerprint = Fingerprint::new("fp-socket-ttl".to_string(), "127.0.0.1".to_string(), evicted_addr);
+    let channel = test_channel(2021);
+
+    manager.add_connection(&evicted_addr).await;
+    manager
+        .update_connection(ActiveUserConnectionParams {
+            uid: 21,
+            meter_uid: 0,
+            username: "socket-ttl-user",
+            max_connections: 1,
+            soft_connections: 0,
+            connection_kind: ConnectionKind::Normal,
+            priority: 0,
+            soft_priority: 0,
+            fingerprint: &fingerprint,
+            provider: "provider-a".intern(),
+            stream_channel: &channel,
+            user_agent: Cow::Borrowed("ua"),
+            session_token: None,
+        })
+        .await;
+
+    manager.mark_recent_eviction_guard_for_addr(&evicted_addr, protected_addr, Duration::from_secs(10)).await;
+    let virtual_id = shared::model::VirtualId::new(channel.virtual_id);
+    assert_eq!(
+        manager.recent_socket_reentry_protected_addr("socket-ttl-user", "127.0.0.1", virtual_id).await,
+        Some(protected_addr)
+    );
+
+    // Expire only the guard while the protected address stays registered: the TTL is
+    // authoritative and must not fall back to the still-present socket registration.
+    {
+        let mut connections = manager.connections.write().await;
+        let key = create_socket_reentry_guard_key("socket-ttl-user", "127.0.0.1", virtual_id);
+        let protection =
+            connections.recent_socket_reentry_guards.get_mut(&key).expect("socket reentry guard should exist");
+        protection.expires_at = Instant::now().checked_sub(Duration::from_secs(1)).unwrap_or_else(Instant::now);
+    }
+    assert_eq!(manager.recent_socket_reentry_protected_addr("socket-ttl-user", "127.0.0.1", virtual_id).await, None);
 }
 
 #[tokio::test]
@@ -2433,7 +2483,7 @@ async fn unlimited_user_can_open_same_and_different_live_streams_from_same_ip() 
 }
 
 #[tokio::test]
-async fn release_stream_by_uid_removes_only_matching_stream_on_shared_addr() {
+async fn affine_request_claims_keep_playback_until_oldest_body_finishes() {
     let config = Config::default();
     let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
     let event_manager = Arc::new(EventManager::new());
@@ -2458,19 +2508,140 @@ async fn release_stream_by_uid_removes_only_matching_stream_on_shared_addr() {
                 soft_priority: 0,
                 fingerprint: &fingerprint,
                 provider: "provider-a".intern(),
-                stream_channel: &test_channel(3004),
+                stream_channel: &test_adaptive_channel(3004),
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-live-shared-addr"),
             })
             .await;
     }
 
-    let removed = manager.release_stream_by_uid(&addr, 42).await;
-    assert!(removed.as_ref().is_some_and(|stream| stream.uid == 42));
+    assert_eq!(manager.active_streams().await.len(), 1);
+    assert!(manager.release_stream_by_uid(&addr, 42).await.is_none());
 
     let streams = manager.active_streams().await;
     assert_eq!(streams.len(), 1);
     assert_eq!(streams[0].uid, 41);
+
+    let removed = manager.release_stream_by_uid(&addr, 41).await;
+    assert!(removed.as_ref().is_some_and(|stream| stream.uid == 41));
+    assert!(manager.active_streams().await.is_empty());
+}
+
+#[tokio::test]
+async fn affine_request_claims_keep_playback_until_newest_body_finishes() {
+    let config = Config::default();
+    let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+    let event_manager = Arc::new(EventManager::new());
+    let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+    let addr: SocketAddr = "127.0.0.1:55037".parse().unwrap();
+    let fingerprint = Fingerprint::new("fp-affine-cleanup-order".to_string(), "127.0.0.1".to_string(), addr);
+
+    manager.add_connection(&addr).await;
+    for uid in [45, 46] {
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid,
+                meter_uid: 0,
+                username: "user1",
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint,
+                provider: "provider-a".intern(),
+                stream_channel: &test_adaptive_channel(3005),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-affine-cleanup-order"),
+            })
+            .await
+            .expect("affine request should register");
+    }
+
+    assert!(manager.release_stream_by_uid(&addr, 45).await.is_none());
+    assert_eq!(manager.active_users_and_connections().await, (1, 1));
+    assert_eq!(manager.active_streams().await.len(), 1);
+
+    let removed = manager.release_stream_by_uid(&addr, 46).await;
+    assert!(removed.as_ref().is_some_and(|stream| stream.uid == 45));
+    assert_eq!(manager.active_users_and_connections().await, (0, 0));
+    assert!(manager.active_streams().await.is_empty());
+}
+
+/// PR1 regression: two bodies with distinct request UIDs that map to the same
+/// display stream must both clean up correctly. The current body path passes the
+/// *display* UID (`stream_info.uid`) to cleanup, not the request UID. This test
+/// asserts that the cleanup is request-affine — releasing the display UID twice
+/// must drain both claims, and the second release must find the stream.
+#[tokio::test]
+async fn pr1_two_bodies_same_display_uid_both_cleanups_must_succeed() {
+    let config = Config::default();
+    let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+    let event_manager = Arc::new(EventManager::new());
+    let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+    let addr: SocketAddr = "127.0.0.1:55035".parse().unwrap();
+    let fingerprint = Fingerprint::new("fp-pr1-display-vs-request".to_string(), "127.0.0.1".to_string(), addr);
+    manager.add_connection(&addr).await;
+
+    // Request 41 creates the display stream.
+    let first = manager
+        .update_connection(ActiveUserConnectionParams {
+            uid: 41,
+            meter_uid: 301,
+            username: "user1",
+            max_connections: 1,
+            soft_connections: 0,
+            connection_kind: ConnectionKind::Normal,
+            priority: 0,
+            soft_priority: 0,
+            fingerprint: &fingerprint,
+            provider: "provider-a".intern(),
+            stream_channel: &test_adaptive_channel(3006),
+            user_agent: Cow::Borrowed("ua"),
+            session_token: Some("tok-pr1"),
+        })
+        .await
+        .expect("first body should register");
+
+    // Request 42 reuses the same playback (same session token, same channel).
+    let second = manager
+        .update_connection(ActiveUserConnectionParams {
+            uid: 42,
+            meter_uid: 302,
+            username: "user1",
+            max_connections: 1,
+            soft_connections: 0,
+            connection_kind: ConnectionKind::Normal,
+            priority: 0,
+            soft_priority: 0,
+            fingerprint: &fingerprint,
+            provider: "provider-a".intern(),
+            stream_channel: &test_adaptive_channel(3006),
+            user_agent: Cow::Borrowed("ua"),
+            session_token: Some("tok-pr1"),
+        })
+        .await
+        .expect("second body should register");
+
+    // Both return the same display UID.
+    assert_eq!(first.uid, second.uid, "display UID must be stable across requests");
+    let display_uid = first.uid;
+
+    // Fixed behavior: the body passes its own request UID to cleanup, not the display UID.
+    // First body (request 41) finishes → should NOT remove the stream (request 42 still active).
+    let removed_first = manager.release_stream_by_uid(&addr, 41).await;
+    assert!(removed_first.is_none(), "first body cleanup must keep stream alive for second body");
+
+    assert_eq!(manager.active_streams().await.len(), 1, "stream must survive first body cleanup");
+
+    // Second body (request 42) finishes → should remove the stream (no more claims).
+    let removed_second = manager.release_stream_by_uid(&addr, 42).await;
+    assert!(removed_second.is_some(), "second body cleanup must find and remove the stream");
+    assert_eq!(removed_second.unwrap().uid, display_uid);
+
+    assert!(manager.active_streams().await.is_empty(), "no streams left after all bodies finish");
+    assert_eq!(manager.active_users_and_connections().await, (0, 0));
 }
 
 #[tokio::test]
@@ -2621,7 +2792,7 @@ async fn connection_counts_are_broadcast_when_active_user_logging_is_disabled() 
 
     manager
         .update_connection(ActiveUserConnectionParams {
-            uid: 49,
+            uid: 48,
             meter_uid: 0,
             username: "event-user",
             max_connections: 1,
@@ -3890,7 +4061,7 @@ async fn clear_unbound_session_addr_prunes_touch_only_manifest_addr() {
 }
 
 #[tokio::test]
-async fn socket_expiry_deadline_does_not_refresh_active_vod_streams_without_activity() {
+async fn socket_expiry_deadline_extends_direct_body_streams_to_the_idle_timeout() {
     let config = Config::default();
     let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
     let event_manager = Arc::new(EventManager::new());
@@ -3941,10 +4112,13 @@ async fn socket_expiry_deadline_does_not_refresh_active_vod_streams_without_acti
         .await
         .expect("vod stream should be created");
 
+    // The player stops reading while draining its buffer. The pause already exceeds the
+    // short HLS session TTL but stays well within the direct-body idle timeout, so the
+    // socket must not be treated as expired yet.
     let previous_registration_ts = {
         let mut connections = manager.connections.write().await;
         let registration = connections.key_by_addr.get_mut(&addr).expect("registration should exist");
-        registration.ts = registration.ts.saturating_sub(DEFAULT_ACTIVE_SOCKET_TTL_SECS + 5);
+        registration.ts = registration.ts.saturating_sub(default_hls_session_ttl_secs() + 5);
         registration.ts
     };
 
@@ -3957,10 +4131,77 @@ async fn socket_expiry_deadline_does_not_refresh_active_vod_streams_without_acti
     };
 
     assert_eq!(unchanged_registration_ts, previous_registration_ts);
+    assert!(
+        deadline > current_time_secs(),
+        "a buffering direct-body stream must not be treated as expired after only the HLS session TTL"
+    );
     assert_eq!(
         deadline,
-        previous_registration_ts.saturating_add(manager.active_socket_ttl_secs()),
-        "deadline checks must not refresh VOD sockets without real body activity"
+        previous_registration_ts.saturating_add(DIRECT_BODY_IDLE_TIMEOUT_SECS),
+        "direct-body sockets must use the direct-body idle timeout as their expiry allowance"
+    );
+}
+
+#[tokio::test]
+async fn socket_expiry_deadline_keeps_hls_session_ttl_for_adaptive_streams() {
+    let config = Config::default();
+    let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+    let event_manager = Arc::new(EventManager::new());
+    let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+    let addr: SocketAddr = "127.0.0.1:55043".parse().unwrap();
+    let fingerprint = Fingerprint::new("fp-hls".to_string(), "127.0.0.1".to_string(), addr);
+    let mut user = ProxyUserCredentials::default();
+    user.username = "user-hls-expiry".to_string();
+    user.max_connections = 1;
+
+    manager.add_connection(&addr).await;
+    manager
+        .create_user_session(CreateUserSessionParams {
+            user: &user,
+            session_token: "tok-hls-expiry",
+            virtual_id: 8891,
+            provider: "provider-a",
+            stream_url: "http://localhost/live.m3u8",
+            addr: &addr,
+            connection_permission: UserConnectionPermission::Allowed,
+            connection_kind: Some(ConnectionKind::Normal),
+            socket_bound: false,
+        })
+        .await;
+
+    manager
+        .update_connection(ActiveUserConnectionParams {
+            uid: 605,
+            meter_uid: 705,
+            username: "user-hls-expiry",
+            max_connections: 1,
+            soft_connections: 0,
+            connection_kind: ConnectionKind::Normal,
+            priority: 0,
+            soft_priority: 0,
+            fingerprint: &fingerprint,
+            provider: "provider-a".intern(),
+            stream_channel: &test_adaptive_channel(8891),
+            user_agent: Cow::Borrowed("player/1.0"),
+            session_token: Some("tok-hls-expiry"),
+        })
+        .await
+        .expect("hls stream should be created");
+
+    let registration_ts = {
+        let mut connections = manager.connections.write().await;
+        let registration = connections.key_by_addr.get_mut(&addr).expect("registration should exist");
+        registration.ts = registration.ts.saturating_sub(default_hls_session_ttl_secs() + 5);
+        registration.ts
+    };
+
+    let deadline = manager.socket_expiry_deadline(&addr).await.expect("HLS streams should stay scheduled for expiry");
+
+    assert_eq!(
+        deadline,
+        registration_ts.saturating_add(manager.active_socket_ttl_secs()),
+        "adaptive sockets keep the short HLS session TTL"
     );
 }
 
@@ -4389,9 +4630,9 @@ async fn session_activation_keeps_first_hls_slot_uncommitted_before_stream_regis
         .connection_admission_for_session_activation(&user.username, user.max_connections, 0, "tok-second")
         .await;
 
-    assert_eq!(first_admission.permission, UserConnectionPermission::Allowed);
-    assert_eq!(first_admission.kind, Some(ConnectionKind::Normal));
-    assert_eq!(second_admission.permission, UserConnectionPermission::Allowed);
+    assert_eq!(first_admission.permission(), UserConnectionPermission::Allowed);
+    assert_eq!(first_admission.kind(), Some(ConnectionKind::Normal));
+    assert_eq!(second_admission.permission(), UserConnectionPermission::Allowed);
 
     let connections = manager.connections.read().await;
     let connection_data = connections.by_key.get(&user.username).expect("user connection data");
@@ -4466,8 +4707,8 @@ async fn binding_reserved_sessions_keeps_hard_and_soft_counts_stable() {
             "tok-normal",
         )
         .await;
-    assert_eq!(first_admission.permission, UserConnectionPermission::Allowed);
-    assert_eq!(first_admission.kind, Some(ConnectionKind::Normal));
+    assert_eq!(first_admission.permission(), UserConnectionPermission::Allowed);
+    assert_eq!(first_admission.kind(), Some(ConnectionKind::Normal));
 
     manager
         .update_connection(ActiveUserConnectionParams {
@@ -4496,8 +4737,8 @@ async fn binding_reserved_sessions_keeps_hard_and_soft_counts_stable() {
             "tok-soft",
         )
         .await;
-    assert_eq!(second_admission.permission, UserConnectionPermission::Allowed);
-    assert_eq!(second_admission.kind, Some(ConnectionKind::Soft));
+    assert_eq!(second_admission.permission(), UserConnectionPermission::Allowed);
+    assert_eq!(second_admission.kind(), Some(ConnectionKind::Soft));
 
     manager
         .update_connection(ActiveUserConnectionParams {
@@ -4591,8 +4832,8 @@ async fn origin_policy_refresh_promotes_counted_soft_session_when_hard_slot_is_a
             "tok-normal",
         )
         .await;
-    assert_eq!(normal_admission.permission, UserConnectionPermission::Allowed);
-    assert_eq!(normal_admission.kind, Some(ConnectionKind::Normal));
+    assert_eq!(normal_admission.permission(), UserConnectionPermission::Allowed);
+    assert_eq!(normal_admission.kind(), Some(ConnectionKind::Normal));
     manager
         .update_connection(ActiveUserConnectionParams {
             uid: 411,
@@ -4620,8 +4861,8 @@ async fn origin_policy_refresh_promotes_counted_soft_session_when_hard_slot_is_a
             "tok-soft",
         )
         .await;
-    assert_eq!(soft_admission.permission, UserConnectionPermission::Allowed);
-    assert_eq!(soft_admission.kind, Some(ConnectionKind::Soft));
+    assert_eq!(soft_admission.permission(), UserConnectionPermission::Allowed);
+    assert_eq!(soft_admission.kind(), Some(ConnectionKind::Soft));
     manager
         .update_connection(ActiveUserConnectionParams {
             uid: 412,
@@ -4795,7 +5036,7 @@ async fn release_unbound_session_reservation_frees_reserved_slot() {
     let admission = manager
         .connection_admission_for_session_activation(&user.username, user.max_connections, 0, "tok-release")
         .await;
-    assert_eq!(admission.permission, UserConnectionPermission::Allowed);
+    assert_eq!(admission.permission(), UserConnectionPermission::Allowed);
 
     manager.release_unbound_session_reservation(&user.username, "tok-release", None, false).await;
 
@@ -4828,7 +5069,7 @@ async fn preserved_reactivation_admission_does_not_create_ownerless_counted_slot
 
     let virtual_admission =
         manager.connection_admission(&user.username, user.max_connections, user.soft_connections).await;
-    assert_eq!(virtual_admission.permission, UserConnectionPermission::Exhausted);
+    assert_eq!(virtual_admission.permission(), UserConnectionPermission::Exhausted);
 
     let admission = manager
         .connection_admission_for_session_activation(
@@ -4839,8 +5080,8 @@ async fn preserved_reactivation_admission_does_not_create_ownerless_counted_slot
         )
         .await;
 
-    assert_eq!(admission.permission, UserConnectionPermission::Allowed);
-    assert_eq!(admission.kind, Some(ConnectionKind::Normal));
+    assert_eq!(admission.permission(), UserConnectionPermission::Allowed);
+    assert_eq!(admission.kind(), Some(ConnectionKind::Normal));
     let connections = manager.connections.read().await;
     let connection_data = connections.by_key.get(&user.username).expect("user connection data");
     assert_preserved_session_is_uncounted(connection_data, session_token, stream_uid);
@@ -4869,7 +5110,7 @@ async fn preserved_reactivation_admission_then_kicked_release_removes_state_with
             session_token,
         )
         .await;
-    assert_eq!(admission.permission, UserConnectionPermission::Allowed);
+    assert_eq!(admission.permission(), UserConnectionPermission::Allowed);
     {
         let connections = manager.connections.read().await;
         let connection_data = connections.by_key.get(&user.username).expect("user connection data");
@@ -4917,7 +5158,7 @@ async fn preserved_reactivation_admission_then_lease_idle_cleanup_leaves_counter
             session_token,
         )
         .await;
-    assert_eq!(admission.permission, UserConnectionPermission::Allowed);
+    assert_eq!(admission.permission(), UserConnectionPermission::Allowed);
     {
         let connections = manager.connections.read().await;
         let connection_data = connections.by_key.get(&user.username).expect("user connection data");
@@ -4966,7 +5207,7 @@ async fn repeated_preserved_reactivation_cleanup_does_not_accumulate_connections
                 session_token,
             )
             .await;
-        assert_eq!(admission.permission, UserConnectionPermission::Allowed);
+        assert_eq!(admission.permission(), UserConnectionPermission::Allowed);
 
         let counter_changed =
             manager.release_session_streams_and_counted_reservation(&user.username, session_token).await;
@@ -5004,7 +5245,7 @@ async fn dashboard_counts_only_real_slots_during_preserved_reactivation_admissio
             session_token,
         )
         .await;
-    assert_eq!(admission.permission, UserConnectionPermission::Allowed);
+    assert_eq!(admission.permission(), UserConnectionPermission::Allowed);
     assert_eq!(manager.active_users_and_connections().await, (0, 0));
 
     let connections = manager.connections.read().await;
@@ -5078,8 +5319,8 @@ async fn preserved_soft_reactivation_and_cleanup_leave_normal_slot_unchanged() {
             session_token,
         )
         .await;
-    assert_eq!(admission.permission, UserConnectionPermission::Allowed);
-    assert_eq!(admission.kind, Some(ConnectionKind::Soft));
+    assert_eq!(admission.permission(), UserConnectionPermission::Allowed);
+    assert_eq!(admission.kind(), Some(ConnectionKind::Soft));
 
     {
         let connections = manager.connections.read().await;
@@ -5394,7 +5635,7 @@ async fn connection_admission_treats_preserved_stream_as_reserved_capacity() {
 
     let admission = manager.connection_admission(username, user.max_connections, 0).await;
     assert_eq!(
-        admission.permission,
+        admission.permission(),
         UserConnectionPermission::Exhausted,
         "a preserved stream should still reserve capacity against unrelated playback admissions"
     );
@@ -5472,7 +5713,7 @@ async fn connection_admission_for_session_evaluates_admission_for_uncounted_sess
     // freeing a slot for the uncounted session to reactivate
     let admission = manager.connection_admission_for_session(username, 1, 0, "tok-uncounted").await;
     assert_eq!(
-        admission.permission,
+        admission.permission(),
         UserConnectionPermission::Exhausted,
         "uncounted session should not bypass admission when user is at limit; \
              bug: session exists -> Allowed -> strategy evaluation skipped"
@@ -5711,4 +5952,141 @@ async fn divergence_log_rate_limited_within_cooldown_window() {
     let entry = cache.peek(&key).expect("repeated divergence should remain cached");
     assert_eq!(entry.count_since_last_log, 2);
     assert_eq!(entry.last_logged, first_logged);
+}
+
+#[test]
+fn socket_registration_primary_username_is_deterministic() {
+    let mut reg = SocketRegistration::anonymous();
+    reg.add_user("user_z", 100);
+    reg.add_user("user_a", 100);
+    reg.add_user("user_m", 100);
+    assert_eq!(reg.primary_username(), Some("user_a"));
+}
+
+#[tokio::test]
+async fn release_stream_without_uid_rejects_ambiguous_multiple_users_on_same_addr() {
+    let config = Config::default();
+    let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+    let event_manager = Arc::new(EventManager::new());
+    let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+    let addr: SocketAddr = "192.168.1.100:12345".parse().unwrap();
+    let fingerprint = Fingerprint::new("fp-key".to_string(), "192.168.1.100".to_string(), addr);
+
+    manager.add_connection(&addr).await;
+
+    let stream_a = manager
+        .update_connection(ActiveUserConnectionParams {
+            uid: 1,
+            meter_uid: 0,
+            username: "user_a",
+            max_connections: 5,
+            soft_connections: 0,
+            connection_kind: ConnectionKind::Normal,
+            priority: 0,
+            soft_priority: 0,
+            fingerprint: &fingerprint,
+            provider: "provider-a".intern(),
+            stream_channel: &test_channel(1001),
+            user_agent: Cow::Borrowed("ua"),
+            session_token: None,
+        })
+        .await
+        .expect("register user_a");
+
+    let stream_b = manager
+        .update_connection(ActiveUserConnectionParams {
+            uid: 2,
+            meter_uid: 0,
+            username: "user_b",
+            max_connections: 5,
+            soft_connections: 0,
+            connection_kind: ConnectionKind::Normal,
+            priority: 0,
+            soft_priority: 0,
+            fingerprint: &fingerprint,
+            provider: "provider-b".intern(),
+            stream_channel: &test_channel(1002),
+            user_agent: Cow::Borrowed("ua"),
+            session_token: None,
+        })
+        .await
+        .expect("register user_b");
+
+    // Releasing without stream_uid when multiple users are on the same addr must return None (ambiguous)
+    let released = manager.release_stream(&addr).await;
+    assert!(
+        released.is_none(),
+        "releasing without uid must not arbitrarily pick a user when multiple are active on the same addr"
+    );
+
+    // But releasing with explicit stream_uid works cleanly:
+    let released_a = manager.release_stream_by_uid(&addr, stream_a.uid).await;
+    assert!(released_a.is_some(), "releasing with stream_uid succeeds");
+
+    // Now only user_b remains on addr. Releasing without stream_uid should now succeed:
+    let released_b = manager.release_stream(&addr).await;
+    assert!(released_b.is_some(), "releasing without stream_uid succeeds when only a single user remains on addr");
+    assert_eq!(released_b.unwrap().uid, stream_b.uid);
+}
+
+#[tokio::test]
+async fn arm_eviction_protection_protects_all_users_on_addr() {
+    let config = Config::default();
+    let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+    let event_manager = Arc::new(EventManager::new());
+    let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+    let addr: SocketAddr = "192.168.1.100:12345".parse().unwrap();
+    let protected_addr: SocketAddr = "192.168.1.101:54321".parse().unwrap();
+    let fingerprint = Fingerprint::new("fp-key".to_string(), "192.168.1.100".to_string(), addr);
+
+    manager.add_connection(&addr).await;
+
+    manager
+        .update_connection(ActiveUserConnectionParams {
+            uid: 1,
+            meter_uid: 0,
+            username: "user_a",
+            max_connections: 5,
+            soft_connections: 0,
+            connection_kind: ConnectionKind::Normal,
+            priority: 0,
+            soft_priority: 0,
+            fingerprint: &fingerprint,
+            provider: "provider-a".intern(),
+            stream_channel: &test_channel(2001),
+            user_agent: Cow::Borrowed("ua"),
+            session_token: None,
+        })
+        .await
+        .expect("register user_a");
+
+    manager
+        .update_connection(ActiveUserConnectionParams {
+            uid: 2,
+            meter_uid: 0,
+            username: "user_b",
+            max_connections: 5,
+            soft_connections: 0,
+            connection_kind: ConnectionKind::Normal,
+            priority: 0,
+            soft_priority: 0,
+            fingerprint: &fingerprint,
+            provider: "provider-b".intern(),
+            stream_channel: &test_channel(2002),
+            user_agent: Cow::Borrowed("ua"),
+            session_token: None,
+        })
+        .await
+        .expect("register user_b");
+
+    manager.mark_recent_eviction_guard_for_addr(&addr, protected_addr, Duration::from_secs(60)).await;
+
+    let connections = manager.connections.read().await;
+    let key_a = create_socket_reentry_guard_key("user_a", "192.168.1.100", shared::model::VirtualId::new(2001));
+    let key_b = create_socket_reentry_guard_key("user_b", "192.168.1.100", shared::model::VirtualId::new(2002));
+
+    assert!(connections.recent_socket_reentry_guards.contains_key(&key_a), "user_a guard must be armed");
+    assert!(connections.recent_socket_reentry_guards.contains_key(&key_b), "user_b guard must be armed");
 }
