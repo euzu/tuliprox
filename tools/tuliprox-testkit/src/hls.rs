@@ -28,8 +28,11 @@ pub async fn read_segments(
     let mut consumed: HashSet<String> = HashSet::new();
     let deadline = tokio::time::Instant::now() + MANIFEST_RELOAD_DEADLINE;
     loop {
-        let manifest =
-            request_with_headers(client.get(manifest_url), headers).send().await?.error_for_status()?.text().await?;
+        let manifest = tokio::time::timeout_at(deadline, async {
+            request_with_headers(client.get(manifest_url), headers).send().await?.error_for_status()?.text().await
+        })
+        .await
+        .map_err(|_| TestkitError::Protocol("HLS manifest request exceeded overall deadline".to_owned()))??;
         let segments = manifest
             .lines()
             .map(str::trim)
@@ -41,15 +44,23 @@ pub async fn read_segments(
                 continue;
             }
             let segment_url = base.join(&segment).map_err(|error| TestkitError::Configuration(error.to_string()))?;
-            let response = request_with_headers(client.get(segment_url), headers).send().await?.error_for_status()?;
+            let response = tokio::time::timeout_at(deadline, async {
+                request_with_headers(client.get(segment_url), headers).send().await?.error_for_status()
+            })
+            .await
+            .map_err(|_| TestkitError::Protocol("HLS segment request exceeded overall deadline".to_owned()))??;
             let mut decoder = FrameDecoder::default();
             let mut body = response.bytes_stream();
             loop {
-                let chunk = match tokio::time::timeout(SEGMENT_IDLE_TIMEOUT, body.next()).await {
-                    Ok(Some(chunk)) => chunk?,
-                    Ok(None) => break,
-                    Err(_) => return Err(TestkitError::Protocol("HLS segment idle timeout".to_owned())),
-                };
+                let chunk =
+                    match tokio::time::timeout_at(deadline, tokio::time::timeout(SEGMENT_IDLE_TIMEOUT, body.next()))
+                        .await
+                    {
+                        Ok(Ok(Some(chunk))) => chunk?,
+                        Ok(Ok(None)) => break,
+                        Ok(Err(_)) => return Err(TestkitError::Protocol("HLS segment idle timeout".to_owned())),
+                        Err(_) => return Err(TestkitError::Protocol("HLS read exceeded overall deadline".to_owned())),
+                    };
                 for frame in decoder.push(&chunk)? {
                     validator.validate(&frame)?;
                     frames += 1;
@@ -67,7 +78,11 @@ pub async fn read_segments(
                 "HLS produced {frames} valid frames, expected at least {minimum_frames}"
             )));
         }
-        tokio::time::sleep(MANIFEST_RELOAD_INTERVAL).await;
+        if tokio::time::timeout_at(deadline, tokio::time::sleep(MANIFEST_RELOAD_INTERVAL)).await.is_err() {
+            return Err(TestkitError::Protocol(format!(
+                "HLS produced {frames} valid frames, expected at least {minimum_frames}"
+            )));
+        }
     }
 }
 

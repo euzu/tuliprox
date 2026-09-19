@@ -165,6 +165,18 @@ impl ProviderBodyOwner {
                             select! {
                                 biased;
                                 () = cancel_token.cancelled() => {},
+                                () = &mut idle => {
+                                    debug!("Provider body owner task idle timeout expired while delivering provider error ({idle_timeout:?})");
+                                    if let Some(reason) = &close_reason {
+                                        let _ = reason.compare_exchange(
+                                            ProviderCloseReason::Unspecified as u8,
+                                            ProviderCloseReason::IdleTimeout as u8,
+                                            Ordering::AcqRel,
+                                            Ordering::Relaxed,
+                                        );
+                                    }
+                                    cancel_token.cancel();
+                                }
                                 _ = tx.send(Err(err)) => {},
                             }
                             break;
@@ -506,6 +518,50 @@ mod tests {
             .await
             .expect("owner must terminate after the idle timeout");
         assert_eq!(close_reason.load(Ordering::Acquire), ProviderCloseReason::IdleTimeout as u8);
+
+        drop(owner);
+    }
+
+    struct SingleChunkThenErrStream {
+        chunk_sent: bool,
+    }
+    impl Stream for SingleChunkThenErrStream {
+        type Item = Result<Bytes, StreamError>;
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if self.chunk_sent {
+                Poll::Ready(Some(Err(StreamError::Stream("test error".to_owned()))))
+            } else {
+                self.chunk_sent = true;
+                Poll::Ready(Some(Ok(Bytes::from_static(b"chunk"))))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_timeout_terminates_owner_blocked_delivering_provider_error() {
+        let cancel = CancellationToken::new();
+        let completion = CancellationToken::new();
+        let close_reason = Arc::new(AtomicU8::new(0));
+        let owner = ProviderBodyOwner::new(
+            Box::pin(SingleChunkThenErrStream { chunk_sent: false }),
+            ProviderBodyOwnerConfig {
+                channel_capacity: 1,
+                max_buffer_bytes: 1024,
+                idle_timeout: Duration::from_millis(50),
+            },
+            cancel.clone(),
+            Some(completion.clone()),
+            Some(close_reason.clone()),
+        );
+
+        // Never poll `owner`: the first chunk fills the channel, so the provider
+        // error send blocks. The idle timer must still terminate the owner task.
+        // The provider error was recorded before the send, so it stays the close
+        // reason (existing precedence); the timeout only unblocks termination.
+        tokio::time::timeout(Duration::from_secs(2), completion.cancelled())
+            .await
+            .expect("owner must terminate after the idle timeout while delivering the provider error");
+        assert_eq!(close_reason.load(Ordering::Acquire), ProviderCloseReason::ProviderError as u8);
 
         drop(owner);
     }

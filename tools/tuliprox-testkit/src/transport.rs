@@ -82,6 +82,27 @@ impl SharedControllerState {
         }
     }
 
+    /// Applies an agent message only while the sending connection still owns the
+    /// registration token. The `agents` lock is held across the update so a
+    /// superseded socket cannot refresh `last_seen`, re-insert readiness, or append
+    /// playback events after a replacement connection has registered.
+    async fn apply_agent_message(&self, agent_id: &AgentId, token: u64, event: Envelope<AgentMessage>) -> bool {
+        let agents = self.agents.lock().await;
+        if agents.get(agent_id).is_none_or(|registered| registered.token != token) {
+            return false;
+        }
+        let is_ready = matches!(event.payload, AgentMessage::Ready);
+        let is_event = matches!(event.payload, AgentMessage::Event { .. });
+        if is_ready {
+            self.ready_agents.lock().await.insert(agent_id.clone());
+        }
+        if is_event {
+            self.events.lock().await.push(event);
+        }
+        self.last_seen.lock().await.insert(agent_id.clone(), Instant::now());
+        true
+    }
+
     #[must_use]
     pub fn run_id(&self) -> RunId { self.run_id.clone() }
 
@@ -171,15 +192,11 @@ async fn serve_agent(socket: WebSocket, state: ControllerState) {
                             && event.run_id == state.run_id
                             && event.run_generation == state.generation
                             && event.agent_id == agent_id
+                            && !state.apply_agent_message(&agent_id, connection_token, event).await
                         {
-                            state.last_seen.lock().await.insert(agent_id.clone(), Instant::now());
-                            match event.payload {
-                                AgentMessage::Ready => {
-                                    state.ready_agents.lock().await.insert(agent_id.clone());
-                                }
-                                AgentMessage::Event { .. } => state.events.lock().await.push(event),
-                                AgentMessage::Hello { .. } | AgentMessage::Heartbeat => {}
-                            }
+                            // A newer connection replaced this registration; stop
+                            // serving the stale socket before it can mutate state.
+                            break;
                         }
                     }
                 }
@@ -290,6 +307,61 @@ mod tests {
 
         state.unregister_agent(&agent_id, new_token).await;
         assert!(!state.connected_agents().await.contains(&agent_id));
+    }
+
+    #[tokio::test]
+    async fn superseded_connection_cannot_update_state_or_append_events() {
+        let state = SharedControllerState::new(RunId::new("run"), 1);
+        let agent_id = AgentId::new("agent");
+
+        let (old_tx, _old_rx) = mpsc::channel(1);
+        let old_token = state.next_connection_token();
+        state.register_agent(agent_id.clone(), old_token, old_tx).await;
+
+        let (new_tx, _new_rx) = mpsc::channel(1);
+        let new_token = state.next_connection_token();
+        state.register_agent(agent_id.clone(), new_token, new_tx).await;
+
+        let ready = |sequence: u64| Envelope {
+            schema_version: 1,
+            run_id: RunId::new("run"),
+            run_generation: 1,
+            message_id: format!("ready-{sequence}"),
+            agent_id: agent_id.clone(),
+            agent_boot_id: "boot".to_owned(),
+            source_sequence: sequence,
+            caused_by_command_id: None,
+            local_elapsed_nanos: 0,
+            payload: AgentMessage::Ready,
+        };
+        let event = Envelope {
+            schema_version: 1,
+            run_id: RunId::new("run"),
+            run_generation: 1,
+            message_id: "event".to_owned(),
+            agent_id: agent_id.clone(),
+            agent_boot_id: "boot".to_owned(),
+            source_sequence: 9,
+            caused_by_command_id: None,
+            local_elapsed_nanos: 0,
+            payload: AgentMessage::Event {
+                event: crate::protocol::PlaybackEvent::Terminal {
+                    playback_id: crate::protocol::PlaybackId::new("playback"),
+                    outcome: "passed".to_owned(),
+                    typed_outcome: None,
+                },
+            },
+        };
+
+        // A superseded socket cannot mark the agent ready or append events.
+        assert!(!state.apply_agent_message(&agent_id, old_token, ready(1)).await);
+        assert!(!state.apply_agent_message(&agent_id, old_token, event).await);
+        assert!(matches!(state.ready_agents().await.as_slice(), []));
+        assert!(matches!(state.take_events().await.as_slice(), []));
+
+        // The active connection still can.
+        assert!(state.apply_agent_message(&agent_id, new_token, ready(2)).await);
+        assert!(state.ready_agents().await.contains(&agent_id));
     }
 
     #[tokio::test]
