@@ -1,3 +1,4 @@
+use super::curation::prepare_selector_category;
 use crate::{
     defaults::{
         default_as_true, default_trakt_fuzzy_threshold, is_false, is_true, DEFAULT_USER_AGENT, TRAKT_API_URL,
@@ -33,20 +34,8 @@ pub struct TraktApiConfigDto {
     pub user_agent: String,
 }
 
-#[derive(Debug, Default, Copy, Clone, Serialize, Deserialize, PartialEq, Eq, Display, EnumString)]
-#[serde(rename_all = "lowercase")]
-#[strum(serialize_all = "lowercase", ascii_case_insensitive)]
-pub enum TraktCatalogSelection {
-    #[default]
-    Full,
-    Curated,
-}
-
-impl TraktCatalogSelection {
-    pub const fn is_full(&self) -> bool { matches!(self, Self::Full) }
-
-    pub const fn is_curated(self) -> bool { matches!(self, Self::Curated) }
-}
+// Keep the existing Rust/public configuration vocabulary compatible.
+pub use super::curation::CurationCatalogSelection as TraktCatalogSelection;
 
 impl TraktApiConfigDto {
     pub fn prepare(&mut self) {
@@ -150,6 +139,35 @@ impl Default for TraktListConfigDto {
     }
 }
 
+/// Trakt source settings under a target-owned curation policy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TraktSourceConfigDto {
+    #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub api: TraktApiConfigDto,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lists: Vec<TraktListConfigDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub charts: Vec<TraktChartConfigDto>,
+}
+
+impl Default for TraktSourceConfigDto {
+    fn default() -> Self {
+        Self { enabled: true, api: TraktApiConfigDto::default(), lists: Vec::new(), charts: Vec::new() }
+    }
+}
+
+impl TraktSourceConfigDto {
+    pub fn has_selectors(&self) -> bool { !self.lists.is_empty() || !self.charts.is_empty() }
+
+    pub(super) fn prepare(&mut self, curation_enabled: bool) -> Result<(), TuliproxError> {
+        self.api.prepare();
+        prepare_trakt_selectors(&mut self.lists, &mut self.charts, curation_enabled && self.enabled)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct TraktConfigDto {
@@ -180,17 +198,26 @@ impl Default for TraktConfigDto {
     }
 }
 
-fn prepare_selector_category(
-    category_name: &mut Option<String>,
-    create_xtream_category: bool,
+fn prepare_trakt_selectors(
+    lists: &mut [TraktListConfigDto],
+    charts: &mut [TraktChartConfigDto],
     validate: bool,
-    selector_name: &str,
 ) -> Result<(), TuliproxError> {
-    *category_name = category_name.take().map(|name| name.trim().to_string()).filter(|name| !name.is_empty());
-    if validate && create_xtream_category && category_name.is_none() {
-        return Err(TuliproxError::Config(format!(
-            "Trakt {selector_name} category_name is required when create_xtream_category is true"
-        )));
+    for selector in lists {
+        prepare_selector_category(
+            &mut selector.category_name,
+            selector.create_xtream_category,
+            validate,
+            "Trakt list",
+        )?;
+    }
+    for selector in charts {
+        prepare_selector_category(
+            &mut selector.category_name,
+            selector.create_xtream_category,
+            validate,
+            "Trakt chart",
+        )?;
     }
     Ok(())
 }
@@ -209,22 +236,7 @@ impl TraktConfigDto {
 
     pub fn prepare(&mut self) -> Result<(), TuliproxError> {
         self.api.prepare();
-        for selector in &mut self.lists {
-            prepare_selector_category(
-                &mut selector.category_name,
-                selector.create_xtream_category,
-                self.enabled,
-                "list",
-            )?;
-        }
-        for selector in &mut self.charts {
-            prepare_selector_category(
-                &mut selector.category_name,
-                selector.create_xtream_category,
-                self.enabled,
-                "chart",
-            )?;
-        }
+        prepare_trakt_selectors(&mut self.lists, &mut self.charts, self.enabled)?;
         if self.enabled && !self.has_selectors() && !self.is_source_less_noop() {
             return Err(TuliproxError::Config(
                 "Enabled Trakt curation with non-default policy requires at least one list or chart".to_string(),
