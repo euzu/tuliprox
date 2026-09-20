@@ -35,8 +35,8 @@ BOLD  := \033[1m
 CPU_COUNT := $(shell nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
 CARGO_BUILD_JOBS := $(CPU_COUNT)
 
-# Support positional argument for serve: make serve <settings_folder>
-ifeq ($(firstword $(MAKECMDGOALS)),serve)
+# Support positional argument for serve / run-be: make serve <settings_folder>
+ifneq ($(filter $(firstword $(MAKECMDGOALS)),serve run-be),)
   SETTINGS_ARG := $(word 2,$(MAKECMDGOALS))
   ifneq ($(SETTINGS_ARG),)
     SETTINGS_FOLDER ?= $(SETTINGS_ARG)
@@ -150,6 +150,11 @@ trunk-build: ## Build frontend with Trunk (WASM)
 	@echo "==> Building frontend (trunk)"
 	@cd frontend && NO_COLOR=true $(TRUNK) build
 
+.PHONY: run-fe
+run-fe: ## Run frontend development server with Trunk
+	@echo "==> Serving frontend (trunk)"
+	@cd frontend && $(TRUNK) serve
+
 .PHONY: cargo-machete-check
 cargo-machete-check: ## Detect unused dependencies across all crates (auto-installs cargo-machete if missing)
 	@echo "==> Detecting unused dependencies"
@@ -215,7 +220,7 @@ build: ## Build the entire workspace in parallel using detected CPU count
 	@echo "==> Building workspace with $(CARGO_BUILD_JOBS) jobs"
 	@TMPDIR="$${TMPDIR:-/tmp}" $(CARGO_STABLE) build -j$(CARGO_BUILD_JOBS) --workspace
 
-.PHONY: serve
+.PHONY: serve run-be
 serve: ## Run tuliprox server with settings folder: make serve <settings_folder>
 	@if [ -z "$(SETTINGS_FOLDER)" ]; then \
 		echo "❌ Error: Settings folder is required."; \
@@ -224,6 +229,8 @@ serve: ## Run tuliprox server with settings folder: make serve <settings_folder>
 	fi
 	@echo "==> Starting tuliprox server with TULIPROX_HOME=$(SETTINGS_FOLDER)"
 	TULIPROX_HOME="$(SETTINGS_FOLDER)" $(CARGO) run --release --manifest-path $(PROJECT_DIR)/Cargo.toml --package tuliprox --bin tuliprox -- -s
+
+run-be: serve ## Alias for serve
 
 .PHONY: architecture-check
 architecture-check: ## Verify workspace dependency direction

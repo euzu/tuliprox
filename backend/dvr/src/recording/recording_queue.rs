@@ -1229,7 +1229,14 @@ impl RecordingQueue {
         task
     }
 
-    pub async fn find_duplicate(&self, candidate: &RecordingTask) -> Option<RecordingTask> {
+    /// An already-pending copy of the same work, if there is one.
+    ///
+    /// Terminal entries are deliberately excluded: after a failed or
+    /// cancelled attempt the caller must be able to ask again, and a
+    /// successful one may legitimately be re-requested. Only work that is
+    /// still active, queued or scheduled is a duplicate that a second
+    /// request would run twice.
+    pub async fn find_pending_duplicate(&self, candidate: &RecordingTask) -> Option<RecordingTask> {
         if let Some(active) = self.active.read().await.as_ref() {
             if active.matches_existing_task(candidate) {
                 return Some(active.clone());
@@ -1241,13 +1248,7 @@ impl RecordingQueue {
             return Some(queued);
         }
 
-        if let Some(scheduled) =
-            self.scheduled.read().await.iter().find(|task| task.matches_existing_task(candidate)).cloned()
-        {
-            return Some(scheduled);
-        }
-
-        self.finished.read().await.iter().find(|task| task.matches_existing_task(candidate)).cloned()
+        self.scheduled.read().await.iter().find(|task| task.matches_existing_task(candidate)).cloned()
     }
 
     /// Pause the active task. Persists the new state through the
@@ -2282,16 +2283,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn find_duplicate_matches_active_queue_scheduled_and_finished_downloads() {
+    async fn find_pending_duplicate_matches_active_queue_and_scheduled_downloads() {
         let queue = RecordingQueue::new();
         let candidate = task("candidate", RecordingKind::Vod, RecordingTaskState::Queued);
 
         *queue.active.write().await = Some(RecordingTask { uuid: "active".to_string(), ..candidate.clone() });
-        assert_eq!(queue.find_duplicate(&candidate).await.map(|download| download.uuid), Some("active".to_string()));
+        assert_eq!(
+            queue.find_pending_duplicate(&candidate).await.map(|download| download.uuid),
+            Some("active".to_string())
+        );
 
         *queue.active.write().await = None;
         queue.queue.lock().await.push_back(RecordingTask { uuid: "queued".to_string(), ..candidate.clone() });
-        assert_eq!(queue.find_duplicate(&candidate).await.map(|download| download.uuid), Some("queued".to_string()));
+        assert_eq!(
+            queue.find_pending_duplicate(&candidate).await.map(|download| download.uuid),
+            Some("queued".to_string())
+        );
 
         queue.queue.lock().await.clear();
         let scheduled = RecordingTask {
@@ -2310,7 +2317,7 @@ mod tests {
             ..task("recording-candidate", RecordingKind::Live, RecordingTaskState::Scheduled)
         };
         assert_eq!(
-            queue.find_duplicate(&recording_candidate).await.map(|download| download.uuid),
+            queue.find_pending_duplicate(&recording_candidate).await.map(|download| download.uuid),
             Some("scheduled".to_string())
         );
 
@@ -2321,7 +2328,10 @@ mod tests {
             state: RecordingTaskState::Completed,
             ..candidate.clone()
         });
-        assert_eq!(queue.find_duplicate(&candidate).await.map(|download| download.uuid), Some("finished".to_string()));
+        assert!(
+            queue.find_pending_duplicate(&candidate).await.is_none(),
+            "a finished recording must not block asking again"
+        );
     }
 
     #[tokio::test]
@@ -2339,7 +2349,7 @@ mod tests {
             ..task("candidate", RecordingKind::Live, RecordingTaskState::Scheduled)
         };
 
-        assert!(queue.find_duplicate(&different_window).await.is_none());
+        assert!(queue.find_pending_duplicate(&different_window).await.is_none());
     }
 
     #[tokio::test]

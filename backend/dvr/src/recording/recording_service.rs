@@ -629,9 +629,14 @@ impl RecordingService {
         out.ok_or(ServiceError::UnknownRecording)
     }
 
-    /// Cancel an in-flight or scheduled recording. Calls the queue's
-    /// `cancel_active` when the recording is active; for queued or
-    /// scheduled tasks are not cancelled here.
+    /// Cancel an in-flight or scheduled recording.
+    ///
+    /// An active recording is asked to stop, not marked stopped: the worker
+    /// still owns the file and the provider slot, so it must release them
+    /// first and is the one that commits `Cancelled`. Marking it terminal
+    /// here would show it as a finished recording while it is still writing,
+    /// and a later remove would then find it in the active slot, leave it
+    /// there, and report success.
     pub async fn cancel_recording(&self, claims: &shared::model::Claims, uuid: &str) -> Result<(), ServiceError> {
         let owner_id = Self::subject_id(claims)?;
         let active = self.recordings.active.read().await.clone();
@@ -645,15 +650,18 @@ impl RecordingService {
             // above and this call ffmpeg can finish and the queue can
             // promote a *different* recording into the active slot; the
             // no-uuid variant would then kill that innocent recording.
-            match self.recordings.cancel_active_matching(uuid).await {
-                Ok(true) => return Ok(()),
+            match self.recordings.cancel_requested(uuid).await {
+                // The task is active (running, waiting, or paused). A paused
+                // one has already been moved to `finished`; a worker-owned one
+                // is now `Cancelling` and the worker will finish it.
+                Ok(Some(_)) => return Ok(()),
                 // The task left the active slot in the meantime. Fall
                 // through to the inactive path: it either finds the task
                 // in `scheduled`/`queue` (a re-promotion) or reports
                 // `UnknownRecording`, which is the truthful answer.
-                Ok(false) => {}
+                Ok(None) => {}
                 Err(err) => {
-                    log::error!("cancel_active_matching failed for {uuid}: {err}");
+                    log::error!("cancel_requested failed for {uuid}: {err}");
                     return Err(ServiceError::PersistenceFailed);
                 }
             }
@@ -732,6 +740,13 @@ impl RecordingService {
         let owner_id = Self::subject_id(claims)?;
         mutate(&self.recordings, |candidate| {
             authorize_task_in_candidate(candidate, uuid, claims, &owner_id, RecordingAction::Delete)?;
+            // The active slot is owned by the worker. Removing a task from
+            // it here would leave the worker writing to a file no entry
+            // names, so refuse instead of silently doing nothing (the retain
+            // below cannot reach the active slot).
+            if candidate.active.as_ref().is_some_and(|active| active.uuid == uuid) {
+                return Err(QueueMutationError::StateNotEditable);
+            }
             let original = candidate.queue.len() + candidate.scheduled.len() + candidate.finished.len();
             candidate.queue.retain(|task| task.uuid != uuid);
             candidate.scheduled.retain(|task| task.uuid != uuid);
@@ -1902,6 +1917,50 @@ mod tests {
 
         assert!(matches!(result, Err(ServiceError::InvalidState)));
         assert_eq!(committed_records(&downloads).await, persisted_before);
+    }
+
+    #[tokio::test]
+    async fn cancelling_an_active_recording_leaves_it_worker_owned_until_the_worker_finishes() {
+        // Regression: the request used to stamp `Cancelled` on the active
+        // task, so it appeared in the completed list while the worker was
+        // still writing. Removing it then found no entry in any inactive
+        // bucket, left the active slot alone, and reported success.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_file = dir.path().join("downloads.json");
+        let downloads =
+            Arc::new(RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository"));
+        let mut task = RecordingQueue::from_persisted(persisted_media(
+            "recording",
+            "web:alice",
+            RecordingVisibility::Private,
+            "http://provider/film.mp4",
+        ))
+        .expect("valid recording task");
+        task.state = RecordingTaskState::Running;
+        *downloads.active.write().await = Some(task);
+
+        let service = RecordingService::new(Arc::clone(&downloads), test_app_config());
+        let claims = shared::model::Claims {
+            username: "alice".to_string(),
+            iss: "tuliprox".to_string(),
+            iat: 0,
+            exp: 0,
+            roles: shared::model::RoleSet::new(),
+            permissions: Permission::RecordingCreate | Permission::RecordingManage | Permission::RecordingDelete,
+            pwd_version: 0,
+            subject_id: Some(UserId::from("web:alice")),
+            permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,
+        };
+
+        service.cancel_recording(&claims, "recording").await.expect("cancel request accepted");
+
+        let active = downloads.active.read().await.clone().expect("the worker still owns it");
+        assert_eq!(active.state, RecordingTaskState::Cancelling, "the worker commits the terminal state");
+        assert!(downloads.finished.read().await.is_empty(), "nothing terminal yet");
+        assert!(
+            matches!(service.remove_recording_task(&claims, "recording").await, Err(ServiceError::InvalidState)),
+            "removing a worker-owned recording must be refused, not silently ignored"
+        );
     }
 
     #[tokio::test]

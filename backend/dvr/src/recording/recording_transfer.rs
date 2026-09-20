@@ -1838,7 +1838,25 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
                             }
                         }
                     } else {
-                        break;
+                        // The active slot is empty. A submission can enqueue
+                        // work after this worker last checked but before it
+                        // stops, and that submission is already past its
+                        // `worker_running` check in
+                        // `ensure_recording_worker_running`. Decide under the
+                        // same flag lock, then re-check the queue while
+                        // holding it, so the two cannot both decline the work.
+                        let mut running = dq.worker_running.write().await;
+                        if dq.queue.lock().await.is_empty() {
+                            *running = false;
+                            break;
+                        }
+                        drop(running);
+                        // Nothing runnable right now means the next submission
+                        // starts a worker instead of this one spinning.
+                        if !matches!(promote_next_download(&dq).await, Ok(Some(_))) {
+                            *dq.worker_running.write().await = false;
+                            break;
+                        }
                     }
                 }
                 *dq.worker_running.write().await = false;

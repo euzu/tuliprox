@@ -46,6 +46,22 @@ fn service_error_response(err: &ServiceError) -> axum::response::Response {
     error_response(service_error_status(err), err.code())
 }
 
+/// Start the transfer worker after a command has made work runnable.
+///
+/// Pause deliberately stops the worker while leaving the task in the active
+/// slot. Retry moves a terminal task back to the queue. Neither state mutation
+/// owns the runtime dependencies needed to spawn a worker, so command handlers
+/// must do that here after the mutation has committed.
+async fn start_recording_worker_if_needed(app_state: &AppState) -> Result<(), &'static str> {
+    let recording_config = app_state.app_config.config.load().recording().cloned().ok_or("recording_disabled")?;
+    tuliprox_dvr::recording::recording_transfer::resume_recording_worker_if_needed(
+        &app_state.recording_ctx(),
+        &recording_config,
+    )
+    .await
+    .map_err(|_| "recording_worker_failed")
+}
+
 /// HTTP status for a service error. The wire code always comes from
 /// `ServiceError::code`, so it is not duplicated here.
 fn service_error_status(err: &ServiceError) -> StatusCode {
@@ -220,7 +236,7 @@ async fn create_http_recording_task(
         .map(str::to_string);
 
     let is_owner = true;
-    if let Some(existing) = app_state.recordings.find_duplicate(&task).await {
+    if let Some(existing) = app_state.recordings.find_pending_duplicate(&task).await {
         return Json(existing.to_view(is_owner)).into_response();
     }
     if let Err(error) = mutate(&app_state.recordings, |candidate| {
@@ -334,10 +350,14 @@ pub async fn resume_recording_task(
     }
     let service = RecordingService::new(app_state.recordings.clone(), app_state.app_config.clone());
     match service.resume_recording(&claims, &id).await {
-        Ok(_) => {
+        Ok(true) => {
+            if let Err(error) = start_recording_worker_if_needed(&app_state).await {
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, error);
+            }
             let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
             StatusCode::NO_CONTENT.into_response()
         }
+        Ok(false) => service_error_response(&ServiceError::InvalidState),
         Err(err) => service_error_response(&err),
     }
 }
@@ -355,10 +375,14 @@ pub async fn retry_recording_task(
     }
     let service = RecordingService::new(app_state.recordings.clone(), app_state.app_config.clone());
     match service.retry_recording(&claims, &id).await {
-        Ok(_) => {
+        Ok(true) => {
+            if let Err(error) = start_recording_worker_if_needed(&app_state).await {
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, error);
+            }
             let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
             StatusCode::NO_CONTENT.into_response()
         }
+        Ok(false) => service_error_response(&ServiceError::InvalidState),
         Err(err) => service_error_response(&err),
     }
 }
@@ -1140,7 +1164,34 @@ pub use recording_enabled_layer;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::future::BoxFuture;
     use serde_json::json;
+    use std::time::Duration;
+    use tokio::sync::Notify;
+    use tuliprox_core::model::ProviderHandle;
+    use tuliprox_dvr::recording::recording_capacity::{ProviderCapacity, RecordingCapacityPort};
+
+    struct UnavailableCapacity {
+        notify: Arc<Notify>,
+    }
+
+    impl UnavailableCapacity {
+        fn new() -> Arc<Self> { Arc::new(Self { notify: Arc::new(Notify::new()) }) }
+    }
+
+    impl RecordingCapacityPort for UnavailableCapacity {
+        fn capacities_for_input<'a>(&'a self, _input_name: &'a Arc<str>) -> BoxFuture<'a, Vec<ProviderCapacity>> {
+            Box::pin(async { vec![(Arc::from("provider"), 1, 1)] })
+        }
+
+        fn acquire<'a>(&'a self, _input_name: &'a Arc<str>, _priority: i8) -> BoxFuture<'a, Option<ProviderHandle>> {
+            Box::pin(async { None })
+        }
+
+        fn release(&self, _handle: Option<ProviderHandle>) -> BoxFuture<'_, ()> { Box::pin(async {}) }
+
+        fn capacity_changed(&self) -> Arc<Notify> { Arc::clone(&self.notify) }
+    }
 
     fn edit_claims(subject_id: Option<UserId>, admin: bool) -> shared::model::Claims {
         shared::model::Claims {
@@ -1167,6 +1218,91 @@ mod tests {
             }),
             ..crate::model::Config::default()
         })
+    }
+
+    fn resumable_vod(state: shared::model::RecordingTaskState) -> RecordingTask {
+        let recording_config = crate::model::RecordingConfig::from(&shared::model::RecordingConfigDto {
+            enabled: true,
+            ..Default::default()
+        });
+        let metadata = RecordingMetadata::new_media(
+            RecordingOwner::User(UserId::from("web:alice")),
+            RecordingVisibility::Private,
+            RecordingSource::new("target", "42", "provider"),
+            "Film".to_string(),
+        );
+        let mut task = RecordingTask::new(
+            RecordingKind::Vod,
+            "https://example.com/film.mp4",
+            "film.mp4",
+            &recording_config,
+            Some(Arc::from("provider")),
+            recording_config.priority,
+            metadata,
+        )
+        .expect("valid VOD task");
+        task.uuid = "vod".to_string();
+        task.state = state;
+        task.paused = state == shared::model::RecordingTaskState::Paused;
+        task.finished = state.is_terminal();
+        task
+    }
+
+    async fn wait_until_worker_owns_runnable_task(state: &AppState) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let running = *state.recordings.worker_running.read().await;
+                let runnable = state.recordings.active.read().await.as_ref().is_some_and(|task| {
+                    matches!(
+                        task.state,
+                        shared::model::RecordingTaskState::Running
+                            | shared::model::RecordingTaskState::WaitingForCapacity
+                    ) && !task.paused
+                });
+                if running && runnable {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("recording worker did not start");
+    }
+
+    #[tokio::test]
+    async fn resume_command_restarts_the_worker_for_a_paused_vod() {
+        let mut state = enabled_recording_state();
+        Arc::get_mut(&mut state).expect("unique app state").recording_capacity = UnavailableCapacity::new();
+        *state.recordings.active.write().await = Some(resumable_vod(shared::model::RecordingTaskState::Paused));
+
+        let response = resume_recording_task(
+            axum::extract::Path("vod".to_string()),
+            State(Arc::clone(&state)),
+            AuthClaims(edit_claims(Some(UserId::from("web:alice")), true)),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        wait_until_worker_owns_runnable_task(&state).await;
+    }
+
+    #[tokio::test]
+    async fn retry_command_restarts_the_worker_for_a_cancelled_vod() {
+        let mut state = enabled_recording_state();
+        Arc::get_mut(&mut state).expect("unique app state").recording_capacity = UnavailableCapacity::new();
+        state.recordings.finished.write().await.push(resumable_vod(shared::model::RecordingTaskState::Cancelled));
+
+        let response = retry_recording_task(
+            axum::extract::Path("vod".to_string()),
+            State(Arc::clone(&state)),
+            AuthClaims(edit_claims(Some(UserId::from("web:alice")), true)),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        wait_until_worker_owns_runnable_task(&state).await;
     }
 
     #[tokio::test]

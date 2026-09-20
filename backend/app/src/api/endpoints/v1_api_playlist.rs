@@ -3001,6 +3001,30 @@ mod tests {
     }
 
     #[test]
+    fn epg_channel_match_applies_the_target_output_case() {
+        let item = "NPO3.nl".intern();
+        let requested_lowercase =
+            crate::utils::canonicalize_untrusted_epg_id("npo3.nl", crate::utils::EpgIdOutputCase::LowercaseAscii);
+
+        assert!(super::epg_channel_id_matches(
+            Some(&item),
+            &requested_lowercase,
+            crate::utils::EpgIdOutputCase::LowercaseAscii
+        ));
+        assert!(!super::epg_channel_id_matches(
+            Some(&item),
+            &requested_lowercase,
+            crate::utils::EpgIdOutputCase::Preserve
+        ));
+    }
+
+    #[test]
+    fn epg_channel_match_rejects_absent_ids() {
+        let requested = "npo3.nl".intern();
+        assert!(!super::epg_channel_id_matches(None, &requested, crate::utils::EpgIdOutputCase::Preserve));
+    }
+
+    #[test]
     fn merge_epg_channels_prefers_higher_priority_metadata_and_fills_lower_priority_gaps() {
         let low_priority = EpgChannel {
             id: "demo.channel".intern(),
