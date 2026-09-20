@@ -110,6 +110,13 @@
 
 ## 🌟 New Features
 
+- **Target-owned discovery with TMDB Trending.** `target.curation` combines optional Trakt and TMDB sources under one
+  `full`/`curated` policy. TMDB supports movie/TV day/week feeds with explicit `scope: first_page`, its own Bearer token,
+  exact same-kind TMDB-ID matching, and optional Xtream category projection. Every active selector is required; failed
+  fetches retain finalized target artifacts in both modes. M3U/STRM keep normal selected entries, without Xtream aliases.
+  Legacy `output[].trakt` remains supported but cannot coexist with the new declaration on one target. Source Editor
+  preserves the YAML-owned block and shows ownership hints; the dashboard version card now includes TMDB Credits.
+
 - **Runtime liveness watchdog.** An optional heartbeat/watchdog detects a wedged
   async runtime (process alive, scheduler no longer making progress, logs stop) and logs a diagnostic snapshot with
   runtime metrics and a per-thread `/proc/self/task` inventory. It is opt-in and off by default (`TULIPROX_WATCHDOG=1`

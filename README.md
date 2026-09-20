@@ -127,7 +127,7 @@ Tuliprox can transform provider data into the structure you actually want to use
 - Output filters for the final playlist state
 - Favorites/bouquet management through `add_favourite(group_name)`
 - Target-specific bouquet whitelist/blacklist editing directly from the Web UI
-- Trakt-based auto-curated bouquets such as trending and popular content
+- Target-wide Trakt and TMDB Trending curation, with optional Xtream bouquets over locally available content
 
 **Benefit:** providers supply the raw catalog; Tuliprox decides what your users actually see and how it is organized.
 

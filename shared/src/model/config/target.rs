@@ -668,6 +668,28 @@ mod tests {
     fn xtream_output() -> TargetOutputDto { TargetOutputDto::Xtream(XtreamTargetOutputDto::default()) }
 
     #[test]
+    fn shipped_tmdb_example_is_safe_by_default_and_prepares_when_explicitly_enabled() {
+        let sources: crate::model::SourcesConfigDto =
+            serde_saphyr::from_str(include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../config/source.yml"))).unwrap();
+        let mut target = sources
+            .sources
+            .into_iter()
+            .flat_map(|source| source.targets)
+            .find(|target| target.name == "tmdb-discovery-example")
+            .expect("shipped TMDB example");
+        assert!(!target.enabled);
+        assert!(!target.curation.as_ref().unwrap().enabled);
+        assert!(target.curation.as_ref().unwrap().tmdb.as_ref().unwrap().api.access_token.is_empty());
+        target.prepare(1, None, None).unwrap();
+        target.enabled = true;
+        target.curation.as_mut().unwrap().enabled = true;
+        target.prepare(1, None, None).unwrap();
+        let yaml = serde_saphyr::to_string(&target).unwrap();
+        let restored: ConfigTargetDto = serde_saphyr::from_str(&yaml).unwrap();
+        assert_eq!(restored.curation, target.curation);
+    }
+
+    #[test]
     fn target_curation_prepares_and_round_trips_tmdb_only_and_mixed_sources() {
         for with_trakt in [false, true] {
             let mut value = serde_json::json!({"name": "discovery", "output": [{"type": "xtream"}, {"type": "m3u"}],

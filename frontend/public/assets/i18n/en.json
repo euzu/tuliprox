@@ -1515,6 +1515,7 @@
     "REFRESH": "Refresh",
     "REGEXP": "Regexp",
     "RELEASES": "Releases",
+    "CREDITS": "Credits",
     "REMOVE_DUPLICATES": "Remove duplicates",
     "CLEAR_INVALID_EPG_IDS": "Clear invalid EPG IDs",
     "RENAME": "Rename",
