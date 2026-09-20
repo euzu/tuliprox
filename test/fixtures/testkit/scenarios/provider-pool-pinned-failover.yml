@@ -1,0 +1,119 @@
+schema_version: 1
+name: provider-pool-pinned-failover
+tuliprox:
+  base_url: http://fixture.invalid
+  execution_mode: isolated_fixture
+  bootstrap:
+    command: "${env:TULIPROX_TESTKIT_SUT_BINARY}"
+    arguments: ["-s", "-c", "{config_file}", "-i", "{source_file}", "-a", "{api_proxy_file}"]
+    readiness_url: "{base_url}/healthcheck"
+origin:
+  run_id: provider-pool-pinned-failover
+  account_limit: 2
+  limit_mode: reject_new
+actors:
+  - id: baba-blocker
+    agent: local
+    username: baba
+    user_agent: tuliprox-testkit/baba-blocker
+    client_ip: { mode: forwarded, value: 10.30.0.10 }
+  - id: baba-occupier
+    agent: local
+    username: baba
+    user_agent: tuliprox-testkit/baba-occupier
+    client_ip: { mode: forwarded, value: 10.30.0.11 }
+  - id: xtr-viewer
+    agent: local
+    username: xtr
+    user_agent: tuliprox-testkit/xtr-viewer
+    client_ip: { mode: forwarded, value: 10.30.0.12 }
+channels:
+  blocker-channel: { origin_marker: 17, protocol: xtream_ts }
+  occupied-channel: { origin_marker: 18, protocol: xtream_ts }
+steps:
+  - command_id: occupy-account-a
+    start:
+      actor: baba-blocker
+      playback_id: blocker-a
+      session_group: blocker-a
+      channel: blocker-channel
+    await: { valid_frames: 3 }
+    assert_origin:
+      active_body: 1
+      latest_request_account: account-a
+  - command_id: pin-xtr-to-account-b
+    start:
+      actor: xtr-viewer
+      playback_id: xtr-pin-b
+      session_group: xtr-movie
+      vod_object: movie.mkv
+      range: "bytes=0-524287"
+      read_limit_bytes: 32768
+      post_read_action: pause
+    assert_origin:
+      active_body: 2
+      latest_request_account: account-b
+  - command_id: release-xtr-account-b
+    stop: { playback_id: xtr-pin-b }
+    assert_origin: { active_body: 1 }
+  - command_id: occupy-account-b
+    start:
+      actor: baba-occupier
+      playback_id: occupier-b
+      session_group: occupier-b
+      channel: occupied-channel
+    await: { valid_frames: 3 }
+    assert_origin:
+      active_body: 2
+      latest_request_account: account-b
+  - command_id: release-account-a
+    stop: { playback_id: blocker-a }
+    assert_origin: { active_body: 1 }
+  - command_id: reopen-xtr-via-free-account-a
+    start:
+      actor: xtr-viewer
+      playback_id: xtr-fallback-a
+      session_group: xtr-movie
+      vod_object: movie.mkv
+      range: "bytes=1048576-1572863"
+      read_limit_bytes: 32768
+      post_read_action: pause
+    assert_origin:
+      active_body: 2
+      max_active_body: 2
+      latest_request_account: account-a
+      no_limit_rejections: true
+      no_evictions: true
+  - command_id: release-xtr-account-a
+    stop: { playback_id: xtr-fallback-a }
+    assert_origin: { active_body: 1 }
+  - command_id: release-account-b
+    stop: { playback_id: occupier-b }
+    assert_origin: { active_body: 0 }
+  - command_id: verify-xtr-pin-updated-to-account-a
+    start:
+      actor: xtr-viewer
+      playback_id: xtr-reopen-a
+      session_group: xtr-movie
+      vod_object: movie.mkv
+      range: "bytes=2097152-2621439"
+      read_limit_bytes: 32768
+      post_read_action: pause
+    assert_origin:
+      active_body: 1
+      max_active_body: 2
+      latest_request_account: account-a
+      no_limit_rejections: true
+      no_evictions: true
+  - command_id: stop-xtr-reopen
+    stop: { playback_id: xtr-reopen-a }
+    assert_origin: { active_body: 0 }
+policy_contract:
+  user_access_control: true
+  users:
+    baba: { max_connections: 2 }
+    xtr: { max_connections: 1 }
+  admission_strategies: []
+  provider_pool:
+    - { name: account-a, max_connections: 1 }
+    - { name: account-b, max_connections: 1 }

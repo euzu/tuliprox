@@ -588,20 +588,29 @@ async fn serve_origin(
     Ok(RunExit::Passed)
 }
 
-fn catalog_m3u(state: &OriginState, host: &str) -> String {
+fn catalog_m3u(state: &OriginState, host: &str, account: Option<&str>) -> String {
+    let account_query = account.map_or_else(String::new, |account| format!("&token={account}"));
     let mut catalog = String::from("#EXTM3U\n");
     for marker in state.markers.iter() {
         let _ = writeln!(catalog, "#EXTINF:-1 tvg-id=\"test-{marker}\",Test channel {marker}");
-        let _ = writeln!(catalog, "http://{host}/live/{marker}.ts?run={}", state.run_id.0);
+        let _ = writeln!(catalog, "http://{host}/live/{marker}.ts?run={}{}", state.run_id.0, account_query);
     }
     let _ = writeln!(catalog, "#EXTINF:-1 tvg-id=\"test-vod-movie.mkv\" tvg-type=\"movie\",Test Movie");
-    let _ = writeln!(catalog, "http://{host}/vod/movie.mkv?run={}", state.run_id.0);
+    let _ = writeln!(catalog, "http://{host}/vod/movie.mkv?run={}{}", state.run_id.0, account_query);
     catalog
 }
 
-async fn catalog(State(state): State<OriginState>, headers: HeaderMap) -> impl IntoResponse {
+fn origin_account(query: &HashMap<String, String>) -> Option<&str> {
+    query.get("account").or_else(|| query.get("token")).map(String::as_str)
+}
+
+async fn catalog(
+    State(state): State<OriginState>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     let host = headers.get(header::HOST).and_then(|value| value.to_str().ok()).unwrap_or("127.0.0.1");
-    ([(header::CONNECTION, "close")], catalog_m3u(&state, host))
+    ([(header::CONNECTION, "close")], catalog_m3u(&state, host, query.get("account").map(String::as_str)))
 }
 
 struct LiveStreamState {
@@ -644,14 +653,7 @@ async fn live(
     let ua = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok());
     let req_res = state
         .tracker
-        .on_request_started(
-            conn_id,
-            "GET",
-            &format!("/live/{stream}"),
-            range_str,
-            ua,
-            query.get("account").map(String::as_str),
-        )
+        .on_request_started(conn_id, "GET", &format!("/live/{stream}"), range_str, ua, origin_account(&query))
         .await;
 
     let req_id = match req_res {
@@ -875,14 +877,7 @@ async fn vod(
     let ua = headers.get(header::USER_AGENT).and_then(|value| value.to_str().ok());
     let req_res = state
         .tracker
-        .on_request_started(
-            conn_id,
-            "GET",
-            &format!("/vod/{object}"),
-            range_header,
-            ua,
-            query.get("account").map(String::as_str),
-        )
+        .on_request_started(conn_id, "GET", &format!("/vod/{object}"), range_header, ua, origin_account(&query))
         .await;
 
     let req_id = match req_res {
@@ -2077,7 +2072,8 @@ async fn check_origin_assertions<'a>(
                 }
                 let check_evictions = assert_origin.no_evictions.unwrap_or(false);
                 let check_rejections = assert_origin.no_limit_rejections.unwrap_or(false);
-                if check_evictions || check_rejections {
+                let check_account = assert_origin.latest_request_account.as_deref();
+                if check_evictions || check_rejections || check_account.is_some() {
                     if let Ok(evts) = obs.events(origin_run_id).await {
                         if check_evictions
                             && evts.iter().any(|e| matches!(e.kind, OriginEventKind::EvictionTriggered { .. }))
@@ -2090,6 +2086,20 @@ async fn check_origin_assertions<'a>(
                         {
                             *any_failed = true;
                             events.push((step_id, "origin_rejection_observed"));
+                        }
+                        if let Some(expected_account) = check_account {
+                            let latest_account = evts.iter().rev().find_map(|event| match &event.kind {
+                                OriginEventKind::RequestStarted { path, account, .. }
+                                    if path.starts_with("/live/") || path.starts_with("/vod/") =>
+                                {
+                                    Some(account.as_deref())
+                                }
+                                _ => None,
+                            });
+                            if latest_account != Some(Some(expected_account)) {
+                                *any_failed = true;
+                                events.push((step_id, "origin_request_account_mismatch"));
+                            }
                         }
                     } else {
                         *observations_incomplete = true;
@@ -2372,10 +2382,13 @@ async fn execute_scenario_steps<'a>(
                     expected_terminations.insert(playback_id.clone());
                     evicted_victim_id = Some(playback_id.clone());
                 }
-                let provider_limited_rejection =
-                    scenario.policy_contract.as_ref().and_then(|contract| contract.provider_max_connections).is_some()
-                        && step.expect.is_rejected()
-                        && oracle_expected == ExpectedPlayback::Streaming;
+                let provider_limited_rejection = scenario
+                    .policy_contract
+                    .as_ref()
+                    .and_then(tuliprox_testkit::config::PolicyContract::provider_capacity)
+                    .is_some()
+                    && step.expect.is_rejected()
+                    && oracle_expected == ExpectedPlayback::Streaming;
                 // The static oracle does not model the time-based reentry guard, so a
                 // suppressed retry intentionally diverges from its eviction prediction.
                 // The concrete SUT outcome is asserted through `step.expect`.
@@ -2511,7 +2524,7 @@ async fn execute_scenario_steps<'a>(
                 events.push((start.playback_id.as_str(), "runtime_observed"));
                 if let Some(policy) = &scenario.policy_contract {
                     if let Ok(slots) = provider_slot_count(&snapshot.status) {
-                        if policy.provider_max_connections.is_some_and(|limit| slots > usize::from(limit)) {
+                        if policy.provider_capacity().is_some_and(|limit| slots > limit) {
                             any_failed = true;
                             events.push((start.playback_id.as_str(), "provider_limit_exceeded"));
                         }
@@ -2597,7 +2610,8 @@ async fn execute_scenario_steps<'a>(
         }
     }
     execution_result?;
-    if scenario.policy_contract.as_ref().is_some_and(|contract| contract.provider_max_connections.is_some()) {
+    if scenario.policy_contract.as_ref().and_then(tuliprox_testkit::config::PolicyContract::provider_capacity).is_some()
+    {
         if wait_for_provider_slots(observer, 0, Duration::from_secs(5)).await.is_ok() {
             events.push((scenario.name.as_str(), "provider_slots_released"));
         } else {
@@ -2982,7 +2996,7 @@ mod tests {
     async fn catalog_exposes_each_configured_marker() {
         let mut state = test_origin_state("catalog-run");
         state.markers = Arc::new(vec![17, 19]);
-        let document = catalog_m3u(&state, "127.0.0.1");
+        let document = catalog_m3u(&state, "127.0.0.1", None);
         assert!(document.contains("tvg-id=\"test-17\""));
         assert!(document.contains("tvg-id=\"test-19\""));
         assert!(document.contains("run=catalog-run"));
@@ -3139,13 +3153,7 @@ mod tests {
         let mut events = Vec::new();
         let mut any_failed = false;
         let mut observations_incomplete = false;
-        let assert_origin = tuliprox_testkit::config::AssertOrigin {
-            active_body: None,
-            max_active_body: None,
-            max_active_tcp: None,
-            no_evictions: Some(true),
-            no_limit_rejections: None,
-        };
+        let assert_origin = tuliprox_testkit::config::AssertOrigin { no_evictions: Some(true), ..Default::default() };
 
         check_origin_assertions(
             "step-1",
@@ -3206,13 +3214,7 @@ mod tests {
         let mut events = Vec::new();
         let mut any_failed = false;
         let mut observations_incomplete = false;
-        let assert_origin = tuliprox_testkit::config::AssertOrigin {
-            active_body: None,
-            max_active_body: None,
-            max_active_tcp: None,
-            no_evictions: Some(true),
-            no_limit_rejections: None,
-        };
+        let assert_origin = tuliprox_testkit::config::AssertOrigin { no_evictions: Some(true), ..Default::default() };
 
         check_origin_assertions(
             "step-1",
