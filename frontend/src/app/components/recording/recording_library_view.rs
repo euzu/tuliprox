@@ -6,7 +6,10 @@
 //! partial list can never be mistaken for the whole one.
 
 use crate::{
-    app::components::{IconButton, LoadingIndicator, NoContent, Table, TableDefinition, TaskStatusBadge, TextButton},
+    app::{
+        components::{IconButton, LoadingIndicator, NoContent, Table, TableDefinition, TaskStatusBadge, TextButton},
+        ConfigContext,
+    },
     hooks::use_service_context,
     i18n::use_translation,
     model::DialogResult,
@@ -255,10 +258,23 @@ fn format_quota_pool(used_bytes: u64, limit_bytes: Option<u64>) -> String {
 /// what was.
 fn should_apply_snapshot(seen: Option<u64>, incoming: u64) -> bool { seen.is_none_or(|last| incoming > last) }
 
+pub const fn should_request_recording_snapshot(active: bool, recording_enabled: bool, has_loaded: bool) -> bool {
+    active && recording_enabled && !has_loaded
+}
+
+#[derive(Properties, Clone, PartialEq, Debug)]
+pub struct RecordingLibraryViewProps {
+    #[prop_or(true)]
+    pub active: bool,
+}
+
 #[function_component(RecordingLibraryView)]
-pub fn recording_library_view() -> Html {
+pub fn recording_library_view(props: &RecordingLibraryViewProps) -> Html {
     let translate = use_translation();
     let services = use_service_context();
+    let config_ctx = use_context::<ConfigContext>();
+    let recording_enabled =
+        config_ctx.as_ref().and_then(|ctx| ctx.config.as_ref()).is_some_and(|cfg| cfg.is_recording_enabled());
     let dialog = use_context::<DialogService>().expect("Dialog service not found");
     let can_manage = services.auth.has_permission(Permission::RecordingManage);
     let can_delete = services.auth.has_permission(Permission::RecordingDelete);
@@ -279,6 +295,7 @@ pub fn recording_library_view() -> Html {
     let quota_state = use_state(shared::model::RecordingQuotaSummaryDto::default);
     // Stale data is more useful than no data, but it has to be labelled.
     let connected = use_state(|| true);
+    let has_loaded = use_mut_ref(|| false);
 
     let request_snapshot = {
         let services = services.clone();
@@ -286,6 +303,20 @@ pub fn recording_library_view() -> Html {
             let _ = services.websocket.send_message(ProtocolMessage::RecordingSnapshotRequest);
         })
     };
+
+    // Lazy load on first activation when enabled
+    {
+        let request_snapshot = request_snapshot.clone();
+        let has_loaded = has_loaded.clone();
+        let active = props.active;
+        use_effect_with((active, recording_enabled), move |(active, enabled)| {
+            if should_request_recording_snapshot(*active, *enabled, *has_loaded.borrow()) {
+                *has_loaded.borrow_mut() = true;
+                request_snapshot.emit(());
+            }
+            || ()
+        });
+    }
 
     {
         let tasks_state = tasks_state.clone();
@@ -296,8 +327,8 @@ pub fn recording_library_view() -> Html {
         let seen_revision = seen_revision.clone();
         let quota_state = quota_state.clone();
         let connected = connected.clone();
+        let has_loaded = has_loaded.clone();
         use_effect_with((), move |()| {
-            request_snapshot_effect.emit(());
             let sub_id = services.event.subscribe(move |msg| match msg {
                 crate::model::EventMessage::RecordingSnapshot { revision, tasks, quota, .. } => {
                     let mut seen = seen_revision.borrow_mut();
@@ -319,7 +350,7 @@ pub fn recording_library_view() -> Html {
                 }
                 crate::model::EventMessage::WebSocketStatus(online) => {
                     connected.set(online);
-                    if online {
+                    if online && *has_loaded.borrow() && recording_enabled {
                         // A reconnect must be able to replace stale local state
                         // even if the server's revision has not moved.
                         *seen_revision.borrow_mut() = None;
@@ -493,6 +524,23 @@ pub fn recording_library_view() -> Html {
         "recording_token_refresh_required" => translate.t("LABEL.RECORDING_TOKEN_REFRESH_HINT"),
         _ => String::new(),
     });
+
+    if !recording_enabled {
+        return html! {
+            <div class="tp__recording-view tp__list-view">
+                <div class="tp__recording-view__body tp__list-view__body">
+                    <div class="tp__recording-list tp__list-list">
+                        <div class="tp__recording-list__header tp__list-list__header">
+                            <h1>{translate.t("LABEL.RECORDING_LIBRARY")}</h1>
+                        </div>
+                        <div class="tp__recording-list__body tp__list-list__body">
+                            <NoContent text={translate.t("LABEL.RECORDING_UNAVAILABLE")} hint={translate.t("LABEL.RECORDING_DISABLED_HINT")} />
+                        </div>
+                    </div>
+                </div>
+            </div>
+        };
+    }
 
     html! {
         <div class="tp__recording-view tp__list-view">
@@ -755,5 +803,13 @@ mod tests {
         t.retry_attempts = 2;
         let text = format_error_parts(&t, "Attempt", "Next");
         assert!(text.starts_with("boom | Attempt 2"), "{text}");
+    }
+
+    #[test]
+    fn should_request_recording_snapshot_checks_active_enabled_and_loaded() {
+        assert!(super::should_request_recording_snapshot(true, true, false));
+        assert!(!super::should_request_recording_snapshot(false, true, false));
+        assert!(!super::should_request_recording_snapshot(true, false, false));
+        assert!(!super::should_request_recording_snapshot(true, true, true));
     }
 }

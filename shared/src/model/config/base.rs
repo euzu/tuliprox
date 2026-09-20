@@ -596,12 +596,16 @@ impl ConfigDto {
         self.is_stream_history_enabled()
             && self.reverse_proxy.as_ref().and_then(|r| r.qos_aggregation.as_ref()).is_some_and(|qos| qos.enabled)
     }
+
+    pub fn is_recording_enabled(&self) -> bool {
+        self.video.as_ref().and_then(|v| v.recording.as_ref()).is_some_and(|r| r.enabled)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::defaults::CONFIG_PATH;
+    use crate::{defaults::CONFIG_PATH, model::RecordingConfigDto};
     use serde_json::json;
 
     #[test]
@@ -894,5 +898,19 @@ reverse_proxy:
         cfg.reverse_proxy.as_mut().unwrap().stream_history.as_mut().unwrap().stream_history_enabled = false;
         assert!(!cfg.is_stream_history_enabled());
         assert!(!cfg.is_qos_aggregation_enabled());
+    }
+
+    #[test]
+    fn is_recording_enabled_matches_nested_config() {
+        let mut cfg = ConfigDto::default();
+        assert!(!cfg.is_recording_enabled());
+
+        let mut video = VideoConfigDto::default();
+        video.recording = Some(RecordingConfigDto { enabled: true, ..Default::default() });
+        cfg.video = Some(video);
+        assert!(cfg.is_recording_enabled());
+
+        cfg.video.as_mut().unwrap().recording.as_mut().unwrap().enabled = false;
+        assert!(!cfg.is_recording_enabled());
     }
 }

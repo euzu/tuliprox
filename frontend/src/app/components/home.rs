@@ -45,6 +45,7 @@ struct HomeViewAccess {
     setup_mode: bool,
     show_streams_page: bool,
     show_stream_history: bool,
+    show_recording: bool,
     can_read_system_status: bool,
     can_read_config: bool,
     can_read_users: bool,
@@ -97,7 +98,7 @@ fn is_allowed_home_view(view: ViewType, access: HomeViewAccess) -> bool {
         ViewType::PlaylistEpg => access.can_read_epg,
         ViewType::Rbac => access.is_admin,
         ViewType::RecordingLibrary | ViewType::RecordingRules | ViewType::RecordingRuleForm => {
-            access.can_read_recordings
+            access.show_recording && access.can_read_recordings
         }
     }
 }
@@ -298,16 +299,19 @@ pub fn Home() -> Html {
 
     // combine_views_stats_streams=true means embed streams in stats (no separate page), so show_streams_page = !combine_views_stats_streams.
     // The default unwrap_or(true) correctly preserves backward compatibility (separate pages by default).
-    let show_streams_page = config_context
-        .config
-        .as_ref()
-        .and_then(|app_cfg| app_cfg.config.web_ui.as_ref())
-        .is_none_or(|web_ui| !web_ui.combine_views_stats_streams);
-    let show_stream_history = config_context.config.as_ref().is_some_and(|app_cfg| app_cfg.is_stream_history_enabled());
+    let (show_streams_page, show_stream_history, show_recording) =
+        config_context.config.as_ref().map_or((true, false, false), |app_cfg| {
+            (
+                app_cfg.config.web_ui.as_ref().is_none_or(|web_ui| !web_ui.combine_views_stats_streams),
+                app_cfg.is_stream_history_enabled(),
+                app_cfg.is_recording_enabled(),
+            )
+        });
     let home_access = HomeViewAccess {
         setup_mode,
         show_streams_page,
         show_stream_history,
+        show_recording,
         can_read_system_status,
         can_read_config,
         can_read_users,
@@ -503,7 +507,7 @@ pub fn Home() -> Html {
                { if setup_mode {
                     html! {}
                  } else {
-                    html! { <Sidebar active_page={resolved_view} onview={handle_view_change_sidebar} show_streams_page={show_streams_page} show_stream_history={show_stream_history}/> }
+                    html! { <Sidebar active_page={resolved_view} onview={handle_view_change_sidebar} show_streams_page={show_streams_page} show_stream_history={show_stream_history} show_recording={show_recording}/> }
                  }
                }
 
@@ -640,20 +644,20 @@ pub fn Home() -> Html {
                                                </ErrorBoundary>
                                            </Panel>
                                        })}
-                                       { html_if!(can_read_recordings, {
-                                           <Panel class="tp__full-width" value={ViewType::RecordingLibrary.intern()} active={view_page.clone()}>
-                                               <ErrorBoundary name={translate.t("LABEL.RECORDING_LIBRARY")}>
-                                                 <RecordingLibraryView />
-                                               </ErrorBoundary>
-                                           </Panel>
-                                       })}
-                                       { html_if!(can_read_recordings, {
-                                           <Panel class="tp__full-width" value={ViewType::RecordingRules.intern()} active={view_page.clone()}>
-                                               <ErrorBoundary name={translate.t("LABEL.RECORDING_RULES")}>
-                                                 <RecordingRulesView />
-                                               </ErrorBoundary>
-                                           </Panel>
-                                       })}
+                                        { html_if!(can_read_recordings && show_recording, {
+                                            <Panel class="tp__full-width" value={ViewType::RecordingLibrary.intern()} active={view_page.clone()}>
+                                                <ErrorBoundary name={translate.t("LABEL.RECORDING_LIBRARY")}>
+                                                  <RecordingLibraryView active={view_page == ViewType::RecordingLibrary.intern()} />
+                                                </ErrorBoundary>
+                                            </Panel>
+                                        })}
+                                        { html_if!(can_read_recordings && show_recording, {
+                                            <Panel class="tp__full-width" value={ViewType::RecordingRules.intern()} active={view_page.clone()}>
+                                                <ErrorBoundary name={translate.t("LABEL.RECORDING_RULES")}>
+                                                  <RecordingRulesView active={view_page == ViewType::RecordingRules.intern()} />
+                                                </ErrorBoundary>
+                                            </Panel>
+                                        })}
                                     </>
                                 }
                             }
@@ -678,6 +682,7 @@ mod tests {
             setup_mode: false,
             show_streams_page: true,
             show_stream_history: true,
+            show_recording: true,
             can_read_system_status: true,
             can_read_config: true,
             can_read_users: true,
@@ -788,5 +793,38 @@ mod tests {
         let access = super::HomeViewAccess { show_stream_history: false, ..full_access() };
         let resolved = resolve_home_view(Some(ViewType::StreamHistory), ViewType::Dashboard, access);
         assert_eq!(resolved, ViewType::Dashboard);
+    }
+
+    #[test]
+    fn is_allowed_home_view_recording_checks_permission_and_config() {
+        let mut access = full_access();
+        assert!(is_allowed_home_view(ViewType::RecordingLibrary, access));
+        assert!(is_allowed_home_view(ViewType::RecordingRules, access));
+        assert!(is_allowed_home_view(ViewType::RecordingRuleForm, access));
+
+        access.show_recording = false;
+        assert!(!is_allowed_home_view(ViewType::RecordingLibrary, access));
+        assert!(!is_allowed_home_view(ViewType::RecordingRules, access));
+        assert!(!is_allowed_home_view(ViewType::RecordingRuleForm, access));
+
+        access.show_recording = true;
+        access.can_read_recordings = false;
+        assert!(!is_allowed_home_view(ViewType::RecordingLibrary, access));
+        assert!(!is_allowed_home_view(ViewType::RecordingRules, access));
+        assert!(!is_allowed_home_view(ViewType::RecordingRuleForm, access));
+    }
+
+    #[test]
+    fn resolve_home_view_rejects_recording_when_disabled() {
+        let access = super::HomeViewAccess { show_recording: false, ..full_access() };
+        assert_eq!(
+            resolve_home_view(Some(ViewType::RecordingLibrary), ViewType::Dashboard, access),
+            ViewType::Dashboard
+        );
+        assert_eq!(resolve_home_view(Some(ViewType::RecordingRules), ViewType::Dashboard, access), ViewType::Dashboard);
+        assert_eq!(
+            resolve_home_view(Some(ViewType::RecordingRuleForm), ViewType::Dashboard, access),
+            ViewType::Dashboard
+        );
     }
 }

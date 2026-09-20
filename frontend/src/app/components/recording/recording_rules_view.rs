@@ -167,39 +167,61 @@ pub fn rule_schedule_label(translate: &YewI18n, rule: &RecordingRuleResponse) ->
 /// Translate a rule-service failure for display.
 fn error_message(translate: &YewI18n, error: &RecordingError) -> String { translate.t(error.i18n_key()) }
 
+pub const fn should_fetch_recording_rules(active: bool, recording_enabled: bool, has_loaded: bool) -> bool {
+    active && recording_enabled && !has_loaded
+}
+
+#[derive(Properties, Clone, PartialEq, Debug)]
+pub struct RecordingRulesViewProps {
+    #[prop_or(true)]
+    pub active: bool,
+}
+
 #[function_component(RecordingRulesView)]
-pub fn recording_rules_view() -> Html {
+pub fn recording_rules_view(props: &RecordingRulesViewProps) -> Html {
     let translate = use_translation();
     let services = use_service_context();
+    let config_ctx = use_context::<ConfigContext>();
+    let recording_enabled =
+        config_ctx.as_ref().and_then(|ctx| ctx.config.as_ref()).is_some_and(|cfg| cfg.is_recording_enabled());
     let dialog = use_context::<DialogService>();
     let rules = use_state(|| Rc::new(Vec::<RecordingRuleResponse>::new()));
     let editing = use_state(|| None::<RecordingRuleSnapshot>);
     let creating = use_state(|| false);
+    let has_loaded = use_mut_ref(|| false);
 
+    // Lazy load on first activation when enabled
     {
         let rules = rules.clone();
-        let svc = services.clone();
-        use_effect_with((), move |()| {
-            wasm_bindgen_futures::spawn_local(async move {
-                if let Ok(r) = RecordingService::new().list_rules().await {
-                    rules.set(Rc::new(r));
-                }
-            });
-            let _ = svc; // suppress unused
-            || {}
+        let has_loaded = has_loaded.clone();
+        let active = props.active;
+        use_effect_with((active, recording_enabled), move |(active, enabled)| {
+            if should_fetch_recording_rules(*active, *enabled, *has_loaded.borrow()) {
+                *has_loaded.borrow_mut() = true;
+                let rules = rules.clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    if let Ok(r) = RecordingService::new().list_rules().await {
+                        rules.set(Rc::new(r));
+                    }
+                });
+            }
+            || ()
         });
     }
 
     // Live updates: the backend broadcasts `RecordingRulesChanged`
     // when the rule repository mutates. Subscribe to it directly
-    // — no per-recording-snapshot refetch. The initial fetch above
-    // is what the user sees until the first mutation arrives.
+    // — only handle if already loaded and recording is enabled.
     {
         let rules = rules.clone();
         let svc = services.clone();
+        let has_loaded = has_loaded.clone();
         use_effect_with((), move |()| {
             let sid = svc.event.subscribe(move |msg| {
                 if matches!(msg, EventMessage::RecordingRulesChanged) {
+                    if !*has_loaded.borrow() || !recording_enabled {
+                        return;
+                    }
                     let rules = rules.clone();
                     wasm_bindgen_futures::spawn_local(async move {
                         if let Ok(r) = RecordingService::new().list_rules().await {
@@ -464,6 +486,25 @@ pub fn recording_rules_view() -> Html {
         on_sort,
     });
 
+    if !recording_enabled {
+        return html! {
+            <div class="tp__recording-rules-view tp__list-view">
+                <div class="tp__recording-rules-view__body tp__list-view__body">
+                    <div class="tp__recording-rules tp__list-list">
+                        <div class="tp__recording-rules__header tp__list-list__header">
+                            <h1>{ translate.t("LABEL.RECORDING_RULES") }</h1>
+                        </div>
+                        <div class="tp__recording-rules__body tp__list-list__body">
+                            <p class="tp__recording-list__empty">
+                                { translate.t("LABEL.RECORDING_DISABLED_HINT") }
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        };
+    }
+
     html! {
         <div class="tp__recording-rules-view tp__list-view">
             <div class="tp__recording-rules-view__body tp__list-view__body">
@@ -492,6 +533,14 @@ pub fn recording_rules_view() -> Html {
 mod tests {
     use super::*;
     use shared::model::recording_rule::{RuleSource, RuleVisibility};
+
+    #[test]
+    fn should_fetch_recording_rules_checks_active_enabled_and_loaded() {
+        assert!(should_fetch_recording_rules(true, true, false));
+        assert!(!should_fetch_recording_rules(false, true, false));
+        assert!(!should_fetch_recording_rules(true, false, false));
+        assert!(!should_fetch_recording_rules(true, true, true));
+    }
 
     #[test]
     fn can_show_rules_section_requires_recording_read() {
