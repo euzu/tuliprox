@@ -6,7 +6,12 @@ use reqwest::{
 };
 use shared::model::{TmdbTrendingKind, TmdbTrendingScope, TmdbTrendingTimeWindow};
 use std::time::Duration;
-use tuliprox_core::model::{TmdbCurationApiConfig, TmdbTrendingConfig};
+use tuliprox_core::{
+    model::{TmdbCurationApiConfig, TmdbTrendingConfig},
+    utils::network::content_coding::{
+        decode_response_to_identity, read_to_end_limited, ContentBodyReadError, ContentCodingDetection,
+    },
+};
 
 const TMDB_ORIGIN: &str = "https://api.themoviedb.org/";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -72,7 +77,7 @@ impl TmdbClient {
         let TmdbTrendingScope::FirstPage = selector.scope;
         let mut url = self.origin.join(&format!("3/trending/{kind}/{window}")).expect("fixed trending path");
         url.query_pairs_mut().append_pair("language", "en-US");
-        let mut response = self
+        let response = self
             .http
             .get(url.clone())
             .header(AUTHORIZATION, self.authorization.clone())
@@ -88,13 +93,13 @@ impl TmdbClient {
         if !response.status().is_success() {
             return Err(TmdbFailure::Status(response.status().as_u16()));
         }
-        let mut body = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|_| TmdbFailure::Body)? {
-            if chunk.len() > self.body_limit.saturating_sub(body.len()) {
-                return Err(TmdbFailure::BodyLimit);
-            }
-            body.extend_from_slice(&chunk);
-        }
+        let mut decoded = decode_response_to_identity(response, ContentCodingDetection::DeclaredOnly)
+            .await
+            .map_err(|_| TmdbFailure::Body)?;
+        let body = read_to_end_limited(&mut decoded.body, self.body_limit).await.map_err(|error| match error {
+            ContentBodyReadError::LimitExceeded { .. } => TmdbFailure::BodyLimit,
+            ContentBodyReadError::InvalidUtf8 { .. } | ContentBodyReadError::Io(_) => TmdbFailure::Body,
+        })?;
         translate_page(&body, selector.kind).map_err(|()| TmdbFailure::InvalidResponse)
     }
 }
@@ -103,6 +108,7 @@ impl TmdbClient {
 mod tests {
     use super::*;
     use crate::test_support::{http_response, TestServer};
+    use tuliprox_core::utils::compression_utils::compress_string;
 
     const EMPTY: &str = r#"{"page":1,"total_pages":0,"total_results":0,"results":[]}"#;
     const TOKEN: &str = "private-test-token";
@@ -115,6 +121,97 @@ mod tests {
             category_name: None,
             create_xtream_category: false,
         }
+    }
+
+    fn gzip(body: &str) -> Vec<u8> { compress_string(body).expect("gzip fixture") }
+
+    fn gzip_response_from_bytes(compressed: &[u8]) -> Vec<u8> {
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            compressed.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(compressed);
+        response
+    }
+
+    fn gzip_response(body: &str) -> Vec<u8> { gzip_response_from_bytes(&gzip(body)) }
+
+    fn empty_page_with_length(length: usize) -> String {
+        const PREFIX: &str = "{\"page\":1,\"total_pages\":0,\"total_results\":0,\"results\":[],\"padding\":\"";
+        const SUFFIX: &str = "\"}";
+        let padding = length.checked_sub(PREFIX.len() + SUFFIX.len()).expect("fixture length fits page envelope");
+        let body = format!("{PREFIX}{}{SUFFIX}", "x".repeat(padding));
+        assert_eq!(body.len(), length);
+        body
+    }
+
+    #[tokio::test]
+    async fn tmdb_accepts_valid_gzip_page_within_decoded_limit() {
+        let server = TestServer::new_bytes(gzip_response(EMPTY)).await;
+        let client = TmdbClient::for_test(
+            &Client::new(),
+            &TmdbCurationApiConfig { access_token: TOKEN.to_string() },
+            &server.url,
+        )
+        .unwrap();
+
+        assert!(client
+            .trending(&selector(TmdbTrendingKind::Movie, TmdbTrendingTimeWindow::Week))
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn tmdb_gzip_body_limit_counts_decoded_bytes_and_allows_the_exact_limit() {
+        let exact = empty_page_with_length(BODY_LIMIT);
+        let compressed = gzip(&exact);
+        assert!(compressed.len() < BODY_LIMIT, "fixture must expand during decoding");
+        let server = TestServer::new_bytes(gzip_response_from_bytes(&compressed)).await;
+        let client = TmdbClient::for_test(
+            &Client::new(),
+            &TmdbCurationApiConfig { access_token: TOKEN.to_string() },
+            &server.url,
+        )
+        .unwrap();
+        assert!(
+            client.trending(&selector(TmdbTrendingKind::Movie, TmdbTrendingTimeWindow::Week)).await.unwrap().is_empty(),
+            "the decoded 1 MiB boundary is accepted"
+        );
+
+        let oversized = empty_page_with_length(BODY_LIMIT + 1);
+        let compressed = gzip(&oversized);
+        assert!(compressed.len() < BODY_LIMIT, "encoded bytes alone must not trip the limit");
+        let server = TestServer::new_bytes(gzip_response_from_bytes(&compressed)).await;
+        let client = TmdbClient::for_test(
+            &Client::new(),
+            &TmdbCurationApiConfig { access_token: TOKEN.to_string() },
+            &server.url,
+        )
+        .unwrap();
+        assert_eq!(
+            client.trending(&selector(TmdbTrendingKind::Movie, TmdbTrendingTimeWindow::Week)).await.unwrap_err(),
+            TmdbFailure::BodyLimit
+        );
+    }
+
+    #[tokio::test]
+    async fn tmdb_truncated_gzip_is_a_sanitized_failure_not_an_empty_page() {
+        let mut compressed = gzip(EMPTY);
+        compressed.truncate(compressed.len() / 2);
+        let server = TestServer::new_bytes(gzip_response_from_bytes(&compressed)).await;
+        let client = TmdbClient::for_test(
+            &Client::new(),
+            &TmdbCurationApiConfig { access_token: TOKEN.to_string() },
+            &server.url,
+        )
+        .unwrap();
+
+        let error =
+            client.trending(&selector(TmdbTrendingKind::Movie, TmdbTrendingTimeWindow::Week)).await.unwrap_err();
+        assert_eq!(error, TmdbFailure::Body);
+        assert!(!format!("{error:?}").contains(TOKEN));
     }
 
     #[tokio::test]
@@ -222,9 +319,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tmdb_deadline_covers_headers_and_body() {
+    async fn tmdb_deadline_covers_headers_and_decoded_body() {
         for send_headers in [false, true] {
-            let server = TestServer::delayed(http_response(200, EMPTY), Duration::from_secs(2), send_headers).await;
+            let server = TestServer::delayed_bytes(gzip_response(EMPTY), Duration::from_secs(2), send_headers).await;
             let mut client = TmdbClient::for_test(
                 &Client::new(),
                 &TmdbCurationApiConfig { access_token: TOKEN.to_string() },

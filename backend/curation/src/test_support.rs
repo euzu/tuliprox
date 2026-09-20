@@ -19,15 +19,21 @@ pub(crate) struct TestServer {
 }
 
 impl TestServer {
-    pub(crate) async fn new(response: String) -> Self { Self::delayed(response, Duration::ZERO, false).await }
+    pub(crate) async fn new(response: String) -> Self { Self::new_bytes(response.into_bytes()).await }
 
-    pub(crate) async fn delayed(response: String, delay: Duration, send_headers: bool) -> Self {
+    pub(crate) async fn new_bytes(response: Vec<u8>) -> Self {
+        Self::delayed_bytes(response, Duration::ZERO, false).await
+    }
+
+    pub(crate) async fn delayed_bytes(response: Vec<u8>, delay: Duration, send_headers: bool) -> Self {
         Self::serve(vec![response], delay, send_headers).await
     }
 
-    pub(crate) async fn sequence(responses: Vec<String>) -> Self { Self::serve(responses, Duration::ZERO, false).await }
+    pub(crate) async fn sequence(responses: Vec<String>) -> Self {
+        Self::serve(responses.into_iter().map(String::into_bytes).collect(), Duration::ZERO, false).await
+    }
 
-    async fn serve(responses: Vec<String>, delay: Duration, send_headers: bool) -> Self {
+    async fn serve(responses: Vec<Vec<u8>>, delay: Duration, send_headers: bool) -> Self {
         assert!(!responses.is_empty());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/", listener.local_addr().unwrap());
@@ -55,10 +61,14 @@ impl TestServer {
                     requests.len() - 1
                 };
                 let response = &responses[index.min(responses.len() - 1)];
-                let split = if send_headers { response.find("\r\n\r\n").unwrap() + 4 } else { 0 };
-                let _ = stream.write_all(&response.as_bytes()[..split]).await;
+                let split = if send_headers {
+                    response.windows(4).position(|bytes| bytes == b"\r\n\r\n").unwrap() + 4
+                } else {
+                    0
+                };
+                let _ = stream.write_all(&response[..split]).await;
                 tokio::time::sleep(delay).await;
-                let _ = stream.write_all(&response.as_bytes()[split..]).await;
+                let _ = stream.write_all(&response[split..]).await;
             }
         });
         Self { url, requests, task }
