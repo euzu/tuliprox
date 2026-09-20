@@ -29,6 +29,8 @@ pub struct SidebarProps {
     pub onview: Callback<ViewType>,
     #[prop_or_default]
     pub show_streams_page: bool,
+    #[prop_or(true)]
+    pub show_stream_history: bool,
     #[prop_or_default]
     pub active_page: ViewType,
 }
@@ -67,6 +69,10 @@ fn is_sidebar_expanded(collapsed: CollapseState) -> bool {
 /// the toggle in the first place.
 pub const fn show_recording_nav(has_recording_read: bool) -> bool { has_recording_read }
 
+pub const fn show_stream_history_nav(has_system_read: bool, stream_history_enabled: bool) -> bool {
+    has_system_read && stream_history_enabled
+}
+
 #[component]
 pub fn Sidebar(props: &SidebarProps) -> Html {
     let services = use_service_context();
@@ -80,6 +86,8 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
     let resolved_state = resolved_sidebar_state(*collapsed, *is_mobile);
     let active_menu = props.active_page;
     let show_recording = show_recording_nav(services.auth.has_permission(Permission::RecordingRead));
+    let show_stream_history =
+        show_stream_history_nav(services.auth.has_permission(Permission::SystemRead), props.show_stream_history);
 
     let handle_menu_click = {
         let viewchange = props.onview.clone();
@@ -201,7 +209,7 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
             {html_if!(props.show_streams_page && auth.has_permission(Permission::SystemRead), {
                 <MenuItem class={if active_menu == ViewType::Streams { "active" } else {""}} icon="Streams" name={ViewType::Streams.to_string()} label={translate.t("LABEL.STREAMS")} onclick={&handle_menu_click}></MenuItem>
              })}
-            {html_if!(auth.has_permission(Permission::SystemRead), {
+            {html_if!(show_stream_history, {
                 <MenuItem class={if active_menu == ViewType::StreamHistory { "active" } else {""}} icon="Log" name={ViewType::StreamHistory.to_string()} label={translate.t("LABEL.STREAM_HISTORY")} onclick={&handle_menu_click}></MenuItem>
             })}
             {html_if!(
@@ -277,7 +285,7 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
             {html_if!(props.show_streams_page && auth.has_permission(Permission::SystemRead), {
              <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Streams, if active_menu == ViewType::Streams { " active" } else {""})} icon="Streams" name={ViewType::Streams.to_string()} hint={translate.t("LABEL.STREAMS")} aria_label={translate.t("LABEL.STREAMS")} onclick={&handle_menu_click}></IconButton>
             })}
-            {html_if!(auth.has_permission(Permission::SystemRead), {
+            {html_if!(show_stream_history, {
                 <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::StreamHistory, if active_menu == ViewType::StreamHistory { " active" } else {""})} icon="Log" name={ViewType::StreamHistory.to_string()} hint={translate.t("LABEL.STREAM_HISTORY")} aria_label={translate.t("LABEL.STREAM_HISTORY")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(
@@ -430,5 +438,13 @@ mod tests {
     fn recording_nav_requires_only_recording_read() {
         assert!(show_recording_nav(true));
         assert!(!show_recording_nav(false));
+    }
+
+    #[test]
+    fn stream_history_nav_requires_both_system_read_and_stream_history_enabled() {
+        assert!(super::show_stream_history_nav(true, true));
+        assert!(!super::show_stream_history_nav(true, false));
+        assert!(!super::show_stream_history_nav(false, true));
+        assert!(!super::show_stream_history_nav(false, false));
     }
 }

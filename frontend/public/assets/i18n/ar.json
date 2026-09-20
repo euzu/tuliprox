@@ -1554,6 +1554,7 @@
     "STREAM_HISTORY_TIME": "الوقت",
     "STREAM_HISTORY_TO": "إلى",
     "STREAM_HISTORY_ENABLED": "تفعيل سجل البث",
+    "STREAM_HISTORY_DISABLED_HINT": "سجل البث غير مفعّل على هذا الخادم. يرجى تفعيله في إعدادات الخادم.",
     "STREAM_HISTORY_BATCH_SIZE": "حجم الدفعة",
     "STREAM_HISTORY_DETAILS": "التفاصيل",
     "STREAM_HISTORY_DISCONNECTS": "الانقطاعات",

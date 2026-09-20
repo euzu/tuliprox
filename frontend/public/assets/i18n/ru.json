@@ -1465,6 +1465,7 @@
     "STREAM_HISTORY_TIME": "Время",
     "STREAM_HISTORY_TO": "К",
     "STREAM_HISTORY_ENABLED": "Включить историю потоков",
+    "STREAM_HISTORY_DISABLED_HINT": "История потоков не включена на этом сервере. Включите ее в конфигурации сервера.",
     "STREAM_HISTORY_BATCH_SIZE": "Размер пакета",
     "STREAM_HISTORY_DETAILS": "Детали",
     "STREAM_HISTORY_DISCONNECTS": "Отключения",

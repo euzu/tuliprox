@@ -44,6 +44,7 @@ const LAST_HOME_VIEW_STORAGE_KEY: &str = "tp_last_home_view";
 struct HomeViewAccess {
     setup_mode: bool,
     show_streams_page: bool,
+    show_stream_history: bool,
     can_read_system_status: bool,
     can_read_config: bool,
     can_read_users: bool,
@@ -83,7 +84,8 @@ fn is_allowed_home_view(view: ViewType, access: HomeViewAccess) -> bool {
 
     match normalize_requested_home_view(view, access) {
         ViewType::Dashboard => true,
-        ViewType::Stats | ViewType::StreamHistory => access.can_read_system_status,
+        ViewType::Stats => access.can_read_system_status,
+        ViewType::StreamHistory => access.show_stream_history && access.can_read_system_status,
         ViewType::Streams => access.show_streams_page && access.can_read_system_status,
         ViewType::Users => access.can_read_users || access.can_write_users,
         ViewType::Plans => access.can_read_config,
@@ -301,9 +303,11 @@ pub fn Home() -> Html {
         .as_ref()
         .and_then(|app_cfg| app_cfg.config.web_ui.as_ref())
         .is_none_or(|web_ui| !web_ui.combine_views_stats_streams);
+    let show_stream_history = config_context.config.as_ref().is_some_and(|app_cfg| app_cfg.is_stream_history_enabled());
     let home_access = HomeViewAccess {
         setup_mode,
         show_streams_page,
+        show_stream_history,
         can_read_system_status,
         can_read_config,
         can_read_users,
@@ -499,7 +503,7 @@ pub fn Home() -> Html {
                { if setup_mode {
                     html! {}
                  } else {
-                    html! { <Sidebar active_page={resolved_view} onview={handle_view_change_sidebar} show_streams_page={show_streams_page}/> }
+                    html! { <Sidebar active_page={resolved_view} onview={handle_view_change_sidebar} show_streams_page={show_streams_page} show_stream_history={show_stream_history}/> }
                  }
                }
 
@@ -573,10 +577,10 @@ pub fn Home() -> Html {
                                               </ErrorBoundary>
                                             </Panel>
                                         })}
-                                        { html_if!(can_read_system_status, {
+                                        { html_if!(can_read_system_status && show_stream_history, {
                                             <Panel class="tp__full-width" value={ViewType::StreamHistory.intern()} active={view_page.clone()}>
                                                 <ErrorBoundary name={translate.t("LABEL.STREAM_HISTORY")}>
-                                                  <StreamHistoryView/>
+                                                  <StreamHistoryView active={view_page == ViewType::StreamHistory.intern()}/>
                                                 </ErrorBoundary>
                                             </Panel>
                                         })}
@@ -673,6 +677,7 @@ mod tests {
         super::HomeViewAccess {
             setup_mode: false,
             show_streams_page: true,
+            show_stream_history: true,
             can_read_system_status: true,
             can_read_config: true,
             can_read_users: true,
@@ -763,5 +768,25 @@ mod tests {
         let access = super::HomeViewAccess { setup_mode: true, ..full_access() };
         assert!(is_allowed_home_view(ViewType::Config, access));
         assert!(!is_allowed_home_view(ViewType::Dashboard, access));
+    }
+
+    #[test]
+    fn is_allowed_home_view_stream_history_checks_permission_and_config() {
+        let mut access = full_access();
+        assert!(is_allowed_home_view(ViewType::StreamHistory, access));
+
+        access.show_stream_history = false;
+        assert!(!is_allowed_home_view(ViewType::StreamHistory, access));
+
+        access.show_stream_history = true;
+        access.can_read_system_status = false;
+        assert!(!is_allowed_home_view(ViewType::StreamHistory, access));
+    }
+
+    #[test]
+    fn resolve_home_view_rejects_stream_history_when_disabled() {
+        let access = super::HomeViewAccess { show_stream_history: false, ..full_access() };
+        let resolved = resolve_home_view(Some(ViewType::StreamHistory), ViewType::Dashboard, access);
+        assert_eq!(resolved, ViewType::Dashboard);
     }
 }

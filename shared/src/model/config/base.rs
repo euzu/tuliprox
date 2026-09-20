@@ -587,6 +587,15 @@ impl ConfigDto {
     }
 
     pub fn is_library_enabled(&self) -> bool { self.library.as_ref().is_some_and(|l| l.enabled) }
+
+    pub fn is_stream_history_enabled(&self) -> bool {
+        self.reverse_proxy.as_ref().and_then(|r| r.stream_history.as_ref()).is_some_and(|sh| sh.stream_history_enabled)
+    }
+
+    pub fn is_qos_aggregation_enabled(&self) -> bool {
+        self.is_stream_history_enabled()
+            && self.reverse_proxy.as_ref().and_then(|r| r.qos_aggregation.as_ref()).is_some_and(|qos| qos.enabled)
+    }
 }
 
 #[cfg(test)]
@@ -861,5 +870,29 @@ reverse_proxy:
 
         assert!(cfg.reverse_proxy.is_some());
         assert!(cfg.reverse_proxy.as_ref().and_then(|rp| rp.stream_history.as_ref()).is_none());
+    }
+
+    #[test]
+    fn is_stream_history_and_qos_enabled_match_nested_config() {
+        let mut cfg = ConfigDto::default();
+        assert!(!cfg.is_stream_history_enabled());
+        assert!(!cfg.is_qos_aggregation_enabled());
+
+        let mut rp = ReverseProxyConfigDto::default();
+        rp.stream_history =
+            Some(crate::model::StreamHistoryConfigDto { stream_history_enabled: true, ..Default::default() });
+        cfg.reverse_proxy = Some(rp);
+        assert!(cfg.is_stream_history_enabled());
+        assert!(!cfg.is_qos_aggregation_enabled());
+
+        cfg.reverse_proxy.as_mut().unwrap().qos_aggregation =
+            Some(crate::model::QosAggregationConfigDto { enabled: true, ..Default::default() });
+        assert!(cfg.is_stream_history_enabled());
+        assert!(cfg.is_qos_aggregation_enabled());
+
+        // Disabling stream history disables QoS aggregation as well
+        cfg.reverse_proxy.as_mut().unwrap().stream_history.as_mut().unwrap().stream_history_enabled = false;
+        assert!(!cfg.is_stream_history_enabled());
+        assert!(!cfg.is_qos_aggregation_enabled());
     }
 }

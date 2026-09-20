@@ -1583,6 +1583,7 @@
     "STREAM_HISTORY_TIME": "Hora",
     "STREAM_HISTORY_TO": "Hasta",
     "STREAM_HISTORY_ENABLED": "Habilitar historial de streams",
+    "STREAM_HISTORY_DISABLED_HINT": "El historial de streams no está habilitado en este servidor. Habilítelo en la configuración del servidor.",
     "STREAM_HISTORY_BATCH_SIZE": "Tamaño del lote",
     "STREAM_HISTORY_DETAILS": "Detalles",
     "STREAM_HISTORY_DISCONNECTS": "Desconexiones",

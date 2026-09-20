@@ -1648,6 +1648,7 @@
     "STREAM_HISTORY_TIME": "Time",
     "STREAM_HISTORY_TO": "To",
     "STREAM_HISTORY_ENABLED": "Enable stream history",
+    "STREAM_HISTORY_DISABLED_HINT": "Stream history is not enabled on this server. Enable it in the server configuration.",
     "STREAM_HISTORY_BATCH_SIZE": "Batch size",
     "STREAM_HISTORY_DETAILS": "Details",
     "STREAM_HISTORY_DISCONNECTS": "Disconnects",
