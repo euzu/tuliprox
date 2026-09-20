@@ -16,6 +16,8 @@ use tuliprox_curation::{
     CurationEvaluation, CurationMediaKind, CurationMembership, CurationSelectorKey, CurationSelectorSummary,
 };
 
+mod curation_publication;
+
 #[derive(Clone, Default)]
 struct PlaylistRunCollectSink(Arc<std::sync::Mutex<Vec<EventMessage>>>);
 
@@ -1963,7 +1965,7 @@ mod curation_effect_gate {
         utils::FileLockManager,
     };
 
-    fn app_config(storage_dir: &Path) -> Arc<AppConfig> {
+    pub(super) fn app_config(storage_dir: &Path) -> Arc<AppConfig> {
         Arc::new(AppConfig {
             config: Arc::new(ArcSwap::from_pointee(Config {
                 storage_dir: storage_dir.to_string_lossy().into_owned(),
@@ -1993,7 +1995,7 @@ mod curation_effect_gate {
         })
     }
 
-    fn processing_context(
+    pub(super) fn processing_context(
         app_config: Arc<AppConfig>,
         playlist_state: Option<Arc<PlaylistStorageState>>,
     ) -> PlaylistProcessingContext<NoopSink> {
@@ -2029,7 +2031,7 @@ mod curation_effect_gate {
         TargetPlaylistPersistOptions { publication_plan, ..TargetPlaylistPersistOptions::default() }
     }
 
-    fn file_snapshot(root: &Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
+    pub(super) fn file_snapshot(root: &Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
         fn collect(root: &Path, path: &Path, snapshot: &mut BTreeMap<std::path::PathBuf, Vec<u8>>) {
             let Ok(entries) = std::fs::read_dir(path) else { return };
             for entry in entries.flatten() {
