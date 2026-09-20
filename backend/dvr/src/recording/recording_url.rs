@@ -19,6 +19,7 @@ fn build_recording_stream_url(
     input_name: &str,
     virtual_id: u32,
     cluster: XtreamCluster,
+    provider_allocation_id: Option<u64>,
 ) -> Option<String> {
     let mut url = Url::parse(base_url).ok()?;
     url.path_segments_mut().ok()?.pop_if_empty().extend([
@@ -30,7 +31,12 @@ fn build_recording_stream_url(
         cluster.as_stream_type(),
         &virtual_id.to_string(),
     ]);
-    url.query_pairs_mut().append_pair("target_name", target_name).append_pair("input_name", input_name);
+    let mut query = url.query_pairs_mut();
+    query.append_pair("target_name", target_name).append_pair("input_name", input_name);
+    if let Some(allocation_id) = provider_allocation_id {
+        query.append_pair("provider_allocation_id", &allocation_id.to_string());
+    }
+    drop(query);
     Some(url.into())
 }
 
@@ -43,6 +49,7 @@ pub fn build_stable_recording_url(
     input_name: &str,
     virtual_id: u32,
     cluster: XtreamCluster,
+    provider_allocation_id: Option<u64>,
 ) -> Option<String> {
     let access_token = create_access_token(
         &app_config.access_token_secret,
@@ -56,7 +63,15 @@ pub fn build_stable_recording_url(
         .and_then(|web_ui| web_ui.player_server.as_ref())
         .map_or("default", |server_name| server_name.as_str());
     let server_info = app_config.get_server_info(server_name)?;
-    build_recording_stream_url(&server_info.get_base_url(), &access_token, target_name, input_name, virtual_id, cluster)
+    build_recording_stream_url(
+        &server_info.get_base_url(),
+        &access_token,
+        target_name,
+        input_name,
+        virtual_id,
+        cluster,
+        provider_allocation_id,
+    )
 }
 
 #[cfg(test)]
@@ -73,15 +88,17 @@ mod tests {
             "Input A",
             42,
             XtreamCluster::Video,
+            Some(77),
         )
         .expect("url");
         assert!(url.starts_with("http://localhost:8901/api/v1/playlist/recording/token-1/movie/42?"), "{url}");
         assert!(url.contains("target_name=My+Target"), "{url}");
         assert!(url.contains("input_name=Input+A"), "{url}");
+        assert!(url.contains("provider_allocation_id=77"), "{url}");
     }
 
     #[test]
     fn recording_stream_url_rejects_an_unparsable_base() {
-        assert!(build_recording_stream_url("not a url", "t", "target", "input", 1, XtreamCluster::Live).is_none());
+        assert!(build_recording_stream_url("not a url", "t", "target", "input", 1, XtreamCluster::Live, None).is_none());
     }
 }

@@ -12,7 +12,8 @@ use crate::{
             is_seekable_media_request, is_session_based_playback, is_stream_share_enabled, local_stream_response,
             redirect, redirect_response, reentry_suppressed_response, resolve_initial_stalker_playback_url,
             resource_response, separate_number_and_remainder, should_allow_exhausted_shared_reconnect, stream_response,
-            try_option_bad_request, try_result_bad_request, try_unwrap_body, RedirectParams, ResourceFetchPolicy,
+            stream_response_with_provider_handle, try_option_bad_request, try_result_bad_request, try_unwrap_body,
+            RedirectParams, ResourceFetchPolicy,
         },
         endpoints::{
             hls_api::{
@@ -857,7 +858,7 @@ pub(in crate::api) async fn xtream_player_api_stream_with_token(
     let Some(target) = app_state.app_config.get_target_by_id(target_id) else {
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     };
-    xtream_player_api_stream_with_resolved_target(fingerprint, req_headers, app_state, target, None, stream_req)
+    xtream_player_api_stream_with_resolved_target(fingerprint, req_headers, app_state, target, None, stream_req, None)
         .await
         .into_response()
 }
@@ -870,6 +871,7 @@ pub(in crate::api) async fn xtream_player_api_stream_with_resolved_target(
     target: Arc<ConfigTarget>,
     expected_input: Option<Arc<ConfigInput>>,
     stream_req: ApiStreamRequest<'_>,
+    provider_allocation_id: Option<u64>,
 ) -> impl IntoResponse + Send {
     if stream_req.access_token
         && !verify_access_token(
@@ -979,6 +981,9 @@ pub(in crate::api) async fn xtream_player_api_stream_with_resolved_target(
 
         // Reverse proxy mode — only route genuine HLS into the HLS handler, not DASH
         if is_session_request && playback_ext == Some(shared::defaults::HLS_EXT) {
+            if let Some(allocation_id) = provider_allocation_id {
+                app_state.active_provider.complete_release(allocation_id);
+            }
             let Some(stream_context) = HlsEntryStreamContext::from_playlist_item(&pli) else {
                 error!("HLS input stream identity missing for virtual_id={virtual_id}; refresh target playlist");
                 return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -1014,7 +1019,15 @@ pub(in crate::api) async fn xtream_player_api_stream_with_resolved_target(
         );
 
         trace_if_enabled!("Streaming stream request from {}", sanitize_sensitive_info(&stream_url));
-        stream_response(
+        let preacquired_provider_handle = if let Some(allocation_id) = provider_allocation_id {
+            let Some(handle) = app_state.active_provider.claim_download_connection(allocation_id, &input.name) else {
+                return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+            };
+            Some(tuliprox_session::ManagedProviderHandle::new(Arc::clone(&app_state.active_provider), handle))
+        } else {
+            None
+        };
+        stream_response_with_provider_handle(
             fingerprint,
             app_state,
             session_key.as_str(),
@@ -1030,6 +1043,7 @@ pub(in crate::api) async fn xtream_player_api_stream_with_resolved_target(
             crate::api::model::ConnectionKind::Normal,
             false,
             None,
+            preacquired_provider_handle,
         )
         .await
         .into_response()

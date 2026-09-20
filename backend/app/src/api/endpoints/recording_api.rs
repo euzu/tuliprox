@@ -205,6 +205,7 @@ async fn create_http_recording_task(
         &source.input_name,
         resolved.virtual_id,
         source.cluster,
+        None,
     ) else {
         return error_response(StatusCode::BAD_REQUEST, "recording_invalid_source");
     };

@@ -75,11 +75,22 @@ enum ProviderAcquireResult {
     WindowClosed,
 }
 
-fn recording_execution_download(app_config: &AppConfig, task: &RecordingTask) -> Result<RecordingTask, String> {
+fn recording_execution_download(
+    app_config: &AppConfig,
+    task: &RecordingTask,
+    provider_handle: Option<&tuliprox_core::model::ProviderHandle>,
+) -> Result<RecordingTask, String> {
     let source = &task.recording.source;
     let virtual_id = source.virtual_id.parse::<u32>().map_err(|_| "Recording source virtual id invalid".to_string())?;
-    let url = build_stable_recording_url(app_config, &source.target_id, &source.input_name, virtual_id, source.cluster)
-        .ok_or_else(|| "Recording execution URL unavailable".to_string())?;
+    let url = build_stable_recording_url(
+        app_config,
+        &source.target_id,
+        &source.input_name,
+        virtual_id,
+        source.cluster,
+        provider_handle.map(|handle| handle.allocation_id),
+    )
+    .ok_or_else(|| "Recording execution URL unavailable".to_string())?;
     let mut execution = task.clone();
     execution.url = reqwest::Url::parse(&url).map_err(|_| "Recording execution URL invalid".to_string())?;
     Ok(execution)
@@ -1492,7 +1503,7 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
                             }
                         };
 
-                        let execution_result = {
+                        let mut execution_result = {
                             let Some(download) = active_download_snapshot_for_worker(&dq.active, &worker_uuid).await
                             else {
                                 capacity.release(provider_handle).await;
@@ -1512,8 +1523,11 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
                             }
                             match download.kind {
                                 RecordingKind::Vod | RecordingKind::Series => 'http_execution: {
-                                    let execution_download = match recording_execution_download(&app_config, &download)
-                                    {
+                                    let execution_download = match recording_execution_download(
+                                        &app_config,
+                                        &download,
+                                        provider_handle.as_ref(),
+                                    ) {
                                         Ok(execution) => execution,
                                         Err(error) => break 'http_execution DownloadExecutionResult::Failed(error),
                                     };
@@ -1523,14 +1537,17 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
                                         &client,
                                         Arc::clone(&control_signal),
                                         Arc::clone(&control_notify),
-                                        provider_handle.as_ref().and_then(|handle| handle.cancel_token.clone()),
+                                        None,
                                         Some(&event_manager),
                                     )
                                     .await
                                 }
                                 RecordingKind::Live => 'recording_execution: {
-                                    let execution_download = match recording_execution_download(&app_config, &download)
-                                    {
+                                    let execution_download = match recording_execution_download(
+                                        &app_config,
+                                        &download,
+                                        provider_handle.as_ref(),
+                                    ) {
                                         Ok(execution_download) => execution_download,
                                         Err(err) => break 'recording_execution DownloadExecutionResult::Failed(err),
                                     };
@@ -1545,7 +1562,7 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
                                         &execution_download,
                                         &control_signal,
                                         &control_notify,
-                                        provider_handle.as_ref().and_then(|handle| handle.cancel_token.as_ref()),
+                                        None,
                                         container_format,
                                     ));
                                     let mut progress_tick = time::interval(RECORDING_PROGRESS_UPDATE_INTERVAL);
@@ -1586,6 +1603,17 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
                                 }
                             }
                         };
+
+                        // The internal HTTP stream now owns the same provider allocation.
+                        // Its normal EOF/client-close cleanup cancels the allocation token too,
+                        // so cancellation alone no longer means foreground preemption. The
+                        // manager records an explicit close reason before a real priority
+                        // eviction; only that outcome requeues the recording.
+                        if provider_handle.as_ref().is_some_and(|handle| {
+                            handle.get_close_reason() == tuliprox_core::model::ProviderCloseReason::PriorityPreempted
+                        }) {
+                            execution_result = DownloadExecutionResult::Preempted;
+                        }
 
                         match execution_result {
                             DownloadExecutionResult::Completed => {

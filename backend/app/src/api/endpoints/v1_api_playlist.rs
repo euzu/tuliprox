@@ -925,7 +925,7 @@ async fn playlist_webplayer_stream(
     );
     let user = Arc::new(create_api_proxy_user(&app_state));
 
-    m3u_api_stream_loaded(user, target, &fingerprint, &req_headers, &app_state, pli, input, None, None)
+    m3u_api_stream_loaded(user, target, &fingerprint, &req_headers, &app_state, pli, input, None, None, None)
         .await
         .into_response()
 }
@@ -934,6 +934,7 @@ async fn playlist_webplayer_stream(
 struct RecordingStreamQuery {
     target_name: String,
     input_name: String,
+    provider_allocation_id: Option<u64>,
 }
 
 async fn playlist_recording_stream(
@@ -954,7 +955,6 @@ async fn playlist_recording_stream(
     let Some(resolved) = resolved else {
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     };
-
     if resolved.target.has_output(TargetType::Xtream) {
         let stream_id = virtual_id.to_string();
         return xtream_player_api_stream_with_resolved_target(
@@ -964,6 +964,7 @@ async fn playlist_recording_stream(
             resolved.target,
             Some(resolved.input),
             ApiStreamRequest::from_access_token(ctxt, &token, &stream_id, ""),
+            query.provider_allocation_id,
         )
         .await
         .into_response();
@@ -991,6 +992,7 @@ async fn playlist_recording_stream(
         resolved.input,
         None,
         None,
+        query.provider_allocation_id,
     )
     .await
     .into_response()
@@ -2448,6 +2450,7 @@ mod tests {
             Query(super::RecordingStreamQuery {
                 target_name: "stable-target".to_string(),
                 input_name: "input-b".to_string(),
+                provider_allocation_id: None,
             }),
             State(app_state),
             axum::http::HeaderMap::new(),
