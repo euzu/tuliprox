@@ -2239,10 +2239,8 @@ async fn execute_scenario_steps<'a>(
                         _ => any_failed = true,
                     }
                 } else {
-                    return Err(TestkitError::Protocol(format!(
-                        "playback {} was not active at stop",
-                        stop.playback_id
-                    )));
+                    any_failed = true;
+                    events.push((stop.playback_id.as_str(), "playback_not_active_at_stop"));
                 }
 
                 if let Some(assert_origin) = &step.assert_origin {

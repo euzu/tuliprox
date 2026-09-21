@@ -3879,6 +3879,56 @@ async fn resolve_streaming_strategy_honors_forced_provider_fallback_policy() {
 }
 
 #[tokio::test]
+async fn resolve_streaming_strategy_rewrites_url_on_fallback_even_when_accept_requested_stream_url_is_true() {
+    let app_state = create_test_dual_provider_app_state();
+    let input_name = "provider_1".intern();
+    let input =
+        app_state.app_config.sources.load().get_input_by_name(&input_name).cloned().unwrap_or_else(|| unreachable!());
+    let pinned_provider = "provider_1".intern();
+    let busy_addr: SocketAddr = "127.0.0.1:55304".parse().unwrap_or_else(|_| unreachable!());
+    let fallback_addr: SocketAddr = "127.0.0.1:55305".parse().unwrap_or_else(|_| unreachable!());
+    let stream_url = "http://provider-1.example/movie/user1/pass1/1.mkv";
+
+    let busy = app_state.active_provider.acquire_exact_connection_with_grace(
+        &pinned_provider,
+        &busy_addr,
+        false,
+        0,
+        crate::api::model::ConnectionKind::Normal,
+    );
+    assert!(busy.is_some(), "setup should occupy the pinned provider");
+
+    let fallback = resolve_streaming_strategy(
+        &app_state,
+        stream_url,
+        &create_test_fingerprint(fallback_addr),
+        &input,
+        StreamingAcquireOptions {
+            force_provider: Some(&pinned_provider),
+            allow_forced_provider_fallback: true,
+            allow_provider_grace: false,
+            user_priority: 0,
+            connection_kind: crate::api::model::ConnectionKind::Normal,
+            session_owner: Some("vod-session"),
+            playback_kind: crate::model::PlaybackKind::Vod,
+            accept_requested_stream_url: true,
+        },
+    )
+    .await;
+
+    let (ProviderStreamState::Available(Some(fallback_provider), url)
+    | ProviderStreamState::GracePeriod(Some(fallback_provider), url)) = fallback.provider_stream_state
+    else {
+        panic!("fallback-enabled request should allocate fallback provider")
+    };
+    assert_eq!(fallback_provider.as_ref(), "provider_2");
+    assert_eq!(url.as_ref(), "http://provider-2.example/movie/user2/pass2/1.mkv");
+
+    app_state.active_provider.release_connection(&busy_addr);
+    app_state.active_provider.release_connection(&fallback_addr);
+}
+
+#[tokio::test]
 async fn resolve_streaming_strategy_rewrites_stale_alias_url_to_selected_main_provider() {
     let app_state = create_test_dual_provider_app_state();
     let input_name = "provider_1".intern();

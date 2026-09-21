@@ -12,20 +12,20 @@ origin:
   account_limit: 2
   limit_mode: reject_new
 actors:
-  - id: baba-blocker
+  - id: korath-blocker
     agent: local
-    username: baba
-    user_agent: tuliprox-testkit/baba-blocker
+    username: korath
+    user_agent: tuliprox-testkit/korath-blocker
     client_ip: { mode: forwarded, value: 10.30.0.10 }
-  - id: baba-occupier
+  - id: korath-occupier
     agent: local
-    username: baba
-    user_agent: tuliprox-testkit/baba-occupier
+    username: korath
+    user_agent: tuliprox-testkit/korath-occupier
     client_ip: { mode: forwarded, value: 10.30.0.11 }
-  - id: xtr-viewer
+  - id: solis-viewer
     agent: local
-    username: xtr
-    user_agent: tuliprox-testkit/xtr-viewer
+    username: solis
+    user_agent: tuliprox-testkit/solis-viewer
     client_ip: { mode: forwarded, value: 10.30.0.12 }
 channels:
   blocker-channel: { origin_marker: 17, protocol: xtream_ts }
@@ -33,7 +33,7 @@ channels:
 steps:
   - command_id: occupy-account-a
     start:
-      actor: baba-blocker
+      actor: korath-blocker
       playback_id: blocker-a
       session_group: blocker-a
       channel: blocker-channel
@@ -41,11 +41,11 @@ steps:
     assert_origin:
       active_body: 1
       latest_request_account: account-a
-  - command_id: pin-xtr-to-account-b
+  - command_id: pin-solis-to-account-b
     start:
-      actor: xtr-viewer
-      playback_id: xtr-pin-b
-      session_group: xtr-movie
+      actor: solis-viewer
+      playback_id: solis-pin-b
+      session_group: solis-movie
       vod_object: movie.mkv
       range: "bytes=0-524287"
       read_limit_bytes: 32768
@@ -53,12 +53,12 @@ steps:
     assert_origin:
       active_body: 2
       latest_request_account: account-b
-  - command_id: release-xtr-account-b
-    stop: { playback_id: xtr-pin-b }
+  - command_id: release-solis-account-b
+    stop: { playback_id: solis-pin-b }
     assert_origin: { active_body: 1 }
   - command_id: occupy-account-b
     start:
-      actor: baba-occupier
+      actor: korath-occupier
       playback_id: occupier-b
       session_group: occupier-b
       channel: occupied-channel
@@ -69,11 +69,11 @@ steps:
   - command_id: release-account-a
     stop: { playback_id: blocker-a }
     assert_origin: { active_body: 1 }
-  - command_id: reopen-xtr-via-free-account-a
+  - command_id: reopen-solis-via-free-account-a
     start:
-      actor: xtr-viewer
-      playback_id: xtr-fallback-a
-      session_group: xtr-movie
+      actor: solis-viewer
+      playback_id: solis-fallback-a
+      session_group: solis-movie
       vod_object: movie.mkv
       range: "bytes=1048576-1572863"
       read_limit_bytes: 32768
@@ -84,17 +84,17 @@ steps:
       latest_request_account: account-a
       no_limit_rejections: true
       no_evictions: true
-  - command_id: release-xtr-account-a
-    stop: { playback_id: xtr-fallback-a }
+  - command_id: release-solis-account-a
+    stop: { playback_id: solis-fallback-a }
     assert_origin: { active_body: 1 }
   - command_id: release-account-b
     stop: { playback_id: occupier-b }
     assert_origin: { active_body: 0 }
-  - command_id: verify-xtr-pin-updated-to-account-a
+  - command_id: verify-solis-pin-updated-to-account-a
     start:
-      actor: xtr-viewer
-      playback_id: xtr-reopen-a
-      session_group: xtr-movie
+      actor: solis-viewer
+      playback_id: solis-reopen-a
+      session_group: solis-movie
       vod_object: movie.mkv
       range: "bytes=2097152-2621439"
       read_limit_bytes: 32768
@@ -105,14 +105,14 @@ steps:
       latest_request_account: account-a
       no_limit_rejections: true
       no_evictions: true
-  - command_id: stop-xtr-reopen
-    stop: { playback_id: xtr-reopen-a }
+  - command_id: stop-solis-reopen
+    stop: { playback_id: solis-reopen-a }
     assert_origin: { active_body: 0 }
 policy_contract:
   user_access_control: true
   users:
-    baba: { max_connections: 2 }
-    xtr: { max_connections: 1 }
+    korath: { max_connections: 2 }
+    solis: { max_connections: 1 }
   admission_strategies: []
   provider_pool:
     - { name: account-a, max_connections: 1 }
