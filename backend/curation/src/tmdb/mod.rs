@@ -31,12 +31,18 @@ pub(crate) async fn evaluate_selectors(
     keys: &[CurationSelectorKey],
 ) -> Vec<SelectorOutcome> {
     assert_eq!(keys.len(), config.trending.len());
-    let mut outcomes = Vec::with_capacity(keys.len());
-    for (selector, key) in config.trending.iter().zip(keys) {
-        let references = match &client {
-            Ok(client) => client.trending(selector).await,
+    // Acquire the whole TMDB batch before matching: deadlines bound acquisition and
+    // normalization only. Failed selectors never expose their selected prefix.
+    let mut batch = client.as_ref().ok().map(TmdbClient::batch_budget);
+    let mut acquired = Vec::with_capacity(keys.len());
+    for selector in &config.trending {
+        acquired.push(match &client {
+            Ok(client) => client.trending(selector, batch.as_mut().expect("client has a batch budget")).await,
             Err(error) => Err(*error),
-        };
+        });
+    }
+    let mut outcomes = Vec::with_capacity(keys.len());
+    for ((selector, key), references) in config.trending.iter().zip(keys).zip(acquired) {
         outcomes.push(match references {
             Ok(references) => evaluate_selector(*key, &references, playlist, selector_spec(selector.kind)),
             Err(error) => {
@@ -45,7 +51,10 @@ pub(crate) async fn evaluate_selectors(
                     TmdbFailure::Configuration => {
                         SelectorOutcome::Unavailable { key: *key, reason: CurationUnavailableReason::Configuration }
                     }
-                    TmdbFailure::Body | TmdbFailure::BodyLimit => {
+                    TmdbFailure::RequestLimit | TmdbFailure::NoProgress => {
+                        SelectorOutcome::Incomplete { key: *key, reason: CurationIncompleteReason::PaginationTruncated }
+                    }
+                    TmdbFailure::Body | TmdbFailure::BodyLimit | TmdbFailure::Deadline => {
                         SelectorOutcome::Incomplete { key: *key, reason: CurationIncompleteReason::Interrupted }
                     }
                     _ => SelectorOutcome::Unavailable { key: *key, reason: CurationUnavailableReason::Source },

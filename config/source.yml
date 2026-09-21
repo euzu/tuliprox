@@ -50,11 +50,11 @@ sources:
             trending:
               - kind: movie
                 time_window: week
-                scope: first_page
+                limit: 100 # Unique remote references, not local matches; optional (1..=500).
                 category_name: TMDB Weekly Movies
               - kind: tv
                 time_window: day
-                scope: first_page
+                limit: 100
                 category_name: TMDB Daily TV
         output:
           - type: xtream

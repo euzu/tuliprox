@@ -33,7 +33,7 @@ impl TestServer {
         Self::serve(responses.into_iter().map(String::into_bytes).collect(), Duration::ZERO, false).await
     }
 
-    async fn serve(responses: Vec<Vec<u8>>, delay: Duration, send_headers: bool) -> Self {
+    pub(crate) async fn serve(responses: Vec<Vec<u8>>, delay: Duration, send_headers: bool) -> Self {
         assert!(!responses.is_empty());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/", listener.local_addr().unwrap());

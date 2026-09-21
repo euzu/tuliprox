@@ -158,8 +158,8 @@ pub(super) fn prepare_selector_category(
 mod tests {
     use super::*;
     use crate::model::{
-        M3uTargetOutputDto, TmdbTrendingKind, TmdbTrendingScope, TmdbTrendingTimeWindow, TraktCatalogSelection,
-        TraktConfigDto, XtreamTargetOutputDto,
+        M3uTargetOutputDto, TmdbTrendingKind, TmdbTrendingTimeWindow, TraktCatalogSelection, TraktConfigDto,
+        XtreamTargetOutputDto,
     };
     use serde_json::{json, Value};
 
@@ -169,9 +169,7 @@ mod tests {
 
     fn config(value: Value) -> CurationConfigDto { serde_json::from_value(value).expect("curation config shape") }
 
-    fn tmdb_selector() -> Value {
-        json!({"kind": "movie", "time_window": "week", "scope": "first_page", "category_name": "Trending"})
-    }
+    fn tmdb_selector() -> Value { json!({"kind": "movie", "time_window": "week", "category_name": "Trending"}) }
 
     fn mixed() -> Value {
         json!({
@@ -201,7 +199,7 @@ mod tests {
         assert!(tmdb.enabled);
         assert_eq!(tmdb.trending[0].kind, TmdbTrendingKind::Movie);
         assert_eq!(tmdb.trending[0].time_window, TmdbTrendingTimeWindow::Week);
-        assert_eq!(tmdb.trending[0].scope, TmdbTrendingScope::FirstPage);
+        assert_eq!(tmdb.trending[0].limit, 100);
         assert!(tmdb.trending[0].create_xtream_category);
     }
 
@@ -393,14 +391,14 @@ mod tests {
     }
 
     #[test]
-    fn curation_tmdb_requires_explicit_kind_window_and_scope_even_when_disabled() {
-        for field in ["kind", "time_window", "scope"] {
+    fn curation_tmdb_requires_explicit_kind_and_window_even_when_disabled() {
+        for field in ["kind", "time_window"] {
             let mut selector = tmdb_selector();
             selector.as_object_mut().unwrap().remove(field);
             let value = json!({"enabled": false, "tmdb": {"trending": [selector]}});
             assert!(serde_json::from_value::<CurationConfigDto>(value).is_err(), "missing {field}");
         }
-        for (field, invalid) in [("kind", "all"), ("time_window", "month"), ("scope", "all_pages")] {
+        for (field, invalid) in [("kind", "all"), ("time_window", "month")] {
             let mut selector = tmdb_selector();
             selector[field] = json!(invalid);
             let value = json!({"enabled": false, "tmdb": {"trending": [selector]}});
@@ -412,7 +410,7 @@ mod tests {
     fn curation_tmdb_accepts_all_four_bounded_feed_shapes() {
         for kind in ["movie", "tv"] {
             for window in ["day", "week"] {
-                let value = json!({"tmdb": {"trending": [{"kind": kind, "time_window": window, "scope": "first_page", "create_xtream_category": false}]}});
+                let value = json!({"tmdb": {"trending": [{"kind": kind, "time_window": window, "create_xtream_category": false}]}});
                 let mut dto = config(value);
                 dto.prepare(&m3u()).unwrap();
             }

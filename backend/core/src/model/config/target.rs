@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn effective_curation_retains_canonical_owner_and_credentials_without_legacy_output() {
         let mut dto: ConfigTargetDto = serde_json::from_value(serde_json::json!({"name": "discovery", "output": [{"type": "m3u"}],
-            "curation": {"catalog_selection": "curated", "tmdb": {"api": {"access_token": "test-token"}, "trending": [{"kind": "tv", "time_window": "day", "scope": "first_page", "create_xtream_category": false}]}}})).unwrap();
+            "curation": {"catalog_selection": "curated", "tmdb": {"api": {"access_token": "test-token"}, "trending": [{"kind": "tv", "time_window": "day", "limit": 37, "create_xtream_category": false}]}}})).unwrap();
         dto.prepare(1, None, None).unwrap();
         let target = ConfigTarget::from(&dto);
         assert!(matches!(target.effective_curation(), Some(Cow::Borrowed(_))));

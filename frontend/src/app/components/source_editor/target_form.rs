@@ -704,7 +704,11 @@ mod tests {
 
     #[test]
     fn target_form_name_edits_preserve_yaml_curation() {
-        let dto: shared::model::ConfigTargetDto = serde_json::from_value(serde_json::json!({"name": "before", "curation": {"enabled": false, "tmdb": {"api": {"access_token": "test-token"}}}})).unwrap();
+        let dto: shared::model::ConfigTargetDto = serde_json::from_value(serde_json::json!({"name": "before", "curation": {"enabled": false, "tmdb": {"enabled": false, "api": {"access_token": "test-token"}, "trending": [
+            {"kind": "movie", "time_window": "week", "limit": 500, "create_xtream_category": false, "category_name": "Saved"},
+            {"kind": "tv", "time_window": "day", "limit": 100, "category_name": "Shows"},
+            {"kind": "movie", "time_window": "day", "category_name": "Movies"}
+        ]}}})).unwrap();
         let state = Rc::new(super::ConfigTargetFormState { form: dto.clone(), modified: false });
         let state = state.reduce(super::ConfigTargetFormAction::Name("after".to_string()));
         assert_eq!(state.form.curation, dto.curation);
@@ -720,7 +724,7 @@ mod tests {
                 "charts": [{"kind": "movies", "chart": "popular", "create_xtream_category": false}]
             },
             "tmdb": {
-                "trending": [{"kind": "movie", "time_window": "week", "scope": "first_page", "create_xtream_category": false}]
+                "trending": [{"kind": "movie", "time_window": "week", "limit": 500, "create_xtream_category": false}]
             }
         }))
         .unwrap();

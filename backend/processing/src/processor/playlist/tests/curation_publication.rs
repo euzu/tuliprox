@@ -1,5 +1,6 @@
 //! Real HTTPS adapters -> eligible catalog -> target finalization -> disk/cache/watch publication.
 //! DNS overrides and a fixture-only CA keep the production TMDB origin and certificate validation intact.
+mod item_limit;
 use super::{
     curation_effect_gate::{app_config, file_snapshot, processing_context},
     *,
@@ -19,18 +20,22 @@ use tokio::{
 use tokio_rustls::{rustls, TlsAcceptor};
 use tuliprox_repository::{load_m3u_target_storage, load_xtream_target_storage};
 
-const MOVIES: &str = "/3/trending/movie/week?language=en-US";
-const TV: &str = "/3/trending/tv/day?language=en-US";
+const MOVIES: &str = "/3/trending/movie/week?language=en-US&page=1";
+const MOVIES_2: &str = "/3/trending/movie/week?language=en-US&page=2";
+const TV: &str = "/3/trending/tv/day?language=en-US&page=1";
 const TRAKT: &str = "/movies/popular?page=1&limit=100";
 const MOVIE_PAGE: &str =
-    r#"{"page":1,"total_pages":9,"total_results":99,"results":[{"id":8,"media_type":"movie"},{"id":7},{"id":8}]}"#;
-const TV_PAGE: &str = r#"{"page":1,"total_pages":9,"total_results":99,"results":[{"id":7,"media_type":"tv"}]}"#;
+    r#"{"page":1,"total_pages":9,"total_results":99,"results":[{"id":8,"media_type":"movie"},{"id":8}]}"#;
+const MOVIE_PAGE_2: &str = r#"{"page":2,"total_pages":2,"total_results":2,"results":[{"id":8},{"id":7}]}"#;
+const TV_PAGE: &str = r#"{"page":1,"total_pages":1,"total_results":1,"results":[{"id":7,"media_type":"tv"}]}"#;
 const TRAKT_PAGE: &str = r#"[{"title":"Unselected","ids":{"tmdb":99,"trakt":1,"slug":"unselected"}},{"title":"First","ids":{"tmdb":7,"trakt":2,"slug":"first"}}]"#;
 const EMPTY: &str = r#"{"page":1,"total_pages":0,"total_results":0,"results":[]}"#;
 
 struct DiscoveryServer {
     client: reqwest::Client,
-    replies: Arc<StdMutex<BTreeMap<String, (u16, String)>>>,
+    tmdb_client: reqwest::Client,
+    address: std::net::SocketAddr,
+    replies: Arc<StdMutex<BTreeMap<String, Vec<u8>>>>,
     requests: Arc<StdMutex<Vec<String>>>,
     task: JoinHandle<()>,
 }
@@ -58,10 +63,20 @@ impl DiscoveryServer {
             .timeout(Duration::from_secs(3))
             .build()
             .unwrap();
-        let replies: Arc<StdMutex<BTreeMap<String, (u16, String)>>> = Arc::new(StdMutex::new(BTreeMap::from([
-            (MOVIES.into(), (200, MOVIE_PAGE.into())),
-            (TV.into(), (200, TV_PAGE.into())),
-            (TRAKT.into(), (200, TRAKT_PAGE.into())),
+        let profile_directory = tempdir().unwrap();
+        let tmdb_client =
+            tuliprox_core::utils::network::request::create_tmdb_client(&app_config(profile_directory.path()))
+                .unwrap()
+                .no_proxy()
+                .add_root_certificate(reqwest::Certificate::from_der(cert.cert.der()).unwrap())
+                .resolve("api.themoviedb.org", address)
+                .build()
+                .unwrap();
+        let replies = Arc::new(StdMutex::new(BTreeMap::from([
+            (MOVIES.into(), response(200, MOVIE_PAGE)),
+            (MOVIES_2.into(), response(200, MOVIE_PAGE_2)),
+            (TV.into(), response(200, TV_PAGE)),
+            (TRAKT.into(), response(200, TRAKT_PAGE)),
         ])));
         let requests = Arc::new(StdMutex::new(Vec::new()));
         let responses = Arc::clone(&replies);
@@ -70,7 +85,7 @@ impl DiscoveryServer {
             let acceptor = TlsAcceptor::from(Arc::new(tls));
             loop {
                 let (tcp, _) = listener.accept().await.unwrap();
-                let mut stream = acceptor.accept(tcp).await.unwrap();
+                let Ok(mut stream) = acceptor.accept(tcp).await else { continue };
                 let mut bytes = Vec::new();
                 while !bytes.windows(4).any(|w| w == b"\r\n\r\n") {
                     let mut chunk = [0; 1024];
@@ -80,19 +95,22 @@ impl DiscoveryServer {
                 }
                 let request = String::from_utf8(bytes).unwrap();
                 let path = request.split_whitespace().nth(1).unwrap();
-                let (status, body) = responses.lock().unwrap().get(path).cloned().unwrap_or((404, "{}".into()));
+                let response = responses.lock().unwrap().get(path).cloned().unwrap_or_else(|| response(404, "{}"));
                 recorded.lock().unwrap().push(request);
-                let response = format!("HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
-                stream.write_all(response.as_bytes()).await.unwrap();
-                stream.shutdown().await.unwrap();
+                let _ = stream.write_all(&response).await;
+                let _ = stream.shutdown().await;
             }
         });
-        Self { client, replies, requests, task }
+        Self { client, tmdb_client, address, replies, requests, task }
     }
 
-    fn reply(&self, path: &str, status: u16, body: &str) {
-        self.replies.lock().unwrap().insert(path.into(), (status, body.into()));
-    }
+    fn reply(&self, path: &str, status: u16, body: &str) { self.reply_raw(path, response(status, body)); }
+
+    fn reply_raw(&self, path: &str, body: Vec<u8>) { self.replies.lock().unwrap().insert(path.into(), body); }
+}
+
+fn response(status: u16, body: &str) -> Vec<u8> {
+    format!("HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).into_bytes()
 }
 
 impl Drop for DiscoveryServer {
@@ -141,6 +159,7 @@ fn catalog() -> Vec<PlaylistGroup> {
                 url: format!("http://media.invalid/{id}.mkv").intern(),
                 item_type,
                 xtream_cluster: cluster,
+                epg_channel_id: (cluster == XtreamCluster::Live).then(|| "fixture.live".intern()),
                 additional_properties: properties,
                 ..Default::default()
             };
@@ -183,8 +202,8 @@ fn target(policy: &str, mixed: bool, xtream: bool) -> ConfigTargetDto {
     let mut value = json!({"name":"publication", "watch":[".*"], "use_memory_cache":true,
     "output":[{"type":"m3u","filename":"published.m3u"},{"type":"strm","directory":"strm","flat":true,"cleanup":true}],
     "curation":{"catalog_selection":policy,"tmdb":{"api":{"access_token":"fixture-discovery-token"},"trending":[
-        {"kind":"movie","time_window":"week","scope":"first_page","create_xtream_category":xtream,"category_name":"TMDB Movies"},
-        {"kind":"tv","time_window":"day","scope":"first_page","create_xtream_category":xtream,"category_name":"TMDB TV"}
+        {"kind":"movie","time_window":"week","limit":100,"create_xtream_category":xtream,"category_name":"TMDB Movies"},
+        {"kind":"tv","time_window":"day","limit":100,"create_xtream_category":xtream,"category_name":"TMDB TV"}
     ]}}});
     if xtream {
         value["output"].as_array_mut().unwrap().push(json!({"type":"xtream"}));
@@ -203,6 +222,7 @@ struct Publication {
     directory: TempDir,
     context: Arc<PlaylistProcessingContext<shared::model::NoopSink>>,
     target: ConfigTarget,
+    tmdb_client: reqwest::Client,
 }
 
 impl Publication {
@@ -210,22 +230,46 @@ impl Publication {
         let directory = tempdir().unwrap();
         let mut context = processing_context(app_config(directory.path()), Some(Arc::new(PlaylistStorageState::new())));
         context.client = server.client.clone();
-        Self { directory, context: Arc::new(context), target: ConfigTarget::from(dto) }
+        Self {
+            directory,
+            context: Arc::new(context),
+            target: ConfigTarget::from(dto),
+            tmdb_client: server.tmdb_client.clone(),
+        }
     }
 
-    async fn publish(&self) -> Result<(), Vec<TuliproxError>> {
+    async fn publish(&self) -> Result<(), Vec<TuliproxError>> { self.publish_catalog(catalog()).await }
+
+    async fn publish_catalog(&self, playlist: Vec<PlaylistGroup>) -> Result<(), Vec<TuliproxError>> {
+        let mut channel = shared::model::EpgChannel::new("fixture.live".intern());
+        channel.title = Some("Fixture Live".intern());
+        channel.programmes.push(shared::model::EpgProgramme::new_all(
+            2_000_000_000,
+            2_000_003_600,
+            "fixture.live".intern(),
+            playlist.first().and_then(|group| group.channels.first()).map(|item| Arc::clone(&item.header.title)),
+            None,
+            None,
+        ));
         let prepared = PreparedTarget {
             target: self.target.clone(),
-            playlist: catalog(),
-            epg: Vec::new(),
+            playlist,
+            epg: vec![tuliprox_core::model::Epg {
+                priority: 0,
+                logo_override: false,
+                attributes: None,
+                children: vec![Arc::new(channel)],
+            }],
             processing: PipelineStats::default(),
             accepted_empty_clusters: ClusterFlags::empty(),
             library_empty: tuliprox_repository::LibraryEmptyPublication::None,
         };
-        let (result, errors) =
-            tokio::time::timeout(Duration::from_secs(5), finalize_prepared_target(Arc::clone(&self.context), prepared))
-                .await
-                .expect("bounded publication");
+        let (result, errors) = tokio::time::timeout(
+            Duration::from_secs(5),
+            target::finalize_prepared_target_with_tmdb(Arc::clone(&self.context), prepared, Some(&self.tmdb_client)),
+        )
+        .await
+        .expect("bounded publication");
         assert!(errors.is_empty(), "unexpected non-curation errors: {errors:?}");
         result
     }
@@ -244,7 +288,16 @@ impl Publication {
     async fn cache_signature(&self) -> Vec<String> {
         let cache = self.context.playlist_state.as_ref().unwrap().data.read().await;
         let Some(storage) = cache.get(&self.target.name) else { return Vec::new() };
-        let mut values = Vec::new();
+        let mut values = vec![format!(
+            "target:{}:xtream={}:m3u={}:mapping={}",
+            self.target.name,
+            storage.xtream.is_some(),
+            storage.m3u.is_some(),
+            storage.id_mapping.is_some()
+        )];
+        if let Some(mapping) = &storage.id_mapping {
+            values.extend(mapping.iter().map(|(key, record)| format!("mapping:{key:?}:{record:?}")));
+        }
         if let Some(xtream) = &storage.xtream {
             values.extend(
                 xtream
@@ -260,6 +313,17 @@ impl Publication {
         }
         values.sort();
         values
+    }
+
+    async fn identity_signature(&self) -> BTreeMap<String, (u32, u32)> {
+        let cache = self.context.playlist_state.as_ref().unwrap().data.read().await;
+        cache[&self.target.name]
+            .id_mapping
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|(_, record)| (record.uuid.to_string(), (record.virtual_id.get(), record.parent_virtual_id.get())))
+            .collect()
     }
 
     fn strm_contents(&self) -> Vec<String> {
@@ -316,11 +380,11 @@ async fn tmdb_https_to_publication_preserves_rank_subjects_series_and_output_bou
         assert_eq!(strm.iter().filter(|body| body.contains(&format!("/{id}.mkv"))).count(), 1);
     }
     assert!(!strm.iter().any(|body| body.contains("/204.mkv") || body.contains("/402.mkv")));
-    let before = run.cache_signature().await;
+    let before = run.identity_signature().await;
     run.publish().await.unwrap();
-    assert_eq!(run.cache_signature().await, before, "repeat publication retains virtual IDs and aliases");
+    assert_eq!(run.identity_signature().await, before, "repeat publication retains virtual IDs and aliases");
     let requests = server.requests.lock().unwrap();
-    assert_eq!(requests.len(), 4, "one page per selector/run, no next-page or per-item fetch");
+    assert_eq!(requests.len(), 6, "two movie pages and one TV page per run, no per-item fetch");
     assert!(requests.iter().all(|r| r.to_lowercase().contains("authorization: bearer fixture-discovery-token")));
 }
 
@@ -339,7 +403,7 @@ async fn mixed_https_publication_unions_subjects_without_duplicating_base_output
             assert_eq!(m3u.iter().filter(|(_, item)| item.title.as_ref() == name).count(), 1, "union once: {name}");
         }
         assert!(m3u.iter().all(|(_, item)| !item.group.starts_with("TMDB") && !item.group.starts_with("Trakt")));
-        assert_eq!(server.requests.lock().unwrap().len(), 3);
+        assert_eq!(server.requests.lock().unwrap().len(), 4);
     }
 }
 
@@ -354,7 +418,7 @@ async fn tmdb_https_selection_only_publishes_m3u_strm_without_an_xtream_output()
     assert!(!run.strm_contents().is_empty());
     let cache = run.context.playlist_state.as_ref().unwrap().data.read().await;
     assert!(cache[&run.target.name].xtream.is_none());
-    assert_eq!(server.requests.lock().unwrap().len(), 2);
+    assert_eq!(server.requests.lock().unwrap().len(), 3);
 }
 
 #[tokio::test]
@@ -433,9 +497,9 @@ async fn legacy_to_canonical_trakt_migration_retains_published_virtual_ids_and_a
     legacy.prepare(1, None, None).unwrap();
     let mut run = Publication::new(&server, &legacy);
     run.publish().await.unwrap();
-    let before = run.cache_signature().await;
+    let before = run.identity_signature().await;
     run.target = ConfigTarget::from(&canonical);
     run.publish().await.unwrap();
-    assert_eq!(run.cache_signature().await, before);
+    assert_eq!(run.identity_signature().await, before);
     assert_eq!(server.requests.lock().unwrap().len(), 2);
 }

@@ -467,6 +467,25 @@ pub(crate) async fn finalize_prepared_target<E: EventSink + Clone + 'static, M: 
     ctx: Arc<PlaylistProcessingContext<E, M>>,
     prepared: PreparedTarget,
 ) -> (Result<(), Vec<TuliproxError>>, Vec<TuliproxError>) {
+    let needs_tmdb = prepared.target.effective_curation().is_some_and(|config| {
+        config.enabled && config.tmdb.as_ref().is_some_and(|source| source.enabled && !source.trending.is_empty())
+    });
+    let tmdb_client = if needs_tmdb {
+        // No generic-client fallback: unavailable transport participates in the same admission gate.
+        tuliprox_core::utils::network::request::create_tmdb_client(&ctx.config)
+            .ok()
+            .and_then(|builder| builder.build().ok())
+    } else {
+        None
+    };
+    finalize_prepared_target_with_tmdb(ctx, prepared, tmdb_client.as_ref()).await
+}
+
+pub(super) async fn finalize_prepared_target_with_tmdb<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: Arc<PlaylistProcessingContext<E, M>>,
+    prepared: PreparedTarget,
+    tmdb_client: Option<&reqwest::Client>,
+) -> (Result<(), Vec<TuliproxError>>, Vec<TuliproxError>) {
     let target = &prepared.target;
     let mut new_playlist = prepared.playlist;
     let mut new_epg = prepared.epg;
@@ -488,7 +507,7 @@ pub(crate) async fn finalize_prepared_target<E: EventSink + Clone + 'static, M: 
     }
 
     let eligible_catalog = prepare_eligible_catalog(target, new_playlist, &mut step);
-    let views = match prepare_target_playlist_views(&ctx.client, target, eligible_catalog).await {
+    let views = match prepare_target_playlist_views(&ctx.client, tmdb_client, target, eligible_catalog).await {
         Ok(views) => views,
         Err(error) => {
             step.stop("Curation failed; skipping persist to preserve finalized artifacts");
@@ -889,6 +908,7 @@ pub(crate) fn build_curated_playlist_views(
 
 pub(crate) async fn prepare_target_playlist_views(
     client: &reqwest::Client,
+    tmdb_client: Option<&reqwest::Client>,
     target: &ConfigTarget,
     playlist: Vec<PlaylistGroup>,
 ) -> Result<TargetPlaylistViews, TuliproxError> {
@@ -900,7 +920,7 @@ pub(crate) async fn prepare_target_playlist_views(
         });
     };
 
-    let outcome = evaluate_curation(client, &playlist, &target.name, &config).await;
+    let outcome = evaluate_curation(client, tmdb_client, &playlist, &target.name, &config).await;
     curation_playlist_views(target, playlist, &config, outcome)
 }
 

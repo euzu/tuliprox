@@ -1689,11 +1689,11 @@ curation:
     trending:
       - kind: movie
         time_window: week
-        scope: first_page
+        limit: 100
         category_name: TMDB Weekly Movies
       - kind: tv
         time_window: day
-        scope: first_page
+        limit: 100
         category_name: TMDB Daily TV
 output:
   - type: xtream
@@ -1719,10 +1719,10 @@ selector unavailable without a request. Rejected/expired credentials also fail t
 | `tmdb` | absent | Optional TMDB Trending source. |
 | `trakt.enabled`, `tmdb.enabled` | `true` | Disabled sources make no requests and contribute no required selectors. |
 | `tmdb.api.access_token` | empty | Explicit TMDB application Read Access Token, required for an active fetch. |
-| `tmdb.trending` | `[]` | Configured first-page selectors. Each active entry is required. |
+| `tmdb.trending` | `[]` | Configured Trending selectors. Each active entry is required. |
 | `tmdb.trending[].kind` | required | `movie` or `tv`; no mixed/person endpoint. |
 | `tmdb.trending[].time_window` | required | `day` or `week`. |
-| `tmdb.trending[].scope` | required | Exactly `first_page`; acknowledges bounded selection. |
+| `tmdb.trending[].limit` | `100` | Integer **1..=500**: up to this many unique remote references, before local matching. |
 | `tmdb.trending[].create_xtream_category` | `true` | Projects a category in Xtream; false makes the selector selection-only. |
 | `tmdb.trending[].category_name` | absent | Nonblank name required for an active projection; retained but unused for selection-only entries. |
 
@@ -1735,30 +1735,63 @@ Category names still participate in alias identity: renaming them does not promi
 
 An enabled non-default policy without active selectors is rejected. An all-default source-less block is a no-op.
 Disabling the whole block preserves incomplete category/credential edits without executing them. Required enum fields
-(`kind`, `time_window`, `scope`), unknown-field checks and declaration ownership checks still apply to disabled drafts.
+(`kind`, `time_window`), unknown-field checks and declaration ownership checks still apply to disabled drafts. `limit` must
+remain an integer in range even when the target, block or source is disabled: null, zero, negatives, fractions, quoted
+numbers and overflow are errors, not defaults or clamped values. Saving omits the default 100 and retains non-default limits.
 
 #### Bounded discovery, matching and failure behavior
 
-TMDB requests `/3/trending/movie/{day|week}` or `/3/trending/tv/{day|week}`, with `language=en-US`, for the default first
-page only. There is no configurable page/result limit, implicit pagination, Discover filtering or details lookup. Do not
-assume a fixed result count. The response can report more remote pages: it is still complete for the explicit `first_page`
-scope, not an exhaustive TMDB catalog. Fetches are sequential within a target run, with a 15-second request/body deadline
-and a 1 MiB decoded-body cap. No new retries, feed cache or stale-feed fallback are provided.
+TMDB requests `/3/trending/movie/{day|week}` or `/3/trending/tv/{day|week}`, with `language=en-US&page=p`, sequentially
+from page 1. Pagination is internal transport, not operator configuration. There is no remote `limit` parameter, Discover
+filtering or details lookup. N counts unique **(movie/TV kind, positive TMDB ID)** references, not local titles, versions,
+aliases or episodes. An unavailable local title still consumes a reference; Tuliprox does not keep searching for N matches.
+
+Selection stops at the Nth unique reference, but the entire last response is read and validated, including duplicates and
+the suffix beyond N. An invalid record anywhere fails the selector. Duplicates keep the first text and rank. Rank is the
+observed row ordinal across actual page lengths, including duplicates, not an ordinal among unique IDs or a fixed page-size
+calculation. No extra page is requested after N or a valid end. A valid end before N is also complete.
+
+Each response must echo the requested page and have coherent totals. A short page alone is not an end. Totals may change;
+the current page's last-page indication is used without assuming a remote snapshot. An empty response is valid only on
+page 1 with zero results and total pages 0 or 1. A later empty page, or a later page with no new IDs (even the last page),
+fails rather than publishing a partial prefix. This deliberately conservative rule can reject a legitimately overlapping
+page. Trending pagination has empirical support; TMDB's public Trending references do not currently document the `page`
+query parameter. If its behavior changes, these checks fail closed, not back to first-page discovery.
+
+Internal guards are independent of `limit` and cannot be configured:
+
+| Resource | Per request | Per TMDB selector | Shared TMDB acquisition batch per target/run |
+| --- | --- | --- | --- |
+| Admitted GET attempts | 1 | 32 | 128 |
+| Absolute deadline | 15 seconds | 60 seconds | 180 seconds |
+| Decoded bytes consumed | 1 MiB | 8 MiB | 32 MiB |
+
+The dedicated configured HTTP profile preserves proxy/authentication, TLS policy and connect timeout, but never follows
+redirects or replays requests. Client construction failures have no unconfigured fallback. Attempts are counted before
+sending, and consumed decoded bytes include duplicate/suffix rows and failed bodies; size detection may consume one extra
+byte on failure, never on success. These are not TLS/compressed-byte or total-memory limits. Deadlines cover headers,
+decoding and normalization, do not restart per page/chunk, and are checked before success. They bound TMDB acquisition,
+not inputs, Trakt, local matching or the entire refresh. Acquisition finishes before local matching. There is no feed
+cache or stale-feed fallback. A valid N may not fit these guards: needing another request or byte after exhaustion fails;
+completing exactly at a request/byte boundary succeeds. Do not assume 100 references always require five pages or yield
+100 matches.
 
 Matching is exact by positive TMDB ID **and** movie/TV kind; there is no title/year fuzzy fallback for TMDB. Local items
 without a matching ID are not selected. Distinct local subjects sharing an ID remain distinct; duplicate feed entries keep
-the first rank. Remote order applies within each projected category, without globally reordering the base catalog.
+the first rank. Day/week selectors keep independent ranks and memberships; their base selection is unioned by local
+subject, not remote ID. Changing only the limit preserves surviving subject/alias identities when local UUID and category
+name remain unchanged. Remote order applies within each projected category, without globally reordering the base catalog.
 Existing target sorting and filters still apply afterwards. M3U and STRM consume selected ordinary entries, not the new
 Xtream aliases; HDHomeRun follows its existing underlying output.
 
 All enabled Trakt and TMDB selectors, including selection-only selectors, must complete before publication in **both**
-`full` and `curated`. A timeout, size limit, unsuccessful status, malformed/inconsistent page, invalid ID/media kind or
-redirect to a different endpoint prevents changes to finalized target IDs, files, caches and watches. Successful sibling
+`full` and `curated`. A timeout, resource exhaustion, unsuccessful status, malformed/inconsistent page, invalid ID/media
+kind, lack of pagination progress or any redirect prevents changes to finalized target IDs, files, caches and watches. Successful sibling
 feeds do not authorize partial publication. The first failed run publishes nothing; later failures retain prior artifacts.
 `full` does not make configured discovery optional. Writers remain best-effort after successful curation admission; this
 is not a cross-output storage transaction.
 
-A valid empty page and a complete feed with **no local matches are successes**, not errors. In `curated`, either can clear
+A valid initial empty page and a complete selection with **no local matches are successes**, not errors. In `curated`, either can clear
 published VOD/Series while retaining eligible Live. This can happen when the library lacks trending titles or TMDB IDs.
 Enrichment is separate: rebuild the target after IDs become available. Start with `full` if this narrowing is not intended.
 
@@ -1776,7 +1809,7 @@ curation:
     trending:
       - kind: movie
         time_window: week
-        scope: first_page
+        limit: 100
         create_xtream_category: false
 output:
   - type: m3u

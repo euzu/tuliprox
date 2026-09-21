@@ -1896,7 +1896,7 @@ fn persist_filter_can_select_a_base_group() {
 async fn trakt_target_curation_is_a_noop_without_xtream_configuration() {
     let target = ConfigTarget::from(&ConfigTargetDto::default());
 
-    let views = prepare_target_playlist_views(&reqwest::Client::new(), &target, Vec::new())
+    let views = prepare_target_playlist_views(&reqwest::Client::new(), None, &target, Vec::new())
         .await
         .expect("unconfigured curation should not fail");
 
@@ -1939,7 +1939,7 @@ async fn unavailable_required_selector_returns_target_failure_instead_of_base_fa
         xtream_cluster: XtreamCluster::Video,
     }];
 
-    let error = prepare_target_playlist_views(&reqwest::Client::new(), &target, base)
+    let error = prepare_target_playlist_views(&reqwest::Client::new(), None, &target, base)
         .await
         .expect_err("missing credentials must stop target publication");
 
@@ -2087,7 +2087,7 @@ mod curation_effect_gate {
         for policy in ["full", "curated"] {
             for mixed in [false, true] {
                 let (url, server) = empty_trakt_server().await;
-                let mut value = serde_json::json!({"catalog_selection": policy, "tmdb": {"trending": [{"kind": "movie", "time_window": "week", "scope": "first_page", "category_name": "TMDB"}]}});
+                let mut value = serde_json::json!({"catalog_selection": policy, "tmdb": {"trending": [{"kind": "movie", "time_window": "week", "limit": 100, "category_name": "TMDB"}]}});
                 if mixed {
                     value["trakt"] = serde_json::json!({"api": {"api_key": "test-client", "url": url}, "charts": [{"kind": "movies", "chart": "popular", "category_name": "Trakt"}]});
                 }
@@ -2286,7 +2286,7 @@ mod curation_effect_gate {
 fn tmdb_complete_target_selection_preserves_live_and_keeps_xtream_aliases_out_of_normal_outputs() {
     for has_xtream in [false, true] {
         let mut value = serde_json::json!({"name": "discovery", "output": [{"type": "m3u"}],
-            "curation": {"catalog_selection": "curated", "tmdb": {"trending": [{"kind": "movie", "time_window": "week", "scope": "first_page", "create_xtream_category": has_xtream, "category_name": "TMDB"}]}}});
+            "curation": {"catalog_selection": "curated", "tmdb": {"trending": [{"kind": "movie", "time_window": "week", "limit": 100, "create_xtream_category": has_xtream, "category_name": "TMDB"}]}}});
         if has_xtream {
             value["output"].as_array_mut().unwrap().push(serde_json::json!({"type": "xtream"}));
         }

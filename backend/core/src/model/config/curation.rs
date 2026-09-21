@@ -1,7 +1,7 @@
 use crate::model::{macros, TraktApiConfig, TraktChartConfig, TraktConfig, TraktListConfig};
 use shared::model::{
     CurationCatalogSelection, CurationConfigDto, TmdbCurationApiConfigDto, TmdbCurationConfigDto,
-    TmdbTrendingConfigDto, TmdbTrendingKind, TmdbTrendingScope, TmdbTrendingTimeWindow, TraktSourceConfigDto,
+    TmdbTrendingConfigDto, TmdbTrendingKind, TmdbTrendingTimeWindow, TraktSourceConfigDto,
 };
 use std::fmt;
 
@@ -60,7 +60,7 @@ impl From<&TmdbCurationApiConfig> for TmdbCurationApiConfigDto {
 pub struct TmdbTrendingConfig {
     pub kind: TmdbTrendingKind,
     pub time_window: TmdbTrendingTimeWindow,
-    pub scope: TmdbTrendingScope,
+    pub limit: u32,
     pub category_name: Option<String>,
     pub create_xtream_category: bool,
 }
@@ -71,7 +71,7 @@ impl From<&TmdbTrendingConfigDto> for TmdbTrendingConfig {
         Self {
             kind: dto.kind,
             time_window: dto.time_window,
-            scope: dto.scope,
+            limit: dto.limit,
             category_name: dto.category_name.clone(),
             create_xtream_category: dto.create_xtream_category,
         }
@@ -83,7 +83,7 @@ impl From<&TmdbTrendingConfig> for TmdbTrendingConfigDto {
         Self {
             kind: config.kind,
             time_window: config.time_window,
-            scope: config.scope,
+            limit: config.limit,
             category_name: config.category_name.clone(),
             create_xtream_category: config.create_xtream_category,
         }
@@ -275,8 +275,8 @@ mod tests {
             "tmdb": {
                 "api": {"access_token": "private-test-token"},
                 "trending": [
-                    {"kind": "movie", "time_window": "day", "scope": "first_page", "category_name": "Saved label", "create_xtream_category": false},
-                    {"kind": "tv", "time_window": "week", "scope": "first_page", "category_name": "Shows"}
+                    {"kind": "movie", "time_window": "day", "limit": 1, "category_name": "Saved label", "create_xtream_category": false},
+                    {"kind": "tv", "time_window": "week", "limit": 500, "category_name": "Shows"}
                 ]
             }
         });
@@ -285,6 +285,31 @@ mod tests {
         assert_eq!(CurationConfigDto::from(&resolved), dto);
         assert!(!format!("{resolved:?}").contains("private-test-token"));
         assert!(!format!("{dto:?}").contains("private-test-token"));
+    }
+
+    #[test]
+    fn curation_item_limit_json_yaml_prepare_runtime_round_trip() {
+        for limit in [None, Some(100), Some(1), Some(500)] {
+            let mut selector = serde_json::json!({"kind": "movie", "time_window": "day", "category_name": "Movies"});
+            if let Some(limit) = limit {
+                selector["limit"] = limit.into();
+            }
+            let value = serde_json::json!({"tmdb": {"trending": [selector]}});
+            let dto: CurationConfigDto = serde_json::from_value(value).unwrap();
+            let yaml = serde_saphyr::to_string(&dto).unwrap();
+            let mut dto: CurationConfigDto = serde_saphyr::from_str(&yaml).unwrap();
+            dto.prepare(&[TargetOutputDto::Xtream(XtreamTargetOutputDto::default())]).unwrap();
+            let runtime = CurationConfig::from(&dto);
+            assert_eq!(runtime.tmdb.as_ref().unwrap().trending[0].limit, limit.unwrap_or(100));
+            let restored = CurationConfigDto::from(&runtime);
+            assert_eq!(restored, dto);
+            let serialized = serde_json::to_value(&restored).unwrap();
+            assert_eq!(serialized["tmdb"]["trending"][0].get("limit").is_none(), limit.unwrap_or(100) == 100);
+            assert_eq!(
+                serde_saphyr::from_str::<CurationConfigDto>(&serde_saphyr::to_string(&restored).unwrap()).unwrap(),
+                dto
+            );
+        }
     }
 
     #[test]

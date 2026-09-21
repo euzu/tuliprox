@@ -2549,7 +2549,11 @@ mod tests {
 
     #[test]
     fn source_editor_preserves_yaml_curation_when_rebuilding_target_outputs() {
-        let target: ConfigTargetDto = serde_json::from_value(serde_json::json!({"name": "discovery", "curation": {"enabled": false, "catalog_selection": "curated", "tmdb": {"api": {"access_token": "test-token"}, "trending": [{"kind": "movie", "time_window": "week", "scope": "first_page", "category_name": "Saved", "create_xtream_category": false}]}}})).unwrap();
+        let target: ConfigTargetDto = serde_json::from_value(serde_json::json!({"name": "discovery", "curation": {"enabled": false, "catalog_selection": "curated", "tmdb": {"enabled": false, "api": {"access_token": "test-token"}, "trending": [
+            {"kind": "movie", "time_window": "week", "limit": 37, "category_name": "Saved", "create_xtream_category": false},
+            {"kind": "tv", "time_window": "day", "limit": 100, "category_name": "Shows"},
+            {"kind": "movie", "time_window": "day", "category_name": "Movies"}
+        ]}}})).unwrap();
         let mut state = EditorState::default();
         state.blocks.push(create_block(1, BlockType::Target, BlockInstance::Target(Rc::new(target.clone()))));
         state.blocks.push(create_block(2, BlockType::OutputXtream, create_instance(BlockType::OutputXtream)));

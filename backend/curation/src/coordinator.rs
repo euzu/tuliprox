@@ -34,15 +34,15 @@ fn selector_keys(config: &CurationConfig) -> (Vec<CurationSelectorKey>, Vec<Cura
 /// Evaluate all required selectors against the same eligible, pre-projection catalog.
 pub async fn evaluate_curation(
     http: &reqwest::Client,
+    tmdb_http: Option<&reqwest::Client>,
     playlist: &[PlaylistGroup],
     target: &str,
     config: &CurationConfig,
 ) -> CurationRunOutcome {
-    let tmdb_client = config
-        .tmdb
-        .as_ref()
-        .filter(|source| config.enabled && source.enabled && !source.trending.is_empty())
-        .map(|source| TmdbClient::new(http, &source.api));
+    let tmdb_client =
+        config.tmdb.as_ref().filter(|source| config.enabled && source.enabled && !source.trending.is_empty()).map(
+            |source| tmdb_http.ok_or(TmdbFailure::Configuration).and_then(|http| TmdbClient::new(http, &source.api)),
+        );
     evaluate_with_tmdb(http, playlist, target, config, tmdb_client).await
 }
 

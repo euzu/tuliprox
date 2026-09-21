@@ -1,7 +1,7 @@
 use crate::kernel::{CuratedMediaReference, CurationMediaKind};
 use serde::{Deserialize, Deserializer};
 use shared::model::TmdbTrendingKind;
-use std::{collections::HashSet, num::NonZeroU32};
+use std::num::NonZeroU32;
 
 #[derive(Deserialize)]
 struct TrendingPage {
@@ -26,27 +26,45 @@ fn present_kind<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Tmd
     TmdbTrendingKind::deserialize(deserializer).map(Some)
 }
 
-pub(super) fn translate_page(body: &[u8], kind: TmdbTrendingKind) -> Result<Vec<CuratedMediaReference>, ()> {
+pub(super) struct ValidatedPage {
+    /// All rows, including duplicates and the suffix beyond the selection limit.
+    pub rows: Vec<CuratedMediaReference>,
+    pub last: bool,
+}
+
+pub(super) fn translate_page(
+    body: &[u8],
+    kind: TmdbTrendingKind,
+    requested_page: u64,
+    preceding_rows: u32,
+) -> Result<ValidatedPage, ()> {
     let page: TrendingPage = serde_json::from_slice(body).map_err(|_| ())?;
-    if page.page != 1 || page.total_results < u64::try_from(page.results.len()).map_err(|_| ())? {
+    if requested_page == 0
+        || page.page != requested_page
+        || page.total_results < u64::try_from(page.results.len()).map_err(|_| ())?
+    {
         return Err(());
     }
     if page.results.is_empty() {
-        return if page.total_results == 0 && page.total_pages <= 1 { Ok(Vec::new()) } else { Err(()) };
+        return if requested_page == 1 && page.total_results == 0 && page.total_pages <= 1 {
+            Ok(ValidatedPage { rows: Vec::new(), last: true })
+        } else {
+            Err(())
+        };
     }
-    if page.total_pages == 0 {
+    if page.total_pages < requested_page {
         return Err(());
     }
-    let mut seen = HashSet::new();
-    let mut references = Vec::with_capacity(page.results.len());
+    let mut rows = Vec::with_capacity(page.results.len());
     for (index, item) in page.results.into_iter().enumerate() {
-        // Validate duplicates too: malformed records cannot be silently discarded.
+        // Validate before deduplication or selection: even an unselected suffix is authoritative wire data.
         if item.media_type.is_some_and(|media_type| media_type != kind) {
             return Err(());
         }
-        if !seen.insert(item.id) {
-            continue;
-        }
+        let rank = preceding_rows
+            .checked_add(u32::try_from(index).map_err(|_| ())?)
+            .and_then(|rank| rank.checked_add(1))
+            .ok_or(())?;
         let (media_kind, title, date) = match kind {
             TmdbTrendingKind::Movie => (CurationMediaKind::Movie, item.title, item.release_date),
             TmdbTrendingKind::Tv => (CurationMediaKind::Series, item.name, item.first_air_date),
@@ -56,110 +74,73 @@ pub(super) fn translate_page(body: &[u8], kind: TmdbTrendingKind) -> Result<Vec<
             .and_then(|date| date.split('-').next())
             .and_then(|year| year.parse::<u32>().ok())
             .filter(|year| (1900..=2100).contains(year));
-        references.push(CuratedMediaReference::new(
+        rows.push(CuratedMediaReference::new(
             media_kind,
             title.unwrap_or_default(),
             year,
             Some(item.id.get()),
-            Some(u32::try_from(index + 1).map_err(|_| ())?),
+            Some(rank),
         ));
     }
-    Ok(references)
+    Ok(ValidatedPage { rows, last: page.page == page.total_pages })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kernel::CurationMediaKind;
     use serde_json::{json, Value};
 
-    fn page(results: Value) -> Value {
-        let mut page = json!({"page": 1, "total_pages": 100, "total_results": 1000, "results": null});
-        page["results"] = results;
-        page
-    }
-
-    fn translate(value: &Value, kind: TmdbTrendingKind) -> Result<Vec<CuratedMediaReference>, ()> {
-        translate_page(&serde_json::to_vec(value).unwrap(), kind)
+    fn translate(results: Value, kind: TmdbTrendingKind, preceding: u32) -> Result<ValidatedPage, ()> {
+        translate_page(
+            &serde_json::to_vec(&json!({"page":2,"total_pages":3,"total_results":100,"results":results})).unwrap(),
+            kind,
+            2,
+            preceding,
+        )
     }
 
     #[test]
-    fn tmdb_declared_first_page_is_complete_even_when_more_pages_exist() {
-        let result = translate(
-            &page(json!([{"id": 7, "title": "Film", "release_date": "2024-01-02"}])),
+    fn tmdb_wire_translation_preserves_every_row_and_cumulative_rank() {
+        let page = translate(
+            json!([{"id":7,"title":"First","release_date":"2024-01-02"},{"id":7,"title":"Duplicate"},{"id":u32::MAX}]),
             TmdbTrendingKind::Movie,
+            3,
         )
         .unwrap();
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].kind, CurationMediaKind::Movie);
-        assert_eq!(result[0].tmdb_id, Some(7));
-        assert_eq!(result[0].year, Some(2024));
-        assert_eq!(result[0].rank, Some(1));
-    }
-
-    #[test]
-    fn tmdb_tv_translation_and_absent_auxiliary_text_remain_exact_only() {
-        let result = translate(
-            &page(json!([{"id": 7, "name": "Show", "first_air_date": "unknown", "media_type": "tv"}, {"id": 8}])),
+        assert!(!page.last);
+        assert_eq!(page.rows.len(), 3);
+        assert_eq!(page.rows[0].title, "First");
+        assert_eq!(page.rows[0].year, Some(2024));
+        assert_eq!(page.rows[2].rank, Some(6));
+        assert_eq!(page.rows[2].tmdb_id, Some(u32::MAX));
+        let page = translate(
+            json!([{"id":7,"media_type":"tv","name":"Show","first_air_date":"unknown"},{"id":8,"name":null}]),
             TmdbTrendingKind::Tv,
+            0,
         )
         .unwrap();
-        assert_eq!(result[0].kind, CurationMediaKind::Series);
-        assert_eq!(result[0].title, "Show");
-        assert_eq!(result[0].year, None);
-        assert_eq!(result[1].title, "");
+        assert_eq!(page.rows[0].kind, CurationMediaKind::Series);
+        assert_eq!(page.rows[0].title, "Show");
+        assert_eq!(page.rows[0].year, None);
+        assert_eq!(page.rows[1].title, "");
+        assert!(translate(json!([{"id":7}]), TmdbTrendingKind::Movie, u32::MAX).is_err());
     }
 
     #[test]
-    fn tmdb_duplicate_ids_keep_first_occurrence_and_original_rank() {
-        let result = translate(
-            &page(json!([{"id": 7, "title": "First"}, {"id": 7, "title": "Duplicate"}, {"id": 8}])),
-            TmdbTrendingKind::Movie,
-        )
-        .unwrap();
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0].title, "First");
-        assert_eq!(result[1].rank, Some(3));
-    }
-
-    #[test]
-    fn tmdb_empty_requires_consistent_authoritative_totals() {
-        for pages in [0, 1] {
-            let value = json!({"page": 1, "total_pages": pages, "total_results": 0, "results": []});
-            assert!(translate(&value, TmdbTrendingKind::Movie).unwrap().is_empty());
-        }
-        assert!(translate(&page(json!([])), TmdbTrendingKind::Movie).is_err());
-    }
-
-    #[test]
-    fn tmdb_bad_record_cannot_shrink_a_successful_snapshot() {
+    fn tmdb_wire_invalid_duplicate_or_suffix_is_not_discarded() {
         for bad in [
             json!({}),
-            json!({"id": 0}),
-            json!({"id": -1}),
-            json!({"id": 4_294_967_296_u64}),
-            json!({"id": "7"}),
-            json!({"id": 7, "media_type": "tv"}),
-            json!({"id": 7, "media_type": null}),
-            json!({"id": 7, "title": 42}),
+            json!({"id":0}),
+            json!({"id":-1}),
+            json!({"id":4294967296_u64}),
+            json!({"id":"7"}),
+            json!({"id":7.0}),
+            json!({"id":7,"media_type":"tv"}),
+            json!({"id":7,"media_type":null}),
+            json!({"id":7,"title":42}),
+            json!({"id":7,"release_date":false}),
         ] {
-            assert!(translate(&page(json!([{"id": 9}, bad])), TmdbTrendingKind::Movie).is_err());
+            assert!(translate(json!([{"id":7},bad]), TmdbTrendingKind::Movie, 0).is_err());
         }
-    }
-
-    #[test]
-    fn tmdb_invalid_page_envelopes_are_not_empty_successes() {
-        for value in [
-            json!({}),
-            json!([]),
-            json!({"page": 2, "total_pages": 2, "total_results": 1, "results": [{"id": 7}]}),
-            json!({"page": 1, "total_pages": 0, "total_results": 1, "results": [{"id": 7}]}),
-            json!({"page": 1, "total_pages": 1, "total_results": 0, "results": [{"id": 7}]}),
-            json!({"page": 1, "total_pages": 1, "total_results": -1, "results": []}),
-            json!({"page": 1, "total_pages": 1, "total_results": 0, "results": null}),
-        ] {
-            assert!(translate(&value, TmdbTrendingKind::Movie).is_err());
-        }
-        assert!(translate_page(br#"{"page":1,"results":["#, TmdbTrendingKind::Movie).is_err());
     }
 }

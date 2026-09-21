@@ -50,8 +50,8 @@ fn catalog() -> Vec<PlaylistGroup> {
 
 fn config(trakt_url: Option<&str>) -> CurationConfig {
     let mut value = json!({"tmdb": {"api": {"access_token": "test-token"}, "trending": [
-        {"kind": "movie", "time_window": "week", "scope": "first_page", "category_name": "TMDB Movies"},
-        {"kind": "tv", "time_window": "day", "scope": "first_page", "category_name": "TMDB TV"}
+        {"kind": "movie", "time_window": "week", "limit": 1, "category_name": "TMDB Movies"},
+        {"kind": "tv", "time_window": "day", "limit": 1, "category_name": "TMDB TV"}
     ]}});
     if let Some(url) = trakt_url {
         value["trakt"] = json!({"api": {"api_key": "test-client", "url": url}, "charts": [{"kind": "movies", "chart": "popular", "category_name": "Trakt", "tmdb_only": true}]});
@@ -60,7 +60,12 @@ fn config(trakt_url: Option<&str>) -> CurationConfig {
 }
 
 async fn run(config: &CurationConfig, playlist: &[PlaylistGroup], server: &TestServer) -> CurationRunOutcome {
-    let http = reqwest::Client::new();
+    let http = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .build()
+        .unwrap();
     let client = config.tmdb.as_ref().map(|source| TmdbClient::for_test(&http, &source.api, &server.url));
     evaluate_with_tmdb(&http, playlist, "test", config, client).await
 }

@@ -693,7 +693,7 @@ mod tests {
     fn target_curation_prepares_and_round_trips_tmdb_only_and_mixed_sources() {
         for with_trakt in [false, true] {
             let mut value = serde_json::json!({"name": "discovery", "output": [{"type": "xtream"}, {"type": "m3u"}],
-                "curation": {"catalog_selection": "curated", "tmdb": {"trending": [{"kind": "movie", "time_window": "week", "scope": "first_page", "category_name": "TMDB"}]}}});
+                "curation": {"catalog_selection": "curated", "tmdb": {"trending": [{"kind": "movie", "time_window": "week", "limit": 37, "category_name": "TMDB"}]}}});
             if with_trakt {
                 value["curation"]["trakt"] =
                     serde_json::json!({"charts": [{"kind": "movies", "chart": "popular", "category_name": "Trakt"}]});
@@ -717,7 +717,7 @@ mod tests {
     #[test]
     fn target_curation_m3u_only_requires_selection_only_entries() {
         let mut target: ConfigTargetDto = serde_json::from_value(serde_json::json!({"name": "discovery", "output": [{"type": "m3u"}],
-            "curation": {"catalog_selection": "curated", "tmdb": {"trending": [{"kind": "tv", "time_window": "day", "scope": "first_page", "category_name": "Shows"}]}}})).unwrap();
+            "curation": {"catalog_selection": "curated", "tmdb": {"trending": [{"kind": "tv", "time_window": "day", "limit": 500, "category_name": "Shows"}]}}})).unwrap();
         assert!(target.prepare(1, None, None).is_err());
         target.curation.as_mut().unwrap().tmdb.as_mut().unwrap().trending[0].create_xtream_category = false;
         target.prepare(1, None, None).unwrap();

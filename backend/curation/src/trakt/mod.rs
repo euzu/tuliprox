@@ -26,7 +26,7 @@ pub async fn evaluate_trakt_curation(
     target_name: &str,
     trakt_config: &TraktConfig,
 ) -> CurationRunOutcome {
-    crate::evaluate_curation(http_client, playlist, target_name, &CurationConfig::from(trakt_config)).await
+    crate::evaluate_curation(http_client, None, playlist, target_name, &CurationConfig::from(trakt_config)).await
 }
 
 pub(crate) async fn evaluate_selectors(

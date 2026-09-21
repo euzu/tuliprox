@@ -1331,7 +1331,7 @@ mod tests {
             url: "http://example.com/playlist.m3u".to_string(),
             ..Default::default()
         };
-        let curation: shared::model::CurationConfigDto = serde_json::from_value(serde_json::json!({"enabled": false, "catalog_selection": "curated", "tmdb": {"api": {"access_token": "discovery-test-token"}, "trending": [{"kind": "movie", "time_window": "week", "scope": "first_page", "create_xtream_category": false}]}})).unwrap();
+        let curation: shared::model::CurationConfigDto = serde_json::from_value(serde_json::json!({"enabled": false, "catalog_selection": "curated", "tmdb": {"api": {"access_token": "discovery-test-token"}, "trending": [{"kind": "movie", "time_window": "week", "limit": 37, "create_xtream_category": false}]}})).unwrap();
         let initial_sources = SourcesConfigDto {
             inputs: vec![input_dto.clone()],
             sources: vec![shared::model::ConfigSourceDto {

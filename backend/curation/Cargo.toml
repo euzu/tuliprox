@@ -19,6 +19,7 @@ reqwest = { version = "0.13.4", features = ["json", "rustls"] }
 serde.workspace = true
 serde_json.workspace = true
 strsim = "0.11.1"
+tokio = { workspace = true, features = ["io-util", "time"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "test-util"] }
