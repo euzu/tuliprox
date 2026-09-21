@@ -1,9 +1,9 @@
 use super::*;
 use crate::{
     api::model::{
-        ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, EventManager,
-        MetadataUpdateManager, PlaylistStorageState, ProviderConfig as RuntimeProviderConfig, ProviderConfigConnection,
-        SharedStreamManager,
+        empty_resource_client_set, ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager,
+        EventManager, MetadataUpdateManager, PlaylistStorageState, ProviderConfig as RuntimeProviderConfig,
+        ProviderConfigConnection, ResourceClientSet, SharedStreamManager,
     },
     auth::Fingerprint,
     model::{
@@ -27,9 +27,10 @@ use shared::{
     defaults::{default_catchup_session_ttl_secs, default_hls_session_ttl_secs},
     foundation::Filter,
     model::{
-        AdmissionStrategy, ClusterFlags, ConfigPaths, ConfigProviderDto, ConfigTargetOptions, GeoIpUnavailablePolicy,
-        InputFetchMethod, InputType, PlaylistItem, PlaylistItemHeader, PlaylistItemType, ProcessingOrder,
-        ProviderUrlSelectionPolicy, ProxyType, StreamChannel, TargetType, XtreamCluster,
+        provider_saturation::build_group_lookup, AdmissionStrategy, ClusterFlags, ConfigPaths, ConfigProviderDto,
+        ConfigTargetOptions, GeoIpUnavailablePolicy, InputFetchMethod, InputType, PlaylistItem, PlaylistItemHeader,
+        PlaylistItemType, ProcessingOrder, ProviderUrlSelectionPolicy, ProxyType, ResourcePolicyDto, StreamChannel,
+        TargetType, XtreamCluster,
     },
     utils::Internable,
 };
@@ -39,7 +40,10 @@ use tokio::{
     net::TcpListener,
     sync::{mpsc, RwLock},
 };
-use tuliprox_core::utils::response_compression::should_compress_response;
+use tuliprox_core::{
+    model::{public_only_policy, ResourceClientKey, ResourcePolicy, ResourcePolicyError, ResourceRedirectMode},
+    utils::{resource_cache_key, response_compression::should_compress_response},
+};
 use tuliprox_session::{
     admission::{evaluate_remaining_strategies_after_grace, get_effective_admission_strategies},
     AdmissionRejectionReason, GraceResolutionContext,
@@ -4161,6 +4165,83 @@ fn create_test_app_config() -> AppConfig {
     }
 }
 
+/// App config whose only input carries `policy` and one enabled alias.
+fn create_policy_app_config(policy: ResourcePolicyDto) -> AppConfig {
+    let config = create_test_app_config();
+    let policy = Arc::new(ResourcePolicy::from_dto(&policy).expect("test policy"));
+    let input = Arc::new(ConfigInput {
+        id: 1,
+        name: "main-input".intern(),
+        input_type: InputType::M3u,
+        url: "https://provider.example/playlist.m3u".to_string(),
+        enabled: true,
+        resource_policy: Some(policy),
+        aliases: Some(vec![ConfigInputAlias {
+            id: 2,
+            name: "aliased-input".intern(),
+            url: "https://provider.example/alias.m3u".to_string(),
+            username: None,
+            password: None,
+            priority: 0,
+            max_connections: 1,
+            exp_date: None,
+            enabled: true,
+            stalker: None,
+        }]),
+        ..ConfigInput::default()
+    });
+    let inputs = vec![Arc::clone(&input)];
+    let sources = SourcesConfig { inputs, group_lookup: build_group_lookup(&[input]), ..SourcesConfig::default() };
+    config.sources.store(Arc::new(sources));
+    config
+}
+
+#[test]
+fn resource_authorization_uses_the_main_input_policy_for_an_alias() {
+    let app_config = create_policy_app_config(ResourcePolicyDto {
+        allowed_hosts: vec!["media.home.arpa".to_string()],
+        allowed_networks: vec!["192.168.50.20/32".to_string()],
+    });
+    let input_name = Arc::from("aliased-input");
+    let authorization = resolve_resource_authorization(&app_config, Some(&input_name)).expect("authorized");
+
+    assert_eq!(authorization.input_name.as_deref(), Some("main-input"));
+    assert!(authorization.policy.allows_host("media.home.arpa"));
+    assert_ne!(authorization.policy_digest, public_only_policy().digest());
+}
+
+#[test]
+fn resource_authorization_rejects_an_unknown_or_disabled_origin() {
+    let app_config = create_policy_app_config(ResourcePolicyDto::default());
+    let input_name = Arc::from("removed-input");
+    let error = resolve_resource_authorization(&app_config, Some(&input_name)).expect_err("rejected");
+
+    assert_eq!(error, ResourcePolicyError::UnknownOrigin("removed-input".to_string()));
+    assert_eq!(rejection_status(&error), StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn resource_authorization_follows_a_config_change_without_regenerating_links() {
+    let app_config = create_policy_app_config(ResourcePolicyDto {
+        allowed_hosts: vec!["first.home.arpa".to_string()],
+        allowed_networks: vec!["192.168.50.20/32".to_string()],
+    });
+    let input_name = Arc::from("main-input");
+    let before = resolve_resource_authorization(&app_config, Some(&input_name)).expect("authorized");
+
+    let reloaded = create_policy_app_config(ResourcePolicyDto {
+        allowed_hosts: vec!["second.home.arpa".to_string()],
+        allowed_networks: vec!["10.0.0.0/8".to_string()],
+    });
+    app_config.sources.store(Arc::clone(&reloaded.sources.load()));
+
+    let after = resolve_resource_authorization(&app_config, Some(&input_name)).expect("authorized");
+
+    assert_ne!(before.policy_digest, after.policy_digest);
+    assert!(after.policy.allows_host("second.home.arpa"));
+    assert!(!after.policy.allows_host("first.home.arpa"));
+}
+
 fn create_test_provider_app_config() -> AppConfig {
     let input = Arc::new(ConfigInput {
         id: 1,
@@ -4310,6 +4391,7 @@ fn create_test_app_state_for_config(app_cfg: Arc<AppConfig>) -> Arc<AppState> {
         http_client: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
         http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
         public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+        resource_clients: empty_resource_client_set(),
         downloads: Arc::new(crate::api::model::DownloadQueue::new()),
         cache: Arc::new(ArcSwapOption::default()),
         shared_stream_manager,
@@ -4341,7 +4423,7 @@ fn create_test_fingerprint(addr: std::net::SocketAddr) -> Fingerprint {
 }
 
 #[tokio::test]
-async fn resource_cache_is_used_only_by_matching_standard_fetch_policy() {
+async fn resource_cache_is_scoped_to_the_authorizing_policy() {
     const CACHED_BODY: &[u8] = b"cached image";
     const UPSTREAM_BODY: &[u8] = b"upstream image";
 
@@ -4350,9 +4432,13 @@ async fn resource_cache_is_used_only_by_matching_standard_fetch_policy() {
     let cache_dir = temp_dir.path().to_string_lossy();
     let mut cache = LRUResourceCache::new(1024, cache_dir.as_ref());
     let resource_url = "http://1.1.1.1/icon.png";
-    let cached_path = cache.store_path(resource_url, Some("image/png"));
+
+    // An entry stored under the public-only scope: it must never answer a request authorized by a
+    // policy that is allowed to reach private destinations.
+    let public_only_scope = resource_cache_key(public_only_policy().digest().as_str(), resource_url);
+    let cached_path = cache.store_path(&public_only_scope, Some("image/png"));
     tokio::fs::write(&cached_path, CACHED_BODY).await.expect("write cached image");
-    cache.add_content(resource_url, Some("image/png".to_string()), CACHED_BODY.len()).expect("register cached image");
+    cache.add_content(&public_only_scope, Some("image/png".to_string()), CACHED_BODY.len()).expect("cache entry");
     app_state.cache.store(Some(Arc::new(RwLock::new(cache))));
 
     let response_head = format!(
@@ -4362,37 +4448,83 @@ async fn resource_cache_is_used_only_by_matching_standard_fetch_policy() {
     let (upstream_addr, upstream_task) = spawn_legacy_hls_test_origin(response_head, UPSTREAM_BODY.to_vec()).await;
     let proxy = reqwest::Proxy::http(format!("http://{upstream_addr}")).expect("mock proxy URL");
     let mock_client = reqwest::Client::builder().proxy(proxy).build().expect("mock upstream client");
-    app_state.public_http_client_no_redirect.store(Arc::new(mock_client));
 
-    let standard_response =
-        resource_response(&app_state, ResourceFetchPolicy::Standard, resource_url, &HeaderMap::new(), None)
+    let public_only = ResolvedResourceAuthorization::public_only();
+    let private_policy = Arc::new(
+        ResourcePolicy::from_dto(&shared::model::ResourcePolicyDto {
+            allowed_hosts: vec!["media.home.arpa".to_string()],
+            allowed_networks: vec!["192.168.50.20/32".to_string()],
+        })
+        .expect("policy"),
+    );
+    let scoped = ResolvedResourceAuthorization::for_input("private".into(), Some(&private_policy));
+    assert_ne!(public_only.policy_digest, scoped.policy_digest);
+
+    let mut clients = HashMap::new();
+    for key in [
+        ResourceClientKey::new(public_only.policy_digest.clone(), ResourceRedirectMode::Bounded),
+        ResourceClientKey::new(scoped.policy_digest.clone(), ResourceRedirectMode::Bounded),
+    ] {
+        clients.insert(key, mock_client.clone());
+    }
+    app_state.resource_clients.store(Arc::new(ResourceClientSet::from_clients(clients)));
+
+    let cached_response = resource_response(
+        &app_state,
+        ResourceFetchOptions::cached(public_only.clone()),
+        resource_url,
+        &HeaderMap::new(),
+        None,
+    )
+    .await
+    .into_response();
+    assert_eq!(cached_response.status(), StatusCode::OK);
+    let cached_body = cached_response.into_body().collect().await.expect("read cached image").to_bytes();
+    assert_eq!(cached_body, Bytes::from_static(CACHED_BODY));
+
+    let fresh_response =
+        resource_response(&app_state, ResourceFetchOptions::cached(scoped), resource_url, &HeaderMap::new(), None)
             .await
             .into_response();
-    assert_eq!(standard_response.status(), StatusCode::OK);
-    let standard_body = standard_response.into_body().collect().await.expect("read cached image").to_bytes();
-    assert_eq!(standard_body, Bytes::from_static(CACHED_BODY));
-
-    let response =
-        resource_response(&app_state, ResourceFetchPolicy::PublicNoRedirect, resource_url, &HeaderMap::new(), None)
-            .await
-            .into_response();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let response_body = response.into_body().collect().await.expect("read upstream image").to_bytes();
-    assert_eq!(response_body, Bytes::from_static(UPSTREAM_BODY));
-    assert_ne!(response_body, Bytes::from_static(CACHED_BODY));
+    assert_eq!(fresh_response.status(), StatusCode::OK);
+    let fresh_body = fresh_response.into_body().collect().await.expect("read upstream image").to_bytes();
+    assert_eq!(fresh_body, Bytes::from_static(UPSTREAM_BODY));
+    assert_ne!(fresh_body, Bytes::from_static(CACHED_BODY));
 
     let upstream_request = upstream_task.await.expect("mock upstream task completes");
     assert!(upstream_request.starts_with("GET http://1.1.1.1/icon.png HTTP/1.1\r\n"));
 }
 
 #[tokio::test]
-async fn public_resource_destination_validation_rejects_loopback_url() {
-    let url = Url::parse("http://127.0.0.1/icon.png").expect("loopback URL");
+async fn resource_response_rejects_blocked_ip_literal_without_a_client() {
+    let app_state = create_test_app_state();
+    let response = resource_response(
+        &app_state,
+        ResourceFetchOptions::cached(ResolvedResourceAuthorization::public_only()),
+        "http://127.0.0.1/icon.png",
+        &HeaderMap::new(),
+        None,
+    )
+    .await
+    .into_response();
 
-    let result = validate_public_resource_destination(&url).await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+}
 
-    assert!(result.is_err_and(|err| err.kind() == std::io::ErrorKind::PermissionDenied));
+#[tokio::test]
+async fn resource_response_rejects_a_policy_without_a_current_client() {
+    let app_state = create_test_app_state();
+    let response = resource_response(
+        &app_state,
+        ResourceFetchOptions::cached(ResolvedResourceAuthorization::public_only()),
+        "http://1.1.1.1/icon.png",
+        &HeaderMap::new(),
+        None,
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
 }
 
 fn create_test_fingerprint_with_user_agent(addr: std::net::SocketAddr, user_agent: &str) -> Fingerprint {

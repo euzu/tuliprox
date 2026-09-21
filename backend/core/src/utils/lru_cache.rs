@@ -12,6 +12,16 @@ const CACHEDIR_TAG: &str = "CACHEDIR.TAG";
 #[inline]
 fn encode_cache_key(key: &str) -> String { encode_base64_hash(key) }
 
+/// Cache identity of a proxied resource.
+///
+/// One URL can be fetched under different destination policies, and a body fetched under a
+/// permissive policy must never answer a request that is restricted to public destinations. The
+/// policy digest therefore belongs to the key. The version domain is part of the key so a future
+/// layout change invalidates old entries instead of handing them to a differently scoped request.
+pub fn resource_cache_key(policy_digest: &str, canonical_url: &str) -> String {
+    format!("tuliprox.resource.v1|{policy_digest}|{canonical_url}")
+}
+
 /// `LRUResourceCache`
 ///
 /// A least-recently-used (LRU) file-based resource cache that stores files in a directory on disk,
@@ -244,5 +254,20 @@ impl LRUResourceCache {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod cache_key_tests {
+    use super::resource_cache_key;
+
+    #[test]
+    fn resource_cache_key_separates_policies() {
+        let url = "https://cdn.example.com/logo.png";
+        let public_only = resource_cache_key("public", url);
+        let private = resource_cache_key("private", url);
+
+        assert_ne!(public_only, private);
+        assert_eq!(public_only, resource_cache_key("public", url));
     }
 }

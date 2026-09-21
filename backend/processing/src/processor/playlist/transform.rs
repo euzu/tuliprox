@@ -164,6 +164,12 @@ impl MappingStageOutcome {
 }
 
 pub(crate) fn map_channel(mut channel: PlaylistItem, mapping: &CompiledMapping) -> ChannelMappingOutcome {
+    let mut trusted_locators = HashSet::new();
+    channel.header.visit_resource_values(&mut |value| {
+        if shared::model::resolve_resource_value(value).is_ok_and(|locator| locator.is_some()) {
+            trusted_locators.insert(Arc::clone(value));
+        }
+    });
     let mut matched_rules = 0;
     let mut virtual_items = vec![];
     let mut changed_fields = HashSet::new();
@@ -198,6 +204,16 @@ pub(crate) fn map_channel(mut channel: PlaylistItem, mapping: &CompiledMapping) 
             }
         }
     }
+    let normalize_mapped_item = |item: &mut PlaylistItem| {
+        item.header.visit_resource_values_mut(&mut |value| {
+            if shared::model::has_resource_scheme(value) && !trusted_locators.contains(value) {
+                *value = Arc::from("");
+            }
+        });
+        item.header.normalize_internal_resource_values();
+    };
+    normalize_mapped_item(&mut channel);
+    virtual_items.iter_mut().for_each(normalize_mapped_item);
     ChannelMappingOutcome { channel, virtual_items, matched_rules, changed_fields, diagnostics }
 }
 

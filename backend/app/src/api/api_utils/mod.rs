@@ -1,3 +1,4 @@
+mod resource;
 pub use crate::repository::{
     evaluate_network_access, log_network_access_allowed_geoip_unavailable, log_network_access_denied,
     NetworkAccessDecision, NetworkAccessDenyReason,
@@ -36,7 +37,7 @@ use crate::{
     utils::{
         async_file_reader, async_file_writer, create_new_file_for_write, debug_if_enabled, get_file_extension, request,
         request::{content_type_from_ext, parse_range, send_with_retry_and_provider},
-        trace_if_enabled,
+        resource_cache_key, trace_if_enabled,
     },
     BUILD_TIMESTAMP,
 };
@@ -50,6 +51,11 @@ use bytes::{Bytes, BytesMut};
 use chrono::{DateTime, Utc};
 use futures::{stream, Stream, StreamExt, TryStreamExt};
 use log::{debug, error, info, log_enabled, trace, warn};
+pub use resource::{
+    decode_resource_link, log_missing_resource_client, log_resource_rejection, rejection_status, resolve_resource,
+    resolve_resource_authorization, ResolvedResource, ResolvedResourceAuthorization, ResourceCacheMode,
+    ResourceFetchOptions,
+};
 use serde::Serialize;
 use shared::{
     concat_string,
@@ -3707,41 +3713,10 @@ async fn fetch_resource_with_retry(
     Some(try_unwrap_body!(response_builder.body(axum::body::Body::from_stream(stream))))
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ResourceFetchPolicy {
-    Standard,
-    PublicNoRedirect,
-}
-
-impl ResourceFetchPolicy {
-    const fn cache_key(self, resource_url: &str) -> Option<&str> {
-        match self {
-            Self::Standard => Some(resource_url),
-            Self::PublicNoRedirect => None,
-        }
-    }
-
-    const fn requires_public_destination(self) -> bool { matches!(self, Self::PublicNoRedirect) }
-}
-
-async fn validate_public_resource_destination(url: &Url) -> std::io::Result<()> {
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "unsupported resource URL scheme"));
-    }
-    let host = url
-        .host_str()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "resource URL has no host"))?;
-    let port = url
-        .port_or_known_default()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "resource URL has no port"))?;
-    tuliprox_core::utils::network::request::resolve_public_socket_addrs(host, port).await?;
-    Ok(())
-}
-
 /// # Panics
 pub async fn resource_response(
     app_state: &Arc<AppState>,
-    fetch_policy: ResourceFetchPolicy,
+    options: ResourceFetchOptions,
     resource_url: &str,
     req_headers: &HeaderMap,
     input: Option<&ConfigInput>,
@@ -3750,20 +3725,8 @@ pub async fn resource_response(
         return StatusCode::NO_CONTENT.into_response();
     }
 
-    let validated_url = if fetch_policy.requires_public_destination() {
-        let Ok(url) = Url::parse(resource_url) else {
-            error!("Url is malformed {}", sanitize_sensitive_info(resource_url));
-            return StatusCode::BAD_REQUEST.into_response();
-        };
-        if let Err(err) = validate_public_resource_destination(&url).await {
-            debug!("Rejected non-public resource destination {}: {err}", sanitize_sensitive_info(resource_url));
-            return StatusCode::BAD_GATEWAY.into_response();
-        }
-        Some(url)
-    } else {
-        None
-    };
-
+    // Dispatched before any HTTP(S) policy decision: these URLs are served by a dedicated
+    // media-server path and never leave through the resource proxy.
     if resource_url.starts_with("media-server://image/") {
         return match open_media_server_image_resource(app_state, resource_url).await {
             Ok(response) => response,
@@ -3778,10 +3741,35 @@ pub async fn resource_response(
             }
         };
     }
+
+    let authorization = &options.authorization;
+    let Ok(url) = Url::parse(resource_url) else {
+        error!("Url is malformed {}", sanitize_sensitive_info(resource_url));
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+
+    // Scheme, host presence, and IP literals are checked before the first request. Host names are
+    // left to the connection-time policy resolver, which is also the only place that sees the real
+    // address a name resolves to.
+    if let Err(err) = authorization.policy.validate_initial_url(&url) {
+        log_resource_rejection(authorization.input_name.as_deref(), &err, resource_url);
+        return rejection_status(&err).into_response();
+    }
+
+    let Some(http_client) =
+        app_state.resource_clients.load().client(&authorization.policy_digest, options.redirect_mode).cloned()
+    else {
+        log_missing_resource_client(authorization.input_name.as_deref(), &authorization.policy_digest);
+        return StatusCode::BAD_GATEWAY.into_response();
+    };
+
     let filter: HeaderFilter = Some(Box::new(|key| key != "if-none-match" && key != "if-modified-since"));
     let req_headers = get_headers_from_request(req_headers, &filter);
-    let cache_key = fetch_policy.cache_key(resource_url);
-    if let (Some(cache_key), Some(cache)) = (cache_key, app_state.cache.load().as_ref()) {
+    let cache_key = match options.cache_mode {
+        ResourceCacheMode::Enabled => Some(resource_cache_key(authorization.policy_digest.as_str(), url.as_str())),
+        ResourceCacheMode::Disabled => None,
+    };
+    if let (Some(cache_key), Some(cache)) = (cache_key.as_deref(), app_state.cache.load().as_ref()) {
         let cache_hit = {
             let mut guard = cache.write().await;
             guard.get_content(cache_key)
@@ -3799,21 +3787,21 @@ pub async fn resource_response(
         }
     }
     trace_if_enabled!("Try to fetch resource {}", sanitize_sensitive_info(resource_url));
-    if let Ok(url) = validated_url.map_or_else(|| Url::parse(resource_url), Ok) {
-        let http_client = match fetch_policy {
-            ResourceFetchPolicy::Standard => app_state.http_client.load(),
-            ResourceFetchPolicy::PublicNoRedirect => app_state.public_http_client_no_redirect.load(),
-        };
-        if let Some(resp) =
-            fetch_resource_with_retry(app_state, &http_client, &url, cache_key, resource_url, &req_headers, input).await
-        {
-            return resp;
-        }
-        // Upstream failure after retries
-        return StatusCode::BAD_GATEWAY.into_response();
+    if let Some(resp) = fetch_resource_with_retry(
+        app_state,
+        &http_client,
+        &url,
+        cache_key.as_deref(),
+        resource_url,
+        &req_headers,
+        input,
+    )
+    .await
+    {
+        return resp;
     }
-    error!("Url is malformed {}", sanitize_sensitive_info(resource_url));
-    StatusCode::BAD_REQUEST.into_response()
+    // Upstream failure after retries
+    StatusCode::BAD_GATEWAY.into_response()
 }
 
 async fn open_media_server_image_resource(

@@ -87,6 +87,7 @@ incremental = false
 [profile.dev]
 lto = false
 incremental = true
+debug = "line-tables-only"
 codegen-units = 256
 
 [profile.dev-slim]

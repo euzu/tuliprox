@@ -1,5 +1,5 @@
 use crate::{
-    model::{macros, ConfigInputUpdateQuality, ConfigProvider, EpgConfig, PanelApiConfig},
+    model::{macros, ConfigInputUpdateQuality, ConfigProvider, EpgConfig, PanelApiConfig, ResourcePolicy},
     utils::get_csv_file_path,
 };
 use chrono::Utc;
@@ -506,6 +506,9 @@ pub struct ConfigInput {
     pub provider_configs: Option<Vec<Arc<ConfigProvider>>>,
     /// Resolved Stalker device identity + portal hints.
     pub stalker: Option<StalkerInputConfig>,
+    /// Trusted private destinations for resource URLs supplied by this input. `None` and an
+    /// empty policy are equivalent: public destinations only.
+    pub resource_policy: Option<Arc<ResourcePolicy>>,
 }
 
 impl ConfigInput {
@@ -894,6 +897,8 @@ impl ConfigInput {
                 let password = alias.password.clone().or_else(|| cfg.password.clone());
                 StalkerInputConfig { username, password, ..cfg }
             }),
+            // An alias serves the same resources as its main input, so it inherits the policy.
+            resource_policy: self.resource_policy.clone(),
         }
     }
 
@@ -986,6 +991,13 @@ impl From<&ConfigInputDto> for ConfigInput {
                 .stalker
                 .as_ref()
                 .map(|s| StalkerInputConfig::from(s).with_credentials(dto.username.as_ref(), dto.password.as_ref())),
+            // An invalid policy is rejected while the sources config is built; dropping it here
+            // fails closed to public-only instead of silently trusting a partial allowlist.
+            resource_policy: dto
+                .resource_policy
+                .as_ref()
+                .and_then(|policy| ResourcePolicy::from_dto(policy).ok())
+                .map(Arc::new),
         }
     }
 }
@@ -1141,6 +1153,45 @@ mod tests {
         let alias_input = input.as_input(alias);
 
         assert_update_quality_is_preserved(&alias_input);
+    }
+
+    #[test]
+    fn alias_conversion_inherits_the_resource_policy() {
+        let dto = ConfigInputDto {
+            input_type: InputType::M3u,
+            url: "https://provider.example/playlist.m3u".to_string(),
+            resource_policy: Some(shared::model::ResourcePolicyDto {
+                allowed_hosts: vec!["media.home.arpa".to_string()],
+                allowed_networks: vec!["192.168.50.20/32".to_string()],
+            }),
+            aliases: Some(vec![ConfigInputAliasDto {
+                name: "alias".into(),
+                url: "https://alias.example.invalid".to_string(),
+                ..ConfigInputAliasDto::default()
+            }]),
+            ..ConfigInputDto::default()
+        };
+        let input = ConfigInput::from(&dto);
+        let alias = input.aliases.as_ref().and_then(|aliases| aliases.first()).expect("runtime alias");
+
+        let alias_input = input.as_input(alias);
+
+        let policy = alias_input.resource_policy.expect("alias inherits the policy");
+        assert!(policy.allows_host("media.home.arpa"));
+    }
+
+    #[test]
+    fn an_invalid_resource_policy_converts_to_public_only() {
+        // The load path rejects this configuration; the conversion itself must fail closed.
+        let dto = ConfigInputDto {
+            resource_policy: Some(shared::model::ResourcePolicyDto {
+                allowed_hosts: vec!["not a host".to_string()],
+                allowed_networks: Vec::new(),
+            }),
+            ..ConfigInputDto::default()
+        };
+
+        assert!(ConfigInput::from(&dto).resource_policy.is_none());
     }
 
     #[test]

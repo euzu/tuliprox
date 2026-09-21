@@ -2612,8 +2612,9 @@ async fn persist_input_info(
     cluster: XtreamCluster,
     input_name: &str,
     provider_id: u32,
-    props: StreamProperties,
+    mut props: StreamProperties,
 ) -> Result<(), Error> {
+    props.ingest_resource_values(&Arc::from(input_name));
     let xtream_path = xtream_get_file_path(storage_path, cluster);
     if xtream_path.exists() {
         let file_lock = app_config.file_locks.write_lock(&xtream_path).await;
@@ -2656,10 +2657,14 @@ pub async fn persist_input_info_batch(
     storage_path: &Path,
     cluster: XtreamCluster,
     input_name: &str,
-    updates: Vec<(u32, StreamProperties)>,
+    mut updates: Vec<(u32, StreamProperties)>,
 ) -> Result<(), Error> {
     if updates.is_empty() {
         return Ok(());
+    }
+    let input_name_arc: Arc<str> = Arc::from(input_name);
+    for (_, props) in &mut updates {
+        props.ingest_resource_values(&input_name_arc);
     }
     let xtream_path = xtream_get_file_path(storage_path, cluster);
     if xtream_path.exists() {

@@ -471,6 +471,7 @@ fn process_header_internal(
         }
     }
 
+    plih.ingest_resource_values(input_name);
     plih.freeze_input_stream_id();
     plih
 }
@@ -793,7 +794,7 @@ mod test {
     use crate::m3u::{classify_token, parse_m3u, process_header, M3uToken};
     use shared::{
         defaults::default_episode_pattern,
-        model::{PlaylistItemType, StreamProperties, XtreamCluster, REGEX_CACHE},
+        model::{PlaylistItemType, ResourceLocator, StreamProperties, XtreamCluster, REGEX_CACHE},
         utils::{fnv1a_32, parse_season_episode, Internable, CONSTANTS},
     };
     use tokio::io::AsyncWriteExt;
@@ -820,6 +821,12 @@ mod test {
             password: Some("pass".to_string()),
             ..ConfigInput::default()
         }
+    }
+
+    fn assert_resource(locator: &str, input_name: &str, url: &str) {
+        let locator = ResourceLocator::decode(locator).expect("resource locator");
+        assert_eq!(locator.input_name.as_ref(), input_name);
+        assert_eq!(locator.url.as_ref(), url);
     }
 
     #[tokio::test]
@@ -1089,7 +1096,7 @@ https://example.test/series/user/pass/episode-2
         // tvg-id is preserved as epg_channel_id, id falls back to numeric url segment
         assert_eq!(pli.epg_channel_id, Some("abc-seven".intern()));
         assert_eq!(pli.id, "70001".intern());
-        assert_eq!(pli.logo, "https://abc.nz/.images/seven.png".intern());
+        assert_resource(&pli.logo, "hello", "https://abc.nz/.images/seven.png");
         assert_eq!(pli.chno, 7);
         assert_eq!(&*pli.group, "Sydney");
     }
@@ -1105,7 +1112,7 @@ https://example.test/series/user/pass/episode-2
         assert_eq!(pli.title, "Seven".intern());
         assert_eq!(pli.epg_channel_id, Some("abc-seven".intern()));
         assert_eq!(pli.id, "70002".intern());
-        assert_eq!(pli.logo, "https://abc.nz/.images/seven.png".intern());
+        assert_resource(&pli.logo, "hello", "https://abc.nz/.images/seven.png");
         assert_eq!(pli.chno, 7);
         assert_eq!(&*pli.group, "Sydney");
     }
@@ -1121,7 +1128,7 @@ https://example.test/series/user/pass/episode-2
         assert_eq!(pli.name, "UK-NOWTV| SKY CRIME FHD".intern());
         assert_eq!(pli.title, "UK-NOWTV| SKY CRIME FHD".intern());
         assert_eq!(pli.id, "1905905".intern()); // URL id is master; CUID is only fallback
-        assert_eq!(pli.logo, "https://logo.m3uassets.com/skycrime.png".intern());
+        assert_resource(&pli.logo, "test", "https://logo.m3uassets.com/skycrime.png");
         assert_eq!(&*pli.group, "🔪Murder Mystery");
         assert_eq!(pli.epg_channel_id, Some("skycrime.uk".intern()));
     }
