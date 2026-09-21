@@ -463,21 +463,43 @@ fn finalize_playlist_view(
     playlist
 }
 
+// Keep construction and its diagnostic seam private to the processing boundary.
+// Only fixed phase labels can reach the reporter, never dependency error details.
+pub(super) fn build_target_tmdb_client(
+    target: &ConfigTarget,
+    configure: impl FnOnce() -> Result<reqwest::ClientBuilder, TuliproxError>,
+    report: impl FnOnce(&'static str),
+) -> Option<reqwest::Client> {
+    let needs_tmdb = target.effective_curation().is_some_and(|config| {
+        config.enabled && config.tmdb.as_ref().is_some_and(|source| source.enabled && !source.trending.is_empty())
+    });
+    if !needs_tmdb {
+        return None;
+    }
+    let Ok(builder) = configure() else {
+        report("phase=profile_configuration");
+        return None;
+    };
+    if let Ok(client) = builder.build() {
+        Some(client)
+    } else {
+        report("phase=client_build");
+        None
+    }
+}
+
 pub(crate) async fn finalize_prepared_target<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
     ctx: Arc<PlaylistProcessingContext<E, M>>,
     prepared: PreparedTarget,
 ) -> (Result<(), Vec<TuliproxError>>, Vec<TuliproxError>) {
-    let needs_tmdb = prepared.target.effective_curation().is_some_and(|config| {
-        config.enabled && config.tmdb.as_ref().is_some_and(|source| source.enabled && !source.trending.is_empty())
-    });
-    let tmdb_client = if needs_tmdb {
-        // No generic-client fallback: unavailable transport participates in the same admission gate.
-        tuliprox_core::utils::network::request::create_tmdb_client(&ctx.config)
-            .ok()
-            .and_then(|builder| builder.build().ok())
-    } else {
-        None
-    };
+    // No generic-client fallback: unavailable transport participates in the same admission gate.
+    let tmdb_client = build_target_tmdb_client(
+        &prepared.target,
+        || tuliprox_core::utils::network::request::create_tmdb_client(&ctx.config),
+        |phase| {
+            warn!("TMDB discovery client unavailable: target_id={} run_id={} {phase}", prepared.target.id, ctx.run_id);
+        },
+    );
     finalize_prepared_target_with_tmdb(ctx, prepared, tmdb_client.as_ref()).await
 }
 

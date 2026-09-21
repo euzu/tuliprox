@@ -1766,8 +1766,11 @@ Internal guards are independent of `limit` and cannot be configured:
 | Absolute deadline | 15 seconds | 60 seconds | 180 seconds |
 | Decoded bytes consumed | 1 MiB | 8 MiB | 32 MiB |
 
-The dedicated configured HTTP profile preserves proxy/authentication, TLS policy and connect timeout, but never follows
-redirects or replays requests. Client construction failures have no unconfigured fallback. Attempts are counted before
+The dedicated configured HTTP profile preserves proxy/authentication, trusted CAs and connect timeout, but always verifies
+TLS certificates and hostnames, even when `accept_insecure_ssl_certificates: true`. A TLS-inspecting proxy with an untrusted
+certificate cannot complete TMDB discovery until valid CA trust is established. This exception does not change Trakt,
+metadata or playback clients. The profile never follows redirects or replays requests. Client construction failures have
+no unconfigured fallback. Attempts are counted before
 sending, and consumed decoded bytes include duplicate/suffix rows and failed bodies; size detection may consume one extra
 byte on failure, never on success. These are not TLS/compressed-byte or total-memory limits. Deadlines cover headers,
 decoding and normalization, do not restart per page/chunk, and are checked before success. They bound TMDB acquisition,

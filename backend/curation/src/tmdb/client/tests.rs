@@ -1,10 +1,27 @@
 use super::*;
-use crate::test_support::{http_response, TestServer};
+use crate::test_support::{http_response, with_paused_io, TestServer};
 use serde_json::{json, Value};
+use std::cell::Cell;
+use tokio::io::AsyncWriteExt;
 use tuliprox_core::utils::compression_utils::compress_string;
 
 const EMPTY: &str = r#"{"page":1,"total_pages":0,"total_results":0,"results":[]}"#;
 const TOKEN: &str = "private-test-token";
+
+// The paused tests run on one thread. Observe the existing reader's byte debit,
+// not a socket write: only consumption is a valid milestone before advancing time.
+thread_local! {
+    static CONSUMED_BYTES: Cell<usize> = const { Cell::new(0) };
+}
+
+pub(super) fn record_consumed_bytes(bytes: usize) { CONSUMED_BYTES.with(|count| count.set(count.get() + bytes)); }
+
+async fn wait_for_consumed_bytes(expected: usize) {
+    while CONSUMED_BYTES.with(Cell::get) < expected {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(CONSUMED_BYTES.with(Cell::get), expected);
+}
 
 fn selector(limit: u32) -> TmdbTrendingConfig {
     TmdbTrendingConfig {
@@ -407,22 +424,39 @@ async fn tmdb_request_guards_admit_32_and_128_but_never_33_or_129() {
     assert_eq!(server.requests.lock().unwrap().len(), 128);
 }
 
-#[tokio::test]
-async fn tmdb_absolute_deadlines_cover_headers_bodies_and_accumulated_pages() {
-    for headers in [false, true] {
-        let server = TestServer::delayed_bytes(gzip_response(EMPTY), Duration::from_secs(2), headers).await;
-        let mut client = client(&server);
-        client.limits.request_timeout = Duration::from_millis(50);
-        assert_eq!(client.fetch(&selector(1)).await.unwrap_err(), TmdbFailure::Deadline);
-        assert_eq!(server.requests.lock().unwrap().len(), 1);
-    }
-    for batch_bound in [false, true] {
-        let server = TestServer::serve(
-            (1..=4).map(|p| http_response(200, &page(p, 4, &[u32::try_from(p).unwrap()])).into_bytes()).collect(),
-            Duration::from_millis(40),
-            true,
-        )
-        .await;
+#[tokio::test(start_paused = true)]
+async fn tmdb_request_deadline_covers_headers_and_bodies() {
+    with_paused_io(async {
+        for headers in [false, true] {
+            let (server, mut received) = TestServer::controlled().await;
+            let mut client = client(&server);
+            client.limits.request_timeout = Duration::from_millis(50);
+            let mut budget = client.batch_budget();
+            let selected = selector(1);
+            let (result, _stalled) = tokio::join!(client.trending(&selected, &mut budget), async {
+                let mut stream = received.recv().await.unwrap();
+                if headers {
+                    // Consume a useful prefix, proving headers have been processed,
+                    // but keep the declared body incomplete until the request deadline.
+                    let before = CONSUMED_BYTES.with(Cell::get);
+                    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n{").await.unwrap();
+                    wait_for_consumed_bytes(before + 1).await;
+                }
+                tokio::time::advance(Duration::from_millis(50)).await;
+                stream
+            });
+            assert_eq!(result.unwrap_err(), TmdbFailure::Deadline);
+            assert_eq!(budget.requests, 1);
+            assert_eq!(budget.bytes, usize::from(headers));
+            assert_eq!(server.requests.lock().unwrap().len(), 1);
+        }
+    })
+    .await;
+}
+
+async fn accumulated_deadline(batch_bound: bool) {
+    with_paused_io(async {
+        let (server, mut received) = TestServer::controlled().await;
         let mut client = client(&server);
         client.limits.request_timeout = Duration::from_secs(1);
         if batch_bound {
@@ -431,56 +465,73 @@ async fn tmdb_absolute_deadlines_cover_headers_bodies_and_accumulated_pages() {
             client.limits.selector_timeout = Duration::from_millis(110);
         }
         let mut budget = client.batch_budget();
-        assert_eq!(client.trending(&selector(100), &mut budget).await.unwrap_err(), TmdbFailure::Deadline);
-        assert!(budget.requests <= 3 && budget.requests >= 2);
+        let selected = selector(100);
+        let (result, _stalled) = tokio::join!(client.trending(&selected, &mut budget), async {
+            for p in 1..=2 {
+                let mut stream = received.recv().await.unwrap();
+                tokio::time::advance(Duration::from_millis(40)).await;
+                stream
+                    .write_all(http_response(200, &page(p, 4, &[u32::try_from(p).unwrap()])).as_bytes())
+                    .await
+                    .unwrap();
+            }
+            // GET3 proves pages 1 and 2 were consumed/normalized at t=40/80,
+            // not merely written by the server. Keep page 3 incomplete at t=110.
+            let mut stream = received.recv().await.unwrap();
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n").await.unwrap();
+            tokio::time::advance(Duration::from_millis(30)).await;
+            stream
+        });
+        assert_eq!(result.unwrap_err(), TmdbFailure::Deadline);
+        assert_eq!(budget.requests, 3);
+        assert_eq!(budget.bytes, page(1, 4, &[1]).len() + page(2, 4, &[2]).len());
         if batch_bound {
-            let requests = budget.requests;
-            assert_eq!(client.trending(&selector(100), &mut budget).await.unwrap_err(), TmdbFailure::Deadline);
-            assert_eq!(budget.requests, requests);
+            assert_eq!(client.trending(&selected, &mut budget).await.unwrap_err(), TmdbFailure::Deadline);
+            assert_eq!(budget.requests, 3, "pending selector cannot reset the batch clock");
         }
-    }
+        let requests = server.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3, "no fourth page or pending selector traffic");
+        for (index, request) in requests.iter().enumerate() {
+            assert!(request.starts_with(&format!("GET /3/trending/movie/week?language=en-US&page={} ", index + 1)));
+        }
+    })
+    .await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
+async fn tmdb_selector_deadline_accumulates_pages() { accumulated_deadline(false).await; }
+
+#[tokio::test(start_paused = true)]
+async fn tmdb_batch_deadline_accumulates_pages_and_refuses_pending_selectors() { accumulated_deadline(true).await; }
+
+#[tokio::test(start_paused = true)]
 async fn tmdb_slow_chunks_do_not_reset_deadline_or_accept_a_useful_json_prefix() {
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::TcpListener,
-    };
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let origin = format!("http://{}/", listener.local_addr().unwrap());
-    let task = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
-        let mut request = Vec::new();
-        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
-            let mut buffer = [0; 1024];
-            let n = stream.read(&mut buffer).await.unwrap();
-            assert!(n > 0);
-            request.extend_from_slice(&buffer[..n]);
-        }
-        let body = padded(&page(1, 1, &[7]), 1000);
-        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n").await.unwrap();
-        for chunk in body.as_bytes().chunks(100) {
-            if stream.write_all(chunk).await.is_err() {
-                break;
+    with_paused_io(async {
+        let (server, mut received) = TestServer::controlled().await;
+        let mut client = client(&server);
+        client.limits.request_timeout = Duration::from_millis(100);
+        let mut budget = client.batch_budget();
+        let selected = selector(1);
+        let before = CONSUMED_BYTES.with(Cell::get);
+        let (result, _stalled) = tokio::join!(client.trending(&selected, &mut budget), async {
+            let mut stream = received.recv().await.unwrap();
+            let body = padded(&page(1, 1, &[7]), 1000);
+            assert!(serde_json::from_str::<Value>(&body[..100]).is_ok(), "first chunk is already useful JSON");
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n").await.unwrap();
+            for (index, chunk) in body.as_bytes().chunks(100).take(3).enumerate() {
+                tokio::time::advance(Duration::from_millis(30)).await;
+                stream.write_all(chunk).await.unwrap();
+                wait_for_consumed_bytes(before + (index + 1) * 100).await;
             }
-            tokio::time::sleep(Duration::from_millis(30)).await;
-        }
-    });
-    let http = Client::builder()
-        .no_proxy()
-        .retry(reqwest::retry::never())
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap();
-    let mut client =
-        TmdbClient::for_test(&http, &TmdbCurationApiConfig { access_token: TOKEN.into() }, &origin).unwrap();
-    client.limits.request_timeout = Duration::from_millis(100);
-    let mut budget = client.batch_budget();
-    assert_eq!(client.trending(&selector(1), &mut budget).await.unwrap_err(), TmdbFailure::Deadline);
-    assert!(budget.bytes >= 100 && budget.bytes < 1000);
-    assert_eq!(budget.requests, 1);
-    task.abort();
+            tokio::time::advance(Duration::from_millis(10)).await;
+            stream
+        });
+        assert_eq!(result.unwrap_err(), TmdbFailure::Deadline);
+        assert_eq!(budget.bytes, 300, "consumed at t=30/60/90, never accepted as a complete body");
+        assert_eq!(budget.requests, 1);
+        assert_eq!(server.requests.lock().unwrap().len(), 1);
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -514,7 +565,7 @@ async fn tmdb_transport_failure_debits_the_admitted_attempt_without_resetting_th
     assert_eq!(budget.requests, 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn tmdb_batch_deadline_blocks_admission_with_matching_prefix_and_completed_sibling() {
     use crate::kernel::{CurationIncompleteReason, CurationRunOutcome, CurationSelectorKey, SelectorOutcome};
     use shared::{
@@ -524,16 +575,7 @@ async fn tmdb_batch_deadline_blocks_admission_with_matching_prefix_and_completed
         },
         utils::{hash_string, Internable},
     };
-    let server = TestServer::serve(
-        vec![
-            http_response(200, &page(1, 1, &[7])).into_bytes(),
-            http_response(200, &page(1, 9, &[8])).into_bytes(),
-            http_response(200, &page(2, 9, &[7])).into_bytes(),
-        ],
-        Duration::from_millis(60),
-        true,
-    )
-    .await;
+    let (server, mut received) = TestServer::controlled().await;
     let mut client = client(&server);
     client.limits.batch_timeout = Duration::from_millis(150);
     let dto: CurationConfigDto = serde_json::from_value(json!({"tmdb":{"trending":[
@@ -564,20 +606,34 @@ async fn tmdb_batch_deadline_blocks_admission_with_matching_prefix_and_completed
             })
             .collect(),
     }];
-    let outcomes = crate::tmdb::evaluate_selectors(
-        Ok(client),
-        &playlist,
-        "deadline",
-        &config,
-        &[CurationSelectorKey(0), CurationSelectorKey(1), CurationSelectorKey(2)],
-    )
+    let keys = [CurationSelectorKey(0), CurationSelectorKey(1), CurationSelectorKey(2)];
+    let before = CONSUMED_BYTES.with(Cell::get);
+    let (outcomes, _stalled) = with_paused_io(async {
+        tokio::join!(crate::tmdb::evaluate_selectors(Ok(client), &playlist, "deadline", &config, &keys), async {
+            for body in [page(1, 1, &[7]), page(1, 9, &[8])] {
+                let mut stream = received.recv().await.unwrap();
+                tokio::time::advance(Duration::from_millis(60)).await;
+                stream.write_all(http_response(200, &body).as_bytes()).await.unwrap();
+            }
+            // Third GET proves sibling completion and a matching prefix in the next selector.
+            let mut stream = received.recv().await.unwrap();
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n").await.unwrap();
+            tokio::time::advance(Duration::from_millis(30)).await;
+            stream
+        })
+    })
     .await;
+    assert_eq!(CONSUMED_BYTES.with(Cell::get) - before, page(1, 1, &[7]).len() + page(1, 9, &[8]).len());
     assert!(matches!(&outcomes[0], SelectorOutcome::Complete { memberships, .. } if memberships.len() == 1));
     for outcome in &outcomes[1..] {
         assert!(matches!(outcome, SelectorOutcome::Incomplete { reason: CurationIncompleteReason::Interrupted, .. }));
     }
     assert!(matches!(crate::coordinator::complete_evaluation(outcomes), CurationRunOutcome::Failed(_)));
-    assert_eq!(server.requests.lock().unwrap().len(), 3, "pending sibling does not reset the batch clock");
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3, "pending sibling does not reset the batch clock");
+    for (request, page) in requests.iter().zip([1, 1, 2]) {
+        assert!(request.starts_with(&format!("GET /3/trending/movie/week?language=en-US&page={page} ")));
+    }
 }
 
 #[tokio::test(start_paused = true)]

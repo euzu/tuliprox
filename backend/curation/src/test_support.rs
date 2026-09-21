@@ -1,10 +1,12 @@
 use std::{
+    future::{poll_fn, Future},
     sync::{Arc, Mutex},
     time::Duration,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
+    sync::mpsc,
     task::JoinHandle,
 };
 
@@ -41,23 +43,10 @@ impl TestServer {
         let recorded = Arc::clone(&requests);
         let task = tokio::spawn(async move {
             while let Ok((mut stream, _)) = listener.accept().await {
-                let mut request = Vec::new();
-                let mut buffer = [0; 1024];
-                loop {
-                    let count =
-                        tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buffer)).await.unwrap().unwrap();
-                    if count == 0 {
-                        break;
-                    }
-                    request.extend_from_slice(&buffer[..count]);
-                    assert!(request.len() <= 16384);
-                    if request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
-                        break;
-                    }
-                }
+                let request = read_request(&mut stream).await;
                 let index = {
                     let mut requests = recorded.lock().unwrap();
-                    requests.push(String::from_utf8(request).unwrap());
+                    requests.push(request);
                     requests.len() - 1
                 };
                 let response = &responses[index.min(responses.len() - 1)];
@@ -73,6 +62,55 @@ impl TestServer {
         });
         Self { url, requests, task }
     }
+
+    /// Each received stream is a request-observed milestone. The test owns when
+    /// headers/body/chunks are released, and keeps stalled streams open until timeout.
+    pub(crate) async fn controlled() -> (Self, mpsc::UnboundedReceiver<TcpStream>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&requests);
+        let (send, receive) = mpsc::unbounded_channel();
+        let task = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let request = read_request(&mut stream).await;
+                recorded.lock().unwrap().push(request);
+                if send.send(stream).is_err() {
+                    break;
+                }
+            }
+        });
+        (Self { url, requests, task }, receive)
+    }
+}
+
+async fn read_request(stream: &mut TcpStream) -> String {
+    let mut request = Vec::new();
+    let mut buffer = [0; 1024];
+    while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+        let count = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buffer)).await.unwrap().unwrap();
+        assert!(count > 0, "connection closed before request headers");
+        request.extend_from_slice(&buffer[..count]);
+        assert!(request.len() <= 16384);
+    }
+    String::from_utf8(request).unwrap()
+}
+
+/// Keep the paused runtime ready while real I/O progresses, preventing automatic
+/// clock advance. This real-time watchdog also bounds missing milestones. All
+/// acquisition/controller futures are inline, so panic drops them, not detached tasks.
+pub(crate) async fn with_paused_io<T>(future: impl Future<Output = T>) -> T {
+    let started = std::time::Instant::now();
+    let mut future = std::pin::pin!(future);
+    poll_fn(|cx| {
+        assert!(started.elapsed() < Duration::from_secs(5), "paused-I/O test stalled (real-time watchdog)");
+        let result = future.as_mut().poll(cx);
+        if result.is_pending() {
+            cx.waker().wake_by_ref();
+        }
+        result
+    })
+    .await
 }
 
 impl Drop for TestServer {

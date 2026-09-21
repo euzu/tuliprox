@@ -1,6 +1,8 @@
 //! Real HTTPS adapters -> eligible catalog -> target finalization -> disk/cache/watch publication.
 //! DNS overrides and a fixture-only CA keep the production TMDB origin and certificate validation intact.
+mod client_diagnostics;
 mod item_limit;
+mod tls_profile;
 use super::{
     curation_effect_gate::{app_config, file_snapshot, processing_context},
     *,
@@ -34,6 +36,7 @@ const EMPTY: &str = r#"{"page":1,"total_pages":0,"total_results":0,"results":[]}
 struct DiscoveryServer {
     client: reqwest::Client,
     tmdb_client: reqwest::Client,
+    certificate: reqwest::Certificate,
     address: std::net::SocketAddr,
     replies: Arc<StdMutex<BTreeMap<String, Vec<u8>>>>,
     requests: Arc<StdMutex<Vec<String>>>,
@@ -101,7 +104,15 @@ impl DiscoveryServer {
                 let _ = stream.shutdown().await;
             }
         });
-        Self { client, tmdb_client, address, replies, requests, task }
+        Self {
+            client,
+            tmdb_client,
+            certificate: reqwest::Certificate::from_der(cert.cert.der()).unwrap(),
+            address,
+            replies,
+            requests,
+            task,
+        }
     }
 
     fn reply(&self, path: &str, status: u16, body: &str) { self.reply_raw(path, response(status, body)); }

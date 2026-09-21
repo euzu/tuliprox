@@ -116,6 +116,8 @@ impl<R: AsyncRead + Unpin> AsyncRead for CountedReader<'_, R> {
         let consumed = buf.filled().len() - before;
         *this.selector_bytes += consumed;
         *this.batch_bytes += consumed;
+        #[cfg(test)]
+        tests::record_consumed_bytes(consumed);
         result
     }
 }

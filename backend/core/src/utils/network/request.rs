@@ -2968,7 +2968,12 @@ pub fn create_tmdb_client(cfg: &AppConfig) -> Result<reqwest::ClientBuilder, Tul
         }
         reqwest::Proxy::all(url.as_str()).map_err(|_| invalid_proxy())?;
     }
-    let mut builder = configured_client(&config, Policy::none()).retry(reqwest::retry::never()).http1_only();
+    // Discovery carries its own Bearer credential: never inherit the generic TLS bypass.
+    // Keep configured proxy/auth and trusted roots, including hostname verification.
+    let mut builder = configured_client(&config, Policy::none())
+        .danger_accept_invalid_certs(false)
+        .retry(reqwest::retry::never())
+        .http1_only();
     if config.connect_timeout_secs > 0 {
         builder = builder.connect_timeout(Duration::from_secs(u64::from(config.connect_timeout_secs)));
     }
