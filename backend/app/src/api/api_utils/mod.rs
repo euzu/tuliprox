@@ -1625,6 +1625,15 @@ async fn create_stream_response_details(
             } else {
                 false
             };
+            let is_fallback_provider = force_provider
+                .is_some_and(|forced| guard_provider_name.as_ref().is_some_and(|allocated| allocated != forced));
+            if is_fallback_provider {
+                if let Some(token) = session_owner {
+                    let _ =
+                        app_state.active_users.update_session_provider_headers(username, token, &HashMap::new()).await;
+                }
+            }
+            let session_headers = if is_fallback_provider { None } else { session_headers };
             let (stream, stream_info, provider_session_headers, reconnect_flag) =
                 if defer_provider_stream_until_grace_check {
                     debug_if_enabled!(
@@ -2211,6 +2220,23 @@ pub async fn force_provider_stream_response(
                         &user_session.token,
                         Arc::clone(allocated_provider),
                         new_stream_url,
+                    )
+                    .await;
+                app_state
+                    .active_users
+                    .update_session_provider_headers(
+                        &ctx.user.username,
+                        &user_session.token,
+                        &stream_details.provider_session_headers,
+                    )
+                    .await;
+            } else if !stream_details.provider_session_headers.is_empty() {
+                app_state
+                    .active_users
+                    .update_session_provider_headers(
+                        &ctx.user.username,
+                        &user_session.token,
+                        &stream_details.provider_session_headers,
                     )
                     .await;
             }

@@ -5,6 +5,7 @@ use crate::{
 };
 use serde_json::Value;
 use std::collections::HashMap;
+use url::Url;
 
 /// Validate the persisted fixture configuration before any playback is started.
 ///
@@ -90,9 +91,12 @@ fn validate_provider_pool(contract: &PolicyContract, config: &Value) -> Result<(
         )));
     }
     for (expected, (url, limit)) in contract.provider_pool.iter().zip(configured) {
-        if !url.is_some_and(|url| url.contains(&format!("account={}", expected.name)))
-            || limit != Some(u64::from(expected.max_connections))
-        {
+        let account_matches = url.is_some_and(|raw| {
+            Url::parse(raw).is_ok_and(|parsed| {
+                parsed.query_pairs().find(|(key, _)| key == "account").is_some_and(|(_, value)| value == expected.name)
+            })
+        });
+        if !account_matches || limit != Some(u64::from(expected.max_connections)) {
             return Err(TestkitError::Configuration(format!(
                 "fixture provider pool account mismatch for {}",
                 expected.name
@@ -307,5 +311,91 @@ mod tests {
             "inputs": [{"name": "other-origin"}]
         });
         assert!(validate_fixture_policy(&contract_with_provider, &config_missing).is_err());
+    }
+
+    #[test]
+    fn validates_provider_pool() {
+        use crate::config::ProviderPoolAccount;
+
+        let mut contract_with_pool = contract();
+        contract_with_pool.provider_pool = vec![
+            ProviderPoolAccount { name: "alpha".to_owned(), max_connections: 2 },
+            ProviderPoolAccount { name: "beta".to_owned(), max_connections: 3 },
+        ];
+
+        let mut config_matching = fixture();
+        config_matching["sources"] = json!({
+            "inputs": [{
+                "name": "testkit-origin",
+                "url": "http://127.0.0.1:8080/catalog/input.m3u?run=r1&account=alpha",
+                "max_connections": 2,
+                "aliases": [{
+                    "name": "beta-alias",
+                    "url": "http://127.0.0.1:8080/catalog/input.m3u?run=r1&account=beta",
+                    "max_connections": 3
+                }]
+            }]
+        });
+        assert!(validate_fixture_policy(&contract_with_pool, &config_matching).is_ok());
+
+        let mut config_encoded = fixture();
+        config_encoded["sources"] = json!({
+            "inputs": [{
+                "name": "testkit-origin",
+                "url": "http://127.0.0.1:8080/catalog/input.m3u?run=r1&account=al%70ha",
+                "max_connections": 2,
+                "aliases": [{
+                    "name": "beta-alias",
+                    "url": "http://127.0.0.1:8080/catalog/input.m3u?run=r1&account=beta",
+                    "max_connections": 3
+                }]
+            }]
+        });
+        assert!(validate_fixture_policy(&contract_with_pool, &config_encoded).is_ok());
+
+        let mut config_substring = fixture();
+        config_substring["sources"] = json!({
+            "inputs": [{
+                "name": "testkit-origin",
+                "url": "http://127.0.0.1:8080/catalog/input.m3u?run=r1&account=alpha-extra",
+                "max_connections": 2,
+                "aliases": [{
+                    "name": "beta-alias",
+                    "url": "http://127.0.0.1:8080/catalog/input.m3u?run=r1&account=beta",
+                    "max_connections": 3
+                }]
+            }]
+        });
+        assert!(validate_fixture_policy(&contract_with_pool, &config_substring).is_err());
+
+        let mut config_wrong_key = fixture();
+        config_wrong_key["sources"] = json!({
+            "inputs": [{
+                "name": "testkit-origin",
+                "url": "http://127.0.0.1:8080/catalog/input.m3u?run=r1&other_account=alpha",
+                "max_connections": 2,
+                "aliases": [{
+                    "name": "beta-alias",
+                    "url": "http://127.0.0.1:8080/catalog/input.m3u?run=r1&account=beta",
+                    "max_connections": 3
+                }]
+            }]
+        });
+        assert!(validate_fixture_policy(&contract_with_pool, &config_wrong_key).is_err());
+
+        let mut config_limit_mismatch = fixture();
+        config_limit_mismatch["sources"] = json!({
+            "inputs": [{
+                "name": "testkit-origin",
+                "url": "http://127.0.0.1:8080/catalog/input.m3u?run=r1&account=alpha",
+                "max_connections": 1,
+                "aliases": [{
+                    "name": "beta-alias",
+                    "url": "http://127.0.0.1:8080/catalog/input.m3u?run=r1&account=beta",
+                    "max_connections": 3
+                }]
+            }]
+        });
+        assert!(validate_fixture_policy(&contract_with_pool, &config_limit_mismatch).is_err());
     }
 }

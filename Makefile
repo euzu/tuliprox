@@ -17,8 +17,14 @@ WASM_BINDGEN ?= $(call resolve_tool,wasm-bindgen)
 CARGO_SET_VERSION ?= $(call resolve_tool,cargo-set-version)
 CARGO_MACHETE ?= $(call resolve_tool,cargo-machete)
 MDBOOK ?= $(call resolve_tool,mdbook)
-PINNED_NIGHTLY_TOOLCHAIN := nightly-2026-05-01
-NIGHTLY_TOOLCHAIN ?= $(shell if $(RUSTUP) toolchain list 2>/dev/null | grep -q '^$(PINNED_NIGHTLY_TOOLCHAIN)'; then echo $(PINNED_NIGHTLY_TOOLCHAIN); else echo nightly; fi)
+PINNED_NIGHTLY_TOOLCHAIN := nightly-2026-09-21
+NIGHTLY_TOOLCHAIN ?= $(shell \
+	if $(RUSTUP) toolchain list 2>/dev/null | grep -q '^$(PINNED_NIGHTLY_TOOLCHAIN)'; then \
+		echo $(PINNED_NIGHTLY_TOOLCHAIN); \
+	else \
+		INSTALLED_NIGHTLY=$$($(RUSTUP) toolchain list 2>/dev/null | grep '^nightly' | head -n1 | cut -d' ' -f1 | sed -E 's/-(x86_64|aarch64|arm|i686|riscv64).*//'); \
+		if [ -n "$$INSTALLED_NIGHTLY" ]; then echo "$$INSTALLED_NIGHTLY"; else echo nightly; fi; \
+	fi)
 
 # Explicitly force stable/nightly to avoid system-wide overrides
 CARGO_STABLE     := $(CARGO) +stable
@@ -60,10 +66,10 @@ help: ## Display this help
 install-tools: rustup install-nightly-fmt cross trunk wasm-bindgen cargo-set-version cargo-machete mdbook markdownlint ## Install required development tools
 
 .PHONY: install-nightly-fmt
-install-nightly-fmt: ## Install nightly toolchain specifically for formatting
-	@echo "📦 Ensuring nightly rustfmt is available"
-	@$(RUSTUP) toolchain install $(NIGHTLY_TOOLCHAIN) --component rustfmt --profile minimal
-	@echo "✅ Nightly rustfmt ready"
+install-nightly-fmt: ## Install nightly toolchain specifically for formatting and clippy
+	@echo "📦 Ensuring nightly rustfmt and clippy are available"
+	@$(RUSTUP) toolchain install $(NIGHTLY_TOOLCHAIN) --component rustfmt --component clippy --profile minimal
+	@echo "✅ Nightly rustfmt and clippy ready"
 
 .PHONY: rustup
 rustup: $(RUSTUP) ## Install Rust toolchain and cargo

@@ -26,7 +26,8 @@ sudo apt-get install -y --no-install-recommends \
   clang \
   lld \
   mold \
-  jq
+  jq \
+  ffmpeg
 
 if ! command -v gh >/dev/null 2>&1; then
   echo "==> Installing GitHub CLI"
@@ -41,23 +42,23 @@ fi
 
 sudo rm -rf /var/lib/apt/lists/*
 
-RUST_VERSION="1.89.0"
-RUST_NIGHTLY_VERSION="nightly-2026-05-01"
-CARGO_BINSTALL_VERSION="1.15.7"
+RUST_VERSION="stable"
+RUST_NIGHTLY_VERSION="nightly-2026-09-21"
+CARGO_BINSTALL_VERSION="1.23.0"
 TRUNK_VERSION="0.21.14"
-WASM_BINDGEN_CLI_VERSION="0.2.104"
+WASM_BINDGEN_CLI_VERSION="0.2.127"
 CROSS_VERSION="0.2.5"
-CARGO_EDIT_VERSION="0.13.7"
-MDBOOK_VERSION="0.4.52"
+CARGO_EDIT_VERSION="0.13.13"
+MDBOOK_VERSION="0.5.4"
 CARGO_WATCH_VERSION="8.5.3"
-CARGO_LLVM_COV_VERSION="0.6.21"
-CARGO_DENY_VERSION="0.18.3"
-CARGO_MACHETE_VERSION="0.8.0"
-MARKDOWNLINT_CLI2_VERSION="0.18.1"
+CARGO_LLVM_COV_VERSION="0.9.1"
+CARGO_DENY_VERSION="0.20.2"
+CARGO_MACHETE_VERSION="0.9.2"
+MARKDOWNLINT_CLI2_VERSION="0.23.2"
 rustup toolchain install "${RUST_VERSION}" --profile minimal --component clippy --component rustfmt
 rustup default "${RUST_VERSION}"
 
-rustup toolchain install "${RUST_NIGHTLY_VERSION}" --profile minimal --component rustfmt
+rustup toolchain install "${RUST_NIGHTLY_VERSION}" --profile minimal --component rustfmt --component clippy
 
 rustup target add \
   wasm32-unknown-unknown \
@@ -111,6 +112,11 @@ cargo binstall -y \
   "cargo-llvm-cov@${CARGO_LLVM_COV_VERSION}" \
   "cargo-deny@${CARGO_DENY_VERSION}" \
   "cargo-machete@${CARGO_MACHETE_VERSION}"
+
+echo "==> Installing wasm tools 128 (wasm-opt)"
+chmod +x ./bin/install_wasm_tools.sh
+WASM_TOOLS_BIN="$(./bin/install_wasm_tools.sh 128)"
+sudo ln -sf "${WASM_TOOLS_BIN}/wasm-opt" /usr/local/bin/wasm-opt
 
 echo "==> Installing markdownlint-cli2"
 npm install -g "markdownlint-cli2@${MARKDOWNLINT_CLI2_VERSION}"

@@ -3929,6 +3929,169 @@ async fn resolve_streaming_strategy_rewrites_url_on_fallback_even_when_accept_re
 }
 
 #[tokio::test]
+async fn create_stream_response_details_clears_headers_on_fallback_provider() {
+    let app_state = create_test_dual_provider_app_state();
+    let input_name = "provider_1".intern();
+    let input =
+        app_state.app_config.sources.load().get_input_by_name(&input_name).cloned().unwrap_or_else(|| unreachable!());
+    let pinned_provider = "provider_1".intern();
+    let busy_addr: SocketAddr = "127.0.0.1:55306".parse().unwrap_or_else(|_| unreachable!());
+    let reacquire_addr: SocketAddr = "127.0.0.1:55307".parse().unwrap_or_else(|_| unreachable!());
+    let stream_url = "http://provider-1.example/movie/user1/pass1/1.mkv";
+
+    let user = load_test_user("test-fallback-headers-user");
+    let session_token = "sess-fallback-headers-1";
+    let initial_headers = HashMap::from([("cookie".to_string(), "old_prov_sess=1".to_string())]);
+    let created = app_state
+        .active_users
+        .create_user_session(crate::api::model::CreateUserSessionParams {
+            user: &user,
+            session_token,
+            virtual_id: 1,
+            provider: &pinned_provider,
+            stream_url,
+            addr: &reacquire_addr,
+            connection_permission: UserConnectionPermission::Allowed,
+            connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+            socket_bound: false,
+        })
+        .await;
+    assert!(!created.is_empty());
+    app_state.active_users.update_session_provider_headers(&user.username, session_token, &initial_headers).await;
+
+    let busy = app_state.active_provider.acquire_exact_connection_with_grace(
+        &pinned_provider,
+        &busy_addr,
+        false,
+        0,
+        crate::api::model::ConnectionKind::Normal,
+    );
+    assert!(busy.is_some(), "setup should occupy the pinned provider");
+
+    let channel = create_test_live_channel(stream_url);
+    let details = create_stream_response_details(
+        &app_state,
+        &get_stream_options(&app_state.app_config),
+        stream_url,
+        &user.username,
+        &create_test_fingerprint(reacquire_addr),
+        &HeaderMap::new(),
+        &input,
+        &channel,
+        PlaylistItemType::Video,
+        crate::api::model::ProviderContentRepresentationMode::Identity,
+        false,
+        UserConnectionPermission::Allowed,
+        Some(&pinned_provider),
+        true,
+        false,
+        VirtualId::new(channel.virtual_id),
+        0,
+        crate::api::model::ConnectionKind::Normal,
+        true,
+        Some(session_token),
+        Some(&initial_headers),
+        true,
+        None,
+        None,
+    )
+    .await
+    .unwrap_or_else(|err| panic!("create_stream_response_details should succeed: {err}"));
+
+    assert_eq!(details.provider_name.as_deref(), Some("provider_2"));
+    assert!(details.session_headers.is_none(), "fallback request should not pass pinned provider session headers");
+
+    let session = app_state
+        .active_users
+        .get_and_update_user_session(&user.username, session_token)
+        .await
+        .expect("session should exist");
+    assert!(
+        session.provider_session_headers.is_empty(),
+        "stored session headers should be cleared before opening fallback request"
+    );
+
+    app_state.active_provider.release_connection(&busy_addr);
+    app_state.active_provider.release_connection(&reacquire_addr);
+}
+
+#[tokio::test]
+async fn force_provider_stream_response_fallback_clears_stored_headers_when_pinned_exhausted() {
+    let app_state = create_test_dual_provider_app_state();
+    let input_name = "provider_1".intern();
+    let input =
+        app_state.app_config.sources.load().get_input_by_name(&input_name).cloned().unwrap_or_else(|| unreachable!());
+    let pinned_provider = "provider_1".intern();
+    let busy_addr: SocketAddr = "127.0.0.1:55308".parse().unwrap_or_else(|_| unreachable!());
+    let reacquire_addr: SocketAddr = "127.0.0.1:55309".parse().unwrap_or_else(|_| unreachable!());
+    let stream_url = "http://provider-1.example/movie/user1/pass1/1.mkv";
+
+    let user = load_test_user("test-fallback-force-user");
+    let session_token = "sess-fallback-force-1";
+    let initial_headers = HashMap::from([("cookie".to_string(), "old_pinned_token=abc".to_string())]);
+    let created = app_state
+        .active_users
+        .create_user_session(crate::api::model::CreateUserSessionParams {
+            user: &user,
+            session_token,
+            virtual_id: 1,
+            provider: &pinned_provider,
+            stream_url,
+            addr: &reacquire_addr,
+            connection_permission: UserConnectionPermission::Allowed,
+            connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+            socket_bound: false,
+        })
+        .await;
+    assert!(!created.is_empty());
+    app_state.active_users.update_session_provider_headers(&user.username, session_token, &initial_headers).await;
+
+    let busy = app_state.active_provider.acquire_exact_connection_with_grace(
+        &pinned_provider,
+        &busy_addr,
+        false,
+        0,
+        crate::api::model::ConnectionKind::Normal,
+    );
+    assert!(busy.is_some(), "setup should occupy the pinned provider");
+
+    let session = app_state
+        .active_users
+        .get_and_update_user_session(&user.username, session_token)
+        .await
+        .expect("session should exist");
+
+    let channel = create_test_live_channel(stream_url);
+    let _response = force_provider_stream_response(
+        &create_test_fingerprint(reacquire_addr),
+        &app_state,
+        &session,
+        channel,
+        ForceStreamRequestContext {
+            req_headers: &HeaderMap::new(),
+            input: &input,
+            user: &user,
+            session_reservation_ttl_secs: 0,
+            content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+        },
+        None,
+    )
+    .await;
+
+    let updated_session = app_state
+        .active_users
+        .get_and_update_user_session(&user.username, session_token)
+        .await
+        .expect("session should exist");
+    assert!(
+        updated_session.provider_session_headers.is_empty(),
+        "stored session headers must be cleared when fallback request differs from pinned provider"
+    );
+
+    app_state.active_provider.release_connection(&busy_addr);
+}
+
+#[tokio::test]
 async fn resolve_streaming_strategy_rewrites_stale_alias_url_to_selected_main_provider() {
     let app_state = create_test_dual_provider_app_state();
     let input_name = "provider_1".intern();
