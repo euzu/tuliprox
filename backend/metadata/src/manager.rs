@@ -2589,7 +2589,36 @@ impl InputWorker {
         false
     }
 
-    // Changed to static method
+    fn ingest_vod_resources(updates: &mut [(ProviderIdType, VideoStreamProperties)], input_name: &Arc<str>) {
+        for (_, props) in updates {
+            let mut value = StreamProperties::Video(Box::new(std::mem::take(props)));
+            value.normalize_internal_resource_values(input_name);
+            if let StreamProperties::Video(normalized) = value {
+                *props = *normalized;
+            }
+        }
+    }
+
+    fn ingest_series_resources(updates: &mut [(ProviderIdType, SeriesStreamProperties)], input_name: &Arc<str>) {
+        for (_, props) in updates {
+            let mut value = StreamProperties::Series(Box::new(std::mem::take(props)));
+            value.normalize_internal_resource_values(input_name);
+            if let StreamProperties::Series(normalized) = value {
+                *props = *normalized;
+            }
+        }
+    }
+
+    fn ingest_live_resources(updates: &mut [(ProviderIdType, LiveStreamProperties)], input_name: &Arc<str>) {
+        for (_, props) in updates {
+            let mut value = StreamProperties::Live(Box::new(std::mem::take(props)));
+            value.normalize_internal_resource_values(input_name);
+            if let StreamProperties::Live(normalized) = value {
+                *props = *normalized;
+            }
+        }
+    }
+
     async fn flush_batch_static<E: EventSink + Clone + 'static>(
         input_name: &str,
         bound_ctx: Option<&MetadataUpdateCtx<E>>,
@@ -2602,9 +2631,13 @@ impl InputWorker {
         let Some(ctx) = bound_ctx else { return };
         let app_config = &ctx.app_config;
         let cfg = app_config.config.load();
-        let vod_updates = batch_buffer.take_vod_updates();
-        let series_updates = batch_buffer.take_series_updates();
-        let live_updates = batch_buffer.take_live_updates();
+        let mut vod_updates = batch_buffer.take_vod_updates();
+        let mut series_updates = batch_buffer.take_series_updates();
+        let mut live_updates = batch_buffer.take_live_updates();
+        let input_name_arc: Arc<str> = Arc::from(input_name);
+        Self::ingest_vod_resources(&mut vod_updates, &input_name_arc);
+        Self::ingest_series_resources(&mut series_updates, &input_name_arc);
+        Self::ingest_live_resources(&mut live_updates, &input_name_arc);
 
         if vod_updates.is_empty() && series_updates.is_empty() && live_updates.is_empty() {
             return;

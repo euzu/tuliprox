@@ -4,6 +4,38 @@
 
 ## ⚠️ Breaking Changes
 
+- **Proxied resource URLs are now restricted to public destinations by default.** Tuliprox proxies external
+  resource URLs that come from provider, playlist, and EPG content: channel and small logos, EPG channel and
+  programme icons, cover images, posters, and backdrops. These requests now enforce a destination policy on every
+  route that serves them (`/resource/m3u/...`, the Xtream resource routes, `/resource/epg/...`, and
+  `/api/v1/playlist/resource/...`), where previously three of them fetched any destination reachable by the
+  configured HTTP client.
+  - A resource URL whose DNS host name resolves to a private address (RFC 1918 or IPv6 ULA) is rejected unless the
+    input that supplied it lists the exact host name in `resource_policy.allowed_hosts` **and** the address in
+    `resource_policy.allowed_networks`. A private IP literal requires only a matching
+    `resource_policy.allowed_networks` entry because IP literals are not valid `allowed_hosts` values. Add the policy
+    to the input that provides the logo or icon; for icons that `logo_override` copies out of EPG, that is the EPG
+    input.
+  - Loopback, link-local, cloud-metadata, CGNAT, multicast, and reserved addresses stay blocked with or without a
+    policy. Redirects are re-checked on every hop and are bounded.
+  - Resource ownership is stored generically with each URL, including nested cover, poster, backdrop, and episode
+    image fields. Legacy raw playlist/Xtream item resources use their containing item's input; legacy EPG resources
+    without an authoritative input remain public-only until regenerated.
+  - `resource://` is an internal reserved scheme. Provider data and mapping configuration must never supply it;
+    such values are rejected rather than interpreted as authorization claims.
+  - The canonical input name is the authorization identity of a resource origin. Configured input and alias names
+    must be non-empty, globally unique strings; a configuration with duplicate input names, duplicate alias names,
+    or an alias name that shadows an input name is now rejected while loading. Internal IDs are managed separately.
+  - The resource cache is keyed by the policy that authorized the entry, so an entry fetched under one policy is
+    never served to another. The cache starts cold once on upgrade because the key layout changes.
+  - Resource proxying now always connects directly: a configured proxy and the `HTTP_PROXY` / `HTTPS_PROXY` /
+    `ALL_PROXY` environment variables are ignored for these requests, and Tuliprox logs a warning at startup and on
+    reload when one is set. Provider fetches, playlist and EPG downloads, and streams keep using the proxy.
+  - The Source Editor exposes the policy on every input under the shield-shaped **Resource Policy** page. Empty host
+    and network lists restore the public-only default and omit the policy from the saved input.
+  - See [Resource Policy](docs/src/configuration/source.md#27-resource-policy-resource_policy) for the parameters
+    and the exact host-plus-network rule.
+
 - **The Web UI WebSocket protocol is now version 4.** Playlist update completion messages carry the correlated
   run ID and execution order instead of a bare status. Reload existing browser tabs after upgrading the server;
   version-3 clients are rejected during the handshake rather than receiving incompatible update messages.
@@ -1335,6 +1367,14 @@
   episodes are unchanged: their properties carry no provider URL at that layer.
 
 ## ⚙️ New Settings
+
+- **source.yml (input `resource_policy`)**: Added an optional per-input policy for private resource destinations.
+  - `allowed_hosts` (list of exact DNS names, default empty) and `allowed_networks` (list of private CIDR ranges,
+    default empty) authorize a private address only together: the host name must match and the resolved address must
+    fall inside one of the networks. An IP literal is authorized by `allowed_networks` alone. An absent or empty
+    policy means public-only.
+  - Invalid entries (scheme, path, port, wildcard, IP literal in `allowed_hosts`; a range outside
+    `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, or `fc00::/7`) are rejected while the configuration is loaded.
 
 - **Runtime diagnostics (environment variables)**:
   - `TULIPROX_WATCHDOG` (default unset = off) is a mode selector: `1` (`true`/`on`/`yes`/`enabled`) observes and logs

@@ -4,6 +4,7 @@ use crate::{
             empty_json_list_response, json_or_bin_response, stream_json_or_bin_response_stream,
             stream_json_or_bin_response_try_stream,
         },
+        endpoints::xmltv_api::encode_resource_link,
         model::AppState,
     },
     iptv::{m3u, xtream},
@@ -17,7 +18,10 @@ use crate::{
 use axum::response::IntoResponse;
 use serde_json::json;
 use shared::{
-    model::{InputPersistence, M3uPlaylistItem, TargetType, UiPlaylistItem, XtreamCluster, XtreamPlaylistItem},
+    model::{
+        resolve_resource_value, InputPersistence, M3uPlaylistItem, ResourceLocator, TargetType, UiPlaylistItem,
+        XtreamCluster, XtreamPlaylistItem,
+    },
     utils::{concat_path, concat_path_leading_slash, interner_gc, obfuscate_text, Internable},
 };
 use std::sync::Arc;
@@ -97,15 +101,38 @@ pub(in crate::api::endpoints) async fn get_playlist_for_target(
     (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Invalid Arguments"}))).into_response()
 }
 
-fn rewrite_resource_url(encrypt_secret: &[u8; 16], resource_url: &str, item: UiPlaylistItem) -> UiPlaylistItem {
-    if item.logo.is_empty() {
+pub(in crate::api::endpoints) fn rewrite_resource_url(
+    encrypt_secret: &[u8; 16],
+    resource_url: &str,
+    mut item: UiPlaylistItem,
+) -> UiPlaylistItem {
+    if item.logo.is_empty() || item.logo.starts_with('/') {
         return item;
     }
-    let mut item = item;
-    if item.logo.starts_with('/') {
-        return item;
-    }
-    item.logo = concat_path(resource_url, &obfuscate_text(encrypt_secret, &item.logo)).intern();
+    let resource = match resolve_resource_value(&item.logo) {
+        Ok(Some(_)) => Arc::clone(&item.logo),
+        Ok(None) => {
+            let Ok(resource) = ResourceLocator::new(Arc::clone(&item.input_name), Arc::clone(&item.logo))
+                .and_then(|locator| locator.encode())
+            else {
+                item.logo = Arc::from("");
+                return item;
+            };
+            resource
+        }
+        Err(_) => {
+            item.logo = Arc::from("");
+            return item;
+        }
+    };
+    let encoded = encode_resource_link(encrypt_secret, &resource).unwrap_or_else(|| {
+        let external = resolve_resource_value(&resource)
+            .ok()
+            .flatten()
+            .map_or_else(String::new, |locator| locator.url.to_string());
+        obfuscate_text(encrypt_secret, &external)
+    });
+    item.logo = concat_path(resource_url, &encoded).intern();
     item
 }
 
@@ -128,18 +155,26 @@ pub(in crate::api::endpoints) async fn get_playlist_for_input(
     accept: Option<&str>,
 ) -> impl IntoResponse + Send {
     if let Some(input) = cfg_input {
+        let config = app_state.app_config.config.load();
+        let web_ui_path = config.web_ui.as_ref().and_then(|web_ui| web_ui.path.as_ref()).map_or("", String::as_str);
+        let resource_url = concat_path_leading_slash(web_ui_path, "api/v1/playlist/resource");
+        let encrypt_secret = app_state.get_encrypt_secret();
         if input.input_type.is_xtream() {
             let Some(channel_iterator) = iter_raw_xtream_input_playlist(&app_state.app_config, input, cluster).await
             else {
                 return empty_json_list_response();
             };
-            let converted_stream = channel_iterator.map(|entry| entry.map(UiPlaylistItem::from));
+            let converted_stream = channel_iterator.map(move |entry| {
+                entry.map(|item| rewrite_resource_url(&encrypt_secret, &resource_url, UiPlaylistItem::from(item)))
+            });
             return stream_json_or_bin_response_try_stream(accept, converted_stream).into_response();
         } else if input.input_type.is_m3u() {
             let Some(channels) = iter_raw_m3u_input_playlist(&app_state.app_config, input, Some(cluster)).await else {
                 return empty_json_list_response();
             };
-            let converted_stream = channels.map(|entry| entry.map(UiPlaylistItem::from));
+            let converted_stream = channels.map(move |entry| {
+                entry.map(|item| rewrite_resource_url(&encrypt_secret, &resource_url, UiPlaylistItem::from(item)))
+            });
             return stream_json_or_bin_response_try_stream(accept, converted_stream).into_response();
         } else if input.input_type.is_stalker() {
             // TODO refactor
@@ -175,6 +210,7 @@ pub(in crate::api::endpoints) async fn get_playlist_for_input(
                 .iter()
                 .flat_map(|group| group.channels.iter())
                 .map(UiPlaylistItem::from)
+                .map(|item| rewrite_resource_url(&encrypt_secret, &resource_url, item))
                 .map(|item| rewrite_stalker_playback_url(&encrypt_secret, &resource_url, input.id, item))
                 .collect();
             interner_gc();
@@ -262,12 +298,8 @@ pub(in crate::api::endpoints) async fn get_playlist_for_custom_provider(
                 let input_id = input.id;
                 let converted_stream =
                     tokio_stream::iter(result.into_iter().flat_map(|g| g.channels).map(move |pli| {
-                        rewrite_stalker_playback_url(
-                            &encrypt_secret,
-                            &resource_url,
-                            input_id,
-                            UiPlaylistItem::from(&pli),
-                        )
+                        let item = rewrite_resource_url(&encrypt_secret, &resource_url, UiPlaylistItem::from(&pli));
+                        rewrite_stalker_playback_url(&encrypt_secret, &resource_url, input_id, item)
                     }));
                 stream_json_or_bin_response_stream(accept, converted_stream).into_response()
             }
@@ -282,9 +314,17 @@ pub(in crate::api::endpoints) async fn get_playlist_for_custom_provider(
 mod tests {
     use super::{rewrite_resource_url, stalker_refresh_pending_response};
     use shared::{
-        model::{PlaylistItemType, UiPlaylistItem, XtreamCluster},
-        utils::{obfuscate_text, Internable},
+        model::{PlaylistItemType, ResourceLocator, UiPlaylistItem, XtreamCluster},
+        utils::Internable,
     };
+    use tuliprox_core::utils::MAX_RESOURCE_TOKEN_BYTES;
+
+    /// Decodes a rewritten link with the same route-specific decoding the resource route uses.
+    fn decode_link(secret: &[u8; 16], link: &str) -> ResourceLocator {
+        let encoded = link.rsplit('/').next().expect("encoded part");
+        let token = tuliprox_core::utils::decode_resource_token(secret, encoded).expect("token decodes");
+        ResourceLocator::decode(&token.resource).expect("locator decodes")
+    }
 
     fn sample_item(logo: &str) -> UiPlaylistItem {
         UiPlaylistItem {
@@ -335,13 +375,25 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_resource_url_wraps_external_urls() {
+    fn rewrite_resource_url_wraps_external_urls_with_their_origin() {
         let secret = [7u8; 16];
         let item = sample_item("https://example.com/poster.jpg");
 
         let rewritten = rewrite_resource_url(&secret, "/api/v1/playlist/resource", item);
-        let expected_suffix = obfuscate_text(&secret, "https://example.com/poster.jpg");
 
-        assert_eq!(rewritten.logo.as_ref(), format!("/api/v1/playlist/resource/{expected_suffix}"));
+        let locator = decode_link(&secret, rewritten.logo.as_ref());
+        assert_eq!(locator.url.as_ref(), "https://example.com/poster.jpg");
+        assert_eq!(locator.input_name.as_ref(), "test");
+    }
+
+    #[test]
+    fn rewrite_resource_url_rejects_oversized_urls() {
+        let secret = [7u8; 16];
+        let long_logo = format!("https://example.com/{}", "a".repeat(MAX_RESOURCE_TOKEN_BYTES));
+        let item = sample_item(&long_logo);
+
+        let rewritten = rewrite_resource_url(&secret, "/api/v1/playlist/resource", item);
+
+        assert!(rewritten.logo.is_empty());
     }
 }

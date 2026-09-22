@@ -1,4 +1,4 @@
-use super::PanelApiConfigDto;
+use super::{PanelApiConfigDto, ResourcePolicyDto};
 use crate::{
     check_input_connections, check_input_credentials,
     defaults::{
@@ -524,6 +524,10 @@ pub struct ConfigInputDto {
     /// is `Stalker` or `StalkerBatch`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stalker: Option<StalkerInputConfigDto>,
+    /// Trusted private destinations for resource URLs supplied by this input. Absent means
+    /// public destinations only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_policy: Option<ResourcePolicyDto>,
 }
 
 impl Default for ConfigInputDto {
@@ -554,6 +558,7 @@ impl Default for ConfigInputDto {
             panel_api: None,
             provider: None,
             stalker: None,
+            resource_policy: None,
         }
     }
 }
