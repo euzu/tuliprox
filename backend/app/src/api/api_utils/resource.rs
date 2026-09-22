@@ -153,7 +153,7 @@ pub const fn rejection_status(error: &ResourcePolicyError) -> StatusCode {
 
 /// At most one warning per input and minute: a hostile playlist can generate unlimited rejections,
 /// and the operator only needs the first occurrences to notice.
-const REJECTION_LOG_WINDOW: Duration = Duration::from_minss(1);
+const REJECTION_LOG_WINDOW: Duration = Duration::from_mins(1);
 const REJECTION_LOG_MAX_ENTRIES: usize = 512;
 
 static REJECTION_LOG: LazyLock<Mutex<HashMap<String, Instant>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
