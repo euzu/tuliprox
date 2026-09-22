@@ -807,9 +807,9 @@ pub async fn write_strm_playlist(
     target: &ConfigTarget,
     target_output: &StrmTargetOutput,
     new_playlist: &mut [PlaylistGroup],
-    library_empty: crate::LibraryEmptyPublication,
+    allow_empty_publication: bool,
 ) -> Result<(), TuliproxError> {
-    if new_playlist.is_empty() && !library_empty.replaces_empty_target() {
+    if new_playlist.is_empty() && !allow_empty_publication {
         return Ok(());
     }
 
