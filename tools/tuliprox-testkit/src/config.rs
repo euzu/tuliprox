@@ -57,7 +57,16 @@ pub struct PolicyContract {
     #[serde(default)]
     pub provider_max_connections: Option<u16>,
     #[serde(default)]
+    pub provider_pool: Vec<ProviderPoolAccount>,
+    #[serde(default)]
     pub expected_provider_slots: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderPoolAccount {
+    pub name: String,
+    pub max_connections: u16,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -84,6 +93,15 @@ impl PolicyContract {
                 GraceMode::HoldStream => vec![AdmissionStrategy::GraceHoldStream],
             })
         })
+    }
+
+    #[must_use]
+    pub fn provider_capacity(&self) -> Option<usize> {
+        if self.provider_pool.is_empty() {
+            self.provider_max_connections.map(usize::from)
+        } else {
+            Some(self.provider_pool.iter().map(|account| usize::from(account.max_connections)).sum())
+        }
     }
 }
 
@@ -288,6 +306,8 @@ pub struct AssertOrigin {
     pub no_evictions: Option<bool>,
     #[serde(default)]
     pub no_limit_rejections: Option<bool>,
+    #[serde(default)]
+    pub latest_request_account: Option<String>,
 }
 
 /// Per-step assertions against the SUT runtime status (`/api/v1/status`).
@@ -380,6 +400,9 @@ impl Scenario {
             return Err(TestkitError::Configuration(
                 "provider_max_connections must be positive when specified".to_owned(),
             ));
+        }
+        if let Some(contract) = &self.policy_contract {
+            validate_provider_pool_contract(contract)?;
         }
         let actor_ids = self.actors.iter().map(|actor| actor.id.as_str()).collect::<HashSet<_>>();
         if actor_ids.len() != self.actors.len() || actor_ids.iter().any(|id| id.is_empty()) {
@@ -486,6 +509,25 @@ impl Scenario {
         expand_steps(&self.steps, "", &mut expanded)?;
         Ok(expanded)
     }
+}
+
+fn validate_provider_pool_contract(contract: &PolicyContract) -> Result<(), TestkitError> {
+    if contract.provider_max_connections.is_some() && !contract.provider_pool.is_empty() {
+        return Err(TestkitError::Configuration(
+            "provider_max_connections and provider_pool are mutually exclusive".to_owned(),
+        ));
+    }
+    let mut account_names = HashSet::new();
+    for account in &contract.provider_pool {
+        let valid_name = !account.name.is_empty()
+            && account.name.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
+        if !valid_name || account.max_connections == 0 || !account_names.insert(account.name.as_str()) {
+            return Err(TestkitError::Configuration(
+                "provider_pool accounts require unique URL-safe names and positive max_connections".to_owned(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn expand_steps(steps: &[Step], prefix: &str, expanded: &mut Vec<Step>) -> Result<(), TestkitError> {
