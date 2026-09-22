@@ -132,17 +132,18 @@ impl TraktClient {
         loop {
             let mut page_items =
                 fetch_page(page).await.map_err(|error| TraktFetchFailure::from_page_error(page, error))?;
+            let reported_page_count = page_items.page_count.filter(|count| *count > 0);
             let page_count = if page == 1 {
-                expected_page_count = page_items.page_count;
+                expected_page_count = reported_page_count;
                 expected_item_count = page_items.item_count;
-                page_items.page_count.unwrap_or(page)
+                reported_page_count.unwrap_or(page)
             } else {
                 let Some(page_count) = expected_page_count else {
                     return Err(TraktFetchFailure::pagination_truncated(format!(
                         "Trakt {kind_label} {id_label} pagination metadata was missing before page {page}"
                     )));
                 };
-                if page_items.page_count != Some(page_count) || page_items.item_count != expected_item_count {
+                if reported_page_count != Some(page_count) || page_items.item_count != expected_item_count {
                     return Err(TraktFetchFailure::pagination_truncated(format!(
                         "Trakt {kind_label} {id_label} pagination metadata changed or disappeared at page {page}"
                     )));
@@ -452,6 +453,21 @@ mod tests {
             .expect_err("reported count mismatch must fail");
 
         assert_eq!(error.kind, TraktFetchFailureKind::PaginationTruncated);
+    }
+
+    #[tokio::test]
+    async fn zero_page_count_allows_an_empty_first_page_snapshot() {
+        let client = TraktClient::new(reqwest::Client::new(), api_config("http://127.0.0.1:9".to_string(), "test-key"))
+            .expect("client");
+
+        let items = client
+            .paginate_items("list", "empty-list".to_string(), |_| async {
+                Ok(TraktListItemsPage { items: Vec::new(), page_count: Some(0), item_count: Some(0) })
+            })
+            .await
+            .expect("a zero page count should represent an empty snapshot");
+
+        assert!(items.is_empty());
     }
 
     #[tokio::test]
