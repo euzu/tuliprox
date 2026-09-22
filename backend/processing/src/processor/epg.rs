@@ -952,6 +952,7 @@ mod tests {
                 match_names,
                 config: Box::new(IcsEpgSourceConfig::default()),
             },
+            input_name: None,
         }])
     }
 
@@ -1040,6 +1041,7 @@ mod tests {
             priority: 0,
             logo_override: false,
             kind: PersistedEpgSourceKind::Xmltv,
+            input_name: None,
         }]);
         let mut playlist = FetchedPlaylist {
             input: &input,
@@ -1254,6 +1256,7 @@ mod tests {
                 priority: 0,
                 logo_override: true,
                 kind: PersistedEpgSourceKind::Xmltv,
+                input_name: Some("epg-input".into()),
             }]);
             let mut playlist = FetchedPlaylist {
                 input: &input,
@@ -1266,8 +1269,12 @@ mod tests {
 
             let updated = playlist.items_mut().next().unwrap();
             assert_eq!(updated.header.epg_channel_id.as_deref(), Some("demo.channel"));
-            assert_eq!(updated.header.logo.as_ref(), "http://guide/icon.png");
-            assert_eq!(updated.header.logo_small.as_ref(), "http://guide/icon.png");
+            let logo = shared::model::ResourceLocator::decode(&updated.header.logo).expect("EPG logo locator");
+            let logo_small =
+                shared::model::ResourceLocator::decode(&updated.header.logo_small).expect("EPG small logo locator");
+            assert_eq!(logo.input_name.as_ref(), "epg-input");
+            assert_eq!(logo.url.as_ref(), "http://guide/icon.png");
+            assert_eq!(logo_small, logo);
             assert_eq!(epg[0].children[0].id.as_ref(), "Demo.Channel");
         });
     }
@@ -1327,6 +1334,7 @@ mod tests {
                 priority: 0,
                 logo_override: false,
                 kind: PersistedEpgSourceKind::Xmltv,
+                input_name: None,
             }]);
             let mut playlist = FetchedPlaylist {
                 input: &input,
@@ -1434,6 +1442,7 @@ mod tests {
                 priority: 0,
                 logo_override: false,
                 kind: PersistedEpgSourceKind::Xmltv,
+                input_name: None,
             }]);
             let mut playlist = FetchedPlaylist {
                 input: &input,
@@ -1468,6 +1477,7 @@ mod tests {
                 priority: 0,
                 logo_override: false,
                 kind: PersistedEpgSourceKind::Xmltv,
+                input_name: None,
             }]);
             let mut playlist = FetchedPlaylist {
                 input: &input,

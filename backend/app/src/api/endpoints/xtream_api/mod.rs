@@ -10,9 +10,10 @@ use crate::{
             empty_json_response_as_array, empty_json_response_as_object, force_provider_stream_response,
             get_session_reservation_ttl_secs, get_user_target, get_user_target_by_credentials, internal_server_error,
             is_seekable_media_request, is_session_based_playback, is_stream_share_enabled, local_stream_response,
-            redirect, redirect_response, reentry_suppressed_response, resolve_initial_stalker_playback_url,
-            resource_response, separate_number_and_remainder, should_allow_exhausted_shared_reconnect, stream_response,
-            try_option_bad_request, try_result_bad_request, try_unwrap_body, RedirectParams, ResourceFetchPolicy,
+            log_resource_rejection, redirect, redirect_response, reentry_suppressed_response, rejection_status,
+            resolve_initial_stalker_playback_url, resolve_resource, resource_response, separate_number_and_remainder,
+            should_allow_exhausted_shared_reconnect, stream_response, try_option_bad_request, try_result_bad_request,
+            try_unwrap_body, RedirectParams, ResourceFetchOptions,
         },
         endpoints::{
             hls_api::{
@@ -1073,13 +1074,28 @@ async fn xtream_player_api_resource(
         return axum::http::StatusCode::NOT_FOUND.into_response();
     }
 
+    if !shared::model::is_resource_field_name(resource) {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    }
     let stream_url = pli.resolve_resource_url(resource);
 
     match stream_url {
         None => axum::http::StatusCode::NOT_FOUND.into_response(),
-        Some(url) => {
+        Some(value) => {
+            let resolved = match resolve_resource(&app_state.app_config, &value, Some(&pli.input_name)) {
+                Ok(resolved) => resolved,
+                Err(err) => {
+                    log_resource_rejection(Some(pli.input_name.as_ref()), &err, &value);
+                    return rejection_status(&err).into_response();
+                }
+            };
+            let url = resolved.url;
             if user.proxy.is_redirect(pli.item_type) || target.is_force_redirect(pli.item_type) {
-                let input = app_state.app_config.get_input_by_name(&pli.input_name);
+                let input = resolved
+                    .authorization
+                    .input_name
+                    .as_ref()
+                    .and_then(|input_name| app_state.app_config.get_input_by_name(input_name));
                 let redirect_url = api_utils::resolve_redirect_location(input.as_deref(), &url);
                 match redirect_url {
                     Ok(redirect_url) => {
@@ -1096,9 +1112,15 @@ async fn xtream_player_api_resource(
                 }
             } else {
                 trace_if_enabled!("Resource request to {}", sanitize_sensitive_info(&url));
-                resource_response(app_state, ResourceFetchPolicy::Standard, &url, req_headers, None)
-                    .await
-                    .into_response()
+                resource_response(
+                    app_state,
+                    ResourceFetchOptions::cached(resolved.authorization),
+                    &url,
+                    req_headers,
+                    None,
+                )
+                .await
+                .into_response()
             }
         }
     }

@@ -12,6 +12,25 @@ const CACHEDIR_TAG: &str = "CACHEDIR.TAG";
 #[inline]
 fn encode_cache_key(key: &str) -> String { encode_base64_hash(key) }
 
+/// Cache identity of a proxied resource.
+///
+/// One URL can be fetched under different destination policies, input identities, and credential
+/// contexts. All three scopes belong to the key so a body fetched in one authorization context can
+/// never answer another. The version domain invalidates entries created with an older layout.
+pub fn resource_cache_key(
+    policy_digest: &str,
+    canonical_input: &str,
+    credential_context: &str,
+    canonical_url: &str,
+) -> String {
+    format!(
+        "tuliprox.resource.v2|{}:{policy_digest}|{}:{canonical_input}|{}:{credential_context}|{canonical_url}",
+        policy_digest.len(),
+        canonical_input.len(),
+        credential_context.len(),
+    )
+}
+
 /// `LRUResourceCache`
 ///
 /// A least-recently-used (LRU) file-based resource cache that stores files in a directory on disk,
@@ -244,5 +263,22 @@ impl LRUResourceCache {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod cache_key_tests {
+    use super::resource_cache_key;
+
+    #[test]
+    fn resource_cache_key_separates_policies() {
+        let url = "https://cdn.example.com/logo.png";
+        let public_only = resource_cache_key("public", "input", "credentials", url);
+        let private = resource_cache_key("private", "input", "credentials", url);
+
+        assert_ne!(public_only, private);
+        assert_ne!(public_only, resource_cache_key("public", "other-input", "credentials", url));
+        assert_ne!(public_only, resource_cache_key("public", "input", "other-credentials", url));
+        assert_eq!(public_only, resource_cache_key("public", "input", "credentials", url));
     }
 }

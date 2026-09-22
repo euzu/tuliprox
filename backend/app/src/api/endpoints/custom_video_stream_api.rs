@@ -507,11 +507,12 @@ mod tests {
     use super::{cvs_api_register, parse_cvs_standalone_hls_segment_file};
     use crate::{
         api::model::{
-            build_hls_standalone_custom_plan, hls_custom_video_manifest_response_for_access_lease,
-            ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, CustomVideoStreamType,
-            DownloadQueue, EventManager, HlsAccessLease, HlsAccessLeaseId, HlsPlaybackFamilyKey, HlsProvisioningState,
-            HlsProxyManager, HlsRuntimeCustomTailReason, HlsStandaloneCustomAccess, MetadataUpdateManager,
-            PlaylistStorageState, ProxySessionId, SharedStreamManager, TransportStreamBuffer, UpdateGuard,
+            build_hls_standalone_custom_plan, empty_resource_client_set,
+            hls_custom_video_manifest_response_for_access_lease, ActiveProviderManager, ActiveUserManager, AppState,
+            CancelTokens, ConnectionManager, CustomVideoStreamType, DownloadQueue, EventManager, HlsAccessLease,
+            HlsAccessLeaseId, HlsPlaybackFamilyKey, HlsProvisioningState, HlsProxyManager, HlsRuntimeCustomTailReason,
+            HlsStandaloneCustomAccess, MetadataUpdateManager, PlaylistStorageState, ProxySessionId,
+            SharedStreamManager, TransportStreamBuffer, UpdateGuard,
         },
         model::{
             ApiProxyConfig, ApiProxyServerInfo, AppConfig, Config, ConfigInput, ConfigSource, ConfigTarget,
@@ -724,6 +725,7 @@ mod tests {
             http_client: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
             http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
             public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+            resource_clients: empty_resource_client_set(),
             downloads: Arc::new(DownloadQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,

@@ -1,9 +1,9 @@
 use super::*;
 use crate::{
     api::model::{
-        ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, EventManager,
-        MetadataUpdateManager, PlaylistStorageState, ProviderConfig as RuntimeProviderConfig, ProviderConfigConnection,
-        SharedStreamManager,
+        empty_resource_client_set, ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager,
+        EventManager, MetadataUpdateManager, PlaylistStorageState, ProviderConfig as RuntimeProviderConfig,
+        ProviderConfigConnection, ResourceClientSet, SharedStreamManager,
     },
     auth::Fingerprint,
     model::{
@@ -27,9 +27,10 @@ use shared::{
     defaults::{default_catchup_session_ttl_secs, default_hls_session_ttl_secs},
     foundation::Filter,
     model::{
-        AdmissionStrategy, ClusterFlags, ConfigPaths, ConfigProviderDto, ConfigTargetOptions, GeoIpUnavailablePolicy,
-        InputFetchMethod, InputType, PlaylistItem, PlaylistItemHeader, PlaylistItemType, ProcessingOrder,
-        ProviderUrlSelectionPolicy, ProxyType, StreamChannel, TargetType, XtreamCluster,
+        provider_saturation::build_group_lookup, AdmissionStrategy, ClusterFlags, ConfigPaths, ConfigProviderDto,
+        ConfigTargetOptions, GeoIpUnavailablePolicy, InputFetchMethod, InputType, PlaylistItem, PlaylistItemHeader,
+        PlaylistItemType, ProcessingOrder, ProviderUrlSelectionPolicy, ProxyType, ResourcePolicyDto, StreamChannel,
+        TargetType, XtreamCluster,
     },
     utils::Internable,
 };
@@ -39,7 +40,10 @@ use tokio::{
     net::TcpListener,
     sync::{mpsc, RwLock},
 };
-use tuliprox_core::utils::response_compression::should_compress_response;
+use tuliprox_core::{
+    model::{public_only_policy, ResourceClientKey, ResourcePolicy, ResourcePolicyError, ResourceRedirectMode},
+    utils::{resource_cache_key, response_compression::should_compress_response},
+};
 use tuliprox_session::{
     admission::{evaluate_remaining_strategies_after_grace, get_effective_admission_strategies},
     AdmissionRejectionReason, GraceResolutionContext,
@@ -3879,6 +3883,245 @@ async fn resolve_streaming_strategy_honors_forced_provider_fallback_policy() {
 }
 
 #[tokio::test]
+async fn resolve_streaming_strategy_rewrites_url_on_fallback_even_when_accept_requested_stream_url_is_true() {
+    let app_state = create_test_dual_provider_app_state();
+    let input_name = "provider_1".intern();
+    let input =
+        app_state.app_config.sources.load().get_input_by_name(&input_name).cloned().unwrap_or_else(|| unreachable!());
+    let pinned_provider = "provider_1".intern();
+    let busy_addr: SocketAddr = "127.0.0.1:55304".parse().unwrap_or_else(|_| unreachable!());
+    let fallback_addr: SocketAddr = "127.0.0.1:55305".parse().unwrap_or_else(|_| unreachable!());
+    let stream_url = "http://provider-1.example/movie/user1/pass1/1.mkv";
+
+    let busy = app_state.active_provider.acquire_exact_connection_with_grace(
+        &pinned_provider,
+        &busy_addr,
+        false,
+        0,
+        crate::api::model::ConnectionKind::Normal,
+    );
+    assert!(busy.is_some(), "setup should occupy the pinned provider");
+
+    let fallback = resolve_streaming_strategy(
+        &app_state,
+        stream_url,
+        &create_test_fingerprint(fallback_addr),
+        &input,
+        StreamingAcquireOptions {
+            force_provider: Some(&pinned_provider),
+            allow_forced_provider_fallback: true,
+            allow_provider_grace: false,
+            user_priority: 0,
+            connection_kind: crate::api::model::ConnectionKind::Normal,
+            session_owner: Some("vod-session"),
+            playback_kind: crate::model::PlaybackKind::Vod,
+            accept_requested_stream_url: true,
+        },
+    )
+    .await;
+
+    let (ProviderStreamState::Available(Some(fallback_provider), url)
+    | ProviderStreamState::GracePeriod(Some(fallback_provider), url)) = fallback.provider_stream_state
+    else {
+        panic!("fallback-enabled request should allocate fallback provider")
+    };
+    assert_eq!(fallback_provider.as_ref(), "provider_2");
+    assert_eq!(url.as_ref(), "http://provider-2.example/movie/user2/pass2/1.mkv");
+
+    app_state.active_provider.release_connection(&busy_addr);
+    app_state.active_provider.release_connection(&fallback_addr);
+}
+
+#[tokio::test]
+async fn create_stream_response_details_preserves_stored_headers_when_fallback_open_fails() {
+    let app_state = create_test_dual_provider_app_state();
+    let input_name = "provider_1".intern();
+    let input =
+        app_state.app_config.sources.load().get_input_by_name(&input_name).cloned().unwrap_or_else(|| unreachable!());
+    let pinned_provider = "provider_1".intern();
+    let busy_addr: SocketAddr = "127.0.0.1:55306".parse().unwrap_or_else(|_| unreachable!());
+    let reacquire_addr: SocketAddr = "127.0.0.1:55307".parse().unwrap_or_else(|_| unreachable!());
+    let stream_url = "http://provider-1.example/movie/user1/pass1/1.mkv";
+
+    let user = load_test_user("test-fallback-headers-user");
+    let session_token = "sess-fallback-headers-1";
+    let initial_headers = HashMap::from([("cookie".to_string(), "old_prov_sess=1".to_string())]);
+    let created = app_state
+        .active_users
+        .create_user_session(crate::api::model::CreateUserSessionParams {
+            user: &user,
+            session_token,
+            virtual_id: 1,
+            provider: &pinned_provider,
+            stream_url,
+            addr: &reacquire_addr,
+            connection_permission: UserConnectionPermission::Allowed,
+            connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+            socket_bound: false,
+        })
+        .await;
+    assert!(!created.is_empty());
+    app_state.active_users.update_session_provider_headers(&user.username, session_token, &initial_headers).await;
+
+    let busy = app_state.active_provider.acquire_exact_connection_with_grace(
+        &pinned_provider,
+        &busy_addr,
+        false,
+        0,
+        crate::api::model::ConnectionKind::Normal,
+    );
+    assert!(busy.is_some(), "setup should occupy the pinned provider");
+
+    let channel = create_test_live_channel(stream_url);
+    let details = create_stream_response_details(
+        &app_state,
+        &get_stream_options(&app_state.app_config),
+        stream_url,
+        &user.username,
+        &create_test_fingerprint(reacquire_addr),
+        &HeaderMap::new(),
+        &input,
+        &channel,
+        PlaylistItemType::Video,
+        crate::api::model::ProviderContentRepresentationMode::Identity,
+        false,
+        UserConnectionPermission::Allowed,
+        Some(&pinned_provider),
+        true,
+        false,
+        VirtualId::new(channel.virtual_id),
+        0,
+        crate::api::model::ConnectionKind::Normal,
+        true,
+        Some(session_token),
+        Some(&initial_headers),
+        true,
+        None,
+        None,
+    )
+    .await
+    .unwrap_or_else(|err| panic!("create_stream_response_details should succeed: {err}"));
+
+    assert_eq!(details.provider_name.as_deref(), Some("provider_2"));
+    assert!(details.session_headers.is_none(), "fallback request should not pass pinned provider session headers");
+    assert!(details.stream.is_none(), "test setup should fail to open the fallback provider stream");
+
+    let session = app_state
+        .active_users
+        .get_and_update_user_session(&user.username, session_token)
+        .await
+        .expect("session should exist");
+    assert_eq!(
+        session.provider_session_headers, initial_headers,
+        "stored session headers should be retained when the fallback provider cannot be opened"
+    );
+
+    app_state.active_provider.release_connection(&busy_addr);
+    app_state.active_provider.release_connection(&reacquire_addr);
+}
+
+#[tokio::test]
+async fn force_provider_stream_response_clears_stored_headers_after_fallback_open_succeeds() {
+    const FALLBACK_BODY: &[u8] = b"fallback-provider";
+    let response_head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        FALLBACK_BODY.len()
+    );
+    let (origin_addr, origin_task) = spawn_legacy_hls_test_origin(response_head, FALLBACK_BODY.to_vec()).await;
+    let app_config = create_test_dual_provider_app_config();
+    let Some(configured_input) = app_config.sources.load().inputs.first().cloned() else { unreachable!() };
+    let mut fallback_input = (*configured_input).clone();
+    let Some(aliases) = fallback_input.aliases.as_mut() else { unreachable!() };
+    let Some(fallback_alias) = aliases.first_mut() else { unreachable!() };
+    fallback_alias.url = format!("http://{origin_addr}");
+    app_config
+        .sources
+        .store(Arc::new(SourcesConfig { inputs: vec![Arc::new(fallback_input)], ..SourcesConfig::default() }));
+    let app_state = create_test_app_state_for_config(Arc::new(app_config));
+    let input_name = "provider_1".intern();
+    let input =
+        app_state.app_config.sources.load().get_input_by_name(&input_name).cloned().unwrap_or_else(|| unreachable!());
+    let pinned_provider = "provider_1".intern();
+    let busy_addr: SocketAddr = "127.0.0.1:55308".parse().unwrap_or_else(|_| unreachable!());
+    let reacquire_addr: SocketAddr = "127.0.0.1:55309".parse().unwrap_or_else(|_| unreachable!());
+    let stream_url = "http://provider-1.example/movie/user1/pass1/1.mkv";
+
+    let user = load_test_user("test-fallback-force-user");
+    let session_token = "sess-fallback-force-1";
+    let initial_headers = HashMap::from([("cookie".to_string(), "old_pinned_token=abc".to_string())]);
+    let created = app_state
+        .active_users
+        .create_user_session(crate::api::model::CreateUserSessionParams {
+            user: &user,
+            session_token,
+            virtual_id: 1,
+            provider: &pinned_provider,
+            stream_url,
+            addr: &reacquire_addr,
+            connection_permission: UserConnectionPermission::Allowed,
+            connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+            socket_bound: false,
+        })
+        .await;
+    assert!(!created.is_empty());
+    app_state.active_users.update_session_provider_headers(&user.username, session_token, &initial_headers).await;
+
+    let busy = app_state.active_provider.acquire_exact_connection_with_grace(
+        &pinned_provider,
+        &busy_addr,
+        false,
+        0,
+        crate::api::model::ConnectionKind::Normal,
+    );
+    assert!(busy.is_some(), "setup should occupy the pinned provider");
+
+    let session = app_state
+        .active_users
+        .get_and_update_user_session(&user.username, session_token)
+        .await
+        .expect("session should exist");
+
+    let channel = create_test_live_channel(stream_url);
+    let response = force_provider_stream_response(
+        &create_test_fingerprint(reacquire_addr),
+        &app_state,
+        &session,
+        channel,
+        ForceStreamRequestContext {
+            req_headers: &HeaderMap::new(),
+            input: &input,
+            user: &user,
+            session_reservation_ttl_secs: 0,
+            content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+        },
+        None,
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.expect("fallback stream body").to_bytes();
+    assert_eq!(body.as_ref(), FALLBACK_BODY);
+    let request = tokio::time::timeout(std::time::Duration::from_secs(5), origin_task)
+        .await
+        .expect("fallback request was not sent within 5 seconds")
+        .expect("fallback origin task completes");
+    assert!(!request.is_empty(), "fallback provider must receive the stream request");
+
+    let updated_session = app_state
+        .active_users
+        .get_and_update_user_session(&user.username, session_token)
+        .await
+        .expect("session should exist");
+    assert!(
+        updated_session.provider_session_headers.is_empty(),
+        "stored session headers must be cleared after the fallback provider stream opens"
+    );
+
+    app_state.active_provider.release_connection(&busy_addr);
+}
+
+#[tokio::test]
 async fn resolve_streaming_strategy_rewrites_stale_alias_url_to_selected_main_provider() {
     let app_state = create_test_dual_provider_app_state();
     let input_name = "provider_1".intern();
@@ -4059,6 +4302,60 @@ async fn resolve_streaming_strategy_accepts_stalker_portal_url() {
 }
 
 #[tokio::test]
+async fn resolve_streaming_strategy_rejects_stalker_url_after_forced_provider_fallback() {
+    let app_config = create_test_dual_provider_app_config();
+    let Some(configured_input) = app_config.sources.load().inputs.first().cloned() else { unreachable!() };
+    let mut stalker_input = (*configured_input).clone();
+    stalker_input.input_type = InputType::Stalker;
+    app_config
+        .sources
+        .store(Arc::new(SourcesConfig { inputs: vec![Arc::new(stalker_input)], ..SourcesConfig::default() }));
+    let app_state = create_test_app_state_for_config(Arc::new(app_config));
+    let input_name = "provider_1".intern();
+    let input =
+        app_state.app_config.sources.load().get_input_by_name(&input_name).cloned().unwrap_or_else(|| unreachable!());
+    let pinned_provider = "provider_1".intern();
+    let busy_addr: SocketAddr = "127.0.0.1:55308".parse().unwrap_or_else(|_| unreachable!());
+    let fallback_addr: SocketAddr = "127.0.0.1:55309".parse().unwrap_or_else(|_| unreachable!());
+    let stream_url = "http://line.example/play/live.php?mac=00:11:22:33:44:55&stream=347&extension=ts&play_token=abc";
+
+    let busy = app_state.active_provider.acquire_exact_connection_with_grace(
+        &pinned_provider,
+        &busy_addr,
+        false,
+        0,
+        crate::api::model::ConnectionKind::Normal,
+    );
+    assert!(busy.is_some(), "setup should occupy the pinned provider");
+
+    let strategy = resolve_streaming_strategy(
+        &app_state,
+        stream_url,
+        &create_test_fingerprint(fallback_addr),
+        &input,
+        StreamingAcquireOptions {
+            force_provider: Some(&pinned_provider),
+            allow_forced_provider_fallback: true,
+            allow_provider_grace: false,
+            user_priority: 0,
+            connection_kind: crate::api::model::ConnectionKind::Normal,
+            session_owner: Some("live-session"),
+            playback_kind: crate::model::PlaybackKind::LiveTs,
+            accept_requested_stream_url: false,
+        },
+    )
+    .await;
+
+    assert!(matches!(
+        strategy.provider_stream_state,
+        ProviderStreamState::Custom { reason: ProviderStreamCustomReason::UnmappedProviderUrl, .. }
+    ));
+
+    app_state.active_provider.release_connection(&busy_addr);
+    app_state.active_provider.release_connection(&fallback_addr);
+}
+
+#[tokio::test]
 async fn resolve_streaming_strategy_accepts_session_requested_stream_url() {
     let app_state = create_test_dual_provider_app_state();
     let input_name = "provider_1".intern();
@@ -4159,6 +4456,83 @@ fn create_test_app_config() -> AppConfig {
         encrypt_secret: [0; 16],
         media_tools: Arc::new(MediaToolCapabilities::new()),
     }
+}
+
+/// App config whose only input carries `policy` and one enabled alias.
+fn create_policy_app_config(policy: ResourcePolicyDto) -> AppConfig {
+    let config = create_test_app_config();
+    let policy = Arc::new(ResourcePolicy::from_dto(&policy).expect("test policy"));
+    let input = Arc::new(ConfigInput {
+        id: 1,
+        name: "main-input".intern(),
+        input_type: InputType::M3u,
+        url: "https://provider.example/playlist.m3u".to_string(),
+        enabled: true,
+        resource_policy: Some(policy),
+        aliases: Some(vec![ConfigInputAlias {
+            id: 2,
+            name: "aliased-input".intern(),
+            url: "https://provider.example/alias.m3u".to_string(),
+            username: None,
+            password: None,
+            priority: 0,
+            max_connections: 1,
+            exp_date: None,
+            enabled: true,
+            stalker: None,
+        }]),
+        ..ConfigInput::default()
+    });
+    let inputs = vec![Arc::clone(&input)];
+    let sources = SourcesConfig { inputs, group_lookup: build_group_lookup(&[input]), ..SourcesConfig::default() };
+    config.sources.store(Arc::new(sources));
+    config
+}
+
+#[test]
+fn resource_authorization_uses_the_main_input_policy_for_an_alias() {
+    let app_config = create_policy_app_config(ResourcePolicyDto {
+        allowed_hosts: vec!["media.home.arpa".to_string()],
+        allowed_networks: vec!["192.168.50.20/32".to_string()],
+    });
+    let input_name = Arc::from("aliased-input");
+    let authorization = resolve_resource_authorization(&app_config, Some(&input_name)).expect("authorized");
+
+    assert_eq!(authorization.input_name.as_deref(), Some("main-input"));
+    assert!(authorization.policy.allows_host("media.home.arpa"));
+    assert_ne!(authorization.policy_digest, public_only_policy().digest());
+}
+
+#[test]
+fn resource_authorization_rejects_an_unknown_or_disabled_origin() {
+    let app_config = create_policy_app_config(ResourcePolicyDto::default());
+    let input_name = Arc::from("removed-input");
+    let error = resolve_resource_authorization(&app_config, Some(&input_name)).expect_err("rejected");
+
+    assert_eq!(error, ResourcePolicyError::UnknownOrigin("removed-input".to_string()));
+    assert_eq!(rejection_status(&error), StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn resource_authorization_follows_a_config_change_without_regenerating_links() {
+    let app_config = create_policy_app_config(ResourcePolicyDto {
+        allowed_hosts: vec!["first.home.arpa".to_string()],
+        allowed_networks: vec!["192.168.50.20/32".to_string()],
+    });
+    let input_name = Arc::from("main-input");
+    let before = resolve_resource_authorization(&app_config, Some(&input_name)).expect("authorized");
+
+    let reloaded = create_policy_app_config(ResourcePolicyDto {
+        allowed_hosts: vec!["second.home.arpa".to_string()],
+        allowed_networks: vec!["10.0.0.0/8".to_string()],
+    });
+    app_config.sources.store(Arc::clone(&reloaded.sources.load()));
+
+    let after = resolve_resource_authorization(&app_config, Some(&input_name)).expect("authorized");
+
+    assert_ne!(before.policy_digest, after.policy_digest);
+    assert!(after.policy.allows_host("second.home.arpa"));
+    assert!(!after.policy.allows_host("first.home.arpa"));
 }
 
 fn create_test_provider_app_config() -> AppConfig {
@@ -4310,6 +4684,7 @@ fn create_test_app_state_for_config(app_cfg: Arc<AppConfig>) -> Arc<AppState> {
         http_client: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
         http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
         public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+        resource_clients: empty_resource_client_set(),
         downloads: Arc::new(crate::api::model::DownloadQueue::new()),
         cache: Arc::new(ArcSwapOption::default()),
         shared_stream_manager,
@@ -4340,8 +4715,30 @@ fn create_test_fingerprint(addr: std::net::SocketAddr) -> Fingerprint {
     Fingerprint::new(format!("fp-{addr}"), addr.ip().to_string(), addr)
 }
 
+#[test]
+fn resource_credential_context_separates_configured_and_inbound_credentials() {
+    let mut input = ConfigInput {
+        name: "input".into(),
+        username: Some("user".to_string()),
+        password: Some("password-a".to_string()),
+        ..ConfigInput::default()
+    };
+    let no_headers = HashMap::new();
+    let configured_a = resource_credential_context(Some(&input), &no_headers);
+    input.password = Some("password-b".to_string());
+    let configured_b = resource_credential_context(Some(&input), &no_headers);
+    assert_ne!(configured_a, configured_b);
+
+    let mut request_headers = HashMap::new();
+    request_headers.insert("authorization".to_string(), b"Bearer a".to_vec());
+    let inbound_a = resource_credential_context(None, &request_headers);
+    request_headers.insert("authorization".to_string(), b"Bearer b".to_vec());
+    let inbound_b = resource_credential_context(None, &request_headers);
+    assert_ne!(inbound_a, inbound_b);
+}
+
 #[tokio::test]
-async fn resource_cache_is_used_only_by_matching_standard_fetch_policy() {
+async fn resource_cache_is_scoped_to_the_authorizing_policy() {
     const CACHED_BODY: &[u8] = b"cached image";
     const UPSTREAM_BODY: &[u8] = b"upstream image";
 
@@ -4350,9 +4747,18 @@ async fn resource_cache_is_used_only_by_matching_standard_fetch_policy() {
     let cache_dir = temp_dir.path().to_string_lossy();
     let mut cache = LRUResourceCache::new(1024, cache_dir.as_ref());
     let resource_url = "http://1.1.1.1/icon.png";
-    let cached_path = cache.store_path(resource_url, Some("image/png"));
+
+    // An entry stored under the public-only scope: it must never answer a request authorized by a
+    // policy that is allowed to reach private destinations.
+    let public_only_scope = resource_cache_key(
+        public_only_policy().digest().as_str(),
+        "",
+        &resource_credential_context(None, &HashMap::new()),
+        resource_url,
+    );
+    let cached_path = cache.store_path(&public_only_scope, Some("image/png"));
     tokio::fs::write(&cached_path, CACHED_BODY).await.expect("write cached image");
-    cache.add_content(resource_url, Some("image/png".to_string()), CACHED_BODY.len()).expect("register cached image");
+    cache.add_content(&public_only_scope, Some("image/png".to_string()), CACHED_BODY.len()).expect("cache entry");
     app_state.cache.store(Some(Arc::new(RwLock::new(cache))));
 
     let response_head = format!(
@@ -4362,37 +4768,161 @@ async fn resource_cache_is_used_only_by_matching_standard_fetch_policy() {
     let (upstream_addr, upstream_task) = spawn_legacy_hls_test_origin(response_head, UPSTREAM_BODY.to_vec()).await;
     let proxy = reqwest::Proxy::http(format!("http://{upstream_addr}")).expect("mock proxy URL");
     let mock_client = reqwest::Client::builder().proxy(proxy).build().expect("mock upstream client");
-    app_state.public_http_client_no_redirect.store(Arc::new(mock_client));
 
-    let standard_response =
-        resource_response(&app_state, ResourceFetchPolicy::Standard, resource_url, &HeaderMap::new(), None)
+    let public_only = ResolvedResourceAuthorization::public_only();
+    let private_policy = Arc::new(
+        ResourcePolicy::from_dto(&shared::model::ResourcePolicyDto {
+            allowed_hosts: vec!["media.home.arpa".to_string()],
+            allowed_networks: vec!["192.168.50.20/32".to_string()],
+        })
+        .expect("policy"),
+    );
+    let scoped = ResolvedResourceAuthorization::for_input("private".into(), Some(&private_policy));
+    assert_ne!(public_only.policy_digest, scoped.policy_digest);
+
+    let mut clients = HashMap::new();
+    for key in [
+        ResourceClientKey::new(public_only.policy_digest.clone(), ResourceRedirectMode::Bounded),
+        ResourceClientKey::new(scoped.policy_digest.clone(), ResourceRedirectMode::Bounded),
+    ] {
+        clients.insert(key, mock_client.clone());
+    }
+    app_state.resource_clients.store(Arc::new(ResourceClientSet::from_clients(clients)));
+
+    let cached_response = resource_response(
+        &app_state,
+        ResourceFetchOptions::cached(public_only.clone()),
+        resource_url,
+        &HeaderMap::new(),
+        None,
+    )
+    .await
+    .into_response();
+    assert_eq!(cached_response.status(), StatusCode::OK);
+    let cached_body = cached_response.into_body().collect().await.expect("read cached image").to_bytes();
+    assert_eq!(cached_body, Bytes::from_static(CACHED_BODY));
+
+    let fresh_response =
+        resource_response(&app_state, ResourceFetchOptions::cached(scoped), resource_url, &HeaderMap::new(), None)
             .await
             .into_response();
-    assert_eq!(standard_response.status(), StatusCode::OK);
-    let standard_body = standard_response.into_body().collect().await.expect("read cached image").to_bytes();
-    assert_eq!(standard_body, Bytes::from_static(CACHED_BODY));
-
-    let response =
-        resource_response(&app_state, ResourceFetchPolicy::PublicNoRedirect, resource_url, &HeaderMap::new(), None)
-            .await
-            .into_response();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let response_body = response.into_body().collect().await.expect("read upstream image").to_bytes();
-    assert_eq!(response_body, Bytes::from_static(UPSTREAM_BODY));
-    assert_ne!(response_body, Bytes::from_static(CACHED_BODY));
+    assert_eq!(fresh_response.status(), StatusCode::OK);
+    let fresh_body = fresh_response.into_body().collect().await.expect("read upstream image").to_bytes();
+    assert_eq!(fresh_body, Bytes::from_static(UPSTREAM_BODY));
+    assert_ne!(fresh_body, Bytes::from_static(CACHED_BODY));
 
     let upstream_request = upstream_task.await.expect("mock upstream task completes");
     assert!(upstream_request.starts_with("GET http://1.1.1.1/icon.png HTTP/1.1\r\n"));
 }
 
 #[tokio::test]
-async fn public_resource_destination_validation_rejects_loopback_url() {
-    let url = Url::parse("http://127.0.0.1/icon.png").expect("loopback URL");
+async fn resource_response_bypasses_shared_cache_for_forwarded_authorization() {
+    const CACHED_BODY: &[u8] = b"cached private image";
+    const UPSTREAM_BODY: &[u8] = b"upstream private image";
 
-    let result = validate_public_resource_destination(&url).await;
+    let app_state = create_test_app_state();
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let cache_dir = temp_dir.path().to_string_lossy();
+    let mut cache = LRUResourceCache::new(1024, cache_dir.as_ref());
+    let resource_url = "http://1.1.1.1/private-icon.png";
+    let authorization = ResolvedResourceAuthorization::public_only();
+    let credential_headers = HashMap::from([("authorization".to_string(), b"Bearer private".to_vec())]);
+    let cache_key = resource_cache_key(
+        authorization.policy_digest.as_str(),
+        "",
+        &resource_credential_context(None, &credential_headers),
+        resource_url,
+    );
+    let cached_path = cache.store_path(&cache_key, Some("image/png"));
+    tokio::fs::write(&cached_path, CACHED_BODY).await.expect("write cached image");
+    cache.add_content(&cache_key, Some("image/png".to_string()), CACHED_BODY.len()).expect("cache entry");
+    app_state.cache.store(Some(Arc::new(RwLock::new(cache))));
 
-    assert!(result.is_err_and(|err| err.kind() == std::io::ErrorKind::PermissionDenied));
+    let response_head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nCache-Control: public, max-age=60\r\nConnection: close\r\n\r\n",
+        UPSTREAM_BODY.len()
+    );
+    let (upstream_addr, upstream_task) = spawn_legacy_hls_test_origin(response_head, UPSTREAM_BODY.to_vec()).await;
+    let proxy = reqwest::Proxy::http(format!("http://{upstream_addr}")).expect("mock proxy URL");
+    let mock_client = reqwest::Client::builder().proxy(proxy).build().expect("mock upstream client");
+    let mut clients = HashMap::new();
+    clients.insert(
+        ResourceClientKey::new(authorization.policy_digest.clone(), ResourceRedirectMode::Bounded),
+        mock_client,
+    );
+    app_state.resource_clients.store(Arc::new(ResourceClientSet::from_clients(clients)));
+
+    let mut request_headers = HeaderMap::new();
+    request_headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer private"));
+    let response = resource_response(
+        &app_state,
+        ResourceFetchOptions::cached(authorization),
+        resource_url,
+        &request_headers,
+        None,
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(header::CACHE_CONTROL).and_then(|value| value.to_str().ok()),
+        Some("private, no-store")
+    );
+    let body = response.into_body().collect().await.expect("read upstream image").to_bytes();
+    assert_eq!(body, Bytes::from_static(UPSTREAM_BODY));
+    assert_ne!(body, Bytes::from_static(CACHED_BODY));
+
+    let upstream_request = tokio::time::timeout(std::time::Duration::from_secs(1), upstream_task)
+        .await
+        .expect("credential-varying request was not sent")
+        .expect("mock upstream task completes");
+    assert!(upstream_request.to_ascii_lowercase().contains("authorization: bearer private\r\n"));
+}
+
+#[tokio::test]
+async fn resource_response_rejects_blocked_ip_literal_before_request() {
+    let app_state = create_test_app_state();
+    let response_head = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string();
+    let (origin_addr, mut origin_task) = spawn_legacy_hls_test_origin(response_head, Vec::new()).await;
+    let authorization = ResolvedResourceAuthorization::public_only();
+    let mut clients = HashMap::new();
+    clients.insert(
+        ResourceClientKey::new(authorization.policy_digest.clone(), ResourceRedirectMode::Bounded),
+        reqwest::Client::builder().no_proxy().build().expect("test resource client"),
+    );
+    app_state.resource_clients.store(Arc::new(ResourceClientSet::from_clients(clients)));
+
+    let response = resource_response(
+        &app_state,
+        ResourceFetchOptions::cached(authorization),
+        &format!("http://{origin_addr}/icon.png"),
+        &HeaderMap::new(),
+        None,
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let origin_result = tokio::time::timeout(std::time::Duration::from_millis(250), &mut origin_task).await;
+    origin_task.abort();
+    assert!(origin_result.is_err(), "blocked loopback request reached the test origin");
+}
+
+#[tokio::test]
+async fn resource_response_rejects_a_policy_without_a_current_client() {
+    let app_state = create_test_app_state();
+    let response = resource_response(
+        &app_state,
+        ResourceFetchOptions::cached(ResolvedResourceAuthorization::public_only()),
+        "http://1.1.1.1/icon.png",
+        &HeaderMap::new(),
+        None,
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
 }
 
 fn create_test_fingerprint_with_user_agent(addr: std::net::SocketAddr, user_agent: &str) -> Fingerprint {

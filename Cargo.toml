@@ -3,7 +3,7 @@ members = ["backend/*", "frontend", "shared", "tools/tuliprox-testkit"]
 resolver = "2"
 
 [workspace.package]
-version = "3.3.114"
+version = "3.3.115"
 edition = "2021"
 rust-version = "1.95.0"
 
@@ -87,6 +87,7 @@ incremental = false
 [profile.dev]
 lto = false
 incremental = true
+debug = "line-tables-only"
 codegen-units = 256
 
 [profile.dev-slim]
