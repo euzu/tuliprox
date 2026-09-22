@@ -1305,8 +1305,8 @@ async fn resolve_streaming_strategy(
                 // the session's stream_url still points to the old provider and cannot be accepted as-is;
                 // it must be resolved or rewritten for the newly allocated provider account.
                 let accept_requested_stream_url = (options.accept_requested_stream_url
-                    && options.force_provider.is_none_or(|forced| forced.as_ref() == provider_cfg.name.as_ref()))
-                    || input.input_type.is_stalker();
+                    || input.input_type.is_stalker())
+                    && options.force_provider.is_none_or(|forced| forced.as_ref() == provider_cfg.name.as_ref());
                 // Keep the URL only when it already targets the selected provider account. Hot reload can leave old
                 // alias URLs in persisted playlists until the next processing run.
                 if let Some((selected_provider_name, url)) = select_provider_stream_url(
@@ -1627,12 +1627,6 @@ async fn create_stream_response_details(
             };
             let is_fallback_provider = force_provider
                 .is_some_and(|forced| guard_provider_name.as_ref().is_some_and(|allocated| allocated != forced));
-            if is_fallback_provider {
-                if let Some(token) = session_owner {
-                    let _ =
-                        app_state.active_users.update_session_provider_headers(username, token, &HashMap::new()).await;
-                }
-            }
             let session_headers = if is_fallback_provider { None } else { session_headers };
             let (stream, stream_info, provider_session_headers, reconnect_flag) =
                 if defer_provider_stream_until_grace_check {
@@ -1794,6 +1788,13 @@ async fn create_stream_response_details(
                     }
                     (stream, stream_info, provider_session_headers, reconnect_flag)
                 };
+
+            if is_fallback_provider && stream.is_some() {
+                if let Some(token) = session_owner {
+                    let _ =
+                        app_state.active_users.update_session_provider_headers(username, token, &HashMap::new()).await;
+                }
+            }
 
             if log_enabled!(log::Level::Debug) {
                 if let Some((headers, status_code, response_url, _custom_video_type)) = stream_info.as_ref() {

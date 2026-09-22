@@ -3929,7 +3929,7 @@ async fn resolve_streaming_strategy_rewrites_url_on_fallback_even_when_accept_re
 }
 
 #[tokio::test]
-async fn create_stream_response_details_clears_headers_on_fallback_provider() {
+async fn create_stream_response_details_preserves_stored_headers_when_fallback_open_fails() {
     let app_state = create_test_dual_provider_app_state();
     let input_name = "provider_1".intern();
     let input =
@@ -4000,15 +4000,16 @@ async fn create_stream_response_details_clears_headers_on_fallback_provider() {
 
     assert_eq!(details.provider_name.as_deref(), Some("provider_2"));
     assert!(details.session_headers.is_none(), "fallback request should not pass pinned provider session headers");
+    assert!(details.stream.is_none(), "test setup should fail to open the fallback provider stream");
 
     let session = app_state
         .active_users
         .get_and_update_user_session(&user.username, session_token)
         .await
         .expect("session should exist");
-    assert!(
-        session.provider_session_headers.is_empty(),
-        "stored session headers should be cleared before opening fallback request"
+    assert_eq!(
+        session.provider_session_headers, initial_headers,
+        "stored session headers should be retained when the fallback provider cannot be opened"
     );
 
     app_state.active_provider.release_connection(&busy_addr);
@@ -4016,8 +4017,23 @@ async fn create_stream_response_details_clears_headers_on_fallback_provider() {
 }
 
 #[tokio::test]
-async fn force_provider_stream_response_fallback_clears_stored_headers_when_pinned_exhausted() {
-    let app_state = create_test_dual_provider_app_state();
+async fn force_provider_stream_response_clears_stored_headers_after_fallback_open_succeeds() {
+    const FALLBACK_BODY: &[u8] = b"fallback-provider";
+    let response_head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        FALLBACK_BODY.len()
+    );
+    let (origin_addr, origin_task) = spawn_legacy_hls_test_origin(response_head, FALLBACK_BODY.to_vec()).await;
+    let app_config = create_test_dual_provider_app_config();
+    let Some(configured_input) = app_config.sources.load().inputs.first().cloned() else { unreachable!() };
+    let mut fallback_input = (*configured_input).clone();
+    let Some(aliases) = fallback_input.aliases.as_mut() else { unreachable!() };
+    let Some(fallback_alias) = aliases.first_mut() else { unreachable!() };
+    fallback_alias.url = format!("http://{origin_addr}");
+    app_config
+        .sources
+        .store(Arc::new(SourcesConfig { inputs: vec![Arc::new(fallback_input)], ..SourcesConfig::default() }));
+    let app_state = create_test_app_state_for_config(Arc::new(app_config));
     let input_name = "provider_1".intern();
     let input =
         app_state.app_config.sources.load().get_input_by_name(&input_name).cloned().unwrap_or_else(|| unreachable!());
@@ -4062,7 +4078,7 @@ async fn force_provider_stream_response_fallback_clears_stored_headers_when_pinn
         .expect("session should exist");
 
     let channel = create_test_live_channel(stream_url);
-    let _response = force_provider_stream_response(
+    let response = force_provider_stream_response(
         &create_test_fingerprint(reacquire_addr),
         &app_state,
         &session,
@@ -4076,7 +4092,14 @@ async fn force_provider_stream_response_fallback_clears_stored_headers_when_pinn
         },
         None,
     )
-    .await;
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.expect("fallback stream body").to_bytes();
+    assert_eq!(body.as_ref(), FALLBACK_BODY);
+    let request = origin_task.await.expect("fallback origin task completes");
+    assert!(!request.is_empty(), "fallback provider must receive the stream request");
 
     let updated_session = app_state
         .active_users
@@ -4085,7 +4108,7 @@ async fn force_provider_stream_response_fallback_clears_stored_headers_when_pinn
         .expect("session should exist");
     assert!(
         updated_session.provider_session_headers.is_empty(),
-        "stored session headers must be cleared when fallback request differs from pinned provider"
+        "stored session headers must be cleared after the fallback provider stream opens"
     );
 
     app_state.active_provider.release_connection(&busy_addr);
@@ -4269,6 +4292,60 @@ async fn resolve_streaming_strategy_accepts_stalker_portal_url() {
     assert_eq!(url.as_ref(), stream_url);
 
     app_state.active_provider.release_connection(&addr);
+}
+
+#[tokio::test]
+async fn resolve_streaming_strategy_rejects_stalker_url_after_forced_provider_fallback() {
+    let app_config = create_test_dual_provider_app_config();
+    let Some(configured_input) = app_config.sources.load().inputs.first().cloned() else { unreachable!() };
+    let mut stalker_input = (*configured_input).clone();
+    stalker_input.input_type = InputType::Stalker;
+    app_config
+        .sources
+        .store(Arc::new(SourcesConfig { inputs: vec![Arc::new(stalker_input)], ..SourcesConfig::default() }));
+    let app_state = create_test_app_state_for_config(Arc::new(app_config));
+    let input_name = "provider_1".intern();
+    let input =
+        app_state.app_config.sources.load().get_input_by_name(&input_name).cloned().unwrap_or_else(|| unreachable!());
+    let pinned_provider = "provider_1".intern();
+    let busy_addr: SocketAddr = "127.0.0.1:55308".parse().unwrap_or_else(|_| unreachable!());
+    let fallback_addr: SocketAddr = "127.0.0.1:55309".parse().unwrap_or_else(|_| unreachable!());
+    let stream_url = "http://line.example/play/live.php?mac=00:11:22:33:44:55&stream=347&extension=ts&play_token=abc";
+
+    let busy = app_state.active_provider.acquire_exact_connection_with_grace(
+        &pinned_provider,
+        &busy_addr,
+        false,
+        0,
+        crate::api::model::ConnectionKind::Normal,
+    );
+    assert!(busy.is_some(), "setup should occupy the pinned provider");
+
+    let strategy = resolve_streaming_strategy(
+        &app_state,
+        stream_url,
+        &create_test_fingerprint(fallback_addr),
+        &input,
+        StreamingAcquireOptions {
+            force_provider: Some(&pinned_provider),
+            allow_forced_provider_fallback: true,
+            allow_provider_grace: false,
+            user_priority: 0,
+            connection_kind: crate::api::model::ConnectionKind::Normal,
+            session_owner: Some("live-session"),
+            playback_kind: crate::model::PlaybackKind::LiveTs,
+            accept_requested_stream_url: false,
+        },
+    )
+    .await;
+
+    assert!(matches!(
+        strategy.provider_stream_state,
+        ProviderStreamState::Custom { reason: ProviderStreamCustomReason::UnmappedProviderUrl, .. }
+    ));
+
+    app_state.active_provider.release_connection(&busy_addr);
+    app_state.active_provider.release_connection(&fallback_addr);
 }
 
 #[tokio::test]
