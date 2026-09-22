@@ -224,6 +224,7 @@ struct PlaylistCandidate<'a> {
 struct MatchResult<'playlist, 'reference> {
     playlist_item: &'playlist PlaylistItem,
     reference: &'reference CuratedMediaReference,
+    media_kind: CurationMediaKind,
     candidate_order: usize,
 }
 
@@ -302,7 +303,12 @@ fn find_best_fuzzy_match_for_item<'playlist, 'reference>(
             candidate.item.header.title,
             reference.title
         );
-        return Some(MatchResult { playlist_item: candidate.item, reference, candidate_order: 0 });
+        return Some(MatchResult {
+            playlist_item: candidate.item,
+            reference,
+            media_kind: candidate.kind,
+            candidate_order: 0,
+        });
     }
 
     None
@@ -319,7 +325,12 @@ fn find_best_match_for_item<'playlist, 'reference>(
         }) {
             if Some(playlist_tmdb_id) == reference.tmdb_id {
                 trace!("TMDB exact curation match: '{}' (TMDB: {})", candidate.item.header.title, playlist_tmdb_id);
-                return Some(MatchResult { playlist_item: candidate.item, reference, candidate_order: 0 });
+                return Some(MatchResult {
+                    playlist_item: candidate.item,
+                    reference,
+                    media_kind: candidate.kind,
+                    candidate_order: 0,
+                });
             }
         }
     }
@@ -401,8 +412,7 @@ pub(crate) fn evaluate_selector(
         .map(|matched| CurationMembership {
             selector_key: key,
             subject_uuid: subject_uuid(matched.playlist_item),
-            media_kind: CurationMediaKind::from_playlist_item_type(matched.playlist_item.header.item_type)
-                .expect("curation matches contain only movie or series roots"),
+            media_kind: matched.media_kind,
             rank: matched.reference.rank,
             title_tiebreak: matched.reference.title.to_lowercase(),
             candidate_order: matched.candidate_order,
