@@ -4715,6 +4715,28 @@ fn create_test_fingerprint(addr: std::net::SocketAddr) -> Fingerprint {
     Fingerprint::new(format!("fp-{addr}"), addr.ip().to_string(), addr)
 }
 
+#[test]
+fn resource_credential_context_separates_configured_and_inbound_credentials() {
+    let mut input = ConfigInput {
+        name: "input".into(),
+        username: Some("user".to_string()),
+        password: Some("password-a".to_string()),
+        ..ConfigInput::default()
+    };
+    let no_headers = HashMap::new();
+    let configured_a = resource_credential_context(Some(&input), &no_headers);
+    input.password = Some("password-b".to_string());
+    let configured_b = resource_credential_context(Some(&input), &no_headers);
+    assert_ne!(configured_a, configured_b);
+
+    let mut request_headers = HashMap::new();
+    request_headers.insert("authorization".to_string(), b"Bearer a".to_vec());
+    let inbound_a = resource_credential_context(None, &request_headers);
+    request_headers.insert("authorization".to_string(), b"Bearer b".to_vec());
+    let inbound_b = resource_credential_context(None, &request_headers);
+    assert_ne!(inbound_a, inbound_b);
+}
+
 #[tokio::test]
 async fn resource_cache_is_scoped_to_the_authorizing_policy() {
     const CACHED_BODY: &[u8] = b"cached image";
@@ -4728,7 +4750,12 @@ async fn resource_cache_is_scoped_to_the_authorizing_policy() {
 
     // An entry stored under the public-only scope: it must never answer a request authorized by a
     // policy that is allowed to reach private destinations.
-    let public_only_scope = resource_cache_key(public_only_policy().digest().as_str(), resource_url);
+    let public_only_scope = resource_cache_key(
+        public_only_policy().digest().as_str(),
+        "",
+        &resource_credential_context(None, &HashMap::new()),
+        resource_url,
+    );
     let cached_path = cache.store_path(&public_only_scope, Some("image/png"));
     tokio::fs::write(&cached_path, CACHED_BODY).await.expect("write cached image");
     cache.add_content(&public_only_scope, Some("image/png".to_string()), CACHED_BODY.len()).expect("cache entry");
@@ -4789,12 +4816,22 @@ async fn resource_cache_is_scoped_to_the_authorizing_policy() {
 }
 
 #[tokio::test]
-async fn resource_response_rejects_blocked_ip_literal_without_a_client() {
+async fn resource_response_rejects_blocked_ip_literal_before_request() {
     let app_state = create_test_app_state();
+    let response_head = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string();
+    let (origin_addr, mut origin_task) = spawn_legacy_hls_test_origin(response_head, Vec::new()).await;
+    let authorization = ResolvedResourceAuthorization::public_only();
+    let mut clients = HashMap::new();
+    clients.insert(
+        ResourceClientKey::new(authorization.policy_digest.clone(), ResourceRedirectMode::Bounded),
+        reqwest::Client::builder().no_proxy().build().expect("test resource client"),
+    );
+    app_state.resource_clients.store(Arc::new(ResourceClientSet::from_clients(clients)));
+
     let response = resource_response(
         &app_state,
-        ResourceFetchOptions::cached(ResolvedResourceAuthorization::public_only()),
-        "http://127.0.0.1/icon.png",
+        ResourceFetchOptions::cached(authorization),
+        &format!("http://{origin_addr}/icon.png"),
         &HeaderMap::new(),
         None,
     )
@@ -4802,6 +4839,9 @@ async fn resource_response_rejects_blocked_ip_literal_without_a_client() {
     .into_response();
 
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let origin_result = tokio::time::timeout(std::time::Duration::from_millis(250), &mut origin_task).await;
+    origin_task.abort();
+    assert!(origin_result.is_err(), "blocked loopback request reached the test origin");
 }
 
 #[tokio::test]

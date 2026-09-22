@@ -3596,6 +3596,50 @@ pub fn is_hls_stream_share_enabled(target: &ConfigTarget) -> bool {
     target.options.as_ref().is_some_and(ConfigTargetOptions::share_live_hls_enabled)
 }
 
+fn resource_credential_context(input: Option<&ConfigInput>, request_headers: &HashMap<String, Vec<u8>>) -> String {
+    fn update_field(hasher: &mut blake3::Hasher, value: &[u8]) {
+        hasher.update(&(value.len() as u64).to_be_bytes());
+        hasher.update(value);
+    }
+
+    fn update_headers(hasher: &mut blake3::Hasher, headers: impl Iterator<Item = (String, Vec<u8>)>) {
+        let mut headers = headers.collect::<Vec<_>>();
+        headers.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        for (name, value) in headers {
+            update_field(hasher, name.as_bytes());
+            update_field(hasher, &value);
+        }
+    }
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"tuliprox.resource.credentials.v1");
+    if let Some(input) = input {
+        update_field(&mut hasher, input.name.as_bytes());
+        update_field(&mut hasher, input.username.as_deref().unwrap_or_default().as_bytes());
+        update_field(&mut hasher, input.password.as_deref().unwrap_or_default().as_bytes());
+        update_headers(
+            &mut hasher,
+            input
+                .headers
+                .iter()
+                .filter(|(name, _)| !request::is_safe_cross_origin_redirect_header(name))
+                .map(|(name, value)| (name.to_ascii_lowercase(), value.as_bytes().to_vec())),
+        );
+    } else {
+        update_field(&mut hasher, &[]);
+        update_field(&mut hasher, &[]);
+        update_field(&mut hasher, &[]);
+    }
+    update_headers(
+        &mut hasher,
+        request_headers
+            .iter()
+            .filter(|(name, _)| !request::is_safe_cross_origin_redirect_header(name))
+            .map(|(name, value)| (name.to_ascii_lowercase(), value.clone())),
+    );
+    hasher.finalize().to_hex().to_string()
+}
+
 fn get_add_cache_content(
     res_url: &str,
     mime_type: Option<String>,
@@ -3814,8 +3858,16 @@ pub async fn resource_response(
 
     let filter: HeaderFilter = Some(Box::new(|key| key != "if-none-match" && key != "if-modified-since"));
     let req_headers = get_headers_from_request(req_headers, &filter);
+    let configured_input =
+        authorization.input_name.as_ref().and_then(|input_name| app_state.app_config.get_input_by_name(input_name));
+    let credential_context = resource_credential_context(configured_input.as_deref().or(input), &req_headers);
     let cache_key = match options.cache_mode {
-        ResourceCacheMode::Enabled => Some(resource_cache_key(authorization.policy_digest.as_str(), url.as_str())),
+        ResourceCacheMode::Enabled => Some(resource_cache_key(
+            authorization.policy_digest.as_str(),
+            authorization.input_name.as_deref().unwrap_or_default(),
+            &credential_context,
+            url.as_str(),
+        )),
         ResourceCacheMode::Disabled => None,
     };
     if let (Some(cache_key), Some(cache)) = (cache_key.as_deref(), app_state.cache.load().as_ref()) {
