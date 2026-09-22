@@ -188,6 +188,20 @@ pub fn canonicalize_ip(address: IpAddr) -> IpAddr {
     }
 }
 
+fn embedded_ipv4(address: Ipv6Addr) -> Option<Ipv4Addr> {
+    let segments = address.segments();
+    let (high, low) = if segments[..6] == [0, 0, 0, 0, 0, 0] || segments[..6] == [0x0064, 0xff9b, 0, 0, 0, 0] {
+        (segments[6], segments[7])
+    } else if segments[0] == 0x2002 {
+        (segments[1], segments[2])
+    } else {
+        return None;
+    };
+    let [a, b] = high.to_be_bytes();
+    let [c, d] = low.to_be_bytes();
+    Some(Ipv4Addr::new(a, b, c, d))
+}
+
 fn classify_ipv4(address: Ipv4Addr) -> AddressClass {
     let [a, b, _, _] = address.octets();
     if address.is_private() {
@@ -210,6 +224,9 @@ fn classify_ipv4(address: Ipv4Addr) -> AddressClass {
 }
 
 fn classify_ipv6(address: Ipv6Addr) -> AddressClass {
+    if let Some(address) = embedded_ipv4(address) {
+        return classify_ipv4(address);
+    }
     let segments = address.segments();
     if segments[0] & 0xfe00 == 0xfc00 {
         // fc00::/7 unique local addresses.
@@ -3188,14 +3205,16 @@ pub fn should_trigger_failover(status: StatusCode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        download_text_content, download_text_content_with_headers_and_options, get_input_epg_content_as_file,
-        get_remote_content_as_stream, is_safe_cross_origin_redirect_header, next_provider_url_index,
-        preview_request_diagnostics_for_logging, preview_request_target_for_logging, resolve_attempt_target,
-        same_origin, send_input_with_retry_and_provider_policy_with_manual_redirects_and_options_result,
+        classify_ip, download_text_content, download_text_content_with_headers_and_options,
+        get_input_epg_content_as_file, get_remote_content_as_stream, is_safe_cross_origin_redirect_header,
+        next_provider_url_index, preview_request_diagnostics_for_logging, preview_request_target_for_logging,
+        resolve_attempt_target, same_origin,
+        send_input_with_retry_and_provider_policy_with_manual_redirects_and_options_result,
         send_input_with_retry_and_provider_policy_with_options_result, send_with_retry_and_provider,
         send_with_retry_and_provider_policy, should_retry_text_body_error, should_try_next_ip_on_connect_error,
-        strip_sensitive_headers_for_cross_origin_redirect, text_response_error_log_label, InputEpgFileRequest,
-        PublicIpResolver, RequestFetchOptions, TextContentBodyOptions, TextContentFetchOptions, STREAM_IDLE_TIMEOUT,
+        strip_sensitive_headers_for_cross_origin_redirect, text_response_error_log_label, AddressClass,
+        InputEpgFileRequest, PublicIpResolver, RequestFetchOptions, TextContentBodyOptions, TextContentFetchOptions,
+        STREAM_IDLE_TIMEOUT,
     };
     use crate::{
         model::{
@@ -3224,7 +3243,7 @@ mod tests {
     use std::{
         collections::{HashMap, HashSet},
         io::{Error, ErrorKind, Write},
-        net::SocketAddr,
+        net::{IpAddr, SocketAddr},
         path::{Path, PathBuf},
         sync::{
             atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -3238,6 +3257,32 @@ mod tests {
         sync::{oneshot, Mutex},
     };
     use url::Url;
+
+    #[test]
+    fn embedded_ipv4_destinations_use_ipv4_classification() {
+        for (address, expected) in [
+            ("64:ff9b::a00:1", AddressClass::Private),
+            ("64:ff9b::808:808", AddressClass::Public),
+            ("2002:a00:1::", AddressClass::Private),
+            ("2002:808:808::", AddressClass::Public),
+            ("::a00:1", AddressClass::Private),
+            ("::808:808", AddressClass::Public),
+            ("64:ff9b::7f00:1", AddressClass::Blocked),
+        ] {
+            assert_eq!(classify_ip(address.parse::<IpAddr>().expect("valid IP address")), expected, "{address}");
+        }
+    }
+
+    #[test]
+    fn native_ipv6_destinations_keep_ipv6_classification() {
+        for (address, expected) in [
+            ("2001:4860:4860::8888", AddressClass::Public),
+            ("fc00::1", AddressClass::Private),
+            ("2001:db8::1", AddressClass::Blocked),
+        ] {
+            assert_eq!(classify_ip(address.parse::<IpAddr>().expect("valid IP address")), expected, "{address}");
+        }
+    }
 
     fn make_test_app_config(config: Config) -> Arc<AppConfig> {
         Arc::new(AppConfig {

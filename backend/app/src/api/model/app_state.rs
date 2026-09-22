@@ -720,6 +720,7 @@ impl AppState {
         }
         self.app_config.set_sources(sources)?;
         self.active_provider.update_config(&self.app_config);
+        self.resource_clients.store(Arc::new(create_resource_client_set(&self.app_config)?));
 
         shared::model::REGEX_CACHE.sweep();
         Ok(changes)

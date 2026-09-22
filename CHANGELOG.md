@@ -10,10 +10,12 @@
   route that serves them (`/resource/m3u/...`, the Xtream resource routes, `/resource/epg/...`, and
   `/api/v1/playlist/resource/...`), where previously three of them fetched any destination reachable by the
   configured HTTP client.
-  - A resource URL that resolves to a private address (RFC 1918 or IPv6 ULA) is rejected unless the input that
-    supplied it lists the exact host name in `resource_policy.allowed_hosts` **and** the address in
-    `resource_policy.allowed_networks`. Add the policy to the input that provides the logo or icon; for icons that
-    `logo_override` copies out of EPG, that is the EPG input.
+  - A resource URL whose DNS host name resolves to a private address (RFC 1918 or IPv6 ULA) is rejected unless the
+    input that supplied it lists the exact host name in `resource_policy.allowed_hosts` **and** the address in
+    `resource_policy.allowed_networks`. A private IP literal requires only a matching
+    `resource_policy.allowed_networks` entry because IP literals are not valid `allowed_hosts` values. Add the policy
+    to the input that provides the logo or icon; for icons that `logo_override` copies out of EPG, that is the EPG
+    input.
   - Loopback, link-local, cloud-metadata, CGNAT, multicast, and reserved addresses stay blocked with or without a
     policy. Redirects are re-checked on every hop and are bounded.
   - Resource ownership is stored generically with each URL, including nested cover, poster, backdrop, and episode
@@ -21,9 +23,9 @@
     without an authoritative input remain public-only until regenerated.
   - `resource://` is an internal reserved scheme. Provider data and mapping configuration must never supply it;
     such values are rejected rather than interpreted as authorization claims.
-  - The canonical input name is the authorization identity of a resource origin. Input and alias names are UUIDs and
-    must be unique; a configuration with duplicate input names, duplicate alias names, or an alias name that shadows
-    an input name is now rejected while loading.
+  - The canonical input name is the authorization identity of a resource origin. Configured input and alias names
+    must be non-empty, globally unique strings; a configuration with duplicate input names, duplicate alias names,
+    or an alias name that shadows an input name is now rejected while loading. Internal IDs are managed separately.
   - The resource cache is keyed by the policy that authorized the entry, so an entry fetched under one policy is
     never served to another. The cache starts cold once on upgrade because the key layout changes.
   - Resource proxying now always connects directly: a configured proxy and the `HTTP_PROXY` / `HTTPS_PROXY` /

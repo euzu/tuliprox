@@ -2592,7 +2592,7 @@ impl InputWorker {
     fn ingest_vod_resources(updates: &mut [(ProviderIdType, VideoStreamProperties)], input_name: &Arc<str>) {
         for (_, props) in updates {
             let mut value = StreamProperties::Video(Box::new(std::mem::take(props)));
-            value.ingest_resource_values(input_name);
+            value.normalize_internal_resource_values(input_name);
             if let StreamProperties::Video(normalized) = value {
                 *props = *normalized;
             }
@@ -2602,7 +2602,7 @@ impl InputWorker {
     fn ingest_series_resources(updates: &mut [(ProviderIdType, SeriesStreamProperties)], input_name: &Arc<str>) {
         for (_, props) in updates {
             let mut value = StreamProperties::Series(Box::new(std::mem::take(props)));
-            value.ingest_resource_values(input_name);
+            value.normalize_internal_resource_values(input_name);
             if let StreamProperties::Series(normalized) = value {
                 *props = *normalized;
             }
@@ -2612,14 +2612,13 @@ impl InputWorker {
     fn ingest_live_resources(updates: &mut [(ProviderIdType, LiveStreamProperties)], input_name: &Arc<str>) {
         for (_, props) in updates {
             let mut value = StreamProperties::Live(Box::new(std::mem::take(props)));
-            value.ingest_resource_values(input_name);
+            value.normalize_internal_resource_values(input_name);
             if let StreamProperties::Live(normalized) = value {
                 *props = *normalized;
             }
         }
     }
 
-    // Changed to static method
     async fn flush_batch_static<E: EventSink + Clone + 'static>(
         input_name: &str,
         bound_ctx: Option<&MetadataUpdateCtx<E>>,

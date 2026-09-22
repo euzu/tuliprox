@@ -1217,10 +1217,11 @@ record that contains it. Two consequences matter in practice:
 * `logo_override: true` copies an EPG icon into a playlist logo. That logo keeps the EPG input as its origin and is
   authorized with the **EPG input's** policy, not the playlist input's.
 
-The canonical input name is the authorization identity of a resource origin. Names are UUIDs and globally unique:
-no two inputs — and no input and alias — may share a name, and the loader rejects a configuration that does. Renaming
-an input invalidates the links that were issued for it, and reusing a name for a different input would hand it the
-authority of the old input, so treat a rename as a new identity.
+The canonical input name is the authorization identity of a resource origin. Configured input and alias names are
+non-empty, globally unique strings: no two inputs — and no input and alias — may share a name, and the loader rejects
+a configuration that does. Internal numeric IDs and generated playlist UUIDs are managed separately from these names.
+Renaming an input invalidates the links that were issued for it, and reusing a name for a different input would hand
+it the authority of the old input, so treat a rename as a new identity.
 
 #### Legacy data and links
 
