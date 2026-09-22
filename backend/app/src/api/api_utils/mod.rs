@@ -28,6 +28,7 @@ use crate::{
     },
     model::{
         AppConfig, ConfigInput, ConfigInputFlags, ConfigTarget, InputUserInfo, PlaybackKind, ProxyUserCredentials,
+        ReverseProxyDisabledHeaderConfig,
     },
     processing::{
         parser::hls::{rewrite_hls, RewriteHlsProps},
@@ -3640,6 +3641,16 @@ fn resource_credential_context(input: Option<&ConfigInput>, request_headers: &Ha
     hasher.finalize().to_hex().to_string()
 }
 
+fn resource_request_has_authorization(input: Option<&ConfigInput>, request_headers: &HashMap<String, Vec<u8>>) -> bool {
+    input.is_some_and(|input| {
+        input.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case(header::AUTHORIZATION.as_str()) && HeaderValue::from_str(value).is_ok()
+        })
+    }) || request_headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case(header::AUTHORIZATION.as_str()) && HeaderValue::from_bytes(value).is_ok()
+    })
+}
+
 fn get_add_cache_content(
     res_url: &str,
     mime_type: Option<String>,
@@ -3698,6 +3709,7 @@ async fn build_resource_stream_response(
     cache_key: Option<&str>,
     resource_url: &str,
     response: reqwest::Response,
+    credential_varying: bool,
 ) -> axum::response::Response {
     let sanitized_resource_url = sanitize_sensitive_info(resource_url);
     let status = response.status();
@@ -3710,7 +3722,11 @@ async fn build_resource_stream_response(
         }
     }
 
-    if !response_builder.headers_ref().is_some_and(|h| h.contains_key(header::CACHE_CONTROL)) {
+    if credential_varying {
+        if let Some(headers) = response_builder.headers_mut() {
+            headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
+        }
+    } else if !response_builder.headers_ref().is_some_and(|h| h.contains_key(header::CACHE_CONTROL)) {
         response_builder = response_builder.header(header::CACHE_CONTROL, "public, max-age=14400");
     }
 
@@ -3752,20 +3768,25 @@ async fn build_resource_stream_response(
     try_unwrap_body!(response_builder.body(axum::body::Body::from_stream(byte_stream)))
 }
 
+struct ResourceRequestContext<'a> {
+    headers: &'a HashMap<String, Vec<u8>>,
+    input: Option<&'a ConfigInput>,
+    disabled_headers: Option<&'a ReverseProxyDisabledHeaderConfig>,
+    credential_varying: bool,
+}
+
 async fn fetch_resource_with_retry(
     app_state: &Arc<AppState>,
     http_client: &reqwest::Client,
     url: &Url,
     cache_key: Option<&str>,
     resource_url: &str,
-    req_headers: &HashMap<String, Vec<u8>>,
-    input: Option<&ConfigInput>,
+    request_context: ResourceRequestContext<'_>,
 ) -> Option<axum::response::Response> {
+    let ResourceRequestContext { headers, input, disabled_headers, credential_varying } = request_context;
     let config = app_state.app_config.config.load();
     let default_user_agent = config.default_user_agent.clone();
     drop(config);
-
-    let disabled_headers = app_state.get_disabled_headers();
 
     let provider_config = input.and_then(|i| i.get_resolve_provider(url.as_str()));
     let Ok(response) =
@@ -3775,8 +3796,8 @@ async fn fetch_resource_with_retry(
                 input.map_or(InputFetchMethod::GET, |i| i.method),
                 input.map(|i| &i.headers),
                 resolved_url,
-                Some(req_headers),
-                disabled_headers.as_ref(),
+                Some(headers),
+                disabled_headers,
                 default_user_agent.as_deref(),
             )
         })
@@ -3788,7 +3809,9 @@ async fn fetch_resource_with_retry(
     let status = response.status();
 
     if status.is_success() {
-        return Some(build_resource_stream_response(app_state, cache_key, resource_url, response).await);
+        return Some(
+            build_resource_stream_response(app_state, cache_key, resource_url, response, credential_varying).await,
+        );
     }
 
     // Non-retriable Status -> Upstream Response incl. Body
@@ -3798,6 +3821,11 @@ async fn fetch_resource_with_retry(
     for (key, value) in response.headers() {
         if !is_hop_by_hop_response_header(key) {
             response_builder = response_builder.header(key, value);
+        }
+    }
+    if credential_varying {
+        if let Some(headers) = response_builder.headers_mut() {
+            headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
         }
     }
 
@@ -3860,15 +3888,21 @@ pub async fn resource_response(
     let req_headers = get_headers_from_request(req_headers, &filter);
     let configured_input =
         authorization.input_name.as_ref().and_then(|input_name| app_state.app_config.get_input_by_name(input_name));
-    let credential_context = resource_credential_context(configured_input.as_deref().or(input), &req_headers);
+    let effective_input = configured_input.as_deref().or(input);
+    let credential_context = resource_credential_context(effective_input, &req_headers);
+    let disabled_headers = app_state.get_disabled_headers();
+    let authorization_disabled =
+        disabled_headers.as_ref().is_some_and(|disabled| disabled.should_remove(header::AUTHORIZATION.as_str()));
+    let credential_varying =
+        !authorization_disabled && resource_request_has_authorization(effective_input, &req_headers);
     let cache_key = match options.cache_mode {
-        ResourceCacheMode::Enabled => Some(resource_cache_key(
+        ResourceCacheMode::Enabled if !credential_varying => Some(resource_cache_key(
             authorization.policy_digest.as_str(),
             authorization.input_name.as_deref().unwrap_or_default(),
             &credential_context,
             url.as_str(),
         )),
-        ResourceCacheMode::Disabled => None,
+        ResourceCacheMode::Enabled | ResourceCacheMode::Disabled => None,
     };
     if let (Some(cache_key), Some(cache)) = (cache_key.as_deref(), app_state.cache.load().as_ref()) {
         let cache_hit = {
@@ -3894,8 +3928,12 @@ pub async fn resource_response(
         &url,
         cache_key.as_deref(),
         resource_url,
-        &req_headers,
-        input,
+        ResourceRequestContext {
+            headers: &req_headers,
+            input: effective_input,
+            disabled_headers: disabled_headers.as_ref(),
+            credential_varying,
+        },
     )
     .await
     {

@@ -4816,6 +4816,71 @@ async fn resource_cache_is_scoped_to_the_authorizing_policy() {
 }
 
 #[tokio::test]
+async fn resource_response_bypasses_shared_cache_for_forwarded_authorization() {
+    const CACHED_BODY: &[u8] = b"cached private image";
+    const UPSTREAM_BODY: &[u8] = b"upstream private image";
+
+    let app_state = create_test_app_state();
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let cache_dir = temp_dir.path().to_string_lossy();
+    let mut cache = LRUResourceCache::new(1024, cache_dir.as_ref());
+    let resource_url = "http://1.1.1.1/private-icon.png";
+    let authorization = ResolvedResourceAuthorization::public_only();
+    let credential_headers = HashMap::from([("authorization".to_string(), b"Bearer private".to_vec())]);
+    let cache_key = resource_cache_key(
+        authorization.policy_digest.as_str(),
+        "",
+        &resource_credential_context(None, &credential_headers),
+        resource_url,
+    );
+    let cached_path = cache.store_path(&cache_key, Some("image/png"));
+    tokio::fs::write(&cached_path, CACHED_BODY).await.expect("write cached image");
+    cache.add_content(&cache_key, Some("image/png".to_string()), CACHED_BODY.len()).expect("cache entry");
+    app_state.cache.store(Some(Arc::new(RwLock::new(cache))));
+
+    let response_head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nCache-Control: public, max-age=60\r\nConnection: close\r\n\r\n",
+        UPSTREAM_BODY.len()
+    );
+    let (upstream_addr, upstream_task) = spawn_legacy_hls_test_origin(response_head, UPSTREAM_BODY.to_vec()).await;
+    let proxy = reqwest::Proxy::http(format!("http://{upstream_addr}")).expect("mock proxy URL");
+    let mock_client = reqwest::Client::builder().proxy(proxy).build().expect("mock upstream client");
+    let mut clients = HashMap::new();
+    clients.insert(
+        ResourceClientKey::new(authorization.policy_digest.clone(), ResourceRedirectMode::Bounded),
+        mock_client,
+    );
+    app_state.resource_clients.store(Arc::new(ResourceClientSet::from_clients(clients)));
+
+    let mut request_headers = HeaderMap::new();
+    request_headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer private"));
+    let response = resource_response(
+        &app_state,
+        ResourceFetchOptions::cached(authorization),
+        resource_url,
+        &request_headers,
+        None,
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(header::CACHE_CONTROL).and_then(|value| value.to_str().ok()),
+        Some("private, no-store")
+    );
+    let body = response.into_body().collect().await.expect("read upstream image").to_bytes();
+    assert_eq!(body, Bytes::from_static(UPSTREAM_BODY));
+    assert_ne!(body, Bytes::from_static(CACHED_BODY));
+
+    let upstream_request = tokio::time::timeout(std::time::Duration::from_secs(1), upstream_task)
+        .await
+        .expect("credential-varying request was not sent")
+        .expect("mock upstream task completes");
+    assert!(upstream_request.to_ascii_lowercase().contains("authorization: bearer private\r\n"));
+}
+
+#[tokio::test]
 async fn resource_response_rejects_blocked_ip_literal_before_request() {
     let app_state = create_test_app_state();
     let response_head = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string();
