@@ -465,7 +465,7 @@ mod tests {
             ProviderBodyOwnerConfig {
                 channel_capacity: 2,
                 max_buffer_bytes: max,
-                idle_timeout: Duration::from_secs(60),
+                idle_timeout: Duration::from_mins(1),
             },
             CancellationToken::new(),
             None,

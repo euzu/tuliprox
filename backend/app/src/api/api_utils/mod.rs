@@ -1292,8 +1292,6 @@ async fn resolve_streaming_strategy(
     input: &ConfigInput,
     options: StreamingAcquireOptions<'_>,
 ) -> StreamingStrategy {
-    // allocate a provider connection
-    let accept_requested_stream_url = options.accept_requested_stream_url || input.input_type.is_stalker();
     let mut provider_connection_handle = acquire_stream_provider_handle(app_state, input, fingerprint, &options).await;
 
     // panel_api provisioning/loading is handled later in the stream creation flow
@@ -1309,6 +1307,12 @@ async fn resolve_streaming_strategy(
                 ProviderStreamState::Custom { response: stream, reason: ProviderStreamCustomReason::ProviderExhausted }
             }
             ProviderAllocation::Available(ref provider_cfg) | ProviderAllocation::GracePeriod(ref provider_cfg) => {
+                // If a forced/pinned provider was requested but allocation fell back to another account,
+                // the session's stream_url still points to the old provider and cannot be accepted as-is;
+                // it must be resolved or rewritten for the newly allocated provider account.
+                let accept_requested_stream_url = (options.accept_requested_stream_url
+                    || input.input_type.is_stalker())
+                    && options.force_provider.is_none_or(|forced| forced.as_ref() == provider_cfg.name.as_ref());
                 // Keep the URL only when it already targets the selected provider account. Hot reload can leave old
                 // alias URLs in persisted playlists until the next processing run.
                 if let Some((selected_provider_name, url)) = select_provider_stream_url(
@@ -1627,6 +1631,9 @@ async fn create_stream_response_details(
             } else {
                 false
             };
+            let is_fallback_provider = force_provider
+                .is_some_and(|forced| guard_provider_name.as_ref().is_some_and(|allocated| allocated != forced));
+            let session_headers = if is_fallback_provider { None } else { session_headers };
             let (stream, stream_info, provider_session_headers, reconnect_flag) =
                 if defer_provider_stream_until_grace_check {
                     debug_if_enabled!(
@@ -1787,6 +1794,13 @@ async fn create_stream_response_details(
                     }
                     (stream, stream_info, provider_session_headers, reconnect_flag)
                 };
+
+            if is_fallback_provider && stream.is_some() {
+                if let Some(token) = session_owner {
+                    let _ =
+                        app_state.active_users.update_session_provider_headers(username, token, &HashMap::new()).await;
+                }
+            }
 
             if log_enabled!(log::Level::Debug) {
                 if let Some((headers, status_code, response_url, _custom_video_type)) = stream_info.as_ref() {
@@ -2129,10 +2143,13 @@ pub async fn force_provider_stream_response(
         cleanup_forced_reopen_addrs(app_state, &user_session.token, &cleanup_addrs).await;
     }
 
-    // Provider-affine playback must stay on the same provider account across seeks/range reconnects.
-    // Only non-affine sessions may fall back to a different account in the same lineup.
+    // In the normal case, provider-affine playback (such as VOD, series, or catchup) must remain pinned
+    // to its original provider account across seeks and range reconnects.
+    // However, if the pinned provider account is currently exhausted or unavailable, allowing fallback
+    // to lineup allocation acts as an emergency failover switch ("Notfallweiche") to prevent immediate
+    // playback disruption when another account in the provider pool has available capacity.
     let preferred_provider = Some(&user_session.provider);
-    let allow_forced_provider_fallback = !item_type.requires_provider_affinity();
+    let allow_forced_provider_fallback = true;
     // Never allow provider-side grace for forced seek/session reacquire.
     // Over-allocation here would break provider-side one-connection limits.
     let allow_provider_grace = false;
@@ -2197,6 +2214,38 @@ pub async fn force_provider_stream_response(
                     PlaybackKind::classify(item_type, extract_extension_from_url(user_session.stream_url.as_ref())),
                     ctx.session_reservation_ttl_secs,
                 );
+            }
+        }
+        if let Some(allocated_provider) = stream_details.provider_name.as_ref() {
+            if allocated_provider.as_ref() != user_session.provider.as_ref() {
+                let new_stream_url =
+                    stream_details.request_url.as_deref().map_or_else(|| user_session.stream_url.clone(), Arc::from);
+                app_state
+                    .active_users
+                    .update_session_provider_binding(
+                        &ctx.user.username,
+                        &user_session.token,
+                        Arc::clone(allocated_provider),
+                        new_stream_url,
+                    )
+                    .await;
+                app_state
+                    .active_users
+                    .update_session_provider_headers(
+                        &ctx.user.username,
+                        &user_session.token,
+                        &stream_details.provider_session_headers,
+                    )
+                    .await;
+            } else if !stream_details.provider_session_headers.is_empty() {
+                app_state
+                    .active_users
+                    .update_session_provider_headers(
+                        &ctx.user.username,
+                        &user_session.token,
+                        &stream_details.provider_session_headers,
+                    )
+                    .await;
             }
         }
         app_state.active_users.update_session_addr(&ctx.user.username, &user_session.token, &fingerprint.addr).await;

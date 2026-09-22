@@ -2502,6 +2502,37 @@ impl ActiveUserManager {
         }
     }
 
+    pub async fn update_session_provider_binding(
+        &self,
+        username: &str,
+        token: &str,
+        provider: Arc<str>,
+        stream_url: Arc<str>,
+    ) {
+        let now = current_time_secs();
+        let mut user_connections = self.connections.write().await;
+        if let Some(connection_data) = user_connections.by_key.get_mut(username) {
+            if let Some(session) = connection_data.sessions.iter_mut().find(|s| s.token == token) {
+                let previous_provider = session.provider.clone();
+                session.provider = provider.clone();
+                session.stream_url = stream_url.clone();
+                session.ts = now;
+                Self::bump_session_transition_version(session);
+                for stream in &mut connection_data.streams {
+                    if stream.session_token.as_deref() == Some(token) {
+                        stream.provider = provider.clone();
+                        stream.ts = now;
+                    }
+                }
+                debug_if_enabled!(
+                    "Updated session {token} for {username} provider binding {} -> {}",
+                    sanitize_sensitive_info(&previous_provider),
+                    sanitize_sensitive_info(&provider)
+                );
+            }
+        }
+    }
+
     pub async fn clear_unbound_session_addr(&self, username: &str, token: &str, addr: &SocketAddr) {
         let now = current_time_secs();
         let mut user_connections = self.connections.write().await;

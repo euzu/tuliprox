@@ -126,15 +126,43 @@ fn render_sources(
         markers.push(17);
     }
     let marker_comment = markers.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
-    let provider_limit = policy
-        .and_then(|contract| contract.provider_max_connections)
-        .map_or_else(String::new, |limit| format!("    max_connections: {limit}\n"));
+    let provider_config = render_provider_pool(run_id, origin_address, policy);
     let share_hls = fixture_stream.share_live_hls;
     let share_mpeg_ts = fixture_stream.share_live_mpeg_ts;
     let extra_output = if add_xtream_output { "          - type: xtream\n" } else { "" };
     format!(
-        "inputs:\n  - name: testkit-origin\n    type: m3u\n    url: http://{origin_address}/catalog/input.m3u?run={run_id}\n{provider_limit}sources:\n  - inputs:\n      - testkit-origin\n    targets:\n      - name: testkit\n        output:\n          - type: m3u\n{extra_output}        options:\n          share_live_streams:\n            hls: {share_hls}\n            mpeg_ts: {share_mpeg_ts}\n# Origin markers for this fixture: {marker_comment}\n"
+        "inputs:\n{provider_config}sources:\n  - inputs:\n      - testkit-origin\n    targets:\n      - name: testkit\n        output:\n          - type: m3u\n{extra_output}        options:\n          share_live_streams:\n            hls: {share_hls}\n            mpeg_ts: {share_mpeg_ts}\n# Origin markers for this fixture: {marker_comment}\n"
     )
+}
+
+fn render_provider_pool(run_id: &str, origin_address: SocketAddr, policy: Option<&PolicyContract>) -> String {
+    let accounts = policy.map(|contract| contract.provider_pool.as_slice()).unwrap_or_default();
+    if let Some((root, aliases)) = accounts.split_first() {
+        let mut rendered = format!(
+            "  - name: testkit-origin\n    type: m3u\n    url: http://{origin_address}/catalog/input.m3u?run={run_id}&account={}\n    max_connections: {}\n",
+            root.name, root.max_connections
+        );
+        if !aliases.is_empty() {
+            rendered.push_str("    aliases:\n");
+            for alias in aliases {
+                let _ = writeln!(
+                    rendered,
+                    "      - name: {}\n        url: http://{origin_address}/catalog/input.m3u?run={run_id}&account={}\n        max_connections: {}",
+                    yaml_string(&alias.name),
+                    alias.name,
+                    alias.max_connections
+                );
+            }
+        }
+        rendered
+    } else {
+        let provider_limit = policy
+            .and_then(|contract| contract.provider_max_connections)
+            .map_or_else(String::new, |limit| format!("    max_connections: {limit}\n"));
+        format!(
+            "  - name: testkit-origin\n    type: m3u\n    url: http://{origin_address}/catalog/input.m3u?run={run_id}\n{provider_limit}"
+        )
+    }
 }
 
 fn render_api_proxy(tuliprox_address: SocketAddr, policy: Option<&PolicyContract>) -> String {
@@ -464,6 +492,7 @@ mod tests {
             recent_eviction_reentry_ttl_ms: None,
             grace: None,
             provider_max_connections: None,
+            provider_pool: Vec::new(),
             expected_provider_slots: None,
         };
         let channels = HashMap::from([(
