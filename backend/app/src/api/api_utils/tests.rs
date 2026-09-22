@@ -4098,7 +4098,10 @@ async fn force_provider_stream_response_clears_stored_headers_after_fallback_ope
     assert_eq!(response.status(), StatusCode::OK);
     let body = response.into_body().collect().await.expect("fallback stream body").to_bytes();
     assert_eq!(body.as_ref(), FALLBACK_BODY);
-    let request = origin_task.await.expect("fallback origin task completes");
+    let request = tokio::time::timeout(std::time::Duration::from_secs(5), origin_task)
+        .await
+        .expect("fallback request was not sent within 5 seconds")
+        .expect("fallback origin task completes");
     assert!(!request.is_empty(), "fallback provider must receive the stream request");
 
     let updated_session = app_state
