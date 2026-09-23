@@ -486,7 +486,7 @@ pub(crate) fn cluster_selected(cluster: XtreamCluster, clusters: ClusterFlags) -
 }
 
 pub(crate) fn apply_staged_overlay_groups(
-    provider_name: &Arc<str>,
+    provider: &ConfigInput,
     clusters: ClusterFlags,
     provider_groups: Vec<PlaylistGroup>,
     staged_groups: Vec<PlaylistGroup>,
@@ -494,14 +494,56 @@ pub(crate) fn apply_staged_overlay_groups(
     let mut groups: Vec<PlaylistGroup> =
         provider_groups.into_iter().filter(|group| !cluster_selected(group.xtream_cluster, clusters)).collect();
 
-    groups.extend(staged_groups.into_iter().filter(|group| cluster_selected(group.xtream_cluster, clusters)).map(
-        |mut group| {
-            for item in &mut group.channels {
-                item.header.input_name = Arc::clone(provider_name);
-            }
-            group
-        },
-    ));
+    if provider.input_type != InputType::Xtream {
+        groups.extend(staged_groups.into_iter().filter(|group| cluster_selected(group.xtream_cluster, clusters)).map(
+            |mut group| {
+                for item in &mut group.channels {
+                    item.header.input_name = Arc::clone(&provider.name);
+                }
+                group
+            },
+        ));
+        return groups;
+    }
+
+    let (Some(username), Some(password)) = (provider.username.as_deref(), provider.password.as_deref()) else {
+        warn!("Skipping staged channels for Xtream input '{}' without credentials", provider.name);
+        return groups;
+    };
+    let live_stream_use_prefix = provider.has_flag(ConfigInputFlags::XtreamLiveStreamUsePrefix);
+    let live_stream_without_extension = provider.has_flag(ConfigInputFlags::XtreamLiveStreamWithoutExtension);
+
+    for mut group in staged_groups.into_iter().filter(|group| cluster_selected(group.xtream_cluster, clusters)) {
+        group.channels.retain_mut(|item| {
+            // The staged item's ID identifies its original Xtream stream.
+            let Ok(stream_id) = item.header.id.parse::<u32>() else {
+                warn!("Skipping staged channel '{}' without a numeric Xtream stream ID", item.header.name);
+                return false;
+            };
+            let container_extension = if group.xtream_cluster == XtreamCluster::Video {
+                shared::utils::extract_extension_from_url(&item.header.url)
+                    .and_then(|extension| extension.strip_prefix('.'))
+            } else {
+                None
+            };
+            item.header.url = tuliprox_parser::xtream::get_xtream_url(
+                group.xtream_cluster,
+                &provider.url,
+                username,
+                password,
+                stream_id,
+                container_extension,
+                live_stream_use_prefix,
+                live_stream_without_extension,
+            )
+            .into();
+            item.header.input_name = Arc::clone(&provider.name);
+            true
+        });
+        if !group.channels.is_empty() {
+            groups.push(group);
+        }
+    }
 
     groups
 }
@@ -1275,7 +1317,7 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
         } else {
             let provider_groups = playlist.take_groups();
             let staged_groups = staged_result.source.take_groups();
-            let merged_groups = apply_staged_overlay_groups(&input.name, clusters, provider_groups, staged_groups);
+            let merged_groups = apply_staged_overlay_groups(input, clusters, provider_groups, staged_groups);
             if let Some(input_telemetry) = playlist_download_result.input_telemetry.as_mut() {
                 neutralize_overlaid_cluster_facts(input_telemetry, clusters);
             }

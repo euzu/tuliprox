@@ -682,23 +682,37 @@ fn test_group(cluster: XtreamCluster, item_name: &str, input_name: &str) -> Play
 
 #[test]
 fn pipeline_transparency_staged_overlay_replaces_groups_and_neutralizes_overlaid_runtime_facts() {
-    let provider_name = "provider".intern();
+    let provider = ConfigInput {
+        name: "provider".intern(),
+        input_type: InputType::Xtream,
+        url: "http://provider.example".to_string(),
+        username: Some("real-user".to_string()),
+        password: Some("real-pass".to_string()),
+        options: Some(ConfigInputOptions::defaults().clone()),
+        ..Default::default()
+    };
     let provider_groups = vec![
         test_group(XtreamCluster::Live, "provider-live", "provider"),
         test_group(XtreamCluster::Video, "provider-vod", "provider"),
     ];
-    let staged_groups = vec![
-        test_group(XtreamCluster::Live, "staged-live", "staged"),
-        test_group(XtreamCluster::Series, "staged-series", "staged"),
-    ];
+    let mut staged_live = test_group(XtreamCluster::Live, "staged-live", "staged");
+    staged_live.channels[0].header.id = "11203".intern();
+    staged_live.channels[0].header.url = "http://iptvhost.example/live/fake-user/fake-pass/11203.ts".intern();
+    let mut invalid = test_group(XtreamCluster::Live, "invalid", "staged").channels.remove(0);
+    invalid.header.id = "invalid".intern();
+    invalid.header.url = "http://iptvhost.example/live/fake-user/fake-pass/invalid.ts".intern();
+    staged_live.channels.push(invalid);
+    let staged_groups = vec![staged_live, test_group(XtreamCluster::Series, "staged-series", "staged")];
 
-    let groups = apply_staged_overlay_groups(&provider_name, ClusterFlags::Live, provider_groups, staged_groups);
+    let groups = apply_staged_overlay_groups(&provider, ClusterFlags::Live, provider_groups, staged_groups);
 
     assert_eq!(groups.len(), 2);
     assert_eq!(groups[0].title.as_ref(), "provider-vod");
     assert_eq!(groups[0].channels[0].header.input_name.as_ref(), "provider");
     assert_eq!(groups[1].title.as_ref(), "staged-live");
+    assert_eq!(groups[1].channels.len(), 1);
     assert_eq!(groups[1].channels[0].header.input_name.as_ref(), "provider");
+    assert_eq!(groups[1].channels[0].header.url.as_ref(), "http://provider.example/live/real-user/real-pass/11203.ts");
 
     let mut telemetry = PlaylistUpdateInputTelemetry {
         refresh_policy: InputRefreshPolicy::NORMAL,
@@ -752,6 +766,114 @@ fn pipeline_transparency_staged_overlay_replaces_groups_and_neutralizes_overlaid
     assert_eq!(video.active_count, Some(200));
     assert_eq!(video.quality, Some(100));
     assert_eq!(video.decision, Some(PlaylistUpdateClusterDecision::Accepted));
+}
+
+#[test]
+fn staged_xtream_vod_url_uses_provider_credentials_and_one_extension() {
+    let provider = ConfigInput {
+        name: "provider".intern(),
+        input_type: InputType::Xtream,
+        url: "http://provider.example".to_string(),
+        username: Some("real-user".to_string()),
+        password: Some("real-pass".to_string()),
+        ..Default::default()
+    };
+    let mut staged_vod = test_group(XtreamCluster::Video, "staged-vod", "staged");
+    staged_vod.channels[0].header.id = "310".intern();
+    staged_vod.channels[0].header.url = "http://iptvhost.example/movie/fake-user/fake-pass/310.mkv".intern();
+
+    let groups = apply_staged_overlay_groups(&provider, ClusterFlags::Vod, Vec::new(), vec![staged_vod]);
+
+    assert_eq!(groups[0].channels[0].header.url.as_ref(), "http://provider.example/movie/real-user/real-pass/310.mkv");
+}
+
+#[test]
+fn staged_xtream_live_url_respects_prefix_and_without_extension_flags() {
+    let provider_prefix = ConfigInput {
+        name: "provider".intern(),
+        input_type: InputType::Xtream,
+        url: "http://provider.example".to_string(),
+        username: Some("real-user".to_string()),
+        password: Some("real-pass".to_string()),
+        options: Some(ConfigInputOptions {
+            flags: ConfigInputFlags::XtreamLiveStreamUsePrefix.into(),
+            ..ConfigInputOptions::defaults().clone()
+        }),
+        ..Default::default()
+    };
+    let mut staged_live_prefix = test_group(XtreamCluster::Live, "staged-live", "staged");
+    staged_live_prefix.channels[0].header.id = "11203".intern();
+    staged_live_prefix.channels[0].header.url = "http://iptvhost.example/fake-user/fake-pass/11203.ts".intern();
+
+    let groups_prefix =
+        apply_staged_overlay_groups(&provider_prefix, ClusterFlags::Live, Vec::new(), vec![staged_live_prefix]);
+
+    assert_eq!(
+        groups_prefix[0].channels[0].header.url.as_ref(),
+        "http://provider.example/live/real-user/real-pass/11203.ts"
+    );
+
+    let provider_no_ext = ConfigInput {
+        name: "provider".intern(),
+        input_type: InputType::Xtream,
+        url: "http://provider.example".to_string(),
+        username: Some("real-user".to_string()),
+        password: Some("real-pass".to_string()),
+        options: Some(ConfigInputOptions {
+            flags: ConfigInputFlags::XtreamLiveStreamWithoutExtension.into(),
+            ..ConfigInputOptions::defaults().clone()
+        }),
+        ..Default::default()
+    };
+    let mut staged_live_no_ext = test_group(XtreamCluster::Live, "staged-live", "staged");
+    staged_live_no_ext.channels[0].header.id = "11203".intern();
+    staged_live_no_ext.channels[0].header.url = "http://iptvhost.example/fake-user/fake-pass/11203.ts".intern();
+
+    let groups_no_ext =
+        apply_staged_overlay_groups(&provider_no_ext, ClusterFlags::Live, Vec::new(), vec![staged_live_no_ext]);
+
+    assert_eq!(groups_no_ext[0].channels[0].header.url.as_ref(), "http://provider.example/real-user/real-pass/11203");
+}
+
+#[test]
+fn staged_xtream_overlay_recomputes_uuid_on_group_load() {
+    let provider = ConfigInput {
+        name: "provider".intern(),
+        input_type: InputType::Xtream,
+        url: "http://provider.example".to_string(),
+        username: Some("real-user".to_string()),
+        password: Some("real-pass".to_string()),
+        options: Some(ConfigInputOptions {
+            flags: ConfigInputFlags::XtreamLiveStreamUsePrefix.into(),
+            ..ConfigInputOptions::defaults().clone()
+        }),
+        ..Default::default()
+    };
+    let mut staged_live = test_group(XtreamCluster::Live, "staged-live", "staged");
+    staged_live.channels[0].header.id = "11203".intern();
+    staged_live.channels[0].header.freeze_input_stream_id();
+    staged_live.channels[0].header.url = "http://iptvhost.example/live/fake-user/fake-pass/11203.ts".intern();
+    staged_live.channels[0].header.gen_uuid();
+    let old_uuid = staged_live.channels[0].header.get_uuid().clone();
+
+    let mut groups = apply_staged_overlay_groups(&provider, ClusterFlags::Live, Vec::new(), vec![staged_live]);
+
+    assert_eq!(groups[0].channels[0].header.input_name.as_ref(), "provider");
+    let reconstructed_url = "http://provider.example/live/real-user/real-pass/11203.ts";
+    assert_eq!(groups[0].channels[0].header.url.as_ref(), reconstructed_url);
+    assert_eq!(groups[0].channels[0].header.get_input_stream_id().as_deref(), Some("11203"));
+
+    groups[0].on_load();
+
+    let expected_uuid = shared::utils::generate_runtime_playlist_uuid(
+        "provider",
+        "11203",
+        shared::model::PlaylistItemType::Live,
+        reconstructed_url,
+    );
+    assert_ne!(groups[0].channels[0].header.get_uuid(), &old_uuid);
+    assert_eq!(groups[0].channels[0].header.get_uuid(), &expected_uuid);
+    assert_eq!(groups[0].channels[0].header.get_input_stream_id().as_deref(), Some("11203"));
 }
 
 #[test]

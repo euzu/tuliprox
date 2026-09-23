@@ -9,6 +9,11 @@ use yew::{
 };
 
 const DOUBLE_TAP_THRESHOLD_MS: f64 = 320.0;
+
+fn is_span_target<E: TargetCast>(e: &E) -> bool {
+    e.target_dyn_into::<web_sys::Element>().is_some_and(|target| target.tag_name().eq_ignore_ascii_case("span"))
+}
+
 #[derive(Properties, PartialEq)]
 pub struct BlockProps {
     pub(crate) block: Block,
@@ -53,11 +58,8 @@ pub fn BlockView(props: &BlockProps) -> Html {
         let on_block_mouse_down = props.on_mouse_down.clone();
         Callback::from(move |e: MouseEvent| {
             e.prevent_default();
-            if let Some(target) = e.target_dyn_into::<web_sys::Element>() {
-                let tag = target.tag_name().to_lowercase();
-                if &tag == "span" {
-                    return;
-                }
+            if is_span_target(&e) {
+                return;
             }
             e.stop_propagation();
             on_block_mouse_down.emit((block_id, e));
@@ -71,11 +73,8 @@ pub fn BlockView(props: &BlockProps) -> Html {
     let handle_touch_start = {
         let on_block_touch_start = props.on_touch_start.clone();
         Callback::from(move |e: TouchEvent| {
-            if let Some(target) = e.target_dyn_into::<web_sys::Element>() {
-                let tag = target.tag_name().to_lowercase();
-                if &tag == "span" {
-                    return;
-                }
+            if is_span_target(&e) {
+                return;
             }
             e.stop_propagation();
             on_block_touch_start.emit((block_id, e));
@@ -86,11 +85,8 @@ pub fn BlockView(props: &BlockProps) -> Html {
         let on_edit = props.on_edit.clone();
         let last_touch_end_ts = last_touch_end_ts.clone();
         Callback::from(move |e: TouchEvent| {
-            if let Some(target) = e.target_dyn_into::<web_sys::Element>() {
-                let tag = target.tag_name().to_lowercase();
-                if &tag == "span" {
-                    return;
-                }
+            if is_span_target(&e) {
+                return;
             }
 
             let mut last_touch_end_ts = last_touch_end_ts.borrow_mut();
