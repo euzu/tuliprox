@@ -144,6 +144,7 @@ inputs:
 | `aliases`               | List   |    No    |         | Connection pooling / Sub-accounts (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                                          |
 | `staged`                | Object |    No    |         | Staged overlay settings. Only valid when `type: staged` (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                    |
 | `panel_api`             | Object |    No    |         | Automated reseller account generation (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                                      |
+| `resource_policy`       | Object | No       |         | Trusted private destinations for resource URLs supplied by this input (see [below](#27-resource-policy-resource_policy)).                                                                                                                                                                                                                                                                                                                 |
 
 #### Minimal Stalker Input Example
 
@@ -207,14 +208,15 @@ logic.
 
 ### Input Subsections (Object Keys)
 
-| Block       | Description                                                                | Link                                               |
-|:------------|:---------------------------------------------------------------------------|:---------------------------------------------------|
-| `headers`   | Custom HTTP request headers for playlist and EPG downloads.                | [See Headers](#21-headers-headers)                 |
-| `options`   | Behavior controls for metadata resolution, stream probing, and skip logic. | [See Options](#22-input-options-options)           |
-| `epg`       | XMLTV source management and Smart Match fuzzy logic settings.              | [See EPG](#23-epg-assignment--smart-match-epg)     |
-| `aliases`   | Connection pooling for multiple subscriptions from the same provider.      | [See Aliases](#24-provider-aliases-aliases--batch) |
-| `staged`    | Overlay settings for first-class staged inputs.                            | [See Staged](#25-staged-sources-staged)            |
-| `panel_api` | Automated reseller panel integration (provisioning/renewal).               | [See Panel API](#26-provider-panel-api-panel_api)  |
+| Block             | Description                                                                | Link                                                       |
+| :---------------- | :------------------------------------------------------------------------- | :--------------------------------------------------------- |
+| `headers`         | Custom HTTP request headers for playlist and EPG downloads.                | [See Headers](#21-headers-headers)                         |
+| `options`         | Behavior controls for metadata resolution, stream probing, and skip logic. | [See Options](#22-input-options-options)                   |
+| `epg`             | XMLTV source management and Smart Match fuzzy logic settings.              | [See EPG](#23-epg-assignment--smart-match-epg)             |
+| `aliases`         | Connection pooling for multiple subscriptions from the same provider.      | [See Aliases](#24-provider-aliases-aliases--batch)         |
+| `staged`          | Overlay settings for first-class staged inputs.                            | [See Staged](#25-staged-sources-staged)                    |
+| `panel_api`       | Automated reseller panel integration (provisioning/renewal).               | [See Panel API](#26-provider-panel-api-panel_api)          |
+| `resource_policy` | Trusted private destinations for resource URLs supplied by this input.     | [See Resource Policy](#27-resource-policy-resource_policy) |
 
 ---
 
@@ -1151,6 +1153,104 @@ Tuliprox processes all Panel API responses as JSON and strictly requires `status
 
 ---
 
+### 2.7 Resource Policy (`resource_policy`)
+
+Restricts which destinations Tuliprox may reach when it proxies a resource URL that came from this input, including
+channel logos, EPG channel and programme icons, covers, posters, episode images, backdrops, and nested Xtream
+metadata resources.
+
+Without a policy, every resource URL is treated as **public-only**: only publicly routable destinations are
+fetched. An internal logo host therefore stops working until it is listed here.
+
+```yaml
+inputs:
+  - name: local-playlist
+    type: m3u
+    url: /data/local-playlist.m3u
+    resource_policy:
+      allowed_hosts:
+        - media.home.arpa
+      allowed_networks:
+        - 192.168.50.20/32
+```
+
+#### Configure it in the Web UI
+
+1. Open the **Source Editor** and select the input that supplies the resource.
+2. Open the **Resource Policy** page using the shield icon.
+3. Add the exact DNS names under **Allowed Resource Hosts**. Enter host names only, without a scheme, path, port,
+   wildcard, or IP address.
+4. Add the smallest required private CIDR ranges under **Allowed Resource Networks**.
+5. Apply the input changes and save the source configuration.
+
+For a private DNS destination, configure both a matching host and network. A private IP literal needs only a
+matching network. Removing every host and network removes the policy from the input and restores the public-only
+default.
+
+#### Parameters
+
+| Parameter              | Type | Required | Default | Technical Impact & Background                                                                                                                                                                                                                                                                           |
+| :--------------------- | :--- | :------: | :------ | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **`allowed_hosts`**    | List |    No    | `[]`    | Exact DNS names that may resolve to a private address. Matched case-insensitively and without a trailing dot. Wildcards, ports, schemes, paths, and IP literals are rejected while the configuration is loaded.                                                                                         |
+| **`allowed_networks`** | List |    No    | `[]`    | Private CIDR ranges a destination address may fall into (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7` and subnets of them). Anything broader, and every public or special-use range, is rejected while the configuration is loaded. Use `/32`, `/128`, or the smallest practical subnet. |
+
+#### What a policy authorizes
+
+* A **publicly routable** destination is always allowed, with or without a policy.
+* A **private DNS destination** requires both: the exact host name in `allowed_hosts` **and** the resolved address
+  inside `allowed_networks`. Listing one without the other authorizes nothing.
+* A **private IP literal** in the URL (for example `http://192.168.1.1/logo.png`) is authorized by
+  `allowed_networks` alone, because a literal has no host name to match.
+* Loopback, link-local, cloud-metadata, unspecified, multicast, CGNAT, documentation, benchmarking, broadcast, and
+  reserved addresses are always rejected, even when a matching CIDR is configured.
+* Redirects are re-checked on every hop with the same policy, and redirect hops are bounded.
+* `allowed_hosts` and `allowed_networks` contain no port, so an authorized host is reachable on **every** port that
+  serves `http` or `https`. This is deliberate: providers serve images on non-standard ports, and the address
+  policy is the actual restriction, not the port.
+
+#### Where the policy comes from
+
+The policy is looked up on the input that supplied the concrete resource URL, not on the target, the item, or the
+record that contains it. Two consequences matter in practice:
+
+* Items delivered through an alias are authorized with the policy of their main input; aliases inherit it.
+* `logo_override: true` copies an EPG icon into a playlist logo. That logo keeps the EPG input as its origin and is
+  authorized with the **EPG input's** policy, not the playlist input's.
+
+The canonical input name is the authorization identity of a resource origin. Configured input and alias names are
+non-empty, globally unique strings: no two inputs — and no input and alias — may share a name, and the loader rejects
+a configuration that does. Internal numeric IDs and generated playlist UUIDs are managed separately from these names.
+Renaming an input invalidates the links that were issued for it, and reusing a name for a different input would hand
+it the authority of the old input, so treat a rename as a new identity.
+
+#### Legacy data and links
+
+Legacy raw resources stored on playlist and Xtream items use the containing item's input. Legacy EPG resources and
+external links without an authoritative input remain public-only until the data is regenerated. An origin that
+names an input which no longer exists or is disabled is rejected with `400`; it is never silently downgraded to
+public-only.
+
+Tuliprox stores ownership internally in a value beginning with `resource://`. This scheme is reserved and must not
+appear in provider data, playlists, EPG documents, metadata, or mapping configuration. Provider-supplied and mapped
+values using the reserved scheme are discarded so they cannot claim another input's network policy. External M3U,
+XMLTV, Xtream, and Web UI responses always contain either the original HTTP(S) URL or a Tuliprox proxy URL, never the
+internal representation.
+
+#### Proxy interaction
+
+Resource proxying always connects directly, so the destination policy can be enforced while the connection is
+established. A configured proxy, and the `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` environment variables, are
+ignored for these requests; Tuliprox logs a warning at startup and on reload when one is configured. Provider
+fetches, playlist and EPG downloads, and streams keep using the proxy.
+
+#### Cache
+
+Proxied resources are cached per policy scope. An entry fetched under one policy is never served to a request
+authorized by another, and the resource cache starts cold once on upgrade because the cache key layout changes.
+The cache size limits are unchanged.
+
+---
+
 ## 3. Routing & Targets (`sources`)
 
 This block links your inputs to one or more output targets and defines how Tuliprox transforms, filters, sorts, and
@@ -1292,8 +1392,9 @@ filter:
   persist: 'EpgId IS NOT EMPTY'
 ```
 
-`processing` runs at the normal `F` position. `persist` runs after EPG matching, smart matching, all mappings, merge,
-favourites/Trakt, deduplication, sorting, channel numbering, and counters, immediately before watch evaluation and target
+`processing` runs at the normal `F` position. The target then applies favourites, merges groups, performs post-merge
+content deduplication, evaluates any configured Trakt selectors, and derives the base and Xtream appearance views.
+`persist` runs after each view is sorted, numbered, and counted, immediately before output filters, watch evaluation, and
 persistence. Output-level filters remain plain strings and have no configurable stage.
 
 You can define complex strings or regex patterns exactly once in [template.yml](./template.md)
@@ -1697,6 +1798,8 @@ output:
     update_strategy: instant
     trakt:
       enabled: true
+      catalog_selection: curated
+      include_xtream_base_categories: true
       api:
         # Despite the compatible field name, this value is the Trakt Client ID.
         api_key: "${env:TRAKT_CLIENT_ID}"
@@ -1707,6 +1810,7 @@ output:
         - user: "gary"
           list_slug: "latest-tv"
           category_name: "Trending TV"
+          create_xtream_category: true
           content_type: series
           fuzzy_match_threshold: 80
 ```
@@ -1720,7 +1824,7 @@ output:
 | `skip_video_direct_source`  | Bool   |    No    | `true`    | If `true`, Tuliprox ignores provider `direct_source` values for movies/VOD. This improves consistency across clients that otherwise may bypass Tuliprox for video playback.                           |
 | `skip_series_direct_source` | Bool   |    No    | `true`    | If `true`, Tuliprox ignores provider `direct_source` values for series entries. This ensures Tuliprox stays in control of series playback URL generation and proxy behavior.                          |
 | `update_strategy`           | Enum   |    No    | `instant` | `instant` writes changes immediately, while `bundled` batches write operations. This directly trades off freshness versus disk I/O load during background metadata enrichment and output maintenance. |
-| `trakt`                     | Object |    No    |           | Trakt.tv integration block. Tuliprox can fetch Trakt lists, fuzzy-match them against playlist entries, and inject matched VOD or series entries into generated virtual categories.                    |
+| `trakt`                     | Object |    No    |           | Trakt.tv target-wide catalog selection and Xtream category-projection block.                                                                                                                          |
 | `filter`                    | String |    No    |           | Optional output-level filter for the Xtream export only. Useful when the same target should expose different subsets to different output formats.                                                     |
 
 > **Note:** IPTV players vary in how they resolve streams: some use the direct-source attribute, while others
@@ -1735,9 +1839,9 @@ output:
 
 #### `trakt` Object in Xtream Output
 
-Trakt.tv is an online platform for tracking, organizing, and discovering movies and TV shows.
-Tuliprox can query Trakt lists and match playlist entries using Jaro-Winkler-style fuzzy matching.
-Matching entries are then added to new virtual categories inside the Xtream output.
+Trakt.tv is an online platform for tracking, organizing, and discovering movies and TV shows. Tuliprox evaluates every
+configured list and chart against the target's merged, deduplicated VOD and series catalog. The resulting exact-entry
+memberships can select the target-wide catalog and independently create compatibility alias categories in Xtream.
 
 You can define a `Trakt` config like
 
@@ -1762,6 +1866,8 @@ sources:
             skip_series_direct_source: true
             trakt:
               enabled: true
+              catalog_selection: curated
+              include_xtream_base_categories: true
               api:
                 # Despite the compatible field name, this value is the Trakt Client ID.
                 api_key: "${env:TRAKT_CLIENT_ID}"
@@ -1772,17 +1878,19 @@ sources:
                 - user: "linaspurinis"
                   list_slug: "top-watched-movies-of-the-week"
                   category_name: "📈 Top Weekly Movies"
+                  create_xtream_category: true
                   content_type: vod
                   fuzzy_match_threshold: 80
                 - user: "garycrawfordgc"
                   list_slug: "latest-tv-shows"
-                  category_name: "📺 Latest TV Shows"
+                  create_xtream_category: false
                   content_type: series
                   fuzzy_match_threshold: 80
               charts:
                 - kind: movies
                   chart: trending
                   category_name: "🔥 Trending Movies"
+                  create_xtream_category: true
                   tmdb_only: true
                 - kind: shows
                   chart: popular
@@ -1790,9 +1898,10 @@ sources:
                   tmdb_only: true
 ```
 
-This configuration creates additional virtual categories populated with matched entries from the configured Trakt user
-lists and public Trakt charts. Define `TRAKT_CLIENT_ID` in the environment of the Tuliprox process before enabling the
-block.
+This example selects one catalog for the target: all Live entries plus VOD/series roots selected by at least one Trakt
+selector, including the selected series' episode closure. The first list and both charts also create named Xtream alias
+categories. The second list is selection-only and therefore needs no `category_name`. M3U and STRM outputs on the same
+target receive selected normal entries, never those Xtream aliases.
 
 The serialized field remains `api.api_key` for configuration compatibility, but its value is the Client ID of your
 Trakt API application and is sent in the `trakt-api-key` header. Tuliprox does not bundle a Client ID and never falls
@@ -1800,31 +1909,46 @@ back to another identity. Creating Trakt API applications currently requires act
 response only means that Trakt denied the request; check both the configured Client ID and access to the requested
 resource rather than assuming that every `403` proves a particular account state.
 
-If lists or charts are configured while the Client ID is blank or cannot be used as an HTTP header, Tuliprox makes no
-Trakt request, logs one target-scoped warning, and skips only optional Trakt curation. The rest of target processing
-continues. A disabled block, or a block with no lists or charts, remains a silent no-op.
+Every enabled list and chart is required for one refresh. A missing or invalid Client ID makes no request; credential,
+transport, status, JSON, interrupted-pagination, or truncated-pagination failures stop that target before IDs, files,
+caches, or watches are changed. A complete response with zero references, or with no local matches, remains successful.
+With `catalog_selection: curated`, that complete result clears VOD/Series while preserving Live. A disabled block, or a
+source-less block whose policies all use their defaults, remains a no-op. Input quality/force decisions are resolved
+before this boundary: curation cannot make an unauthorized empty input publishable, and even force-authorized emptiness
+waits for every required selector to complete. After a complete curation result enters publication, independent writer
+failures retain the existing best-effort cross-output behavior and are reported as writer failures rather than as Trakt
+source failures.
 
 ##### Trakt Parameters
 
-| Parameter                        | Type    | Required | Default                | Technical Impact & Background                                                                                                                           |
-| :------------------------------- | :------ | :------: | :--------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `enabled`                        | Bool    | No       | `true`                 | Enables Trakt curation. Keep it `false` until an explicit Client ID is configured.                                                                      |
-| `api.api_key`                    | String  | Yes      |                        | Compatible field that stores the Trakt Client ID. There is no bundled fallback; use an explicit value such as `${env:TRAKT_CLIENT_ID}`.                 |
-| `api.version`                    | String  | No       | `"2"`                  | API version header value. This ensures Tuliprox formats requests against the correct Trakt API version.                                                 |
-| `api.url`                        | String  | No       | `https://api.trakt.tv` | Base API URL for Trakt requests. This defines the remote endpoint Tuliprox queries for list data.                                                       |
-| `api.user_agent`                 | String  | No       |                        | Optional `User-Agent` used for Trakt API requests. This can help satisfy API gateway expectations or deployment-specific request policies.              |
-| `lists[].user`                   | String  | Yes      |                        | Trakt username owning the list. This identifies which account namespace Tuliprox fetches list data from.                                                |
-| `lists[].list_slug`              | String  | Yes      |                        | Trakt list slug. Combined with `user`, this uniquely identifies the remote list to load.                                                                |
-| `lists[].category_name`          | String  | Yes      |                        | Name of the generated virtual category inside Tuliprox's Xtream output. This controls where matched entries appear to clients.                          |
-| `lists[].content_type`           | Enum    | Yes      |                        | `vod` or `series`. This determines which class of playlist entries Tuliprox will attempt to match and inject into the generated category.               |
-| `lists[].tmdb_only`              | Bool    | No       | `false`                | If `true`, only exact TMDB-id matches are accepted for this list, disabling title/year fuzzy fallback and reducing false positives.                     |
-| `lists[].fuzzy_match_threshold`  | Integer | No       |                        | Fuzzy matching threshold for title matching. Higher values reduce false positives but may miss loosely matching items.                                  |
-| `charts[]`                       | List    | No       | `[]`                   | Public Trakt chart definitions. Unlike `lists[]`, these are system charts and do not have a user/list owner.                                            |
-| `charts[].kind`                  | Enum    | Yes      |                        | `movies` or `shows`. Aliases such as `movie`, `vod`, `show`, `series`, and `tvshows` are accepted.                                                      |
-| `charts[].chart`                 | Enum    | Yes      |                        | Public chart to fetch. MVP supports `trending` and `popular`.                                                                                           |
-| `charts[].category_name`         | String  | Yes      |                        | Name of the generated virtual category inside Tuliprox's Xtream output.                                                                                 |
-| `charts[].tmdb_only`             | Bool    | No       | `false`                | If `true`, only exact TMDB-id matches are accepted. This is recommended for dynamic charts to avoid fuzzy false positives.                              |
-| `charts[].fuzzy_match_threshold` | Integer | No       |                        | Fuzzy matching threshold for chart title matching when `tmdb_only` is not enabled.                                                                      |
+| Parameter                         | Type    | Required    | Default                | Technical Impact & Background                                                                                               |
+| :-------------------------------- | :------ | :---------: | :--------------------- | :-------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`                         | Bool    | No          | `true`                 | Enables Trakt curation. Disabled blocks may retain incomplete editor values without running selectors.                      |
+| `catalog_selection`               | Enum    | No          | `full`                 | `full` keeps the complete eligible target catalog; `curated` keeps all Live plus selected VOD/Series and series children.   |
+| `include_xtream_base_categories`  | Bool    | No          | `true`                 | Includes normal VOD/Series categories in Xtream independently of catalog selection and alias-category creation.             |
+| `api.api_key`                     | String  | Yes         |                        | Compatible field containing the explicit Trakt Client ID, for example `${env:TRAKT_CLIENT_ID}`.                             |
+| `api.version`                     | String  | No          | `"2"`                  | API version header value.                                                                                                   |
+| `api.url`                         | String  | No          | `https://api.trakt.tv` | Base API URL for Trakt requests.                                                                                            |
+| `api.user_agent`                  | String  | No          |                        | Optional `User-Agent` for Trakt requests.                                                                                   |
+| `lists[].user`                    | String  | Yes         |                        | Trakt username owning the list.                                                                                             |
+| `lists[].list_slug`               | String  | Yes         |                        | Trakt list slug within the user's namespace.                                                                                |
+| `lists[].create_xtream_category`  | Bool    | No          | `true`                 | Creates a category-scoped Xtream alias projection. `false` keeps the list as a required selection-only selector.            |
+| `lists[].category_name`           | String  | Conditional |                        | Required and non-blank only when `create_xtream_category` is `true`; a saved value is preserved while creation is disabled. |
+| `lists[].content_type`            | Enum    | Yes         |                        | `vod`, `series`, or `both`; direct matching uses VOD/series roots, never episode titles.                                    |
+| `lists[].tmdb_only`               | Bool    | No          | `false`                | Accepts only exact TMDB-id matches, disabling title/year fuzzy fallback.                                                    |
+| `lists[].fuzzy_match_threshold`   | Integer | No          |                        | Fuzzy title-match threshold when `tmdb_only` is not enabled.                                                                |
+| `charts[]`                        | List    | No          | `[]`                   | Public, non-OAuth Trakt chart definitions.                                                                                  |
+| `charts[].kind`                   | Enum    | Yes         |                        | `movies` or `shows`; the documented singular/VOD/series aliases remain accepted.                                            |
+| `charts[].chart`                  | Enum    | Yes         |                        | Public chart; currently `trending` or `popular`.                                                                            |
+| `charts[].create_xtream_category` | Bool    | No          | `true`                 | Creates the chart's named Xtream alias; `false` leaves it as a required selection-only selector.                            |
+| `charts[].category_name`          | String  | Conditional |                        | Required and non-blank only when `create_xtream_category` is `true`.                                                        |
+| `charts[].tmdb_only`              | Bool    | No          | `false`                | Accepts only exact TMDB-id matches.                                                                                         |
+| `charts[].fuzzy_match_threshold`  | Integer | No          |                        | Fuzzy title-match threshold when `tmdb_only` is not enabled.                                                                |
+
+Existing configurations omit all three new policy controls and therefore retain Case A behavior: `full` catalog,
+Xtream base categories, and one category for every configured selector. Filters at `filter.persist` and inside output
+blocks run on their concrete post-projection appearance; they can hide an appearance but cannot reintroduce a subject
+that was absent from the eligible catalog.
 
 The `charts[]` MVP intentionally supports only public, non-OAuth Trakt charts. User-specific recommendations and
 account-scoped history feeds are not fetched by this block.

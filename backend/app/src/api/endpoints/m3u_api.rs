@@ -5,10 +5,10 @@ use crate::{
             create_playback_session_fingerprint, create_session_fingerprint, force_provider_stream_response,
             get_session_reservation_ttl_secs, get_user_target, get_user_target_by_credentials,
             is_seekable_media_request, is_session_based_playback, is_stream_share_enabled, local_stream_response,
-            redirect, redirect_response, reentry_suppressed_response, resolve_initial_stalker_playback_url,
-            resource_response, separate_number_and_remainder, should_allow_exhausted_shared_reconnect,
-            stream_response_with_provider_handle, try_option_bad_request, try_result_bad_request, try_result_not_found,
-            try_unwrap_body, RedirectParams, ResourceFetchPolicy,
+            log_resource_rejection, redirect, redirect_response, reentry_suppressed_response, rejection_status,
+            resolve_initial_stalker_playback_url, resolve_resource, resource_response, separate_number_and_remainder,
+            should_allow_exhausted_shared_reconnect, stream_response_with_provider_handle, try_option_bad_request,
+            try_result_bad_request, try_result_not_found, try_unwrap_body, RedirectParams, ResourceFetchOptions,
         },
         endpoints::{
             hls_api::{
@@ -37,8 +37,8 @@ use shared::{
     defaults::HLS_EXT,
     error::TuliproxError,
     model::{
-        CatchupProperties, ConnectFailureReason, FieldGetAccessor, PlaylistEntry, PlaylistItemType, StreamProperties,
-        TargetType, UserConnectionPermission,
+        is_resource_field_name, CatchupProperties, ConnectFailureReason, FieldGetAccessor, PlaylistEntry,
+        PlaylistItemType, StreamProperties, TargetType, UserConnectionPermission,
     },
     utils::{concat_path, extract_extension_from_url, sanitize_sensitive_info},
 };
@@ -951,12 +951,27 @@ async fn m3u_api_resource(
         return axum::http::StatusCode::NOT_FOUND.into_response();
     }
 
+    if !is_resource_field_name(&resource) {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    }
     let stream_url = m3u_item.get_field(resource.as_str());
     match stream_url {
         None => axum::http::StatusCode::NOT_FOUND.into_response(),
-        Some(url) => {
+        Some(value) => {
+            let resolved = match resolve_resource(&app_state.app_config, &value, Some(&m3u_item.input_name)) {
+                Ok(resolved) => resolved,
+                Err(err) => {
+                    log_resource_rejection(Some(m3u_item.input_name.as_ref()), &err, &value);
+                    return rejection_status(&err).into_response();
+                }
+            };
+            let url = resolved.url;
             if user.proxy.is_redirect(m3u_item.item_type) || target.is_force_redirect(m3u_item.item_type) {
-                let input = app_state.app_config.get_input_by_name(&m3u_item.input_name);
+                let input = resolved
+                    .authorization
+                    .input_name
+                    .as_ref()
+                    .and_then(|input_name| app_state.app_config.get_input_by_name(input_name));
                 let redirect_url = crate::api::api_utils::resolve_redirect_location(input.as_deref(), &url);
                 match redirect_url {
                     Ok(redirect_url) => {
@@ -969,9 +984,15 @@ async fn m3u_api_resource(
                     }
                 }
             } else {
-                resource_response(&app_state, ResourceFetchPolicy::Standard, &url, &req_headers, None)
-                    .await
-                    .into_response()
+                resource_response(
+                    &app_state,
+                    ResourceFetchOptions::cached(resolved.authorization),
+                    &url,
+                    &req_headers,
+                    None,
+                )
+                .await
+                .into_response()
             }
         }
     }

@@ -97,6 +97,8 @@ pub struct PersistedEpgSource {
     pub priority: i16,
     pub logo_override: bool,
     pub kind: PersistedEpgSourceKind,
+    /// Canonical input that owns resource values read from this source.
+    pub input_name: Option<Arc<str>>,
 }
 
 fn filter_channels_and_programmes(channels: &mut Vec<EpgChannel>, programmes: &mut Vec<EpgProgramme>) {

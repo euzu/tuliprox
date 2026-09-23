@@ -5,6 +5,7 @@ use crate::{
 };
 use serde_json::Value;
 use std::collections::HashMap;
+use url::Url;
 
 /// Validate the persisted fixture configuration before any playback is started.
 ///
@@ -59,7 +60,49 @@ pub fn validate_fixture_policy(contract: &PolicyContract, config: &Value) -> Res
     if let Some(expected_limit) = contract.provider_max_connections {
         validate_provider_limit(expected_limit.into(), config)?;
     }
+    if !contract.provider_pool.is_empty() {
+        validate_provider_pool(contract, config)?;
+    }
 
+    Ok(())
+}
+
+fn validate_provider_pool(contract: &PolicyContract, config: &Value) -> Result<(), TestkitError> {
+    let inputs = config
+        .pointer("/sources/inputs")
+        .and_then(Value::as_array)
+        .ok_or_else(|| TestkitError::Protocol("fixture configuration omits sources.inputs".to_owned()))?;
+    let input = inputs
+        .iter()
+        .find(|input| input.get("name").and_then(Value::as_str) == Some("testkit-origin"))
+        .ok_or_else(|| TestkitError::Configuration("fixture sources omit testkit-origin".to_owned()))?;
+    let mut configured = Vec::with_capacity(contract.provider_pool.len());
+    configured.push((input.get("url").and_then(Value::as_str), input.get("max_connections").and_then(Value::as_u64)));
+    if let Some(aliases) = input.get("aliases").and_then(Value::as_array) {
+        configured.extend(aliases.iter().map(|alias| {
+            (alias.get("url").and_then(Value::as_str), alias.get("max_connections").and_then(Value::as_u64))
+        }));
+    }
+    if configured.len() != contract.provider_pool.len() {
+        return Err(TestkitError::Configuration(format!(
+            "fixture provider pool size mismatch: scenario {}, fixture {}",
+            contract.provider_pool.len(),
+            configured.len()
+        )));
+    }
+    for (expected, (url, limit)) in contract.provider_pool.iter().zip(configured) {
+        let account_matches = url.is_some_and(|raw| {
+            Url::parse(raw).is_ok_and(|parsed| {
+                parsed.query_pairs().find(|(key, _)| key == "account").is_some_and(|(_, value)| value == expected.name)
+            })
+        });
+        if !account_matches || limit != Some(u64::from(expected.max_connections)) {
+            return Err(TestkitError::Configuration(format!(
+                "fixture provider pool account mismatch for {}",
+                expected.name
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -211,6 +254,7 @@ mod tests {
             recent_eviction_reentry_ttl_ms: None,
             grace: None,
             provider_max_connections: None,
+            provider_pool: Vec::new(),
             expected_provider_slots: None,
         }
     }
@@ -267,5 +311,91 @@ mod tests {
             "inputs": [{"name": "other-origin"}]
         });
         assert!(validate_fixture_policy(&contract_with_provider, &config_missing).is_err());
+    }
+
+    #[test]
+    fn validates_provider_pool() {
+        use crate::config::ProviderPoolAccount;
+
+        let mut contract_with_pool = contract();
+        contract_with_pool.provider_pool = vec![
+            ProviderPoolAccount { name: "alpha".to_owned(), max_connections: 2 },
+            ProviderPoolAccount { name: "beta".to_owned(), max_connections: 3 },
+        ];
+
+        let mut config_matching = fixture();
+        config_matching["sources"] = json!({
+            "inputs": [{
+                "name": "testkit-origin",
+                "url": "http://127.0.0.1:8080/catalog/input.m3u?run=r1&account=alpha",
+                "max_connections": 2,
+                "aliases": [{
+                    "name": "beta-alias",
+                    "url": "http://127.0.0.1:8080/catalog/input.m3u?run=r1&account=beta",
+                    "max_connections": 3
+                }]
+            }]
+        });
+        assert!(validate_fixture_policy(&contract_with_pool, &config_matching).is_ok());
+
+        let mut config_encoded = fixture();
+        config_encoded["sources"] = json!({
+            "inputs": [{
+                "name": "testkit-origin",
+                "url": "http://127.0.0.1:8080/catalog/input.m3u?run=r1&account=al%70ha",
+                "max_connections": 2,
+                "aliases": [{
+                    "name": "beta-alias",
+                    "url": "http://127.0.0.1:8080/catalog/input.m3u?run=r1&account=beta",
+                    "max_connections": 3
+                }]
+            }]
+        });
+        assert!(validate_fixture_policy(&contract_with_pool, &config_encoded).is_ok());
+
+        let mut config_substring = fixture();
+        config_substring["sources"] = json!({
+            "inputs": [{
+                "name": "testkit-origin",
+                "url": "http://127.0.0.1:8080/catalog/input.m3u?run=r1&account=alpha-extra",
+                "max_connections": 2,
+                "aliases": [{
+                    "name": "beta-alias",
+                    "url": "http://127.0.0.1:8080/catalog/input.m3u?run=r1&account=beta",
+                    "max_connections": 3
+                }]
+            }]
+        });
+        assert!(validate_fixture_policy(&contract_with_pool, &config_substring).is_err());
+
+        let mut config_wrong_key = fixture();
+        config_wrong_key["sources"] = json!({
+            "inputs": [{
+                "name": "testkit-origin",
+                "url": "http://127.0.0.1:8080/catalog/input.m3u?run=r1&other_account=alpha",
+                "max_connections": 2,
+                "aliases": [{
+                    "name": "beta-alias",
+                    "url": "http://127.0.0.1:8080/catalog/input.m3u?run=r1&account=beta",
+                    "max_connections": 3
+                }]
+            }]
+        });
+        assert!(validate_fixture_policy(&contract_with_pool, &config_wrong_key).is_err());
+
+        let mut config_limit_mismatch = fixture();
+        config_limit_mismatch["sources"] = json!({
+            "inputs": [{
+                "name": "testkit-origin",
+                "url": "http://127.0.0.1:8080/catalog/input.m3u?run=r1&account=alpha",
+                "max_connections": 1,
+                "aliases": [{
+                    "name": "beta-alias",
+                    "url": "http://127.0.0.1:8080/catalog/input.m3u?run=r1&account=beta",
+                    "max_connections": 3
+                }]
+            }]
+        });
+        assert!(validate_fixture_policy(&contract_with_pool, &config_limit_mismatch).is_err());
     }
 }

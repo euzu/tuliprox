@@ -4444,6 +4444,66 @@ async fn vod_session_survives_overlapping_and_seek_sockets() {
 }
 
 #[tokio::test]
+async fn update_session_provider_binding_updates_session_and_streams() {
+    let config = Config::default();
+    let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+    let event_manager = Arc::new(EventManager::new());
+    let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+    let addr: SocketAddr = "127.0.0.1:55140".parse().unwrap();
+    let mut user = ProxyUserCredentials::default();
+    user.username = String::from("user1");
+    user.max_connections = 1;
+
+    manager.add_connection(&addr).await;
+    manager
+        .create_user_session(CreateUserSessionParams {
+            user: &user,
+            session_token: "tok-binding",
+            virtual_id: 100,
+            provider: "account-b",
+            stream_url: "http://example.com/vod/movie.mkv?token=account-b",
+            addr: &addr,
+            connection_permission: UserConnectionPermission::Allowed,
+            connection_kind: Some(ConnectionKind::Normal),
+            socket_bound: false,
+        })
+        .await;
+
+    {
+        let mut connections = manager.connections.write().await;
+        let data = connections.by_key.get_mut("user1").expect("user connection data");
+        data.streams.push(StreamInfo::new(shared::model::StreamInfoParams {
+            uid: 1,
+            meter_uid: 1,
+            username: &user.username,
+            addr: &addr,
+            client_ip: "127.0.0.1",
+            provider: "account-b".intern(),
+            stream_channel: test_channel(100),
+            user_agent: "ua".to_string(),
+            country_code: None,
+            session_token: Some("tok-binding"),
+        }));
+    }
+
+    manager
+        .update_session_provider_binding(
+            "user1",
+            "tok-binding",
+            "account-a".intern(),
+            "http://example.com/vod/movie.mkv?token=account-a".into(),
+        )
+        .await;
+
+    let connections = manager.connections.read().await;
+    let connection_data = connections.by_key.get("user1").expect("user connection data");
+    assert_eq!(connection_data.sessions[0].provider.as_ref(), "account-a");
+    assert_eq!(connection_data.sessions[0].stream_url.as_ref(), "http://example.com/vod/movie.mkv?token=account-a");
+    assert_eq!(connection_data.streams[0].provider.as_ref(), "account-a");
+}
+
+#[tokio::test]
 async fn catchup_release_connection_preserves_logical_stream_until_session_expires() {
     let config = Config::default();
     let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());

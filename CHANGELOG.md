@@ -21,6 +21,38 @@
   with no `users/<owner-id>/` or `shared/` component. Recordings written by an earlier build are
   not found at the new location and must be moved, or re-recorded.
 
+- **Proxied resource URLs are now restricted to public destinations by default.** Tuliprox proxies external
+  resource URLs that come from provider, playlist, and EPG content: channel and small logos, EPG channel and
+  programme icons, cover images, posters, and backdrops. These requests now enforce a destination policy on every
+  route that serves them (`/resource/m3u/...`, the Xtream resource routes, `/resource/epg/...`, and
+  `/api/v1/playlist/resource/...`), where previously three of them fetched any destination reachable by the
+  configured HTTP client.
+  - A resource URL whose DNS host name resolves to a private address (RFC 1918 or IPv6 ULA) is rejected unless the
+    input that supplied it lists the exact host name in `resource_policy.allowed_hosts` **and** the address in
+    `resource_policy.allowed_networks`. A private IP literal requires only a matching
+    `resource_policy.allowed_networks` entry because IP literals are not valid `allowed_hosts` values. Add the policy
+    to the input that provides the logo or icon; for icons that `logo_override` copies out of EPG, that is the EPG
+    input.
+  - Loopback, link-local, cloud-metadata, CGNAT, multicast, and reserved addresses stay blocked with or without a
+    policy. Redirects are re-checked on every hop and are bounded.
+  - Resource ownership is stored generically with each URL, including nested cover, poster, backdrop, and episode
+    image fields. Legacy raw playlist/Xtream item resources use their containing item's input; legacy EPG resources
+    without an authoritative input remain public-only until regenerated.
+  - `resource://` is an internal reserved scheme. Provider data and mapping configuration must never supply it;
+    such values are rejected rather than interpreted as authorization claims.
+  - The canonical input name is the authorization identity of a resource origin. Configured input and alias names
+    must be non-empty, globally unique strings; a configuration with duplicate input names, duplicate alias names,
+    or an alias name that shadows an input name is now rejected while loading. Internal IDs are managed separately.
+  - The resource cache is keyed by the policy that authorized the entry, so an entry fetched under one policy is
+    never served to another. The cache starts cold once on upgrade because the key layout changes.
+  - Resource proxying now always connects directly: a configured proxy and the `HTTP_PROXY` / `HTTPS_PROXY` /
+    `ALL_PROXY` environment variables are ignored for these requests, and Tuliprox logs a warning at startup and on
+    reload when one is set. Provider fetches, playlist and EPG downloads, and streams keep using the proxy.
+  - The Source Editor exposes the policy on every input under the shield-shaped **Resource Policy** page. Empty host
+    and network lists restore the public-only default and omit the policy from the saved input.
+  - See [Resource Policy](docs/src/configuration/source.md#27-resource-policy-resource_policy) for the parameters
+    and the exact host-plus-network rule.
+
 - **The Web UI WebSocket protocol is now version 4.** Playlist update completion messages carry the correlated
   run ID and execution order instead of a bare status. Reload existing browser tabs after upgrading the server;
   version-3 clients are rejected during the handshake rather than receiving incompatible update messages.
@@ -132,6 +164,21 @@
   runtime metrics and a per-thread `/proc/self/task` inventory. It is opt-in and off by default (`TULIPROX_WATCHDOG=1`
   to observe, `=2` to also restart the process on a confirmed stall), and exposes its state through the `/healthcheck`
   `runtime` object.
+
+- **Trakt curation can now select one target-wide VOD/Series catalog and project Xtream categories independently.**
+  `output[].trakt.catalog_selection` accepts `full` (the compatibility default) or `curated`;
+  `include_xtream_base_categories` defaults to `true`; and each list/chart has a default-true
+  `create_xtream_category`. Existing YAML therefore keeps the full catalog, normal Xtream categories, and current
+  category-scoped alias IDs. Selection-only selectors may omit `category_name`, while category-producing selectors
+  still require it. The Source Editor exposes the same controls in all supported locales.
+  - Curation now evaluates exact surviving target UUIDs after favourites, group merge, and post-merge content
+    deduplication. M3U and STRM receive selected normal entries rather than Xtream aliases, while Xtream watch behavior
+    continues to observe its category view.
+  - Every enabled list/chart is required for a refresh. Partial selector success, missing/invalid credentials, request
+    failures, malformed responses, and incomplete pagination now fail that target before IDs, persistence, cache, or
+    watch effects instead of publishing a partial/base fallback.
+  - A complete empty or no-match result under `catalog_selection: curated` intentionally clears managed VOD/Series
+    Xtream, M3U, and STRM state while preserving Live. Ordinary or failed empty refreshes retain previous artifacts.
 
 - **`.env` file support for secrets and environment variables:** Tuliprox now automatically loads environment variables
   from a `.env` file at startup.
@@ -1353,6 +1400,14 @@
 
 ## ⚙️ New Settings
 
+- **source.yml (input `resource_policy`)**: Added an optional per-input policy for private resource destinations.
+  - `allowed_hosts` (list of exact DNS names, default empty) and `allowed_networks` (list of private CIDR ranges,
+    default empty) authorize a private address only together: the host name must match and the resolved address must
+    fall inside one of the networks. An IP literal is authorized by `allowed_networks` alone. An absent or empty
+    policy means public-only.
+  - Invalid entries (scheme, path, port, wildcard, IP literal in `allowed_hosts`; a range outside
+    `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, or `fc00::/7`) are rejected while the configuration is loaded.
+
 - **Runtime diagnostics (environment variables)**:
   - `TULIPROX_WATCHDOG` (default unset = off) is a mode selector: `1` (`true`/`on`/`yes`/`enabled`) observes and logs
     stalls, `2` (`restart`) additionally exits the process after the stall persists so a supervisor restarts it.
@@ -1501,10 +1556,10 @@
 
 ## 🛠 Maintenance
 
-- **Playlist curation now has a dedicated capability boundary**: matching, ordering, and virtual-category projection
-  live in the source-neutral `tuliprox-curation` crate, while Trakt HTTP/JSON handling translates records at the edge.
-  Existing `output[].trakt` configuration, category identity, matching behavior, and partial-success semantics remain
-  unchanged.
+- **Playlist curation now has a dedicated capability boundary**: matching and ordered membership evaluation live in the
+  source-neutral `tuliprox-curation` kernel, while Trakt HTTP/JSON handling translates records at the edge and the
+  category-scoped compatibility projector remains separate from membership identity. Existing category identity and
+  matching rules remain unchanged; the target-wide selection entry above documents the intentional outcome changes.
 
 - **`AdmissionRequest` bundles the request-scoped admission arguments**: five functions each threaded the same ten
   positional parameters, three of them consecutive bare `bool`s (`use_session_admission`, then
