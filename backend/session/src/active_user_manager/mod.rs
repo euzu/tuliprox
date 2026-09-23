@@ -2231,69 +2231,75 @@ impl ActiveUserManager {
     ) {
         let (connection_changed, user_removed, promotions, divergence_snapshot) = {
             let mut user_connections = self.connections.write().await;
-            let Some(connection_data) = user_connections.by_key.get_mut(username) else {
-                return;
-            };
+            let (connection_changed, user_removed, promotions, divergence_snapshot) = {
+                let Some(connection_data) = user_connections.by_key.get_mut(username) else {
+                    return;
+                };
 
-            if Self::session_has_stream(connection_data, session_token) {
-                return;
-            }
-
-            let Some(session_index) =
-                connection_data.sessions.iter().position(|session| session.token == session_token)
-            else {
-                return;
-            };
-
-            if expected_transition_version
-                .is_some_and(|expected| connection_data.sessions[session_index].transition_version != expected)
-            {
-                return;
-            }
-
-            let mut connection_changed = false;
-            if connection_data.sessions[session_index].lifecycle.is_counted() {
-                let kind = connection_data.sessions[session_index].connection_kind.unwrap_or(ConnectionKind::Normal);
-                connection_data.decrement_kind(kind);
-                connection_data.sessions[session_index].lifecycle = PlaybackLifecycle::Expired;
-                connection_changed = true;
-            }
-            connection_data.sessions[session_index].transition_version =
-                connection_data.sessions[session_index].transition_version.saturating_add(1);
-
-            if remove_session_if_unbound {
-                connection_data.sessions.swap_remove(session_index);
-            }
-
-            if connection_data.connections < connection_data.max_connections {
-                connection_data.granted_grace = false;
-                connection_data.grace_ts = 0;
-            }
-
-            let mut promotions = Vec::new();
-            while let Some(action) = connection_data.try_promote_soft_stream() {
-                let promoted_stream = connection_data.streams.iter().find(|stream| stream.uid == action.uid).cloned();
-                if let Some(stream) = promoted_stream.as_ref() {
-                    Self::promote_session_for_stream(connection_data, stream);
+                if Self::session_has_stream(connection_data, session_token) {
+                    return;
                 }
-                promotions.push(action);
-            }
-            while connection_data.try_promote_soft_session_reservation() {}
 
-            let user_removed = connection_data.connections == 0
-                && connection_data.streams.is_empty()
-                && connection_data.sessions.is_empty();
-            let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, username);
+                let Some(session_index) =
+                    connection_data.sessions.iter().position(|session| session.token == session_token)
+                else {
+                    return;
+                };
+
+                if expected_transition_version
+                    .is_some_and(|expected| connection_data.sessions[session_index].transition_version != expected)
+                {
+                    return;
+                }
+
+                let mut connection_changed = false;
+                if connection_data.sessions[session_index].lifecycle.is_counted() {
+                    let kind =
+                        connection_data.sessions[session_index].connection_kind.unwrap_or(ConnectionKind::Normal);
+                    connection_data.decrement_kind(kind);
+                    connection_data.sessions[session_index].lifecycle = PlaybackLifecycle::Expired;
+                    connection_changed = true;
+                }
+                connection_data.sessions[session_index].transition_version =
+                    connection_data.sessions[session_index].transition_version.saturating_add(1);
+
+                if remove_session_if_unbound {
+                    connection_data.sessions.swap_remove(session_index);
+                }
+
+                if connection_data.connections < connection_data.max_connections {
+                    connection_data.granted_grace = false;
+                    connection_data.grace_ts = 0;
+                }
+
+                let mut promotions = Vec::new();
+                while let Some(action) = connection_data.try_promote_soft_stream() {
+                    let promoted_stream =
+                        connection_data.streams.iter().find(|stream| stream.uid == action.uid).cloned();
+                    if let Some(stream) = promoted_stream.as_ref() {
+                        Self::promote_session_for_stream(connection_data, stream);
+                    }
+                    promotions.push(action);
+                }
+                while connection_data.try_promote_soft_session_reservation() {}
+
+                let user_removed = connection_data.connections == 0
+                    && connection_data.streams.is_empty()
+                    && connection_data.sessions.is_empty();
+                let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, username);
+
+                (connection_changed, user_removed, promotions, divergence_snapshot)
+            };
+
+            if user_removed {
+                user_connections.by_key.remove(username);
+            }
 
             (connection_changed, user_removed, promotions, divergence_snapshot)
         };
 
         self.log_divergence_snapshot(divergence_snapshot).await;
 
-        if user_removed {
-            let mut user_connections = self.connections.write().await;
-            user_connections.by_key.remove(username);
-        }
         if connection_changed || user_removed {
             self.log_active_user().await;
         }
@@ -2305,40 +2311,44 @@ impl ActiveUserManager {
     pub async fn release_session_streams_and_counted_reservation(&self, username: &str, session_token: &str) -> bool {
         let (connection_changed, user_removed, promotions, divergence_snapshot) = {
             let mut user_connections = self.connections.write().await;
-            let Some(connection_data) = user_connections.by_key.get_mut(username) else {
-                return false;
+            let (connection_changed, user_removed, promotions, divergence_snapshot) = {
+                let Some(connection_data) = user_connections.by_key.get_mut(username) else {
+                    return false;
+                };
+
+                let counted_kind = connection_data
+                    .sessions
+                    .iter()
+                    .find(|session| session.token == session_token && session.lifecycle.is_counted())
+                    .and_then(|session| session.connection_kind);
+                let (_removed_streams, mut connection_changed) =
+                    connection_data.remove_streams_for_session_and_release_counted(session_token, counted_kind);
+                Self::clear_session_counted_without_stream(connection_data, session_token);
+
+                if connection_data.connections < connection_data.max_connections {
+                    connection_data.granted_grace = false;
+                    connection_data.grace_ts = 0;
+                }
+
+                let promotions = Self::collect_promotions_after_capacity_release(connection_data);
+                let user_removed = connection_data.connections == 0
+                    && connection_data.streams.is_empty()
+                    && connection_data.sessions.is_empty();
+                let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, username);
+                connection_changed |= !promotions.is_empty();
+
+                (connection_changed, user_removed, promotions, divergence_snapshot)
             };
 
-            let counted_kind = connection_data
-                .sessions
-                .iter()
-                .find(|session| session.token == session_token && session.lifecycle.is_counted())
-                .and_then(|session| session.connection_kind);
-            let (_removed_streams, mut connection_changed) =
-                connection_data.remove_streams_for_session_and_release_counted(session_token, counted_kind);
-            Self::clear_session_counted_without_stream(connection_data, session_token);
-
-            if connection_data.connections < connection_data.max_connections {
-                connection_data.granted_grace = false;
-                connection_data.grace_ts = 0;
+            if user_removed {
+                user_connections.by_key.remove(username);
             }
-
-            let promotions = Self::collect_promotions_after_capacity_release(connection_data);
-            let user_removed = connection_data.connections == 0
-                && connection_data.streams.is_empty()
-                && connection_data.sessions.is_empty();
-            let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, username);
-            connection_changed |= !promotions.is_empty();
 
             (connection_changed, user_removed, promotions, divergence_snapshot)
         };
 
         self.log_divergence_snapshot(divergence_snapshot).await;
 
-        if user_removed {
-            let mut user_connections = self.connections.write().await;
-            user_connections.by_key.remove(username);
-        }
         if connection_changed || user_removed {
             self.log_active_user().await;
         }
