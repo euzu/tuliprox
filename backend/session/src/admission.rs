@@ -288,6 +288,18 @@ enum StrategyLoopResult {
     Rejected(crate::AdmissionRejectionReason),
 }
 
+async fn pending_provider_release_ready(adm: &AdmissionCtx, username: &str) -> bool {
+    let Some(addr) = adm.active_users.pending_provider_release(username).await else {
+        return true;
+    };
+    if !adm.connection_manager.provider_manager.wait_for_addr_release(&addr, EVICTED_PROVIDER_RELEASE_TIMEOUT).await {
+        debug!("Provider allocation for evicted connection {addr} remains active after close timeout");
+        return false;
+    }
+    adm.active_users.clear_pending_provider_release(username).await;
+    true
+}
+
 /// Shared strategy-evaluation loop used by both the initial admission path
 /// (`resolve_admission_with_strategies`) and the remaining-strategies path
 /// (`evaluate_remaining_strategies_after_grace`).
@@ -362,6 +374,9 @@ where
                 let connections_before = adm.active_users.user_connections(username).await;
                 let ttl = get_reentry_ttl(adm);
                 adm.active_users.mark_recent_eviction_guard_for_addr(&target.addr, *request_addr, ttl).await;
+                if target.addr != *request_addr {
+                    adm.active_users.set_pending_provider_release(username, target.addr).await;
+                }
                 adm.connection_manager.release_connection_as_kicked(&target.addr).await;
                 // This request cannot wait for its own transport to close.
                 if target.addr != *request_addr {
@@ -375,7 +390,9 @@ where
                             "Provider allocation for evicted connection {} remains active after close timeout",
                             target.addr
                         );
+                        return StrategyLoopResult::Rejected(crate::AdmissionRejectionReason::UserConnectionsExhausted);
                     }
+                    adm.active_users.clear_pending_provider_release(username).await;
                 }
                 performed_legitimate_eviction = true;
                 let retry_admission = get_admission_for_request(adm, request).await;
@@ -431,7 +448,34 @@ pub async fn resolve_admission_with_strategies(
     let username = request.username;
     let admission = get_admission_for_request(adm, &request).await;
 
+    if admission.permission() != UserConnectionPermission::Exhausted
+        && adm.active_users.pending_provider_release(username).await.is_none()
+    {
+        return AdmissionStrategyResolution { admission, grace_mode: None, grace_context: None };
+    }
+
+    let _admission_guard = adm.active_users.acquire_user_admission(username).await;
+
+    if !pending_provider_release_ready(adm, username).await {
+        return AdmissionStrategyResolution {
+            admission: crate::ConnectionAdmission::exhausted(
+                crate::AdmissionRejectionReason::UserConnectionsExhausted,
+                admission.kind(),
+            ),
+            grace_mode: None,
+            grace_context: None,
+        };
+    }
+
+    // Re-read admission now that the gate is held. The first read above happened
+    // before we queued on the gate, so a request ahead of us may have released
+    // the very slot we are about to evict somebody for. Walking the strategies on
+    // the stale snapshot kicks a live connection to free a slot that is already
+    // free.
+    let admission = get_admission_for_request(adm, &request).await;
+
     if admission.permission() != UserConnectionPermission::Exhausted {
+        debug!("Admission became available while waiting on the admission gate for user {username}");
         return AdmissionStrategyResolution { admission, grace_mode: None, grace_context: None };
     }
 
@@ -446,20 +490,6 @@ pub async fn resolve_admission_with_strategies(
             grace_mode: None,
             grace_context: None,
         };
-    }
-
-    let _admission_guard = adm.active_users.acquire_user_admission(username).await;
-
-    // Re-read admission now that the gate is held. The first read above happened
-    // before we queued on the gate, so a request ahead of us may have released
-    // the very slot we are about to evict somebody for. Walking the strategies on
-    // the stale snapshot kicks a live connection to free a slot that is already
-    // free.
-    let admission = get_admission_for_request(adm, &request).await;
-
-    if admission.permission() != UserConnectionPermission::Exhausted {
-        debug!("Admission became available while waiting on the admission gate for user {username}");
-        return AdmissionStrategyResolution { admission, grace_mode: None, grace_context: None };
     }
 
     let build_grace_ctx = |global_idx: usize| GraceResolutionContext {
@@ -527,6 +557,17 @@ pub async fn evaluate_remaining_strategies_after_grace(
     };
 
     let _admission_guard = adm.active_users.acquire_user_admission(username).await;
+
+    if !pending_provider_release_ready(adm, username).await {
+        return AdmissionStrategyResolution {
+            admission: crate::ConnectionAdmission::exhausted(
+                crate::AdmissionRejectionReason::UserConnectionsExhausted,
+                original_kind,
+            ),
+            grace_mode: None,
+            grace_context: None,
+        };
+    }
 
     match evaluate_admission_strategy_loop(
         adm,
