@@ -987,21 +987,42 @@ and the catalog page limit are configured on the parent input in the Web UI or Y
 
 ### 2.5 Staged Sources (`staged`)
 
-The **staged input** is a first-class input type for pre-formatted playlists. Tuliprox reads the selected playlist
-clusters from the staged source, then stores the merged result in the linked provider input. Stream delivery and API
-requests continue to use that provider input.
+The **staged input** is a first-class input type for pre-formatted playlists. Tuliprox overlays the selected clusters
+of the linked provider with the staged groups, then stores the merged result in that provider input. Stream delivery
+and API requests continue to use the provider input.
 
 This is useful when an external playlist editor already has the desired channel order, groups, and original stream IDs.
-For example, an IPTV editor can provide the Live playlist layout while the actual streams are still opened against the
-Xtream or M3U provider.
+A staged playlist is typically a restructured copy of the provider playlist: the streams stay the same, while group
+names, channel names, and their order may differ. For example, an IPTV editor can provide the Live playlist layout while
+the actual streams are still opened against the Xtream or M3U provider.
 
 **Data flow:**
 
-* `staged input -> provider input`: the staged input is an overlay for that provider. Clusters listed in
-  `staged.clusters` are loaded from the staged input; the remaining clusters are loaded from the provider input itself.
+* `staged input -> provider input`: the staged input is an overlay for that provider. Inside the clusters listed in
+  `staged.clusters`, each staged group of an `xtream` provider replaces the provider category it belongs to; provider
+  categories that the staged playlist does not represent stay as they are. For any other provider type the listed
+  clusters are replaced entirely by the staged groups. Clusters not listed are loaded from the provider input itself.
   The merged playlist is persisted under the provider input, and streaming/API requests still target the provider input.
 * `staged input -> target` is not supported. Use a normal `m3u` or `xtream` input if the source should be connected
   directly to a target.
+
+**Overlay matching (`xtream` providers):**
+
+* Matching is ID-driven. A staged group overlays the provider category that owns its staged stream IDs, strongest overlap
+  first; when that category is already claimed by a stronger overlap, the group's next-ranked category is used. A group
+  whose stream IDs the provider playlist knows none of is resolved by the category ID, and only when neither matches does
+  the group title act as a last resort. A group title therefore never overrides an ID match, so a renamed group still
+  overlays its provider category, and a group whose staged ID is positional (as in an `m3u` staged playlist) cannot take
+  over an unrelated category by accident.
+* The overlaid category keeps its own category ID; the staged playlist supplies the group name and the channel order.
+* Every staged channel needs a numeric provider stream ID in its `header.id`, either from an `xui-id` / `cuid`
+  attribute or from the numeric last URL segment. Rows without one are skipped, a single warning per group reports how
+  many rows were dropped, and the provider category stays in place instead of being emptied.
+* A staged group that matches no provider category is added as a new category. Its category ID is reused when it is
+  still free, otherwise Tuliprox assigns an unused ID, so two groups of one cluster never share an ID.
+
+For every other provider type the staged groups of a listed cluster are taken as they are: their group IDs, URLs, and
+channel IDs stay unchanged, and the clusters they cover are replaced completely.
 
 #### Configuration Example (Provider With Staged Live Overlay)
 
@@ -1034,13 +1055,16 @@ inputs:
 | `method`                | Enum   |    No    | `GET`   | HTTP request method (`GET` or `POST`). Not inherited from the provider input.                         |
 | `headers`               | Dict   |    No    |         | Custom HTTP headers for the staged download. Not inherited from the provider input.                   |
 | `staged.for_input`      | String |   Yes    |         | Provider input name. Must reference a non-staged `m3u` or `xtream` input.                             |
-| `staged.clusters`       | List   |    No    | all     | Clusters loaded from the staged input: `live`, `vod`, `series`.                                       |
+| `staged.clusters`       | List   |    No    | all     | Clusters whose categories are overlaid from the staged input: `live`, `vod`, `series`.                |
 
 #### Staged Cluster Behavior & Validation
 
-`staged.clusters` is the group of clusters loaded from the staged input.
+`staged.clusters` names the clusters whose categories are overlaid from the staged input.
 
 * The referenced provider supplies all clusters not listed in `staged.clusters`.
+* Inside a listed cluster of an `xtream` provider, only the categories represented by the staged playlist are overlaid;
+  provider categories without a staged counterpart stay available. For any other provider type the listed clusters are
+  replaced entirely.
 * `staged.for_input` must reference an existing non-staged `m3u` or `xtream` input.
 * Each provider input can have at most one staged overlay.
 * `staged.clusters` must not be empty.

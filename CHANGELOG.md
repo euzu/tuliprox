@@ -58,9 +58,13 @@
   provider inputs (with `enabled`, `live_source`, `vod_source`, and `series_source`) has been removed.
   A staged source is now its own input with `type: staged`. It points to one non-staged `m3u` /
   `xtream` provider through `staged.for_input`, and `staged.clusters` selects which clusters (`live`,
-  `vod`, `series`) are loaded from the staged playlist. Clusters not selected there are loaded from the
-  provider input itself. The merged result is stored under the provider input, so playlist delivery and
-  stream/API routing continue to use the provider.
+  `vod`, `series`) are overlaid by the staged playlist. Inside such a cluster of an `xtream` provider each staged group
+  replaces the provider category it belongs to, matched by the staged channels' stream IDs and only then by category ID
+  or group title; provider categories without a staged counterpart stay as they are. For any other provider type the
+  selected clusters are replaced entirely by the staged groups, and the clusters not selected are loaded from the
+  provider input itself. The merged result is stored under the provider input, so playlist delivery and stream/API
+  routing continue to use the provider. See
+  [Staged Sources](docs/src/configuration/source.md#25-staged-sources-staged) for the matching rules.
 
   Before:
 
