@@ -18,7 +18,7 @@ use crate::{
 };
 use log::debug;
 use shared::model::{AdmissionStrategy, ConnectionDenied, EventMessage, UserConnectionPermission, VirtualId};
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tuliprox_core::model::{AppConfig, Fingerprint, ProxyUserCredentials};
 
 /// The handles admission reads from the running server.
@@ -34,6 +34,7 @@ pub struct AdmissionCtx {
 
 /// Default duration an eviction is remembered if not configured.
 pub const DEFAULT_RECENT_EVICTION_REENTRY_TTL_MS: u64 = shared::defaults::DEFAULT_RECENT_EVICTION_REENTRY_TTL_MS;
+const EVICTED_PROVIDER_RELEASE_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// Reentry cooldown from a resolved stream config, falling back to the default when
 /// no `reverse_proxy.stream` block is configured.
@@ -362,6 +363,20 @@ where
                 let ttl = get_reentry_ttl(adm);
                 adm.active_users.mark_recent_eviction_guard_for_addr(&target.addr, *request_addr, ttl).await;
                 adm.connection_manager.release_connection_as_kicked(&target.addr).await;
+                // This request cannot wait for its own transport to close.
+                if target.addr != *request_addr {
+                    let released = adm
+                        .connection_manager
+                        .provider_manager
+                        .wait_for_addr_release(&target.addr, EVICTED_PROVIDER_RELEASE_TIMEOUT)
+                        .await;
+                    if !released {
+                        debug!(
+                            "Provider allocation for evicted connection {} remains active after close timeout",
+                            target.addr
+                        );
+                    }
+                }
                 performed_legitimate_eviction = true;
                 let retry_admission = get_admission_for_request(adm, request).await;
                 if retry_admission.permission() == UserConnectionPermission::Allowed {

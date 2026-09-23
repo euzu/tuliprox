@@ -6073,6 +6073,9 @@ async fn evaluate_remaining_strategies_evicts_after_used_grace() {
         recent_eviction_reentry_ttl: std::time::Duration::from_millis(1500),
         admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream, AdmissionStrategy::EvictUserOldest]),
     });
+    let provider_config = create_test_provider_app_config();
+    app_state.app_config.sources.store(provider_config.sources.load_full());
+    app_state.active_provider.update_config(&app_state.app_config);
 
     let addr1: SocketAddr = "127.0.0.1:55701".parse().unwrap_or_else(|_| unreachable!());
     let addr2: SocketAddr = "10.0.0.5:55702".parse().unwrap_or_else(|_| unreachable!());
@@ -6121,6 +6124,32 @@ async fn evaluate_remaining_strategies_evicts_after_used_grace() {
         .await
         .expect("stream should be created");
 
+    let provider_handle = app_state
+        .active_provider
+        .acquire_connection_with_grace_for_session(
+            &"provider_1".intern(),
+            &addr1,
+            false,
+            0,
+            crate::api::model::ConnectionKind::Normal,
+            Some("tok-counted"),
+        )
+        .expect("old stream should occupy the only provider slot");
+    assert!(app_state.active_provider.register_body_owner(provider_handle.allocation_id));
+    let close_rx = app_state.connection_manager.register_close_socket(addr1);
+    let manager = Arc::clone(&app_state.connection_manager);
+    let provider = Arc::clone(&app_state.active_provider);
+    let close_task = tokio::spawn(async move {
+        assert_eq!(close_rx.await.expect("kick close signal"), shared::model::DisconnectReason::ClientKicked);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        manager.release_provider_deferred(&addr1).await;
+        assert_eq!(provider.get_provider_connections_count(), 1, "body owner still holds provider capacity");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        provider.release_handle(&provider_handle);
+        provider_handle.completion_token.as_ref().expect("body completion token").cancel();
+        manager.unregister_close_socket(&addr1);
+    });
+
     let result = evaluate_remaining_strategies_after_grace(
         &app_state.admission_ctx(),
         AdmissionRequest {
@@ -6145,6 +6174,24 @@ async fn evaluate_remaining_strategies_evicts_after_used_grace() {
         "EvictUserOldest should free the slot"
     );
     assert!(result.grace_context.is_none(), "no grace context on eviction success");
+    assert_eq!(
+        app_state.active_provider.get_provider_connections_count(),
+        0,
+        "admission must not return while the evicted stream still owns the provider slot"
+    );
+    let replacement = app_state.active_provider.acquire_connection_with_grace_for_session(
+        &"provider_1".intern(),
+        &addr2,
+        false,
+        0,
+        crate::api::model::ConnectionKind::Normal,
+        Some("tok-new"),
+    );
+    assert!(replacement.is_some(), "newly admitted stream must acquire the freed provider slot");
+    if let Some(replacement) = replacement {
+        app_state.active_provider.release_handle(&replacement);
+    }
+    close_task.await.expect("old transport cleanup");
 }
 
 #[tokio::test]

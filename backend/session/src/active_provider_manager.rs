@@ -38,6 +38,7 @@ type PreemptionCandidate = (PriorityOwner, AllocationId, i8, Instant);
 type PriorityKey = (i8, Reverse<Instant>, AllocationId);
 
 const PREEMPTION_COMPLETION_TIMEOUT: Duration = Duration::from_millis(1500);
+const EVICTED_PROVIDER_RELEASE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionKind {
@@ -444,6 +445,33 @@ impl std::ops::Deref for ActiveProviderManager {
 }
 
 impl ActiveProviderManager {
+    fn has_connections_for_addr(&self, addr: &SocketAddr) -> bool {
+        let _transition = self.lock_capacity_transition();
+        let connections = self.read_connections();
+        connections.single.values().any(|info| info.client_addr == *addr)
+            || connections
+                .shared
+                .by_key
+                .values()
+                .any(|shared| shared.connections.values().any(|subscriber| subscriber.addr == *addr))
+    }
+
+    /// Waits for a kicked transport's provider allocations to leave the registry.
+    /// The socket close may be signalled before its response bodies and provider handles are dropped.
+    pub async fn wait_for_addr_release(&self, addr: &SocketAddr, timeout: Duration) -> bool {
+        let deadline = TokioInstant::now() + timeout;
+        loop {
+            if !self.has_connections_for_addr(addr) {
+                return true;
+            }
+            let now = TokioInstant::now();
+            if now >= deadline {
+                return false;
+            }
+            tokio::time::sleep_until((now + EVICTED_PROVIDER_RELEASE_POLL_INTERVAL).min(deadline)).await;
+        }
+    }
+
     fn upsert_priority_entry(
         connections: &mut Connections,
         provider_name: &Arc<str>,
