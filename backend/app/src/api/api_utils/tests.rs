@@ -6052,7 +6052,7 @@ async fn grace_context_is_populated_when_grace_strategy_is_actually_granted() {
 async fn evaluate_remaining_strategies_evicts_after_used_grace() {
     // Strategies: [GraceHoldStream, EvictUserOldest]
     // Grace was used at index 0, so only EvictUserOldest (index 1) is evaluated.
-    // Eviction frees the slot -> Allowed.
+    // The new request stays retryable while the evicted stream still owns its provider slot.
     let strategies = vec![AdmissionStrategy::GraceHoldStream, AdmissionStrategy::EvictUserOldest];
     let grace_context = GraceResolutionContext { strategy_index: 0, strategies: strategies.into(), kind: None };
 
@@ -6139,34 +6139,56 @@ async fn evaluate_remaining_strategies_evicts_after_used_grace() {
     let close_rx = app_state.connection_manager.register_close_socket(addr1);
     let manager = Arc::clone(&app_state.connection_manager);
     let provider = Arc::clone(&app_state.active_provider);
+    let release_body = Arc::new(tokio::sync::Notify::new());
+    let release_body_after_timeout = Arc::clone(&release_body);
     let close_task = tokio::spawn(async move {
         assert_eq!(close_rx.await.expect("kick close signal"), shared::model::DisconnectReason::ClientKicked);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         manager.release_provider_deferred(&addr1).await;
         assert_eq!(provider.get_provider_connections_count(), 1, "body owner still holds provider capacity");
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        release_body_after_timeout.notified().await;
         provider.release_handle(&provider_handle);
         provider_handle.completion_token.as_ref().expect("body completion token").cancel();
         manager.unregister_close_socket(&addr1);
     });
 
-    let result = evaluate_remaining_strategies_after_grace(
-        &app_state.admission_ctx(),
-        AdmissionRequest {
-            username: "remaining-evict",
-            max_connections: 1,
-            soft_connections: 0,
-            client_ip: &fingerprint2.client_ip,
-            request_addr: &fingerprint2.addr,
-            use_session_admission: true,
-            session_token: Some("tok-new"),
-            activate_unbound_session: true,
-            eviction_reentry_guard: EvictionReentryGuard::Session("tok-new"),
-        },
-        &grace_context,
-        Some(crate::api::model::ConnectionKind::Normal),
+    let request = || AdmissionRequest {
+        username: "remaining-evict",
+        max_connections: 1,
+        soft_connections: 0,
+        client_ip: &fingerprint2.client_ip,
+        request_addr: &fingerprint2.addr,
+        use_session_admission: true,
+        session_token: Some("tok-new"),
+        activate_unbound_session: true,
+        eviction_reentry_guard: EvictionReentryGuard::Session("tok-new"),
+    };
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        evaluate_remaining_strategies_after_grace(
+            &app_state.admission_ctx(),
+            request(),
+            &grace_context,
+            Some(crate::api::model::ConnectionKind::Normal),
+        ),
     )
-    .await;
+    .await
+    .expect("admission must remain retryable while the provider slot is held");
+
+    assert_eq!(result.admission.permission(), UserConnectionPermission::Exhausted);
+    assert_eq!(app_state.active_provider.get_provider_connections_count(), 1);
+
+    let retry = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        resolve_admission_with_strategies(&app_state.admission_ctx(), request()),
+    )
+    .await
+    .expect("retry must remain bounded while the provider slot is held");
+    assert_eq!(retry.admission.permission(), UserConnectionPermission::Exhausted);
+
+    release_body.notify_one();
+    close_task.await.expect("old transport cleanup");
+    let result = resolve_admission_with_strategies(&app_state.admission_ctx(), request()).await;
 
     assert_eq!(
         result.admission.permission(),
@@ -6191,7 +6213,6 @@ async fn evaluate_remaining_strategies_evicts_after_used_grace() {
     if let Some(replacement) = replacement {
         app_state.active_provider.release_handle(&replacement);
     }
-    close_task.await.expect("old transport cleanup");
 }
 
 #[tokio::test]
