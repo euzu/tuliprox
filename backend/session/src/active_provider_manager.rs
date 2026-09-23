@@ -130,6 +130,7 @@ impl AcquireProviderParams<'_> {
 #[derive(Debug, Clone)]
 struct SharedAllocation {
     allocation_id: AllocationId,
+    origin_subscriber_id: SharedSubscriberId,
     allocation: ProviderAllocation,
     /// Keyed by unique subscriber id, never by socket: two external clients behind one
     /// reverse proxy must not collapse into a single entry.
@@ -505,8 +506,14 @@ impl ActiveProviderManager {
     fn has_connections_from_snapshot(&self, snapshot: &ProviderReleaseSnapshot) -> bool {
         let _transition = self.lock_capacity_transition();
         let connections = self.read_connections();
-        snapshot.single_allocations.iter().any(|id| connections.single.contains_key(id))
-            || snapshot.shared_subscribers.iter().any(|id| connections.shared.key_by_subscriber.contains_key(id))
+        snapshot.single_allocations.iter().any(|id| {
+            connections.single.contains_key(id)
+                || connections.shared.shared_by_allocation_id.get(id).is_some_and(|key| {
+                    connections.shared.by_key.get(key).is_some_and(|shared| {
+                        connections.shared.key_by_subscriber.get(&shared.origin_subscriber_id) == Some(key)
+                    })
+                })
+        }) || snapshot.shared_subscribers.iter().any(|id| connections.shared.key_by_subscriber.contains_key(id))
     }
 
     /// Waits for the kicked transport's original provider allocations to leave the registry.
@@ -2600,6 +2607,7 @@ impl ActiveProviderManager {
             Arc::clone(&shared_key),
             SharedAllocation {
                 allocation_id: handle.allocation_id,
+                origin_subscriber_id: subscriber_id,
                 allocation: info.allocation,
                 connections: HashMap::from([(
                     subscriber_id,
@@ -3002,14 +3010,17 @@ mod tests {
         let second = SharedSubscriberId::from_stream_uid(50_024);
         let origin =
             provider.acquire_connection(&input, &first_addr, 0, ConnectionKind::Normal).expect("shared origin");
+        let before_promotion = provider.release_snapshot_for_addr(&first_addr);
         assert!(provider.make_shared_connection(&origin, "shared-release", first));
         provider
             .add_shared_connection(&second_addr, second, "shared-release", 0, ConnectionKind::Normal)
             .expect("second subscriber");
         let snapshot = provider.release_snapshot_for_addr(&first_addr);
+        assert!(!provider.wait_for_snapshot_release(&before_promotion, Duration::ZERO).await);
         assert!(!provider.wait_for_snapshot_release(&snapshot, Duration::ZERO).await);
 
         provider.release_connection(&first_addr);
+        assert!(provider.wait_for_snapshot_release(&before_promotion, Duration::ZERO).await);
         assert!(provider.wait_for_snapshot_release(&snapshot, Duration::ZERO).await);
         assert_eq!(provider.get_provider_connections_count(), 1);
         provider.release_connection(&second_addr);
