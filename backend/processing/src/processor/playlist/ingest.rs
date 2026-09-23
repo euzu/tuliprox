@@ -488,6 +488,7 @@ pub(crate) fn cluster_selected(cluster: XtreamCluster, clusters: ClusterFlags) -
 fn prepare_staged_xtream_group(
     mut group: PlaylistGroup,
     provider: &ConfigInput,
+    provider_urls: &HashMap<(XtreamCluster, u32), &Arc<str>>,
     username: &str,
     password: &str,
     live_stream_use_prefix: bool,
@@ -499,23 +500,32 @@ fn prepare_staged_xtream_group(
         let Ok(stream_id) = item.header.id.parse::<u32>() else {
             return false;
         };
-        let container_extension = if group.xtream_cluster == XtreamCluster::Video {
-            shared::utils::extract_extension_from_url(&item.header.url)
-                .and_then(|extension| extension.strip_prefix('.'))
-        } else {
-            None
-        };
-        item.header.url = tuliprox_parser::xtream::get_xtream_url(
-            group.xtream_cluster,
-            &provider.url,
-            username,
-            password,
-            stream_id,
-            container_extension,
-            live_stream_use_prefix,
-            live_stream_without_extension,
-        )
-        .into();
+        // Existing streams keep the provider's playback URL, including a direct source URL.
+        item.header.url = provider_urls.get(&(group.xtream_cluster, stream_id)).map_or_else(
+            || {
+                let metadata_extension = item.header.get_container_extension();
+                let container_extension = if group.xtream_cluster == XtreamCluster::Video {
+                    metadata_extension.as_deref().or_else(|| {
+                        shared::utils::extract_extension_from_url(&item.header.url)
+                            .and_then(|extension| extension.strip_prefix('.'))
+                    })
+                } else {
+                    None
+                };
+                tuliprox_parser::xtream::get_xtream_url(
+                    group.xtream_cluster,
+                    &provider.url,
+                    username,
+                    password,
+                    stream_id,
+                    container_extension,
+                    live_stream_use_prefix,
+                    live_stream_without_extension,
+                )
+                .into()
+            },
+            |url| Arc::clone(url),
+        );
         item.header.input_name = Arc::clone(&provider.name);
         true
     });
@@ -536,6 +546,7 @@ fn prepare_staged_xtream_group(
 /// unusable overlay rows cannot remove provider content.
 pub(crate) fn apply_staged_overlay_groups(
     provider: &ConfigInput,
+    staged_type: StagedInputType,
     clusters: ClusterFlags,
     provider_groups: Vec<PlaylistGroup>,
     staged_groups: Vec<PlaylistGroup>,
@@ -561,6 +572,30 @@ pub(crate) fn apply_staged_overlay_groups(
     let live_stream_use_prefix = provider.has_flag(ConfigInputFlags::XtreamLiveStreamUsePrefix);
     let live_stream_without_extension = provider.has_flag(ConfigInputFlags::XtreamLiveStreamWithoutExtension);
 
+    let staged_stream_ids: HashSet<(XtreamCluster, u32)> = staged_groups
+        .iter()
+        .filter(|group| cluster_selected(group.xtream_cluster, clusters))
+        .flat_map(|group| {
+            group.channels.iter().filter_map(|item| {
+                item.header.id.parse::<u32>().ok().map(|stream_id| (group.xtream_cluster, stream_id))
+            })
+        })
+        .collect();
+    let mut provider_urls = HashMap::with_capacity(staged_stream_ids.len());
+    for group in &provider_groups {
+        if !cluster_selected(group.xtream_cluster, clusters) {
+            continue;
+        }
+        for item in &group.channels {
+            if let Ok(stream_id) = item.header.id.parse::<u32>() {
+                let key = (group.xtream_cluster, stream_id);
+                if staged_stream_ids.contains(&key) {
+                    provider_urls.entry(key).or_insert(&item.header.url);
+                }
+            }
+        }
+    }
+
     let mut staged_selected: Vec<Option<PlaylistGroup>> = staged_groups
         .into_iter()
         .filter(|group| cluster_selected(group.xtream_cluster, clusters))
@@ -568,6 +603,7 @@ pub(crate) fn apply_staged_overlay_groups(
             Some(prepare_staged_xtream_group(
                 group,
                 provider,
+                &provider_urls,
                 username,
                 password,
                 live_stream_use_prefix,
@@ -581,7 +617,7 @@ pub(crate) fn apply_staged_overlay_groups(
     // would be collapsed into a single category. Only staged ids are renumbered; a provider playlist
     // that already repeats a category id is passed through unchanged.
     let mut used_ids = GroupCategoryIds::from_groups(&provider_groups);
-    let assignment = match_staged_groups(&provider_groups, &staged_selected, clusters);
+    let assignment = match_staged_groups(&provider_groups, &staged_selected, staged_type, clusters);
 
     let mut result: Vec<PlaylistGroup> = Vec::with_capacity(provider_groups.len() + staged_selected.len());
 
@@ -646,11 +682,16 @@ fn sync_channel_category_id(group: &mut PlaylistGroup) {
 struct StagedOverlayAssignment {
     staged_by_provider: Vec<Option<usize>>,
     provider_by_staged: Vec<Option<usize>>,
+    has_stream_id_evidence: Vec<bool>,
 }
 
 impl StagedOverlayAssignment {
     fn new(provider_len: usize, staged_len: usize) -> Self {
-        Self { staged_by_provider: vec![None; provider_len], provider_by_staged: vec![None; staged_len] }
+        Self {
+            staged_by_provider: vec![None; provider_len],
+            provider_by_staged: vec![None; staged_len],
+            has_stream_id_evidence: vec![false; staged_len],
+        }
     }
 
     /// Assigns `staged_idx` to `provider_idx`; returns `false` when either side is already taken.
@@ -676,16 +717,20 @@ impl StagedOverlayAssignment {
 /// 1. the channel stream ids decide. A staged channel carries the provider stream id, and the provider
 ///    playlist itself states which category owns a stream, so this also covers staged sources whose
 ///    group ids are not provider category ids (a `m3u` staged playlist numbers its groups positionally).
-/// 2. the category id decides for staged groups whose channels the provider playlist does not know.
-/// 3. the title remains the last resort for staged sources that carry neither.
+/// 2. the category id decides for Xtream staged groups whose channels the provider playlist does not know.
+///    M3U staged group ids are positional and cannot identify provider categories.
+/// 3. the title remains the last resort for staged groups without provider stream-id evidence.
 fn match_staged_groups(
     provider_groups: &[PlaylistGroup],
     staged_groups: &[Option<PlaylistGroup>],
+    staged_type: StagedInputType,
     clusters: ClusterFlags,
 ) -> StagedOverlayAssignment {
     let mut assignment = StagedOverlayAssignment::new(provider_groups.len(), staged_groups.len());
     match_staged_by_stream_id(provider_groups, staged_groups, clusters, &mut assignment);
-    match_staged_by_category_id(provider_groups, staged_groups, clusters, &mut assignment);
+    if staged_type == StagedInputType::Xtream {
+        match_staged_by_category_id(provider_groups, staged_groups, clusters, &mut assignment);
+    }
     match_staged_by_title(provider_groups, staged_groups, clusters, &mut assignment);
     assignment
 }
@@ -740,6 +785,7 @@ fn match_staged_by_stream_id(
                 *hits_by_provider.entry(*provider_idx).or_insert(0) += 1;
             }
         }
+        assignment.has_stream_id_evidence[staged_idx] = !hits_by_provider.is_empty();
         candidates.extend(hits_by_provider.iter().map(|(provider_idx, hits)| StreamOverlap {
             hits: *hits,
             staged_idx,
@@ -780,7 +826,7 @@ fn match_staged_by_category_id(
         let Some(staged) = staged else {
             continue;
         };
-        if staged.id == 0 || assignment.is_assigned(staged_idx) {
+        if staged.id == 0 || assignment.is_assigned(staged_idx) || assignment.has_stream_id_evidence[staged_idx] {
             continue;
         }
         if let Some(provider_idx) = provider_idx_by_id.get(&(staged.xtream_cluster, staged.id)).copied() {
@@ -799,7 +845,7 @@ fn match_staged_by_title(
     // Staged groups of the same name are interchangeable, so one lookup per provider category is enough.
     let mut staged_by_title: HashMap<(XtreamCluster, &str), Vec<usize>> = HashMap::new();
     for (staged_idx, staged) in staged_groups.iter().enumerate() {
-        if assignment.is_assigned(staged_idx) {
+        if assignment.is_assigned(staged_idx) || assignment.has_stream_id_evidence[staged_idx] {
             continue;
         }
         if let Some(staged) = staged {
@@ -1636,7 +1682,8 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
         } else {
             let provider_groups = playlist.take_groups();
             let staged_groups = staged_result.source.take_groups();
-            let merged_groups = apply_staged_overlay_groups(input, clusters, provider_groups, staged_groups);
+            let merged_groups =
+                apply_staged_overlay_groups(input, staged_input.staged_type, clusters, provider_groups, staged_groups);
             if let Some(input_telemetry) = playlist_download_result.input_telemetry.as_mut() {
                 neutralize_overlaid_cluster_facts(input_telemetry, clusters);
             }

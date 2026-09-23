@@ -16,6 +16,15 @@ use tuliprox_curation::{
     CurationEvaluation, CurationMediaKind, CurationMembership, CurationSelectorKey, CurationSelectorSummary,
 };
 
+fn apply_staged_overlay_groups(
+    provider: &ConfigInput,
+    clusters: ClusterFlags,
+    provider_groups: Vec<PlaylistGroup>,
+    staged_groups: Vec<PlaylistGroup>,
+) -> Vec<PlaylistGroup> {
+    super::apply_staged_overlay_groups(provider, StagedInputType::Xtream, clusters, provider_groups, staged_groups)
+}
+
 #[derive(Clone, Default)]
 struct PlaylistRunCollectSink(Arc<std::sync::Mutex<Vec<EventMessage>>>);
 
@@ -788,6 +797,63 @@ fn staged_xtream_vod_url_uses_provider_credentials_and_one_extension() {
 }
 
 #[test]
+fn staged_xtream_overlay_keeps_known_provider_stream_urls() {
+    let provider = ConfigInput {
+        name: "provider".intern(),
+        input_type: InputType::Xtream,
+        url: "http://provider.example".to_string(),
+        username: Some("real-user".to_string()),
+        password: Some("real-pass".to_string()),
+        ..Default::default()
+    };
+    let mut provider_vod = test_group(XtreamCluster::Video, "Movies", "provider");
+    provider_vod.channels[0].header.id = "310".intern();
+    provider_vod.channels[0].header.url = "https://cdn.example/video?id=310".intern();
+    let mut second_provider = provider_vod.channels[0].clone();
+    second_provider.header.id = "311".intern();
+    second_provider.header.url = "http://provider.example/movie/real-user/real-pass/311.mp4".intern();
+    provider_vod.channels.push(second_provider);
+
+    let mut staged_vod = test_group(XtreamCluster::Video, "Edited Movies", "staged");
+    staged_vod.channels[0].header.id = "310".intern();
+    staged_vod.channels[0].header.url = "http://editor.example/movie/310.mkv".intern();
+    let mut second_staged = staged_vod.channels[0].clone();
+    second_staged.header.id = "311".intern();
+    second_staged.header.url = "http://editor.example/movie/311.mkv".intern();
+    staged_vod.channels.push(second_staged);
+
+    let groups = apply_staged_overlay_groups(&provider, ClusterFlags::Vod, vec![provider_vod], vec![staged_vod]);
+
+    assert_eq!(groups[0].title.as_ref(), "Edited Movies");
+    assert_eq!(groups[0].channels[0].header.url.as_ref(), "https://cdn.example/video?id=310");
+    assert_eq!(groups[0].channels[1].header.url.as_ref(), "http://provider.example/movie/real-user/real-pass/311.mp4");
+}
+
+#[test]
+fn staged_xtream_new_vod_stream_uses_metadata_extension() {
+    let provider = ConfigInput {
+        name: "provider".intern(),
+        input_type: InputType::Xtream,
+        url: "http://provider.example".to_string(),
+        username: Some("real-user".to_string()),
+        password: Some("real-pass".to_string()),
+        ..Default::default()
+    };
+    let mut staged_vod = test_group(XtreamCluster::Video, "New Movies", "staged");
+    staged_vod.channels[0].header.id = "310".intern();
+    staged_vod.channels[0].header.url = "http://editor.example/movie/310".intern();
+    staged_vod.channels[0].header.additional_properties =
+        Some(StreamProperties::Video(Box::new(shared::model::VideoStreamProperties {
+            container_extension: "mkv".intern(),
+            ..Default::default()
+        })));
+
+    let groups = apply_staged_overlay_groups(&provider, ClusterFlags::Vod, Vec::new(), vec![staged_vod]);
+
+    assert_eq!(groups[0].channels[0].header.url.as_ref(), "http://provider.example/movie/real-user/real-pass/310.mkv");
+}
+
+#[test]
 fn staged_xtream_live_url_respects_prefix_and_without_extension_flags() {
     let provider_prefix = ConfigInput {
         name: "provider".intern(),
@@ -1307,6 +1373,83 @@ fn staged_xtream_overlay_matches_by_stream_id_over_group_id() {
 }
 
 #[test]
+fn staged_xtream_split_group_does_not_replace_an_unrelated_category() {
+    let provider = ConfigInput {
+        name: "provider".intern(),
+        input_type: InputType::Xtream,
+        url: "http://provider.example".to_string(),
+        username: Some("real-user".to_string()),
+        password: Some("real-pass".to_string()),
+        ..Default::default()
+    };
+    let mut provider_sports = test_group(XtreamCluster::Live, "Sports", "provider");
+    provider_sports.id = 5;
+    provider_sports.channels[0].header.id = "100".intern();
+    let mut second_sport = provider_sports.channels[0].clone();
+    second_sport.header.id = "101".intern();
+    provider_sports.channels.push(second_sport);
+    let mut provider_news = test_group(XtreamCluster::Live, "News", "provider");
+    provider_news.id = 7;
+    provider_news.channels[0].header.id = "200".intern();
+
+    let mut staged_first = test_group(XtreamCluster::Live, "Sports A", "staged");
+    staged_first.id = 5;
+    staged_first.channels[0].header.id = "100".intern();
+    let mut staged_second = test_group(XtreamCluster::Live, "News", "staged");
+    staged_second.id = 7;
+    staged_second.channels[0].header.id = "101".intern();
+
+    let groups = apply_staged_overlay_groups(
+        &provider,
+        ClusterFlags::Live,
+        vec![provider_sports, provider_news],
+        vec![staged_first, staged_second],
+    );
+
+    assert_eq!(groups.len(), 3);
+    assert_eq!(groups[0].id, 5);
+    assert_eq!(groups[0].title.as_ref(), "Sports A");
+    assert_eq!(groups[1].id, 7);
+    assert_eq!(groups[1].channels[0].header.id.as_ref(), "200");
+    assert_eq!(groups[2].title.as_ref(), "News");
+    assert_eq!(groups[2].channels[0].header.id.as_ref(), "101");
+    assert_unique_category_ids(&groups);
+}
+
+#[test]
+fn staged_m3u_unknown_streams_do_not_match_positional_category_id() {
+    let provider = ConfigInput {
+        name: "provider".intern(),
+        input_type: InputType::Xtream,
+        url: "http://provider.example".to_string(),
+        username: Some("real-user".to_string()),
+        password: Some("real-pass".to_string()),
+        ..Default::default()
+    };
+    let mut provider_sports = test_group(XtreamCluster::Live, "Sports", "provider");
+    provider_sports.id = 5;
+    provider_sports.channels[0].header.id = "100".intern();
+    let mut staged_new = test_group(XtreamCluster::Live, "New", "staged");
+    staged_new.id = 5;
+    staged_new.channels[0].header.id = "300".intern();
+
+    let groups = super::apply_staged_overlay_groups(
+        &provider,
+        StagedInputType::M3u,
+        ClusterFlags::Live,
+        vec![provider_sports],
+        vec![staged_new],
+    );
+
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0].title.as_ref(), "Sports");
+    assert_eq!(groups[0].channels[0].header.id.as_ref(), "100");
+    assert_eq!(groups[1].title.as_ref(), "New");
+    assert_eq!(groups[1].channels[0].header.id.as_ref(), "300");
+    assert_unique_category_ids(&groups);
+}
+
+#[test]
 fn staged_xtream_overlay_falls_back_to_the_secondary_stream_overlap() {
     let provider = ConfigInput {
         name: "provider".intern(),
@@ -1415,6 +1558,7 @@ fn staged_xtream_overlay_empty_staged_group_without_provider_fallback_is_omitted
     provider_action.channels[0].header.id = "10".intern();
 
     let mut staged_horror = test_group(XtreamCluster::Video, "Horror", "staged");
+    staged_horror.id = 2;
     staged_horror.channels[0].header.id = "non-numeric".intern();
 
     let groups = apply_staged_overlay_groups(&provider, ClusterFlags::Vod, vec![provider_action], vec![staged_horror]);

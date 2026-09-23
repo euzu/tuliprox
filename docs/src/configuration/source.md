@@ -1010,11 +1010,13 @@ the actual streams are still opened against the Xtream or M3U provider.
 
 * Matching is ID-driven. A staged group overlays the provider category that owns its staged stream IDs, strongest overlap
   first; when that category is already claimed by a stronger overlap, the group's next-ranked category is used. A group
-  whose stream IDs the provider playlist knows none of is resolved by the category ID, and only when neither matches does
-  the group title act as a last resort. A group title therefore never overrides an ID match, so a renamed group still
-  overlays its provider category, and a group whose staged ID is positional (as in an `m3u` staged playlist) cannot take
-  over an unrelated category by accident.
+  with known provider stream IDs that loses the assignment is added as a new category. When none of its stream IDs are
+  known, an `xtream` staged group is resolved by category ID; an `m3u` staged group skips that step because its category
+  IDs are positional. The group title acts as a last resort. A group title therefore never overrides a stream ID match,
+  so a renamed or split group cannot take over an unrelated category by accident.
 * The overlaid category keeps its own category ID; the staged playlist supplies the group name and the channel order.
+* Known streams keep their provider playback URL, including a direct source URL. New streams use the provider address and
+  credentials; for VOD, the staged stream's container metadata supplies the extension when available.
 * Every staged channel needs a numeric provider stream ID in its `header.id`, either from an `xui-id` / `cuid`
   attribute or from the numeric last URL segment. Rows without one are skipped, a single warning per group reports how
   many rows were dropped, and the provider category stays in place instead of being emptied.
