@@ -1038,6 +1038,29 @@
 
 ## 🐛 Fixes
 
+- **Streaming and connection management: resolved silent async hang / deadlock during client kicks and concurrent stream load.**
+  Under concurrent stream traffic, `tuliprox` would occasionally stop logging and serving requests (the Web UI became
+  unreachable and active streams dropped) while the container remained in a running state with near-zero CPU and memory
+  usage. Thread inspection revealed Tokio worker threads parked in `futex_wait` or `epoll_wait` with no crash or panic.
+
+  Several interrelated issues contributed to this stall:
+  - Hyper's HTTP/1.1 `graceful_shutdown()` only prevents accepting subsequent requests on keep-alive connections; it does
+    not abort active streaming response bodies. When a client was kicked while streaming live media, the server's serve
+    loop waited indefinitely on `conn.as_mut().await` as long as the client continued reading bytes, postponing the
+    associated upstream provider release and holding provider slots indefinitely. Forced socket closures now actively
+    drop the connection transport (`drop(conn)`), terminating in-flight response bodies and triggering immediate provider
+    cleanup.
+  - Connection close signals were delivered via unaddressed broadcasts, meaning an unrelated receiver could report
+    delivery success even if no transport task listened for the target socket address, causing the fallback provider
+    cleanup on kicks to be skipped. A per-socket `SocketCloseState` (`Open` / `Closing`) using oneshot channels now
+    ensures targeted signal delivery, preserves provider allocations across duplicate kicks until transport termination,
+    and reliably invokes fallback provider cleanup when unreceived.
+  - In `ActiveUserManager`, empty user records were removed by dropping and re-acquiring the write lock on the connections
+    registry, causing severe lock thrashing and starvation against concurrent periodic tasks (such as active user logging).
+    Empty user records are now removed atomically under the same lock acquisition.
+  - In `SharedStreamManager`, the shared registry lock guard is now explicitly dropped prior to secondary asynchronous
+    cleanup and meter token cancellation.
+
 - **Provider priority was ignored and a second concurrent client failed with a source error while capacity was free.**
   Provider-slot reservations were granted as soon as a playback opened a provider, so an HLS/DASH entry that only ever
   served a manifest — or a player that retried its manifest and gave up — still held a reservation for the whole
