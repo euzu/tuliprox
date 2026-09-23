@@ -40,6 +40,17 @@ type PriorityKey = (i8, Reverse<Instant>, AllocationId);
 const PREEMPTION_COMPLETION_TIMEOUT: Duration = Duration::from_millis(1500);
 const EVICTED_PROVIDER_RELEASE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProviderReleaseSnapshot {
+    pub addr: SocketAddr,
+    single_allocations: Vec<AllocationId>,
+    shared_subscribers: Vec<SharedSubscriberId>,
+}
+
+impl ProviderReleaseSnapshot {
+    pub fn is_empty(&self) -> bool { self.single_allocations.is_empty() && self.shared_subscribers.is_empty() }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionKind {
     Normal,
@@ -456,12 +467,58 @@ impl ActiveProviderManager {
                 .any(|shared| shared.connections.values().any(|subscriber| subscriber.addr == *addr))
     }
 
-    /// Waits for a kicked transport's provider allocations to leave the registry.
-    /// The socket close may be signalled before its response bodies and provider handles are dropped.
+    /// Waits for every allocation currently using an address to leave the registry.
+    /// Admission handoffs use `wait_for_snapshot_release` to ignore later allocations at that address.
     pub async fn wait_for_addr_release(&self, addr: &SocketAddr, timeout: Duration) -> bool {
         let deadline = TokioInstant::now() + timeout;
         loop {
             if !self.has_connections_for_addr(addr) {
+                return true;
+            }
+            let now = TokioInstant::now();
+            if now >= deadline {
+                return false;
+            }
+            tokio::time::sleep_until((now + EVICTED_PROVIDER_RELEASE_POLL_INTERVAL).min(deadline)).await;
+        }
+    }
+
+    pub(crate) fn release_snapshot_for_addr(&self, addr: &SocketAddr) -> ProviderReleaseSnapshot {
+        let _transition = self.lock_capacity_transition();
+        let connections = self.read_connections();
+        let single_allocations = connections
+            .single
+            .values()
+            .filter_map(|info| (info.client_addr == *addr).then_some(info.allocation_id))
+            .collect();
+        let shared_subscribers = connections
+            .shared
+            .by_key
+            .values()
+            .flat_map(|shared| {
+                shared.connections.iter().filter_map(|(id, subscriber)| (subscriber.addr == *addr).then_some(*id))
+            })
+            .collect();
+        ProviderReleaseSnapshot { addr: *addr, single_allocations, shared_subscribers }
+    }
+
+    fn has_connections_from_snapshot(&self, snapshot: &ProviderReleaseSnapshot) -> bool {
+        let _transition = self.lock_capacity_transition();
+        let connections = self.read_connections();
+        snapshot.single_allocations.iter().any(|id| connections.single.contains_key(id))
+            || snapshot.shared_subscribers.iter().any(|id| connections.shared.key_by_subscriber.contains_key(id))
+    }
+
+    /// Waits for the kicked transport's original provider allocations to leave the registry.
+    /// The socket close may be signalled before its response bodies and provider handles are dropped.
+    pub(crate) async fn wait_for_snapshot_release(
+        &self,
+        snapshot: &ProviderReleaseSnapshot,
+        timeout: Duration,
+    ) -> bool {
+        let deadline = TokioInstant::now() + timeout;
+        loop {
+            if !self.has_connections_from_snapshot(snapshot) {
                 return true;
             }
             let now = TokioInstant::now();
@@ -2660,7 +2717,7 @@ impl ActiveProviderManager {
 #[cfg(test)]
 mod tests {
     use super::{ActiveProviderManager, ConnectionKind, PlaybackLeaseRef};
-    use crate::{EventManager, SharedStreamManager};
+    use crate::{ActiveUserManager, EventManager, SharedStreamManager};
     use arc_swap::{ArcSwap, ArcSwapOption};
     use shared::{
         defaults::{default_probe_user_priority, default_user_priority},
@@ -2899,6 +2956,63 @@ mod tests {
         manager.release_handle(&replacement);
         manager.release_handle(&other);
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn release_snapshot_tracks_original_allocation_after_addr_reuse() {
+        let app_cfg = create_test_app_config_with_pool(2, 3);
+        let events = Arc::new(EventManager::new());
+        let provider = ActiveProviderManager::new(&app_cfg, &events);
+        let addr = SocketAddr::from(([127, 0, 0, 1], 50_022));
+        let input = "provider_1".intern();
+        let original = provider
+            .acquire_connection_with_grace_for_session(&input, &addr, false, 0, ConnectionKind::Normal, Some("old"))
+            .expect("original allocation");
+        let original_snapshot = provider.release_snapshot_for_addr(&addr);
+        assert!(!provider.wait_for_snapshot_release(&original_snapshot, Duration::ZERO).await);
+
+        provider.release_handle(&original);
+        let replacement = provider
+            .acquire_connection_with_grace_for_session(&input, &addr, false, 0, ConnectionKind::Normal, Some("new"))
+            .expect("replacement allocation");
+        let replacement_snapshot = provider.release_snapshot_for_addr(&addr);
+        assert!(provider.wait_for_snapshot_release(&original_snapshot, Duration::ZERO).await);
+        assert!(!provider.wait_for_snapshot_release(&replacement_snapshot, Duration::ZERO).await);
+
+        let geoip = Arc::new(ArcSwapOption::default());
+        let users = ActiveUserManager::new(&Config::default(), &geoip, &events);
+        users.set_pending_provider_release("user", original_snapshot.clone()).await;
+        users.set_pending_provider_release("user", replacement_snapshot.clone()).await;
+        assert!(!users.clear_pending_provider_release("user", &original_snapshot).await);
+        assert_eq!(users.pending_provider_release("user").await, Some(replacement_snapshot.clone()));
+        assert!(users.clear_pending_provider_release("user", &replacement_snapshot).await);
+        assert_eq!(users.pending_provider_release("user").await, None);
+        provider.release_handle(&replacement);
+    }
+
+    #[tokio::test]
+    async fn release_snapshot_tracks_shared_subscriber_without_waiting_for_other_subscribers() {
+        let app_cfg = create_test_app_config_single_provider_pool();
+        let events = Arc::new(EventManager::new());
+        let provider = ActiveProviderManager::new(&app_cfg, &events);
+        let input = "provider_1".intern();
+        let first_addr = SocketAddr::from(([127, 0, 0, 1], 50_023));
+        let second_addr = SocketAddr::from(([127, 0, 0, 1], 50_024));
+        let first = SharedSubscriberId::from_stream_uid(50_023);
+        let second = SharedSubscriberId::from_stream_uid(50_024);
+        let origin =
+            provider.acquire_connection(&input, &first_addr, 0, ConnectionKind::Normal).expect("shared origin");
+        assert!(provider.make_shared_connection(&origin, "shared-release", first));
+        provider
+            .add_shared_connection(&second_addr, second, "shared-release", 0, ConnectionKind::Normal)
+            .expect("second subscriber");
+        let snapshot = provider.release_snapshot_for_addr(&first_addr);
+        assert!(!provider.wait_for_snapshot_release(&snapshot, Duration::ZERO).await);
+
+        provider.release_connection(&first_addr);
+        assert!(provider.wait_for_snapshot_release(&snapshot, Duration::ZERO).await);
+        assert_eq!(provider.get_provider_connections_count(), 1);
+        provider.release_connection(&second_addr);
     }
 
     #[tokio::test(start_paused = true)]

@@ -289,15 +289,19 @@ enum StrategyLoopResult {
 }
 
 async fn pending_provider_release_ready(adm: &AdmissionCtx, username: &str) -> bool {
-    let Some(addr) = adm.active_users.pending_provider_release(username).await else {
+    let Some(snapshot) = adm.active_users.pending_provider_release(username).await else {
         return true;
     };
-    if !adm.connection_manager.provider_manager.wait_for_addr_release(&addr, EVICTED_PROVIDER_RELEASE_TIMEOUT).await {
-        debug!("Provider allocation for evicted connection {addr} remains active after close timeout");
+    if !adm
+        .connection_manager
+        .provider_manager
+        .wait_for_snapshot_release(&snapshot, EVICTED_PROVIDER_RELEASE_TIMEOUT)
+        .await
+    {
+        debug!("Provider allocation for evicted connection {} remains active after close timeout", snapshot.addr);
         return false;
     }
-    adm.active_users.clear_pending_provider_release(username).await;
-    true
+    adm.active_users.clear_pending_provider_release(username, &snapshot).await
 }
 
 /// Shared strategy-evaluation loop used by both the initial admission path
@@ -374,16 +378,24 @@ where
                 let connections_before = adm.active_users.user_connections(username).await;
                 let ttl = get_reentry_ttl(adm);
                 adm.active_users.mark_recent_eviction_guard_for_addr(&target.addr, *request_addr, ttl).await;
-                if target.addr != *request_addr {
-                    adm.active_users.set_pending_provider_release(username, target.addr).await;
-                }
+                let pending_release = if target.addr == *request_addr {
+                    None
+                } else {
+                    let snapshot = adm.connection_manager.provider_manager.release_snapshot_for_addr(&target.addr);
+                    if snapshot.is_empty() {
+                        None
+                    } else {
+                        adm.active_users.set_pending_provider_release(username, snapshot.clone()).await;
+                        Some(snapshot)
+                    }
+                };
                 adm.connection_manager.release_connection_as_kicked(&target.addr).await;
                 // This request cannot wait for its own transport to close.
-                if target.addr != *request_addr {
+                if let Some(snapshot) = pending_release {
                     let released = adm
                         .connection_manager
                         .provider_manager
-                        .wait_for_addr_release(&target.addr, EVICTED_PROVIDER_RELEASE_TIMEOUT)
+                        .wait_for_snapshot_release(&snapshot, EVICTED_PROVIDER_RELEASE_TIMEOUT)
                         .await;
                     if !released {
                         debug!(
@@ -392,7 +404,9 @@ where
                         );
                         return StrategyLoopResult::Rejected(crate::AdmissionRejectionReason::UserConnectionsExhausted);
                     }
-                    adm.active_users.clear_pending_provider_release(username).await;
+                    if !adm.active_users.clear_pending_provider_release(username, &snapshot).await {
+                        return StrategyLoopResult::Rejected(crate::AdmissionRejectionReason::UserConnectionsExhausted);
+                    }
                 }
                 performed_legitimate_eviction = true;
                 let retry_admission = get_admission_for_request(adm, request).await;

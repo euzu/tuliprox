@@ -1,5 +1,5 @@
 use crate::{
-    active_provider_manager::ConnectionKind,
+    active_provider_manager::{ConnectionKind, ProviderReleaseSnapshot},
     connection_manager::CleanupEvent,
     stream::{uses_direct_body_idle_timeout, DIRECT_BODY_IDLE_TIMEOUT_SECS},
     ActiveProviderManager, EventManager,
@@ -692,7 +692,7 @@ pub struct ActiveUserManager {
     transition_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     // An evicted stream can keep its provider slot after its user count is released.
     // Retain the handoff across bounded admission attempts until the slot is gone.
-    pending_provider_releases: Mutex<HashMap<String, SocketAddr>>,
+    pending_provider_releases: Mutex<HashMap<String, ProviderReleaseSnapshot>>,
     pub dropped_cleanup_events: AtomicU64,
     reentry_suppressed_total: AtomicU64,
     divergence_cache: Mutex<LruCache<String, DivergenceEntry>>,
@@ -849,16 +849,25 @@ impl ActiveUserManager {
         gate.lock_owned().await
     }
 
-    pub(crate) async fn pending_provider_release(&self, username: &str) -> Option<SocketAddr> {
-        self.pending_provider_releases.lock().await.get(username).copied()
+    pub(crate) async fn pending_provider_release(&self, username: &str) -> Option<ProviderReleaseSnapshot> {
+        self.pending_provider_releases.lock().await.get(username).cloned()
     }
 
-    pub(crate) async fn set_pending_provider_release(&self, username: &str, addr: SocketAddr) {
-        self.pending_provider_releases.lock().await.insert(username.to_owned(), addr);
+    pub(crate) async fn set_pending_provider_release(&self, username: &str, snapshot: ProviderReleaseSnapshot) {
+        self.pending_provider_releases.lock().await.insert(username.to_owned(), snapshot);
     }
 
-    pub(crate) async fn clear_pending_provider_release(&self, username: &str) {
-        self.pending_provider_releases.lock().await.remove(username);
+    pub(crate) async fn clear_pending_provider_release(
+        &self,
+        username: &str,
+        snapshot: &ProviderReleaseSnapshot,
+    ) -> bool {
+        let mut pending = self.pending_provider_releases.lock().await;
+        if pending.get(username) != Some(snapshot) {
+            return false;
+        }
+        pending.remove(username);
+        true
     }
 
     fn should_reuse_stream_for_session(existing_stream: &StreamInfo, incoming_channel: &StreamChannel) -> bool {
