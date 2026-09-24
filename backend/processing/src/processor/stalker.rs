@@ -202,7 +202,7 @@ pub async fn download_stalker_playlist(
                 app_config,
                 api_client.as_ref(),
                 &handshake,
-                refresh_plan,
+                refresh_plan.clone(),
                 &storage_path,
                 identity_fingerprint,
                 refresh_mode.budget(),

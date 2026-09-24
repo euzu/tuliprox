@@ -4,6 +4,38 @@
 
 ## ⚠️ Breaking Changes
 
+- **Proxied resource URLs are now restricted to public destinations by default.** Tuliprox proxies external
+  resource URLs that come from provider, playlist, and EPG content: channel and small logos, EPG channel and
+  programme icons, cover images, posters, and backdrops. These requests now enforce a destination policy on every
+  route that serves them (`/resource/m3u/...`, the Xtream resource routes, `/resource/epg/...`, and
+  `/api/v1/playlist/resource/...`), where previously three of them fetched any destination reachable by the
+  configured HTTP client.
+  - A resource URL whose DNS host name resolves to a private address (RFC 1918 or IPv6 ULA) is rejected unless the
+    input that supplied it lists the exact host name in `resource_policy.allowed_hosts` **and** the address in
+    `resource_policy.allowed_networks`. A private IP literal requires only a matching
+    `resource_policy.allowed_networks` entry because IP literals are not valid `allowed_hosts` values. Add the policy
+    to the input that provides the logo or icon; for icons that `logo_override` copies out of EPG, that is the EPG
+    input.
+  - Loopback, link-local, cloud-metadata, CGNAT, multicast, and reserved addresses stay blocked with or without a
+    policy. Redirects are re-checked on every hop and are bounded.
+  - Resource ownership is stored generically with each URL, including nested cover, poster, backdrop, and episode
+    image fields. Legacy raw playlist/Xtream item resources use their containing item's input; legacy EPG resources
+    without an authoritative input remain public-only until regenerated.
+  - `resource://` is an internal reserved scheme. Provider data and mapping configuration must never supply it;
+    such values are rejected rather than interpreted as authorization claims.
+  - The canonical input name is the authorization identity of a resource origin. Configured input and alias names
+    must be non-empty, globally unique strings; a configuration with duplicate input names, duplicate alias names,
+    or an alias name that shadows an input name is now rejected while loading. Internal IDs are managed separately.
+  - The resource cache is keyed by the policy that authorized the entry, so an entry fetched under one policy is
+    never served to another. The cache starts cold once on upgrade because the key layout changes.
+  - Resource proxying now always connects directly: a configured proxy and the `HTTP_PROXY` / `HTTPS_PROXY` /
+    `ALL_PROXY` environment variables are ignored for these requests, and Tuliprox logs a warning at startup and on
+    reload when one is set. Provider fetches, playlist and EPG downloads, and streams keep using the proxy.
+  - The Source Editor exposes the policy on every input under the shield-shaped **Resource Policy** page. Empty host
+    and network lists restore the public-only default and omit the policy from the saved input.
+  - See [Resource Policy](docs/src/configuration/source.md#27-resource-policy-resource_policy) for the parameters
+    and the exact host-plus-network rule.
+
 - **The Web UI WebSocket protocol is now version 4.** Playlist update completion messages carry the correlated
   run ID and execution order instead of a bare status. Reload existing browser tabs after upgrading the server;
   version-3 clients are rejected during the handshake rather than receiving incompatible update messages.
@@ -26,9 +58,13 @@
   provider inputs (with `enabled`, `live_source`, `vod_source`, and `series_source`) has been removed.
   A staged source is now its own input with `type: staged`. It points to one non-staged `m3u` /
   `xtream` provider through `staged.for_input`, and `staged.clusters` selects which clusters (`live`,
-  `vod`, `series`) are loaded from the staged playlist. Clusters not selected there are loaded from the
-  provider input itself. The merged result is stored under the provider input, so playlist delivery and
-  stream/API routing continue to use the provider.
+  `vod`, `series`) are overlaid by the staged playlist. Inside such a cluster of an `xtream` provider each staged group
+  replaces the provider category it belongs to, matched by the staged channels' stream IDs and only then by category ID
+  or group title; provider categories without a staged counterpart stay as they are. For any other provider type the
+  selected clusters are replaced entirely by the staged groups, and the clusters not selected are loaded from the
+  provider input itself. The merged result is stored under the provider input, so playlist delivery and stream/API
+  routing continue to use the provider. See
+  [Staged Sources](docs/src/configuration/source.md#25-staged-sources-staged) for the matching rules.
 
   Before:
 
@@ -1013,6 +1049,29 @@
 
 ## 🐛 Fixes
 
+- **Streaming and connection management: resolved silent async hang / deadlock during client kicks and concurrent stream load.**
+  Under concurrent stream traffic, `tuliprox` would occasionally stop logging and serving requests (the Web UI became
+  unreachable and active streams dropped) while the container remained in a running state with near-zero CPU and memory
+  usage. Thread inspection revealed Tokio worker threads parked in `futex_wait` or `epoll_wait` with no crash or panic.
+
+  Several interrelated issues contributed to this stall:
+  - Hyper's HTTP/1.1 `graceful_shutdown()` only prevents accepting subsequent requests on keep-alive connections; it does
+    not abort active streaming response bodies. When a client was kicked while streaming live media, the server's serve
+    loop waited indefinitely on `conn.as_mut().await` as long as the client continued reading bytes, postponing the
+    associated upstream provider release and holding provider slots indefinitely. Forced socket closures now actively
+    drop the connection transport (`drop(conn)`), terminating in-flight response bodies and triggering immediate provider
+    cleanup.
+  - Connection close signals were delivered via unaddressed broadcasts, meaning an unrelated receiver could report
+    delivery success even if no transport task listened for the target socket address, causing the fallback provider
+    cleanup on kicks to be skipped. A per-socket `SocketCloseState` (`Open` / `Closing`) using oneshot channels now
+    ensures targeted signal delivery, preserves provider allocations across duplicate kicks until transport termination,
+    and reliably invokes fallback provider cleanup when unreceived.
+  - In `ActiveUserManager`, empty user records were removed by dropping and re-acquiring the write lock on the connections
+    registry, causing severe lock thrashing and starvation against concurrent periodic tasks (such as active user logging).
+    Empty user records are now removed atomically under the same lock acquisition.
+  - In `SharedStreamManager`, the shared registry lock guard is now explicitly dropped prior to secondary asynchronous
+    cleanup and meter token cancellation.
+
 - **Provider priority was ignored and a second concurrent client failed with a source error while capacity was free.**
   Provider-slot reservations were granted as soon as a playback opened a provider, so an HLS/DASH entry that only ever
   served a manifest — or a player that retried its manifest and gave up — still held a reservation for the whole
@@ -1357,6 +1416,14 @@
   episodes are unchanged: their properties carry no provider URL at that layer.
 
 ## ⚙️ New Settings
+
+- **source.yml (input `resource_policy`)**: Added an optional per-input policy for private resource destinations.
+  - `allowed_hosts` (list of exact DNS names, default empty) and `allowed_networks` (list of private CIDR ranges,
+    default empty) authorize a private address only together: the host name must match and the resolved address must
+    fall inside one of the networks. An IP literal is authorized by `allowed_networks` alone. An absent or empty
+    policy means public-only.
+  - Invalid entries (scheme, path, port, wildcard, IP literal in `allowed_hosts`; a range outside
+    `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, or `fc00::/7`) are rejected while the configuration is loaded.
 
 - **Runtime diagnostics (environment variables)**:
   - `TULIPROX_WATCHDOG` (default unset = off) is a mode selector: `1` (`true`/`on`/`yes`/`enabled`) observes and logs

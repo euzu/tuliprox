@@ -1,5 +1,5 @@
 use crate::{
-    active_provider_manager::ConnectionKind,
+    active_provider_manager::{ConnectionKind, ProviderReleaseSnapshot},
     connection_manager::CleanupEvent,
     stream::{uses_direct_body_idle_timeout, DIRECT_BODY_IDLE_TIMEOUT_SECS},
     ActiveProviderManager, EventManager,
@@ -690,6 +690,9 @@ pub struct ActiveUserManager {
     cleanup_tx: tokio::sync::OnceCell<mpsc::Sender<CleanupEvent>>,
     provider_manager: tokio::sync::OnceCell<Arc<ActiveProviderManager>>,
     transition_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    // An evicted stream can keep its provider slot after its user count is released.
+    // Retain the handoff across bounded admission attempts until the slot is gone.
+    pending_provider_releases: Mutex<HashMap<String, ProviderReleaseSnapshot>>,
     pub dropped_cleanup_events: AtomicU64,
     reentry_suppressed_total: AtomicU64,
     divergence_cache: Mutex<LruCache<String, DivergenceEntry>>,
@@ -791,6 +794,7 @@ impl ActiveUserManager {
             cleanup_tx: tokio::sync::OnceCell::new(),
             provider_manager: tokio::sync::OnceCell::new(),
             transition_gates: Mutex::new(HashMap::new()),
+            pending_provider_releases: Mutex::new(HashMap::new()),
             dropped_cleanup_events: AtomicU64::new(0),
             reentry_suppressed_total: AtomicU64::new(0),
             divergence_cache: Mutex::new(LruCache::new(DIVERGENCE_CACHE_CAPACITY)),
@@ -843,6 +847,27 @@ impl ActiveUserManager {
             Arc::clone(transition_gates.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))))
         };
         gate.lock_owned().await
+    }
+
+    pub(crate) async fn pending_provider_release(&self, username: &str) -> Option<ProviderReleaseSnapshot> {
+        self.pending_provider_releases.lock().await.get(username).cloned()
+    }
+
+    pub(crate) async fn set_pending_provider_release(&self, username: &str, snapshot: ProviderReleaseSnapshot) {
+        self.pending_provider_releases.lock().await.insert(username.to_owned(), snapshot);
+    }
+
+    pub(crate) async fn clear_pending_provider_release(
+        &self,
+        username: &str,
+        snapshot: &ProviderReleaseSnapshot,
+    ) -> bool {
+        let mut pending = self.pending_provider_releases.lock().await;
+        if pending.get(username) != Some(snapshot) {
+            return false;
+        }
+        pending.remove(username);
+        true
     }
 
     fn should_reuse_stream_for_session(existing_stream: &StreamInfo, incoming_channel: &StreamChannel) -> bool {
@@ -2231,69 +2256,75 @@ impl ActiveUserManager {
     ) {
         let (connection_changed, user_removed, promotions, divergence_snapshot) = {
             let mut user_connections = self.connections.write().await;
-            let Some(connection_data) = user_connections.by_key.get_mut(username) else {
-                return;
-            };
+            let (connection_changed, user_removed, promotions, divergence_snapshot) = {
+                let Some(connection_data) = user_connections.by_key.get_mut(username) else {
+                    return;
+                };
 
-            if Self::session_has_stream(connection_data, session_token) {
-                return;
-            }
-
-            let Some(session_index) =
-                connection_data.sessions.iter().position(|session| session.token == session_token)
-            else {
-                return;
-            };
-
-            if expected_transition_version
-                .is_some_and(|expected| connection_data.sessions[session_index].transition_version != expected)
-            {
-                return;
-            }
-
-            let mut connection_changed = false;
-            if connection_data.sessions[session_index].lifecycle.is_counted() {
-                let kind = connection_data.sessions[session_index].connection_kind.unwrap_or(ConnectionKind::Normal);
-                connection_data.decrement_kind(kind);
-                connection_data.sessions[session_index].lifecycle = PlaybackLifecycle::Expired;
-                connection_changed = true;
-            }
-            connection_data.sessions[session_index].transition_version =
-                connection_data.sessions[session_index].transition_version.saturating_add(1);
-
-            if remove_session_if_unbound {
-                connection_data.sessions.swap_remove(session_index);
-            }
-
-            if connection_data.connections < connection_data.max_connections {
-                connection_data.granted_grace = false;
-                connection_data.grace_ts = 0;
-            }
-
-            let mut promotions = Vec::new();
-            while let Some(action) = connection_data.try_promote_soft_stream() {
-                let promoted_stream = connection_data.streams.iter().find(|stream| stream.uid == action.uid).cloned();
-                if let Some(stream) = promoted_stream.as_ref() {
-                    Self::promote_session_for_stream(connection_data, stream);
+                if Self::session_has_stream(connection_data, session_token) {
+                    return;
                 }
-                promotions.push(action);
-            }
-            while connection_data.try_promote_soft_session_reservation() {}
 
-            let user_removed = connection_data.connections == 0
-                && connection_data.streams.is_empty()
-                && connection_data.sessions.is_empty();
-            let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, username);
+                let Some(session_index) =
+                    connection_data.sessions.iter().position(|session| session.token == session_token)
+                else {
+                    return;
+                };
+
+                if expected_transition_version
+                    .is_some_and(|expected| connection_data.sessions[session_index].transition_version != expected)
+                {
+                    return;
+                }
+
+                let mut connection_changed = false;
+                if connection_data.sessions[session_index].lifecycle.is_counted() {
+                    let kind =
+                        connection_data.sessions[session_index].connection_kind.unwrap_or(ConnectionKind::Normal);
+                    connection_data.decrement_kind(kind);
+                    connection_data.sessions[session_index].lifecycle = PlaybackLifecycle::Expired;
+                    connection_changed = true;
+                }
+                connection_data.sessions[session_index].transition_version =
+                    connection_data.sessions[session_index].transition_version.saturating_add(1);
+
+                if remove_session_if_unbound {
+                    connection_data.sessions.swap_remove(session_index);
+                }
+
+                if connection_data.connections < connection_data.max_connections {
+                    connection_data.granted_grace = false;
+                    connection_data.grace_ts = 0;
+                }
+
+                let mut promotions = Vec::new();
+                while let Some(action) = connection_data.try_promote_soft_stream() {
+                    let promoted_stream =
+                        connection_data.streams.iter().find(|stream| stream.uid == action.uid).cloned();
+                    if let Some(stream) = promoted_stream.as_ref() {
+                        Self::promote_session_for_stream(connection_data, stream);
+                    }
+                    promotions.push(action);
+                }
+                while connection_data.try_promote_soft_session_reservation() {}
+
+                let user_removed = connection_data.connections == 0
+                    && connection_data.streams.is_empty()
+                    && connection_data.sessions.is_empty();
+                let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, username);
+
+                (connection_changed, user_removed, promotions, divergence_snapshot)
+            };
+
+            if user_removed {
+                user_connections.by_key.remove(username);
+            }
 
             (connection_changed, user_removed, promotions, divergence_snapshot)
         };
 
         self.log_divergence_snapshot(divergence_snapshot).await;
 
-        if user_removed {
-            let mut user_connections = self.connections.write().await;
-            user_connections.by_key.remove(username);
-        }
         if connection_changed || user_removed {
             self.log_active_user().await;
         }
@@ -2305,40 +2336,44 @@ impl ActiveUserManager {
     pub async fn release_session_streams_and_counted_reservation(&self, username: &str, session_token: &str) -> bool {
         let (connection_changed, user_removed, promotions, divergence_snapshot) = {
             let mut user_connections = self.connections.write().await;
-            let Some(connection_data) = user_connections.by_key.get_mut(username) else {
-                return false;
+            let (connection_changed, user_removed, promotions, divergence_snapshot) = {
+                let Some(connection_data) = user_connections.by_key.get_mut(username) else {
+                    return false;
+                };
+
+                let counted_kind = connection_data
+                    .sessions
+                    .iter()
+                    .find(|session| session.token == session_token && session.lifecycle.is_counted())
+                    .and_then(|session| session.connection_kind);
+                let (_removed_streams, mut connection_changed) =
+                    connection_data.remove_streams_for_session_and_release_counted(session_token, counted_kind);
+                Self::clear_session_counted_without_stream(connection_data, session_token);
+
+                if connection_data.connections < connection_data.max_connections {
+                    connection_data.granted_grace = false;
+                    connection_data.grace_ts = 0;
+                }
+
+                let promotions = Self::collect_promotions_after_capacity_release(connection_data);
+                let user_removed = connection_data.connections == 0
+                    && connection_data.streams.is_empty()
+                    && connection_data.sessions.is_empty();
+                let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, username);
+                connection_changed |= !promotions.is_empty();
+
+                (connection_changed, user_removed, promotions, divergence_snapshot)
             };
 
-            let counted_kind = connection_data
-                .sessions
-                .iter()
-                .find(|session| session.token == session_token && session.lifecycle.is_counted())
-                .and_then(|session| session.connection_kind);
-            let (_removed_streams, mut connection_changed) =
-                connection_data.remove_streams_for_session_and_release_counted(session_token, counted_kind);
-            Self::clear_session_counted_without_stream(connection_data, session_token);
-
-            if connection_data.connections < connection_data.max_connections {
-                connection_data.granted_grace = false;
-                connection_data.grace_ts = 0;
+            if user_removed {
+                user_connections.by_key.remove(username);
             }
-
-            let promotions = Self::collect_promotions_after_capacity_release(connection_data);
-            let user_removed = connection_data.connections == 0
-                && connection_data.streams.is_empty()
-                && connection_data.sessions.is_empty();
-            let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, username);
-            connection_changed |= !promotions.is_empty();
 
             (connection_changed, user_removed, promotions, divergence_snapshot)
         };
 
         self.log_divergence_snapshot(divergence_snapshot).await;
 
-        if user_removed {
-            let mut user_connections = self.connections.write().await;
-            user_connections.by_key.remove(username);
-        }
         if connection_changed || user_removed {
             self.log_active_user().await;
         }
@@ -2497,6 +2532,37 @@ impl ActiveUserManager {
                     "Updated session {token} for {username} address {} -> {}",
                     sanitize_sensitive_info(&previous_addr.to_string()),
                     sanitize_sensitive_info(&addr.to_string())
+                );
+            }
+        }
+    }
+
+    pub async fn update_session_provider_binding(
+        &self,
+        username: &str,
+        token: &str,
+        provider: Arc<str>,
+        stream_url: Arc<str>,
+    ) {
+        let now = current_time_secs();
+        let mut user_connections = self.connections.write().await;
+        if let Some(connection_data) = user_connections.by_key.get_mut(username) {
+            if let Some(session) = connection_data.sessions.iter_mut().find(|s| s.token == token) {
+                let previous_provider = session.provider.clone();
+                session.provider = provider.clone();
+                session.stream_url = stream_url.clone();
+                session.ts = now;
+                Self::bump_session_transition_version(session);
+                for stream in &mut connection_data.streams {
+                    if stream.session_token.as_deref() == Some(token) {
+                        stream.provider = provider.clone();
+                        stream.ts = now;
+                    }
+                }
+                debug_if_enabled!(
+                    "Updated session {token} for {username} provider binding {} -> {}",
+                    sanitize_sensitive_info(&previous_provider),
+                    sanitize_sensitive_info(&provider)
                 );
             }
         }

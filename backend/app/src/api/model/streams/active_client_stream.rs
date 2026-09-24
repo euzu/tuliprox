@@ -1587,11 +1587,11 @@ mod tests {
     };
     use crate::{
         api::model::{
-            connection_manager::PROVIDER_END_NOT_SET, ActiveProviderManager, ActiveUserManager, AppState,
-            BoxedProviderStream, CancelTokens, ConnectionManager, CreateUserSessionParams, CustomVideoStreamType,
-            DownloadQueue, EventManager, GraceResolutionContext, MetadataUpdateManager, PlaylistStorageState,
-            ProviderContentRepresentationMode, ProviderHandle, SharedStreamManager, StreamDetails, StreamError,
-            UpdateGuard,
+            connection_manager::PROVIDER_END_NOT_SET, empty_resource_client_set, ActiveProviderManager,
+            ActiveUserManager, AppState, BoxedProviderStream, CancelTokens, ConnectionManager, CreateUserSessionParams,
+            CustomVideoStreamType, DownloadQueue, EventManager, GraceResolutionContext, MetadataUpdateManager,
+            PlaylistStorageState, ProviderContentRepresentationMode, ProviderHandle, SharedStreamManager,
+            StreamDetails, StreamError, UpdateGuard,
         },
         auth::Fingerprint,
         model::{
@@ -1719,6 +1719,7 @@ mod tests {
             http_client: Arc::new(ArcSwap::from_pointee(Client::new())),
             http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
             public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
+            resource_clients: empty_resource_client_set(),
             downloads: Arc::new(DownloadQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,
@@ -1798,6 +1799,7 @@ mod tests {
             http_client: Arc::new(ArcSwap::from_pointee(Client::new())),
             http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
             public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
+            resource_clients: empty_resource_client_set(),
             downloads: Arc::new(DownloadQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,

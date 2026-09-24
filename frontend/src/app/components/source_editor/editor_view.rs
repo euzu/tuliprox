@@ -233,7 +233,8 @@ fn clear_active_interaction(editor_state: &mut EditorState) -> bool {
     let had_active_interaction = editor_state.is_panning
         || editor_state.drag.block_id.is_some()
         || editor_state.selection.is_selecting
-        || editor_state.selection.selection_rect.is_some();
+        || editor_state.selection.selection_rect.is_some()
+        || editor_state.pinch_distance.is_some();
     editor_state.block_elements.clear();
     editor_state.connection_elements.clear();
     if editor_state.drag.block_id.is_some() {
@@ -243,6 +244,91 @@ fn clear_active_interaction(editor_state: &mut EditorState) -> bool {
     editor_state.is_panning = false;
     editor_state.pinch_distance = None;
     had_active_interaction
+}
+
+fn is_canvas_background(target: Option<&web_sys::Element>, canvas: Option<&web_sys::Element>) -> bool {
+    let (Some(target), Some(canvas)) = (target, canvas) else {
+        return false;
+    };
+    target.is_same_node(Some(canvas)) || target.tag_name().eq_ignore_ascii_case("svg")
+}
+
+fn start_canvas_pan(editor_state: &mut EditorState, client_x: f32, client_y: f32) {
+    editor_state.selection.reset_selection();
+    editor_state.is_panning = true;
+    editor_state.pan_start = (client_x, client_y);
+}
+
+fn pan_canvas(editor_state: &mut EditorState, client_x: f32, client_y: f32) -> MoveBlockParams {
+    let (start_x, start_y) = editor_state.pan_start;
+    let dx = client_x - start_x;
+    let dy = client_y - start_y;
+    let (canvas_ox, canvas_oy) = editor_state.canvas_offset;
+    editor_state.canvas_offset = (canvas_ox + dx, canvas_oy + dy);
+    editor_state.pan_start = (client_x, client_y);
+
+    let initial_positions: Vec<(BlockId, Position)> = editor_state.blocks.iter().map(|b| (b.id, b.position)).collect();
+
+    (0.0, 0.0, (0.0, 0.0), initial_positions)
+}
+
+fn start_block_drag(editor_state: &mut EditorState, block_id: BlockId, canvas_pos: (f32, f32), ctrl_key: bool) {
+    let Some(block) = editor_state.get_block(block_id).cloned() else {
+        return;
+    };
+
+    editor_state.selection.group_initial_positions.clear();
+    editor_state.drag.dragging_group.clear();
+
+    let (selected_blocks, new_selection) = {
+        let is_selected = editor_state.selection.selected_blocks.contains(&block_id);
+
+        if is_selected && ctrl_key {
+            editor_state.selection.selected_blocks.remove(&block_id);
+            (editor_state.selection.selected_blocks.clone(), None)
+        } else if !is_selected {
+            (HashSet::from([block_id]), Some(block_id))
+        } else {
+            (editor_state.selection.selected_blocks.clone(), None)
+        }
+    };
+
+    let initial_pos: Vec<(BlockId, Position)> =
+        selected_blocks.iter().filter_map(|id| editor_state.get_block(*id).map(|b| (*id, b.position))).collect();
+
+    editor_state.drag.dragging_group = selected_blocks;
+    editor_state.selection.group_initial_positions = initial_pos;
+
+    editor_state
+        .drag
+        .with_drag_block_offset(block_id, (canvas_pos.0 - block.position.0, canvas_pos.1 - block.position.1));
+
+    if let Some(block) = new_selection {
+        if !ctrl_key {
+            editor_state.selection.selected_blocks.clear();
+        }
+        editor_state.selection.selected_blocks.insert(block);
+    }
+
+    editor_state.selection.group_anchor_mouse = canvas_pos;
+}
+
+fn compute_drag_move_params(editor_state: &EditorState, canvas_x: f32, canvas_y: f32) -> Option<MoveBlockParams> {
+    let block_id = editor_state.drag.block_id?;
+    if editor_state.drag.dragging_group.contains(&block_id)
+        && !editor_state.selection.group_initial_positions.is_empty()
+    {
+        Some((
+            canvas_x,
+            canvas_y,
+            editor_state.selection.group_anchor_mouse,
+            editor_state.selection.group_initial_positions.clone(),
+        ))
+    } else {
+        editor_state.get_block(block_id).map(|block| {
+            (canvas_x, canvas_y, editor_state.selection.group_anchor_mouse, vec![(block_id, block.position)])
+        })
+    }
 }
 
 fn screen_from_world(position: Position, canvas_offset: Position, zoom_factor: f32) -> Position {
@@ -1395,136 +1481,42 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
     };
 
     // ----------------- Drag block logic  -----------------
-    let handle_block_mouse_down = {
+    let start_block_drag_action = {
         let editor_state_ref = editor_state_ref.clone();
         let canvas_ref = canvas_ref.clone();
         let cursor_grabbing = cursor_grabbing.clone();
 
-        Callback::from(move |(block_id, e): (BlockId, MouseEvent)| {
-            if !can_write_sources {
+        move |block_id: BlockId, client_x: f32, client_y: f32, ctrl_key: bool| {
+            if !can_write_sources || editor_state_ref.borrow().pending_line.is_some() {
                 return;
             }
-            e.prevent_default();
-            e.stop_propagation();
-
-            if editor_state_ref.borrow().pending_line.is_some() {
-                return;
-            }
-
-            let ctrl_key = e.ctrl_key();
             if let Some(canvas) = canvas_ref.cast::<HtmlElement>() {
                 cursor_grabbing.set(true);
                 let rect = canvas.get_bounding_client_rect();
-                let mouse_x = e.client_x() as f32 - rect.left() as f32;
-                let mouse_y = e.client_y() as f32 - rect.top() as f32;
+                let canvas_x = client_x - rect.left() as f32;
+                let canvas_y = client_y - rect.top() as f32;
 
-                let possible_block = editor_state_ref.borrow().get_block(block_id).cloned();
                 let mut editor_state = editor_state_ref.borrow_mut();
-
-                if let Some(block) = possible_block {
-                    // Prepare group
-                    editor_state.selection.group_initial_positions.clear();
-                    editor_state.drag.dragging_group.clear();
-
-                    // Neue Auswahllogik:
-                    let (selected_blocks, new_selection) = {
-                        let is_selected = editor_state.selection.selected_blocks.contains(&block_id);
-
-                        if is_selected && ctrl_key {
-                            // Ctrl + Click on existing block -> remove from selection
-                            editor_state.selection.selected_blocks.remove(&block_id);
-                            (editor_state.selection.selected_blocks.clone(), None)
-                        } else if !is_selected {
-                            // Block not selected, select only this block
-                            (HashSet::from([block_id]), Some(block_id))
-                        } else {
-                            // The block is selected and Ctrl is not pressed -> the selection remains as is.
-                            (editor_state.selection.selected_blocks.clone(), None)
-                        }
-                    };
-
-                    // initial positions for drag
-                    let mut initial_pos = Vec::new();
-                    for id in &selected_blocks {
-                        if let Some(b) = editor_state.get_block(*id) {
-                            initial_pos.push((*id, b.position));
-                        }
-                    }
-
-                    editor_state.drag.dragging_group = selected_blocks.clone();
-                    editor_state.selection.group_initial_positions = initial_pos;
-
-                    // Drag-Offset calculation
-                    editor_state
-                        .drag
-                        .with_drag_block_offset(block_id, (mouse_x - block.position.0, mouse_y - block.position.1));
-
-                    // update selection
-                    if let Some(block) = new_selection {
-                        if !ctrl_key {
-                            editor_state.selection.selected_blocks.clear();
-                        }
-                        editor_state.selection.selected_blocks.insert(block);
-                    }
-
-                    editor_state.selection.group_anchor_mouse = (mouse_x, mouse_y);
-                }
+                start_block_drag(&mut editor_state, block_id, (canvas_x, canvas_y), ctrl_key);
             }
+        }
+    };
+
+    let handle_block_mouse_down = {
+        let start_block_drag_action = start_block_drag_action.clone();
+        Callback::from(move |(block_id, e): (BlockId, MouseEvent)| {
+            e.prevent_default();
+            e.stop_propagation();
+            start_block_drag_action(block_id, e.client_x() as f32, e.client_y() as f32, e.ctrl_key());
         })
     };
 
     let handle_block_touch_start = {
-        let editor_state_ref = editor_state_ref.clone();
-        let canvas_ref = canvas_ref.clone();
-        let cursor_grabbing = cursor_grabbing.clone();
-
+        let start_block_drag_action = start_block_drag_action;
         Callback::from(move |(block_id, e): (BlockId, TouchEvent)| {
-            if !can_write_sources {
-                return;
-            }
             e.stop_propagation();
-
-            if editor_state_ref.borrow().pending_line.is_some() {
-                return;
-            }
-
             if let Some(touch) = e.touches().item(0) {
-                if let Some(canvas) = canvas_ref.cast::<HtmlElement>() {
-                    cursor_grabbing.set(true);
-                    let rect = canvas.get_bounding_client_rect();
-                    let touch_x = touch.client_x() as f32 - rect.left() as f32;
-                    let touch_y = touch.client_y() as f32 - rect.top() as f32;
-
-                    let possible_block = editor_state_ref.borrow().get_block(block_id).cloned();
-                    let mut editor_state = editor_state_ref.borrow_mut();
-
-                    if let Some(block) = possible_block {
-                        editor_state.selection.group_initial_positions.clear();
-                        editor_state.drag.dragging_group.clear();
-
-                        let selected_blocks = if editor_state.selection.selected_blocks.contains(&block_id) {
-                            editor_state.selection.selected_blocks.clone()
-                        } else {
-                            HashSet::from([block_id])
-                        };
-
-                        let mut initial_pos = Vec::new();
-                        for id in &selected_blocks {
-                            if let Some(b) = editor_state.get_block(*id) {
-                                initial_pos.push((*id, b.position));
-                            }
-                        }
-
-                        editor_state.drag.dragging_group = selected_blocks.clone();
-                        editor_state.selection.group_initial_positions = initial_pos;
-                        editor_state
-                            .drag
-                            .with_drag_block_offset(block_id, (touch_x - block.position.0, touch_y - block.position.1));
-                        editor_state.selection.selected_blocks.clear();
-                        editor_state.selection.selected_blocks.extend(selected_blocks);
-                        editor_state.selection.group_anchor_mouse = (touch_x, touch_y);
-                    }
-                }
+                start_block_drag_action(block_id, touch.client_x() as f32, touch.client_y() as f32, false);
             }
         })
     };
@@ -1540,47 +1532,40 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
             if mouse_button != 0 && mouse_button != 2 {
                 return;
             }
-            if let Some(target) = e.target_dyn_into::<web_sys::Element>() {
-                if let Some(canvas) = canvas_ref.cast::<web_sys::Element>() {
-                    let tag = target.tag_name().to_lowercase();
-                    if target.is_same_node(Some(&canvas)) || tag == "svg" {
-                        e.prevent_default();
-                        e.stop_propagation();
-                        let mut editor_state = editor_state_ref.borrow_mut();
-                        if e.button() == 0 {
-                            // left button
-                            if editor_state.selection.is_selecting {
-                                editor_state.selection.reset_selection();
-                            } else {
-                                // selection area mode
-                                if let Some(rect_el) = canvas_ref.cast::<HtmlElement>() {
-                                    let rect = rect_el.get_bounding_client_rect();
-                                    let mouse_x = e.client_x() as f32 - rect.left() as f32;
-                                    let mouse_y = e.client_y() as f32 - rect.top() as f32;
-                                    if e.ctrl_key() {
-                                        editor_state.selection.with_selecting_start_and_rect(
-                                            true,
-                                            (mouse_x, mouse_y),
-                                            Some((mouse_x, mouse_y, 0.0, 0.0)),
-                                        );
-                                    } else {
-                                        editor_state.selection.with_selecting_start_rect_and_clear_blocks(
-                                            true,
-                                            (mouse_x, mouse_y),
-                                            Some((mouse_x, mouse_y, 0.0, 0.0)),
-                                        );
-                                    }
-                                }
-                            }
-                        } else if e.button() == 2 {
-                            // right button
-                            editor_state.selection.reset_selection();
-                            // Right button panning
-                            cursor_grabbing.set(true);
-                            editor_state.is_panning = true;
-                            editor_state.pan_start = (e.client_x() as f32, e.client_y() as f32);
+            if is_canvas_background(
+                e.target_dyn_into::<web_sys::Element>().as_ref(),
+                canvas_ref.cast::<web_sys::Element>().as_ref(),
+            ) {
+                e.prevent_default();
+                e.stop_propagation();
+                let mut editor_state = editor_state_ref.borrow_mut();
+                if e.button() == 0 {
+                    // left button
+                    if editor_state.selection.is_selecting {
+                        editor_state.selection.reset_selection();
+                    } else if let Some(rect_el) = canvas_ref.cast::<HtmlElement>() {
+                        // selection area mode
+                        let rect = rect_el.get_bounding_client_rect();
+                        let mouse_x = e.client_x() as f32 - rect.left() as f32;
+                        let mouse_y = e.client_y() as f32 - rect.top() as f32;
+                        if e.ctrl_key() {
+                            editor_state.selection.with_selecting_start_and_rect(
+                                true,
+                                (mouse_x, mouse_y),
+                                Some((mouse_x, mouse_y, 0.0, 0.0)),
+                            );
+                        } else {
+                            editor_state.selection.with_selecting_start_rect_and_clear_blocks(
+                                true,
+                                (mouse_x, mouse_y),
+                                Some((mouse_x, mouse_y, 0.0, 0.0)),
+                            );
                         }
                     }
+                } else if e.button() == 2 {
+                    // right button panning
+                    start_canvas_pan(&mut editor_state, e.client_x() as f32, e.client_y() as f32);
+                    cursor_grabbing.set(true);
                 }
             }
         })
@@ -1680,21 +1665,9 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
             let is_panning = { editor_state_ref.borrow().is_panning };
 
             if is_panning {
-                let initial_positions: Vec<(BlockId, Position)> =
-                    { editor_state_ref.borrow().blocks.iter().map(|b| (b.id, b.position)).collect() };
-
-                {
-                    let mut editor_state = editor_state_ref.borrow_mut();
-                    let (start_x, start_y) = editor_state.pan_start;
-                    let dx = client_x as f32 - start_x;
-                    let dy = client_y as f32 - start_y;
-                    let (canvas_ox, canvas_oy) = editor_state.canvas_offset;
-                    editor_state.canvas_offset = (canvas_ox + dx, canvas_oy + dy);
-                    editor_state.pan_start = (client_x as f32, client_y as f32);
-                };
-
+                let move_params = pan_canvas(&mut editor_state_ref.borrow_mut(), client_x as f32, client_y as f32);
                 // Keep panning smooth by moving already-rendered nodes directly.
-                move_blocks.emit((0.0, 0.0, (0.0, 0.0), initial_positions));
+                move_blocks.emit(move_params);
                 return;
             }
 
@@ -1790,34 +1763,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                     }
                 }
 
-                let to_move = {
-                    let editor_state = editor_state_ref.borrow();
-                    // Update dragging block (Single or Group)
-                    if let Some(block_id) = editor_state.drag.block_id {
-                        // If the dragged block is member of a selection  -> move group
-                        if editor_state.drag.dragging_group.contains(&block_id)
-                            && !editor_state.selection.group_initial_positions.is_empty()
-                        {
-                            Some((
-                                mouse_x,
-                                mouse_y,
-                                editor_state.selection.group_anchor_mouse,
-                                editor_state.selection.group_initial_positions.clone(),
-                            ))
-                        } else {
-                            // Single drag block
-                            if let Some(block) = editor_state.get_block(block_id) {
-                                let positions = vec![(block_id, block.position)];
-                                Some((mouse_x, mouse_y, editor_state.selection.group_anchor_mouse, positions))
-                            } else {
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    }
-                };
-                if let Some(move_it) = to_move {
+                if let Some(move_it) = compute_drag_move_params(&editor_state_ref.borrow(), mouse_x, mouse_y) {
                     move_blocks.emit(move_it);
                     // Drag updates are applied directly to DOM for smoothness.
                     // Avoid full re-render on every mouse move while dragging blocks.
@@ -1832,11 +1778,11 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         })
     };
 
-    let handle_canvas_mouse_up = {
+    let end_active_interaction = {
         let editor_state_ref = editor_state_ref.clone();
         let cursor_grabbing = cursor_grabbing.clone();
         let force_update = force_update.clone();
-        Callback::from(move |_e: MouseEvent| {
+        Rc::new(move || {
             let mut editor_state = editor_state_ref.borrow_mut();
             let had_active_interaction = clear_active_interaction(&mut editor_state);
             cursor_grabbing.set(false);
@@ -1844,6 +1790,11 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                 force_update.set(*force_update + 1);
             }
         })
+    };
+
+    let handle_canvas_mouse_up = {
+        let end_active_interaction = end_active_interaction.clone();
+        Callback::from(move |_e: MouseEvent| end_active_interaction())
     };
 
     let handle_canvas_touch_start = {
@@ -1869,19 +1820,15 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                 }
                 return;
             }
-            if let Some(target) = e.target_dyn_into::<web_sys::Element>() {
-                if let Some(canvas) = canvas_ref.cast::<web_sys::Element>() {
-                    let tag = target.tag_name().to_lowercase();
-                    if target.is_same_node(Some(&canvas)) || tag == "svg" {
-                        if let Some(touch) = e.touches().item(0) {
-                            e.stop_propagation();
-                            let mut editor_state = editor_state_ref.borrow_mut();
-                            editor_state.selection.reset_selection();
-                            cursor_grabbing.set(true);
-                            editor_state.is_panning = true;
-                            editor_state.pan_start = (touch.client_x() as f32, touch.client_y() as f32);
-                        }
-                    }
+            if is_canvas_background(
+                e.target_dyn_into::<web_sys::Element>().as_ref(),
+                canvas_ref.cast::<web_sys::Element>().as_ref(),
+            ) {
+                if let Some(touch) = e.touches().item(0) {
+                    e.stop_propagation();
+                    let mut editor_state = editor_state_ref.borrow_mut();
+                    start_canvas_pan(&mut editor_state, touch.client_x() as f32, touch.client_y() as f32);
+                    cursor_grabbing.set(true);
                 }
             }
         })
@@ -1928,52 +1875,23 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
             }
 
             if let Some(touch) = e.touches().item(0) {
-                let (is_panning, drag_block_id, group_anchor_mouse, group_initial_positions, single_block_position) = {
-                    let editor_state = editor_state_ref.borrow();
-                    let drag_block_id = editor_state.drag.block_id;
-                    let single_block_position =
-                        drag_block_id.and_then(|block_id| editor_state.get_block(block_id).map(|block| block.position));
-                    (
-                        editor_state.is_panning,
-                        drag_block_id,
-                        editor_state.selection.group_anchor_mouse,
-                        editor_state.selection.group_initial_positions.clone(),
-                        single_block_position,
-                    )
-                };
+                let client_x = touch.client_x() as f32;
+                let client_y = touch.client_y() as f32;
+
+                let is_panning = editor_state_ref.borrow().is_panning;
                 if is_panning {
                     e.stop_propagation();
-
-                    let initial_positions: Vec<(BlockId, Position)> =
-                        { editor_state_ref.borrow().blocks.iter().map(|b| (b.id, b.position)).collect() };
-
-                    {
-                        let mut editor_state = editor_state_ref.borrow_mut();
-                        let (start_x, start_y) = editor_state.pan_start;
-                        let dx = touch.client_x() as f32 - start_x;
-                        let dy = touch.client_y() as f32 - start_y;
-                        let (canvas_ox, canvas_oy) = editor_state.canvas_offset;
-                        editor_state.canvas_offset = (canvas_ox + dx, canvas_oy + dy);
-                        editor_state.pan_start = (touch.client_x() as f32, touch.client_y() as f32);
-                    }
-
-                    move_blocks.emit((0.0, 0.0, (0.0, 0.0), initial_positions));
-                } else if let Some(block_id) = drag_block_id {
+                    let move_params = pan_canvas(&mut editor_state_ref.borrow_mut(), client_x, client_y);
+                    move_blocks.emit(move_params);
+                } else if editor_state_ref.borrow().drag.block_id.is_some() {
                     e.stop_propagation();
 
                     if let Some(canvas) = canvas_ref.cast::<HtmlElement>() {
                         let rect = canvas.get_bounding_client_rect();
-                        let touch_x = touch.client_x() as f32 - rect.left() as f32;
-                        let touch_y = touch.client_y() as f32 - rect.top() as f32;
+                        let touch_x = client_x - rect.left() as f32;
+                        let touch_y = client_y - rect.top() as f32;
 
-                        let to_move = if group_initial_positions.is_empty() {
-                            single_block_position
-                                .map(|position| (touch_x, touch_y, group_anchor_mouse, vec![(block_id, position)]))
-                        } else {
-                            Some((touch_x, touch_y, group_anchor_mouse, group_initial_positions))
-                        };
-
-                        if let Some(move_it) = to_move {
+                        if let Some(move_it) = compute_drag_move_params(&editor_state_ref.borrow(), touch_x, touch_y) {
                             move_blocks.emit(move_it);
                         } else {
                             force_update.set(*force_update + 1);
@@ -1985,20 +1903,8 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
     };
 
     let handle_canvas_touch_end = {
-        let editor_state_ref = editor_state_ref.clone();
-        let cursor_grabbing = cursor_grabbing.clone();
-        let force_update = force_update.clone();
-        Callback::from(move |_e: TouchEvent| {
-            let mut editor_state = editor_state_ref.borrow_mut();
-            if editor_state.pinch_distance.take().is_some() {
-                force_update.set(*force_update + 1);
-            }
-            let had_active_interaction = clear_active_interaction(&mut editor_state);
-            cursor_grabbing.set(false);
-            if had_active_interaction {
-                force_update.set(*force_update + 1);
-            }
-        })
+        let end_active_interaction = end_active_interaction.clone();
+        Callback::from(move |_e: TouchEvent| end_active_interaction())
     };
 
     let handle_canvas_wheel = {
@@ -2040,62 +1946,28 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         })
     };
 
-    // Ensure interaction state is cleaned up even when mouseup happens outside the canvas.
+    // Ensure interaction state is cleaned up even when mouseup or touchend/touchcancel happens outside the canvas.
     {
-        let editor_state_ref = editor_state_ref.clone();
-        let cursor_grabbing = cursor_grabbing.clone();
-        let force_update = force_update.clone();
+        let end_active_interaction = end_active_interaction.clone();
         use_effect(move || {
-            let handler = Closure::wrap(Box::new(move |_event: MouseEvent| {
-                let mut editor_state = editor_state_ref.borrow_mut();
-                let had_active_interaction = clear_active_interaction(&mut editor_state);
-                if !had_active_interaction {
-                    return;
-                }
-                cursor_grabbing.set(false);
-                force_update.set(*force_update + 1);
+            let handler = Closure::wrap(Box::new(move |_event: web_sys::Event| {
+                end_active_interaction();
             }) as Box<dyn FnMut(_)>);
 
+            const EVENTS: [&str; 3] = ["mouseup", "touchend", "touchcancel"];
             if let Some(browser_window) = window() {
-                let _ = browser_window.add_event_listener_with_callback("mouseup", handler.as_ref().unchecked_ref());
-            }
-
-            move || {
-                if let Some(browser_window) = window() {
+                for event_name in EVENTS {
                     let _ =
-                        browser_window.remove_event_listener_with_callback("mouseup", handler.as_ref().unchecked_ref());
+                        browser_window.add_event_listener_with_callback(event_name, handler.as_ref().unchecked_ref());
                 }
-            }
-        });
-    }
-
-    {
-        let editor_state_ref = editor_state_ref.clone();
-        let cursor_grabbing = cursor_grabbing.clone();
-        let force_update = force_update.clone();
-        use_effect(move || {
-            let handler = Closure::wrap(Box::new(move |_event: TouchEvent| {
-                let mut editor_state = editor_state_ref.borrow_mut();
-                let had_active_interaction = clear_active_interaction(&mut editor_state);
-                if !had_active_interaction {
-                    return;
-                }
-                cursor_grabbing.set(false);
-                force_update.set(*force_update + 1);
-            }) as Box<dyn FnMut(_)>);
-
-            if let Some(browser_window) = window() {
-                let _ = browser_window.add_event_listener_with_callback("touchend", handler.as_ref().unchecked_ref());
-                let _ =
-                    browser_window.add_event_listener_with_callback("touchcancel", handler.as_ref().unchecked_ref());
             }
 
             move || {
                 if let Some(browser_window) = window() {
-                    let _ = browser_window
-                        .remove_event_listener_with_callback("touchend", handler.as_ref().unchecked_ref());
-                    let _ = browser_window
-                        .remove_event_listener_with_callback("touchcancel", handler.as_ref().unchecked_ref());
+                    for event_name in EVENTS {
+                        let _ = browser_window
+                            .remove_event_listener_with_callback(event_name, handler.as_ref().unchecked_ref());
+                    }
                 }
             }
         });
@@ -2608,5 +2480,117 @@ mod tests {
     #[test]
     fn initial_layout_view_matches_manual_layout_origin() {
         assert_eq!(initial_layout_view_transform(), ((0.0, 0.0), 1.0));
+    }
+
+    #[test]
+    fn start_canvas_pan_and_pan_canvas_update_offsets_and_positions() {
+        let mut state = EditorState {
+            blocks: vec![
+                Block {
+                    id: 1,
+                    block_type: BlockType::InputM3u,
+                    position: (10.0, 20.0),
+                    instance: create_instance(BlockType::InputM3u),
+                },
+                Block {
+                    id: 2,
+                    block_type: BlockType::InputM3u,
+                    position: (30.0, 40.0),
+                    instance: create_instance(BlockType::InputM3u),
+                },
+            ],
+            ..EditorState::default()
+        };
+
+        start_canvas_pan(&mut state, 100.0, 200.0);
+        assert!(state.is_panning);
+        assert_eq!(state.pan_start, (100.0, 200.0));
+
+        let params = pan_canvas(&mut state, 150.0, 260.0);
+        assert_eq!(state.canvas_offset, (50.0, 60.0));
+        assert_eq!(state.pan_start, (150.0, 260.0));
+        assert_eq!(params.3, vec![(1, (10.0, 20.0)), (2, (30.0, 40.0))]);
+    }
+
+    #[test]
+    fn start_block_drag_handles_single_drag_and_group_drag_params() {
+        let mut state = EditorState {
+            blocks: vec![
+                Block {
+                    id: 1,
+                    block_type: BlockType::InputM3u,
+                    position: (100.0, 100.0),
+                    instance: create_instance(BlockType::InputM3u),
+                },
+                Block {
+                    id: 2,
+                    block_type: BlockType::InputM3u,
+                    position: (200.0, 200.0),
+                    instance: create_instance(BlockType::InputM3u),
+                },
+            ],
+            ..EditorState::default()
+        };
+
+        // Start dragging block 1 without ctrl (touch or regular click)
+        start_block_drag(&mut state, 1, (110.0, 115.0), false);
+        assert_eq!(state.drag.block_id, Some(1));
+        assert_eq!(state.drag.drag_offset, (10.0, 15.0));
+        assert!(state.selection.selected_blocks.contains(&1));
+        assert_eq!(state.selection.group_anchor_mouse, (110.0, 115.0));
+        assert_eq!(state.selection.group_initial_positions, vec![(1, (100.0, 100.0))]);
+
+        // Computing drag move parameters
+        let drag_params = compute_drag_move_params(&state, 150.0, 160.0);
+        assert_eq!(drag_params, Some((150.0, 160.0, (110.0, 115.0), vec![(1, (100.0, 100.0))])));
+    }
+
+    #[test]
+    fn start_block_drag_handles_ctrl_selection_toggle() {
+        let mut state = EditorState {
+            blocks: vec![
+                Block {
+                    id: 1,
+                    block_type: BlockType::InputM3u,
+                    position: (100.0, 100.0),
+                    instance: create_instance(BlockType::InputM3u),
+                },
+                Block {
+                    id: 2,
+                    block_type: BlockType::InputM3u,
+                    position: (200.0, 200.0),
+                    instance: create_instance(BlockType::InputM3u),
+                },
+            ],
+            ..EditorState::default()
+        };
+
+        // Select block 1
+        start_block_drag(&mut state, 1, (105.0, 105.0), false);
+        assert_eq!(state.selection.selected_blocks, HashSet::from([1]));
+
+        // Ctrl-click block 2 adds it to selection
+        start_block_drag(&mut state, 2, (205.0, 205.0), true);
+        assert_eq!(state.selection.selected_blocks, HashSet::from([1, 2]));
+
+        // Ctrl-click block 1 removes it from selection
+        start_block_drag(&mut state, 1, (105.0, 105.0), true);
+        assert_eq!(state.selection.selected_blocks, HashSet::from([2]));
+    }
+
+    #[test]
+    fn clear_active_interaction_resets_panning_dragging_selection_and_pinch() {
+        let mut state = EditorState { is_panning: true, pinch_distance: Some(42.0), ..EditorState::default() };
+        state.drag.block_id = Some(1);
+        state.selection.is_selecting = true;
+
+        assert!(clear_active_interaction(&mut state));
+        assert!(!state.is_panning);
+        assert!(state.drag.block_id.is_none());
+        assert!(!state.selection.is_selecting);
+        assert!(state.pinch_distance.is_none());
+
+        // Calling again with no active interaction returns false
+        assert!(!clear_active_interaction(&mut state));
     }
 }

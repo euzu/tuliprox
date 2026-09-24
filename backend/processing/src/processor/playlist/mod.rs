@@ -30,8 +30,8 @@ use shared::{
         PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistStats, PlaylistUpdateClusterDecision,
         PlaylistUpdateClusterTelemetry, PlaylistUpdateDataSource, PlaylistUpdateInputTelemetry,
         PlaylistUpdateProgressEvent, PlaylistUpdateRunId, PlaylistUpdateRunOrder, PlaylistUpdateState,
-        PlaylistUpdateSummary, ProviderFetchFailure, SourceStats, StreamProperties, TargetStats, UUIDType,
-        WatchDisabled, WatchDisabledReason, WatchUnmatched, XtreamCluster,
+        PlaylistUpdateSummary, ProviderFetchFailure, SourceStats, StagedInputType, StreamProperties, TargetStats,
+        UUIDType, WatchDisabled, WatchDisabledReason, WatchUnmatched, XtreamCluster,
     },
     utils::{create_alias_uuid, interner_gc, sanitize_sensitive_info, Internable},
 };

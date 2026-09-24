@@ -487,7 +487,6 @@ pub(super) fn build_target_tmdb_client(
         None
     }
 }
-
 pub(crate) async fn finalize_prepared_target<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
     ctx: Arc<PlaylistProcessingContext<E, M>>,
     prepared: PreparedTarget,
@@ -977,7 +976,6 @@ pub(super) fn curation_playlist_views(
         }
     }
 }
-
 fn curation_failure_error(target_name: &str, failure: &CurationFailure) -> TuliproxError {
     let mut complete = 0usize;
     let mut incomplete = 0usize;

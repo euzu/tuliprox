@@ -1,9 +1,10 @@
 use crate::{
     api::{
         api_utils::{
-            coalesce_byte_stream, create_api_proxy_user, empty_json_response_as_array, get_user_target,
-            get_user_target_by_credentials, internal_server_error, resource_response,
-            stream_json_or_bin_response_try_stream, try_unwrap_body, ResourceFetchPolicy,
+            coalesce_byte_stream, create_api_proxy_user, decode_resource_link, empty_json_response_as_array,
+            get_user_target, get_user_target_by_credentials, internal_server_error, log_resource_rejection,
+            rejection_status, resolve_resource, resource_response, stream_json_or_bin_response_try_stream,
+            try_unwrap_body, ResourceFetchOptions,
         },
         model::{AppState, UserApiRequest, UserApiRequestQueryOrBody},
         static_headers::CT_XML,
@@ -20,20 +21,21 @@ use crate::{
     },
     utils,
     utils::{
-        canonicalize_output_epg_id, canonicalize_untrusted_epg_id, deobscure_text, file_exists_async,
-        format_xmltv_time_utc, get_epg_processing_options, lowercase_xmltv_text, obscure_text, EpgIdOutputCase,
-        EpgProcessingOptions, EpgTimeShift,
+        canonicalize_output_epg_id, canonicalize_untrusted_epg_id, deobscure_text, encode_resource_token,
+        file_exists_async, format_xmltv_time_utc, get_epg_processing_options, lowercase_xmltv_text, obscure_text,
+        EpgIdOutputCase, EpgProcessingOptions, EpgTimeShift,
     },
 };
 use axum::response::IntoResponse;
 use chrono::{DateTime, TimeZone};
-use log::{error, trace};
+use log::{debug, error, trace};
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use shared::{
     concat_string,
     model::{
-        ConfigTargetOptions, EpgChannel, EpgProgramme, EpgProgrammeDto, ShortEpgDto, ShortEpgResultDto, StreamEpgEntry,
-        StreamEpgItemRequest, StreamEpgRequest, StreamEpgResponse, TargetType,
+        resolve_resource_value, ConfigTargetOptions, EpgChannel, EpgProgramme, EpgProgrammeDto, ResourceToken,
+        ShortEpgDto, ShortEpgResultDto, StreamEpgEntry, StreamEpgItemRequest, StreamEpgRequest, StreamEpgResponse,
+        TargetType,
     },
     utils::{concat_path, concat_path_leading_slash, obfuscate_text, Internable},
 };
@@ -205,8 +207,36 @@ pub fn rewrite_epg_channel_resource_url(
     if icon.is_empty() || icon.starts_with('/') {
         return channel;
     }
-    channel.icon = Some(concat_path(resource_url, &obfuscate_text(encrypt_secret, icon)).intern());
+    let encoded = encode_resource_link(encrypt_secret, icon).unwrap_or_else(|| {
+        let external = external_resource_url(icon);
+        obfuscate_text(encrypt_secret, external.as_ref())
+    });
+    channel.icon = Some(concat_path(resource_url, &encoded).intern());
     channel
+}
+
+/// Encodes a resource link that carries its origin.
+///
+/// `None` means the link could not carry the origin, for example because the URL is longer than a
+/// token may be. Those links keep the legacy encoding and are therefore public-only, which fails
+/// closed instead of authorizing an unchecked destination.
+pub fn encode_resource_link(encrypt_secret: &[u8; 16], resource: &str) -> Option<String> {
+    let token = ResourceToken { resource: resource.to_string() };
+    match encode_resource_token(encrypt_secret, &token) {
+        Ok(encoded) => Some(encoded),
+        Err(err) => {
+            debug!("Falling back to a legacy resource link: {err}");
+            None
+        }
+    }
+}
+
+fn external_resource_url(value: &str) -> Cow<'_, str> {
+    match resolve_resource_value(value) {
+        Ok(Some(locator)) => Cow::Owned(locator.url.to_string()),
+        Ok(None) => Cow::Borrowed(value),
+        Err(_) => Cow::Borrowed(""),
+    }
 }
 
 macro_rules! continue_on_err {
@@ -256,12 +286,15 @@ fn rewrite_xmltv_icon_url<'a>(
 ) -> Cow<'a, str> {
     if epg_processing_options.rewrite_urls {
         if let Some(base) = base_url {
+            if let Some(encoded) = encode_resource_link(&epg_processing_options.encrypt_secret, icon_url) {
+                return Cow::Owned(concat_string!(base, "/", &encoded));
+            }
             if let Ok(enc) = obscure_text(&epg_processing_options.encrypt_secret, icon_url) {
                 return Cow::Owned(concat_string!(base, "/", &enc));
             }
         }
     }
-    Cow::Borrowed(icon_url)
+    external_resource_url(icon_url)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -916,12 +949,31 @@ async fn epg_api_resource(
     }
 
     let encrypt_secret = app_state.get_encrypt_secret();
-    if let Ok(resource_url) = deobscure_text(&encrypt_secret, &resource) {
-        resource_response(&app_state, ResourceFetchPolicy::PublicNoRedirect, &resource_url, &req_headers, None)
-            .await
-            .into_response()
-    } else {
-        axum::http::StatusCode::BAD_REQUEST.into_response()
+    // This route decodes only its own two formats: the authenticated token for new links, and the
+    // AES-based `obscure_text` encoding for links issued before origin tracking.
+    let decoded =
+        decode_resource_link(&encrypt_secret, &resource, |secret, value| deobscure_text(secret, value).map_err(|_| ()));
+
+    let resource_value = match decoded {
+        Ok(decoded) => decoded,
+        Err(status) => return status.into_response(),
+    };
+
+    // Legacy links and EPG icons without a recorded origin stay public-only.
+    match resolve_resource(&app_state.app_config, &resource_value, None) {
+        Ok(resolved) => resource_response(
+            &app_state,
+            ResourceFetchOptions::epg(resolved.authorization),
+            &resolved.url,
+            &req_headers,
+            None,
+        )
+        .await
+        .into_response(),
+        Err(err) => {
+            log_resource_rejection(None, &err, &resource_value);
+            rejection_status(&err).into_response()
+        }
     }
 }
 
@@ -962,7 +1014,7 @@ mod tests {
         },
         processing::parser::ics::parse_ics_file_to_channel,
         repository::{epg_write_file, BPlusTree},
-        utils::{deobscure_text, lowercase_xmltv_text, EpgIdOutputCase, EpgProcessingOptions, EpgTimeShift},
+        utils::{lowercase_xmltv_text, EpgIdOutputCase, EpgProcessingOptions, EpgTimeShift},
     };
     use arc_swap::ArcSwapOption;
     use axum::response::IntoResponse;
@@ -971,9 +1023,9 @@ mod tests {
         foundation::Filter,
         model::{
             ConfigTargetOptions, EpgCategory, EpgChannel, EpgOutputOptions, EpgProgramme, ProcessingOrder,
-            StreamEpgItemRequest, StreamEpgRequest, TargetType,
+            ResourceLocator, StreamEpgItemRequest, StreamEpgRequest, TargetType,
         },
-        utils::{concat_path, obfuscate_text, Internable},
+        utils::Internable,
     };
     use std::{
         collections::HashMap,
@@ -984,6 +1036,7 @@ mod tests {
     };
     use tempfile::tempdir;
     use tokio::io::AsyncWrite;
+    use tuliprox_core::utils::{decode_resource_token, has_resource_token_prefix};
 
     struct ErroringWriter;
 
@@ -1522,7 +1575,9 @@ mod tests {
         let base_url = "http://localhost/epg/user/password";
         let original_url = "https://example.com/programme.jpg";
         let mut programme = EpgProgramme::new(100, 200, "channel".intern());
-        programme.icon = Some(original_url.intern());
+        programme.icon = Some(
+            ResourceLocator::new("epg-input".into(), original_url.into()).expect("locator").encode().expect("encode"),
+        );
         let mut writer = quick_xml::Writer::new(Vec::new());
         write_programme_metadata_tags(&mut writer, &programme, &options, Some(base_url)).await?;
         let xml = String::from_utf8(writer.into_inner())?;
@@ -1531,7 +1586,10 @@ mod tests {
             .and_then(|value| value.strip_suffix(r#""/>"#))
             .unwrap_or_default();
 
-        assert_eq!(deobscure_text(&secret, resource)?, original_url);
+        let token = decode_resource_token(&secret, resource).expect("token decodes");
+        let locator = ResourceLocator::decode(&token.resource).expect("locator decodes");
+        assert_eq!(locator.url.as_ref(), original_url);
+        assert_eq!(locator.input_name.as_ref(), "epg-input");
         Ok(())
     }
 
@@ -1849,17 +1907,26 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_epg_channel_resource_url_wraps_external_icon() {
+    fn rewrite_epg_channel_resource_url_wraps_external_icon_with_its_origin() {
         let secret = [9u8; 16];
         let resource_url = "/api/v1/playlist/resource";
-        let channel = sample_channel(Some("https://cdn.example.com/logo.png"));
+        let mut channel = sample_channel(None);
+        channel.icon = Some(
+            ResourceLocator::new("epg-input".into(), "https://cdn.example.com/logo.png".into())
+                .expect("locator")
+                .encode()
+                .expect("encode"),
+        );
 
         let rewritten = rewrite_epg_channel_resource_url(&secret, resource_url, channel);
 
-        assert_eq!(
-            rewritten.icon.as_deref(),
-            Some(concat_path(resource_url, &obfuscate_text(&secret, "https://cdn.example.com/logo.png")).as_str())
-        );
+        let link = rewritten.icon.as_deref().expect("rewritten icon");
+        let encoded = link.rsplit('/').next().expect("encoded part");
+        assert!(has_resource_token_prefix(encoded));
+        let token = decode_resource_token(&secret, encoded).expect("token decodes");
+        let locator = ResourceLocator::decode(&token.resource).expect("locator decodes");
+        assert_eq!(locator.url.as_ref(), "https://cdn.example.com/logo.png");
+        assert_eq!(locator.input_name.as_ref(), "epg-input");
     }
 
     #[test]

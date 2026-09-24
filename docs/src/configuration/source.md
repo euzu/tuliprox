@@ -144,6 +144,7 @@ inputs:
 | `aliases`               | List   |    No    |         | Connection pooling / Sub-accounts (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                                          |
 | `staged`                | Object |    No    |         | Staged overlay settings. Only valid when `type: staged` (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                    |
 | `panel_api`             | Object |    No    |         | Automated reseller account generation (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                                      |
+| `resource_policy`       | Object | No       |         | Trusted private destinations for resource URLs supplied by this input (see [below](#27-resource-policy-resource_policy)).                                                                                                                                                                                                                                                                                                                 |
 
 #### Minimal Stalker Input Example
 
@@ -207,14 +208,15 @@ logic.
 
 ### Input Subsections (Object Keys)
 
-| Block       | Description                                                                | Link                                               |
-|:------------|:---------------------------------------------------------------------------|:---------------------------------------------------|
-| `headers`   | Custom HTTP request headers for playlist and EPG downloads.                | [See Headers](#21-headers-headers)                 |
-| `options`   | Behavior controls for metadata resolution, stream probing, and skip logic. | [See Options](#22-input-options-options)           |
-| `epg`       | XMLTV source management and Smart Match fuzzy logic settings.              | [See EPG](#23-epg-assignment--smart-match-epg)     |
-| `aliases`   | Connection pooling for multiple subscriptions from the same provider.      | [See Aliases](#24-provider-aliases-aliases--batch) |
-| `staged`    | Overlay settings for first-class staged inputs.                            | [See Staged](#25-staged-sources-staged)            |
-| `panel_api` | Automated reseller panel integration (provisioning/renewal).               | [See Panel API](#26-provider-panel-api-panel_api)  |
+| Block             | Description                                                                | Link                                                       |
+| :---------------- | :------------------------------------------------------------------------- | :--------------------------------------------------------- |
+| `headers`         | Custom HTTP request headers for playlist and EPG downloads.                | [See Headers](#21-headers-headers)                         |
+| `options`         | Behavior controls for metadata resolution, stream probing, and skip logic. | [See Options](#22-input-options-options)                   |
+| `epg`             | XMLTV source management and Smart Match fuzzy logic settings.              | [See EPG](#23-epg-assignment--smart-match-epg)             |
+| `aliases`         | Connection pooling for multiple subscriptions from the same provider.      | [See Aliases](#24-provider-aliases-aliases--batch)         |
+| `staged`          | Overlay settings for first-class staged inputs.                            | [See Staged](#25-staged-sources-staged)                    |
+| `panel_api`       | Automated reseller panel integration (provisioning/renewal).               | [See Panel API](#26-provider-panel-api-panel_api)          |
+| `resource_policy` | Trusted private destinations for resource URLs supplied by this input.     | [See Resource Policy](#27-resource-policy-resource_policy) |
 
 ---
 
@@ -985,21 +987,44 @@ and the catalog page limit are configured on the parent input in the Web UI or Y
 
 ### 2.5 Staged Sources (`staged`)
 
-The **staged input** is a first-class input type for pre-formatted playlists. Tuliprox reads the selected playlist
-clusters from the staged source, then stores the merged result in the linked provider input. Stream delivery and API
-requests continue to use that provider input.
+The **staged input** is a first-class input type for pre-formatted playlists. Tuliprox overlays the selected clusters
+of the linked provider with the staged groups, then stores the merged result in that provider input. Stream delivery
+and API requests continue to use the provider input.
 
 This is useful when an external playlist editor already has the desired channel order, groups, and original stream IDs.
-For example, an IPTV editor can provide the Live playlist layout while the actual streams are still opened against the
-Xtream or M3U provider.
+A staged playlist is typically a restructured copy of the provider playlist: the streams stay the same, while group
+names, channel names, and their order may differ. For example, an IPTV editor can provide the Live playlist layout while
+the actual streams are still opened against the Xtream or M3U provider.
 
 **Data flow:**
 
-* `staged input -> provider input`: the staged input is an overlay for that provider. Clusters listed in
-  `staged.clusters` are loaded from the staged input; the remaining clusters are loaded from the provider input itself.
+* `staged input -> provider input`: the staged input is an overlay for that provider. Inside the clusters listed in
+  `staged.clusters`, each staged group of an `xtream` provider replaces the provider category it belongs to; provider
+  categories that the staged playlist does not represent stay as they are. For any other provider type the listed
+  clusters are replaced entirely by the staged groups. Clusters not listed are loaded from the provider input itself.
   The merged playlist is persisted under the provider input, and streaming/API requests still target the provider input.
 * `staged input -> target` is not supported. Use a normal `m3u` or `xtream` input if the source should be connected
   directly to a target.
+
+**Overlay matching (`xtream` providers):**
+
+* Matching is ID-driven. A staged group overlays the provider category that owns its staged stream IDs, strongest overlap
+  first; when that category is already claimed by a stronger overlap, the group's next-ranked category is used. A group
+  with known provider stream IDs that loses the assignment is added as a new category. When none of its stream IDs are
+  known, an `xtream` staged group is resolved by category ID; an `m3u` staged group skips that step because its category
+  IDs are positional. The group title acts as a last resort. A group title therefore never overrides a stream ID match,
+  so a renamed or split group cannot take over an unrelated category by accident.
+* The overlaid category keeps its own category ID; the staged playlist supplies the group name and the channel order.
+* Known streams keep their provider playback URL, including a direct source URL. New streams use the provider address and
+  credentials; for VOD, the staged stream's container metadata supplies the extension when available.
+* Every staged channel needs a numeric provider stream ID in its `header.id`, either from an `xui-id` / `cuid`
+  attribute or from the numeric last URL segment. Rows without one are skipped, a single warning per group reports how
+  many rows were dropped, and the provider category stays in place instead of being emptied.
+* A staged group that matches no provider category is added as a new category. Its category ID is reused when it is
+  still free, otherwise Tuliprox assigns an unused ID, so two groups of one cluster never share an ID.
+
+For every other provider type the staged groups of a listed cluster are taken as they are: their group IDs, URLs, and
+channel IDs stay unchanged, and the clusters they cover are replaced completely.
 
 #### Configuration Example (Provider With Staged Live Overlay)
 
@@ -1032,13 +1057,16 @@ inputs:
 | `method`                | Enum   |    No    | `GET`   | HTTP request method (`GET` or `POST`). Not inherited from the provider input.                         |
 | `headers`               | Dict   |    No    |         | Custom HTTP headers for the staged download. Not inherited from the provider input.                   |
 | `staged.for_input`      | String |   Yes    |         | Provider input name. Must reference a non-staged `m3u` or `xtream` input.                             |
-| `staged.clusters`       | List   |    No    | all     | Clusters loaded from the staged input: `live`, `vod`, `series`.                                       |
+| `staged.clusters`       | List   |    No    | all     | Clusters whose categories are overlaid from the staged input: `live`, `vod`, `series`.                |
 
 #### Staged Cluster Behavior & Validation
 
-`staged.clusters` is the group of clusters loaded from the staged input.
+`staged.clusters` names the clusters whose categories are overlaid from the staged input.
 
 * The referenced provider supplies all clusters not listed in `staged.clusters`.
+* Inside a listed cluster of an `xtream` provider, only the categories represented by the staged playlist are overlaid;
+  provider categories without a staged counterpart stay available. For any other provider type the listed clusters are
+  replaced entirely.
 * `staged.for_input` must reference an existing non-staged `m3u` or `xtream` input.
 * Each provider input can have at most one staged overlay.
 * `staged.clusters` must not be empty.
@@ -1148,6 +1176,104 @@ Tuliprox processes all Panel API responses as JSON and strictly requires `status
 * **`client_renew`**: Updates the expiration date without modifying existing credentials.
 * **`client_adult_content`**: Optionally executed after `client_new` or `client_renew` to toggle adult content settings
   on the provider side. Requires `status: true` for success.
+
+---
+
+### 2.7 Resource Policy (`resource_policy`)
+
+Restricts which destinations Tuliprox may reach when it proxies a resource URL that came from this input, including
+channel logos, EPG channel and programme icons, covers, posters, episode images, backdrops, and nested Xtream
+metadata resources.
+
+Without a policy, every resource URL is treated as **public-only**: only publicly routable destinations are
+fetched. An internal logo host therefore stops working until it is listed here.
+
+```yaml
+inputs:
+  - name: local-playlist
+    type: m3u
+    url: /data/local-playlist.m3u
+    resource_policy:
+      allowed_hosts:
+        - media.home.arpa
+      allowed_networks:
+        - 192.168.50.20/32
+```
+
+#### Configure it in the Web UI
+
+1. Open the **Source Editor** and select the input that supplies the resource.
+2. Open the **Resource Policy** page using the shield icon.
+3. Add the exact DNS names under **Allowed Resource Hosts**. Enter host names only, without a scheme, path, port,
+   wildcard, or IP address.
+4. Add the smallest required private CIDR ranges under **Allowed Resource Networks**.
+5. Apply the input changes and save the source configuration.
+
+For a private DNS destination, configure both a matching host and network. A private IP literal needs only a
+matching network. Removing every host and network removes the policy from the input and restores the public-only
+default.
+
+#### Parameters
+
+| Parameter              | Type | Required | Default | Technical Impact & Background                                                                                                                                                                                                                                                                           |
+| :--------------------- | :--- | :------: | :------ | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **`allowed_hosts`**    | List |    No    | `[]`    | Exact DNS names that may resolve to a private address. Matched case-insensitively and without a trailing dot. Wildcards, ports, schemes, paths, and IP literals are rejected while the configuration is loaded.                                                                                         |
+| **`allowed_networks`** | List |    No    | `[]`    | Private CIDR ranges a destination address may fall into (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7` and subnets of them). Anything broader, and every public or special-use range, is rejected while the configuration is loaded. Use `/32`, `/128`, or the smallest practical subnet. |
+
+#### What a policy authorizes
+
+* A **publicly routable** destination is always allowed, with or without a policy.
+* A **private DNS destination** requires both: the exact host name in `allowed_hosts` **and** the resolved address
+  inside `allowed_networks`. Listing one without the other authorizes nothing.
+* A **private IP literal** in the URL (for example `http://192.168.1.1/logo.png`) is authorized by
+  `allowed_networks` alone, because a literal has no host name to match.
+* Loopback, link-local, cloud-metadata, unspecified, multicast, CGNAT, documentation, benchmarking, broadcast, and
+  reserved addresses are always rejected, even when a matching CIDR is configured.
+* Redirects are re-checked on every hop with the same policy, and redirect hops are bounded.
+* `allowed_hosts` and `allowed_networks` contain no port, so an authorized host is reachable on **every** port that
+  serves `http` or `https`. This is deliberate: providers serve images on non-standard ports, and the address
+  policy is the actual restriction, not the port.
+
+#### Where the policy comes from
+
+The policy is looked up on the input that supplied the concrete resource URL, not on the target, the item, or the
+record that contains it. Two consequences matter in practice:
+
+* Items delivered through an alias are authorized with the policy of their main input; aliases inherit it.
+* `logo_override: true` copies an EPG icon into a playlist logo. That logo keeps the EPG input as its origin and is
+  authorized with the **EPG input's** policy, not the playlist input's.
+
+The canonical input name is the authorization identity of a resource origin. Configured input and alias names are
+non-empty, globally unique strings: no two inputs — and no input and alias — may share a name, and the loader rejects
+a configuration that does. Internal numeric IDs and generated playlist UUIDs are managed separately from these names.
+Renaming an input invalidates the links that were issued for it, and reusing a name for a different input would hand
+it the authority of the old input, so treat a rename as a new identity.
+
+#### Legacy data and links
+
+Legacy raw resources stored on playlist and Xtream items use the containing item's input. Legacy EPG resources and
+external links without an authoritative input remain public-only until the data is regenerated. An origin that
+names an input which no longer exists or is disabled is rejected with `400`; it is never silently downgraded to
+public-only.
+
+Tuliprox stores ownership internally in a value beginning with `resource://`. This scheme is reserved and must not
+appear in provider data, playlists, EPG documents, metadata, or mapping configuration. Provider-supplied and mapped
+values using the reserved scheme are discarded so they cannot claim another input's network policy. External M3U,
+XMLTV, Xtream, and Web UI responses always contain either the original HTTP(S) URL or a Tuliprox proxy URL, never the
+internal representation.
+
+#### Proxy interaction
+
+Resource proxying always connects directly, so the destination policy can be enforced while the connection is
+established. A configured proxy, and the `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` environment variables, are
+ignored for these requests; Tuliprox logs a warning at startup and on reload when one is configured. Provider
+fetches, playlist and EPG downloads, and streams keep using the proxy.
+
+#### Cache
+
+Proxied resources are cached per policy scope. An entry fetched under one policy is never served to a request
+authorized by another, and the resource cache starts cold once on upgrade because the cache key layout changes.
+The cache size limits are unchanged.
 
 ---
 

@@ -2,20 +2,20 @@ mod client;
 mod errors;
 mod model;
 
-use crate::{
-    coordinator::LEGACY_CATEGORY_NAMESPACE,
-    kernel::{
-        evaluate_selector, project_memberships, CuratedMediaReference, CurationCategorySpec, CurationEvaluation,
-        CurationIncompleteReason, CurationMatchPolicy, CurationMediaScope, CurationProjectionCatalog,
-        CurationRunOutcome, CurationSelectorKey, CurationSelectorSpec, CurationUnavailableReason,
-        ProjectionIdentityStrategy, SelectorOutcome,
-    },
+use crate::kernel::{
+    evaluate_selector, project_memberships, CuratedMediaReference, CurationCategorySpec, CurationEvaluation,
+    CurationIncompleteReason, CurationMatchPolicy, CurationMediaScope, CurationProjectionCatalog, CurationRunOutcome,
+    CurationSelectorKey, CurationSelectorSpec, CurationUnavailableReason, ProjectionIdentityStrategy, SelectorOutcome,
 };
 use client::{TraktClient, TraktFetchFailureKind};
 use log::{debug, info, warn};
 use model::TraktListItem;
 use shared::model::{PlaylistGroup, TraktContentType};
 use tuliprox_core::model::{CurationConfig, TraktChartConfig, TraktConfig, TraktListConfig, TraktSourceConfig};
+
+// Compatibility policy for the current Xtream projection. This namespace is
+// deliberately supplied by the adapter rather than treated as canonical media identity.
+const LEGACY_TRAKT_CATEGORY_NAMESPACE: &str = "trakt-category";
 
 /// Evaluate every configured Trakt selector into exact target memberships.
 ///
@@ -26,6 +26,9 @@ pub async fn evaluate_trakt_curation(
     target_name: &str,
     trakt_config: &TraktConfig,
 ) -> CurationRunOutcome {
+    if !trakt_config.enabled || (trakt_config.lists.is_empty() && trakt_config.charts.is_empty()) {
+        return CurationRunOutcome::NotConfigured;
+    }
     crate::evaluate_curation(http_client, None, playlist, target_name, &CurationConfig::from(trakt_config)).await
 }
 
@@ -219,10 +222,11 @@ fn category_spec(
     CurationCategorySpec {
         name: category_name,
         selector: selector_spec(content_type, tmdb_only, fuzzy_match_threshold),
-        projection_identity: ProjectionIdentityStrategy::LegacyCategoryScoped { namespace: LEGACY_CATEGORY_NAMESPACE },
+        projection_identity: ProjectionIdentityStrategy::LegacyCategoryScoped {
+            namespace: LEGACY_TRAKT_CATEGORY_NAMESPACE,
+        },
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

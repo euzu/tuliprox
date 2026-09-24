@@ -278,32 +278,7 @@ impl MultiProviderLineup {
         names
     }
 
-    /// Attempts to acquire the next available provider from a specific priority group.
-    ///
-    /// # Parameters
-    /// - `priority_group`: The provider group to search within.
-    ///
-    /// # Returns
-    /// - `ProviderAllocation`: A reference to the next available provider in the specified group.
-    ///
-    /// # Behavior
-    /// - Iterates through the providers in the given group in a round-robin manner.
-    /// - Checks if a provider has available capacity before selecting it.
-    /// - Uses atomic operations to maintain fair provider selection.
-    ///
-    /// # Thread Safety
-    /// - Uses `RwLock` for safe concurrent access.
-    /// - Ensures fair provider allocation across multiple threads.
-    ///
-    /// # Example Usage
-    /// ```text
-    /// let lineup = MultiProviderLineup::new(&config);
-    /// match lineup.acquire_next_provider_from_group(priority_group).await {
-    ///    ProviderAllocation::Exhausted => println!("All providers exhausted"),
-    ///    ProviderAllocation::Available(provider) =>  println!("Provider available {}", provider.name),
-    ///    ProviderAllocation::GracePeriod(provider) =>  println!("Provider with grace period {}", provider.name),
-    /// }
-    /// ```
+    /// Attempts to acquire the next available provider from a priority group in round-robin order.
     fn acquire_next_provider_from_group(
         priority_group: &ProviderPriorityGroup,
         grace: bool,
@@ -400,33 +375,36 @@ impl MultiProviderLineup {
     }
 
     /// Attempts to acquire a provider from the lineup based on priority and availability.
-    ///
-    /// # Returns
-    /// - `ProviderAllocation`: A reference to the acquired provider if allocation was successful.
-    ///
-    /// # Behavior
-    /// - The method iterates through provider priority groups in a round-robin fashion.
-    /// - It attempts to allocate a provider from the highest priority group first.
-    /// - If a provider has available capacity, it is returned.
-    /// - If all providers in a group are exhausted, it moves to the next group.
-    /// - Updates the internal index to ensure fair distribution of requests.
-    ///
-    /// # Thread Safety
-    /// - Uses atomic operations (`AtomicUsize`) for thread-safe indexing.
-    /// - Uses `RwLock` for thread-safe provider allocation.
-    ///
-    /// # Example Usage
-    /// ```text
-    /// let lineup = MultiProviderLineup::new(&config);
-    /// match lineup.acquire().await {
-    ///    ProviderAllocation::Exhausted => println!("All providers exhausted"),
-    ///    ProviderAllocation::Available(provider) =>  println!("Provider available {}", provider.name),
-    ///    ProviderAllocation::GracePeriod(provider) =>  println!("Provider with grace period {}", provider.name),
-    /// }
-    /// ```
     #[cfg(test)]
     fn acquire(&self, with_grace: bool, grace_period_timeout_secs: u64) -> ProviderAllocation {
         self.acquire_excluding(with_grace, grace_period_timeout_secs, &std::collections::HashSet::new())
+    }
+
+    fn scan_priority_groups<T>(
+        &self,
+        with_grace: bool,
+        mut select: impl FnMut(&ProviderPriorityGroup, bool) -> Option<T>,
+    ) -> Option<T> {
+        // Prefer providers with available capacity (no grace allocations),
+        // scanning priority groups from highest -> lowest.
+        for priority_group in &self.providers {
+            if let Some(item) = select(priority_group, false) {
+                return Some(item);
+            }
+        }
+
+        if !with_grace {
+            return None;
+        }
+
+        // If every provider is at capacity, allow grace allocations while respecting priority order.
+        for priority_group in &self.providers {
+            if let Some(item) = select(priority_group, true) {
+                return Some(item);
+            }
+        }
+
+        None
     }
 
     fn acquire_excluding(
@@ -435,58 +413,23 @@ impl MultiProviderLineup {
         grace_period_timeout_secs: u64,
         excluded_providers: &std::collections::HashSet<Arc<str>>,
     ) -> ProviderAllocation {
-        // Prefer providers with available capacity (no grace allocations),
-        // scanning priority groups from highest -> lowest.
-        for priority_group in &self.providers {
+        self.scan_priority_groups(with_grace, |priority_group, grace| {
             let allocation = Self::acquire_next_provider_from_group(
                 priority_group,
-                false,
+                grace,
                 grace_period_timeout_secs,
                 excluded_providers,
             );
-            if !matches!(allocation, ProviderAllocation::Exhausted) {
-                return allocation;
-            }
-        }
-
-        if !with_grace {
-            return ProviderAllocation::Exhausted;
-        }
-
-        // If every provider is at capacity, allow grace allocations while respecting priority order.
-        for priority_group in &self.providers {
-            let allocation = Self::acquire_next_provider_from_group(
-                priority_group,
-                true,
-                grace_period_timeout_secs,
-                excluded_providers,
-            );
-            if !matches!(allocation, ProviderAllocation::Exhausted) {
-                return allocation;
-            }
-        }
-
-        ProviderAllocation::Exhausted
+            (!matches!(allocation, ProviderAllocation::Exhausted)).then_some(allocation)
+        })
+        .unwrap_or(ProviderAllocation::Exhausted)
     }
 
-    // it intended to use with redirects to cycle through provider
+    // It is intended to use with redirects to cycle through providers.
     fn get_next(&self, grace_period_timeout_secs: u64) -> Option<Arc<ProviderConfig>> {
-        // Prefer providers with available capacity (no grace allocations),
-        // scanning priority groups from highest -> lowest.
-        for priority_group in &self.providers {
-            if let Some(config) = Self::get_next_provider_from_group(priority_group, false, grace_period_timeout_secs) {
-                return Some(config);
-            }
-        }
-
-        // If no provider is available, allow grace.
-        for priority_group in &self.providers {
-            if let Some(config) = Self::get_next_provider_from_group(priority_group, true, grace_period_timeout_secs) {
-                return Some(config);
-            }
-        }
-
-        None
+        self.scan_priority_groups(true, |priority_group, grace| {
+            Self::get_next_provider_from_group(priority_group, grace, grace_period_timeout_secs)
+        })
     }
 
     #[cfg(test)]
@@ -1122,6 +1065,7 @@ mod tests {
             provider_configs: None,
             cache_duration_seconds: 0,
             stalker: None,
+            resource_policy: None,
         }
     }
 

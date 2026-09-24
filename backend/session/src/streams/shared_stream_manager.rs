@@ -1065,6 +1065,7 @@ impl SharedStreamManager {
             register.key_by_subscriber.retain(|_, url| url.as_ref() != stream_url);
             register.by_key.remove(stream_url)
         };
+        drop(register);
         if let Some(state) = state {
             self.finish_unregister(stream_url, &state).await;
         }
@@ -1081,6 +1082,7 @@ impl SharedStreamManager {
             register.key_by_subscriber.retain(|_, url| url.as_ref() != stream_url);
             register.by_key.remove(stream_url)
         };
+        drop(register);
         self.remove_meter_uid_if_owned_by(stream_url, Some(allocation_id));
         if let Some(state) = state {
             state.preempted_token.cancel();
