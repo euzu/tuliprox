@@ -1,0 +1,53 @@
+schema_version: 1
+name: live-ts-channel-switch-single-user-two-provider-slots
+tuliprox:
+  base_url: http://fixture.invalid
+  execution_mode: isolated_fixture
+  playback_endpoint: xtream
+  fixture_stream:
+    share_live_hls: true
+    share_live_mpeg_ts: false
+  bootstrap:
+    command: "${env:TULIPROX_TESTKIT_SUT_BINARY}"
+    arguments: ["-s", "-c", "{config_file}", "-i", "{source_file}", "-a", "{api_proxy_file}"]
+    readiness_url: "{base_url}/healthcheck"
+origin:
+  run_id: live-ts-channel-switch-single-user-two-provider-slots
+  account_limit: 2
+  limit_mode: reject_new
+actors:
+  - id: tivimate
+    agent: local
+    username: admission-user
+    user_agent: TiviMate/5.1.6-testkit
+    client_ip: { mode: forwarded, value: 10.41.41.170 }
+channels:
+  live-11: { origin_marker: 11, protocol: xtream_ts }
+  live-12: { origin_marker: 12, protocol: xtream_ts }
+  live-13: { origin_marker: 13, protocol: xtream_ts }
+steps:
+  - command_id: start-11
+    start: { actor: tivimate, playback_id: playback-11, session_group: playback-11, channel: live-11 }
+    await: { valid_frames: 3 }
+  - command_id: switch-12
+    start: { actor: tivimate, playback_id: playback-12, session_group: playback-12, channel: live-12, expect_evicted: true }
+    await: { valid_frames: 3 }
+    assert_origin: { active_body: 2, max_active_body: 2, no_limit_rejections: true }
+  - command_id: release-11
+    stop: { playback_id: playback-11 }
+    assert_origin: { active_body: 1, no_limit_rejections: true }
+  - command_id: switch-13
+    start: { actor: tivimate, playback_id: playback-13, session_group: playback-13, channel: live-13 }
+    await: { valid_frames: 5 }
+    assert_origin: { active_body: 1, max_active_body: 2, no_limit_rejections: true }
+policy_contract:
+  user_access_control: true
+  users:
+    admission-user: { max_connections: 1, soft_connections: 0 }
+  admission_strategies:
+    - grace_instant_stream
+    - evict_user_same_ip_latest
+  grace: { mode: instant, timeout_millis: 2000 }
+  provider_pool:
+    - { name: account-a, max_connections: 1 }
+    - { name: account-b, max_connections: 1 }

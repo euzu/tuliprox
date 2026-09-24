@@ -340,6 +340,8 @@ pub struct Start {
     pub playback_id: String,
     pub session_group: String,
     #[serde(default)]
+    pub expect_evicted: bool,
+    #[serde(default)]
     pub url: Option<String>,
     #[serde(default)]
     pub channel: Option<String>,
@@ -383,6 +385,7 @@ impl Scenario {
         Ok(scenario)
     }
 
+    #[allow(clippy::too_many_lines)]
     pub fn validate(&self) -> Result<(), TestkitError> {
         if self.schema_version != 1 {
             return Err(TestkitError::Configuration("unsupported scenario schema version".to_owned()));
@@ -412,6 +415,7 @@ impl Scenario {
         let mut command_ids = HashSet::new();
         let mut playback_ids = HashSet::new();
         let mut seen_playback_ids = HashSet::new();
+        let mut expected_evictions = HashSet::new();
         for step in &steps {
             if !command_ids.insert(step.command_id.as_str()) || step.command_id.is_empty() {
                 return Err(TestkitError::Configuration("command IDs must be unique and non-empty".to_owned()));
@@ -429,11 +433,27 @@ impl Scenario {
                         stop.playback_id
                     )));
                 }
+                if expected_evictions.contains(stop.playback_id.as_str()) {
+                    return Err(TestkitError::Configuration(format!(
+                        "playback {} expects eviction and cannot be explicitly stopped",
+                        stop.playback_id
+                    )));
+                }
                 playback_ids.remove(stop.playback_id.as_str());
                 continue;
             };
             if !actor_ids.contains(start.actor.as_str()) {
                 return Err(TestkitError::Configuration(format!("unknown actor {}", start.actor)));
+            }
+            if start.expect_evicted {
+                if step.expect.is_rejected()
+                    || self.actors.iter().any(|actor| actor.id == start.actor && actor.agent != "local")
+                {
+                    return Err(TestkitError::Configuration(
+                        "expect_evicted requires a streaming playback on a local actor".to_owned(),
+                    ));
+                }
+                expected_evictions.insert(start.playback_id.as_str());
             }
             if start.playback_id.is_empty() || start.session_group.is_empty() {
                 return Err(TestkitError::Configuration("start requires playback_id and session_group".to_owned()));
@@ -639,6 +659,7 @@ mod tests {
             "vod-range-reopen-strict-cap.yml",
             "vod-reopen-backpressured-body.yml",
             "live-ts-same-channel-retry-latest-wins.yml",
+            "live-ts-channel-switch-single-user-two-provider-slots.yml",
             "reentry-suppresses-evicted-retry.yml",
             "soft-slot-precedes-eviction.yml",
             "soft-slot-exhausts-without-upstream-leak.yml",

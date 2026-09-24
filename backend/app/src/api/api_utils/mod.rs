@@ -495,6 +495,7 @@ struct SessionActivationRequest<'a> {
     stream_url: &'a str,
     connection_permission: UserConnectionPermission,
     connection_kind: crate::api::model::ConnectionKind,
+    granted_grace_mode: Option<crate::api::model::GraceMode>,
     socket_bound: bool,
 }
 
@@ -522,6 +523,7 @@ async fn activate_session_before_stream_open(
         stream_url,
         connection_permission,
         connection_kind,
+        granted_grace_mode,
         socket_bound,
     } = request;
     // Classify based on current session state, not the pre-computed value.
@@ -563,11 +565,26 @@ async fn activate_session_before_stream_open(
     // would evict the same session again). But we must still materialize the grace
     // lifecycle (PendingProvider / GraceActive) so the session state is consistent.
     if connection_permission == UserConnectionPermission::GracePeriod {
+        if loaded_session.as_ref().is_none_or(Option::is_none) {
+            app_state
+                .active_users
+                .ensure_user_session_placeholder(crate::api::model::CreateUserSessionParams {
+                    user,
+                    session_token,
+                    virtual_id: virtual_id.get(),
+                    provider: input.name.as_ref(),
+                    stream_url,
+                    addr: &fingerprint.addr,
+                    connection_permission,
+                    connection_kind: Some(connection_kind),
+                    socket_bound,
+                })
+                .await;
+        }
         // Materialize grace lifecycle under the guard so the session state is consistent.
-        // Determine which grace mode applies by checking the current session state.
         let current_session = match loaded_session {
-            Some(session) => session,
-            None => app_state.active_users.get_and_update_user_session(&user.username, session_token).await,
+            Some(Some(session)) => Some(session),
+            _ => app_state.active_users.get_and_update_user_session(&user.username, session_token).await,
         };
         let (_, resolved_grace) = match current_session.as_ref().map(|s| &s.lifecycle) {
             Some(crate::api::model::PlaybackLifecycle::PendingProvider { .. }) => {
@@ -597,18 +614,14 @@ async fn activate_session_before_stream_open(
                 )
             }
             Some(crate::api::model::PlaybackLifecycle::GraceActive) => {
-                // Already in GraceActive — infer mode from item_type.
-                let mode = if item_type.is_live() || item_type.is_live_adaptive() {
-                    crate::api::model::GraceMode::Hold
-                } else {
-                    crate::api::model::GraceMode::Instant
-                };
-                (crate::api::model::PlaybackLifecycle::GraceActive, Some(mode))
+                (crate::api::model::PlaybackLifecycle::GraceActive, Some(crate::api::model::GraceMode::Instant))
             }
             _ => {
-                // Session not yet in grace state — infer from item_type defaults.
-                // Live/LiveHls/LiveDash default to Hold; VOD/Catchup to Instant.
-                if item_type.is_live() || item_type.is_live_adaptive() {
+                let hold_stream = granted_grace_mode.map_or_else(
+                    || item_type.is_live() || item_type.is_live_adaptive(),
+                    |mode| matches!(mode, crate::api::model::GraceMode::Hold),
+                );
+                if hold_stream {
                     let deadline = current_time_secs().saturating_add(app_state.get_grace_options().timeout_secs);
                     let _ = app_state
                         .active_users
@@ -2363,6 +2376,7 @@ pub(crate) async fn stream_response(
             stream_url,
             connection_permission,
             connection_kind,
+            granted_grace_mode: grace_mode,
             socket_bound,
         },
     )
@@ -3470,6 +3484,7 @@ pub(crate) async fn local_stream_response(
                 stream_url: &pli.url,
                 connection_permission,
                 connection_kind,
+                granted_grace_mode: None,
                 socket_bound,
             },
         )

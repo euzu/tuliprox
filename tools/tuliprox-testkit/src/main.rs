@@ -2473,6 +2473,9 @@ async fn execute_scenario_steps<'a>(
                     start.playback_id.as_str(),
                     if step.expect.is_streaming() { "received_valid_frames" } else { "rejected_as_expected" },
                 ));
+                if start.expect_evicted && actual_streaming {
+                    expected_terminations.insert(start.playback_id.clone());
+                }
                 if remote_outcome.as_ref().is_some_and(PlaybackOutcome::is_streaming) {
                     remote_playbacks.insert(start.playback_id.clone(), actor.agent.clone());
                 }

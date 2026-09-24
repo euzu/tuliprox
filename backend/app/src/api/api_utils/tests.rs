@@ -5246,6 +5246,7 @@ async fn activate_session_before_stream_open_skips_placeholder_for_follow_up_ses
             stream_url: channel.url.as_ref(),
             connection_permission: UserConnectionPermission::Allowed,
             connection_kind: crate::api::model::ConnectionKind::Normal,
+            granted_grace_mode: None,
             socket_bound: true,
         },
     )
@@ -5317,6 +5318,7 @@ async fn activate_session_before_stream_open_revalidates_precomputed_follow_up_r
             stream_url: channel.url.as_ref(),
             connection_permission: UserConnectionPermission::Allowed,
             connection_kind: crate::api::model::ConnectionKind::Normal,
+            granted_grace_mode: None,
             socket_bound: true,
         },
     )
@@ -5398,6 +5400,7 @@ async fn activate_session_before_stream_open_stale_follow_up_reclassified_on_cou
             stream_url: channel.url.as_ref(),
             connection_permission: UserConnectionPermission::Allowed,
             connection_kind: crate::api::model::ConnectionKind::Normal,
+            granted_grace_mode: None,
             socket_bound: true,
         },
     )
@@ -5440,23 +5443,7 @@ async fn activate_session_before_stream_open_pre_resolved_grace_period_materiali
     channel.item_type = PlaylistItemType::LiveHls;
     channel.virtual_id = 55231;
 
-    // Session in Prepared state (no grace lifecycle yet).
-    app_state
-        .active_users
-        .create_user_session(crate::api::model::CreateUserSessionParams {
-            user: &user,
-            session_token: "tok-pre-resolved-grace",
-            virtual_id: channel.virtual_id,
-            provider: input.name.as_ref(),
-            stream_url: channel.url.as_ref(),
-            addr: &addr,
-            connection_permission: UserConnectionPermission::Allowed,
-            connection_kind: Some(crate::api::model::ConnectionKind::Normal),
-            socket_bound: true,
-        })
-        .await;
-
-    // Call activation with pre-resolved GracePeriod permission.
+    // A pre-resolved grace grant reaches activation before a session exists.
     let activation = activate_session_before_stream_open(
         &app_state,
         SessionActivationRequest {
@@ -5470,6 +5457,7 @@ async fn activate_session_before_stream_open_pre_resolved_grace_period_materiali
             stream_url: channel.url.as_ref(),
             connection_permission: UserConnectionPermission::GracePeriod,
             connection_kind: crate::api::model::ConnectionKind::Normal,
+            granted_grace_mode: Some(crate::api::model::GraceMode::Hold),
             socket_bound: true,
         },
     )
@@ -5483,6 +5471,42 @@ async fn activate_session_before_stream_open_pre_resolved_grace_period_materiali
         session.is_some_and(|s| matches!(s.lifecycle, crate::api::model::PlaybackLifecycle::PendingProvider { .. })),
         "pre-resolved GracePeriod must materialize as PendingProvider lifecycle"
     );
+}
+
+#[tokio::test]
+async fn pre_resolved_instant_grace_creates_counted_live_session() {
+    let app_state = create_test_app_state();
+    let addr: SocketAddr = "127.0.0.1:55233".parse().unwrap_or_else(|_| unreachable!());
+    let fingerprint = create_test_fingerprint(addr);
+    let input = app_state.app_config.sources.load().inputs[0].clone();
+    let mut user = ProxyUserCredentials::default();
+    user.username = "instant-grace-live-user".to_string();
+    user.max_connections = 1;
+    let channel = create_test_live_channel("http://provider-1.example/live/55233.ts");
+
+    let activation = activate_session_before_stream_open(
+        &app_state,
+        SessionActivationRequest {
+            fingerprint: &fingerprint,
+            input: input.as_ref(),
+            user: &user,
+            session_token: "tok-instant-grace",
+            request_class: Some(PlaybackRequestClass::Activate),
+            virtual_id: VirtualId::new(channel.virtual_id),
+            item_type: PlaylistItemType::Live,
+            stream_url: channel.url.as_ref(),
+            connection_permission: UserConnectionPermission::GracePeriod,
+            connection_kind: crate::api::model::ConnectionKind::Normal,
+            granted_grace_mode: Some(crate::api::model::GraceMode::Instant),
+            socket_bound: true,
+        },
+    )
+    .await;
+
+    assert_eq!(activation.grace_mode, Some(crate::api::model::GraceMode::Instant));
+    assert_eq!(app_state.active_users.user_connections(&user.username).await, 1);
+    let session = app_state.active_users.get_and_update_user_session(&user.username, "tok-instant-grace").await;
+    assert!(session.is_some_and(|session| session.lifecycle == crate::api::model::PlaybackLifecycle::GraceActive));
 }
 
 /// `activate_session_before_stream_open` skips placeholder for Prepare class.
@@ -5526,6 +5550,7 @@ async fn activate_session_before_stream_open_skips_placeholder_for_prepare() {
             stream_url: "http://provider.example/live/test.ts",
             connection_permission: UserConnectionPermission::Allowed,
             connection_kind: crate::api::model::ConnectionKind::Normal,
+            granted_grace_mode: None,
             socket_bound: true,
         },
     )
@@ -5749,6 +5774,7 @@ async fn activate_session_before_stream_open_marks_pending_provider_for_grace_ho
             stream_url: second_channel.url.as_ref(),
             connection_permission: UserConnectionPermission::Allowed,
             connection_kind: crate::api::model::ConnectionKind::Normal,
+            granted_grace_mode: None,
             socket_bound: false,
         },
     )
@@ -5833,6 +5859,7 @@ async fn activate_session_before_stream_open_does_not_commit_user_lease_before_p
             stream_url: channel.url.as_ref(),
             connection_permission: UserConnectionPermission::Allowed,
             connection_kind: crate::api::model::ConnectionKind::Normal,
+            granted_grace_mode: None,
             socket_bound: false,
         },
     )
