@@ -985,7 +985,7 @@ mod tests {
     fn setup_api_proxy_or_default_creates_server_when_missing() {
         let api_proxy = api_proxy_or_default(&AppConfigDto::default());
         assert_eq!(api_proxy.server.len(), 1);
-        assert!(!api_proxy.server[0].host.trim().is_empty());
+        assert_ne!(api_proxy.server[0].host.trim(), "");
     }
 
     #[cfg(unix)]

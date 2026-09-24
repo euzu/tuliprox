@@ -2022,6 +2022,43 @@ impl ActiveProviderManager {
         )
     }
 
+    /// Transfers an already reserved recording allocation into the internal
+    /// playback request that opens the provider body. The worker keeps its
+    /// original handle so preemption can still stop the recording; releases
+    /// are allocation-id based and therefore remain idempotent.
+    pub fn claim_download_connection(
+        &self,
+        allocation_id: AllocationId,
+        input_name: &Arc<str>,
+    ) -> Option<ProviderHandle> {
+        let _transition = self.lock_capacity_transition();
+        let mut connections = self.write_connections();
+        let info = connections.single.get_mut(&allocation_id)?;
+        if info.lifecycle != ConnectionLifecycle::Active || info.has_body_owner {
+            return None;
+        }
+        let provider_name = info.allocation.get_provider_name()?;
+        if !self.providers.is_provider_for_input(provider_name.as_ref(), input_name.as_ref()) {
+            return None;
+        }
+
+        // Claim under the capacity-transition lock so a duplicated internal
+        // request cannot attach a second provider body to this reservation.
+        info.lifecycle = ConnectionLifecycle::Opening;
+        let handle = ProviderHandle {
+            playback_request_id: info.playback_request_id,
+            binding_tag: None,
+            client_id: info.client_addr,
+            allocation_id: info.allocation_id,
+            allocation: info.allocation.clone(),
+            cancel_token: Some(info.cancel_token.clone()),
+            completion_token: Some(info.completion_token.clone()),
+            close_reason: Arc::clone(&info.close_reason),
+            open_generation: info.open_generation,
+        };
+        Some(handle)
+    }
+
     // This method is used for redirects to cycle through the provider
     pub fn get_next_provider(&self, provider_name: &Arc<str>) -> Option<Arc<ProviderConfig>> {
         self.providers.get_next_provider(provider_name)
@@ -4567,6 +4604,31 @@ mod tests {
 
         manager.release_handle(&alloc_1);
         manager.release_handle(&alloc_2);
+    }
+
+    #[test]
+    fn recording_allocation_is_claimed_without_consuming_a_second_slot() {
+        let app_cfg = build_test_app_config(None, 1);
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+        let input_name = "provider_1".intern();
+
+        let reserved =
+            manager.acquire_connection_for_download(&input_name, 0).expect("recording reserves the only provider slot");
+        assert_eq!(manager.get_provider_connections_count(), 1);
+
+        let claimed = manager
+            .claim_download_connection(reserved.allocation_id, &input_name)
+            .expect("internal recording request claims the existing reservation");
+        assert_eq!(claimed.allocation_id, reserved.allocation_id);
+        assert_eq!(manager.get_provider_connections_count(), 1, "claim must not allocate a second slot");
+        assert!(
+            manager.claim_download_connection(reserved.allocation_id, &input_name).is_none(),
+            "one reservation can only own one provider body"
+        );
+
+        manager.complete_release(reserved.allocation_id);
+        assert_eq!(manager.get_provider_connections_count(), 0);
     }
 
     /// A=2 / B=3 pool: five confirmed playbacks exhaust the pool and a sixth start is

@@ -139,8 +139,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_admin_owner_always_delivers() {
-        let meta = make_meta(RecordingVisibility::Private, RecordingOwner::LegacyAdmin);
+    fn shared_recording_always_delivers() {
+        let meta =
+            make_meta(RecordingVisibility::Shared, RecordingOwner::User(shared::model::UserId::from("web:alice")));
         let d = decide(&meta, LifecycleEvent::Failed, 1_000, false, Some("recording failed".to_string()));
         match d {
             DispatchDecision::PersistAndDeliver { kind, attempted_at, .. } => {

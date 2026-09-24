@@ -106,6 +106,7 @@ error_kinds! {
     ConfigSource => "config source error",
     ConfigStream => "config stream error",
     ConfigStreamHistory => "config stream history error",
+    ConfigRecording => "config recording error",
     ConfigVideoDownload => "config video download error",
     ConfigTarget => "config target error",
     TargetBouquet => "target bouquet error",

@@ -251,7 +251,7 @@ mod tests {
         assert!(data.claims.is_admin());
         assert!(data.claims.permissions.contains(Permission::ConfigRead));
         assert!(data.claims.permissions.contains(Permission::RecordingRead));
-        assert!(data.claims.permissions.contains(Permission::RecordingWrite));
+        assert!(data.claims.permissions.contains(Permission::RecordingManage));
         assert_eq!(data.claims.permission_schema_version, CURRENT_PERMISSION_SCHEMA_VERSION);
     }
 
@@ -271,7 +271,7 @@ mod tests {
         assert_eq!(data.claims.subject_id, Some(UserId::from("web:alice-uuid")));
         assert!(!data.claims.is_admin());
         assert!(data.claims.permissions.contains(Permission::RecordingRead));
-        assert!(!data.claims.permissions.contains(Permission::RecordingWrite));
+        assert!(!data.claims.permissions.contains(Permission::RecordingManage));
     }
 
     #[test]

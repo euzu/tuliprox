@@ -7,42 +7,41 @@ consume.
 
 ## 1. Configuration reference
 
-All new fields live under `video.download.recording` in the config file. Every field is optional;
+All fields live under `video.recording` in the config file. Every field is optional;
 defaults match the recommended values.
 
 ```yaml
 video:
-  download:
-    recording:
-      enabled: true                   # default: true; false stops every DVR supervisor
-      container_format: mpegts        # mpegts (default) | matroska | mp4
-      directory: recordings/          # default: <download-dir>/recordings
-      timezone: Europe/Berlin         # default: UTC (IANA required)
-      filename_template: "{channel}_{program_title}_{start_time}"
-      default_pre_roll_secs: 0        # 0..=max_pre_roll_secs
-      max_pre_roll_secs: 900          # ≤ 900 (15 min)
-      default_post_roll_secs: 0       # 0..=max_post_roll_secs
-      max_post_roll_secs: 1800        # ≤ 1800 (30 min)
-      retention:
+  recording:
+    enabled: true                   # default: true; false stops every DVR supervisor
+    container_format: mpegts        # mpegts (default) | matroska | mp4
+    directory: recordings/          # default: recordings
+    timezone: Europe/Berlin         # default: UTC (IANA required)
+    filename_template: "{channel}_{program_title}_{start_time}"
+    default_pre_roll_secs: 0        # 0..=max_pre_roll_secs
+    max_pre_roll_secs: 900          # ≤ 900 (15 min)
+    default_post_roll_secs: 0       # 0..=max_post_roll_secs
+    max_post_roll_secs: 1800        # ≤ 1800 (30 min)
+    retention:
         keep_last_per_channel: 10     # > 0 when set
         delete_after_days: 30         # > 0 when set
         sweep_interval_secs: 3600     # default 3600; age/count sweep cadence
-      disk:
+    disk:
         high_water_percent: 85        # 0..=100
         low_water_percent: 70         # 0..=100 and < high_water_percent
         cleanup_interval_secs: 3600   # > 0; watermark-check cadence
         safety_bytes: 1073741824      # > 0 (1 GiB)
-      quota:
+    quota:
         default_private_bytes: 53687091200   # 50 GiB
         per_user_bytes:
           "web:user-uuid-1": 107374182400    # 100 GiB
         shared_bytes: 536870912000           # 500 GiB
-      notifications:
+    notifications:
         outbox_buffer: 1024           # default 1024; in-memory queue depth
         max_attempts: 6               # default 6; then dead-lettered
         backoff_initial_secs: 5       # default 5
         backoff_max_secs: 900         # default 900 (15 min)
-      fallback_bytes_per_minute: 8388608     # 8 MiB/min, > 0
+    fallback_bytes_per_minute: 8388608     # 8 MiB/min, > 0
 ```
 
 | Field                                | Default  | Range                       | Restart required | Effect                                                                                                                                                                                                                                                              |
@@ -74,8 +73,8 @@ delete recordings you expected to keep.
 
 Before restarting after a configuration change:
 
-1. **Read back your effective policy.** Check `video.download.recording.retention` and
-   `video.download.recording.disk` in `config.yml`.
+1. **Read back your effective policy.** Check `video.recording.retention` and
+   `video.recording.disk` in `config.yml`.
 2. **Work out what would be deleted.** `keep_last_per_channel: N` keeps the *N most recent*
    recordings per (owner, channel) and deletes the rest. `delete_after_days: N` deletes anything
    whose `completed_at` is more than N days old. The two are a **union**, not an intersection —
@@ -83,7 +82,8 @@ Before restarting after a configuration change:
 3. **If you are unsure, start with retention off.** Remove the `retention` block (or the
    individual keys) and set `enabled: true` with no policy. Nothing is deleted, and you can
    enable a policy deliberately once you have looked at the library.
-4. **Back up** `downloads_state.json` and the recording directory.
+4. **Back up** `recordings.db`, the recovery generations under `backup_dir`, and the
+   recording directory.
 
 There is no dry-run mode. Deletions are logged under the `recording::audit` target with a
 `recording_retention_delete` line and a reason (`Age`, `Count`, or `watermark`), so
@@ -176,35 +176,38 @@ bin/dvr_doctor.sh --token "$ADMIN_TOKEN"
 bin/dvr_doctor.sh --url https://tuliprox.example --token "$ADMIN_TOKEN" --storage-dir /opt/tuliprox/data
 ```
 
-It reports supervisor health, the effective `recording` config block, quota, and aggregate
-summaries of `downloads_state.json`, `recording_rules.json`, and the notification outbox —
-including a `stuck_deleting` count and the set of channels the outbox is still retrying. The
-summaries are deliberately aggregate: no titles, filenames, or owner ids are printed, because a
-diagnostics dump gets pasted into tickets. The health and config sections need an administrator
-token; the on-disk sections work without one.
+It reports supervisor health, the effective `recording` config block, quota, the recording
+repository and its recovery generations, and aggregate summaries of `recording_rules.json` and
+the notification outbox. The summaries are deliberately aggregate: no titles, filenames, or
+owner ids are printed, because a diagnostics dump gets pasted into tickets. The health and
+config sections need an administrator token; the on-disk sections work without one, and take
+`--backup-dir` because the recovery generations live under `backup_dir`, not `storage_dir`.
 
 ## 2. Recording directory layout and immutable IDs
 
-The recording root is the path configured in `recording.directory` (default `<download-dir>/recordings`).
-The runtime resolves the path under `<recording-root>/users/<owner-id>/<rel>` for private
-recordings and `<recording-root>/shared/<rel>` for shared recordings. The `<owner-id>` is the
-authenticated `UserId` from the JWT subject claim (UUID v4 hex with `web:` / `api:` /
-`builtin:admin` namespaces). The `<rel>` is the collision-safe relative path the queue-mutation
-boundary reserved.
+The recording root is the path configured in `recording.directory` (default
+`<download-dir>/recordings`). Every recording is stored at `<recording-root>/<rel>`, where
+`<rel>` is the collision-safe relative path reserved at the queue-mutation boundary.
 
-The directory tree:
+The layout carries **no owner or visibility component**. One physical file is shared by every
+user who requested it, so keying its directory on an owner would be wrong the moment a second
+user attaches, and would force the file to move on disk when the first detaches.
+
+With `organize_into_directories` enabled the layout groups by what the server resolved:
 
 ```text
 <recording-root>/
-  users/
-    <owner-id>/<rel>     # private
-  shared/<rel>           # shared
+  <channel>/<file>                  # live
+  <title>/<file>                    # vod
+  <series>/Season NN/<file>         # series episode
+  <file>                            # unorganized, or no grouping resolved
 ```
 
-`<owner-id>` is **immutable** for the lifetime of the recording record. The runtime never derives
-directory names from usernames, channels, programme titles, or any other mutable identifier. The
-path is canonicalized at file open time against the recording root's file descriptor; any path
-that escapes the root (via `..`, symlinks, or absolute paths) is rejected with
+Path components are sanitised to a single filesystem-safe component: separators, control
+characters and the Windows-forbidden set collapse to `_`, leading and trailing dots are
+stripped, Windows device names fall back to a placeholder, and each component is capped at 255
+bytes on a character boundary. The path is validated against the recording root at open time;
+any path that escapes the root (via `..`, symlinks, or absolute paths) is rejected with
 `recording_unsafe_path`.
 
 ## 3. Filename placeholders
@@ -261,7 +264,7 @@ runtime no longer carries. The charge drops to zero only when `finalize_deletion
 task from the queue.
 
 A task is counted exactly once. Private pools key on `RecordingOwner::User(uid)`; shared pools key
-on `RecordingVisibility::Shared`; `LegacyAdmin` recordings count toward the shared pool. Per-user
+on `RecordingVisibility::Shared`. Per-user
 overrides beat the configured default; an absent limit is unlimited.
 
 ### 5.1 Active overrun policy
@@ -344,20 +347,21 @@ behaviour they cover is asserted portably by the no-clobber tests.
 
 ## 8. Authorization matrix
 
-| Operation                    | Private recording                 | Shared recording                 | `LegacyAdmin`                   | Orphan       |
-|------------------------------|-----------------------------------|----------------------------------|---------------------------------|--------------|
-| Read / Playback / Download   | owner with `recording.read`       | anyone with `recording.read`     | admin only                      | admin only   |
-| Create private               | user with `recording.write`       | n/a                              | admin only                      | n/a          |
-| Create shared                | rejected (admin only)             | admin + `recording.write`        | admin only                      | n/a          |
-| Edit / Cancel / Delete       | owner + `recording.write`         | admin + `recording.write`        | admin only                      | n/a          |
-| Manage recurring rule        | owner + `recording.write`         | admin + `recording.write`        | admin only                      | n/a          |
-| `SystemRetentionDelete`      | ownership bypassed; state-gated   | ownership bypassed; state-gated  | ownership bypassed; state-gated | n/a          |
-| Orphan catalog               | n/a                               | n/a                              | n/a                             | admin only   |
+| Operation                    | Private recording                 | Shared recording                 | Orphan                          |
+|------------------------------|-----------------------------------|----------------------------------|---------------------------------|
+| Read / Playback / Download   | owner with `recording.read`       | anyone with `recording.read`     | admin only                      |
+| Create private               | user with `recording.create`      | n/a                              | n/a                             |
+| Create shared                | rejected (admin only)             | admin + `recording.create`       | n/a                             |
+| Edit / Cancel                | owner + `recording.manage`        | admin + `recording.manage`       | n/a                             |
+| Delete                       | owner + `recording.delete`        | admin + `recording.delete`       | n/a                             |
+| Manage recurring rule        | owner + `recording.manage`        | admin + `recording.manage`       | admin only                      |
+| `SystemRetentionDelete`      | ownership bypassed; state-gated   | ownership bypassed; state-gated  | ownership bypassed; state-gated |
+| Orphan catalog               | n/a                               | n/a                              | n/a                             |
 
 Administrators **do not** implicitly receive another regular user's private recording content. The
 private owner is the only non-administrator allowed to read it. Administrative access is read-only
 for diagnosis; mutations require either the `SystemRetentionDelete` action (which the retention
-worker is the only legitimate caller of) or the appropriate `recording.write` + ownership
+worker is the only legitimate caller of) or the appropriate recording permission + ownership
 combination.
 
 Orphan catalog entries (recordings whose target/input no longer matches a configured source) are
@@ -368,8 +372,8 @@ id is generated per discovery.
 
 The identity registry is `web_user_ids.json` in the storage directory. The startup sequence is:
 
-1. Pre-scan `downloads_state.json` for `RecordingOwner::User(_)` entries (without the registry
-   loaded).
+1. Pre-scan the recording repository for `RecordingOwner::User(_)` entries (without the
+   registry loaded).
 2. Load the existing registry (if any).
 3. Initialize the registry **only** when no persisted real owner exists. New `UserId`s are
    generated for any username that lacks one.
@@ -397,39 +401,53 @@ Operators do **not** need to manually invalidate tokens on a schema bump. Existi
 `web_user_ids.json` are preserved; only the `subject_id` mapping for current usernames is
 recomputed if missing.
 
-## 11. Deprecated `/file/record` behavior
+## 11. The removed `/file/record` route
 
-The legacy `POST /file/record` route is **deprecated** and delegates to
-`RecordingService::create_recording` for administrators only. Non-administrators receive a 403 —
-the deprecated route does not bypass the new policy.
+`POST /file/record` and the whole `/api/v1/file/download/*` family are
+**gone**. There is no deprecated alias and no compatibility shim: a caller
+still using them gets a `404`.
 
-The migration:
-
-- **Frontend code**: switch from `downloads_service::queue_recording` to
-  `recording_service::RecordingService::create_task`. The new client submits
-  `RecordingSourceInput` (target_id + virtual_id + input_name) and `CreateRecordingTaskRequest`,
-  never a free-form URL.
-- **Operator code**: the legacy route is documented as deprecated and will be removed in the
-  next major release. New automations should use `/api/v1/recording/tasks` (and
-  `/api/v1/recording/rules` for recurring rules).
+Automations must use the recording routes below. They submit server-owned
+source ids (`target_id` + `virtual_id` + `input_name`), never a free-form URL
+or filename, so a caller cannot direct a recording at arbitrary storage.
 
 ## 12. Scoped REST and WebSocket APIs
 
-The recording surface is exposed under `/api/v1/recording`:
+Recording REST is **commands only**. Every successful command answers
+`204 No Content`; there is no list, task, status or quota endpoint to poll.
+List, progress, quota and availability all reach a client on the WebSocket
+snapshot, so a recording has one description rather than two that can
+disagree.
 
 ```text
-GET    /api/v1/recording/tasks
-POST   /api/v1/recording/tasks
-PATCH  /api/v1/recording/tasks/{id}
-POST   /api/v1/recording/tasks/{id}/cancel
-DELETE /api/v1/recording/tasks/{id}
+POST   /api/v1/recording/requests
+PATCH  /api/v1/recording/requests/{id}
+POST   /api/v1/recording/requests/{id}/cancel
+DELETE /api/v1/recording/requests/{id}
+POST   /api/v1/recording/materializations/{id}/pause
+POST   /api/v1/recording/materializations/{id}/resume
+POST   /api/v1/recording/materializations/{id}/retry
+DELETE /api/v1/recording/materializations/{id}
 POST   /api/v1/recording/conflicts/preview
-GET    /api/v1/recording/quota
+GET    /api/v1/recording/availability
+GET    /api/v1/recording/health
 GET    /api/v1/recording/rules
 POST   /api/v1/recording/rules
 PATCH  /api/v1/recording/rules/{id}
 DELETE /api/v1/recording/rules/{id}?future=retain|cancel
 ```
+
+A `requests/{id}` route addresses the caller's own library entry. The four
+`materializations/{id}` routes act on the shared physical file, are
+administrator-only, and reject Live captures — a broadcast cannot be paused,
+resumed or retried. Deleting a materialization is refused while any entry
+still references it.
+
+`POST /api/v1/recording/requests` accepts an optional `Idempotency-Key`.
+The same principal, key and body returns the original `204` without creating
+a second recording; the same key with a different body returns `409`. The
+record is kept for 24 hours from first acceptance and survives a restart, so
+a client retrying across one cannot duplicate its recording.
 
 The `tasks` payload is a per-session filtered snapshot. The WebSocket protocol carries
 `RecordingSnapshotRequest` and `RecordingSnapshotResponse { revision, tasks }`; there is no
@@ -449,8 +467,7 @@ The cancel-recording-task endpoint emits **both** events because cancelling futu
 recordings mutates the queue as well as the rule store.
 
 Filtering is server-side: private events go only to the owner session, shared events go to anyone
-with `recording.read`, `LegacyAdmin` events go only to administrator sessions. Generic download
-events (`DownloadsResponse`, `DownloadsDeltaResponse`) contain no recording tasks.
+with `recording.read`. A session is never sent another user's recording.
 
 ## 13. Conflict-preview advisory semantics
 
@@ -576,7 +593,6 @@ because a messaging provider is down.
 The routing decision:
 
 - `Shared` → deliver to global channels.
-- `Private` + `LegacyAdmin` owner → deliver.
 - `Private` + administrator owner → deliver.
 - `Private` + regular user owner → suppress.
 
@@ -585,21 +601,21 @@ Missing messaging configuration is a no-op; the adapter logs the dispatch decisi
 ## 16. Migration checklist
 
 1. **Stop or quiesce** recording activity. Cancel active recordings and let the queue drain.
-2. **Back up** the existing config, `downloads_state.json`, user / auth config, and messaging
-   config.
+2. **Back up** the existing config, `recordings.db` with its recovery generations, user /
+   auth config, and messaging config.
 3. **Deploy** the version with additive normalization. No config changes are required for the
    existing flows to keep working.
 4. **Back up `web_user_ids.json`** after the first successful start. The bootstrap writes the
    file automatically; the operator should preserve it across restarts.
-5. **Grant `recording.read` / `recording.write`** explicitly to the user groups that need them.
+5. **Grant `recording.read`, `recording.create`, `recording.manage` and `recording.delete`** explicitly to the user groups that need them.
    The `permissions: 65535` legacy config does **not** implicitly grant the new bits.
 6. **Refresh old tokens**. The schema bump forces a token refresh; pre-bump tokens get an
    `X-Token-Refresh: required` 401. Users sign in again to receive the current claims.
 7. **Verify the recording root and free space** with `statvfs` (Linux) /
    `GetDiskFreeSpaceExW` (Windows). Confirm the `safety_bytes` is at least 1 GiB.
-8. **Verify legacy recordings and paths**. The pre-Phase-1 `file_dir` / `file_path` fields
-   normalize to private `LegacyAdmin` recordings. Confirm the existing media files are within
-   the configured recording root or the legacy download root before enabling retention.
+8. **Expect no recordings to carry over.** There is no migration: a pre-existing
+   `recordings_state.json` is ignored and the library starts empty. Existing media files are left
+   where they are and are not adopted into the new library.
 9. **Test one private and one shared recording** end-to-end before enabling the retention
    worker in production.
 10. **Enable retention / quotas gradually**. Start with `delete_after_days` only; add
@@ -613,10 +629,11 @@ Missing messaging configuration is a no-op; the adapter logs the dispatch decisi
 
 The acceptance scenarios the operator should verify before declaring the migration done:
 
-1. Old configuration and `downloads_state.json` load without data loss.
+1. Old configuration loads without data loss. The recording queue does **not** migrate: a
+   pre-existing `recordings_state.json` is ignored and the queue starts empty.
 2. Invalid recording kind / metadata combinations fail with `recording_invalid_state` or
    `recording_invalid_source`.
-3. Queue persistence failure leaves the state and revision unchanged and emits no delta.
+3. Queue persistence failure leaves the state and revision unchanged and publishes nothing.
 4. WebSocket revision gaps trigger a filtered resnapshot.
 5. A private recording is invisible to a second user in tasks, deltas, catalog, playback,
    conflicts, quota, and logs.
@@ -667,9 +684,8 @@ The DVR is a feature flag, so a rollback does not require a binary downgrade:
 
 ```yaml
 video:
-  download:
-    recording:
-      enabled: false
+  recording:
+    enabled: false
 ```
 
 That stops the supervisors and the rule scheduler, answers `501 recording_disabled` on the

@@ -1293,6 +1293,122 @@ async fn forced_reopen_stays_on_pinned_provider_account() {
 }
 
 #[tokio::test]
+async fn forced_series_reopen_uses_free_pool_account_and_updates_session_pin() {
+    const ACCOUNT_B_BODY: &[u8] = b"account-b-marker";
+
+    let head_a = "HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\na".to_string();
+    let head_b = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: video/x-matroska\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        ACCOUNT_B_BODY.len()
+    );
+    let (origin_a, mut task_a) = spawn_legacy_hls_test_origin(head_a, vec![b'a']).await;
+    let (origin_b, task_b) = spawn_legacy_hls_test_origin(head_b, ACCOUNT_B_BODY.to_vec()).await;
+
+    let input = Arc::new(ConfigInput {
+        id: 1,
+        name: "provider_1".intern(),
+        input_type: InputType::Xtream,
+        headers: HashMap::default(),
+        url: format!("http://{origin_a}"),
+        username: Some("user-a".to_string()),
+        password: Some("pass-a".to_string()),
+        enabled: true,
+        priority: 0,
+        max_connections: 1,
+        method: InputFetchMethod::default(),
+        aliases: Some(vec![ConfigInputAlias {
+            id: 2,
+            name: "provider_2".intern(),
+            url: format!("http://{origin_b}"),
+            username: Some("user-b".to_string()),
+            password: Some("pass-b".to_string()),
+            priority: 1,
+            max_connections: 1,
+            exp_date: None,
+            enabled: true,
+            stalker: None,
+        }]),
+        ..ConfigInput::default()
+    });
+    let app_config = Arc::new(create_test_provider_app_config());
+    app_config.sources.store(Arc::new(SourcesConfig { inputs: vec![Arc::clone(&input)], ..SourcesConfig::default() }));
+    let app_state = create_test_app_state_for_config(app_config);
+    let busy_addr: SocketAddr = "127.0.0.1:55410".parse().unwrap_or_else(|_| unreachable!());
+    let busy = app_state.active_provider.acquire_exact_connection_with_grace(
+        &input.name,
+        &busy_addr,
+        false,
+        0,
+        crate::api::model::ConnectionKind::Normal,
+    );
+    assert!(busy.is_some(), "setup must occupy the pinned provider account");
+
+    let client_addr: SocketAddr = "127.0.0.1:55411".parse().unwrap_or_else(|_| unreachable!());
+    let fingerprint = create_test_fingerprint(client_addr);
+    let mut user = ProxyUserCredentials::default();
+    user.username = "viewer-pool-failover".to_string();
+    let stream_url = format!("http://{origin_a}/series/user-a/pass-a/1.mkv");
+    let session = UserSession {
+        token: "series-pool-token".to_string(),
+        transition_version: 1,
+        virtual_id: 42,
+        provider: Arc::clone(&input.name),
+        stream_url: stream_url.clone().intern(),
+        provider_session_headers: HashMap::new(),
+        user_agent_stream_index: None,
+        addr: client_addr,
+        socket_bound: false,
+        active_addrs: vec![client_addr],
+        ts: 1,
+        started_at: 1,
+        permission: UserConnectionPermission::Allowed,
+        connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+        lifecycle: crate::api::model::PlaybackLifecycle::Active,
+    };
+    let mut stream_channel = create_test_live_channel(&stream_url);
+    stream_channel.virtual_id = session.virtual_id;
+    stream_channel.provider_id = 1;
+    stream_channel.input_name = Arc::clone(&input.name);
+    stream_channel.item_type = PlaylistItemType::Series;
+    stream_channel.cluster = XtreamCluster::Series;
+    stream_channel.url = session.stream_url.clone();
+
+    let response = force_provider_stream_response(
+        &fingerprint,
+        &app_state,
+        &session,
+        stream_channel,
+        ForceStreamRequestContext {
+            req_headers: &HeaderMap::new(),
+            input: &input,
+            user: &user,
+            session_reservation_ttl_secs: 0,
+            content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+        },
+        None,
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.expect("stream body").to_bytes();
+    assert_eq!(body.as_ref(), ACCOUNT_B_BODY, "reopen must use the free provider account B");
+    task_b.await.expect("origin B task completes");
+
+    let updated = app_state
+        .active_users
+        .get_and_update_user_session(&user.username, &session.token)
+        .await
+        .expect("reopened session is persisted");
+    assert_eq!(updated.provider.as_ref(), "provider_2");
+    assert!(updated.stream_url.contains("/series/user-b/pass-b/1.mkv"));
+
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(100), &mut task_a).await.is_err());
+    task_a.abort();
+    app_state.active_provider.release_connection(&busy_addr);
+}
+
+#[tokio::test]
 async fn overlapping_vod_range_requests_return_correct_account_bytes() {
     const VOD_BODY: &[u8] = b"0123456789abcdefghij";
 
@@ -3804,6 +3920,12 @@ fn provider_affinity_policy_matches_stream_types() {
     assert!(PlaylistItemType::Video.requires_provider_affinity());
     assert!(PlaylistItemType::Series.requires_provider_affinity());
     assert!(PlaylistItemType::Catchup.requires_provider_affinity());
+
+    assert!(!allows_provider_pool_failover(PlaylistItemType::LiveHls));
+    assert!(!allows_provider_pool_failover(PlaylistItemType::LiveDash));
+    assert!(allows_provider_pool_failover(PlaylistItemType::Video));
+    assert!(allows_provider_pool_failover(PlaylistItemType::Series));
+    assert!(!allows_provider_pool_failover(PlaylistItemType::Catchup));
 }
 
 #[tokio::test]
@@ -3840,7 +3962,7 @@ async fn resolve_streaming_strategy_honors_forced_provider_fallback_policy() {
             connection_kind: crate::api::model::ConnectionKind::Normal,
             session_owner: Some("vod-session"),
             playback_kind: crate::model::PlaybackKind::Vod,
-            accept_requested_stream_url: false,
+            accept_requested_stream_url: true,
         },
     )
     .await;
@@ -3866,16 +3988,17 @@ async fn resolve_streaming_strategy_honors_forced_provider_fallback_policy() {
             connection_kind: crate::api::model::ConnectionKind::Normal,
             session_owner: Some("live-session"),
             playback_kind: crate::model::PlaybackKind::LiveTs,
-            accept_requested_stream_url: false,
+            accept_requested_stream_url: true,
         },
     )
     .await;
-    let (ProviderStreamState::Available(Some(fallback_provider), _)
-    | ProviderStreamState::GracePeriod(Some(fallback_provider), _)) = fallback.provider_stream_state
+    let (ProviderStreamState::Available(Some(fallback_provider), fallback_url)
+    | ProviderStreamState::GracePeriod(Some(fallback_provider), fallback_url)) = fallback.provider_stream_state
     else {
         panic!("fallback-enabled request should allocate a provider")
     };
     assert_eq!(fallback_provider.as_ref(), "provider_2");
+    assert_eq!(fallback_url.as_ref(), "http://provider-2.example/movie/user2/pass2/1.mkv");
 
     app_state.active_provider.release_connection(&busy_addr);
     app_state.active_provider.release_connection(&strict_addr);
@@ -3996,6 +4119,7 @@ async fn create_stream_response_details_preserves_stored_headers_when_fallback_o
         Some(session_token),
         Some(&initial_headers),
         true,
+        None,
         None,
         None,
     )
@@ -4674,6 +4798,10 @@ fn create_test_app_state_for_config(app_cfg: Arc<AppConfig>) -> Arc<AppState> {
     let (manual_update_sender, _) = mpsc::channel::<crate::api::model::ManualPlaylistUpdateRequest>(1);
 
     Arc::new(AppState {
+        recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
+            Arc::clone(&active_provider),
+            Arc::clone(&connection_manager),
+        ),
         forced_targets: Arc::new(ArcSwap::from_pointee(ProcessTargets {
             enabled: false,
             inputs: Vec::new(),
@@ -4685,7 +4813,7 @@ fn create_test_app_state_for_config(app_cfg: Arc<AppConfig>) -> Arc<AppState> {
         http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
         public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
         resource_clients: empty_resource_client_set(),
-        downloads: Arc::new(crate::api::model::DownloadQueue::new()),
+        recordings: Arc::new(crate::api::model::RecordingQueue::new()),
         cache: Arc::new(ArcSwapOption::default()),
         shared_stream_manager,
         hls_proxy: Arc::new(crate::api::model::HlsProxyManager::new()),
@@ -7756,12 +7884,86 @@ async fn failed_provider_open_preserves_other_allocation_on_same_socket() -> Res
         false,
         None,
         None,
+        None,
     )
     .await?;
     assert!(details.provider_handle.is_none());
     assert_eq!(app.active_provider.get_provider_connections_count(), 1);
     assert!(!live.cancel_token.as_ref().is_some_and(tokio_util::sync::CancellationToken::is_cancelled));
     app.active_provider.release_handle(&live);
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn recording_provider_reservation_opens_without_second_slot() -> Result<(), Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let upstream = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await?;
+        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndata").await
+    });
+    let mut config = create_test_provider_app_config();
+    let input = Arc::new(ConfigInput {
+        id: 1,
+        name: "provider_1".intern(),
+        enabled: true,
+        input_type: InputType::Xtream,
+        url: format!("http://{upstream}"),
+        username: Some("user1".to_string()),
+        password: Some("pass1".to_string()),
+        max_connections: 1,
+        ..ConfigInput::default()
+    });
+    config.sources =
+        Arc::new(ArcSwap::from_pointee(SourcesConfig { inputs: vec![Arc::clone(&input)], ..SourcesConfig::default() }));
+    let app = create_test_app_state_for_config(Arc::new(config));
+    let reserved =
+        app.active_provider.acquire_connection_for_download(&input.name, 0).ok_or("recording reservation missing")?;
+    let allocation_id = reserved.allocation_id;
+    let claimed = app
+        .active_provider
+        .claim_download_connection(allocation_id, &input.name)
+        .ok_or("recording reservation claim missing")?;
+    let managed = tuliprox_session::ManagedProviderHandle::new(Arc::clone(&app.active_provider), claimed);
+    let addr = "127.0.0.1:55145".parse()?;
+    let url = format!("http://{upstream}/live/user1/pass1/100.ts");
+    let channel = create_test_live_channel(&url);
+    let details = create_stream_response_details(
+        &app,
+        &get_stream_options(&app.app_config),
+        &url,
+        "recording-user",
+        &create_test_fingerprint(addr),
+        &HeaderMap::new(),
+        &input,
+        &channel,
+        PlaylistItemType::Live,
+        crate::api::model::ProviderContentRepresentationMode::PreserveOrigin,
+        false,
+        UserConnectionPermission::Allowed,
+        None,
+        true,
+        false,
+        VirtualId::new(channel.virtual_id),
+        0,
+        crate::api::model::ConnectionKind::Normal,
+        false,
+        Some("recording-session"),
+        None,
+        false,
+        None,
+        None,
+        Some(managed),
+    )
+    .await?;
+
+    assert!(details.stream.is_some(), "the claimed reservation must open the provider body");
+    assert!(details.custom_reason.is_none(), "the request must not fall back to ProviderExhausted");
+    assert_eq!(app.active_provider.get_provider_connections_count(), 1, "recording consumes exactly one slot");
+
+    drop(details);
+    app.active_provider.complete_release(allocation_id);
     server.await??;
     Ok(())
 }
@@ -8985,6 +9187,7 @@ async fn intentional_deferred_open_retains_provider_grace_handle() {
         None,
         false,
         Some(true),
+        None,
         None,
     )
     .await

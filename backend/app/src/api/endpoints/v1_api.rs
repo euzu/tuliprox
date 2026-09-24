@@ -3,7 +3,6 @@ use crate::{
         api_utils::{internal_server_error, json_or_bin_response, try_unwrap_body},
         auth_middleware::permission_layer,
         endpoints::{
-            download_api,
             extract_accept_header::ExtractAcceptHeader,
             library_api::library_api_register,
             rbac_api::{rbac_api_register, rbac_api_register_unprotected},
@@ -189,26 +188,12 @@ pub fn v1_api_register(
 
     let system_write = axum::routing::Router::new().route("/geoip/update", axum::routing::get(geoip_update));
 
-    let download_read =
-        axum::routing::Router::new().route("/file/download/info", axum::routing::get(download_api::download_file_info));
-
-    let download_write = axum::routing::Router::new()
-        .route("/file/download", axum::routing::post(download_api::queue_download_file))
-        .route("/file/record", axum::routing::post(download_api::queue_recording_file))
-        .route("/file/download/pause", axum::routing::post(download_api::pause_download))
-        .route("/file/download/resume", axum::routing::post(download_api::resume_download))
-        .route("/file/download/cancel", axum::routing::post(download_api::cancel_download))
-        .route("/file/download/remove", axum::routing::post(download_api::remove_download))
-        .route("/file/download/retry", axum::routing::post(download_api::retry_download));
-
     let mut router = axum::routing::Router::new();
 
     if web_auth_enabled {
         router = router
             .merge(system_read.layer(permission_layer!(app_state, Permission::SystemRead)))
             .merge(system_write.layer(permission_layer!(app_state, Permission::SystemWrite)))
-            .merge(download_read.layer(permission_layer!(app_state, Permission::DownloadRead)))
-            .merge(download_write.layer(permission_layer!(app_state, Permission::DownloadWrite)))
             .merge(v1_api_config_register_with_permissions(app_state))
             .merge(v1_api_user_register_with_permissions(axum::routing::Router::new(), app_state))
             .merge(v1_api_playlist_register_with_permissions(axum::routing::Router::new(), app_state))
@@ -229,8 +214,6 @@ pub fn v1_api_register(
         router = router
             .merge(system_read)
             .merge(system_write)
-            .merge(download_read)
-            .merge(download_write)
             .merge(v1_api_config_register(axum::routing::Router::new()))
             .merge(v1_api_user_register(axum::routing::Router::new()))
             .merge(v1_api_playlist_register_protected(axum::routing::Router::new()))
@@ -262,7 +245,7 @@ mod tests {
     use crate::{
         api::model::{create_test_app_state, ConnectionKind, ConnectionParams},
         auth::{create_jwt_web_user, Fingerprint},
-        model::Config,
+        model::{Config, RecordingConfig},
     };
     use axum::{
         body::Body,
@@ -278,11 +261,18 @@ mod tests {
     /// A config whose DVR block is present and explicitly on or off.
     /// Built through the DTO so the `enabled` flag travels the same
     /// deserialize → domain path it does in production.
+    ///
     fn config_with_recording_enabled(enabled: bool) -> Config {
-        let recording = shared::model::RecordingConfigDto { enabled, ..Default::default() };
-        let download = shared::model::VideoDownloadConfigDto { recording: Some(recording), ..Default::default() };
-        let video = shared::model::VideoConfigDto { download: Some(download), ..Default::default() };
-        Config { video: Some((&video).into()), ..Config::default() }
+        let recording_dto = shared::model::RecordingConfigDto { enabled, ..Default::default() };
+        let recording_runtime = RecordingConfig::from(&recording_dto);
+        Config {
+            video: Some(tuliprox_core::model::VideoConfig {
+                extensions: Vec::new(),
+                web_search: None,
+                recording: Some(recording_runtime),
+            }),
+            ..Config::default()
+        }
     }
 
     fn config_with_recording_and_web_auth(recording_enabled: bool) -> Config {
@@ -311,7 +301,11 @@ mod tests {
 
         let response = router
             .oneshot(
-                Request::builder().method("GET").uri("/api/v1/recording/tasks").body(Body::empty()).expect("request"),
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/recording/requests")
+                    .body(Body::empty())
+                    .expect("request"),
             )
             .await
             .expect("response");
@@ -330,7 +324,11 @@ mod tests {
 
         let response = router
             .oneshot(
-                Request::builder().method("GET").uri("/api/v1/recording/tasks").body(Body::empty()).expect("request"),
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/recording/requests")
+                    .body(Body::empty())
+                    .expect("request"),
             )
             .await
             .expect("response");
@@ -343,7 +341,7 @@ mod tests {
         let app_state = create_test_app_state(config_with_recording_enabled(true));
         let router = v1_api_register(false, &app_state, "").with_state(app_state);
 
-        for path in ["/api/v1/recording/tasks", "/api/v1/library/recording/playback/missing"] {
+        for path in ["/api/v1/recording/requests", "/api/v1/library/recording/playback/missing"] {
             let response = router
                 .clone()
                 .oneshot(Request::builder().method("OPTIONS").uri(path).body(Body::empty()).expect("request"))
@@ -479,7 +477,7 @@ mod tests {
         let clean = create_status_check(&app_state).await;
         assert_eq!(clean.active_users, 0);
         assert_eq!(clean.active_user_connections, 0);
-        assert!(clean.active_user_streams.is_empty());
+        assert_eq!(clean.active_user_streams, [] as [shared::model::StreamInfo; 0]);
         assert_eq!(clean.active_provider_connections.unwrap_or_default().values().sum::<usize>(), 0);
     }
 }

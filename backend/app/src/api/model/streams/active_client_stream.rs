@@ -1589,9 +1589,9 @@ mod tests {
         api::model::{
             connection_manager::PROVIDER_END_NOT_SET, empty_resource_client_set, ActiveProviderManager,
             ActiveUserManager, AppState, BoxedProviderStream, CancelTokens, ConnectionManager, CreateUserSessionParams,
-            CustomVideoStreamType, DownloadQueue, EventManager, GraceResolutionContext, MetadataUpdateManager,
-            PlaylistStorageState, ProviderContentRepresentationMode, ProviderHandle, SharedStreamManager,
-            StreamDetails, StreamError, UpdateGuard,
+            CustomVideoStreamType, EventManager, GraceResolutionContext, MetadataUpdateManager, PlaylistStorageState,
+            ProviderContentRepresentationMode, ProviderHandle, RecordingQueue, SharedStreamManager, StreamDetails,
+            StreamError, UpdateGuard,
         },
         auth::Fingerprint,
         model::{
@@ -1709,6 +1709,10 @@ mod tests {
         let (manual_update_sender, _) = mpsc::channel::<crate::api::model::ManualPlaylistUpdateRequest>(1);
 
         Arc::new(AppState {
+            recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
+                Arc::clone(&active_provider),
+                Arc::clone(&connection_manager),
+            ),
             forced_targets: Arc::new(ArcSwap::from_pointee(ProcessTargets {
                 enabled: false,
                 inputs: Vec::new(),
@@ -1720,7 +1724,7 @@ mod tests {
             http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
             public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
             resource_clients: empty_resource_client_set(),
-            downloads: Arc::new(DownloadQueue::new()),
+            recordings: Arc::new(RecordingQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,
             hls_proxy: Arc::new(crate::api::model::HlsProxyManager::new()),
@@ -1789,6 +1793,10 @@ mod tests {
         let (manual_update_sender, _) = mpsc::channel::<crate::api::model::ManualPlaylistUpdateRequest>(1);
 
         Arc::new(AppState {
+            recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
+                Arc::clone(&active_provider),
+                Arc::clone(&connection_manager),
+            ),
             forced_targets: Arc::new(ArcSwap::from_pointee(ProcessTargets {
                 enabled: false,
                 inputs: Vec::new(),
@@ -1800,7 +1808,7 @@ mod tests {
             http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
             public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
             resource_clients: empty_resource_client_set(),
-            downloads: Arc::new(DownloadQueue::new()),
+            recordings: Arc::new(RecordingQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,
             hls_proxy: Arc::new(crate::api::model::HlsProxyManager::new()),

@@ -283,7 +283,7 @@ mod tests {
     #[tokio::test]
     async fn write_json_atomic_round_trip_writes_expected_content() {
         let dir = TempDir::new().expect("tempdir");
-        let final_path = dir.path().join("downloads_state.json");
+        let final_path = dir.path().join("store_state.json");
         let content = br#"{"hello":"world"}"#;
         write_json_atomic(&final_path, content).await.expect("write");
         let read = tokio::fs::read(&final_path).await.expect("read");
@@ -324,8 +324,8 @@ mod tests {
 
     #[tokio::test]
     async fn tmp_path_for_appends_json_tmp_to_json_extension() {
-        let p = Path::new("/tmp/downloads_state.json");
-        assert_eq!(tmp_path_for(p), Path::new("/tmp/downloads_state.json.tmp"));
+        let p = Path::new("/tmp/store_state.json");
+        assert_eq!(tmp_path_for(p), Path::new("/tmp/store_state.json.tmp"));
     }
 
     #[tokio::test]
@@ -337,7 +337,7 @@ mod tests {
     #[tokio::test]
     async fn write_temp_failure_propagates_and_skips_rename() {
         let dir = TempDir::new().expect("tempdir");
-        let final_path = dir.path().join("downloads_state.json");
+        let final_path = dir.path().join("store_state.json");
         let ops = make_ops(Some(AtomicWriteStage::WriteTemp));
         let result = write_json_atomic_with_ops(&final_path, b"x", ops.as_ref()).await;
         let err = result.expect_err("write_temp should fail");
@@ -351,7 +351,7 @@ mod tests {
     #[tokio::test]
     async fn rename_failure_propagates_and_skips_parent_sync() {
         let dir = TempDir::new().expect("tempdir");
-        let final_path = dir.path().join("downloads_state.json");
+        let final_path = dir.path().join("store_state.json");
         let ops = make_ops(Some(AtomicWriteStage::Rename));
         let result = write_json_atomic_with_ops(&final_path, b"x", ops.as_ref()).await;
         let err = result.expect_err("rename should fail");
@@ -365,7 +365,7 @@ mod tests {
     #[tokio::test]
     async fn sync_file_failure_propagates_and_skips_rename() {
         let dir = TempDir::new().expect("tempdir");
-        let final_path = dir.path().join("downloads_state.json");
+        let final_path = dir.path().join("store_state.json");
         let ops = make_ops(Some(AtomicWriteStage::SyncFile));
         let result = write_json_atomic_with_ops(&final_path, b"x", ops.as_ref()).await;
         let err = result.expect_err("sync_file should fail");
@@ -379,7 +379,7 @@ mod tests {
     #[tokio::test]
     async fn sync_parent_failure_propagates_after_rename() {
         let dir = TempDir::new().expect("tempdir");
-        let final_path = dir.path().join("downloads_state.json");
+        let final_path = dir.path().join("store_state.json");
         let ops = make_ops(Some(AtomicWriteStage::SyncParent));
         let result = write_json_atomic_with_ops(&final_path, b"x", ops.as_ref()).await;
         let err = result.expect_err("sync_parent should fail");
@@ -393,7 +393,7 @@ mod tests {
     #[tokio::test]
     async fn all_four_stages_run_in_order_on_success() {
         let dir = TempDir::new().expect("tempdir");
-        let final_path = dir.path().join("downloads_state.json");
+        let final_path = dir.path().join("store_state.json");
         let ops = make_ops(None);
         write_json_atomic_with_ops(&final_path, b"x", ops.as_ref()).await.expect("write");
         assert_eq!(ops.write_temp_calls.load(Ordering::SeqCst), 1);

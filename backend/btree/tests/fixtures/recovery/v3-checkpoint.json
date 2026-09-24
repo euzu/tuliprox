@@ -1,0 +1,5 @@
+[
+  { "key": { "id": "alpha" }, "value": { "display_name": "Alpha", "enabled": true, "tags": [] } },
+  { "key": { "id": "beta" }, "value": { "display_name": "Beta", "enabled": false, "tags": [] } },
+  { "key": { "id": "gamma" }, "value": { "display_name": "Gamma", "enabled": true, "tags": ["kept"] } }
+]

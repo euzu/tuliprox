@@ -5,8 +5,8 @@
 //! logs and metrics do not leak private recording data.
 
 use super::{
-    recording_quota::{charge_for_task, QuotaRecordingTaskView},
-    recording_retention::{compute_candidates, RetentionCandidate, RetentionConfig, RetentionReason},
+    recording_quota::{charge_for_state, QuotaRecordingTaskView},
+    recording_retention::{compute_candidates, RetentionCandidate, RetentionConfig},
 };
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -36,11 +36,16 @@ pub struct RunStats {
     /// Tasks skipped because the policy check said "skip" (e.g.
     /// already in `Deleting` state, no safe final file).
     pub skipped: u64,
-    /// Bytes reclaimed (sum of `charge_for_task` on each deleted
-    /// task at the moment of deletion).
+    /// Bytes actually freed on disk. An entry whose file another entry still
+    /// holds contributes nothing: crediting it would end a disk-pressure pass
+    /// against space that was never released.
     pub reclaimed_bytes: u64,
     /// `true` if a disk-pressure pass deleted at least one task.
     pub disk_pressure_triggered: bool,
+    /// `true` when the pass ran out of retention-eligible recordings before
+    /// reaching the low watermark. The remaining recordings are protected by
+    /// policy, so only an operator can free the space.
+    pub pressure_unrelieved: bool,
 }
 
 /// Outcome of one delete attempt. The worker treats every
@@ -48,6 +53,9 @@ pub struct RunStats {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeleteOutcome {
     Ok,
+    /// The entry was removed but another library entry still holds its file,
+    /// so no space was freed. Counted as deleted, reclaims nothing.
+    Detached,
     /// The task was already in `Deleting` or otherwise not safe
     /// to delete. Counted under `skipped`.
     Skipped,
@@ -95,6 +103,9 @@ pub fn run_once<V: QuotaRecordingTaskView>(
                 stats.deleted += 1;
                 stats.reclaimed_bytes = stats.reclaimed_bytes.saturating_add(reclaim);
             }
+            DeleteOutcome::Detached => {
+                stats.deleted += 1;
+            }
             DeleteOutcome::Skipped => {
                 stats.skipped += 1;
             }
@@ -109,7 +120,7 @@ pub fn run_once<V: QuotaRecordingTaskView>(
 /// Estimate the charge for a candidate at delete time. Today
 /// the candidate is always `Completed`, so the charge is the
 /// `measured_bytes` (the final file size). We pass it through
-/// `charge_for_task` once a real `FileDownload` is in scope; for
+/// `charge_for_task` once a real `RecordingTask` is in scope; for
 /// the pure runner, we use a conservative constant derived from
 /// the candidate's reason (count or age). The production
 /// integration in `recording_service.rs` will re-summarize from
@@ -141,6 +152,8 @@ fn candidate_charge(cand: &RetentionCandidate) -> u64 {
 pub fn disk_pressure_candidates<V: QuotaRecordingTaskView>(
     tasks: &[V],
     disk: &DiskConfig,
+    retention: &super::recording_retention::RetentionConfig,
+    now_secs: i64,
     used_percent: u8,
     is_recording_root_fs: bool,
 ) -> Option<Vec<RetentionCandidate>> {
@@ -157,40 +170,33 @@ pub fn disk_pressure_candidates<V: QuotaRecordingTaskView>(
     if used_percent < high {
         return None;
     }
-    let mut candidates: Vec<RetentionCandidate> = Vec::new();
-    for task in tasks {
-        let Some(meta) = task.recording() else {
-            continue;
-        };
-        if !matches!(task.state(), crate::download::DownloadState::Completed) {
-            continue;
-        }
-        let Some(completed_at) = meta.completed_at else {
-            continue;
-        };
-        let key = super::recording_retention::RetentionGroupKey {
-            owner: super::recording_retention::RetentionOwner::from_recording_owner(&meta.owner),
-            channel: super::recording_retention::ChannelKey::from_metadata(
-                meta.channel_id.as_deref(),
-                meta.channel_name.as_deref(),
-            ),
-        };
-        candidates.push(RetentionCandidate {
-            uuid: task.uuid().to_string(),
-            owner: key.owner,
-            channel: key.channel,
-            completed_at,
-            reason: RetentionReason::Age,
-        });
-    }
-    candidates.sort_by(|a, b| a.completed_at.cmp(&b.completed_at).then_with(|| a.uuid.cmp(&b.uuid)));
-    Some(candidates)
+    // Pressure only *accelerates* retention; it never widens it. Deleting a
+    // recording the operator's policy says to keep would destroy user data to
+    // reclaim space, which is not a trade the DVR is entitled to make.
+    Some(super::recording_retention::compute_candidates(tasks, retention, now_secs))
 }
 
 /// Bytes charged to the task with this uuid, i.e. what deleting it would
-/// reclaim.
+/// reclaim. Disk pressure only deletes `Completed` candidates, so the
+/// charge is always computed for that state.
 pub fn reclaimable_bytes_for<V: QuotaRecordingTaskView>(tasks: &[V], uuid: &str) -> u64 {
-    charge_for_task(&cand_uuid_view(tasks, uuid))
+    tasks.iter().find(|task| task.uuid() == uuid).map_or(0, |task| {
+        charge_for_state(&crate::recording::recording_queue::RecordingTaskState::Completed, task.recording())
+    })
+}
+
+/// One measurement of the recording-root filesystem.
+///
+/// `is_recording_root_fs` is the selection guard: a caller that measured
+/// `storage_dir` or the generic download directory - potentially a different
+/// mount - must pass `false` rather than let a foreign measurement authorize
+/// deletions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FilesystemUsage {
+    pub used_percent: u8,
+    pub free_bytes: u64,
+    pub total_bytes: u64,
+    pub is_recording_root_fs: bool,
 }
 
 /// Run a disk-pressure pass: keep deleting oldest eligible completed
@@ -201,14 +207,16 @@ pub fn reclaimable_bytes_for<V: QuotaRecordingTaskView>(tasks: &[V], uuid: &str)
 pub fn run_disk_pressure<V: QuotaRecordingTaskView>(
     tasks: &[V],
     disk: &DiskConfig,
-    used_percent: u8,
-    free_bytes: u64,
-    total_bytes: u64,
-    is_recording_root_fs: bool,
+    retention: &super::recording_retention::RetentionConfig,
+    now_secs: i64,
+    usage: FilesystemUsage,
     delete: &mut DeleteFn<'_>,
 ) -> RunStats {
+    let FilesystemUsage { used_percent, free_bytes, total_bytes, is_recording_root_fs } = usage;
     let mut stats = RunStats::default();
-    let Some(candidates) = disk_pressure_candidates(tasks, disk, used_percent, is_recording_root_fs) else {
+    let Some(candidates) =
+        disk_pressure_candidates(tasks, disk, retention, now_secs, used_percent, is_recording_root_fs)
+    else {
         return stats;
     };
     let Some(low) = disk.low_water_percent else {
@@ -226,6 +234,9 @@ pub fn run_disk_pressure<V: QuotaRecordingTaskView>(
                 stats.deleted += 1;
                 stats.reclaimed_bytes = stats.reclaimed_bytes.saturating_add(reclaim);
             }
+            DeleteOutcome::Detached => {
+                stats.deleted += 1;
+            }
             DeleteOutcome::Skipped => {
                 stats.skipped += 1;
             }
@@ -234,6 +245,10 @@ pub fn run_disk_pressure<V: QuotaRecordingTaskView>(
             }
         }
     }
+    // Exhausting the eligible set without reaching the low watermark is a
+    // condition an operator has to resolve; it is not licence to delete
+    // recordings retention is holding.
+    stats.pressure_unrelieved = !pressure_relieved(total_bytes, free_bytes, stats.reclaimed_bytes, low);
     stats
 }
 
@@ -258,33 +273,6 @@ pub fn pressure_relieved(total_bytes: u64, free_bytes: u64, reclaimed_bytes: u64
     let used = total_bytes.saturating_sub(projected_free);
     let pct = (used.saturating_mul(100)).saturating_div(total_bytes);
     pct <= u64::from(low_percent)
-}
-
-/// Helper: look up the charge for a candidate by re-reading the
-/// task list. The production path will fold this into the
-/// worker; the standalone test uses a view-on-uuid adapter.
-fn cand_uuid_view<'a, V: QuotaRecordingTaskView>(tasks: &'a [V], uuid: &'a str) -> UuidView<'a, V> {
-    UuidView { tasks, uuid }
-}
-
-struct UuidView<'a, V: QuotaRecordingTaskView> {
-    tasks: &'a [V],
-    uuid: &'a str,
-}
-
-impl<V: QuotaRecordingTaskView> QuotaRecordingTaskView for UuidView<'_, V> {
-    fn state(&self) -> &crate::download::DownloadState {
-        // The view always reports `Completed` because disk-pressure
-        // only deletes `Completed` candidates. The `charge_for_task`
-        // path uses `measured_bytes` for `Completed`, so the state
-        // is consistent for charging purposes.
-        const COMPLETED: crate::download::DownloadState = crate::download::DownloadState::Completed;
-        &COMPLETED
-    }
-    fn recording(&self) -> Option<&shared::model::recording::RecordingMetadata> {
-        self.tasks.iter().find(|t| t.uuid() == self.uuid).and_then(|t| t.recording())
-    }
-    fn uuid(&self) -> &str { self.uuid }
 }
 
 /// Cancellation-aware worker handle. Holds a `CancelToken` and
@@ -318,7 +306,7 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::download::DownloadState;
+    use crate::recording::recording_queue::RecordingTaskState;
     use shared::model::{
         recording::{RecordingMetadata, RecordingOwner, RecordingSource, RecordingVisibility},
         UserId,
@@ -334,7 +322,7 @@ mod tests {
         RecordingMetadata {
             owner,
             visibility: RecordingVisibility::Private,
-            source: Some(RecordingSource::new("t1", "v1", "in1")),
+            source: (RecordingSource::new("t1", "v1", "in1")),
             program_start: None,
             program_end: None,
             scheduled_start: None,
@@ -348,6 +336,8 @@ mod tests {
             provenance: shared::model::recording::RecordingProvenance::default(),
             relative_path: None,
             partial_relative_path: None,
+            resume_etag: None,
+            resume_last_modified: None,
             reserved_bytes: 0,
             measured_bytes: measured,
             completed_at: Some(completed_at),
@@ -358,31 +348,27 @@ mod tests {
 
     struct T {
         uuid: String,
-        state: DownloadState,
-        recording: Option<RecordingMetadata>,
+        state: RecordingTaskState,
+        recording: RecordingMetadata,
     }
     impl QuotaRecordingTaskView for T {
-        fn state(&self) -> &DownloadState { &self.state }
-        fn recording(&self) -> Option<&RecordingMetadata> { self.recording.as_ref() }
+        fn state(&self) -> &RecordingTaskState { &self.state }
+        fn recording(&self) -> &RecordingMetadata { &self.recording }
         fn uuid(&self) -> &str { &self.uuid }
     }
 
     fn completed(uuid: &str, channel_id: &str, completed_at: i64, measured: u64) -> T {
         T {
             uuid: uuid.to_string(),
-            state: DownloadState::Completed,
-            recording: Some(make_meta(
+            state: RecordingTaskState::Completed,
+            recording: make_meta(
                 RecordingOwner::User(UserId::from("web:alice")),
                 Some(channel_id),
                 Some("Alpha"),
                 completed_at,
                 measured,
-            )),
+            ),
         }
-    }
-
-    fn generic_download(uuid: &str) -> T {
-        T { uuid: uuid.to_string(), state: DownloadState::Completed, recording: None }
     }
 
     fn count_delete(
@@ -430,18 +416,97 @@ mod tests {
         assert_eq!(deleted.borrow().clone(), vec!["a".to_string(), "c".to_string()]);
     }
 
+    /// Fixed "now" for the pressure tests; the fixtures complete at
+    /// small timestamps, so everything is far older than a day.
+    const NOW: i64 = 10_000_000;
+
+    /// A policy under which every completed recording is already eligible, so
+    /// a test can exercise the watermark arithmetic on its own.
+    fn delete_everything() -> RetentionConfig {
+        RetentionConfig { keep_last_per_channel: Some(0), delete_after_days: None }
+    }
+
     #[test]
-    fn run_once_skips_generic_downloads() {
-        // A `Completed` task with no recording metadata is a
-        // generic download. The retention candidate set must
-        // exclude it, so the policy pass produces zero candidates.
-        let tasks = vec![generic_download("g1")];
-        let config = RetentionConfig { keep_last_per_channel: Some(0), delete_after_days: Some(365) };
+    fn detaching_a_shared_file_reclaims_nothing_and_the_pass_keeps_going() {
+        // Counting a detached entry's bytes would end the pass against space
+        // that was never released, leaving the disk full and the run silent.
+        let tasks = vec![
+            completed("a", "chan", NOW - 10_000, 1_000_000),
+            completed("b", "chan", NOW - 9_000, 1_000_000),
+            completed("c", "chan", NOW - 8_000, 1_000_000),
+        ];
+        let mut delete = |uuid: &str| {
+            if uuid == "a" {
+                DeleteOutcome::Detached
+            } else {
+                DeleteOutcome::Ok
+            }
+        };
+        let stats = run_disk_pressure(
+            &tasks,
+            &DiskConfig { high_water_percent: Some(80), low_water_percent: Some(50), safety_bytes: None },
+            &delete_everything(),
+            NOW,
+            FilesystemUsage { used_percent: 90, free_bytes: 0, total_bytes: 10_000_000, is_recording_root_fs: true },
+            &mut delete,
+        );
+        // "a" was removed as an entry but freed no space.
+        assert_eq!(stats.deleted, 3, "every entry was removed");
+        assert_eq!(stats.reclaimed_bytes, 2_000_000, "only the two real unlinks count");
+    }
+
+    #[test]
+    fn disk_pressure_never_deletes_a_recording_retention_protects() {
+        // Regression: pressure treated every Completed recording as a
+        // candidate, so a recording finished moments ago was deleted to
+        // reclaim space the operator's own policy said to keep.
+        let tasks = vec![completed("fresh", "c1", NOW, 900)];
+        let disk = DiskConfig { high_water_percent: Some(80), low_water_percent: Some(50), safety_bytes: None };
+        let keep_everything = RetentionConfig { keep_last_per_channel: Some(10), delete_after_days: Some(30) };
         let deleted = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
         let mut delete = count_delete(deleted.clone(), std::rc::Rc::new(vec![]));
-        let stats = run_once(&tasks, &config, 1_000_000_000, &mut delete);
-        assert_eq!(stats.candidates, 0);
+
+        let stats = run_disk_pressure(
+            &tasks,
+            &disk,
+            &keep_everything,
+            NOW,
+            FilesystemUsage { used_percent: 95, free_bytes: 10, total_bytes: 1_000, is_recording_root_fs: true },
+            &mut delete,
+        );
+
+        assert!(stats.disk_pressure_triggered);
+        assert_eq!(stats.deleted, 0, "a protected recording must survive disk pressure");
         assert!(deleted.borrow().is_empty());
+        // The operator has to resolve this; the DVR must not delete past it.
+        assert!(stats.pressure_unrelieved);
+    }
+
+    #[test]
+    fn disk_pressure_deletes_only_the_retention_eligible_ones() {
+        // `keep_last_per_channel = 1` leaves the two older recordings
+        // eligible and protects the newest.
+        let tasks = vec![
+            completed("old", "c1", 1_000, 400),
+            completed("mid", "c1", 2_000, 400),
+            completed("new", "c1", 3_000, 400),
+        ];
+        let disk = DiskConfig { high_water_percent: Some(80), low_water_percent: Some(10), safety_bytes: None };
+        let keep_one = RetentionConfig { keep_last_per_channel: Some(1), delete_after_days: None };
+        let deleted = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let mut delete = count_delete(deleted.clone(), std::rc::Rc::new(vec![]));
+
+        let stats = run_disk_pressure(
+            &tasks,
+            &disk,
+            &keep_one,
+            NOW,
+            FilesystemUsage { used_percent: 95, free_bytes: 0, total_bytes: 1_000, is_recording_root_fs: true },
+            &mut delete,
+        );
+
+        assert_eq!(stats.candidates, 2, "only the two beyond keep_last are eligible");
+        assert!(!deleted.borrow().contains(&"new".to_string()), "the retained recording must not be deleted");
     }
 
     #[test]
@@ -456,7 +521,14 @@ mod tests {
         let free = 500u64; // 50% used
         let deleted = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
         let mut delete = count_delete(deleted.clone(), std::rc::Rc::new(vec![]));
-        let stats = run_disk_pressure(&tasks, &disk, 90, free, total, true, &mut delete);
+        let stats = run_disk_pressure(
+            &tasks,
+            &disk,
+            &delete_everything(),
+            NOW,
+            FilesystemUsage { used_percent: 90, free_bytes: free, total_bytes: total, is_recording_root_fs: true },
+            &mut delete,
+        );
         // 90% > 80% triggers. With free=50% (= low), the first
         // iteration sees `used_percent ≤ 50%` and breaks without
         // deleting anything.
@@ -477,7 +549,14 @@ mod tests {
         let free = 50u64; // 95% used
         let deleted = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
         let mut delete = count_delete(deleted.clone(), std::rc::Rc::new(vec![]));
-        let stats = run_disk_pressure(&tasks, &disk, 95, free, total, true, &mut delete);
+        let stats = run_disk_pressure(
+            &tasks,
+            &disk,
+            &delete_everything(),
+            NOW,
+            FilesystemUsage { used_percent: 95, free_bytes: free, total_bytes: total, is_recording_root_fs: true },
+            &mut delete,
+        );
         assert_eq!(stats.deleted, 3);
         assert_eq!(deleted.borrow().len(), 3);
         assert_eq!(stats.reclaimed_bytes, 600);
@@ -497,7 +576,14 @@ mod tests {
         // 90% used of 1000 bytes. Deleting the two oldest reclaims 600,
         // taking projected free to 700 (30% used) — past the 50% low
         // watermark — so the third must survive.
-        let stats = run_disk_pressure(&tasks, &disk, 90, 100, 1_000, true, &mut delete);
+        let stats = run_disk_pressure(
+            &tasks,
+            &disk,
+            &delete_everything(),
+            NOW,
+            FilesystemUsage { used_percent: 90, free_bytes: 100, total_bytes: 1_000, is_recording_root_fs: true },
+            &mut delete,
+        );
         assert!(stats.disk_pressure_triggered);
         assert_eq!(stats.deleted, 2, "pass must stop at the low watermark");
         assert_eq!(*deleted.borrow(), vec!["a".to_string(), "b".to_string()]);
@@ -521,7 +607,14 @@ mod tests {
         let disk = DiskConfig { high_water_percent: Some(80), low_water_percent: Some(50), safety_bytes: None };
         let deleted = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
         let mut delete = count_delete(deleted.clone(), std::rc::Rc::new(vec![]));
-        let stats = run_disk_pressure(&tasks, &disk, 60, 400, 1_000, true, &mut delete);
+        let stats = run_disk_pressure(
+            &tasks,
+            &disk,
+            &delete_everything(),
+            NOW,
+            FilesystemUsage { used_percent: 60, free_bytes: 400, total_bytes: 1_000, is_recording_root_fs: true },
+            &mut delete,
+        );
         assert!(!stats.disk_pressure_triggered);
         assert_eq!(stats.deleted, 0);
     }
@@ -535,7 +628,14 @@ mod tests {
         let disk = DiskConfig { high_water_percent: Some(80), low_water_percent: Some(50), safety_bytes: None };
         let deleted = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
         let mut delete = count_delete(deleted.clone(), std::rc::Rc::new(vec![]));
-        let stats = run_disk_pressure(&tasks, &disk, 95, 50, 1_000, false, &mut delete);
+        let stats = run_disk_pressure(
+            &tasks,
+            &disk,
+            &delete_everything(),
+            NOW,
+            FilesystemUsage { used_percent: 95, free_bytes: 50, total_bytes: 1_000, is_recording_root_fs: false },
+            &mut delete,
+        );
         assert!(!stats.disk_pressure_triggered);
         assert_eq!(stats.deleted, 0);
     }
@@ -548,7 +648,14 @@ mod tests {
         let disk = DiskConfig { high_water_percent: Some(50), low_water_percent: Some(80), safety_bytes: None };
         let deleted = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
         let mut delete = count_delete(deleted.clone(), std::rc::Rc::new(vec![]));
-        let stats = run_disk_pressure(&tasks, &disk, 95, 50, 1_000, true, &mut delete);
+        let stats = run_disk_pressure(
+            &tasks,
+            &disk,
+            &delete_everything(),
+            NOW,
+            FilesystemUsage { used_percent: 95, free_bytes: 50, total_bytes: 1_000, is_recording_root_fs: true },
+            &mut delete,
+        );
         assert!(!stats.disk_pressure_triggered);
         assert_eq!(stats.deleted, 0);
     }
@@ -559,7 +666,14 @@ mod tests {
         let disk = DiskConfig { high_water_percent: Some(80), low_water_percent: Some(50), safety_bytes: None };
         let deleted = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
         let mut delete = count_delete(deleted.clone(), std::rc::Rc::new(vec!["a"]));
-        let stats = run_disk_pressure(&tasks, &disk, 95, 50, 1_000, true, &mut delete);
+        let stats = run_disk_pressure(
+            &tasks,
+            &disk,
+            &delete_everything(),
+            NOW,
+            FilesystemUsage { used_percent: 95, free_bytes: 50, total_bytes: 1_000, is_recording_root_fs: true },
+            &mut delete,
+        );
         assert_eq!(stats.deleted, 1);
         assert_eq!(stats.failed, 1);
     }

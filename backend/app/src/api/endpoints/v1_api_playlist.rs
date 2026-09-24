@@ -45,7 +45,7 @@ use crate::{
         iter_raw_m3u_target_playlist, iter_raw_xtream_target_playlist, m3u_get_item_for_stream_id,
         xtream_get_item_for_stream_id,
     },
-    utils::{file_exists_async, request},
+    utils::{canonicalize_output_epg_id, canonicalize_untrusted_epg_id, file_exists_async, request, EpgIdOutputCase},
 };
 use axum::{response::IntoResponse, Router};
 use log::{debug, error};
@@ -55,10 +55,10 @@ use shared::{
     error::TuliproxError,
     foundation::{get_filter_detailed, Filter, ValueProvider},
     model::{
-        ingest_resource_value, permission::Permission, stalker::StalkerStreamKind, EpgChannel,
+        ingest_resource_value, permission::Permission, stalker::StalkerStreamKind, ConfigTargetOptions, EpgChannel,
         InputPlaylistUpdateStatusDto, InputType, InputUpdateAction, InputUpdateCapabilities, InputUpdateRequest,
         OperationRunAccepted, PersistedPlaylistUpdateClusterState, PersistedPlaylistUpdateClusterStatusDto,
-        PersistedPlaylistUpdateInputResult, PlaylistEpgRequest, PlaylistItem, PlaylistRequest,
+        PersistedPlaylistUpdateInputResult, PlaylistEpgRequest, PlaylistItem, PlaylistItemType, PlaylistRequest,
         PlaylistUpdateRequestDto, PlaylistUpdateRequestPayload, PlaylistUpdateRunId, PlaylistUpdateState,
         PlaylistUpdateStatusDto, PlaylistUrlResolveRequest, ProxyType, TargetType, UiPlaylistItem, VirtualId,
         XtreamCluster,
@@ -186,28 +186,6 @@ fn build_playlist_webplayer_url(
     )
 }
 
-fn build_recording_stream_url(
-    base_url: &str,
-    access_token: &str,
-    target_name: &str,
-    input_name: &str,
-    virtual_id: u32,
-    cluster: XtreamCluster,
-) -> Option<String> {
-    let mut url = Url::parse(base_url).ok()?;
-    url.path_segments_mut().ok()?.pop_if_empty().extend([
-        "api",
-        "v1",
-        "playlist",
-        "recording",
-        access_token,
-        cluster.as_stream_type(),
-        &virtual_id.to_string(),
-    ]);
-    url.query_pairs_mut().append_pair("target_name", target_name).append_pair("input_name", input_name);
-    Some(url.into())
-}
-
 pub(in crate::api) fn build_webplayer_recording_url(
     app_config: &crate::model::AppConfig,
     target_id: u16,
@@ -225,28 +203,13 @@ pub(in crate::api) fn build_webplayer_recording_url(
     Some(build_playlist_webplayer_url(&server_info.get_base_url(), &access_token, target_id, virtual_id, cluster))
 }
 
-pub(in crate::api) fn build_stable_recording_url(
-    app_config: &crate::model::AppConfig,
-    target_name: &str,
-    input_name: &str,
-    virtual_id: u32,
-    cluster: XtreamCluster,
-) -> Option<String> {
-    let access_token = create_access_token(&app_config.access_token_secret, 30, crate::auth::scope::INTERNAL_PLAYER);
-    let config = app_config.config.load();
-    let server_name = config
-        .web_ui
-        .as_ref()
-        .and_then(|web_ui| web_ui.player_server.as_ref())
-        .map_or("default", |server_name| server_name.as_str());
-    let server_info = app_config.get_server_info(server_name)?;
-    build_recording_stream_url(&server_info.get_base_url(), &access_token, target_name, input_name, virtual_id, cluster)
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::api) struct ResolvedRecordingSource {
     pub virtual_id: u32,
     pub input_name: String,
+    pub title: String,
+    pub extension: Option<String>,
+    pub downloadable: bool,
 }
 
 pub(in crate::api) async fn resolve_target_recording_source(
@@ -266,6 +229,9 @@ pub(in crate::api) async fn resolve_target_recording_source(
                     resolved = Some(ResolvedRecordingSource {
                         virtual_id: item.virtual_id.get(),
                         input_name: item.input_name.to_string(),
+                        title: item.title.to_string(),
+                        extension: shared::utils::extract_extension_from_url(&item.url).map(str::to_string),
+                        downloadable: item.item_type != PlaylistItemType::SeriesInfo,
                     });
                     break;
                 }
@@ -280,6 +246,9 @@ pub(in crate::api) async fn resolve_target_recording_source(
                     resolved = Some(ResolvedRecordingSource {
                         virtual_id: item.virtual_id.get(),
                         input_name: item.input_name.to_string(),
+                        title: item.title.to_string(),
+                        extension: shared::utils::extract_extension_from_url(&item.url).map(str::to_string),
+                        downloadable: item.item_type != PlaylistItemType::SeriesInfo,
                     });
                     break;
                 }
@@ -288,6 +257,22 @@ pub(in crate::api) async fn resolve_target_recording_source(
     }
     let resolved = resolved?;
     (resolved.input_name == input_name).then_some(resolved)
+}
+
+/// Compares a playlist item's EPG channel id against a requested one under the
+/// target's configured output casing.
+///
+/// The web UI reads channel ids from the target EPG database, where they are
+/// written in the target's output case (`lowercase_ids`). The persisted
+/// playlist keeps the source casing, so a raw comparison misses every channel
+/// whose source id differs in case from the EPG database key.
+fn epg_channel_id_matches(
+    item_epg_channel_id: Option<&Arc<str>>,
+    requested: &Arc<str>,
+    output_case: EpgIdOutputCase,
+) -> bool {
+    item_epg_channel_id
+        .is_some_and(|item_id| canonicalize_output_epg_id(item_id, output_case).as_ref() == requested.as_ref())
 }
 
 pub(in crate::api) async fn resolve_target_live_recording_source_by_epg_channel(
@@ -306,14 +291,24 @@ pub(in crate::api) async fn resolve_target_live_recording_source_by_epg_channel(
         .collect::<Vec<_>>();
     let mut resolved = None;
     for target in targets {
+        let output_case = EpgIdOutputCase::from_lowercase(
+            target.options.as_ref().is_some_and(ConfigTargetOptions::lowercase_epg_ids),
+        );
+        let requested = canonicalize_untrusted_epg_id(epg_channel_id, output_case);
         if target.has_output(TargetType::Xtream) {
-            let mut items = iter_raw_xtream_target_playlist(app_config, &target, XtreamCluster::Live).await?;
+            let Some(mut items) = iter_raw_xtream_target_playlist(app_config, &target, XtreamCluster::Live).await
+            else {
+                continue;
+            };
             while let Some(entry) = items.next().await {
                 let Ok(item) = entry else { continue };
-                if item.epg_channel_id.as_deref() == Some(epg_channel_id) {
+                if epg_channel_id_matches(item.epg_channel_id.as_ref(), &requested, output_case) {
                     let candidate = ResolvedRecordingSource {
                         virtual_id: item.virtual_id.get(),
                         input_name: item.input_name.to_string(),
+                        title: item.title.to_string(),
+                        extension: shared::utils::extract_extension_from_url(&item.url).map(str::to_string),
+                        downloadable: item.item_type != PlaylistItemType::SeriesInfo,
                     };
                     if resolved.replace(candidate).is_some() {
                         return None;
@@ -321,13 +316,19 @@ pub(in crate::api) async fn resolve_target_live_recording_source_by_epg_channel(
                 }
             }
         } else if target.has_output(TargetType::M3u) {
-            let mut items = iter_raw_m3u_target_playlist(app_config, &target, Some(XtreamCluster::Live)).await?;
+            let Some(mut items) = iter_raw_m3u_target_playlist(app_config, &target, Some(XtreamCluster::Live)).await
+            else {
+                continue;
+            };
             while let Some(entry) = items.next().await {
                 let Ok(item) = entry else { continue };
-                if item.epg_channel_id.as_deref() == Some(epg_channel_id) {
+                if epg_channel_id_matches(item.epg_channel_id.as_ref(), &requested, output_case) {
                     let candidate = ResolvedRecordingSource {
                         virtual_id: item.virtual_id.get(),
                         input_name: item.input_name.to_string(),
+                        title: item.title.to_string(),
+                        extension: shared::utils::extract_extension_from_url(&item.url).map(str::to_string),
+                        downloadable: item.item_type != PlaylistItemType::SeriesInfo,
                     };
                     if resolved.replace(candidate).is_some() {
                         return None;
@@ -935,7 +936,7 @@ async fn playlist_webplayer_stream(
     );
     let user = Arc::new(create_api_proxy_user(&app_state));
 
-    m3u_api_stream_loaded(user, target, &fingerprint, &req_headers, &app_state, pli, input, None, None)
+    m3u_api_stream_loaded(user, target, &fingerprint, &req_headers, &app_state, pli, input, None, None, None)
         .await
         .into_response()
 }
@@ -944,6 +945,7 @@ async fn playlist_webplayer_stream(
 struct RecordingStreamQuery {
     target_name: String,
     input_name: String,
+    provider_allocation_id: Option<u64>,
 }
 
 async fn playlist_recording_stream(
@@ -964,7 +966,6 @@ async fn playlist_recording_stream(
     let Some(resolved) = resolved else {
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     };
-
     if resolved.target.has_output(TargetType::Xtream) {
         let stream_id = virtual_id.to_string();
         return xtream_player_api_stream_with_resolved_target(
@@ -974,6 +975,7 @@ async fn playlist_recording_stream(
             resolved.target,
             Some(resolved.input),
             ApiStreamRequest::from_access_token(ctxt, &token, &stream_id, ""),
+            query.provider_allocation_id,
         )
         .await
         .into_response();
@@ -1001,6 +1003,7 @@ async fn playlist_recording_stream(
         resolved.input,
         None,
         None,
+        query.provider_allocation_id,
     )
     .await
     .into_response()
@@ -1448,12 +1451,12 @@ mod tests {
     use crate::{
         api::model::{
             empty_resource_client_set, recording::recording_source_resolution::resolve_recording_config,
-            ActiveProviderManager, ActiveUserManager, AppState, ConnectionManager, DownloadQueue, EventManager,
-            MetadataUpdateManager, PlaylistStorageState, SharedStreamManager,
+            ActiveProviderManager, ActiveUserManager, AppState, ConnectionManager, EventManager, MetadataUpdateManager,
+            PlaylistStorageState, RecordingQueue, SharedStreamManager,
         },
         model::{
             AppConfig, Config, ConfigInput, ConfigInputOptions, ConfigInputUpdateQuality, ConfigProvider, ConfigSource,
-            ConfigTarget, SourcesConfig, StreamHistoryConfig, VideoDownloadConfig,
+            ConfigTarget, RecordingConfig, SourcesConfig, StreamHistoryConfig,
         },
         processing::epg::{get_input_raw_epg_file_path, get_input_raw_xmltv_file_path},
         repository::GeoIp,
@@ -2489,6 +2492,7 @@ mod tests {
             Query(super::RecordingStreamQuery {
                 target_name: "stable-target".to_string(),
                 input_name: "input-b".to_string(),
+                provider_allocation_id: None,
             }),
             State(app_state),
             axum::http::HeaderMap::new(),
@@ -2653,12 +2657,16 @@ mod tests {
             provider_dns: CancellationToken::new(),
             metadata: CancellationToken::new(),
             qos_aggregation: CancellationToken::new(),
-            downloads: CancellationToken::new(),
+            recordings: CancellationToken::new(),
             hls_cache: CancellationToken::new(),
         };
         let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
 
         Arc::new(AppState {
+            recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
+                Arc::clone(&active_provider),
+                Arc::clone(&connection_manager),
+            ),
             forced_targets: Arc::new(ArcSwap::from_pointee(crate::model::ProcessTargets {
                 enabled: false,
                 inputs: Vec::new(),
@@ -2670,7 +2678,7 @@ mod tests {
             http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
             public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
             resource_clients: empty_resource_client_set(),
-            downloads: Arc::new(crate::api::model::DownloadQueue::new()),
+            recordings: Arc::new(crate::api::model::RecordingQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,
             hls_proxy: Arc::new(crate::api::model::HlsProxyManager::new()),
@@ -2975,26 +2983,6 @@ mod tests {
     }
 
     #[test]
-    fn build_recording_stream_url_encodes_stable_names_without_runtime_id() {
-        let url = super::build_recording_stream_url(
-            "http://player.example/base",
-            "token123",
-            "News/HD &+",
-            "input/name ?+",
-            42,
-            XtreamCluster::Live,
-        )
-        .expect("valid recording url");
-        let parsed = Url::parse(&url).expect("parse recording url");
-        let query = parsed.query_pairs().collect::<HashMap<_, _>>();
-
-        assert_eq!(parsed.path(), "/base/api/v1/playlist/recording/token123/live/42");
-        assert_eq!(query.get("target_name").map(std::convert::AsRef::as_ref), Some("News/HD &+"));
-        assert_eq!(query.get("input_name").map(std::convert::AsRef::as_ref), Some("input/name ?+"));
-        assert!(!parsed.path().contains("/11/"));
-    }
-
-    #[test]
     fn recording_source_descriptor_is_token_free_and_percent_encodes_names() {
         let url = crate::api::model::recording::recording_source_resolution::build_recording_source_descriptor(
             "News/HD &+",
@@ -3024,34 +3012,31 @@ mod tests {
             XtreamCluster::Live,
         )
         .expect("valid recording url");
-        let download_cfg = VideoDownloadConfig {
-            directory: "/tmp".to_string(),
-            organize_into_directories: false,
-            episode_pattern: None,
-            headers: HashMap::new(),
-            download_priority: 0,
-            recording_priority: 0,
-            reserve_slots_for_users: 0,
-            max_background_per_provider: 0,
-            retry_backoff_initial_secs: 3,
-            retry_backoff_multiplier: 3.0,
-            retry_backoff_max_secs: 30,
-            retry_backoff_jitter_percent: 0,
-            retry_max_attempts: 5,
-            recording: None,
-        };
-        let recording = crate::api::model::FileDownload::new_recording(
+        let download_cfg = RecordingConfig::from(&shared::model::RecordingConfigDto {
+            directory: Some("/tmp".to_string()),
+            ..Default::default()
+        });
+        let metadata = shared::model::RecordingMetadata::new_live(
+            shared::model::RecordingOwner::User(shared::model::UserId::from("web:alice")),
+            shared::model::RecordingVisibility::Private,
+            shared::model::recording::RecordingSource::new("stable-target", "42", "input-a"),
+            1_700_000_000,
+            1_700_003_600,
+            0,
+            0,
+        );
+        let recording = crate::api::model::RecordingTask::new(
+            shared::model::RecordingKind::Live,
             &url,
             "recording.ts",
             &download_cfg,
-            1_700_000_000,
-            3600,
             Some("input-a".intern()),
             0,
+            metadata,
         )
         .expect("valid recording task");
-        let persisted = DownloadQueue::to_persisted(&recording);
-        let restored = DownloadQueue::from_persisted(persisted.clone()).expect("restore recording task");
+        let persisted = RecordingQueue::to_persisted(&recording);
+        let restored = RecordingQueue::from_persisted(persisted.clone()).expect("restore recording task");
 
         assert_eq!(persisted.url, url);
         assert_eq!(restored.url.as_str(), url);
@@ -3059,6 +3044,30 @@ mod tests {
         assert!(!persisted.url.contains("token"));
         assert!(!persisted.url.contains("/11/"));
         assert!(persisted.url.contains("target_name=stable-target"));
+    }
+
+    #[test]
+    fn epg_channel_match_applies_the_target_output_case() {
+        let item = "NPO3.nl".intern();
+        let requested_lowercase =
+            crate::utils::canonicalize_untrusted_epg_id("npo3.nl", crate::utils::EpgIdOutputCase::LowercaseAscii);
+
+        assert!(super::epg_channel_id_matches(
+            Some(&item),
+            &requested_lowercase,
+            crate::utils::EpgIdOutputCase::LowercaseAscii
+        ));
+        assert!(!super::epg_channel_id_matches(
+            Some(&item),
+            &requested_lowercase,
+            crate::utils::EpgIdOutputCase::Preserve
+        ));
+    }
+
+    #[test]
+    fn epg_channel_match_rejects_absent_ids() {
+        let requested = "npo3.nl".intern();
+        assert!(!super::epg_channel_id_matches(None, &requested, crate::utils::EpgIdOutputCase::Preserve));
     }
 
     #[test]

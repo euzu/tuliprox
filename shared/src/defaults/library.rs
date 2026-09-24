@@ -1,7 +1,7 @@
 //! Library defaults: extensions, categories, thumbnails, processing-order
 //! predicate, video-DTO empty predicate, config-target-options predicate.
 
-use crate::model::{LibraryMetadataFormat, ProcessingOrder, VideoConfigDto};
+use crate::model::{LibraryMetadataFormat, ProcessingOrder};
 
 pub const DEFAULT_SUPPORTED_LIBRARY_EXTENSIONS: &[&str] = &["mp4", "mkv", "avi", "mov", "ts", "m4v", "webm"];
 
@@ -36,10 +36,6 @@ pub fn is_default_processing_order(p: &ProcessingOrder) -> bool { *p == Processi
 
 pub const fn default_probe_live_interval() -> u32 { 120 }
 pub const fn is_default_probe_live_interval(v: &u32) -> bool { *v == default_probe_live_interval() }
-
-pub fn is_none_or_empty_video(video: &Option<VideoConfigDto>) -> bool {
-    video.as_ref().is_none_or(VideoConfigDto::is_empty)
-}
 
 // Clippy's method-path suggestion here names a private module and does not
 // compile; the closure is kept deliberately.

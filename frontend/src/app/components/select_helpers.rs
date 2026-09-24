@@ -60,7 +60,7 @@ mod tests {
         assert_eq!(selection_first(&selection), None);
         assert_eq!(selection_parse_first::<u8>(&selection), None);
         assert_eq!(selection_first_owned(selection.clone()), None);
-        assert!(selection_vec(selection).is_empty());
+        assert_eq!(selection_vec(selection), [] as [std::string::String; 0]);
     }
 
     #[test]

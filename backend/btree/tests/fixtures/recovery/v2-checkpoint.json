@@ -1,0 +1,5 @@
+[
+  { "key": { "id": "alpha" }, "value": { "name": "Alpha", "enabled": true } },
+  { "key": { "id": "beta" }, "value": { "name": "Beta", "enabled": false } },
+  { "key": { "id": "gamma" }, "value": { "name": "Gamma", "enabled": true } }
+]

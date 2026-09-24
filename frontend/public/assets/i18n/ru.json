@@ -783,11 +783,9 @@
       "RESERVE_SLOTS_FOR_USERS": "Сохраняет такое количество слотов провайдера свободными для обычной потоковой передачи пользователей, прежде чем фоновые загрузки смогут их занять.\n\nУстановите 0, чтобы отключить зарезервированный запас.",
       "WEB_SEARCH": "Шаблон URL для внешнего веб-поиска (например, IMDb). {} заменяется заголовком."
     },
-    "VIDEO_DOWNLOAD_CONFIG": {
-      "DIRECTORY": "Целевая директория для загруженных видеофайлов.",
-      "EPISODE_PATTERN": "Регулярное выражение с группой захвата 'episode' для очистки имен файлов сериалов.\nПример:\n```\nepisode_pattern: '.*(?P<episode>[Ss]\\\\d{1,2}.*?[Ee]\\\\d{1,2}).*'\n```",
-      "ORGANIZE_INTO_DIRECTORIES": "Если включено, создает поддиректории для каждого фильма или сериала во время загрузки."
-    },
+    "DIRECTORY": "Целевая директория для записанных видеофайлов.",
+    "EPISODE_PATTERN": "Регулярное выражение с группой захвата 'episode' для очистки имен файлов сериалов.\nПример:\n```\nepisode_pattern: '.*(?P<episode>[Ss]\\\\d{1,2}.*?[Ee]\\\\d{1,2}).*'\n```",
+    "ORGANIZE_INTO_DIRECTORIES": "Если включено, создает поддиректории для каждого фильма или сериала во время записи.",
     "WEBUI_CONFIG": {
       "CONTENT_SECURITY_POLICY_CUSTOM_ATTRIBUTES": "Пользовательские директивы CSP (Content Security Policy), применяемые к Web UI."
     },
@@ -1017,27 +1015,16 @@
     "DNS_SCHEME_HTTPS": "HTTPS",
     "DNS_SCHEMES": "Схемы DNS",
     "DOWNLOAD": "Загрузить",
-    "DOWNLOADS": "Загрузки",
-    "DOWNLOAD_CANCEL": "Отменено",
-    "DOWNLOAD_DOWNLOADED": "Загружено",
-    "DOWNLOAD_FILE_SIZE": "Размер файла",
-    "DOWNLOAD_FINISHED": "Завершено",
-    "DOWNLOAD_QUEUE": "Очередь",
+    "RECORDING_TRANSFERRED": "Загружено",
+    "RECORDING_FILE_SIZE": "Размер файла",
+    "RECORDING_QUEUE": "Очередь",
     "ATTEMPT": "Попытка",
     "NEXT_RETRY": "Следующая попытка",
-    "DOWNLOAD_RETRY_BACKOFF_JITTER_PERCENT": "Дрожание повтора загрузки (%)",
-    "DOWNLOAD_RETRY_MAX_ATTEMPTS": "Макс. попыток повтора загрузки",
-    "DOWNLOAD_RETRY_BACKOFF_INITIAL": "Начальная задержка повтора загрузки (сек)",
-    "DOWNLOAD_RETRY_BACKOFF_MULTIPLIER": "Множитель задержки повтора загрузки",
-    "DOWNLOAD_RETRY_BACKOFF_MAX": "Макс. задержка повтора загрузки (сек)",
-    "DOWNLOAD_STATE_COMPLETED": "Завершено",
-    "DOWNLOAD_STATE_DOWNLOADING": "Загрузка",
-    "DOWNLOAD_STATE_FAILED": "Неудачно",
-    "DOWNLOAD_STATE_PAUSED": "Приостановлено",
-    "DOWNLOAD_STATE_QUEUED": "В очереди",
-    "DOWNLOAD_STATE_RETRY_WAITING": "Ожидание повтора",
-    "DOWNLOAD_STATE_SCHEDULED": "Запланировано",
-    "DOWNLOAD_STATE_WAITING_FOR_CAPACITY": "Ожидание свободных ресурсов",
+    "RECORDING_RETRY_BACKOFF_JITTER_PERCENT": "Дрожание повтора загрузки (%)",
+    "RECORDING_RETRY_MAX_ATTEMPTS": "Макс. попыток повтора загрузки",
+    "RECORDING_RETRY_BACKOFF_INITIAL": "Начальная задержка повтора загрузки (сек)",
+    "RECORDING_RETRY_BACKOFF_MULTIPLIER": "Множитель задержки повтора загрузки",
+    "RECORDING_RETRY_BACKOFF_MAX": "Макс. задержка повтора загрузки (сек)",
     "DURATION": "Длительность",
     "DURATION_MINUTES": "Длительность (мин.)",
     "EDIT": "Редактировать",
@@ -1485,6 +1472,7 @@
     "STREAM_HISTORY_TIME": "Время",
     "STREAM_HISTORY_TO": "К",
     "STREAM_HISTORY_ENABLED": "Включить историю потоков",
+    "STREAM_HISTORY_DISABLED_HINT": "История потоков не включена на этом сервере. Включите ее в конфигурации сервера.",
     "STREAM_HISTORY_BATCH_SIZE": "Размер пакета",
     "STREAM_HISTORY_DETAILS": "Детали",
     "STREAM_HISTORY_DISCONNECTS": "Отключения",
@@ -1652,7 +1640,6 @@
     "VIEW_TYPE_STATS": "Статистика",
     "VIEW_TYPE_STREAMS": "Потоки",
     "VIEW_TYPE_STREAM_HISTORY": "История потоков",
-    "VIEW_TYPE_DOWNLOADS": "Загрузки",
     "VIEW_TYPE_USERS": "Пользователи API",
     "VIEW_TYPE_CONFIG": "Конфигурация",
     "VIEW_TYPE_SOURCE_EDITOR": "Источники",
@@ -1708,6 +1695,16 @@
     "RECORDING_HIGH_WATER_PERCENT": "Верхний порог заполнения (%)",
     "RECORDING_KEEP_LAST_PER_CHANNEL": "Хранить последних записей для канала",
     "RECORDING_LIBRARY": "Записи",
+    "RECORDING_CONFIG": "Запись",
+    "RECORDING_CURRENT": "Текущие",
+    "RECORDING_COMPLETED": "Завершённые",
+    "RECORDING_QUOTA_PRIVATE": "Ваши записи",
+    "RECORDING_QUOTA_SHARED": "Общая библиотека",
+    "RECORDING_OFFLINE": "Нет связи — показано последнее известное состояние",
+    "RECORDING_EMPTY": "Записей нет",
+    "RECORDING_UNAVAILABLE": "Записи недоступны",
+    "RECORDING_DISABLED_HINT": "Запись не включена на этом сервере. Включите её в конфигурации сервера.",
+    "RECORDING_TOKEN_REFRESH_HINT": "Сеанс устарел. Войдите снова.",
     "RECORDING_LOW_WATER_PERCENT": "Нижний порог заполнения (%)",
     "RECORDING_MAX_ATTEMPTS": "Максимум попыток уведомления",
     "RECORDING_MAX_POST_ROLL_SECS": "Максимальная послезапись (секунды)",
@@ -1763,6 +1760,7 @@
     "TASK_STATUS_COMPLETED": "Завершено",
     "TASK_STATUS_FAILED": "Ошибка",
     "TASK_STATUS_CANCELLED": "Отменено",
+    "TASK_STATUS_CANCELLING": "Отмена",
     "CONFLICT_NO_KNOWN_CONFLICT": "Конфликтов нет",
     "CONFLICT_POSSIBLE_CAPACITY_WAIT": "Возможно ожидание свободного слота",
     "CONFLICT_LIKELY_MISSED_WINDOW": "Скорее всего, программа будет пропущена",
@@ -1785,35 +1783,6 @@
     "CONFIG_CHANGED": "Конфигурация на сервере изменилась.",
     "CONFIRM_DELETE": "Вы действительно хотите удалить это?",
     "CONFIRM_SOURCES_SAVE": "Вы действительно хотите сохранить?",
-    "DOWNLOAD": {
-      "DOWNLOAD_QUEUED": "Загрузка в очереди.",
-      "RECORDING_QUEUED": "Запись в очереди.",
-      "DOWNLOAD_PAUSED": "Загрузка приостановлена.",
-      "DOWNLOAD_RESUMED": "Загрузка возобновлена",
-      "DOWNLOAD_CANCELLED": "Загрузка отменена.",
-      "DOWNLOAD_REMOVED": "Загрузка удалена.",
-      "DOWNLOAD_RETRIED": "Загрузка повторена.",
-      "CONFIRM_CANCEL": "Вы действительно хотите отменить эту передачу?",
-      "CONFIRM_REMOVE": "Вы действительно хотите удалить эту запись?",
-      "FAIL": "Не удалось загрузить!",
-      "INVALID_RECORD_DURATION": "Длительность записи должна быть положительным числом минут.",
-      "INVALID_RECORD_START": "Время начала записи недействительно.",
-      "GEOIP": {
-        "FAIL": "Не удалось загрузить базу Geo-IP!",
-        "SUCCESS": "База Geo-IP успешно загружена"
-      },
-      "PLAYLIST": {
-        "FAIL": "Не удалось загрузить плейлист!",
-        "SUCCESS": "Плейлист успешно загружен"
-      },
-      "SERVER_CONFIG": {
-        "FAIL": "Не удалось загрузить конфигурацию сервера!"
-      },
-      "SUCCESS": "Успешно загружено",
-      "USER_BOUQUET": {
-        "FAIL": "Не удалось загрузить букеты пользователя!"
-      }
-    },
     "FAILED_TO_KICK_USER_STREAM": "Не удалось выкинуть поток пользователя",
     "FAILED_TO_RETRIEVE_PROVIDER_URL": "Не удалось получить URL провайдера",
     "FAILED_TO_RETRIEVE_WEBPLAYER_URL": "Не удалось получить URL веб-плеера",
@@ -1878,7 +1847,13 @@
       "EMPTY_RULES": "Пока нет повторяющихся правил. Создайте правило для автоматической записи сериала.",
       "RULE_DELETED": "Повторяющееся правило удалено.",
       "RULE_UPDATED": "Повторяющееся правило обновлено.",
-      "RULE_SAVED": "Повторяющееся правило сохранено."
+      "RULE_SAVED": "Повторяющееся правило сохранено.",
+      "TASK_PAUSED": "Запись приостановлена.",
+      "TASK_RESUMED": "Запись возобновлена.",
+      "TASK_REMOVED": "Запись удалена из списка.",
+      "TASK_RETRIED": "Запись снова поставлена в очередь.",
+      "CONFIRM_CANCEL": "Действительно остановить эту запись?",
+      "CONFIRM_REMOVE": "Действительно удалить эту запись из списка?"
     },
     "RBAC": {
       "ADMIN_HINT": "Пользователь является администратором — дополнительные группы не имеют эффекта.",
@@ -2040,6 +2015,13 @@
       "NETWORK_ACCESS_COUNTRIES": "Введите один 2-буквенный ISO код страны на запись, например DE.",
       "REQUIRED": "Это поле обязательно.",
       "NETWORK_ACCESS_NETWORKS": "Введите один CIDR на запись, например 192.168.0.0/16 или 2001:db8::/32."
+    },
+    "GEOIP": {
+      "FAIL": "Не удалось загрузить базу Geo-IP!",
+      "SUCCESS": "База Geo-IP успешно загружена"
+    },
+    "USER_BOUQUET": {
+      "FAIL": "Не удалось загрузить букеты пользователя!"
     }
   },
   "SETUP": {

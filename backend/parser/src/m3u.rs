@@ -24,10 +24,8 @@ use tuliprox_core::{
 /// The default is wrapped in `Arc<Regex>` once via `LazyLock` so repeated
 /// `build_series_info` calls do not re-clone the regex.
 fn resolve_episode_pattern(cfg: &Config) -> Arc<Regex> {
-    cfg.video
-        .as_ref()
-        .and_then(|v| v.download.as_ref())
-        .and_then(|d| d.episode_pattern.as_ref().map(Arc::clone))
+    cfg.recording()
+        .and_then(|recording| recording.episode_pattern.as_ref().map(Arc::clone))
         .unwrap_or_else(default_episode_pattern_arc)
 }
 
@@ -542,7 +540,7 @@ async fn consume_m3u_scoped<F: FnMut(PlaylistItem)>(
     let input_name = &input.name;
 
     let video_suffixes = match cfg.video.as_ref() {
-        Some(config) => config.extensions.iter().map(Clone::clone).collect::<Vec<String>>(),
+        Some(config) => config.extensions.clone(),
         None => default_supported_video_extensions(),
     };
     let mut lines = tokio::io::BufReader::new(lines).lines();
@@ -1336,5 +1334,41 @@ https://example.test/series/user/pass/episode-2
         assert_eq!(items[0].header.upstream_user_agent.as_deref(), Some("Source UA/1.0"));
         assert_eq!(items[1].header.upstream_user_agent, None);
         assert_eq!(items[2].header.upstream_user_agent, None);
+    }
+
+    #[tokio::test]
+    async fn consume_m3u_uses_default_recording_extensions_for_classification() {
+        let content = concat!("#EXTM3U\n", "#EXTINF:-1,Channel 1\n", "http://provider.example/live/user/pass/1.ts\n",);
+        let mut items = Vec::new();
+        super::consume_m3u(&Config::default(), &test_input(), make_reader(content), |item| items.push(item)).await;
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].header.item_type,
+            PlaylistItemType::Live,
+            "default extensions should classify .ts as Live video"
+        );
+    }
+
+    #[tokio::test]
+    async fn consume_m3u_respects_custom_recording_extensions_when_present() {
+        let cfg = Config {
+            video: Some(tuliprox_core::model::VideoConfig {
+                extensions: vec!["mp4".to_string()],
+                web_search: None,
+                recording: None,
+            }),
+            ..Config::default()
+        };
+        let content = concat!("#EXTM3U\n", "#EXTINF:-1,Channel 1\n", "http://provider.example/v.mp4\n",);
+        let mut items = Vec::new();
+        super::consume_m3u(&cfg, &test_input(), make_reader(content), |item| items.push(item)).await;
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].header.item_type,
+            PlaylistItemType::Video,
+            "custom .mp4 should classify as Video via the extension"
+        );
     }
 }

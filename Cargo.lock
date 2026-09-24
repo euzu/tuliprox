@@ -4489,6 +4489,7 @@ dependencies = [
 name = "tuliprox-btree"
 version = "3.3.119"
 dependencies = [
+ "blake3",
  "crc32fast",
  "log",
  "lz4_flex",
@@ -4497,6 +4498,7 @@ dependencies = [
  "rand 0.9.5",
  "rmp-serde",
  "serde",
+ "serde_json",
  "smallvec",
  "tempfile",
  "thiserror 2.0.20",
@@ -4595,8 +4597,11 @@ name = "tuliprox-dvr"
 version = "3.3.119"
 dependencies = [
  "arc-swap",
+ "bytes",
  "chrono",
  "chrono-tz",
+ "fastrand",
+ "futures",
  "libc",
  "log",
  "reqwest",

@@ -7,8 +7,8 @@ use crate::{
             is_seekable_media_request, is_session_based_playback, is_stream_share_enabled, local_stream_response,
             log_resource_rejection, redirect, redirect_response, reentry_suppressed_response, rejection_status,
             resolve_initial_stalker_playback_url, resolve_resource, resource_response, separate_number_and_remainder,
-            should_allow_exhausted_shared_reconnect, stream_response, try_option_bad_request, try_result_bad_request,
-            try_result_not_found, try_unwrap_body, RedirectParams, ResourceFetchOptions,
+            should_allow_exhausted_shared_reconnect, stream_response_with_provider_handle, try_option_bad_request,
+            try_result_bad_request, try_result_not_found, try_unwrap_body, RedirectParams, ResourceFetchOptions,
         },
         endpoints::{
             hls_api::{
@@ -152,6 +152,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
     input: Arc<crate::model::ConfigInput>,
     stream_ext: Option<&str>,
     archive_discriminator: Option<&str>,
+    provider_allocation_id: Option<u64>,
 ) -> impl IntoResponse + Send {
     let target_name = &target.name;
     if !target.has_output(TargetType::M3u) {
@@ -459,6 +460,12 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
     });
     // Reverse proxy mode — only route genuine HLS into the HLS handler, not DASH
     if is_session_request && extension == shared::defaults::HLS_EXT {
+        // HLS owns capacity per manifest/segment session rather than for one
+        // long-lived provider body. Release the worker's admission reservation
+        // before the HLS machinery performs its own concrete acquisition.
+        if let Some(allocation_id) = provider_allocation_id {
+            app_state.active_provider.complete_release(allocation_id);
+        }
         let Some(stream_context) = HlsEntryStreamContext::from_playlist_item(&pli) else {
             error!("HLS input stream identity missing for virtual_id={}; refresh target playlist", pli.virtual_id);
             return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -486,8 +493,16 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
 
     let pinned_provider =
         user_session.as_ref().filter(|_| pli.item_type.requires_provider_affinity()).map(|session| &session.provider);
+    let preacquired_provider_handle = if let Some(allocation_id) = provider_allocation_id {
+        let Some(handle) = app_state.active_provider.claim_download_connection(allocation_id, &input.name) else {
+            return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
+        Some(tuliprox_session::ManagedProviderHandle::new(Arc::clone(&app_state.active_provider), handle))
+    } else {
+        None
+    };
 
-    stream_response(
+    stream_response_with_provider_handle(
         fingerprint,
         app_state,
         &session_key,
@@ -503,6 +518,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
         connection_kind,
         allow_exhausted_shared_reconnect,
         grace_mode,
+        preacquired_provider_handle,
     )
     .await
     .into_response()
@@ -674,6 +690,7 @@ async fn m3u_api_stream(
             input,
             Some(archive.extension()),
             Some(&discriminator),
+            None,
         )
         .await
         .into_response();
@@ -724,6 +741,7 @@ async fn m3u_api_stream(
         input,
         stream_ext,
         archive_discriminator.as_deref(),
+        None,
     )
     .await
     .into_response()
@@ -799,6 +817,7 @@ async fn m3u_api_stream_nested(
         input,
         stream_ext,
         archive_discriminator.as_deref(),
+        None,
     )
     .await
     .into_response()
@@ -866,6 +885,7 @@ async fn m3u_api_catchup(
         input,
         None,
         Some(&archive_discriminator),
+        None,
     )
     .await
     .into_response()

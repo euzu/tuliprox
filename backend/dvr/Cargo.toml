@@ -16,7 +16,10 @@ tuliprox-messaging = { workspace = true }
 tuliprox-repository = { workspace = true }
 arc-swap.workspace = true
 chrono.workspace = true
+fastrand.workspace = true
 chrono-tz = "0.10.4"
+bytes.workspace = true
+futures.workspace = true
 libc = "0.2"
 log.workspace = true
 reqwest = { version = "0.13.4", features = ["json", "stream", "rustls", "socks", "form", "query"] }

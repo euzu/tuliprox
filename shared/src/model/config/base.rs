@@ -9,9 +9,9 @@ use crate::{
         is_blank_or_default_storage_dir, is_blank_or_default_template_path, is_blank_or_default_user_config_dir,
         is_default_connect_timeout_secs, is_default_custom_stream_response_error_status,
         is_default_event_channel_capacity, is_default_interner_gc_interval_secs, is_default_interner_gc_min_pool_size,
-        is_false, is_none_or_empty_metadata_update, is_none_or_empty_video, is_true, is_zero_u32,
-        normalize_optional_config_file_path, normalize_optional_dir, DEFAULT_BACKUP_DIR,
-        DEFAULT_CUSTOM_STREAM_RESPONSE_PATH, DEFAULT_STORAGE_DIR, DEFAULT_USER_CONFIG_DIR, MAPPING_FILE, TEMPLATE_FILE,
+        is_false, is_none_or_empty_metadata_update, is_true, is_zero_u32, normalize_optional_config_file_path,
+        normalize_optional_dir, DEFAULT_BACKUP_DIR, DEFAULT_CUSTOM_STREAM_RESPONSE_PATH, DEFAULT_STORAGE_DIR,
+        DEFAULT_USER_CONFIG_DIR, MAPPING_FILE, TEMPLATE_FILE,
     },
     error::TuliproxError,
     model::{
@@ -23,8 +23,7 @@ use crate::{
 };
 
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ConfigDto {
     #[serde(default, skip_serializing_if = "is_false")]
     pub process_parallel: bool,
@@ -65,7 +64,7 @@ pub struct ConfigDto {
         skip_serializing_if = "is_default_custom_stream_response_error_status"
     )]
     pub custom_stream_response_error_status: u16,
-    #[serde(default, skip_serializing_if = "is_none_or_empty_video")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video: Option<VideoConfigDto>,
     #[serde(default, skip_serializing_if = "is_none_or_empty_metadata_update")]
     pub metadata_update: Option<MetadataUpdateConfigDto>,
@@ -155,8 +154,126 @@ impl Default for ConfigDto {
     }
 }
 
+// Hand-written deserialization keeps the top-level schema strict while
+// preserving the project-specific defaults used by the configuration form.
+impl<'de> serde::Deserialize<'de> for ConfigDto {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raw {
+            #[serde(default, skip_serializing_if = "is_false")]
+            process_parallel: bool,
+            api: ConfigApiDto,
+            #[serde(default, alias = "working_dir")]
+            storage_dir: Option<String>,
+            #[serde(default = "default_default_user_agent")]
+            default_user_agent: Option<String>,
+            #[serde(default)]
+            backup_dir: Option<String>,
+            #[serde(default)]
+            user_config_dir: Option<String>,
+            #[serde(default)]
+            mapping_path: Option<String>,
+            #[serde(default)]
+            template_path: Option<String>,
+            #[serde(default = "default_custom_stream_response_path")]
+            custom_stream_response_path: Option<String>,
+            #[serde(default)]
+            custom_stream_response_timeout_secs: u32,
+            #[serde(default = "default_as_true")]
+            custom_stream_response_enabled: bool,
+            #[serde(default = "default_custom_stream_response_error_status")]
+            custom_stream_response_error_status: u16,
+            #[serde(default = "default_event_channel_capacity")]
+            event_channel_capacity: u32,
+            #[serde(default)]
+            video: Option<VideoConfigDto>,
+            #[serde(default)]
+            metadata_update: Option<MetadataUpdateConfigDto>,
+            #[serde(default)]
+            schedules: Option<Vec<ScheduleConfigDto>>,
+            #[serde(default)]
+            log: Option<LogConfigDto>,
+            #[serde(default)]
+            user_access_control: bool,
+            #[serde(default = "default_connect_timeout_secs")]
+            connect_timeout_secs: u32,
+            #[serde(default = "default_interner_gc_interval_secs")]
+            interner_gc_interval_secs: u32,
+            #[serde(default = "default_interner_gc_min_pool_size")]
+            interner_gc_min_pool_size: u32,
+            #[serde(default)]
+            sleep_timer_mins: Option<u32>,
+            #[serde(default)]
+            update_on_boot: bool,
+            #[serde(default)]
+            config_hot_reload: bool,
+            #[serde(default)]
+            disk_based_processing: bool,
+            #[serde(default)]
+            accept_insecure_ssl_certificates: bool,
+            #[serde(default)]
+            web_ui: Option<WebUiConfigDto>,
+            #[serde(default)]
+            messaging: Option<MessagingConfigDto>,
+            #[serde(default)]
+            reverse_proxy: Option<ReverseProxyConfigDto>,
+            #[serde(default)]
+            hdhomerun: Option<HdHomeRunConfigDto>,
+            #[serde(default)]
+            proxy: Option<ProxyConfigDto>,
+            #[serde(default)]
+            ipcheck: Option<IpCheckConfigDto>,
+            #[serde(default)]
+            library: Option<LibraryConfigDto>,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+
+        Ok(Self {
+            process_parallel: raw.process_parallel,
+            api: raw.api,
+            storage_dir: raw.storage_dir,
+            default_user_agent: raw.default_user_agent,
+            backup_dir: raw.backup_dir,
+            user_config_dir: raw.user_config_dir,
+            mapping_path: raw.mapping_path,
+            template_path: raw.template_path,
+            custom_stream_response_path: raw.custom_stream_response_path,
+            custom_stream_response_timeout_secs: raw.custom_stream_response_timeout_secs,
+            custom_stream_response_enabled: raw.custom_stream_response_enabled,
+            custom_stream_response_error_status: raw.custom_stream_response_error_status,
+            video: raw.video,
+            metadata_update: raw.metadata_update,
+            schedules: raw.schedules,
+            log: raw.log,
+            user_access_control: raw.user_access_control,
+            connect_timeout_secs: raw.connect_timeout_secs,
+            event_channel_capacity: raw.event_channel_capacity,
+            interner_gc_interval_secs: raw.interner_gc_interval_secs,
+            interner_gc_min_pool_size: raw.interner_gc_min_pool_size,
+            sleep_timer_mins: raw.sleep_timer_mins,
+            update_on_boot: raw.update_on_boot,
+            config_hot_reload: raw.config_hot_reload,
+            disk_based_processing: raw.disk_based_processing,
+            accept_insecure_ssl_certificates: raw.accept_insecure_ssl_certificates,
+            web_ui: raw.web_ui,
+            messaging: raw.messaging,
+            reverse_proxy: raw.reverse_proxy,
+            hdhomerun: raw.hdhomerun,
+            proxy: raw.proxy,
+            ipcheck: raw.ipcheck,
+            library: raw.library,
+        })
+    }
+}
+
 // This MainConfigDto is a copy of ConfigDto simple fields for form editing.
-// It has no other purpose than editing and saving the simple config values
+// It has no other purpose than editing and saving the simple config values.
+// `recording` is intentionally stripped here — the main-config form edits
+// the simple scalar settings; DVR lives on a dedicated form/page (see
+// `SchedulesConfigDto` for the parallel pattern). Add the field here only
+// when the main form gains DVR editing.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct MainConfigDto {
     #[serde(default, skip_serializing_if = "is_false")]
@@ -242,6 +359,8 @@ impl Default for MainConfigDto {
 
 impl From<&ConfigDto> for MainConfigDto {
     fn from(config: &ConfigDto) -> Self {
+        // `recording` is intentionally NOT mirrored: the main-config form
+        // owns simple scalar settings only (see the struct-level comment).
         Self {
             process_parallel: config.process_parallel,
             disk_based_processing: config.disk_based_processing,
@@ -382,8 +501,8 @@ impl ConfigDto {
             None => {
                 self.video = Some(VideoConfigDto {
                     extensions: default_supported_video_extensions(),
-                    download: None,
                     web_search: None,
+                    recording: None,
                 });
             }
             Some(video) => match video.prepare() {
@@ -391,6 +510,7 @@ impl ConfigDto {
                 Err(err) => return Err(err),
             },
         }
+
         Ok(())
     }
 
@@ -414,8 +534,8 @@ impl ConfigDto {
         }
 
         if let Some(video) = &self.video {
-            if let Some(download) = &video.download {
-                if let Some(episode_pattern) = &download.episode_pattern {
+            if let Some(recording) = &video.recording {
+                if let Some(episode_pattern) = &recording.episode_pattern {
                     if !episode_pattern.is_empty() {
                         let re = crate::model::REGEX_CACHE.get_or_compile(episode_pattern);
                         if re.is_err() {
@@ -436,6 +556,9 @@ impl ConfigDto {
     }
 
     pub fn update_from_main_config(&mut self, main_config: &MainConfigDto) {
+        // `recording` is intentionally NOT touched: this is the
+        // simple-form save path; DVR is edited on its own form (see
+        // the `MainConfigDto` comment).
         self.process_parallel = main_config.process_parallel;
         self.disk_based_processing = main_config.disk_based_processing;
         self.storage_dir = normalize_optional_dir(&main_config.storage_dir, DEFAULT_STORAGE_DIR);
@@ -464,12 +587,25 @@ impl ConfigDto {
     }
 
     pub fn is_library_enabled(&self) -> bool { self.library.as_ref().is_some_and(|l| l.enabled) }
+
+    pub fn is_stream_history_enabled(&self) -> bool {
+        self.reverse_proxy.as_ref().and_then(|r| r.stream_history.as_ref()).is_some_and(|sh| sh.stream_history_enabled)
+    }
+
+    pub fn is_qos_aggregation_enabled(&self) -> bool {
+        self.is_stream_history_enabled()
+            && self.reverse_proxy.as_ref().and_then(|r| r.qos_aggregation.as_ref()).is_some_and(|qos| qos.enabled)
+    }
+
+    pub fn is_recording_enabled(&self) -> bool {
+        self.video.as_ref().and_then(|v| v.recording.as_ref()).is_some_and(|r| r.enabled)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::defaults::{default_supported_video_extensions, CONFIG_PATH};
+    use crate::{defaults::CONFIG_PATH, model::RecordingConfigDto};
     use serde_json::json;
 
     #[test]
@@ -510,36 +646,6 @@ mod tests {
         let mut cfg = ConfigDto { custom_stream_response_error_status: 0, ..ConfigDto::default() };
         cfg.prepare(false).expect("zero must be silently clamped, not rejected");
         assert_eq!(cfg.custom_stream_response_error_status, 502);
-    }
-
-    #[test]
-    fn serializing_skips_video_for_default_values() {
-        let cfg = ConfigDto {
-            video: Some(VideoConfigDto {
-                extensions: default_supported_video_extensions(),
-                download: None,
-                web_search: None,
-            }),
-            ..ConfigDto::default()
-        };
-
-        let serialized = serde_json::to_string(&cfg).expect("config serialization should succeed");
-        assert!(!serialized.contains("\"video\""), "expected no video field, got: {serialized}");
-    }
-
-    #[test]
-    fn serializing_keeps_video_for_non_default_values() {
-        let cfg = ConfigDto {
-            video: Some(VideoConfigDto {
-                extensions: default_supported_video_extensions(),
-                download: None,
-                web_search: Some("https://example.org?q={}".to_string()),
-            }),
-            ..ConfigDto::default()
-        };
-
-        let serialized = serde_json::to_string(&cfg).expect("config serialization should succeed");
-        assert!(serialized.contains("\"video\""), "expected video field, got: {serialized}");
     }
 
     #[test]
@@ -768,5 +874,43 @@ reverse_proxy:
 
         assert!(cfg.reverse_proxy.is_some());
         assert!(cfg.reverse_proxy.as_ref().and_then(|rp| rp.stream_history.as_ref()).is_none());
+    }
+
+    #[test]
+    fn is_stream_history_and_qos_enabled_match_nested_config() {
+        let mut cfg = ConfigDto::default();
+        assert!(!cfg.is_stream_history_enabled());
+        assert!(!cfg.is_qos_aggregation_enabled());
+
+        let mut rp = ReverseProxyConfigDto::default();
+        rp.stream_history =
+            Some(crate::model::StreamHistoryConfigDto { stream_history_enabled: true, ..Default::default() });
+        cfg.reverse_proxy = Some(rp);
+        assert!(cfg.is_stream_history_enabled());
+        assert!(!cfg.is_qos_aggregation_enabled());
+
+        cfg.reverse_proxy.as_mut().unwrap().qos_aggregation =
+            Some(crate::model::QosAggregationConfigDto { enabled: true, ..Default::default() });
+        assert!(cfg.is_stream_history_enabled());
+        assert!(cfg.is_qos_aggregation_enabled());
+
+        // Disabling stream history disables QoS aggregation as well
+        cfg.reverse_proxy.as_mut().unwrap().stream_history.as_mut().unwrap().stream_history_enabled = false;
+        assert!(!cfg.is_stream_history_enabled());
+        assert!(!cfg.is_qos_aggregation_enabled());
+    }
+
+    #[test]
+    fn is_recording_enabled_matches_nested_config() {
+        let mut cfg = ConfigDto::default();
+        assert!(!cfg.is_recording_enabled());
+
+        let mut video = VideoConfigDto::default();
+        video.recording = Some(RecordingConfigDto { enabled: true, ..Default::default() });
+        cfg.video = Some(video);
+        assert!(cfg.is_recording_enabled());
+
+        cfg.video.as_mut().unwrap().recording.as_mut().unwrap().enabled = false;
+        assert!(!cfg.is_recording_enabled());
     }
 }

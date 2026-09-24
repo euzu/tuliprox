@@ -265,7 +265,7 @@ playlist_manager:playlist.read,playlist.write,source.read
 
 Available Permissions: `config.read/write`, `source.read/write`, `user.read/write`, `playlist.read/write`,
 `library.read/write`,
-`system.read/write`, `epg.read/write`, `download.read/write`. Note: Write does not imply Read. A group must explicitly
+`system.read/write`, `epg.read/write`, `recording.read/create/manage/delete`. Note: Write does not imply Read. A group must explicitly
 grant both if users need
 to view
 and edit content.
@@ -878,8 +878,8 @@ Optional video-related behaviors, mostly utilized by the Web UI.
 video:
   web_search: "https://www.imdb.com/search/title/?title={}"
   extensions: [ "mkv", "mp4", "avi", "ts", "webm" ]
-  download:
-    directory: /tmp/tuliprox_downloads
+  recording:
+    directory: /tmp/tuliprox_recordings
     headers:
       User-Agent: "AppleTV/tvOS/9.1.1"
       Accept: "video/*"
@@ -889,17 +889,15 @@ video:
 
 * `web_search`: A template URL used in the Web UI to quickly search for a movie title (replaces `{}` with the title).
 * `extensions`: Defines which file endings Tuliprox categorizes as VOD/Video content when transforming M3U to Xtream.
-* `download`: Configuration for the Web UI download and recording manager.
-  * `directory`: Where downloaded files and recordings are saved.
+* `recording`: Configuration for the DVR.
+  * `directory`: Where recordings are saved.
   * `headers` (optional): Custom HTTP headers used for the download request. This is useful for bypassing basic
     user-agent filters or setting specific media types.
   * `organize_into_directories`: If true, Tuliprox automatically creates neat subfolders for series.
   * `episode_pattern`: Crucial for the directory organization. It uses the mandatory Named Capture Group
     `(?P<episode>...)` in the Regex to identify and strip the episode identifier (e.g., `S01E01`)
     from the filename, ensuring all episodes of a show land in the same base-show folder.
-  * `download_priority`: Default provider priority for VOD/series/episode downloads. Lower values mean higher
-    priority.
-  * `recording_priority`: Default provider priority for live recordings. Lower values mean higher priority.
+  * `priority`: Provider priority for recordings. Lower values mean higher priority.
   * `reserve_slots_for_users`: Keeps provider headroom for normal foreground users before background-priority
     transfers
     may consume the last slots.
@@ -916,31 +914,46 @@ Tuliprox handles these transfers like provider-bound background streams:
 * They respect provider limits, user priorities, and connection preemption instead of bypassing normal stream capacity.
 * Waiting for provider capacity is notify-based, not polling-based.
 * The Web UI loads an initial transfer snapshot and then stays synchronized through websocket updates.
-* Changes to `video.download` participate in hot config reloads. The background scheduler restarts and active transfers
+* Changes to `video.recording` participate in hot config reloads. The background scheduler restarts and active transfers
   are  
   re-queued so they continue under the updated download configuration.
 * RBAC integration is explicit:
-  * `download.read` allows opening the downloads view and receiving transfer snapshots.
-  * `download.write` allows queueing, pausing, cancelling, retrying, and removing transfers.
   * `recording.read` allows opening DVR task, quota, library, and recurring-rule views.
-  * `recording.write` allows creating, editing, cancelling, deleting, and managing DVR tasks and rules.
-* Persisted queue recovery is tolerant of corruption. If `downloads_state.json` cannot be deserialized,  
-  Tuliprox renames it to a timestamped `*_corrupt.*.json` backup and starts with an empty transfer queue instead of
-  aborting server boot.
+  * `recording.create` allows requesting a new DVR recording.
+  * `recording.manage` allows editing, cancelling and managing DVR tasks and rules.
+  * `recording.delete` allows removing a recording from a library.
+* The recording queue **fails closed**. It is not discarded on corruption: a damaged
+  `recordings.db` is rebuilt from the recovery history, and a database that is ahead of every
+  surviving history refuses to start rather than silently adopting a queue it cannot account
+  for. Losing the recovery directory while the database survives is therefore a startup error,
+  not an empty queue.
 
 ### 6.1 DVR Runtime Files
 
 The DVR runtime keeps durable state under `storage_dir`:
 
-* `downloads_state.json`: queued, scheduled, active, and finished downloads and recordings.
+* `recordings.db`: the recording queue, stored as a B+Tree.
 * `recording_rules.json`: recurring recording rules and tombstones.
+
+Recovery generations live under `backup_dir/recordings_recovery/`, deliberately away from
+`storage_dir` so they can be pointed at a different filesystem. Each generation holds a
+checkpoint and the journal that continues it; the current generation plus one verified
+predecessor are retained. Every queue mutation is appended to the journal and made durable
+*before* the B+Tree is touched, so a crash can only leave recovery ahead of the database — which
+the next start repairs by rebuilding — and never the database ahead of its own history.
+
+Records are stored as field-named JSON carrying their schema version, so a future change to the
+record shape is migrated forward on restore rather than refused.
+
+There is **no migration** from the previous `recordings_state.json`. An existing queue is not
+carried across; the repository starts empty.
 
 Live recordings use a partial-file lifecycle. The worker writes to `<filename>.partial` and renames it to the final
 path only after ffmpeg exits successfully and the final path is still free.
 
 > **See also:** the full [DVR Operator Reference](../operator/dvr.md) — configuration reference, directory layout,
 > filename placeholders, lifecycle / restart, quota charge-by-state, disk admission, safe deletion, authorization
-> matrix, identity-registry bootstrap, token refresh, deprecated `/file/record`, REST + WebSocket surface, conflict
+> matrix, identity-registry bootstrap, token refresh, the removed `/file/record`, REST + WebSocket surface, conflict
 > preview, recurring-rule matching + DST + reconciliation, at-most-once notification protocol, migration checklist,
 > and the 32-scenario acceptance sweep.
 
@@ -962,13 +975,13 @@ The filename template supports these placeholders (filename only — **never** t
 
 #### 6.1.2 Authorization matrix
 
-The DVR layer runs an additional authorization pass on top of `recording.read` / `recording.write`.
+The DVR layer runs an additional authorization pass on top of `recording.read`, `recording.create`,
+`recording.manage` and `recording.delete`.
 
 | Visibility | Owner                  | Admin (`builtin:admin`) | Foreign user | Notes                                     |
 |------------|------------------------|-------------------------|--------------|-------------------------------------------|
 | `private`  | read + write + delete  | read + write + delete   | —            | Foreign reads return 404                  |
 | `shared`   | —                      | read + write + delete   | read         | Only admins create shared recordings      |
-| `legacy`   | — (orphan)             | read + write + delete   | —            | Created by the deprecated `/file/record`  |
 
 #### 6.1.3 Identity bootstrap
 
@@ -989,12 +1002,12 @@ When the JWT schema version is bumped (a new field is added), existing tokens ar
 toastr surfaces a stable, translatable message. Operators upgrading across a schema-bump release do not need
 to do anything manually.
 
-#### 6.1.5 Deprecated `/file/record`
+#### 6.1.5 The removed `/file/record`
 
-`POST /api/v1/file/record` is the legacy recording endpoint. It is still functional and admin-gated, but
-returns a `recording_forbidden` error for non-admin principals and is **scheduled for removal in the next
-major version**. New code should use `POST /api/v1/recording/tasks` with a `CreateRecordingTaskBody` payload
-(see [REST API cookbook](../rest-api-cookbook.md#downloads-and-recordings)).
+`POST /api/v1/file/record` and the `/api/v1/file/download/*` family have been
+**removed**. There is no deprecated alias and no compatibility shim; a caller still using them gets a
+`404`. Use `POST /api/v1/recording/requests`, which answers `204 No Content`
+(see [REST API cookbook](../rest-api-cookbook.md#recordings)).
 
 > **Note:** The named capture group `(?P<episode>...)` is **mandatory** for this to function correctly.
 >

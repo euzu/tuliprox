@@ -4165,6 +4165,10 @@ fn test_app_state_with_hls_proxy_and_inputs(
     let (manual_update_sender, _) = mpsc::channel::<ManualPlaylistUpdateRequest>(1);
 
     Arc::new(AppState {
+        recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
+            Arc::clone(&active_provider),
+            Arc::clone(&connection_manager),
+        ),
         forced_targets: Arc::new(ArcSwap::from_pointee(ProcessTargets {
             enabled: false,
             inputs: Vec::new(),
@@ -4181,7 +4185,7 @@ fn test_app_state_with_hls_proxy_and_inputs(
         )),
         public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
         resource_clients: empty_resource_client_set(),
-        downloads: Arc::new(crate::api::model::DownloadQueue::new()),
+        recordings: Arc::new(crate::api::model::RecordingQueue::new()),
         cache: Arc::new(ArcSwapOption::default()),
         shared_stream_manager,
         hls_proxy,

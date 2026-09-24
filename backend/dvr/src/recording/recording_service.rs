@@ -2,9 +2,12 @@
 
 use super::{recording_ctx::RecordingCtx, recording_source_resolution as source_resolution};
 use crate::{
-    download::{
-        mutate, DownloadKind, DownloadQueue, DownloadState, FileDownload, PersistedDownloadQueue,
-        PersistedFileDownload, QueueMutationError,
+    recording::{
+        recording_disk, recording_path,
+        recording_queue::{
+            mutate, mutate_with_idempotency, IdempotencyOutcome, PersistedIdempotency, PersistedRecordingQueue,
+            PersistedRecordingTask, QueueMutationError, RecordingQueue, RecordingTask, RecordingTaskState,
+        },
     },
     recording_deletion::{
         begin_deletion_authorized, execute_deletion_target, finalize_deletion, rollback_deletion, DeletionError,
@@ -14,9 +17,13 @@ use crate::{
 };
 use shared::model::{
     recording::{RecordingMetadata, RecordingOwner, RecordingProvenance, RecordingSource, RecordingVisibility},
-    EventSink, UserId, XtreamCluster,
+    EventSink, RecordingKind, UserId, XtreamCluster,
 };
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tuliprox_auth::{authorize, authorize_orphan, RecordingAction, RecordingDecision, RecordingSubject, TerminalState};
 use tuliprox_core::model::AppConfig;
 
@@ -110,11 +117,23 @@ pub enum ServiceError {
     /// The recording cannot fit on disk; reservation would exceed
     /// available space.
     DiskFull,
-    /// The server has no download engine: the `video.download` block
+    /// The server has no download engine: the `video.recording` block
     /// is missing from the configuration. Distinct from
     /// `InvalidSource` because the caller's identifiers may be
     /// perfectly valid — nothing on the server can execute them.
     Disabled,
+    /// This exact request was already accepted under this idempotency key.
+    /// Not a failure: the caller gets the original outcome.
+    IdempotentReplay { recording_id: String },
+    /// Same idempotency key, different request body.
+    IdempotencyConflict,
+}
+
+/// An `Idempotency-Key` and a digest of the body it arrived with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IdempotencyRequest {
+    pub key: String,
+    pub fingerprint: String,
 }
 
 impl std::fmt::Display for ServiceError {
@@ -143,6 +162,8 @@ impl ServiceError {
             Self::InvalidPath => "recording_invalid_path",
             Self::DiskFull => "recording_disk_full",
             Self::Disabled => "recording_disabled",
+            Self::IdempotentReplay { .. } => "recording_idempotent_replay",
+            Self::IdempotencyConflict => "recording_idempotency_conflict",
         }
     }
 }
@@ -229,7 +250,7 @@ pub struct RecordingTaskView {
     pub filename_preview: String,
     pub start_at: Option<i64>,
     pub duration_secs: Option<u64>,
-    pub state: DownloadState,
+    pub state: RecordingTaskState,
 }
 
 /// Input for `RecordingService::edit_recording`.
@@ -247,17 +268,17 @@ pub struct EditRecordingPatch {
 /// Recording mutation boundary. Holds the queue and app config directly
 /// so the server's root state does not carry a back-reference to the service.
 pub struct RecordingService {
-    downloads: Arc<DownloadQueue>,
+    recordings: Arc<RecordingQueue>,
     app_config: Arc<AppConfig>,
 }
 
 impl RecordingService {
     /// Construct from the queue and app config.
-    pub fn new(downloads: Arc<DownloadQueue>, app_config: Arc<AppConfig>) -> Self { Self { downloads, app_config } }
+    pub fn new(recordings: Arc<RecordingQueue>, app_config: Arc<AppConfig>) -> Self { Self { recordings, app_config } }
 
     /// Convenience constructor from the DVR's context.
     pub fn from_ctx<E: EventSink + Clone + 'static>(ctx: &RecordingCtx<E>) -> Self {
-        Self::new(ctx.downloads.clone(), ctx.app_config.clone())
+        Self::new(ctx.recordings.clone(), ctx.app_config.clone())
     }
 
     fn subject_id(claims: &shared::model::Claims) -> Result<UserId, ServiceError> {
@@ -283,49 +304,31 @@ impl RecordingService {
         claims: &shared::model::Claims,
         input: &CreateRecordingInput,
     ) -> Result<RecordingTaskView, ServiceError> {
-        input.validate()?;
-        let owner_id = Self::subject_id(claims)?;
-        let config = self.app_config.config.load();
-        let Some(download_cfg) = config.video.as_ref().and_then(|v| v.download.as_ref()) else {
-            return Err(ServiceError::Disabled);
-        };
-        let recording_cfg = download_cfg.recording.as_ref();
-        recording_edit::validate_padding(input.pre_roll_secs, input.post_roll_secs, padding_bounds(recording_cfg))
-            .map_err(|error: EditError| map_edit_validation_error(&error))?;
-        let window = effective_recording_window(
-            input.program_start,
-            input.program_end,
-            input.pre_roll_secs,
-            input.post_roll_secs,
-            chrono::Utc::now().timestamp(),
-        )?;
-        let url = self.recording_url(&input.source).ok_or(ServiceError::InvalidSource)?;
+        self.create_recording_idempotent(claims, input, None).await
+    }
 
-        // Shared creation requires admin.
-        authorize_create_recording(claims, &owner_id, input.visibility)?;
-
-        let duration_secs = window.remaining_duration_secs;
-        let priority = download_cfg.recording_priority;
+    /// Builds the task a live request describes, and the space it reserves.
+    ///
+    /// Split out of `create_recording_idempotent` purely for length: this is
+    /// the request-to-task translation, with no admission decisions in it.
+    fn build_live_recording(
+        owner_id: &UserId,
+        input: &CreateRecordingInput,
+        recording_cfg: &tuliprox_core::model::RecordingConfig,
+        window: &EffectiveRecordingWindow,
+        url: &str,
+        duration_secs: u64,
+    ) -> Result<(RecordingTask, u64), ServiceError> {
         let filename = render_filename_preview(input);
         let input_name: Option<Arc<str>> =
             (!input.source.input_name.trim().is_empty()).then(|| Arc::from(input.source.input_name.as_str()));
-        let mut recording = FileDownload::new_recording(
-            &url,
-            &filename,
-            download_cfg,
-            window.execution_start,
-            duration_secs,
-            input_name,
-            priority,
-        )
-        .ok_or(ServiceError::InvalidSource)?;
         let source = RecordingSource::new(
             input.source.target_id.clone(),
             input.source.virtual_id.clone(),
             input.source.input_name.clone(),
         )
         .with_cluster(input.source.cluster);
-        let mut meta = RecordingMetadata::new(
+        let mut meta = RecordingMetadata::new_live(
             RecordingOwner::User(owner_id.clone()),
             input.visibility,
             source,
@@ -341,20 +344,102 @@ impl RecordingService {
         meta.program_title = Some(input.program_title.clone());
         meta.provenance = input.provenance.clone();
         meta.epg.clone_from(&input.epg);
-        let fallback_bytes_per_minute = recording_cfg.map_or(8 * 1024 * 1024, |cfg| cfg.fallback_bytes_per_minute);
-        let (reserved_bytes, _) = recording_quota::estimate_reservation(duration_secs, 0, fallback_bytes_per_minute);
+        let (reserved_bytes, _) =
+            recording_quota::estimate_reservation(duration_secs, 0, recording_cfg.fallback_bytes_per_minute);
         meta.reserved_bytes = reserved_bytes;
-        recording.recording = Some(meta);
-        let mut persisted = DownloadQueue::to_persisted(&recording);
-        let view_task = recording.clone();
-        let quota_limits = quota_limits_from_config(recording_cfg.and_then(|cfg| cfg.quota.as_ref()));
+        let recording = RecordingTask::new(
+            RecordingKind::Live,
+            url,
+            &filename,
+            recording_cfg,
+            input_name,
+            recording_cfg.priority,
+            meta,
+        )
+        .ok_or(ServiceError::InvalidSource)?;
+        Ok((recording, reserved_bytes))
+    }
 
-        mutate(&self.downloads, |candidate| {
+    /// `create_recording`, honouring an `Idempotency-Key`.
+    ///
+    /// A replay of an accepted request is answered from the stored record
+    /// rather than run again; the same key with a different body is a
+    /// conflict, because answering it with the first request's result would
+    /// hide a caller bug.
+    pub async fn create_recording_idempotent(
+        &self,
+        claims: &shared::model::Claims,
+        input: &CreateRecordingInput,
+        idempotency: Option<IdempotencyRequest>,
+    ) -> Result<RecordingTaskView, ServiceError> {
+        input.validate()?;
+        let owner_id = Self::subject_id(claims)?;
+        // Before any work: a replay must not resolve sources, reserve a path
+        // or touch quota.
+        if let Some(request) = idempotency.as_ref() {
+            match self
+                .recordings
+                .lookup_idempotency(owner_id.0.as_str(), &request.key, &request.fingerprint)
+                .await
+                .map_err(|err| ServiceError::IoError(err.to_string()))?
+            {
+                IdempotencyOutcome::Fresh => {}
+                IdempotencyOutcome::Replay { recording_id } => {
+                    return Err(ServiceError::IdempotentReplay { recording_id })
+                }
+                IdempotencyOutcome::Conflict => return Err(ServiceError::IdempotencyConflict),
+            }
+        }
+        if !crate::recording::recording_supervisor::recording_enabled(&self.app_config) {
+            return Err(ServiceError::Disabled);
+        }
+        let config = self.app_config.config.load();
+        let Some(recording_cfg) = config.recording() else {
+            return Err(ServiceError::Disabled);
+        };
+        recording_edit::validate_padding(
+            input.pre_roll_secs,
+            input.post_roll_secs,
+            padding_bounds(Some(recording_cfg)),
+        )
+        .map_err(|error: EditError| map_edit_validation_error(&error))?;
+        let window = effective_recording_window(
+            input.program_start,
+            input.program_end,
+            input.pre_roll_secs,
+            input.post_roll_secs,
+            chrono::Utc::now().timestamp(),
+        )?;
+        let url = self.recording_url(&input.source).ok_or(ServiceError::InvalidSource)?;
+
+        // Shared creation requires admin.
+        authorize_create_recording(claims, &owner_id, input.visibility)?;
+
+        let duration_secs = window.remaining_duration_secs;
+        let (recording, reserved_bytes) =
+            Self::build_live_recording(&owner_id, input, recording_cfg, &window, &url, duration_secs)?;
+        let mut persisted = RecordingQueue::to_persisted(&recording);
+        let view_task = recording.clone();
+        let quota_limits = quota_limits_from_config(recording_cfg.quota.as_ref());
+        // Measured before the mutation: it is a syscall, and the lock is
+        // held for the whole closure. `None` means the root could not be
+        // measured, and an unmeasurable disk is not grounds to refuse.
+        let disk_safety_bytes = recording_cfg.disk.as_ref().and_then(|disk| disk.safety_bytes).unwrap_or(0);
+        let free_bytes = recording_disk::free_bytes_for(std::path::Path::new(&recording_cfg.directory));
+        let idempotency_record = idempotency.as_ref().map(|request| PersistedIdempotency {
+            principal: owner_id.0.clone(),
+            key: request.key.clone(),
+            request_fingerprint: request.fingerprint.clone(),
+            recording_id: view_task.uuid.clone(),
+            accepted_at: chrono::Utc::now().timestamp(),
+        });
+
+        let admit = |candidate: &mut PersistedRecordingQueue| -> Result<(), QueueMutationError> {
             reserve_recording_relative_path(candidate, &mut persisted)?;
             if candidate_has_duplicate_recording(candidate, &view_task) {
                 return Err(QueueMutationError::Duplicate);
             }
-            let pool = recording_quota::quota_pool_for_task(&persisted).ok_or(QueueMutationError::InvalidQuotaPool)?;
+            let pool = recording_quota::quota_pool_for_task(&persisted);
             let used = used_bytes_for_pool(candidate, &pool);
             if matches!(
                 recording_quota::would_exceed(&pool, used, reserved_bytes, &quota_limits),
@@ -362,10 +447,25 @@ impl RecordingService {
             ) {
                 return Err(QueueMutationError::QuotaExceeded);
             }
-            candidate.scheduled.push(persisted);
+            // Quota is per-owner and logical; this is the physical
+            // question, and one can pass while the other fails.
+            if let Some(free_bytes) = free_bytes {
+                let active = recording_disk::active_disk_reservations(candidate_tasks(candidate));
+                if matches!(
+                    recording_disk::would_fit_on_disk(free_bytes, disk_safety_bytes, active, reserved_bytes),
+                    recording_disk::DiskAdmission::Insufficient { .. }
+                ) {
+                    return Err(QueueMutationError::DiskFull);
+                }
+            }
+            candidate.scheduled.push(persisted.clone());
             Ok(())
-        })
-        .await
+        };
+
+        match idempotency_record {
+            Some(record) => mutate_with_idempotency(&self.recordings, record, admit).await,
+            None => mutate(&self.recordings, admit).await,
+        }
         .map_err(|e| map_queue_error(&e))?;
 
         Ok(RecordingTaskView {
@@ -375,7 +475,7 @@ impl RecordingService {
             filename_preview: view_task.filename,
             start_at: Some(window.execution_start),
             duration_secs: Some(duration_secs),
-            state: DownloadState::Scheduled,
+            state: RecordingTaskState::Scheduled,
         })
     }
 
@@ -395,13 +495,12 @@ impl RecordingService {
         // helper falls back to the shared-model defaults, so a
         // configured-without-recording deployment still validates
         // edits.
-        let recording_cfg =
-            config.video.as_ref().and_then(|v| v.download.as_ref()).and_then(|dl| dl.recording.as_ref());
+        let recording_cfg = config.recording();
         let bounds = padding_bounds(recording_cfg);
         let fallback_bytes_per_minute = recording_cfg.map_or(8 * 1024 * 1024, |cfg| cfg.fallback_bytes_per_minute);
         let quota_limits = quota_limits_from_config(recording_cfg.and_then(|cfg| cfg.quota.as_ref()));
         let mut out = None;
-        mutate(&self.downloads, |candidate| {
+        mutate(&self.recordings, |candidate| {
             // Single linear scan: locate the recording, snapshot the
             // primitives we need for the immutable analysis, drop the
             // borrow, run the checks, then re-acquire the same task
@@ -419,13 +518,11 @@ impl RecordingService {
                         return Err(QueueMutationError::StateNotEditable);
                     }
                 };
-                if !recording_edit::state_is_editable(task.state.label()) {
+                if !recording_edit::state_is_editable(task.state) {
                     return Err(QueueMutationError::StateNotEditable);
                 }
-                let Some(meta_snapshot) = task.recording.as_ref() else {
-                    return Err(QueueMutationError::UnknownRecording);
-                };
-                let pool = recording_quota::quota_pool_for_task(task).ok_or(QueueMutationError::InvalidQuotaPool)?;
+                let meta_snapshot = &task.recording;
+                let pool = recording_quota::quota_pool_for_task(task);
                 let subject = RecordingSubject::new(Some(meta_snapshot), TerminalState::Active, true);
                 if !matches!(authorize(claims, &owner_id, RecordingAction::Edit, &subject), RecordingDecision::Allow) {
                     return Err(QueueMutationError::Forbidden);
@@ -495,9 +592,7 @@ impl RecordingService {
             let Some(task) = recording_mut_at(candidate, location) else {
                 return Err(QueueMutationError::UnknownRecording);
             };
-            let Some(meta) = task.recording.as_mut() else {
-                return Err(QueueMutationError::UnknownRecording);
-            };
+            let meta = &mut task.recording;
             if let Some(title) = patch.program_title {
                 meta.program_title = Some(title);
             }
@@ -517,17 +612,15 @@ impl RecordingService {
             if snapshot.channel_changed_now {
                 meta.epg = None;
             }
-            task.start_at = Some(start);
-            task.duration_secs = Some(duration_secs);
 
             out = Some(RecordingTaskView {
                 uuid: task.uuid.clone(),
                 owner_id: owner_id.clone(),
                 visibility: meta.visibility,
                 filename_preview: task.filename.clone(),
-                start_at: task.start_at,
-                duration_secs: task.duration_secs,
-                state: task.state.clone(),
+                start_at: meta.scheduled_start,
+                duration_secs: Some(duration_secs),
+                state: task.state,
             });
             Ok(())
         })
@@ -536,14 +629,19 @@ impl RecordingService {
         out.ok_or(ServiceError::UnknownRecording)
     }
 
-    /// Cancel an in-flight or scheduled recording. Calls the queue's
-    /// `cancel_active` when the recording is active; for queued or
-    /// scheduled tasks are not cancelled here.
+    /// Cancel an in-flight or scheduled recording.
+    ///
+    /// An active recording is asked to stop, not marked stopped: the worker
+    /// still owns the file and the provider slot, so it must release them
+    /// first and is the one that commits `Cancelled`. Marking it terminal
+    /// here would show it as a finished recording while it is still writing,
+    /// and a later remove would then find it in the active slot, leave it
+    /// there, and report success.
     pub async fn cancel_recording(&self, claims: &shared::model::Claims, uuid: &str) -> Result<(), ServiceError> {
         let owner_id = Self::subject_id(claims)?;
-        let active = self.downloads.active.read().await.clone();
+        let active = self.recordings.active.read().await.clone();
         if let Some(active) = active.filter(|active| active.uuid == uuid) {
-            let meta = active.recording.clone().ok_or(ServiceError::UnknownRecording)?;
+            let meta = active.recording.clone();
             let subject = RecordingSubject::new(Some(&meta), TerminalState::Active, true);
             if !matches!(authorize(claims, &owner_id, RecordingAction::Cancel, &subject), RecordingDecision::Allow) {
                 return Err(ServiceError::Forbidden);
@@ -552,37 +650,36 @@ impl RecordingService {
             // above and this call ffmpeg can finish and the queue can
             // promote a *different* recording into the active slot; the
             // no-uuid variant would then kill that innocent recording.
-            match self.downloads.cancel_active_matching(uuid).await {
-                Ok(true) => return Ok(()),
+            match self.recordings.cancel_requested(uuid).await {
+                // The task is active (running, waiting, or paused). A paused
+                // one has already been moved to `finished`; a worker-owned one
+                // is now `Cancelling` and the worker will finish it.
+                Ok(Some(_)) => return Ok(()),
                 // The task left the active slot in the meantime. Fall
                 // through to the inactive path: it either finds the task
                 // in `scheduled`/`queue` (a re-promotion) or reports
                 // `UnknownRecording`, which is the truthful answer.
-                Ok(false) => {}
+                Ok(None) => {}
                 Err(err) => {
-                    log::error!("cancel_active_matching failed for {uuid}: {err}");
+                    log::error!("cancel_requested failed for {uuid}: {err}");
                     return Err(ServiceError::PersistenceFailed);
                 }
             }
         }
-        mutate(&self.downloads, |candidate| {
+        mutate(&self.recordings, |candidate| {
             let Some(task) = remove_inactive_recording(candidate, uuid) else {
                 return Err(QueueMutationError::UnknownRecording);
             };
-            let Some(meta) = task.recording.as_ref() else {
-                return Err(QueueMutationError::UnknownRecording);
-            };
+            let meta = &task.recording;
             let subject = RecordingSubject::new(Some(meta), TerminalState::Active, true);
             if !matches!(authorize(claims, &owner_id, RecordingAction::Cancel, &subject), RecordingDecision::Allow) {
                 return Err(QueueMutationError::Forbidden);
             }
             let mut cancelled = task;
-            cancelled.state = DownloadState::Cancelled;
+            cancelled.state = RecordingTaskState::Cancelled;
             cancelled.finished = true;
             cancelled.error = Some("cancelled".to_string());
-            if let Some(meta) = cancelled.recording.as_mut() {
-                meta.reserved_bytes = 0;
-            }
+            cancelled.recording.reserved_bytes = 0;
             candidate.finished.push(cancelled);
             Ok(())
         })
@@ -597,6 +694,97 @@ impl RecordingService {
     /// occurrences, then delete the rule) that cannot be made atomic, so
     /// it keeps these to undo the queue side if the rule store fails —
     /// see [`Self::restore_cancelled_rule_recordings`].
+    pub async fn pause_recording(&self, claims: &shared::model::Claims, uuid: &str) -> Result<(), ServiceError> {
+        let owner_id = Self::subject_id(claims)?;
+        let active = self.recordings.active.read().await.clone();
+        if let Some(active) = active.filter(|active| active.uuid == uuid) {
+            let meta = active.recording.clone();
+            if !active.kind.is_resumable() {
+                return Err(ServiceError::InvalidState); // Live cannot be paused
+            }
+            let subject = RecordingSubject::new(Some(&meta), TerminalState::Active, true);
+            if !matches!(authorize(claims, &owner_id, RecordingAction::Edit, &subject), RecordingDecision::Allow) {
+                return Err(ServiceError::Forbidden);
+            }
+            self.recordings.pause_active(uuid).await.map_err(|_| ServiceError::PersistenceFailed)?;
+            return Ok(());
+        }
+        Err(ServiceError::UnknownRecording)
+    }
+
+    pub async fn resume_recording(&self, claims: &shared::model::Claims, uuid: &str) -> Result<bool, ServiceError> {
+        let owner_id = Self::subject_id(claims)?;
+        let active = self.recordings.active.read().await.clone();
+        if let Some(active) = active.filter(|active| active.uuid == uuid) {
+            let meta = active.recording.clone();
+            if !active.kind.is_resumable() {
+                return Err(ServiceError::InvalidState);
+            }
+            let subject = RecordingSubject::new(Some(&meta), TerminalState::Active, true);
+            if !matches!(authorize(claims, &owner_id, RecordingAction::Edit, &subject), RecordingDecision::Allow) {
+                return Err(ServiceError::Forbidden);
+            }
+            return self.recordings.resume_active(uuid).await.map_err(|_| ServiceError::PersistenceFailed);
+        }
+        Err(ServiceError::UnknownRecording)
+    }
+
+    /// Remove a task from the queue. The ownership check runs inside the
+    /// same mutation that removes it, so a task cannot change hands
+    /// between the check and the write.
+    pub async fn remove_recording_task(
+        &self,
+        claims: &shared::model::Claims,
+        uuid: &str,
+    ) -> Result<bool, ServiceError> {
+        let owner_id = Self::subject_id(claims)?;
+        mutate(&self.recordings, |candidate| {
+            authorize_task_in_candidate(candidate, uuid, claims, &owner_id, RecordingAction::Delete)?;
+            // The active slot is owned by the worker. Removing a task from
+            // it here would leave the worker writing to a file no entry
+            // names, so refuse instead of silently doing nothing (the retain
+            // below cannot reach the active slot).
+            if candidate.active.as_ref().is_some_and(|active| active.uuid == uuid) {
+                return Err(QueueMutationError::StateNotEditable);
+            }
+            let original = candidate.queue.len() + candidate.scheduled.len() + candidate.finished.len();
+            candidate.queue.retain(|task| task.uuid != uuid);
+            candidate.scheduled.retain(|task| task.uuid != uuid);
+            candidate.finished.retain(|task| task.uuid != uuid);
+            let current = candidate.queue.len() + candidate.scheduled.len() + candidate.finished.len();
+            Ok(current != original)
+        })
+        .await
+        .map_err(|e| map_queue_error(&e))
+    }
+
+    /// Requeue a finished VOD/Series transfer. Live is rejected by the
+    /// queue itself: its programme window is gone.
+    pub async fn retry_recording(&self, claims: &shared::model::Claims, uuid: &str) -> Result<bool, ServiceError> {
+        let owner_id = Self::subject_id(claims)?;
+        mutate(&self.recordings, |candidate| {
+            authorize_task_in_candidate(candidate, uuid, claims, &owner_id, RecordingAction::Edit)?;
+            let Some(pos) = candidate.finished.iter().position(|task| task.uuid == uuid) else {
+                return Ok(false);
+            };
+            if !candidate.finished[pos].kind.is_resumable() {
+                return Err(QueueMutationError::StateNotEditable);
+            }
+            let mut task = candidate.finished.remove(pos);
+            task.finished = false;
+            task.size = 0;
+            task.paused = false;
+            task.error = None;
+            task.state = RecordingTaskState::Queued;
+            task.retry_attempts = 0;
+            task.next_retry_at = None;
+            candidate.queue.push(task);
+            Ok(true)
+        })
+        .await
+        .map_err(|e| map_queue_error(&e))
+    }
+
     pub async fn cancel_future_rule_recordings(
         &self,
         claims: &shared::model::Claims,
@@ -604,11 +792,11 @@ impl RecordingService {
         now_secs: i64,
     ) -> Result<Vec<CancelledRuleRecording>, ServiceError> {
         let _ = Self::subject_id(claims)?;
-        if !claims.permissions.contains(shared::model::Permission::RecordingWrite) {
+        if !claims.permissions.contains(shared::model::Permission::RecordingManage) {
             return Err(ServiceError::Forbidden);
         }
         let mut cancelled = Vec::new();
-        mutate(&self.downloads, |candidate| {
+        mutate(&self.recordings, |candidate| {
             cancelled = cancel_future_rule_recordings_in_candidate(candidate, rule_id, now_secs);
             Ok(())
         })
@@ -631,7 +819,7 @@ impl RecordingService {
         if cancelled.is_empty() {
             return Ok(());
         }
-        mutate(&self.downloads, |candidate| {
+        mutate(&self.recordings, |candidate| {
             for entry in cancelled {
                 let uuid = entry.task.uuid.as_str();
                 candidate.finished.retain(|task| task.uuid != uuid);
@@ -659,6 +847,7 @@ impl RecordingService {
             matches!(authorize(claims, &owner_id, RecordingAction::Delete, &subject), RecordingDecision::Allow)
         })
         .await
+        .map(|_| ())
     }
 
     /// The three-phase deletion, shared by the user-facing delete and the
@@ -668,18 +857,21 @@ impl RecordingService {
     /// the previous implementation looked the task up, authorized it,
     /// stamped it, then looked it up a second time and could act on a
     /// stale copy.
-    async fn run_deletion<F>(&self, uuid: &str, permit: F) -> Result<(), ServiceError>
+    /// Returns `true` when the file was actually unlinked. `false` means the
+    /// entry is gone but another library entry still holds its bytes, so the
+    /// caller must not count the space as reclaimed.
+    async fn run_deletion<F>(&self, uuid: &str, permit: F) -> Result<bool, ServiceError>
     where
         F: FnOnce(&RecordingMetadata) -> bool,
     {
-        let queue = self.downloads.clone();
+        let queue = self.recordings.clone();
         let target = begin_deletion_authorized(&queue, uuid, permit).await.map_err(map_deletion_error)?;
         if let Err(err) = execute_deletion_target(&target).await {
             // File removal failed: undo the deletion transition so the
             // recording stays visible in its prior state instead of
             // being silently lost when finalize_deletion runs.
             let uuid_owned = uuid.to_string();
-            let _ = mutate(&self.downloads, |candidate| {
+            let _ = mutate(&self.recordings, |candidate| {
                 rollback_deletion(candidate, &uuid_owned);
                 Ok(())
             })
@@ -687,7 +879,7 @@ impl RecordingService {
             return Err(ServiceError::IoError(err.to_string()));
         }
         finalize_deletion(&queue, uuid).await.map_err(|_| ServiceError::UnknownRecording)?;
-        Ok(())
+        Ok(!target.still_referenced)
     }
 
     /// Internal retention-delete entrypoint used by the retention
@@ -696,7 +888,7 @@ impl RecordingService {
         &self,
         claims: &shared::model::Claims,
         uuid: &str,
-    ) -> Result<(), ServiceError> {
+    ) -> Result<bool, ServiceError> {
         let owner_id = Self::subject_id(claims)?;
         self.run_deletion(uuid, |meta| {
             let subject = RecordingSubject::new(Some(meta), TerminalState::Completed, true);
@@ -735,15 +927,7 @@ impl RecordingService {
         // Reject malformed input up front so the analyzer never sees
         // garbage. The endpoint enforces the same bounds; this is the
         // service-layer defense in depth.
-        let bounds = padding_bounds(
-            self.app_config
-                .config
-                .load()
-                .video
-                .as_ref()
-                .and_then(|v| v.download.as_ref())
-                .and_then(|dl| dl.recording.as_ref()),
-        );
+        let bounds = padding_bounds(self.app_config.config.load().recording());
         recording_edit::validate_padding(request.pre_roll_secs, request.post_roll_secs, bounds)
             .map_err(|error: EditError| map_edit_validation_error(&error))?;
         if request.padded_start >= request.padded_end {
@@ -761,7 +945,7 @@ impl RecordingService {
         // privacy contract from `recording_conflict.rs` still applies
         // — the response only carries anonymized segments.
         let others =
-            collect_demand_points_for_provider(&self.downloads, &request.source.target_id, &request.source.input_name)
+            collect_demand_points_for_provider(&self.recordings, &request.source.target_id, &request.source.input_name)
                 .await;
         let candidate = crate::recording_conflict::DemandPoint {
             task_id: String::new(),
@@ -927,7 +1111,7 @@ fn map_queue_error(err: &QueueMutationError) -> ServiceError {
     }
 }
 
-fn quota_limits_from_config(config: Option<&tuliprox_core::model::RecordingQuotaConfig>) -> QuotaLimits {
+pub fn quota_limits_from_config(config: Option<&tuliprox_core::model::RecordingQuotaConfig>) -> QuotaLimits {
     let mut per_user_bytes = HashMap::new();
     if let Some(config) = config {
         for (user_id, bytes) in &config.per_user_bytes {
@@ -945,9 +1129,29 @@ fn quota_limits_from_config(config: Option<&tuliprox_core::model::RecordingQuota
 
 /// Every task in the candidate snapshot, borrowed. Admission checks run
 /// inside `mutate`, so this must not allocate a clone per task — the
-/// previous implementation built a `Vec<PersistedFileDownload>` of the
+/// previous implementation built a `Vec<PersistedRecordingTask>` of the
 /// entire queue on every create and every edit.
-fn candidate_tasks(candidate: &PersistedDownloadQueue) -> impl Iterator<Item = &PersistedFileDownload> + '_ {
+/// Authorize an action against a task found in the candidate snapshot.
+/// Called inside the queue mutation so the ownership decision and the
+/// state change commit together.
+fn authorize_task_in_candidate(
+    candidate: &PersistedRecordingQueue,
+    uuid: &str,
+    claims: &shared::model::Claims,
+    subject_id: &UserId,
+    action: RecordingAction,
+) -> Result<(), QueueMutationError> {
+    let Some(task) = candidate_tasks(candidate).find(|task| task.uuid == uuid) else {
+        return Err(QueueMutationError::UnknownRecording);
+    };
+    let subject = RecordingSubject::new(Some(&task.recording), TerminalState::Active, true);
+    match authorize(claims, subject_id, action, &subject) {
+        RecordingDecision::Allow => Ok(()),
+        RecordingDecision::Deny(_) => Err(QueueMutationError::Forbidden),
+    }
+}
+
+fn candidate_tasks(candidate: &PersistedRecordingQueue) -> impl Iterator<Item = &PersistedRecordingTask> + '_ {
     candidate
         .queue
         .iter()
@@ -959,51 +1163,53 @@ fn candidate_tasks(candidate: &PersistedDownloadQueue) -> impl Iterator<Item = &
 /// Bytes charged against a single quota pool. Only the pool the caller
 /// asked about is summed; the previous implementation built the full
 /// per-user `HashMap` and then read one entry out of it.
-fn used_bytes_for_pool(candidate: &PersistedDownloadQueue, pool: &QuotaPool) -> u64 {
+fn used_bytes_for_pool(candidate: &PersistedRecordingQueue, pool: &QuotaPool) -> u64 {
     recording_quota::used_bytes_in_pool(candidate_tasks(candidate), pool)
 }
 
 fn reserve_recording_relative_path(
-    candidate: &PersistedDownloadQueue,
-    task: &mut PersistedFileDownload,
+    candidate: &PersistedRecordingQueue,
+    task: &mut PersistedRecordingTask,
 ) -> Result<(), QueueMutationError> {
     // Borrowed set, built once. The old code walked a `Vec<String>` of
     // cloned filenames once per `_N` candidate, so reserving the
     // (N+1)-th recording of a title cost O(N^2) string comparisons.
+    // Borrowed set, built once. The old code walked a `Vec<String>` of
+    // cloned filenames once per `_N` candidate, so reserving the
+    // (N+1)-th recording of a title cost O(N^2) string comparisons.
     let existing: std::collections::HashSet<&str> = collect_existing_relative_paths(candidate).collect();
-    let mut filename = task.filename.clone();
-    if existing.contains(filename.as_str()) {
-        let (stem, ext) = split_filename(&task.filename);
+    // The reservation is over the whole root-relative path, not the bare
+    // filename: two series can legitimately hold an `e01.mkv` in different
+    // season directories.
+    let base = task.recording.relative_path.clone().unwrap_or_else(|| task.filename.clone());
+    let mut relative = PathBuf::from(&base);
+    if existing.contains(base.as_str()) {
         // Linear probe over indices; each probe is one hash lookup.
         for index in 1.. {
-            filename = if ext.is_empty() { format!("{stem}_{index}") } else { format!("{stem}_{index}.{ext}") };
-            if !existing.contains(filename.as_str()) {
+            relative = recording_path::with_collision_suffix(Path::new(&base), index);
+            if !existing.contains(relative.to_string_lossy().as_ref()) {
                 break;
             }
         }
     }
+    let filename =
+        relative.file_name().and_then(|name| name.to_str()).ok_or(QueueMutationError::InvalidPath)?.to_string();
     validate_reserved_filename(&filename).map_err(|_| QueueMutationError::InvalidPath)?;
-    task.filename.clone_from(&filename);
-    task.file_path = task.file_dir.join(&filename);
-    if let Some(meta) = task.recording.as_mut() {
-        meta.relative_path = Some(filename);
+    if !recording_path::is_contained_relative_path(&relative) {
+        return Err(QueueMutationError::InvalidPath);
     }
+    task.file_path = task.file_dir.join(&filename);
+    task.filename = filename;
+    task.recording.relative_path = Some(relative.to_string_lossy().into_owned());
     Ok(())
 }
 
-fn collect_existing_relative_paths(candidate: &PersistedDownloadQueue) -> impl Iterator<Item = &str> + '_ {
+fn collect_existing_relative_paths(candidate: &PersistedRecordingQueue) -> impl Iterator<Item = &str> + '_ {
     candidate_tasks(candidate).map(task_relative_path)
 }
 
-fn task_relative_path(task: &PersistedFileDownload) -> &str {
-    task.recording.as_ref().and_then(|meta| meta.relative_path.as_deref()).unwrap_or(task.filename.as_str())
-}
-
-fn split_filename(filename: &str) -> (String, String) {
-    let path = Path::new(filename);
-    let stem = path.file_stem().and_then(std::ffi::OsStr::to_str).unwrap_or(filename);
-    let ext = path.extension().and_then(std::ffi::OsStr::to_str).unwrap_or_default();
-    (stem.to_string(), ext.to_string())
+fn task_relative_path(task: &PersistedRecordingTask) -> &str {
+    task.recording.relative_path.as_deref().unwrap_or(task.filename.as_str())
 }
 
 /// What makes two recording requests "the same thing".
@@ -1019,28 +1225,34 @@ fn split_filename(filename: &str) -> (String, String) {
 ///   booked over and over.
 ///
 /// The identity is now derived from what the user actually asked for.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum RecordingIdentity {
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub enum RecordingIdentity {
     /// Materialization of one rule occurrence. Two tasks with the same
     /// `(rule_id, occurrence_key)` are the same recording by
     /// definition, whatever their window looks like.
     Occurrence { rule_id: String, occurrence_key: String },
-    /// A concrete programme on a concrete source, per quota pool. The
-    /// pool dimension is deliberate: a shared copy and a private copy of
-    /// the same programme are two different recordings that charge two
-    /// different quotas.
-    Programme {
-        target_id: String,
-        virtual_id: String,
-        program_start: i64,
-        program_end: i64,
-        owner: RecordingOwner,
-        visibility: RecordingVisibility,
-    },
-    /// No programme metadata at all. Fall back to the resolved URL plus
-    /// the *scheduled* (padded) window, which — unlike `start_at` — is
-    /// stable across requests inside a currently-airing window.
+    /// A concrete programme on a concrete source. Deliberately free of any
+    /// owner: two users asking for the same programme are asking for the same
+    /// file, and it is recorded once and linked twice.
+    Programme { target_id: String, virtual_id: String, program_start: i64, program_end: i64 },
+    /// No programme metadata at all: every VOD and series transfer, and a
+    /// Live capture whose programme window is unknown. Falls back to the
+    /// resolved URL plus the *scheduled* (padded) window, which — unlike
+    /// `start_at` — is stable across requests inside a currently-airing
+    /// window.
+    ///
+    /// Owner-free for the same reason `Programme` is: the same URL over the
+    /// same window is the same bytes, whoever asked for them.
     Url { url: String, scheduled_start: Option<i64>, scheduled_end: Option<i64> },
+}
+
+/// A stable, field-named key for the media a request refers to.
+///
+/// Two tasks with the same key are the same recording, so they share one
+/// physical file. The key is persisted, so it has to be stable across builds:
+/// that is why it is serialised rather than formatted with `Debug`.
+pub fn recording_identity_key(meta: &RecordingMetadata, url: &str) -> String {
+    serde_json::to_string(&recording_identity(meta, url)).unwrap_or_else(|_| format!("url:{url}"))
 }
 
 fn recording_identity(meta: &RecordingMetadata, url: &str) -> RecordingIdentity {
@@ -1052,16 +1264,12 @@ fn recording_identity(meta: &RecordingMetadata, url: &str) -> RecordingIdentity 
             occurrence_key: occurrence_key.to_string(),
         };
     }
-    if let (Some(source), Some(program_start), Some(program_end)) =
-        (meta.source.as_ref(), meta.program_start, meta.program_end)
-    {
+    if let (Some(program_start), Some(program_end)) = (meta.program_start, meta.program_end) {
         return RecordingIdentity::Programme {
-            target_id: source.target_id.clone(),
-            virtual_id: source.virtual_id.clone(),
+            target_id: meta.source.target_id.clone(),
+            virtual_id: meta.source.virtual_id.clone(),
             program_start,
             program_end,
-            owner: meta.owner.clone(),
-            visibility: meta.visibility,
         };
     }
     RecordingIdentity::Url {
@@ -1071,25 +1279,24 @@ fn recording_identity(meta: &RecordingMetadata, url: &str) -> RecordingIdentity 
     }
 }
 
-fn persisted_recording_identity(task: &PersistedFileDownload) -> Option<RecordingIdentity> {
-    if task.kind != DownloadKind::Recording {
-        return None;
-    }
-    task.recording.as_ref().map(|meta| recording_identity(meta, &task.url))
+fn persisted_recording_identity(task: &PersistedRecordingTask) -> RecordingIdentity {
+    recording_identity(&task.recording, &task.url)
 }
 
-fn candidate_has_duplicate_recording(candidate: &PersistedDownloadQueue, task: &FileDownload) -> bool {
-    let Some(meta) = task.recording.as_ref() else {
-        return false;
-    };
+fn candidate_has_duplicate_recording(candidate: &PersistedRecordingQueue, task: &RecordingTask) -> bool {
+    let meta = &task.recording;
     let identity = recording_identity(meta, task.url.as_str());
-    // Pending and active tasks are duplicates of anything matching.
+    let pool = recording_quota::quota_pool_for_task(task);
+    // Only the *same* principal asking twice is a duplicate. A different
+    // principal asking for the same media gets their own library entry, which
+    // attaches to the one physical file rather than producing a second.
     let pending_match = candidate
         .queue
         .iter()
         .chain(candidate.scheduled.iter())
         .chain(candidate.active.iter())
-        .filter_map(persisted_recording_identity)
+        .filter(|existing| recording_quota::quota_pool_for_task(*existing) == pool)
+        .map(persisted_recording_identity)
         .any(|existing| existing == identity);
     if pending_match {
         return true;
@@ -1102,7 +1309,12 @@ fn candidate_has_duplicate_recording(candidate: &PersistedDownloadQueue, task: &
     if !matches!(identity, RecordingIdentity::Occurrence { .. }) {
         return false;
     }
-    candidate.finished.iter().filter_map(persisted_recording_identity).any(|existing| existing == identity)
+    candidate
+        .finished
+        .iter()
+        .filter(|existing| recording_quota::quota_pool_for_task(*existing) == pool)
+        .map(persisted_recording_identity)
+        .any(|existing| existing == identity)
 }
 
 /// Where a recording lives in the candidate snapshot. The first scan
@@ -1120,8 +1332,8 @@ enum RecordingLocation {
 /// candidate snapshot. The returned `RecordingLocation` lets the
 /// caller re-acquire the same task for a mutable borrow without a
 /// second search.
-fn locate_recording(candidate: &PersistedDownloadQueue, uuid: &str) -> Option<RecordingLocation> {
-    let matches_uuid = |task: &PersistedFileDownload| task.uuid == uuid && task.kind == DownloadKind::Recording;
+fn locate_recording(candidate: &PersistedRecordingQueue, uuid: &str) -> Option<RecordingLocation> {
+    let matches_uuid = |task: &PersistedRecordingTask| task.uuid == uuid;
     if let Some(i) = candidate.scheduled.iter().position(matches_uuid) {
         return Some(RecordingLocation::Scheduled(i));
     }
@@ -1141,9 +1353,9 @@ fn locate_recording(candidate: &PersistedDownloadQueue, uuid: &str) -> Option<Re
 /// location. The location must have come from the same candidate;
 /// callers obtain it via [`locate_recording`].
 fn recording_mut_at(
-    candidate: &mut PersistedDownloadQueue,
+    candidate: &mut PersistedRecordingQueue,
     location: RecordingLocation,
-) -> Option<&mut PersistedFileDownload> {
+) -> Option<&mut PersistedRecordingTask> {
     match location {
         RecordingLocation::Scheduled(i) => candidate.scheduled.get_mut(i),
         RecordingLocation::Queue(i) => candidate.queue.get_mut(i),
@@ -1183,34 +1395,24 @@ pub struct ConflictPreviewRequest {
 fn effective_capacity_from_config(
     config: &tuliprox_core::model::Config,
 ) -> crate::recording_conflict::EffectiveCapacity {
-    // Background slots come from the recording provider's
-    // `max_background_per_provider`. Reserved interactive slots are
-    // a coarse approximation of the number of users currently
-    // streaming on the same provider; the analyzer treats the value
-    // as a subtraction. When the provider cannot be resolved, fall
-    // back to a zero headroom so the worst case is `LikelyMissedWindow`
-    // and never a silent `NoKnownConflict`.
-    let download_cfg = config.video.as_ref().and_then(|v| v.download.as_ref());
-    let background_slots = download_cfg.map_or(0, |dl| u32::from(dl.max_background_per_provider));
-    let reserved = u32::from(download_cfg.map_or(0, |dl| dl.reserve_slots_for_users));
+    let background_slots = config.recording().map_or(0, |cfg| u32::from(cfg.max_background_per_provider));
+    let reserved = config.recording().map_or(0, |cfg| u32::from(cfg.reserve_slots_for_users));
     crate::recording_conflict::EffectiveCapacity { background_slots, reserved_interactive_slots: reserved }
 }
 
 async fn collect_demand_points_for_provider(
-    queue: &Arc<crate::download::DownloadQueue>,
+    queue: &Arc<crate::recording::recording_queue::RecordingQueue>,
     target_id: &str,
     input_name: &str,
 ) -> Vec<crate::recording_conflict::DemandPoint> {
     use crate::recording_conflict::DemandPoint;
-    fn matches(task: &FileDownload, target_id: &str, input_name: &str) -> bool {
-        task.kind == DownloadKind::Recording
-            && task.recording.as_ref().is_some_and(|meta| match &meta.source {
-                Some(src) => src.target_id == target_id && src.input_name == input_name,
-                None => false,
-            })
+    fn matches(task: &RecordingTask, target_id: &str, input_name: &str) -> bool {
+        task.kind == RecordingKind::Live
+            && task.recording.source.target_id == target_id
+            && task.recording.source.input_name == input_name
     }
-    fn to_demand_point(task: &FileDownload) -> Option<DemandPoint> {
-        let meta = task.recording.as_ref()?;
+    fn to_demand_point(task: &RecordingTask) -> Option<DemandPoint> {
+        let meta = &task.recording;
         let start = meta.scheduled_start?;
         let end = meta.scheduled_end?;
         if end <= start {
@@ -1226,8 +1428,11 @@ async fn collect_demand_points_for_provider(
     // Pending and active recordings are real capacity consumers.
     // Finished recordings no longer claim slots, so they would only
     // inflate the conflict preview's `peak_demand`.
-    fn claims_a_slot(task: &FileDownload) -> bool {
-        !matches!(task.state, DownloadState::Completed | DownloadState::Failed | DownloadState::Cancelled)
+    fn claims_a_slot(task: &RecordingTask) -> bool {
+        !matches!(
+            task.state,
+            RecordingTaskState::Completed | RecordingTaskState::Failed | RecordingTaskState::Cancelled
+        )
     }
     // One committed snapshot rather than three sequential guards. Reading
     // `scheduled`, then `queue`, then `active` in turn let a task that
@@ -1241,13 +1446,11 @@ async fn collect_demand_points_for_provider(
         .collect()
 }
 
-fn remove_inactive_recording(candidate: &mut PersistedDownloadQueue, uuid: &str) -> Option<PersistedFileDownload> {
-    if let Some(index) =
-        candidate.scheduled.iter().position(|task| task.uuid == uuid && task.kind == DownloadKind::Recording)
-    {
+fn remove_inactive_recording(candidate: &mut PersistedRecordingQueue, uuid: &str) -> Option<PersistedRecordingTask> {
+    if let Some(index) = candidate.scheduled.iter().position(|task| task.uuid == uuid) {
         return Some(candidate.scheduled.remove(index));
     }
-    let index = candidate.queue.iter().position(|task| task.uuid == uuid && task.kind == DownloadKind::Recording)?;
+    let index = candidate.queue.iter().position(|task| task.uuid == uuid)?;
     Some(candidate.queue.remove(index))
 }
 
@@ -1263,11 +1466,11 @@ enum CancelOrigin {
 #[derive(Debug, Clone)]
 pub struct CancelledRuleRecording {
     origin: CancelOrigin,
-    task: PersistedFileDownload,
+    task: PersistedRecordingTask,
 }
 
 fn cancel_future_rule_recordings_in_candidate(
-    candidate: &mut PersistedDownloadQueue,
+    candidate: &mut PersistedRecordingQueue,
     rule_id: &str,
     now_secs: i64,
 ) -> Vec<CancelledRuleRecording> {
@@ -1287,12 +1490,12 @@ fn cancel_future_rule_recordings_in_candidate(
 }
 
 fn drain_future_rule_recordings(
-    tasks: &mut Vec<PersistedFileDownload>,
+    tasks: &mut Vec<PersistedRecordingTask>,
     origin: CancelOrigin,
     rule_id: &str,
     now_secs: i64,
     undo: &mut Vec<CancelledRuleRecording>,
-    out: &mut Vec<PersistedFileDownload>,
+    out: &mut Vec<PersistedRecordingTask>,
 ) {
     let mut index = 0;
     while index < tasks.len() {
@@ -1301,12 +1504,10 @@ fn drain_future_rule_recordings(
             // Snapshot before the cancel mutates it: the undo has to
             // restore `reserved_bytes`, which is zeroed just below.
             undo.push(CancelledRuleRecording { origin, task: task.clone() });
-            task.state = DownloadState::Cancelled;
+            task.state = RecordingTaskState::Cancelled;
             task.finished = true;
             task.error = Some("cancelled".to_string());
-            if let Some(meta) = task.recording.as_mut() {
-                meta.reserved_bytes = 0;
-            }
+            task.recording.reserved_bytes = 0;
             out.push(task);
         } else {
             index += 1;
@@ -1314,23 +1515,21 @@ fn drain_future_rule_recordings(
     }
 }
 
-fn is_future_rule_recording(task: &PersistedFileDownload, rule_id: &str, now_secs: i64) -> bool {
-    if task.kind != DownloadKind::Recording {
+fn is_future_rule_recording(task: &PersistedRecordingTask, rule_id: &str, now_secs: i64) -> bool {
+    if task.kind != RecordingKind::Live {
         return false;
     }
-    let Some(start_at) = task.start_at else {
+    let meta = &task.recording;
+    let Some(start_at) = meta.scheduled_start else {
         return false;
     };
     if start_at <= now_secs {
         return false;
     }
-    let Some(meta) = task.recording.as_ref() else {
-        return false;
-    };
     if meta.provenance.rule_id.as_deref() != Some(rule_id) {
         return false;
     }
-    recording_edit::state_is_editable(task.state.label())
+    recording_edit::state_is_editable(task.state)
 }
 
 fn validate_reserved_filename(filename: &str) -> Result<(), &'static str> {
@@ -1381,8 +1580,171 @@ mod tests {
         }
     }
 
-    fn persisted_rule_recording(uuid: &str, rule_id: Option<&str>, start_at: i64) -> PersistedFileDownload {
-        let mut meta = RecordingMetadata::new(
+    /// A VOD transfer for `owner`, resolved to `url`.
+    fn persisted_media(uuid: &str, owner: &str, visibility: RecordingVisibility, url: &str) -> PersistedRecordingTask {
+        let meta = RecordingMetadata::new_media(
+            RecordingOwner::User(UserId::from(owner)),
+            visibility,
+            RecordingSource::new("1", "1", "input-a"),
+            "Film".to_string(),
+        );
+        PersistedRecordingTask {
+            media_identity: String::new(),
+            partition: crate::recording::recording_queue::RecordingPartition::default(),
+            uuid: uuid.to_string(),
+            kind: RecordingKind::Vod,
+            file_dir: std::path::PathBuf::from("/tmp"),
+            file_path: std::path::PathBuf::from(format!("/tmp/{uuid}.mp4")),
+            filename: format!("{uuid}.mp4"),
+            url: url.to_string(),
+            finished: false,
+            size: 0,
+            total_size: None,
+            paused: false,
+            error: None,
+            state: RecordingTaskState::Queued,
+            input_name: Some("input-a".to_string()),
+            priority: 0,
+            retry_attempts: 0,
+            next_retry_at: None,
+            recording: meta,
+        }
+    }
+
+    fn queued_candidate(tasks: Vec<PersistedRecordingTask>) -> PersistedRecordingQueue {
+        PersistedRecordingQueue { queue: tasks, ..PersistedRecordingQueue::default() }
+    }
+
+    #[test]
+    fn a_live_window_must_have_time_left_in_it() {
+        // A window whose padded end is not after its padded start cannot
+        // produce a recording, and admitting one means a scheduled capture that
+        // can only ever fail.
+        let now = 1_700_000_000;
+        // Zero-length and inverted programmes.
+        assert!(matches!(
+            effective_recording_window(now + 100, now + 100, 0, 0, now),
+            Err(ServiceError::InvalidInterval)
+        ));
+        assert!(matches!(
+            effective_recording_window(now + 200, now + 100, 0, 0, now),
+            Err(ServiceError::InvalidInterval)
+        ));
+        // A programme that finished before it was asked for.
+        assert!(matches!(
+            effective_recording_window(now - 7_200, now - 3_600, 0, 0, now),
+            Err(ServiceError::InvalidInterval)
+        ));
+    }
+
+    #[test]
+    fn a_live_window_already_underway_records_only_what_is_left() {
+        // Joining late is legal; it just cannot rewind. The padded bounds stay
+        // as planned so the stop time is still the programme's.
+        let now = 1_700_000_000;
+        let window = effective_recording_window(now - 600, now + 600, 60, 120, now).expect("still running");
+
+        assert_eq!(window.scheduled_start, now - 660, "the padded start is history, not moved to now");
+        assert_eq!(window.scheduled_end, now + 720);
+        assert_eq!(window.execution_start, now, "but recording starts now");
+        assert_eq!(window.remaining_duration_secs, 720, "and runs to the padded end");
+    }
+
+    #[test]
+    fn a_repeated_vod_request_is_a_duplicate() {
+        // Regression: duplicate detection only produced an identity for Live,
+        // so a user who asked for the same film twice got two downloads of it
+        // written side by side as `film.mp4` and `film_1.mp4`.
+        let existing = persisted_media("a", "web:alice", RecordingVisibility::Private, "http://p/film.mp4");
+        let repeat = RecordingQueue::from_persisted(persisted_media(
+            "b",
+            "web:alice",
+            RecordingVisibility::Private,
+            "http://p/film.mp4",
+        ))
+        .expect("valid task");
+        assert!(candidate_has_duplicate_recording(&queued_candidate(vec![existing]), &repeat));
+    }
+
+    #[test]
+    fn a_different_film_is_not_a_duplicate() {
+        let existing = persisted_media("a", "web:alice", RecordingVisibility::Private, "http://p/film.mp4");
+        let other = RecordingQueue::from_persisted(persisted_media(
+            "b",
+            "web:alice",
+            RecordingVisibility::Private,
+            "http://p/other.mp4",
+        ))
+        .expect("valid task");
+        assert!(!candidate_has_duplicate_recording(&queued_candidate(vec![existing]), &other));
+    }
+
+    #[test]
+    fn another_user_asking_for_the_same_film_is_not_refused() {
+        // Until one physical file can carry several library entries, treating
+        // this as a duplicate would tell the second user "already recording"
+        // and leave them with nothing.
+        let existing = persisted_media("a", "web:alice", RecordingVisibility::Private, "http://p/film.mp4");
+        let other_user = RecordingQueue::from_persisted(persisted_media(
+            "b",
+            "web:bob",
+            RecordingVisibility::Private,
+            "http://p/film.mp4",
+        ))
+        .expect("valid task");
+        assert!(!candidate_has_duplicate_recording(&queued_candidate(vec![existing]), &other_user));
+    }
+
+    #[test]
+    fn a_shared_copy_does_not_collide_with_a_private_one() {
+        // The two charge different quota pools, so they are two recordings.
+        let existing = persisted_media("a", "web:alice", RecordingVisibility::Private, "http://p/film.mp4");
+        let shared = RecordingQueue::from_persisted(persisted_media(
+            "b",
+            "web:alice",
+            RecordingVisibility::Shared,
+            "http://p/film.mp4",
+        ))
+        .expect("valid task");
+        assert!(!candidate_has_duplicate_recording(&queued_candidate(vec![existing]), &shared));
+    }
+
+    #[test]
+    fn a_finished_transfer_does_not_block_a_fresh_request() {
+        // After a completed or failed attempt the user may legitimately want
+        // another copy.
+        let mut finished = persisted_media("a", "web:alice", RecordingVisibility::Private, "http://p/film.mp4");
+        finished.finished = true;
+        finished.state = RecordingTaskState::Completed;
+        let candidate = PersistedRecordingQueue { finished: vec![finished], ..PersistedRecordingQueue::default() };
+        let again = RecordingQueue::from_persisted(persisted_media(
+            "b",
+            "web:alice",
+            RecordingVisibility::Private,
+            "http://p/film.mp4",
+        ))
+        .expect("valid task");
+        assert!(!candidate_has_duplicate_recording(&candidate, &again));
+    }
+
+    #[test]
+    fn a_completed_rule_occurrence_still_blocks_a_repeat() {
+        // The scheduler re-evaluates rules on every tick; without this an
+        // occurrence would be re-materialized forever.
+        let mut finished = persisted_rule_recording("a", Some("rule-1"), 100);
+        finished.recording.provenance.occurrence_key = Some("occ-1".to_string());
+        finished.finished = true;
+        finished.state = RecordingTaskState::Completed;
+        let candidate = PersistedRecordingQueue { finished: vec![finished], ..PersistedRecordingQueue::default() };
+
+        let mut repeat_persisted = persisted_rule_recording("b", Some("rule-1"), 100);
+        repeat_persisted.recording.provenance.occurrence_key = Some("occ-1".to_string());
+        let repeat = RecordingQueue::from_persisted(repeat_persisted).expect("valid task");
+        assert!(candidate_has_duplicate_recording(&candidate, &repeat));
+    }
+
+    fn persisted_rule_recording(uuid: &str, rule_id: Option<&str>, start_at: i64) -> PersistedRecordingTask {
+        let mut meta = RecordingMetadata::new_live(
             RecordingOwner::User(UserId::from("web:alice")),
             RecordingVisibility::Private,
             RecordingSource::new("1", "1", "input-a"),
@@ -1393,7 +1755,9 @@ mod tests {
         );
         meta.reserved_bytes = 123;
         meta.provenance.rule_id = rule_id.map(str::to_string);
-        PersistedFileDownload {
+        PersistedRecordingTask {
+            media_identity: String::new(),
+            partition: crate::recording::recording_queue::RecordingPartition::default(),
             uuid: uuid.to_string(),
             file_dir: std::path::PathBuf::from("/tmp"),
             file_path: std::path::PathBuf::from(format!("/tmp/{uuid}.ts")),
@@ -1404,15 +1768,13 @@ mod tests {
             total_size: None,
             paused: false,
             error: None,
-            state: DownloadState::Scheduled,
-            start_at: Some(start_at),
-            duration_secs: Some(3_600),
-            kind: DownloadKind::Recording,
+            state: RecordingTaskState::Scheduled,
+            kind: RecordingKind::Live,
             input_name: Some("input-a".to_string()),
             priority: 0,
             retry_attempts: 0,
             next_retry_at: None,
-            recording: Some(meta),
+            recording: meta,
         }
     }
 
@@ -1495,12 +1857,13 @@ mod tests {
     async fn edit_recording_rejects_padding_above_max_without_persisting_mutation() {
         let dir = tempfile::tempdir().expect("tempdir");
         let state_file = dir.path().join("downloads.json");
-        let downloads = Arc::new(DownloadQueue::new_with_state_file(Some(state_file.clone())));
-        let task = DownloadQueue::from_persisted(persisted_rule_recording("recording", None, 100))
+        let downloads =
+            Arc::new(RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository"));
+        let task = RecordingQueue::from_persisted(persisted_rule_recording("recording", None, 100))
             .expect("valid recording task");
         downloads.scheduled.write().await.push(task);
         downloads.persist_to_disk().await.expect("persist initial queue");
-        let persisted_before = std::fs::read(&state_file).expect("read initial queue");
+        let persisted_before = committed_records(&downloads).await;
         let service = RecordingService::new(Arc::clone(&downloads), test_app_config());
         let claims = shared::model::Claims {
             username: "alice".to_string(),
@@ -1508,7 +1871,7 @@ mod tests {
             iat: 0,
             exp: 0,
             roles: shared::model::RoleSet::new(),
-            permissions: Permission::RecordingWrite.into(),
+            permissions: Permission::RecordingCreate | Permission::RecordingManage | Permission::RecordingDelete,
             pwd_version: 0,
             subject_id: Some(UserId::from("web:alice")),
             permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,
@@ -1518,22 +1881,23 @@ mod tests {
         let result = service.edit_recording(&claims, "recording", patch).await;
 
         assert!(matches!(result, Err(ServiceError::PaddingLimitExceeded)));
-        assert_eq!(std::fs::read(&state_file).expect("read unchanged queue"), persisted_before);
+        assert_eq!(committed_records(&downloads).await, persisted_before);
         let scheduled = downloads.scheduled.read().await;
-        assert_eq!(scheduled[0].recording.as_ref().map(|m| m.pre_roll_secs), Some(0));
+        assert_eq!(scheduled[0].recording.pre_roll_secs, 0);
     }
 
     #[tokio::test]
     async fn edit_recording_rejects_active_state_with_invalid_state_error() {
         let dir = tempfile::tempdir().expect("tempdir");
         let state_file = dir.path().join("downloads.json");
-        let downloads = Arc::new(DownloadQueue::new_with_state_file(Some(state_file.clone())));
-        let mut task = DownloadQueue::from_persisted(persisted_rule_recording("recording", None, 100))
+        let downloads =
+            Arc::new(RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository"));
+        let mut task = RecordingQueue::from_persisted(persisted_rule_recording("recording", None, 100))
             .expect("valid recording task");
-        task.state = DownloadState::Downloading;
+        task.state = RecordingTaskState::Running;
         downloads.scheduled.write().await.push(task);
         downloads.persist_to_disk().await.expect("persist initial queue");
-        let persisted_before = std::fs::read(&state_file).expect("read initial queue");
+        let persisted_before = committed_records(&downloads).await;
         let service = RecordingService::new(Arc::clone(&downloads), test_app_config());
         let claims = shared::model::Claims {
             username: "alice".to_string(),
@@ -1541,7 +1905,7 @@ mod tests {
             iat: 0,
             exp: 0,
             roles: shared::model::RoleSet::new(),
-            permissions: Permission::RecordingWrite.into(),
+            permissions: Permission::RecordingCreate | Permission::RecordingManage | Permission::RecordingDelete,
             pwd_version: 0,
             subject_id: Some(UserId::from("web:alice")),
             permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,
@@ -1552,17 +1916,63 @@ mod tests {
         let result = service.edit_recording(&claims, "recording", patch).await;
 
         assert!(matches!(result, Err(ServiceError::InvalidState)));
-        assert_eq!(std::fs::read(&state_file).expect("read unchanged queue"), persisted_before);
+        assert_eq!(committed_records(&downloads).await, persisted_before);
+    }
+
+    #[tokio::test]
+    async fn cancelling_an_active_recording_leaves_it_worker_owned_until_the_worker_finishes() {
+        // Regression: the request used to stamp `Cancelled` on the active
+        // task, so it appeared in the completed list while the worker was
+        // still writing. Removing it then found no entry in any inactive
+        // bucket, left the active slot alone, and reported success.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_file = dir.path().join("downloads.json");
+        let downloads =
+            Arc::new(RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository"));
+        let mut task = RecordingQueue::from_persisted(persisted_media(
+            "recording",
+            "web:alice",
+            RecordingVisibility::Private,
+            "http://provider/film.mp4",
+        ))
+        .expect("valid recording task");
+        task.state = RecordingTaskState::Running;
+        *downloads.active.write().await = Some(task);
+
+        let service = RecordingService::new(Arc::clone(&downloads), test_app_config());
+        let claims = shared::model::Claims {
+            username: "alice".to_string(),
+            iss: "tuliprox".to_string(),
+            iat: 0,
+            exp: 0,
+            roles: shared::model::RoleSet::new(),
+            permissions: Permission::RecordingCreate | Permission::RecordingManage | Permission::RecordingDelete,
+            pwd_version: 0,
+            subject_id: Some(UserId::from("web:alice")),
+            permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,
+        };
+
+        service.cancel_recording(&claims, "recording").await.expect("cancel request accepted");
+
+        let active = downloads.active.read().await.clone().expect("the worker still owns it");
+        assert_eq!(active.state, RecordingTaskState::Cancelling, "the worker commits the terminal state");
+        assert!(downloads.finished.read().await.is_empty(), "nothing terminal yet");
+        assert!(
+            matches!(service.remove_recording_task(&claims, "recording").await, Err(ServiceError::InvalidState)),
+            "removing a worker-owned recording must be refused, not silently ignored"
+        );
     }
 
     #[tokio::test]
     async fn edit_recording_clears_epg_when_channel_changes_without_programme() {
         let dir = tempfile::tempdir().expect("tempdir");
         let state_file = dir.path().join("downloads.json");
-        let downloads = Arc::new(DownloadQueue::new_with_state_file(Some(state_file.clone())));
-        let mut task = DownloadQueue::from_persisted(persisted_rule_recording("recording", None, 100))
+        let downloads =
+            Arc::new(RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository"));
+        let mut task = RecordingQueue::from_persisted(persisted_rule_recording("recording", None, 100))
             .expect("valid recording task");
-        if let Some(meta) = task.recording.as_mut() {
+        {
+            let meta = &mut task.recording;
             meta.channel_id = Some("a".into());
             meta.channel_name = Some("A".into());
             meta.epg = Some(shared::model::recording::EpgEpisodeMetadata {
@@ -1583,7 +1993,7 @@ mod tests {
             iat: 0,
             exp: 0,
             roles: shared::model::RoleSet::new(),
-            permissions: Permission::RecordingWrite.into(),
+            permissions: Permission::RecordingCreate | Permission::RecordingManage | Permission::RecordingDelete,
             pwd_version: 0,
             subject_id: Some(UserId::from("web:alice")),
             permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,
@@ -1593,7 +2003,7 @@ mod tests {
         let result = service.edit_recording(&claims, "recording", patch).await;
         assert!(result.is_ok());
         let scheduled = downloads.scheduled.read().await;
-        let meta = scheduled[0].recording.as_ref().expect("recording metadata");
+        let meta = &scheduled[0].recording;
         assert_eq!(meta.channel_id.as_deref(), Some("b"));
         assert!(meta.epg.is_none(), "epg metadata must be cleared when channel changed without a fresh programme");
     }
@@ -1606,21 +2016,34 @@ mod tests {
         // fail with QuotaExceeded and persist nothing.
         let dir = tempfile::tempdir().expect("tempdir");
         let state_file = dir.path().join("downloads.json");
-        let downloads = Arc::new(DownloadQueue::new_with_state_file(Some(state_file.clone())));
-        let mut task = DownloadQueue::from_persisted(persisted_rule_recording("recording", None, 100))
+        let downloads =
+            Arc::new(RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository"));
+        let mut task = RecordingQueue::from_persisted(persisted_rule_recording("recording", None, 100))
             .expect("valid recording task");
-        if let Some(meta) = task.recording.as_mut() {
+        {
+            let meta = &mut task.recording;
             meta.reserved_bytes = 800;
         }
         downloads.scheduled.write().await.push(task);
         downloads.persist_to_disk().await.expect("persist initial queue");
-        let persisted_before = std::fs::read(&state_file).expect("read initial queue");
+        let persisted_before = committed_records(&downloads).await;
         let quota = tuliprox_core::model::RecordingQuotaConfig {
             default_private_bytes: Some(1_000),
             per_user_bytes: HashMap::new(),
             shared_bytes: None,
         };
         let rec_cfg = RecordingConfig {
+            headers: HashMap::new(),
+            organize_into_directories: false,
+            episode_pattern: None,
+            priority: 0,
+            reserve_slots_for_users: 0,
+            max_background_per_provider: 0,
+            retry_backoff_initial_secs: 1,
+            retry_backoff_multiplier: 1.0,
+            retry_backoff_max_secs: 1,
+            retry_backoff_jitter_percent: 0,
+            retry_max_attempts: 1,
             enabled: true,
             container_format: RecordingContainerFormat::default(),
             directory: String::new(),
@@ -1636,27 +2059,11 @@ mod tests {
             notifications: RecordingNotificationConfig::default(),
             fallback_bytes_per_minute: 60,
         };
-        let dl_cfg = tuliprox_core::model::VideoDownloadConfig {
-            headers: HashMap::new(),
-            directory: String::new(),
-            organize_into_directories: false,
-            episode_pattern: None,
-            download_priority: 0,
-            recording_priority: 0,
-            reserve_slots_for_users: 0,
-            max_background_per_provider: 0,
-            retry_backoff_initial_secs: 1,
-            retry_backoff_multiplier: 1.0,
-            retry_backoff_max_secs: 1,
-            retry_backoff_jitter_percent: 0,
-            retry_max_attempts: 1,
-            recording: Some(rec_cfg),
-        };
         let config = tuliprox_core::model::Config {
             video: Some(tuliprox_core::model::VideoConfig {
                 extensions: Vec::new(),
-                download: Some(dl_cfg),
                 web_search: None,
+                recording: Some(rec_cfg.clone()),
             }),
             ..tuliprox_core::model::Config::default()
         };
@@ -1691,7 +2098,7 @@ mod tests {
             iat: 0,
             exp: 0,
             roles: shared::model::RoleSet::new(),
-            permissions: Permission::RecordingWrite.into(),
+            permissions: Permission::RecordingCreate | Permission::RecordingManage | Permission::RecordingDelete,
             pwd_version: 0,
             subject_id: Some(UserId::from("web:alice")),
             permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,
@@ -1701,21 +2108,22 @@ mod tests {
         let result = service.edit_recording(&claims, "recording", patch).await;
 
         assert!(matches!(result, Err(ServiceError::QuotaExceeded)));
-        assert_eq!(std::fs::read(&state_file).expect("read unchanged queue"), persisted_before);
+        assert_eq!(committed_records(&downloads).await, persisted_before);
         let scheduled = downloads.scheduled.read().await;
-        assert_eq!(scheduled[0].start_at, Some(100));
+        assert_eq!(scheduled[0].scheduled_start(), Some(100));
     }
 
     #[tokio::test]
     async fn edit_recording_rejects_overflowing_interval_without_persisting_mutation() {
         let dir = tempfile::tempdir().expect("tempdir");
         let state_file = dir.path().join("downloads.json");
-        let downloads = Arc::new(DownloadQueue::new_with_state_file(Some(state_file.clone())));
-        let task = DownloadQueue::from_persisted(persisted_rule_recording("recording", None, 100))
+        let downloads =
+            Arc::new(RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository"));
+        let task = RecordingQueue::from_persisted(persisted_rule_recording("recording", None, 100))
             .expect("valid recording task");
         downloads.scheduled.write().await.push(task);
         downloads.persist_to_disk().await.expect("persist initial queue");
-        let persisted_before = std::fs::read(&state_file).expect("read initial queue");
+        let persisted_before = committed_records(&downloads).await;
         let revision_before = downloads.revision.load(std::sync::atomic::Ordering::SeqCst);
         let service = RecordingService::new(Arc::clone(&downloads), test_app_config());
         let claims = shared::model::Claims {
@@ -1724,7 +2132,7 @@ mod tests {
             iat: 0,
             exp: 0,
             roles: shared::model::RoleSet::new(),
-            permissions: Permission::RecordingWrite.into(),
+            permissions: Permission::RecordingCreate | Permission::RecordingManage | Permission::RecordingDelete,
             pwd_version: 0,
             subject_id: Some(UserId::from("web:alice")),
             permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,
@@ -1740,23 +2148,21 @@ mod tests {
 
         assert!(matches!(result, Err(ServiceError::InvalidInterval)));
         assert_eq!(downloads.revision.load(std::sync::atomic::Ordering::SeqCst), revision_before);
-        assert_eq!(std::fs::read(&state_file).expect("read unchanged queue"), persisted_before);
+        assert_eq!(committed_records(&downloads).await, persisted_before);
         let scheduled = downloads.scheduled.read().await;
-        assert_eq!(scheduled[0].start_at, Some(100));
-        assert_ne!(
-            scheduled[0].recording.as_ref().and_then(|metadata| metadata.program_title.as_deref()),
-            Some("must not persist")
-        );
+        assert_eq!(scheduled[0].scheduled_start(), Some(100));
+        assert_ne!(scheduled[0].recording.program_title.as_deref(), Some("must not persist"));
     }
 
     #[tokio::test]
     async fn create_recording_without_download_config_reports_disabled() {
-        // A missing `video.download` block means the server has no
+        // A missing `video.recording` block means the server has no
         // download engine at all — the caller's source identifiers are
         // not wrong. Reporting `InvalidSource` here sent clients
         // hunting for a misconfiguration that does not exist.
         let dir = tempfile::tempdir().expect("tempdir");
-        let downloads = Arc::new(DownloadQueue::new_with_state_file(Some(dir.path().join("downloads.json"))));
+        let downloads =
+            Arc::new(RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open recording repository"));
         let service = RecordingService::new(Arc::clone(&downloads), test_app_config());
         let claims = shared::model::Claims {
             username: "alice".to_string(),
@@ -1764,7 +2170,7 @@ mod tests {
             iat: 0,
             exp: 0,
             roles: shared::model::RoleSet::new(),
-            permissions: Permission::RecordingWrite.into(),
+            permissions: Permission::RecordingCreate | Permission::RecordingManage | Permission::RecordingDelete,
             pwd_version: 0,
             subject_id: Some(UserId::from("web:alice")),
             permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,
@@ -1773,6 +2179,20 @@ mod tests {
         let result = service.create_recording(&claims, &create_input()).await;
 
         assert!(matches!(result, Err(ServiceError::Disabled)));
+    }
+
+    /// The record set the repository actually holds, for tests that
+    /// assert a rejected mutation left persistence untouched.
+    async fn committed_records(queue: &RecordingQueue) -> Vec<PersistedRecordingTask> {
+        let repository = queue.repository.clone().expect("queue is repository backed");
+        tokio::task::spawn_blocking(move || {
+            let mut guard = repository.lock().expect("repository lock");
+            guard.load()
+        })
+        .await
+        .expect("join")
+        .expect("load")
+        .tasks
     }
 
     fn test_app_config() -> Arc<AppConfig> {
@@ -1894,7 +2314,7 @@ mod tests {
     #[test]
     fn cancel_future_rule_recordings_moves_only_matching_future_tasks() {
         let now = 1_700_000_000;
-        let mut queue = PersistedDownloadQueue::default();
+        let mut queue = PersistedRecordingQueue::default();
         queue.scheduled.push(persisted_rule_recording("future-match", Some("rule-1"), now + 60));
         queue.scheduled.push(persisted_rule_recording("past-match", Some("rule-1"), now - 60));
         queue.queue.push(persisted_rule_recording("other-rule", Some("rule-2"), now + 60));
@@ -1907,9 +2327,9 @@ mod tests {
         assert_eq!(queue.finished.len(), 1);
         let task = &queue.finished[0];
         assert_eq!(task.uuid, "future-match");
-        assert_eq!(task.state, DownloadState::Cancelled);
+        assert_eq!(task.state, RecordingTaskState::Cancelled);
         assert!(task.finished);
-        assert_eq!(task.recording.as_ref().map(|meta| meta.reserved_bytes), Some(0));
+        assert_eq!(task.recording.reserved_bytes, 0);
     }
 
     #[tokio::test]
@@ -1920,14 +2340,13 @@ mod tests {
         // caller submits no `others` payload.
         let dir = tempfile::tempdir().expect("tempdir");
         let state_file = dir.path().join("downloads.json");
-        let downloads = Arc::new(DownloadQueue::new_with_state_file(Some(state_file.clone())));
+        let downloads =
+            Arc::new(RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository"));
         let mut existing = persisted_rule_recording("existing", None, 100);
         // Place a padded window that overlaps 100..200.
-        if let Some(meta) = existing.recording.as_mut() {
-            meta.scheduled_start = Some(100);
-            meta.scheduled_end = Some(200);
-        }
-        let existing = DownloadQueue::from_persisted(existing).expect("valid recording task");
+        existing.recording.scheduled_start = Some(100);
+        existing.recording.scheduled_end = Some(200);
+        let existing = RecordingQueue::from_persisted(existing).expect("valid recording task");
         downloads.queue.lock().await.push_back(existing);
         let points = collect_demand_points_for_provider(&downloads, "1", "input-a").await;
         assert_eq!(points.len(), 1, "queue entry must surface as a demand point");
@@ -1939,18 +2358,14 @@ mod tests {
     async fn preview_conflict_ignores_other_target_or_input() {
         let dir = tempfile::tempdir().expect("tempdir");
         let state_file = dir.path().join("downloads.json");
-        let downloads = Arc::new(DownloadQueue::new_with_state_file(Some(state_file.clone())));
+        let downloads =
+            Arc::new(RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository"));
         let mut other_target = persisted_rule_recording("other-target", None, 100);
-        if let Some(other_target_meta) = other_target.recording.as_mut() {
-            other_target_meta.source =
-                Some(shared::model::recording::RecordingSource::new("other-target", "9", "input-a"));
-        }
+        other_target.recording.source = shared::model::recording::RecordingSource::new("other-target", "9", "input-a");
         let mut other_input = persisted_rule_recording("other-input", None, 100);
-        if let Some(other_input_meta) = other_input.recording.as_mut() {
-            other_input_meta.source = Some(shared::model::recording::RecordingSource::new("1", "9", "input-b"));
-        }
-        let other_target_task = DownloadQueue::from_persisted(other_target).expect("valid task");
-        let other_input_task = DownloadQueue::from_persisted(other_input).expect("valid task");
+        other_input.recording.source = shared::model::recording::RecordingSource::new("1", "9", "input-b");
+        let other_target_task = RecordingQueue::from_persisted(other_target).expect("valid task");
+        let other_input_task = RecordingQueue::from_persisted(other_input).expect("valid task");
         downloads.queue.lock().await.push_back(other_target_task);
         downloads.queue.lock().await.push_back(other_input_task);
         let points = collect_demand_points_for_provider(&downloads, "1", "input-a").await;
@@ -1973,15 +2388,211 @@ mod tests {
         // terminal. Both terminal and non-editable-but-active states
         // must be skipped now.
         let mut cancelled_task = persisted_rule_recording("uuid-c", Some("rule-1"), 1_900_000_000);
-        cancelled_task.state = DownloadState::Cancelled;
+        cancelled_task.state = RecordingTaskState::Cancelled;
         assert!(!is_future_rule_recording(&cancelled_task, "rule-1", 1_800_000_000));
 
         let mut paused_task = persisted_rule_recording("uuid-p", Some("rule-1"), 1_900_000_000);
-        paused_task.state = DownloadState::Paused;
+        paused_task.state = RecordingTaskState::Paused;
         assert!(!is_future_rule_recording(&paused_task, "rule-1", 1_800_000_000));
 
         // Sanity: the happy path still accepts editable future tasks.
         let scheduled_task = persisted_rule_recording("uuid-s", Some("rule-1"), 1_900_000_000);
         assert!(is_future_rule_recording(&scheduled_task, "rule-1", 1_800_000_000));
+    }
+
+    #[tokio::test]
+    async fn create_recording_rejects_absent_recording_config() {
+        let config = tuliprox_core::model::Config::default();
+        let app_config = Arc::new(AppConfig {
+            config: Arc::new(arc_swap::ArcSwap::from_pointee(config)),
+            sources: Arc::new(arc_swap::ArcSwap::from_pointee(tuliprox_core::model::SourcesConfig::default())),
+            hdhomerun: Arc::new(arc_swap::ArcSwapOption::empty()),
+            api_proxy: Arc::new(arc_swap::ArcSwapOption::empty()),
+            file_locks: Arc::new(tuliprox_core::utils::FileLockManager::default()),
+            paths: Arc::new(arc_swap::ArcSwap::from_pointee(shared::model::ConfigPaths {
+                home_path: String::new(),
+                config_path: String::new(),
+                storage_path: String::new(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
+                mapping_file_path: None,
+                mapping_files_used: None,
+                template_file_path: None,
+                template_files_used: None,
+                api_proxy_file_path: String::new(),
+                custom_stream_response_path: None,
+            })),
+            custom_stream_response: Arc::new(arc_swap::ArcSwapOption::empty()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            media_tools: Arc::new(tuliprox_core::model::MediaToolCapabilities::default()),
+        });
+        let downloads = Arc::new(RecordingQueue::new());
+        let service = RecordingService::new(Arc::clone(&downloads), app_config);
+        let claims = shared::model::Claims {
+            username: "alice".to_string(),
+            iss: "tuliprox".to_string(),
+            iat: 0,
+            exp: 0,
+            roles: shared::model::RoleSet::new(),
+            permissions: Permission::RecordingCreate | Permission::RecordingManage | Permission::RecordingDelete,
+            pwd_version: 0,
+            subject_id: Some(UserId::from("web:alice")),
+            permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,
+        };
+        let input = CreateRecordingInput {
+            source: RecordingSourceInput {
+                target_id: "1".to_string(),
+                virtual_id: "1".to_string(),
+                cluster: XtreamCluster::Live,
+                input_name: "input-a".to_string(),
+            },
+            program_title: "title".to_string(),
+            program_start: 0,
+            program_end: 60,
+            pre_roll_secs: 0,
+            post_roll_secs: 0,
+            visibility: RecordingVisibility::Private,
+            channel_id: None,
+            channel_name: None,
+            provenance: RecordingProvenance::default(),
+            epg: None,
+        };
+
+        let result = service.create_recording(&claims, &input).await;
+
+        assert!(
+            matches!(result, Err(ServiceError::Disabled)),
+            "absent recording config must fail closed with Disabled, got: {result:?}"
+        );
+    }
+
+    /// A service rooted at `dir` with the supplied disk block, and the
+    /// source and server configuration a recording needs to resolve its
+    /// own target and URL.
+    fn service_with_disk(
+        dir: &std::path::Path,
+        queue: &Arc<RecordingQueue>,
+        disk: Option<tuliprox_core::model::RecordingDiskConfig>,
+    ) -> RecordingService {
+        let mut rec_cfg =
+            RecordingConfig::from(&shared::model::RecordingConfigDto { enabled: true, ..Default::default() });
+        rec_cfg.directory = dir.to_string_lossy().into_owned();
+        rec_cfg.disk = disk;
+        let config = tuliprox_core::model::Config {
+            video: Some(tuliprox_core::model::VideoConfig {
+                extensions: Vec::new(),
+                web_search: None,
+                recording: Some(rec_cfg),
+            }),
+            ..tuliprox_core::model::Config::default()
+        };
+
+        let input = Arc::new(tuliprox_core::model::ConfigInput { id: 7, name: "input-a".into(), ..Default::default() });
+        let target = Arc::new(tuliprox_core::model::ConfigTarget {
+            id: 11,
+            enabled: true,
+            name: "1".to_string(),
+            options: None,
+            sort: None,
+            filter: tuliprox_core::model::StagedFilter::default(),
+            output: vec![],
+            rename: None,
+            mapping_ids: None,
+            mapping: Arc::default(),
+            favourites: None,
+            processing_order: shared::model::ProcessingOrder::default(),
+            execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
+            watch: None,
+            use_memory_cache: false,
+        });
+        let sources = tuliprox_core::model::SourcesConfig {
+            inputs: vec![Arc::clone(&input)],
+            sources: vec![tuliprox_core::model::ConfigSource { inputs: vec!["input-a".into()], targets: vec![target] }],
+            ..tuliprox_core::model::SourcesConfig::default()
+        };
+
+        let app_config = test_app_config();
+        app_config.config.store(Arc::new(config));
+        app_config.sources.store(Arc::new(sources));
+        RecordingService::new(Arc::clone(queue), app_config)
+    }
+
+    fn creating_claims() -> shared::model::Claims {
+        shared::model::Claims {
+            username: "alice".to_string(),
+            iss: "tuliprox".to_string(),
+            iat: 0,
+            exp: 0,
+            roles: shared::model::RoleSet::new(),
+            permissions: Permission::RecordingCreate | Permission::RecordingManage | Permission::RecordingDelete,
+            pwd_version: 0,
+            subject_id: Some(UserId::from("web:alice")),
+            permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,
+        }
+    }
+
+    fn disk_test_input() -> CreateRecordingInput {
+        let now = chrono::Utc::now().timestamp();
+        CreateRecordingInput {
+            source: RecordingSourceInput {
+                target_id: "1".to_string(),
+                virtual_id: "42".to_string(),
+                cluster: XtreamCluster::Live,
+                input_name: "input-a".to_string(),
+            },
+            program_title: "title".to_string(),
+            program_start: now,
+            program_end: now + 600,
+            pre_roll_secs: 0,
+            post_roll_secs: 0,
+            visibility: RecordingVisibility::Private,
+            channel_id: None,
+            channel_name: None,
+            provenance: RecordingProvenance::default(),
+            epg: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_recording_with_no_room_on_disk_is_refused() {
+        // Logical quota and physical space are different questions, and
+        // until now only the first was ever asked: `would_fit_on_disk` was
+        // implemented and tested but no caller ever ran it, so a server
+        // with a full disk accepted recordings until ffmpeg failed on
+        // ENOSPC. The safety margin drives headroom to zero here rather
+        // than actually filling a filesystem.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let queue = Arc::new(RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open repository"));
+        let service = service_with_disk(
+            dir.path(),
+            &queue,
+            Some(tuliprox_core::model::RecordingDiskConfig {
+                high_water_percent: None,
+                low_water_percent: None,
+                cleanup_interval_secs: None,
+                safety_bytes: Some(u64::MAX),
+            }),
+        );
+
+        let result = service.create_recording(&creating_claims(), &disk_test_input()).await;
+
+        assert!(matches!(result, Err(ServiceError::DiskFull)), "got {result:?}");
+        assert!(queue.scheduled.read().await.is_empty(), "a refused admission must not leave a recording behind");
+    }
+
+    #[tokio::test]
+    async fn the_same_recording_is_admitted_when_the_disk_has_room() {
+        // The counterpart: without the safety margin the identical request
+        // succeeds, so the refusal above is the disk rule and not the
+        // fixture failing for some unrelated reason.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let queue = Arc::new(RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open repository"));
+        let service = service_with_disk(dir.path(), &queue, None);
+
+        let result = service.create_recording(&creating_claims(), &disk_test_input()).await;
+
+        assert!(result.is_ok(), "got {result:?}");
+        assert_eq!(queue.scheduled.read().await.len(), 1);
     }
 }

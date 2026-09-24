@@ -4,12 +4,12 @@
 //! path and file type are revalidated at open time, and new opens are denied
 //! once deletion starts.
 
-use crate::download::DownloadQueue;
+use crate::recording::recording_queue::RecordingQueue;
 use shared::model::{
     permission::Permission,
-    recording::{RecordingMetadata, RecordingOwner, RecordingVisibility},
+    recording::{RecordingMetadata, RecordingOwner, RecordingSource, RecordingVisibility},
     recording_catalog::{CatalogKey, RecordingCatalogEntry},
-    Claims, FileDownloadDto, RecordingTaskDto, UserId, CURRENT_PERMISSION_SCHEMA_VERSION,
+    Claims, UserId, CURRENT_PERMISSION_SCHEMA_VERSION,
 };
 use std::path::Path;
 use tuliprox_auth::{authorize, RecordingAction, RecordingDecision, RecordingSubject, TerminalState};
@@ -118,29 +118,20 @@ pub fn authorize_catalog_entry(
         }
         return Ok(());
     }
-    // Persisted entries use the recording_auth policy.
+    // Persisted entries use the recording_auth policy. An entry without a
+    // resolvable owner is not authorizable as a user recording; only the
+    // orphan branch above may serve it.
+    let Some(owner_id) = entry.owner_id.clone() else {
+        return Err(CatalogAccessError::Forbidden);
+    };
     let recording_meta = RecordingMetadata {
-        owner: entry.owner_id.clone().map_or(RecordingOwner::LegacyAdmin, RecordingOwner::User),
-        visibility: entry.visibility.unwrap_or(RecordingVisibility::Private),
-        source: None,
-        program_start: None,
-        program_end: None,
-        scheduled_start: None,
-        scheduled_end: None,
-        pre_roll_secs: 0,
-        post_roll_secs: 0,
-        channel_id: None,
-        channel_name: None,
-        program_title: None,
-        epg: None,
-        provenance: shared::model::recording::RecordingProvenance::default(),
         relative_path: Some(entry.relative_path.clone()),
-        partial_relative_path: None,
-        reserved_bytes: 0,
-        measured_bytes: 0,
-        completed_at: None,
-        notification_markers: Vec::new(),
-        deleting_previous_state: None,
+        ..RecordingMetadata::new_media(
+            RecordingOwner::User(owner_id),
+            entry.visibility.unwrap_or(RecordingVisibility::Private),
+            RecordingSource::new("", "", ""),
+            String::new(),
+        )
     };
     let subject = RecordingSubject::new(Some(&recording_meta), TerminalState::Completed, true);
     match authorize(claims, subject_id, RecordingAction::Read, &subject) {
@@ -153,7 +144,7 @@ pub fn authorize_catalog_entry(
 /// queue-resident task. Re-validates the path AND the `Deleting`
 /// state to close the deletion/playback race.
 pub async fn authorize_open(
-    queue: &DownloadQueue,
+    queue: &RecordingQueue,
     claims: &Claims,
     subject_id: &UserId,
     uuid: &str,
@@ -165,7 +156,7 @@ pub async fn authorize_open(
         return Err(CatalogAccessError::MissingPermission);
     }
     let recording = lookup_recording(queue, uuid).await.ok_or(CatalogAccessError::NotFound)?;
-    let meta = recording.recording.as_ref().ok_or(CatalogAccessError::NotFound)?;
+    let meta = &recording.recording;
     if meta.deleting_previous_state.is_some() {
         return Err(CatalogAccessError::InDeletingState);
     }
@@ -184,31 +175,12 @@ pub async fn authorize_open(
     }
 }
 
-/// Build a sanitized view for the frontend. Path disclosure is
-/// avoided: we return the stable `key` and a sanitized
-/// `relative_path` (already safe by construction) but never the
-/// underlying canonical path.
-pub fn catalog_entry_view(entry: &RecordingCatalogEntry, can_view_owner_metadata: bool) -> RecordingTaskDto {
-    let mut view = RecordingTaskDto::from_metadata(&recording_meta_stub(
-        entry.owner_id.clone(),
-        entry.visibility.unwrap_or(RecordingVisibility::Private),
-    ));
-    if !can_view_owner_metadata {
-        // For non-owner private entries, strip the owner.
-        view = RecordingTaskDto::from_metadata(&recording_meta_stub(None, RecordingVisibility::Private));
-    }
-    let _ = entry.key.0.clone();
-    view
-}
-
-fn recording_meta_stub(owner_id: Option<UserId>, visibility: RecordingVisibility) -> RecordingMetadata {
-    let owner = owner_id.map_or(RecordingOwner::LegacyAdmin, RecordingOwner::User);
-    RecordingMetadata::new(owner, visibility, shared::model::recording::RecordingSource::new("", "", ""), 0, 0, 0, 0)
-}
-
 /// Look up a recording task by uuid. Awaits each guard in turn so
 /// callers do not silently see `None` under transient lock contention.
-pub async fn lookup_recording(queue: &DownloadQueue, uuid: &str) -> Option<crate::download::FileDownload> {
+pub async fn lookup_recording(
+    queue: &RecordingQueue,
+    uuid: &str,
+) -> Option<crate::recording::recording_queue::RecordingTask> {
     if let Some(t) = queue.queue.lock().await.iter().find(|d| d.uuid == uuid).cloned() {
         return Some(t);
     }
@@ -229,10 +201,6 @@ pub async fn lookup_recording(queue: &DownloadQueue, uuid: &str) -> Option<crate
 /// Build a `CatalogKey` from a relative path. Re-exported so HTTP
 /// handlers can share the dedup-key logic.
 pub fn key_for(relative_path: &str) -> CatalogKey { CatalogKey::from_relative_path(relative_path) }
-
-/// Convenience: produce a stable `FileDownloadDto` from a queue
-/// resident task for the catalog list endpoint.
-pub fn task_view_for(recording: &crate::download::FileDownload) -> FileDownloadDto { FileDownloadDto::from(recording) }
 
 #[cfg(test)]
 mod tests {

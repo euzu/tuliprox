@@ -415,14 +415,85 @@ impl ConfigFile {
 
 #[cfg(test)]
 mod tests {
-    #[ignore = "requires AppState mock infrastructure (future work)"]
-    #[tokio::test]
-    async fn test_forced_targets_preserved_on_config_reload() {
-        // Expected behavior:
-        // - Start with forced_targets = {enabled: false, inputs: [], targets: []}
-        // - Reload config with schedule.targets = ["my-target"]
-        // - Verify forced_targets remains {enabled: false, inputs: [], targets: []}
-        // - Verify scheduler uses filtered targets based on forced_targets AND schedule.targets
-        // Full integration test requires AppState mock infrastructure (future work).
+    use super::refresh_forced_targets;
+    use crate::model::{ConfigSource, ConfigTarget, ProcessTargets, SourcesConfig};
+    use shared::model::ProcessingOrder;
+    use std::sync::Arc;
+
+    fn target(id: u16, name: &str) -> Arc<ConfigTarget> {
+        Arc::new(ConfigTarget {
+            id,
+            enabled: true,
+            name: name.to_string(),
+            options: None,
+            sort: None,
+            filter: crate::model::StagedFilter::default(),
+            output: vec![],
+            rename: None,
+            mapping_ids: None,
+            mapping: Arc::default(),
+            favourites: None,
+            processing_order: ProcessingOrder::default(),
+            execution_plan: crate::model::TargetExecutionPlan::default(),
+            watch: None,
+            use_memory_cache: false,
+        })
+    }
+
+    fn sources_with(targets: Vec<Arc<ConfigTarget>>) -> SourcesConfig {
+        SourcesConfig { sources: vec![ConfigSource { inputs: vec![], targets }], ..SourcesConfig::default() }
+    }
+
+    fn forced(names: &[&str]) -> Arc<ProcessTargets> {
+        Arc::new(ProcessTargets {
+            enabled: true,
+            inputs: vec![],
+            targets: vec![],
+            target_names: names.iter().map(|name| (*name).to_string()).collect(),
+        })
+    }
+
+    /// A reload must not invent a target filter for an operator who never
+    /// passed `-target`.
+    #[test]
+    fn a_disabled_filter_survives_a_reload_untouched() {
+        let current =
+            Arc::new(ProcessTargets { enabled: false, inputs: vec![], targets: vec![], target_names: vec![] });
+
+        let refreshed = refresh_forced_targets(Arc::clone(&current), &sources_with(vec![target(1, "my-target")]));
+
+        assert!(!refreshed.enabled, "a reload must not enable a filter the operator never asked for");
+        assert!(refreshed.target_names.is_empty());
+    }
+
+    /// Target ids are positional, so a surviving name must come back with
+    /// whatever id it has now rather than the one it had at startup.
+    #[test]
+    fn a_surviving_forced_target_is_revalidated_to_its_new_id() {
+        let refreshed = refresh_forced_targets(forced(&["my-target"]), &sources_with(vec![target(42, "my-target")]));
+
+        assert!(refreshed.enabled);
+        assert_eq!(refreshed.target_names, vec!["my-target".to_string()]);
+        assert_eq!(refreshed.targets, vec![42], "the filter must carry the id from the incoming sources");
+    }
+
+    /// One target disappearing must not take the rest of the filter with it.
+    #[test]
+    fn a_removed_forced_target_is_dropped_and_the_rest_kept() {
+        let refreshed = refresh_forced_targets(forced(&["kept", "gone"]), &sources_with(vec![target(1, "kept")]));
+
+        assert!(refreshed.enabled);
+        assert_eq!(refreshed.target_names, vec!["kept".to_string()]);
+        assert_eq!(refreshed.targets, vec![1]);
+    }
+
+    /// With every forced target gone the filter would block everything, so it
+    /// is disabled instead.
+    #[test]
+    fn losing_every_forced_target_disables_the_filter_rather_than_blocking_all() {
+        let refreshed = refresh_forced_targets(forced(&["gone"]), &sources_with(vec![target(1, "other")]));
+
+        assert!(!refreshed.enabled, "an empty filter must not be left enabled: it would process nothing");
+        assert!(refreshed.target_names.is_empty());
     }
 }

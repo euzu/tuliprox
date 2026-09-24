@@ -179,7 +179,7 @@ fn apply_setup_config_forms(config: &mut shared::model::ConfigDto, forms: Vec<Co
             ConfigForm::Api(_, api_cfg) => config.api = api_cfg,
             ConfigForm::Log(_, log_cfg) => config.log = Some(log_cfg),
             ConfigForm::Schedules(_, schedules_cfg) => config.schedules = schedules_cfg.schedules,
-            ConfigForm::Video(_, video_cfg) => config.video = Some(video_cfg),
+            ConfigForm::Recording(_, video_cfg) => config.video = Some(video_cfg),
             ConfigForm::MetadataUpdate(_, mut metadata_update_cfg) => {
                 if metadata_update_cfg.is_empty() {
                     config.metadata_update = None;
@@ -413,7 +413,7 @@ mod tests {
         apply_setup_reverse_proxy_defaults(&mut app_config, true, None);
 
         let reverse_proxy = app_config.config.reverse_proxy.expect("reverse_proxy must be initialized");
-        assert!(!reverse_proxy.rewrite_secret.is_empty());
+        assert_ne!(reverse_proxy.rewrite_secret, "");
         assert_eq!(reverse_proxy.stream.as_ref().map(|stream| stream.retry), Some(true));
         assert_eq!(
             reverse_proxy.disabled_header.as_ref().map(|header| (
@@ -433,7 +433,7 @@ mod tests {
         apply_setup_reverse_proxy_defaults(&mut app_config, false, None);
 
         let reverse_proxy = app_config.config.reverse_proxy.expect("reverse_proxy remains present");
-        assert!(!reverse_proxy.rewrite_secret.is_empty());
+        assert_ne!(reverse_proxy.rewrite_secret, "");
         assert_eq!(reverse_proxy.stream, None);
         assert_eq!(reverse_proxy.disabled_header, None);
     }
@@ -487,7 +487,7 @@ mod tests {
             app_cfg_second.config.reverse_proxy.as_ref().expect("reverse_proxy must be present").rewrite_secret.clone();
 
         assert_eq!(first_secret, second_secret);
-        assert!(!first_secret.is_empty());
+        assert_ne!(first_secret, "");
     }
 
     #[test]

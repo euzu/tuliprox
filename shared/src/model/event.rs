@@ -13,13 +13,13 @@ use crate::model::{
     auth_audit::{AuthAuditEvent, AuthAuditOutcome},
     notification::{registry, EventId, Severity},
     stats::SourceStats,
-    ActiveUserConnectionChange, ConfigReloadFailure, ConfigType, ConnectionDenied, DiskAlert, DownloadsDelta,
-    DownloadsResponse, LibraryScanProgressEvent, LibraryScanSummaryStatus, MetadataUpdateFailure, MsgKind,
-    NotificationDeadLetter, Permission, PlaylistGroupsChanged, PlaylistUpdateProgressEvent, PlaylistUpdateRunId,
-    PlaylistUpdateRunOrder, PlaylistUpdateState, ProviderAccountEvent, ProviderAccountState, ProviderFetchFailure,
-    ProviderPoolExhausted, ProviderPriorityFallback, RecordingLifecycleMessage, ScheduledTaskFailure,
-    ServerLifecycleEvent, ServerLifecycleState, StreamProbeFailure, SystemInfo, UserLifecycleEvent, UserLifecycleState,
-    WatchChanges, WatchDisabled, WatchUnmatched,
+    ActiveUserConnectionChange, ConfigReloadFailure, ConfigType, ConnectionDenied, DiskAlert, LibraryScanProgressEvent,
+    LibraryScanSummaryStatus, MetadataUpdateFailure, MsgKind, NotificationDeadLetter, Permission,
+    PlaylistGroupsChanged, PlaylistUpdateProgressEvent, PlaylistUpdateRunId, PlaylistUpdateRunOrder,
+    PlaylistUpdateState, ProviderAccountEvent, ProviderAccountState, ProviderFetchFailure, ProviderPoolExhausted,
+    ProviderPriorityFallback, RecordingLifecycleMessage, ScheduledTaskFailure, ServerLifecycleEvent,
+    ServerLifecycleState, StreamProbeFailure, SystemInfo, UserLifecycleEvent, UserLifecycleState, WatchChanges,
+    WatchDisabled, WatchUnmatched,
 };
 use std::sync::Arc;
 
@@ -40,9 +40,10 @@ pub enum EventMessage {
     PlaylistUpdateProgress(PlaylistUpdateProgressEvent),
     SystemInfoUpdate(Arc<SystemInfo>),
     LibraryScanProgress(LibraryScanProgressEvent),
-    DownloadsUpdate(Arc<DownloadsResponse>),
-    DownloadsDeltaUpdate(DownloadsDelta),
     RecordingChanged,
+    /// Bytes moved, nothing else. Separate from `RecordingChanged` so a
+    /// session can rate limit it without also delaying a state transition.
+    RecordingProgress,
     RecordingRulesChanged,
     InputMetadataUpdatesCompleted(Arc<str>),
     InputMetadataUpdatesStarted(Arc<str>),
@@ -180,8 +181,6 @@ pub enum EventKind {
     /// A scan that ended in an error. Separate from the progress kind so a
     /// subscriber can take scan failures without the tick firehose.
     LibraryScanFailed,
-    DownloadsUpdate,
-    DownloadsDeltaUpdate,
     RecordingChanged,
     RecordingRulesChanged,
     InputMetadataUpdatesCompleted,
@@ -213,6 +212,9 @@ pub enum EventKind {
     AuthSignInFailed,
     AuthSignInThrottled,
     AuthPermissionDenied,
+    /// Payload-free progress nudge, appended last so no existing kind's bit
+    /// position shifts.
+    RecordingProgress,
 }
 
 impl EventKind {
@@ -220,7 +222,7 @@ impl EventKind {
     ///
     /// The mask type below indexes into this, so the order is load-bearing:
     /// it is the bit order, not just a listing.
-    pub const ALL: [Self; 44] = [
+    pub const ALL: [Self; 43] = [
         Self::ServerError,
         Self::ServerStarted,
         Self::ServerShutdown,
@@ -232,8 +234,6 @@ impl EventKind {
         Self::SystemInfoUpdate,
         Self::LibraryScanProgress,
         Self::LibraryScanFailed,
-        Self::DownloadsUpdate,
-        Self::DownloadsDeltaUpdate,
         Self::RecordingChanged,
         Self::RecordingRulesChanged,
         Self::InputMetadataUpdatesCompleted,
@@ -265,6 +265,7 @@ impl EventKind {
         Self::AuthSignInFailed,
         Self::AuthSignInThrottled,
         Self::AuthPermissionDenied,
+        Self::RecordingProgress,
     ];
 
     /// This kind's bit position.
@@ -283,8 +284,8 @@ impl EventKind {
     #[must_use]
     pub const fn required_permission(self) -> Permission {
         match self {
-            Self::DownloadsUpdate | Self::DownloadsDeltaUpdate => Permission::DownloadRead,
             Self::RecordingChanged
+            | Self::RecordingProgress
             | Self::RecordingRulesChanged
             | Self::RecordingStarted
             | Self::RecordingCompleted
@@ -348,11 +349,7 @@ impl EventKind {
     pub const fn is_high_frequency(self) -> bool {
         matches!(
             self,
-            Self::PlaylistUpdateProgress
-                | Self::LibraryScanProgress
-                | Self::DownloadsUpdate
-                | Self::DownloadsDeltaUpdate
-                | Self::SystemInfoUpdate
+            Self::PlaylistUpdateProgress | Self::LibraryScanProgress | Self::RecordingProgress | Self::SystemInfoUpdate
         )
     }
 
@@ -367,9 +364,7 @@ impl EventKind {
     /// This is what a cold websocket connect should be handed instead of
     /// waiting up to three seconds for the next sample.
     #[must_use]
-    pub const fn is_latched(self) -> bool {
-        matches!(self, Self::SystemInfoUpdate | Self::DownloadsUpdate | Self::ActiveProvider)
-    }
+    pub const fn is_latched(self) -> bool { matches!(self, Self::SystemInfoUpdate | Self::ActiveProvider) }
 
     /// Is this kind a payload-free nudge that can be coalesced?
     ///
@@ -404,9 +399,8 @@ impl EventKind {
             Self::SystemInfoUpdate => "system.info",
             Self::LibraryScanProgress => "library.scan.progress",
             Self::LibraryScanFailed => "library.scan.failed",
-            Self::DownloadsUpdate => "downloads.update",
-            Self::DownloadsDeltaUpdate => "downloads.delta",
             Self::RecordingChanged => "recording.changed",
+            Self::RecordingProgress => "recording.progress",
             Self::RecordingRulesChanged => "recording.rules.changed",
             Self::InputMetadataUpdatesCompleted => "metadata.update.completed",
             Self::InputMetadataUpdatesStarted => "metadata.update.started",
@@ -469,9 +463,8 @@ impl EventMessage {
                 LibraryScanSummaryStatus::Success => EventKind::LibraryScanProgress,
                 LibraryScanSummaryStatus::Error => EventKind::LibraryScanFailed,
             },
-            Self::DownloadsUpdate(_) => EventKind::DownloadsUpdate,
-            Self::DownloadsDeltaUpdate(_) => EventKind::DownloadsDeltaUpdate,
             Self::RecordingChanged => EventKind::RecordingChanged,
+            Self::RecordingProgress => EventKind::RecordingProgress,
             Self::RecordingRulesChanged => EventKind::RecordingRulesChanged,
             Self::InputMetadataUpdatesCompleted(_) => EventKind::InputMetadataUpdatesCompleted,
             Self::InputMetadataUpdatesStarted(_) => EventKind::InputMetadataUpdatesStarted,
@@ -612,10 +605,7 @@ impl EventMessage {
             Self::ActiveProvider(_, _) => registry::PROVIDER_CONNECTIONS_CHANGED,
             Self::RecordingChanged => registry::RECORDING_QUEUE_CHANGED,
             Self::RecordingRulesChanged => registry::RECORDING_RULES_CHANGED,
-            Self::PlaylistUpdateProgress(_)
-            | Self::SystemInfoUpdate(_)
-            | Self::DownloadsUpdate(_)
-            | Self::DownloadsDeltaUpdate(_) => return None,
+            Self::PlaylistUpdateProgress(_) | Self::SystemInfoUpdate(_) | Self::RecordingProgress => return None,
         })
     }
 
@@ -649,9 +639,7 @@ impl EventMessage {
             Self::PlaylistUpdateProgress(progress) => encode(progress),
             Self::SystemInfoUpdate(info) => encode(info.as_ref()),
             Self::LibraryScanProgress(progress) => encode(progress),
-            Self::DownloadsUpdate(downloads) => encode(downloads.as_ref()),
-            Self::DownloadsDeltaUpdate(delta) => encode(delta),
-            Self::RecordingChanged | Self::RecordingRulesChanged => serde_json::Value::Null,
+            Self::RecordingChanged | Self::RecordingProgress | Self::RecordingRulesChanged => serde_json::Value::Null,
             Self::InputMetadataUpdatesStarted(input) | Self::InputMetadataUpdatesCompleted(input) => {
                 serde_json::json!({ "input": input.as_ref() })
             }

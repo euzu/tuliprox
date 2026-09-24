@@ -29,6 +29,10 @@ pub struct SidebarProps {
     pub onview: Callback<ViewType>,
     #[prop_or_default]
     pub show_streams_page: bool,
+    #[prop_or(true)]
+    pub show_stream_history: bool,
+    #[prop_or(true)]
+    pub show_recording: bool,
     #[prop_or_default]
     pub active_page: ViewType,
 }
@@ -60,12 +64,14 @@ fn is_sidebar_expanded(collapsed: CollapseState) -> bool {
 
 /// Should the DVR entries appear in the navigation?
 ///
-/// Visibility is permission-only. The DVR availability gate is checked
-/// at the action site: any record-form open preflights
-/// `RecordingService::ensure_available`, so hiding the menu while the
-/// DVR is off would only hide the path the operator needs to reach
-/// the toggle in the first place.
-pub const fn show_recording_nav(has_recording_read: bool) -> bool { has_recording_read }
+/// Requires both recording read permission and recording enabled in config.
+pub const fn show_recording_nav(has_recording_read: bool, recording_enabled: bool) -> bool {
+    has_recording_read && recording_enabled
+}
+
+pub const fn show_stream_history_nav(has_system_read: bool, stream_history_enabled: bool) -> bool {
+    has_system_read && stream_history_enabled
+}
 
 #[component]
 pub fn Sidebar(props: &SidebarProps) -> Html {
@@ -79,7 +85,10 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
     let is_mobile = use_state(|| false);
     let resolved_state = resolved_sidebar_state(*collapsed, *is_mobile);
     let active_menu = props.active_page;
-    let show_recording = show_recording_nav(services.auth.has_permission(Permission::RecordingRead));
+    let show_recording =
+        show_recording_nav(services.auth.has_permission(Permission::RecordingRead), props.show_recording);
+    let show_stream_history =
+        show_stream_history_nav(services.auth.has_permission(Permission::SystemRead), props.show_stream_history);
 
     let handle_menu_click = {
         let viewchange = props.onview.clone();
@@ -201,12 +210,9 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
             {html_if!(props.show_streams_page && auth.has_permission(Permission::SystemRead), {
                 <MenuItem class={if active_menu == ViewType::Streams { "active" } else {""}} icon="Streams" name={ViewType::Streams.to_string()} label={translate.t("LABEL.STREAMS")} onclick={&handle_menu_click}></MenuItem>
              })}
-            {html_if!(auth.has_permission(Permission::SystemRead), {
+            {html_if!(show_stream_history, {
                 <MenuItem class={if active_menu == ViewType::StreamHistory { "active" } else {""}} icon="Log" name={ViewType::StreamHistory.to_string()} label={translate.t("LABEL.STREAM_HISTORY")} onclick={&handle_menu_click}></MenuItem>
             })}
-            {html_if!(auth.has_permission(Permission::DownloadRead), {
-                <MenuItem class={if active_menu == ViewType::Downloads { "active" } else {""}} icon="Download" name={ViewType::Downloads.to_string()} label={translate.t("LABEL.DOWNLOADS")} onclick={&handle_menu_click}></MenuItem>
-             })}
             {html_if!(
                 auth.has_any_permissions(
                     Permission::ConfigRead
@@ -280,11 +286,8 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
             {html_if!(props.show_streams_page && auth.has_permission(Permission::SystemRead), {
              <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Streams, if active_menu == ViewType::Streams { " active" } else {""})} icon="Streams" name={ViewType::Streams.to_string()} hint={translate.t("LABEL.STREAMS")} aria_label={translate.t("LABEL.STREAMS")} onclick={&handle_menu_click}></IconButton>
             })}
-            {html_if!(auth.has_permission(Permission::SystemRead), {
+            {html_if!(show_stream_history, {
                 <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::StreamHistory, if active_menu == ViewType::StreamHistory { " active" } else {""})} icon="Log" name={ViewType::StreamHistory.to_string()} hint={translate.t("LABEL.STREAM_HISTORY")} aria_label={translate.t("LABEL.STREAM_HISTORY")} onclick={&handle_menu_click}></IconButton>
-            })}
-            {html_if!(auth.has_permission(Permission::DownloadRead), {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Downloads, if active_menu == ViewType::Downloads { " active" } else {""})} icon="Download" name={ViewType::Downloads.to_string()} hint={translate.t("LABEL.DOWNLOADS")} aria_label={translate.t("LABEL.DOWNLOADS")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(
                 auth.has_any_permissions(
@@ -433,8 +436,18 @@ mod tests {
     }
 
     #[test]
-    fn recording_nav_requires_only_recording_read() {
-        assert!(show_recording_nav(true));
-        assert!(!show_recording_nav(false));
+    fn recording_nav_requires_both_recording_read_and_recording_enabled() {
+        assert!(show_recording_nav(true, true));
+        assert!(!show_recording_nav(true, false));
+        assert!(!show_recording_nav(false, true));
+        assert!(!show_recording_nav(false, false));
+    }
+
+    #[test]
+    fn stream_history_nav_requires_both_system_read_and_stream_history_enabled() {
+        assert!(super::show_stream_history_nav(true, true));
+        assert!(!super::show_stream_history_nav(true, false));
+        assert!(!super::show_stream_history_nav(false, true));
+        assert!(!super::show_stream_history_nav(false, false));
     }
 }

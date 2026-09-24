@@ -16,41 +16,18 @@ use crate::{
     services::{get_base_href, request_delete, request_get, request_patch, request_post, Encoding},
 };
 use serde::{Deserialize, Serialize};
+/// The create-recording request and its source identifiers are defined once,
+/// in `shared`, so the client and the REST handler cannot drift apart.
+pub use shared::model::recording::{
+    CreateRecordingRequest as CreateRecordingTaskRequest, RecordingSourceRequest as RecordingSourceInput,
+};
 use shared::{
     model::{
         recording_rule::{RuleBody, RuleVisibility},
-        TaskKindDto, TaskPriorityDto, TransferStatusDto, TransferTaskDto, XtreamCluster,
+        RecordingTaskDto,
     },
     utils::concat_path_leading_slash,
 };
-
-/// Source identifiers (server-resolved) for creating a recording.
-/// These come from the configured target/input combination, never a
-/// free-form URL.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct RecordingSourceInput {
-    pub target_id: String,
-    pub virtual_id: String,
-    pub cluster: XtreamCluster,
-    pub input_name: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct CreateRecordingTaskRequest {
-    pub source: RecordingSourceInput,
-    pub program_title: String,
-    pub program_start: i64,
-    pub program_end: i64,
-    pub pre_roll_secs: u64,
-    pub post_roll_secs: u64,
-    pub visibility: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub channel_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub channel_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub epg: Option<shared::model::recording::EpgEpisodeMetadata>,
-}
 
 #[derive(Clone, Debug, Serialize)]
 pub struct EditRecordingTaskRequest {
@@ -72,63 +49,9 @@ pub struct RecordingTaskId {
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
-pub struct RecordingTaskResponse {
-    pub id: String,
-    pub title: String,
-    /// `create_recording_task` returns only `{id, title, recording}`; the
-    /// `list_tasks` snapshot returns the full `TransferTaskDto` shape.
-    /// `#[serde(default)]` lets both responses deserialize into one type.
-    #[serde(default = "default_kind")]
-    pub kind: TaskKindDto,
-    #[serde(default = "default_priority")]
-    pub priority: TaskPriorityDto,
-    #[serde(default = "default_status")]
-    pub status: TransferStatusDto,
-    #[serde(default)]
-    pub retry_attempts: u8,
-    #[serde(default)]
-    pub downloaded_bytes: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub total_bytes: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub next_retry_at: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scheduled_start_at: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub duration_secs: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    pub recording: Option<shared::model::recording::RecordingTaskDto>,
-}
-
-fn default_priority() -> TaskPriorityDto { TaskPriorityDto::Normal }
-fn default_status() -> TransferStatusDto { TransferStatusDto::Scheduled }
-fn default_kind() -> TaskKindDto { TaskKindDto::Recording }
-
-impl From<TransferTaskDto> for RecordingTaskResponse {
-    fn from(value: TransferTaskDto) -> Self {
-        Self {
-            id: value.id,
-            title: value.title,
-            kind: value.kind,
-            priority: value.priority,
-            status: value.status,
-            retry_attempts: value.retry_attempts,
-            downloaded_bytes: value.downloaded_bytes,
-            total_bytes: value.total_bytes,
-            next_retry_at: value.next_retry_at,
-            scheduled_start_at: value.scheduled_start_at,
-            duration_secs: value.duration_secs,
-            error: value.error,
-            recording: value.recording,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct RecordingSnapshot {
     pub revision: u64,
-    pub tasks: Vec<RecordingTaskResponse>,
+    pub tasks: Vec<RecordingTaskDto>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -296,8 +219,8 @@ pub enum RecordingError {
     /// recording that has not finished yet.
     NotTerminal,
     /// `recording_disabled` — the DVR cannot run on this server:
-    /// either the `video.download` block is missing from the
-    /// configuration, or `video.download.recording.enabled` is
+    /// either the `video.recording` block is missing from the
+    /// configuration, or `video.recording.enabled` is
     /// `false`.
     Disabled,
     /// Catch-all for unrecognised codes so the frontend does not
@@ -426,13 +349,17 @@ impl RecordingService {
     /// server; production uses the default constructed by `new`.
     pub fn with_base_path(base_path: String) -> Self { Self { base_path } }
 
-    fn tasks_path(&self) -> String { concat_path_leading_slash(&self.base_path, "tasks") }
+    fn requests_path(&self) -> String { concat_path_leading_slash(&self.base_path, "requests") }
 
-    fn task_path(&self, id: &str) -> String { concat_path_leading_slash(&self.base_path, &format!("tasks/{id}")) }
+    fn request_path(&self, id: &str) -> String { concat_path_leading_slash(&self.base_path, &format!("requests/{id}")) }
+
+    /// The physical recording behind an entry. Administrator-only on the
+    /// server, and a different id space from a request.
+    fn materialization_path(&self, id: &str) -> String {
+        concat_path_leading_slash(&self.base_path, &format!("materializations/{id}"))
+    }
 
     fn conflicts_path(&self) -> String { concat_path_leading_slash(&self.base_path, "conflicts/preview") }
-
-    fn quota_path(&self) -> String { concat_path_leading_slash(&self.base_path, "quota") }
 
     fn rules_path(&self) -> String { concat_path_leading_slash(&self.base_path, "rules") }
 
@@ -440,32 +367,12 @@ impl RecordingService {
 
     fn availability_path(&self) -> String { concat_path_leading_slash(&self.base_path, "availability") }
 
-    /// GET /recording/tasks — list visible tasks.
-    pub async fn list_tasks(&self) -> Result<RecordingSnapshot, RecordingError> {
-        let body: RecordingSnapshot = request_get(&self.tasks_path(), None, Some(Encoding::Json))
-            .await
-            .map_err(network)?
-            .ok_or_else(|| RecordingError::Other("empty response".into()))?;
-        Ok(body)
-    }
-
-    /// POST /recording/tasks — create a recording. The request must
-    /// carry source identifiers, never a free-form URL.
-    pub async fn create_task(
-        &self,
-        request: CreateRecordingTaskRequest,
-    ) -> Result<RecordingTaskResponse, RecordingError> {
-        let body: RecordingTaskResponse = request_post(&self.tasks_path(), &request, None, Some(Encoding::Json))
-            .await
-            .map_err(network)?
-            .ok_or_else(|| RecordingError::Other("empty response".into()))?;
-        Ok(body)
-    }
-
-    /// PATCH /recording/tasks/{id}. Backend returns 204 No Content.
-    pub async fn edit_task(&self, id: &str, request: EditRecordingTaskRequest) -> Result<(), RecordingError> {
-        let _ = request_patch::<&EditRecordingTaskRequest, serde_json::Value>(
-            &self.task_path(id),
+    /// POST /recording/requests — create a recording. The request must
+    /// carry source identifiers, never a free-form URL. Answers 204: the
+    /// new entry arrives on the recording snapshot, not in this response.
+    pub async fn create_task(&self, request: CreateRecordingTaskRequest) -> Result<(), RecordingError> {
+        let _ = request_post::<&CreateRecordingTaskRequest, serde_json::Value>(
+            &self.requests_path(),
             &request,
             None,
             Some(Encoding::Json),
@@ -475,11 +382,24 @@ impl RecordingService {
         Ok(())
     }
 
-    /// POST /recording/tasks/{id}/cancel
-    pub async fn cancel_task(&self, id: &str) -> Result<(), RecordingError> {
+    /// PATCH /recording/requests/{id}
+    pub async fn edit_task(&self, id: &str, request: EditRecordingTaskRequest) -> Result<(), RecordingError> {
+        let _ = request_patch::<&EditRecordingTaskRequest, serde_json::Value>(
+            &self.request_path(id),
+            &request,
+            None,
+            Some(Encoding::Json),
+        )
+        .await
+        .map_err(network)?;
+        Ok(())
+    }
+
+    /// POST /recording/materializations/{id}/pause
+    pub async fn pause_task(&self, id: &str) -> Result<(), RecordingError> {
         let req = RecordingTaskId { id: id.to_string() };
         let _ = request_post::<&RecordingTaskId, serde_json::Value>(
-            &format!("{}/cancel", self.task_path(id)),
+            &format!("{}/pause", self.materialization_path(id)),
             &req,
             None,
             Some(Encoding::Json),
@@ -489,9 +409,60 @@ impl RecordingService {
         Ok(())
     }
 
-    /// DELETE /recording/tasks/{id}
+    /// POST /recording/materializations/{id}/resume
+    pub async fn resume_task(&self, id: &str) -> Result<(), RecordingError> {
+        let req = RecordingTaskId { id: id.to_string() };
+        let _ = request_post::<&RecordingTaskId, serde_json::Value>(
+            &format!("{}/resume", self.materialization_path(id)),
+            &req,
+            None,
+            Some(Encoding::Json),
+        )
+        .await
+        .map_err(network)?;
+        Ok(())
+    }
+
+    /// POST /recording/materializations/{id}/retry
+    pub async fn retry_task(&self, id: &str) -> Result<(), RecordingError> {
+        let req = RecordingTaskId { id: id.to_string() };
+        let _ = request_post::<&RecordingTaskId, serde_json::Value>(
+            &format!("{}/retry", self.materialization_path(id)),
+            &req,
+            None,
+            Some(Encoding::Json),
+        )
+        .await
+        .map_err(network)?;
+        Ok(())
+    }
+
+    /// DELETE /recording/requests/{id} — the caller leaves their own
+    /// entry. The file survives while anyone else is still attached.
+    pub async fn remove_task(&self, id: &str) -> Result<(), RecordingError> {
+        let _ = request_delete::<serde_json::Value>(&self.request_path(id), None, Some(Encoding::Json))
+            .await
+            .map_err(network)?;
+        Ok(())
+    }
+
+    pub async fn cancel_task(&self, id: &str) -> Result<(), RecordingError> {
+        let req = RecordingTaskId { id: id.to_string() };
+        let _ = request_post::<&RecordingTaskId, serde_json::Value>(
+            &format!("{}/cancel", self.request_path(id)),
+            &req,
+            None,
+            Some(Encoding::Json),
+        )
+        .await
+        .map_err(network)?;
+        Ok(())
+    }
+
+    /// DELETE /recording/materializations/{id} — administrator-only
+    /// physical deletion.
     pub async fn delete_task(&self, id: &str) -> Result<(), RecordingError> {
-        request_delete::<()>(&self.task_path(id), None, None).await.map_err(network)?;
+        request_delete::<()>(&self.materialization_path(id), None, None).await.map_err(network)?;
         Ok(())
     }
 
@@ -503,15 +474,6 @@ impl RecordingService {
         request: &PreviewConflictsRequest,
     ) -> Result<RecordingConflictPreview, RecordingError> {
         let body: RecordingConflictPreview = request_post(&self.conflicts_path(), request, None, Some(Encoding::Json))
-            .await
-            .map_err(network)?
-            .ok_or_else(|| RecordingError::Other("empty response".into()))?;
-        Ok(body)
-    }
-
-    /// GET /recording/quota
-    pub async fn get_quota(&self) -> Result<RecordingQuota, RecordingError> {
-        let body: RecordingQuota = request_get(&self.quota_path(), None, Some(Encoding::Json))
             .await
             .map_err(network)?
             .ok_or_else(|| RecordingError::Other("empty response".into()))?;
@@ -617,15 +579,15 @@ mod tests {
             source: RecordingSourceInput {
                 target_id: "default".to_string(),
                 virtual_id: "42".to_string(),
-                cluster: XtreamCluster::Live,
+                cluster: shared::model::XtreamCluster::Live,
                 input_name: "input-a".to_string(),
             },
             program_title: "News".to_string(),
-            program_start: 100,
-            program_end: 200,
-            pre_roll_secs: 0,
-            post_roll_secs: 0,
-            visibility: "private".to_string(),
+            program_start: Some(100),
+            program_end: Some(200),
+            pre_roll_secs: Some(0),
+            post_roll_secs: Some(0),
+            visibility: shared::model::recording::RecordingVisibility::Private,
             channel_id: None,
             channel_name: None,
             epg: None,
@@ -822,10 +784,10 @@ mod tests {
     #[test]
     fn paths_include_api_v1_recording_prefix() {
         let svc = RecordingService::with_base_path("/api/v1/recording".to_string());
-        assert_eq!(svc.tasks_path(), "/api/v1/recording/tasks");
-        assert_eq!(svc.task_path("rec-1"), "/api/v1/recording/tasks/rec-1");
+        assert_eq!(svc.requests_path(), "/api/v1/recording/requests");
+        assert_eq!(svc.request_path("rec-1"), "/api/v1/recording/requests/rec-1");
+        assert_eq!(svc.materialization_path("mat-1"), "/api/v1/recording/materializations/mat-1");
         assert_eq!(svc.conflicts_path(), "/api/v1/recording/conflicts/preview");
-        assert_eq!(svc.quota_path(), "/api/v1/recording/quota");
         assert_eq!(svc.rules_path(), "/api/v1/recording/rules");
         assert_eq!(svc.rule_path("rule-1"), "/api/v1/recording/rules/rule-1");
         assert_eq!(svc.availability_path(), "/api/v1/recording/availability");

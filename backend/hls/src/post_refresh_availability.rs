@@ -279,6 +279,7 @@ pub(super) async fn evaluate_owner_failure_fallback(
 pub(super) async fn wait_for_owner_resolution(
     ownership: &HlsAvailabilityReevaluationOwnership,
     resolution: HlsPostRefreshOwnerResolution,
+    now_ms: u64,
 ) -> HlsPostRefreshOwnerWaitOutcome {
     let wake_at_ms = match resolution {
         HlsPostRefreshOwnerResolution::RetryAt { at_ms } | HlsPostRefreshOwnerResolution::RetryAfter { at_ms, .. } => {
@@ -293,7 +294,7 @@ pub(super) async fn wait_for_owner_resolution(
                 () = ownership.cancelled() => HlsPostRefreshOwnerWaitOutcome::Cancelled,
                 () = ownership.wake_requested() => HlsPostRefreshOwnerWaitOutcome::Woken,
                 () = tokio::time::sleep(Duration::from_millis(
-                    wake_at_ms.saturating_sub(current_time_millis())
+                    wake_at_ms.saturating_sub(now_ms)
                 )) => HlsPostRefreshOwnerWaitOutcome::DeadlineReached,
             }
         }

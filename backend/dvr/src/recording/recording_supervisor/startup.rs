@@ -28,9 +28,10 @@ use super::{
     now_ts, recording_config, recording_enabled,
 };
 use crate::{
-    download::{mutate, FileDownload},
+    recording::recording_queue::{mutate, RecordingTask},
     recording_deletion::{apply_recovery_to_candidate, recovery_action_for, RecoveryAction},
     recording_reconciliation::ReconcileAction,
+    recording_service::recording_identity_key,
 };
 use log::{debug, error, info, warn};
 use shared::model::{
@@ -48,6 +49,7 @@ pub async fn run_startup_reconciliation<E: EventSink + Clone + 'static>(ctx: &Re
     }
     let stuck = recover_stuck_deletions(ctx).await;
     let drift = reconcile_rule_drift(ctx).await;
+    report_orphan_recordings(ctx).await;
     SupervisorHealth::stamp(&supervisor_health().reconciliation_last_run, now_ts());
     if stuck > 0 || drift > 0 {
         info!("DVR startup reconciliation: repaired {stuck} interrupted deletion(s), {drift} rule drift item(s)");
@@ -55,13 +57,58 @@ pub async fn run_startup_reconciliation<E: EventSink + Clone + 'static>(ctx: &Re
     }
 }
 
+/// Whether an entry other than `subject` still holds the same file.
+///
+/// Mirrors the rule the deletion path uses: entries already mid-deletion do not
+/// count, so a crash between two deletions cannot leave the file with nothing
+/// pointing at it.
+fn media_is_still_referenced(all_tasks: &[RecordingTask], subject: &RecordingTask) -> bool {
+    let key = |task: &RecordingTask| recording_identity_key(&task.recording, task.url.as_str());
+    let subject_key = key(subject);
+    all_tasks.iter().any(|other| {
+        other.uuid != subject.uuid && other.recording.deleting_previous_state.is_none() && key(other) == subject_key
+    })
+}
+
+/// Tell the operator about recordings on disk the repository does not know.
+///
+/// Reporting only. A sidecar describes a file; it is not evidence that anyone
+/// was ever entitled to play it, so rediscovering one must never put it back in
+/// somebody's library. Access comes from the repository or not at all.
+async fn report_orphan_recordings<E: EventSink + Clone + 'static>(ctx: &RecordingCtx<E>) {
+    let Some(root) = recording_config(&ctx.app_config)
+        .map(|cfg| PathBuf::from(cfg.directory))
+        .filter(|dir| !dir.as_os_str().is_empty())
+    else {
+        return;
+    };
+    let (_revision, tasks) = ctx.recordings.committed_snapshot().await;
+    let known: Vec<String> = tasks
+        .iter()
+        .map(|task| {
+            let persisted = crate::recording::recording_queue::RecordingQueue::to_persisted(task);
+            tuliprox_repository::recording_repository::materialization_id_for(&persisted)
+        })
+        .collect();
+    match crate::recording::recording_sidecar::scan_orphans(&root, &known).await {
+        Ok(orphans) if orphans.is_empty() => {}
+        Ok(orphans) => {
+            // Count only: the paths belong to whoever recorded them.
+            warn!(
+                target: "recording::audit",
+                "recording_orphan_files: {} recording(s) on disk are not in the library and are not playable through it",
+                orphans.len()
+            );
+        }
+        Err(error) => warn!("Could not scan the recording directory for orphans: {error}"),
+    }
+}
+
 /// Finish or undo every deletion the previous process left half-done.
 async fn recover_stuck_deletions<E: EventSink + Clone + 'static>(ctx: &RecordingCtx<E>) -> usize {
-    let (_revision, tasks) = ctx.downloads.committed_snapshot().await;
-    let pending: Vec<FileDownload> = tasks
-        .into_iter()
-        .filter(|task| task.recording.as_ref().is_some_and(|meta| meta.deleting_previous_state.is_some()))
-        .collect();
+    let (_revision, all_tasks) = ctx.recordings.committed_snapshot().await;
+    let pending: Vec<RecordingTask> =
+        all_tasks.iter().filter(|task| task.recording.deleting_previous_state.is_some()).cloned().collect();
     if pending.is_empty() {
         return 0;
     }
@@ -69,8 +116,9 @@ async fn recover_stuck_deletions<E: EventSink + Clone + 'static>(ctx: &Recording
         .map(|cfg| PathBuf::from(cfg.directory))
         .filter(|dir| !dir.as_os_str().is_empty());
     let mut repaired = 0;
-    for task in pending {
-        let action = recovery_action_for(&task, recording_root.as_deref()).await;
+    for task in &pending {
+        let still_referenced = media_is_still_referenced(&all_tasks, task);
+        let action = recovery_action_for(task, recording_root.as_deref(), still_referenced).await;
         match action {
             RecoveryAction::NotDeleting => continue,
             RecoveryAction::UnsafeRestore => {
@@ -87,7 +135,7 @@ async fn recover_stuck_deletions<E: EventSink + Clone + 'static>(ctx: &Recording
         }
         let uuid = task.uuid.clone();
         let finish = matches!(action, RecoveryAction::FinishDeletion);
-        let outcome = mutate(&ctx.downloads, move |candidate| {
+        let outcome = mutate(&ctx.recordings, move |candidate| {
             apply_recovery_to_candidate(candidate, &uuid, action);
             if finish {
                 // `apply_recovery_to_candidate` only clears the marker; the
@@ -133,7 +181,7 @@ async fn reconcile_rule_drift<E: EventSink + Clone + 'static>(ctx: &RecordingCtx
 
     // Queue-side actions first — the fixed cross-store order is
     // "queue mutation boundary -> rule repository mutation".
-    let mut applied = finalize_cancelled_occurrences_in_queue(&actions, &ctx.downloads).await;
+    let mut applied = finalize_cancelled_occurrences_in_queue(&actions, &ctx.recordings).await;
 
     // Rule-side actions: one save for the whole plan.
     let (more, changed) = apply_rule_actions_to_tombstones(&actions, &mut file, now);
@@ -153,7 +201,7 @@ async fn reconcile_rule_drift<E: EventSink + Clone + 'static>(ctx: &RecordingCtx
 /// `HashSet<&str>` rather than cloning uuids into a second owned set.
 async fn finalize_cancelled_occurrences_in_queue(
     actions: &[super::super::recording_reconciliation::ReconcileAction],
-    downloads: &crate::download::DownloadQueue,
+    recordings: &crate::recording::recording_queue::RecordingQueue,
 ) -> usize {
     let finalize: Vec<&str> = actions
         .iter()
@@ -167,7 +215,7 @@ async fn finalize_cancelled_occurrences_in_queue(
     }
     let count = finalize.len();
     let targets: HashSet<&str> = finalize.iter().copied().collect();
-    match mutate(downloads, |candidate| {
+    match mutate(recordings, |candidate| {
         candidate.queue.retain(|task| !targets.contains(task.uuid.as_str()));
         candidate.scheduled.retain(|task| !targets.contains(task.uuid.as_str()));
         candidate.finished.retain(|task| !targets.contains(task.uuid.as_str()));

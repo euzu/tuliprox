@@ -3,18 +3,96 @@
 //! This module is the source of truth for `RecordingMetadata`; persistence,
 //! runtime, and DTO layers all mirror it.
 
-use super::identity_registry::UserId;
+use super::{
+    identity_registry::UserId,
+    transfer::{TaskPriorityDto, TransferStatusDto},
+};
 use std::fmt;
 
-/// Public DTO for the recording half of a transfer task. Filters server-
-/// internal fields (source identifiers, internal partial paths, raw
-/// `target_id`/`virtual_id`/`input_name`, notification markers, transitional
-/// `Deleting` state) so the API never leaks another user's owner identity or
-/// the worker-internal relative paths.
+/// Media kind of a recording task. Determined by the server from the
+/// resolved catalog item; never accepted from a client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordingKind {
+    /// Scheduled live capture. Executed with ffmpeg, never resumable.
+    Live,
+    /// Video on demand. Executed over resumable HTTP.
+    Vod,
+    /// Series episode. Executed over resumable HTTP.
+    Series,
+}
+
+impl RecordingKind {
+    /// Live is captured within a programme window; VOD and Series run to EOF.
+    pub fn is_scheduled(self) -> bool { matches!(self, Self::Live) }
+
+    /// Only VOD and Series may be paused and resumed.
+    pub fn is_resumable(self) -> bool { matches!(self, Self::Vod | Self::Series) }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::Vod => "vod",
+            Self::Series => "series",
+        }
+    }
+}
+
+impl fmt::Display for RecordingKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(self.as_str()) }
+}
+
+/// Which controls a recording currently offers.
+///
+/// Computed server-side from the transition graph and carried on the DTO so a
+/// client renders buttons for exactly the commands the server would accept.
+// One flag per control is the point: the set maps 1:1 onto the buttons a
+// client renders, and collapsing it would hide which command was refused.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RecordingAllowedActions {
+    pub pause: bool,
+    pub resume: bool,
+    pub cancel: bool,
+    pub retry: bool,
+    pub edit: bool,
+    pub remove: bool,
+}
+
+/// The caller's own quota, as carried in the recording snapshot.
+///
+/// Only the caller's private pool and the shared pool: there is no
+/// per-user breakdown here, because one user's consumption is not another
+/// user's business.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RecordingQuotaSummaryDto {
+    pub private_used_bytes: u64,
+    pub private_limit_bytes: Option<u64>,
+    pub shared_used_bytes: u64,
+    pub shared_limit_bytes: Option<u64>,
+}
+
+/// Owner-safe public projection of a recording task. This is the only
+/// recording shape crossing the API or WebSocket boundary. It never carries
+/// the source URL, provider/source identifiers, configured headers,
+/// absolute/relative/partial paths, transfer validators, or another user's
+/// owner identifier.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RecordingTaskDto {
-    /// `Some(UserId)` for normal recordings; `None` for legacy admin records
-    /// (caller authorization decides whether the record is visible at all).
+    pub id: String,
+    pub title: String,
+    pub kind: RecordingKind,
+    pub priority: TaskPriorityDto,
+    pub status: TransferStatusDto,
+    pub retry_attempts: u8,
+    pub transferred_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_retry_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// `Some` only when the viewer owns the task; never another user's id.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner_id: Option<UserId>,
     pub visibility: RecordingVisibility,
@@ -36,8 +114,8 @@ pub struct RecordingTaskDto {
     pub post_roll_secs: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<i64>,
-    /// Filename component of the final relative path. Server does not
-    /// expose directory structure or the recording root.
+    /// Filename component of the final relative path. The server does not
+    /// expose the directory structure or the recording root.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filename: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -47,62 +125,42 @@ pub struct RecordingTaskDto {
     pub rule_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub occurrence_key: Option<String>,
+    /// What the server would accept for this recording right now, before the
+    /// viewer's permissions are applied.
+    #[serde(default)]
+    pub allowed_actions: RecordingAllowedActions,
 }
 
 impl RecordingTaskDto {
-    /// Project a `RecordingMetadata` into a public DTO. Filters server-only
-    /// fields and derives `filename` from the final relative path's last
-    /// component.
-    pub fn from_metadata(meta: &RecordingMetadata) -> Self {
-        let owner_id = match &meta.owner {
-            RecordingOwner::User(uid) => Some(uid.clone()),
-            RecordingOwner::LegacyAdmin => None,
-        };
-        let filename = meta.relative_path.as_deref().and_then(extract_filename_component);
-        Self {
-            owner_id,
-            visibility: meta.visibility,
-            channel_id: meta.channel_id.clone(),
-            channel_name: meta.channel_name.clone(),
-            program_title: meta.program_title.clone(),
-            program_start: meta.program_start,
-            program_end: meta.program_end,
-            scheduled_start: meta.scheduled_start,
-            scheduled_end: meta.scheduled_end,
-            pre_roll_secs: meta.pre_roll_secs,
-            post_roll_secs: meta.post_roll_secs,
-            completed_at: meta.completed_at,
-            filename: filename.map(str::to_string),
-            epg: meta.epg.clone(),
-            rule_id: meta.provenance.rule_id.clone(),
-            occurrence_key: meta.provenance.occurrence_key.clone(),
-        }
+    /// Lifecycle partition for the UI: non-terminal tasks are current,
+    /// terminal ones are completed.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self.status, TransferStatusDto::Completed | TransferStatusDto::Failed | TransferStatusDto::Cancelled)
+    }
+
+    /// Effective duration of a scheduled window, when both bounds are known.
+    pub fn scheduled_duration_secs(&self) -> Option<u64> {
+        let (start, end) = self.scheduled_start.zip(self.scheduled_end)?;
+        u64::try_from(end.saturating_sub(start)).ok()
     }
 }
 
-fn extract_filename_component(relative_path: &str) -> Option<&str> {
-    let trimmed = relative_path.trim_end_matches('/');
-    if trimmed.is_empty() {
-        return None;
-    }
-    std::path::Path::new(trimmed).file_name().and_then(|s| s.to_str())
-}
-
-/// Recording owner. `LegacyAdmin` is migration-only and only valid for
-/// records loaded from a pre-DVR persisted state.
+/// Recording owner. Every task is owned by exactly one user; there is no
+/// unowned or admin-legacy record.
 ///
-/// Adjacently tagged so the newtype `User(UserId)` can serialize: the
-/// content field name is `user`, matching what the queue pre-scan in
-/// `backend::download` looks for.
+/// Adjacently tagged so the newtype `User(UserId)` serializes with the
+/// content field name `user`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", content = "user", rename_all = "snake_case")]
 pub enum RecordingOwner {
     User(UserId),
-    LegacyAdmin,
 }
 
 impl RecordingOwner {
-    pub fn is_legacy_admin(&self) -> bool { matches!(self, Self::LegacyAdmin) }
+    pub fn user_id(&self) -> &UserId {
+        let Self::User(uid) = self;
+        uid
+    }
 }
 
 /// Recording visibility. Shared recordings are visible to every user with
@@ -140,6 +198,49 @@ impl RecordingSource {
         self.cluster = cluster;
         self
     }
+}
+
+/// Server-owned source identifiers as a client submits them.
+///
+/// This is the request half of [`RecordingSource`]: the client names the
+/// catalog item, and the server resolves the stream URL from it at execute
+/// time. A URL is never accepted from a client.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordingSourceRequest {
+    pub target_id: String,
+    pub virtual_id: String,
+    pub cluster: super::XtreamCluster,
+    pub input_name: String,
+}
+
+/// The one create-recording wire contract, shared by the REST handler and
+/// the frontend client so the two cannot drift.
+///
+/// Unknown fields are rejected: a client that sends a field this build does
+/// not understand has a different idea of what it is asking for, and
+/// silently ignoring it would record the wrong thing.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateRecordingRequest {
+    pub source: RecordingSourceRequest,
+    pub program_title: String,
+    /// Programme interval, Live only. Rejected for VOD and series.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program_start: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program_end: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_roll_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_roll_secs: Option<u64>,
+    pub visibility: RecordingVisibility,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epg: Option<EpgEpisodeMetadata>,
 }
 
 /// EPG episode metadata with tri-state airing provenance.
@@ -195,7 +296,7 @@ pub struct RecordingProvenance {
 
 /// Terminal state of a task before deletion began. Only `Completed`, `Failed`,
 /// and `Cancelled` are valid previous states; the worker rejects transitions
-/// from `Scheduled`/`Queued`/`Downloading`.
+/// from `Scheduled`/`Queued`/`Running`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DeletionPreviousState {
@@ -214,20 +315,20 @@ impl DeletionPreviousState {
     }
 }
 
-/// Recording metadata. Only present when `FileDownload.kind == Recording`.
-/// Invariant: `RecordingMetadata` is required iff the kind is Recording, and
-/// `recording == None` iff the kind is Download (after normalization).
+/// Recording metadata. Every recording task carries exactly one of these;
+/// the programme interval fields are populated for `RecordingKind::Live`
+/// only.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RecordingMetadata {
     pub owner: RecordingOwner,
     pub visibility: RecordingVisibility,
-    /// `None` for legacy records; required for new recordings.
-    pub source: Option<RecordingSource>,
-    /// Original EPG interval (Unix seconds).
+    /// Server-owned source identity. Never client supplied.
+    pub source: RecordingSource,
+    /// Original EPG interval (Unix seconds). Live only.
     pub program_start: Option<i64>,
     pub program_end: Option<i64>,
     /// Effective padded interval (Unix seconds). When the program is
-    /// currently airing, this is clamped to `now..scheduled_end`.
+    /// currently airing, this is clamped to `now..scheduled_end`. Live only.
     pub scheduled_start: Option<i64>,
     pub scheduled_end: Option<i64>,
     pub pre_roll_secs: u64,
@@ -243,12 +344,22 @@ pub struct RecordingMetadata {
     pub relative_path: Option<String>,
     /// Worker-owned partial path while a recording is in progress.
     pub partial_relative_path: Option<String>,
+    /// Strong `ETag` captured from the first response, so a resume can prove
+    /// the provider has not replaced the file underneath a partial download.
+    /// Weak validators are never stored: they only promise semantic
+    /// equivalence, so two matching weak tags can still be different bytes.
+    /// Internal; never projected into a DTO.
+    #[serde(default)]
+    pub resume_etag: Option<String>,
+    /// `Last-Modified` captured from the first response. Used only when no
+    /// strong `ETag` was offered.
+    #[serde(default)]
+    pub resume_last_modified: Option<String>,
     /// Conservative quota reservation. `0` once the task completes.
     pub reserved_bytes: u64,
     /// Measured partial/final size. Authoritative once the task completes.
     pub measured_bytes: u64,
-    /// Actual completion timestamp. For migrated records, derived from a
-    /// safe file mtime then the scheduled end.
+    /// Actual completion timestamp.
     pub completed_at: Option<i64>,
     /// Persisted at-most-once notification markers.
     #[serde(default)]
@@ -259,9 +370,8 @@ pub struct RecordingMetadata {
 }
 
 impl RecordingMetadata {
-    /// Build metadata for a freshly created recording. Requires a server-owned
-    /// source. Validates the kind-relative invariants.
-    pub fn new(
+    /// Build metadata for a scheduled live recording.
+    pub fn new_live(
         owner: RecordingOwner,
         visibility: RecordingVisibility,
         source: RecordingSource,
@@ -275,7 +385,7 @@ impl RecordingMetadata {
         Self {
             owner,
             visibility,
-            source: Some(source),
+            source,
             program_start: Some(program_start),
             program_end: Some(program_end),
             scheduled_start: Some(scheduled_start),
@@ -289,6 +399,8 @@ impl RecordingMetadata {
             provenance: RecordingProvenance::default(),
             relative_path: None,
             partial_relative_path: None,
+            resume_etag: None,
+            resume_last_modified: None,
             reserved_bytes: 0,
             measured_bytes: 0,
             completed_at: None,
@@ -297,41 +409,101 @@ impl RecordingMetadata {
         }
     }
 
-    /// Build metadata for a legacy admin record loaded from pre-DVR persisted
-    /// state. The source is `None` and the program/scheduled intervals are
-    /// derived from the legacy start/duration if provided.
-    pub fn for_legacy_admin(scheduled_start: i64, duration_secs: u64) -> Self {
-        let program_start = scheduled_start;
-        let program_end = scheduled_start.saturating_add(duration_secs as i64);
+    /// Build metadata for an immediate VOD or series-episode transfer. These
+    /// have no programme window and no padding.
+    pub fn new_media(
+        owner: RecordingOwner,
+        visibility: RecordingVisibility,
+        source: RecordingSource,
+        title: String,
+    ) -> Self {
         Self {
-            owner: RecordingOwner::LegacyAdmin,
-            visibility: RecordingVisibility::Private,
-            source: None,
-            program_start: Some(program_start),
-            program_end: Some(program_end),
-            scheduled_start: Some(program_start),
-            scheduled_end: Some(program_end),
-            pre_roll_secs: 0,
-            post_roll_secs: 0,
-            channel_id: None,
-            channel_name: None,
-            program_title: None,
-            epg: None,
-            provenance: RecordingProvenance::default(),
-            relative_path: None,
-            partial_relative_path: None,
-            reserved_bytes: 0,
-            measured_bytes: 0,
-            completed_at: None,
-            notification_markers: Vec::new(),
-            deleting_previous_state: None,
+            program_start: None,
+            program_end: None,
+            scheduled_start: None,
+            scheduled_end: None,
+            program_title: Some(title),
+            ..Self::new_live(owner, visibility, source, 0, 0, 0, 0)
         }
     }
 
     pub fn is_deleting(&self) -> bool { self.deleting_previous_state.is_some() }
+
+    pub fn owner_id(&self) -> &UserId { self.owner.user_id() }
+
+    /// Filename component of the final relative path, if one is reserved.
+    pub fn filename(&self) -> Option<&str> { self.relative_path.as_deref().and_then(extract_filename_component) }
 }
 
-/// Monotonic revision counter for the persisted download queue. Increments
+fn extract_filename_component(relative_path: &str) -> Option<&str> {
+    let trimmed = relative_path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    std::path::Path::new(trimmed).file_name().and_then(|s| s.to_str())
+}
+
+/// Execution state of a recording task as persisted.
+///
+/// Distinct from [`TransferStatusDto`](super::transfer::TransferStatusDto),
+/// which is the wire projection: this one is written to the recording
+/// repository, so renaming a variant is a storage-format change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum RecordingTaskState {
+    #[default]
+    Queued,
+    Scheduled,
+    WaitingForCapacity,
+    RetryWaiting,
+    Running,
+    Paused,
+    /// Cancellation was requested; the worker still owns the file and the
+    /// provider slot. Deliberately not terminal -- treating it as terminal
+    /// lets a deletion unlink the partial the worker is still writing.
+    Cancelling,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl RecordingTaskState {
+    pub fn is_terminal(self) -> bool { matches!(self, Self::Completed | Self::Failed | Self::Cancelled) }
+
+    /// Stable label used by the edit rules, logs and errors.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Queued => "Queued",
+            Self::Scheduled => "Scheduled",
+            Self::WaitingForCapacity => "WaitingForCapacity",
+            Self::RetryWaiting => "RetryWaiting",
+            Self::Running => "Running",
+            Self::Paused => "Paused",
+            Self::Cancelling => "Cancelling",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+            Self::Cancelled => "Cancelled",
+        }
+    }
+}
+
+impl From<RecordingTaskState> for super::transfer::TransferStatusDto {
+    fn from(value: RecordingTaskState) -> Self {
+        match value {
+            RecordingTaskState::Queued => Self::Queued,
+            RecordingTaskState::Scheduled => Self::Scheduled,
+            RecordingTaskState::WaitingForCapacity => Self::WaitingForCapacity,
+            RecordingTaskState::RetryWaiting => Self::RetryWaiting,
+            RecordingTaskState::Running => Self::Running,
+            RecordingTaskState::Paused => Self::Paused,
+            RecordingTaskState::Cancelling => Self::Cancelling,
+            RecordingTaskState::Completed => Self::Completed,
+            RecordingTaskState::Failed => Self::Failed,
+            RecordingTaskState::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+/// Monotonic revision counter for the persisted recording queue. Increments
 /// once per committed queue mutation. Stored alongside the queue snapshot.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
@@ -345,22 +517,81 @@ impl fmt::Display for QueueRevision {
 mod tests {
     use super::*;
 
+    fn test_source() -> RecordingSource { RecordingSource::new("target-1", "v-1", "input-a") }
+
+    fn test_owner() -> RecordingOwner { RecordingOwner::User(UserId::from("web:abc")) }
+
     #[test]
     fn legacy_recording_source_defaults_to_live_cluster() {
         let source: RecordingSource =
             serde_json::from_str(r#"{"target_id":"target","virtual_id":"42","input_name":"input-a"}"#)
-                .expect("deserialize legacy source");
+                .expect("deserialize source");
 
         assert_eq!(source.cluster, super::super::XtreamCluster::Live);
     }
 
     #[test]
-    fn new_metadata_carries_full_intervals_and_source() {
-        let source = RecordingSource::new("target-1", "v-1", "input-a");
-        let meta = RecordingMetadata::new(
-            RecordingOwner::User(UserId::from("web:abc")),
+    fn recording_kind_serializes_as_snake_case() {
+        assert_eq!(serde_json::to_string(&RecordingKind::Vod).expect("serialize"), "\"vod\"");
+        assert_eq!(serde_json::to_string(&RecordingKind::Series).expect("serialize"), "\"series\"");
+        assert_eq!(serde_json::to_string(&RecordingKind::Live).expect("serialize"), "\"live\"");
+    }
+
+    fn create_request_json() -> &'static str {
+        r#"{"source":{"target_id":"t","virtual_id":"42","cluster":"Video","input_name":"in"},"program_title":"Film","visibility":"private"}"#
+    }
+
+    #[test]
+    fn create_request_round_trips_its_minimal_form() {
+        let request: CreateRecordingRequest = serde_json::from_str(create_request_json()).expect("deserialize");
+        assert_eq!(request.visibility, RecordingVisibility::Private);
+        assert_eq!(request.program_start, None);
+        assert_eq!(serde_json::to_string(&request).expect("serialize"), create_request_json());
+    }
+
+    #[test]
+    fn create_request_rejects_an_unknown_field() {
+        // A client that sends a field this build does not understand has a
+        // different idea of what it is asking for; recording the wrong thing
+        // is worse than refusing.
+        let body = r#"{"source":{"target_id":"t","virtual_id":"42","cluster":"Video","input_name":"in"},
+            "program_title":"Film","visibility":"private","url":"http://evil/stream.ts"}"#;
+        let error = serde_json::from_str::<CreateRecordingRequest>(body).expect_err("unknown field must be rejected");
+        assert!(error.to_string().contains("url"), "{error}");
+    }
+
+    #[test]
+    fn create_request_rejects_an_unknown_visibility() {
+        // The visibility was previously a free-form string built by hand in
+        // the frontend, so a typo reached the server as a valid body.
+        let body = r#"{"source":{"target_id":"t","virtual_id":"42","cluster":"Video","input_name":"in"},
+            "program_title":"Film","visibility":"pubic"}"#;
+        assert!(serde_json::from_str::<CreateRecordingRequest>(body).is_err());
+    }
+
+    #[test]
+    fn create_request_rejects_an_unknown_source_field() {
+        let body = r#"{"source":{"target_id":"t","virtual_id":"42","cluster":"Video","input_name":"in",
+            "stream_url":"http://evil/"},"program_title":"Film","visibility":"private"}"#;
+        assert!(serde_json::from_str::<CreateRecordingRequest>(body).is_err());
+    }
+
+    #[test]
+    fn only_live_is_scheduled_and_only_media_is_resumable() {
+        assert!(RecordingKind::Live.is_scheduled());
+        assert!(!RecordingKind::Live.is_resumable());
+        for kind in [RecordingKind::Vod, RecordingKind::Series] {
+            assert!(!kind.is_scheduled(), "{kind} must not be scheduled");
+            assert!(kind.is_resumable(), "{kind} must be resumable");
+        }
+    }
+
+    #[test]
+    fn live_metadata_carries_padded_interval_and_source() {
+        let meta = RecordingMetadata::new_live(
+            test_owner(),
             RecordingVisibility::Private,
-            source,
+            test_source(),
             1_700_000_000,
             1_700_000_900,
             60,
@@ -370,48 +601,53 @@ mod tests {
         assert_eq!(meta.scheduled_end, Some(1_700_000_900 + 120));
         assert_eq!(meta.pre_roll_secs, 60);
         assert_eq!(meta.post_roll_secs, 120);
-        assert!(meta.source.is_some());
         assert!(!meta.is_deleting());
     }
 
     #[test]
-    fn legacy_admin_metadata_has_no_source_and_zero_padding() {
-        let meta = RecordingMetadata::for_legacy_admin(1_700_000_000, 3_600);
-        assert!(meta.source.is_none());
-        assert!(meta.owner.is_legacy_admin());
+    fn media_metadata_has_owner_and_source_without_live_interval() {
+        let source = test_source().with_cluster(super::super::XtreamCluster::Video);
+        let meta =
+            RecordingMetadata::new_media(test_owner(), RecordingVisibility::Private, source, "Movie".to_string());
+
+        assert_eq!(meta.program_title.as_deref(), Some("Movie"));
+        assert!(meta.program_start.is_none());
+        assert!(meta.program_end.is_none());
+        assert!(meta.scheduled_start.is_none());
+        assert!(meta.scheduled_end.is_none());
         assert_eq!(meta.pre_roll_secs, 0);
         assert_eq!(meta.post_roll_secs, 0);
-        assert_eq!(meta.scheduled_start, Some(1_700_000_000));
-        assert_eq!(meta.scheduled_end, Some(1_700_003_600));
     }
 
     #[test]
-    fn recording_owner_user_round_trips_as_adjacent_tag() {
+    fn recording_owner_round_trips_as_adjacent_tag() {
         let owner = RecordingOwner::User(UserId::from("web:alice"));
         let json = serde_json::to_string(&owner).expect("serialize");
         assert_eq!(json, r#"{"kind":"user","user":"web:alice"}"#);
         let restored: RecordingOwner = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(restored, owner);
-    }
-
-    #[test]
-    fn recording_owner_legacy_admin_round_trips() {
-        let owner = RecordingOwner::LegacyAdmin;
-        let json = serde_json::to_string(&owner).expect("serialize");
-        assert_eq!(json, r#"{"kind":"legacy_admin"}"#);
-        let restored: RecordingOwner = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(restored, owner);
+        assert_eq!(restored.user_id(), &UserId::from("web:alice"));
     }
 
     #[test]
     fn deleting_state_round_trip() {
-        let mut meta = RecordingMetadata::for_legacy_admin(1_700_000_000, 60);
+        let mut meta =
+            RecordingMetadata::new_media(test_owner(), RecordingVisibility::Private, test_source(), "M".to_string());
         assert!(!meta.is_deleting());
         meta.deleting_previous_state = Some(DeletionPreviousState::Completed);
         assert!(meta.is_deleting());
         let json = serde_json::to_string(&meta).expect("serialize");
         let restored: RecordingMetadata = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(restored.deleting_previous_state, Some(DeletionPreviousState::Completed));
+    }
+
+    #[test]
+    fn metadata_filename_is_the_last_relative_path_component() {
+        let mut meta =
+            RecordingMetadata::new_media(test_owner(), RecordingVisibility::Private, test_source(), "M".to_string());
+        assert_eq!(meta.filename(), None);
+        meta.relative_path = Some("users/web:abc/Pilot/pilot.ts".to_string());
+        assert_eq!(meta.filename(), Some("pilot.ts"));
     }
 
     #[test]
@@ -427,109 +663,90 @@ mod tests {
         assert_eq!(format!("{}", QueueRevision(42)), "42");
     }
 
-    // --- RecordingTaskDto tests ---
+    // --- RecordingTaskDto ---
 
-    use super::super::transfer::{TaskKindDto, TaskPriorityDto, TransferStatusDto, TransferTaskDto};
-
-    fn make_test_metadata() -> RecordingMetadata {
-        let mut meta = RecordingMetadata::for_legacy_admin(1_700_000_000, 3_600);
-        meta.owner = RecordingOwner::User(UserId::from("web:abc"));
-        meta.visibility = RecordingVisibility::Private;
-        meta.channel_id = Some("ch-1".to_string());
-        meta.channel_name = Some("Channel One".to_string());
-        meta.program_title = Some("Pilot".to_string());
-        meta.relative_path = Some("users/web:abc/pilot.ts".to_string());
-        meta.partial_relative_path = Some("users/web:abc/.pilot.ts.partial".to_string());
-        meta.completed_at = Some(1_700_000_000);
-        meta.provenance =
-            RecordingProvenance { rule_id: Some("rule-1".to_string()), occurrence_key: Some("occ-1".to_string()) };
-        meta.epg = Some(EpgEpisodeMetadata {
-            programme_id: Some("prog-1".to_string()),
-            series_id: Some("series-1".to_string()),
-            episode_id: Some("ep-1".to_string()),
-            season: Some(1),
-            episode: Some(2),
-            airing: AiringStatus::New,
-        });
-        meta
+    fn make_dto() -> RecordingTaskDto {
+        RecordingTaskDto {
+            id: "rec-1".to_string(),
+            title: "Pilot".to_string(),
+            kind: RecordingKind::Series,
+            priority: TaskPriorityDto::Normal,
+            status: TransferStatusDto::Running,
+            retry_attempts: 1,
+            transferred_bytes: 128,
+            total_bytes: Some(4096),
+            next_retry_at: None,
+            error: None,
+            owner_id: Some(UserId::from("web:abc")),
+            visibility: RecordingVisibility::Private,
+            channel_id: None,
+            channel_name: None,
+            program_title: Some("Pilot".to_string()),
+            program_start: None,
+            program_end: None,
+            scheduled_start: None,
+            scheduled_end: None,
+            pre_roll_secs: 0,
+            post_roll_secs: 0,
+            completed_at: None,
+            filename: Some("pilot.mkv".to_string()),
+            epg: Some(EpgEpisodeMetadata {
+                programme_id: None,
+                series_id: Some("series-1".to_string()),
+                episode_id: Some("ep-1".to_string()),
+                season: Some(1),
+                episode: Some(2),
+                airing: AiringStatus::New,
+            }),
+            rule_id: None,
+            occurrence_key: None,
+            allowed_actions: RecordingAllowedActions::default(),
+        }
     }
 
     #[test]
-    fn recording_task_dto_omits_internal_fields() {
-        let meta = make_test_metadata();
-        let dto = RecordingTaskDto::from_metadata(&meta);
-        // No source, no notification_markers, no deleting state, no
-        // measured/reserved bytes, no partial path.
-        let json = serde_json::to_value(&dto).expect("serialize");
-        assert!(json.get("owner_id").is_some());
-        assert!(json.get("source").is_none(), "source must not leak");
-        assert!(json.get("notification_markers").is_none(), "markers must not leak");
-        assert!(json.get("deleting_previous_state").is_none(), "deleting state must not leak");
-        assert!(json.get("reserved_bytes").is_none(), "reserved bytes must not leak");
-        assert!(json.get("measured_bytes").is_none(), "measured bytes must not leak");
-        assert!(json.get("partial_relative_path").is_none(), "partial path must not leak");
-    }
-
-    #[test]
-    fn recording_task_dto_extracts_filename_from_relative_path() {
-        let meta = make_test_metadata();
-        let dto = RecordingTaskDto::from_metadata(&meta);
-        assert_eq!(dto.filename.as_deref(), Some("pilot.ts"));
-    }
-
-    #[test]
-    fn recording_task_dto_legacy_admin_has_no_owner_id() {
-        let meta = RecordingMetadata::for_legacy_admin(1_700_000_000, 60);
-        let dto = RecordingTaskDto::from_metadata(&meta);
-        assert!(dto.owner_id.is_none());
-    }
-
-    #[test]
-    fn recording_task_dto_round_trips() {
-        let meta = make_test_metadata();
-        let dto = RecordingTaskDto::from_metadata(&meta);
+    fn recording_task_dto_round_trips_preserving_kind() {
+        let dto = make_dto();
         let json = serde_json::to_string(&dto).expect("serialize");
         let restored: RecordingTaskDto = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(restored, dto);
+        assert_eq!(restored.kind, RecordingKind::Series);
     }
 
     #[test]
-    fn transfer_task_dto_with_recording_round_trips() {
-        let task = TransferTaskDto {
-            id: "rec-1".to_string(),
-            title: "Pilot".to_string(),
-            kind: TaskKindDto::Recording,
-            priority: TaskPriorityDto::Normal,
-            status: TransferStatusDto::Scheduled,
-            retry_attempts: 0,
-            downloaded_bytes: 0,
-            total_bytes: None,
-            next_retry_at: None,
-            scheduled_start_at: Some(1_700_000_000),
-            duration_secs: Some(3_600),
-            error: None,
-            recording: Some(RecordingTaskDto::from_metadata(&make_test_metadata())),
+    fn recording_task_dto_has_no_nested_transfer_or_recording_wrapper() {
+        let json = serde_json::to_value(make_dto()).expect("serialize");
+        assert!(json.get("recording").is_none(), "no nested recording wrapper");
+        assert!(json.get("transfer").is_none(), "no nested transfer wrapper");
+        assert_eq!(json.get("kind").and_then(serde_json::Value::as_str), Some("series"));
+    }
+
+    #[test]
+    fn terminal_partition_matches_completed_failed_cancelled() {
+        for status in [TransferStatusDto::Completed, TransferStatusDto::Failed, TransferStatusDto::Cancelled] {
+            assert!(RecordingTaskDto { status, ..make_dto() }.is_terminal(), "{status:?} is terminal");
+        }
+        for status in [
+            TransferStatusDto::Scheduled,
+            TransferStatusDto::Queued,
+            TransferStatusDto::WaitingForCapacity,
+            TransferStatusDto::RetryWaiting,
+            TransferStatusDto::Running,
+            TransferStatusDto::Paused,
+        ] {
+            assert!(!RecordingTaskDto { status, ..make_dto() }.is_terminal(), "{status:?} is current");
+        }
+    }
+
+    #[test]
+    fn scheduled_duration_is_derived_from_the_padded_window() {
+        let dto = RecordingTaskDto {
+            kind: RecordingKind::Live,
+            scheduled_start: Some(1_700_000_000),
+            scheduled_end: Some(1_700_003_600),
+            ..make_dto()
         };
-        let json = serde_json::to_string(&task).expect("serialize");
-        let restored: TransferTaskDto = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(restored, task);
-    }
-
-    #[test]
-    fn transfer_task_dto_without_recording_field_loads_for_backward_compat() {
-        // Old serialized payloads must keep loading after adding the new
-        // `recording` field. The DTO uses `#[serde(default)]` on that field.
-        let legacy = r#"{
-            "id": "abc",
-            "title": "Example",
-            "kind": "download",
-            "priority": "background",
-            "status": "queued",
-            "retry_attempts": 0,
-            "downloaded_bytes": 123
-        }"#;
-        let restored: TransferTaskDto = serde_json::from_str(legacy).expect("legacy payload should load");
-        assert_eq!(restored.id, "abc");
-        assert!(restored.recording.is_none());
+        assert_eq!(dto.scheduled_duration_secs(), Some(3_600));
+        assert_eq!(make_dto().scheduled_duration_secs(), None);
     }
 }

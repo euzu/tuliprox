@@ -1,11 +1,10 @@
 use crate::{
     api::{
-        endpoints::download_api::{resume_download_worker_if_needed, spawn_download_services},
         model::{
             load_target_into_memory_cache, recording_rule_scheduler::spawn_recording_rule_scheduler,
-            ActiveProviderManager, ActiveUserManager, ConnectionManager, DownloadQueue, EventManager,
-            HlsProvisioningState, PlaylistStorage, PlaylistStorageState, SharedStreamManager,
-            StalkerResolveCoordinator, UpdateGuard,
+            ActiveProviderManager, ActiveUserManager, ConnectionManager, EventManager, HlsProvisioningState,
+            PlaylistStorage, PlaylistStorageState, RecordingQueue, SharedStreamManager, StalkerResolveCoordinator,
+            UpdateGuard,
         },
         tasks::{exec_config_watch, exec_scheduler},
     },
@@ -26,7 +25,7 @@ use reqwest::Client;
 use shared::{
     create_bitset,
     error::TuliproxError,
-    model::{PlaylistUpdateRunId, UserConnectionPermission, VideoDownloadConfigDto, WebAuthConfigDto},
+    model::{PlaylistUpdateRunId, RecordingConfigDto, UserConnectionPermission, WebAuthConfigDto},
     utils::small_vecs_equal_unordered,
 };
 use std::{
@@ -37,6 +36,7 @@ use std::{
 use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use tuliprox_core::model::{public_only_policy, PolicyDigest, ResourceClientKey, ResourcePolicy, ResourceRedirectMode};
+use tuliprox_dvr::recording::recording_transfer::{resume_recording_worker_if_needed, spawn_recording_services};
 use tuliprox_hls::api::HlsProxyManager;
 use tuliprox_metadata::manager::MetadataUpdateManager;
 use tuliprox_repository::{identity_registry::IdentityRegistry, token_revocations::TokenRevocations};
@@ -171,7 +171,7 @@ fn cancel_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
         return;
     }
     if changes.flags.contains(UpdateChangesFlags::Downloads) {
-        app_state.downloads.request_worker_restart();
+        app_state.recordings.request_worker_restart();
     }
     let cancel_tokens = app_state.cancel_tokens.load();
 
@@ -187,7 +187,7 @@ fn cancel_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
         cancel_tokens.metadata.clone()
     };
     let qos_aggregation = cancel_service!(qos_aggregation, UpdateChangesFlags::QosAggregation, changes, cancel_tokens);
-    let downloads = cancel_service!(downloads, UpdateChangesFlags::Downloads, changes, cancel_tokens);
+    let recordings = cancel_service!(recordings, UpdateChangesFlags::Downloads, changes, cancel_tokens);
 
     let tokens = CancelTokens {
         scheduler,
@@ -196,7 +196,7 @@ fn cancel_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
         provider_dns,
         metadata,
         qos_aggregation,
-        downloads,
+        recordings,
         hls_cache: cancel_tokens.hls_cache.clone(),
     };
 
@@ -242,20 +242,20 @@ fn start_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
         });
     }
     if changes.flags.contains(UpdateChangesFlags::Downloads) {
-        spawn_download_services(app_state, &app_state.cancel_tokens.load().downloads);
-        spawn_recording_rule_scheduler(&app_state.recording_ctx(), &app_state.cancel_tokens.load().downloads);
+        spawn_recording_services(&app_state.recording_ctx(), &app_state.cancel_tokens.load().recordings);
+        spawn_recording_rule_scheduler(&app_state.recording_ctx(), &app_state.cancel_tokens.load().recordings);
         let config = app_state.app_config.config.load();
-        if let Some(download_cfg) = config.video.as_ref().and_then(|video| video.download.as_ref()).cloned() {
+        if let Some(download_cfg) = config.recording().cloned() {
             let app_state = Arc::clone(app_state);
             tokio::spawn(async move {
                 for _ in 0..50 {
-                    if !*app_state.downloads.worker_running.read().await {
+                    if !*app_state.recordings.worker_running.read().await {
                         break;
                     }
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
-                if let Err(err) = resume_download_worker_if_needed(app_state.as_ref(), &download_cfg).await {
-                    error!("Failed to resume downloads after hot reload: {err}");
+                if let Err(err) = resume_recording_worker_if_needed(&app_state.recording_ctx(), &download_cfg).await {
+                    error!("Failed to resume recordings after hot reload: {err}");
                 }
             });
         }
@@ -450,7 +450,7 @@ pub struct CancelTokens {
     pub(crate) provider_dns: CancellationToken,
     pub(crate) metadata: CancellationToken,
     pub(crate) qos_aggregation: CancellationToken,
-    pub(crate) downloads: CancellationToken,
+    pub(crate) recordings: CancellationToken,
     pub(crate) hls_cache: CancellationToken,
 }
 impl Default for CancelTokens {
@@ -462,7 +462,7 @@ impl Default for CancelTokens {
             provider_dns: CancellationToken::new(),
             metadata: CancellationToken::new(),
             qos_aggregation: CancellationToken::new(),
-            downloads: CancellationToken::new(),
+            recordings: CancellationToken::new(),
             hls_cache: CancellationToken::new(),
         }
     }
@@ -478,8 +478,8 @@ macro_rules! change_detect {
     };
 }
 
-fn video_download_changed(a: &crate::model::VideoDownloadConfig, b: &crate::model::VideoDownloadConfig) -> bool {
-    VideoDownloadConfigDto::from(a) != VideoDownloadConfigDto::from(b)
+fn recording_changed(a: &crate::model::RecordingConfig, b: &crate::model::RecordingConfig) -> bool {
+    RecordingConfigDto::from(a) != RecordingConfigDto::from(b)
 }
 
 #[derive(Clone)]
@@ -498,7 +498,7 @@ pub struct AppState {
     pub public_http_client_no_redirect: Arc<ArcSwap<Client>>,
     /// Policy- and redirect-mode-keyed clients used by the resource proxy.
     pub resource_clients: Arc<ArcSwap<ResourceClientSet>>,
-    pub downloads: Arc<DownloadQueue>,
+    pub recordings: Arc<RecordingQueue>,
     pub cache: Arc<ArcSwapOption<RwLock<LRUResourceCache>>>,
     pub shared_stream_manager: Arc<SharedStreamManager>,
     pub hls_proxy: Arc<HlsProxyManager>,
@@ -507,6 +507,9 @@ pub struct AppState {
     pub active_users: Arc<ActiveUserManager>,
     pub active_provider: Arc<ActiveProviderManager>,
     pub connection_manager: Arc<ConnectionManager>,
+    /// Provider capacity as the DVR sees it; the adapter that keeps provider
+    /// details out of the recording engine.
+    pub recording_capacity: Arc<dyn tuliprox_dvr::recording::recording_capacity::RecordingCapacityPort>,
     pub event_manager: Arc<EventManager>,
     pub cancel_tokens: Arc<ArcSwap<CancelTokens>>,
     pub playlists: Arc<PlaylistStorageState>,
@@ -600,13 +603,17 @@ pub(crate) fn create_test_app_state(config: Config) -> Arc<AppState> {
         http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
         public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
         resource_clients: Arc::new(ArcSwap::from_pointee(ResourceClientSet::default())),
-        downloads: Arc::new(DownloadQueue::new()),
+        recordings: Arc::new(RecordingQueue::new()),
         cache: Arc::new(ArcSwapOption::default()),
         shared_stream_manager,
         hls_proxy: Arc::new(HlsProxyManager::new()),
         hls_provisioning: Arc::new(HlsProvisioningState::new()),
         stalker_resolve_coordinator: Arc::default(),
         active_users,
+        recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
+            Arc::clone(&active_provider),
+            Arc::clone(&connection_manager),
+        ),
         active_provider,
         connection_manager,
         event_manager,
@@ -756,10 +763,10 @@ impl AppState {
         let geoip_enabled_old = old_config.is_geoip_enabled();
         let changed_storage_dir = old_config.storage_dir != config.storage_dir;
         let changed_qos_aggregation = qos_aggregation_changed(&old_config, config);
-        let changed_video_download = change_detect!(
-            video_download_changed,
-            old_config.video.as_ref().and_then(|video| video.download.as_ref()),
-            config.video.as_ref().and_then(|video| video.download.as_ref())
+        let changed_recording = change_detect!(
+            recording_changed,
+            old_config.video.as_ref().and_then(|video| video.recording.as_ref()),
+            config.video.as_ref().and_then(|video| video.recording.as_ref())
         );
 
         let mut changes = UpdateChanges { flags: UpdateChangesFlagsSet::new(), targets: None };
@@ -772,7 +779,7 @@ impl AppState {
         changes.set_flag_if(geoip_enabled != geoip_enabled_old, UpdateChangesFlags::Geoip);
         changes.set_flag_if(changed_storage_dir, UpdateChangesFlags::Metadata);
         changes.set_flag_if(changed_qos_aggregation || changed_storage_dir, UpdateChangesFlags::QosAggregation);
-        changes.set_flag_if(changed_video_download, UpdateChangesFlags::Downloads);
+        changes.set_flag_if(changed_recording, UpdateChangesFlags::Downloads);
         changes
     }
 
@@ -941,16 +948,15 @@ pub struct HdHomerunAppState {
 
 #[cfg(test)]
 mod tests {
-    use super::{qos_aggregation_changed, schedules_changed, video_download_changed};
+    use super::{qos_aggregation_changed, recording_changed, schedules_changed};
     use crate::model::{
-        should_use_manual_redirect_for_proxy, should_use_manual_redirects_for_env_vars, Config, ScheduleConfig,
-        VideoDownloadConfig,
+        should_use_manual_redirect_for_proxy, should_use_manual_redirects_for_env_vars, Config, RecordingConfig,
+        ScheduleConfig,
     };
     use shared::model::{
         QosAggregationConfigDto, ReverseProxyConfigDto, ScheduleTaskType, StreamHistoryConfigDto, WebAuthConfigDto,
         WebUiConfigDto,
     };
-    use std::{collections::HashMap, sync::Arc};
 
     fn config_with_web_auth(secret: &str) -> Config {
         let web_ui = WebUiConfigDto {
@@ -1085,14 +1091,9 @@ mod tests {
     }
 
     #[test]
-    fn video_download_changed_detects_retry_policy_changes() {
-        let base = VideoDownloadConfig {
-            headers: HashMap::new(),
-            directory: "/tmp/downloads".to_string(),
-            organize_into_directories: false,
-            episode_pattern: None,
-            download_priority: 0,
-            recording_priority: 0,
+    fn recording_changed_detects_retry_policy_changes() {
+        let base = RecordingConfig::from(&shared::model::RecordingConfigDto {
+            directory: Some("/tmp/downloads".to_string()),
             reserve_slots_for_users: 1,
             max_background_per_provider: 2,
             retry_backoff_initial_secs: 3,
@@ -1100,22 +1101,21 @@ mod tests {
             retry_backoff_max_secs: 60,
             retry_backoff_jitter_percent: 5,
             retry_max_attempts: 5,
-            recording: None,
-        };
-        let changed = VideoDownloadConfig { retry_backoff_multiplier: 3.0, ..base.clone() };
+            ..Default::default()
+        });
+        let mut changed = base.clone();
+        changed.retry_backoff_multiplier = 3.0;
 
-        assert!(video_download_changed(&base, &changed));
+        assert!(recording_changed(&base, &changed));
     }
 
     #[test]
-    fn video_download_changed_treats_equivalent_configs_as_unchanged() {
-        let base = VideoDownloadConfig {
-            headers: HashMap::new(),
-            directory: "/tmp/downloads".to_string(),
+    fn recording_changed_treats_equivalent_configs_as_unchanged() {
+        let base = RecordingConfig::from(&shared::model::RecordingConfigDto {
+            directory: Some("/tmp/downloads".to_string()),
             organize_into_directories: true,
-            episode_pattern: Some(Arc::new(regex::Regex::new("S(?P<episode>\\d+)").unwrap())),
-            download_priority: -1,
-            recording_priority: 1,
+            episode_pattern: Some("S(?P<episode>\\d+)".to_string()),
+            priority: 1,
             reserve_slots_for_users: 2,
             max_background_per_provider: 3,
             retry_backoff_initial_secs: 3,
@@ -1123,10 +1123,10 @@ mod tests {
             retry_backoff_max_secs: 60,
             retry_backoff_jitter_percent: 5,
             retry_max_attempts: 5,
-            recording: None,
-        };
+            ..Default::default()
+        });
 
-        assert!(!video_download_changed(&base, &base.clone()));
+        assert!(!recording_changed(&base, &base.clone()));
     }
 
     #[test]

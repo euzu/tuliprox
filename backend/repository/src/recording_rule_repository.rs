@@ -109,6 +109,6 @@ mod tests {
         changed.enabled = false;
         assert!(!repo.update(changed).await.expect("update").expect("found").enabled);
         assert!(repo.delete("r1").await.expect("delete"));
-        assert!(repo.list().await.expect("list").is_empty());
+        assert_eq!(repo.list().await.expect("list"), [] as [shared::model::recording_rule::RecordingRule; 0]);
     }
 }

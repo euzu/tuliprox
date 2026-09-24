@@ -7,7 +7,7 @@
 
 use crate::{
     app::components::recording::recording_task_edit_form::TaskEditForm, hooks::use_service_context,
-    i18n::use_translation, model::EventMessage, services::RecordingTaskResponse,
+    i18n::use_translation, model::EventMessage,
 };
 use shared::model::web_socket::ProtocolMessage;
 use std::rc::Rc;
@@ -25,7 +25,7 @@ pub fn recording_edit_view() -> Html {
     let services = use_service_context();
     let translate = use_translation();
     let editing = use_context::<EditingTaskId>().unwrap_or_default();
-    let tasks = use_state(|| Rc::new(Vec::<RecordingTaskResponse>::new()));
+    let tasks = use_state(|| Rc::new(Vec::<shared::model::RecordingTaskDto>::new()));
 
     // Subscribe to the same WS stream the library view uses. The
     // backend broadcasts the same per-session filtered snapshot to
@@ -37,7 +37,7 @@ pub fn recording_edit_view() -> Html {
         use_effect_with((), move |()| {
             let sid = svc.event.subscribe(move |msg| {
                 if let EventMessage::RecordingSnapshot { tasks: incoming, .. } = msg {
-                    let mapped = incoming.iter().map(|t| RecordingTaskResponse::from(t.clone())).collect();
+                    let mapped = (*incoming).clone();
                     tasks.set(Rc::new(mapped));
                 }
             });
