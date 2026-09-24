@@ -186,3 +186,19 @@ async fn missing_credentials_mark_every_required_selector_with_its_assigned_key(
     );
     assert!(server.requests.lock().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn missing_tmdb_transport_marks_all_required_selectors_unavailable() {
+    let config = config(None);
+    let http = reqwest::Client::new();
+    let result = evaluate_with_tmdb(&http, &catalog(), "test", &config, None).await;
+    let expected = CurationRunOutcome::Failed(CurationFailure {
+        selector_outcomes: (0..2)
+            .map(|key| SelectorOutcome::Unavailable {
+                key: CurationSelectorKey(key),
+                reason: CurationUnavailableReason::Configuration,
+            })
+            .collect(),
+    });
+    assert_eq!(result, expected);
+}

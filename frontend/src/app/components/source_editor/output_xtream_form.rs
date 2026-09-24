@@ -222,16 +222,14 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
 
     let trakt_lists_state = use_state(Vec::<TraktListConfigDto>::new);
     let trakt_charts_state = use_state(Vec::<TraktChartConfigDto>::new);
-    let catalog_selection_options = use_memo(trakt_state.form.catalog_selection, {
-        let translate = translate.clone();
-        move |selection| {
+    let catalog_selection_options =
+        use_memo((trakt_state.form.catalog_selection, translate.clone()), |(selection, translate)| {
             build_options(
                 [TraktCatalogSelection::Full, TraktCatalogSelection::Curated],
                 selection,
                 |value| html! { translate.t(trakt_catalog_selection_label_key(*value)) },
             )
-        }
-    });
+        });
     let show_trakt_list_form_state = use_state(|| false);
     let show_trakt_chart_form_state = use_state(|| false);
     let editing_trakt_list_index_state = use_state(|| None::<usize>);

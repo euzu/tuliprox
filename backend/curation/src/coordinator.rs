@@ -62,7 +62,7 @@ async fn evaluate_with_tmdb(
     }
     if !tmdb_keys.is_empty() {
         if let Some(source) = &config.tmdb {
-            let client = tmdb_client.expect("active TMDB selectors have a client construction outcome");
+            let client = tmdb_client.unwrap_or(Err(TmdbFailure::Configuration));
             outcomes.extend(tmdb::evaluate_selectors(client, playlist, target, source, &tmdb_keys).await);
         }
     }

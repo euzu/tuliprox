@@ -142,7 +142,7 @@ impl TmdbClient {
         Ok(Self {
             http: http.clone(),
             authorization,
-            origin: Url::parse(TMDB_ORIGIN).expect("fixed TMDB origin"),
+            origin: Url::parse(TMDB_ORIGIN).map_err(|_| TmdbFailure::Configuration)?,
             limits: Limits::default(),
         })
     }
@@ -150,7 +150,7 @@ impl TmdbClient {
     #[cfg(test)]
     pub(crate) fn for_test(http: &Client, api: &TmdbCurationApiConfig, origin: &str) -> Result<Self, TmdbFailure> {
         let mut client = Self::new(http, api)?;
-        client.origin = Url::parse(origin).expect("local fixture origin");
+        client.origin = Url::parse(origin).map_err(|_| TmdbFailure::Configuration)?;
         Ok(client)
     }
 
@@ -189,7 +189,8 @@ impl TmdbClient {
             let deadline = (Instant::now() + self.limits.request_timeout).min(budget.deadline).min(batch.deadline);
             let max_bytes =
                 self.limits.request_bytes.min(budget.max_bytes - budget.bytes).min(batch.max_bytes - batch.bytes);
-            let mut url = self.origin.join(&format!("3/trending/{kind}/{window}")).expect("fixed trending path");
+            let mut url =
+                self.origin.join(&format!("3/trending/{kind}/{window}")).map_err(|_| TmdbFailure::Configuration)?;
             url.query_pairs_mut().append_pair("language", "en-US").append_pair("page", &page_number.to_string());
             // Debit before sending, including transport failures. The profile forbids redirects/replays.
             budget.requests += 1;
@@ -229,7 +230,8 @@ impl TmdbClient {
                 .ok_or(TmdbFailure::InvalidResponse)?;
             let before = references.len();
             for reference in page.rows {
-                if seen.insert(reference.tmdb_id.expect("validated positive ID")) {
+                let id = reference.tmdb_id.ok_or(TmdbFailure::InvalidResponse)?;
+                if seen.insert(id) {
                     references.push(reference);
                     if references.len() == selector.limit as usize {
                         break;

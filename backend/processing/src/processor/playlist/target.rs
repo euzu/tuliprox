@@ -470,7 +470,7 @@ pub(super) fn build_target_tmdb_client(
     configure: impl FnOnce() -> Result<reqwest::ClientBuilder, TuliproxError>,
     report: impl FnOnce(&'static str),
 ) -> Option<reqwest::Client> {
-    let needs_tmdb = target.effective_curation().is_some_and(|config| {
+    let needs_tmdb = target.curation.as_ref().is_some_and(|config| {
         config.enabled && config.tmdb.as_ref().is_some_and(|source| source.enabled && !source.trending.is_empty())
     });
     if !needs_tmdb {

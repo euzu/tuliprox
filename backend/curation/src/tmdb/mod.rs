@@ -37,7 +37,10 @@ pub(crate) async fn evaluate_selectors(
     let mut acquired = Vec::with_capacity(keys.len());
     for selector in &config.trending {
         acquired.push(match &client {
-            Ok(client) => client.trending(selector, batch.as_mut().expect("client has a batch budget")).await,
+            Ok(client) => match batch.as_mut() {
+                Some(batch) => client.trending(selector, batch).await,
+                None => Err(TmdbFailure::Configuration),
+            },
             Err(error) => Err(*error),
         });
     }
