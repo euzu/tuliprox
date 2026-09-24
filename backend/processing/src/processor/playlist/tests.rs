@@ -16,6 +16,8 @@ use tuliprox_curation::{
     CurationEvaluation, CurationMediaKind, CurationMembership, CurationSelectorKey, CurationSelectorSummary,
 };
 
+mod curation_publication;
+
 fn apply_staged_overlay_groups(
     provider: &ConfigInput,
     clusters: ClusterFlags,
@@ -2709,7 +2711,7 @@ fn persist_filter_can_select_a_base_group() {
 async fn trakt_target_curation_is_a_noop_without_xtream_configuration() {
     let target = ConfigTarget::from(&ConfigTargetDto::default());
 
-    let views = prepare_target_playlist_views(&reqwest::Client::new(), &target, Vec::new())
+    let views = prepare_target_playlist_views(&reqwest::Client::new(), None, &target, Vec::new())
         .await
         .expect("unconfigured curation should not fail");
 
@@ -2752,7 +2754,7 @@ async fn unavailable_required_selector_returns_target_failure_instead_of_base_fa
         xtream_cluster: XtreamCluster::Video,
     }];
 
-    let error = prepare_target_playlist_views(&reqwest::Client::new(), &target, base)
+    let error = prepare_target_playlist_views(&reqwest::Client::new(), None, &target, base)
         .await
         .expect_err("missing credentials must stop target publication");
 
@@ -2778,7 +2780,7 @@ mod curation_effect_gate {
         utils::FileLockManager,
     };
 
-    fn app_config(storage_dir: &Path) -> Arc<AppConfig> {
+    pub(super) fn app_config(storage_dir: &Path) -> Arc<AppConfig> {
         Arc::new(AppConfig {
             config: Arc::new(ArcSwap::from_pointee(Config {
                 storage_dir: storage_dir.to_string_lossy().into_owned(),
@@ -2808,7 +2810,7 @@ mod curation_effect_gate {
         })
     }
 
-    fn processing_context(
+    pub(super) fn processing_context(
         app_config: Arc<AppConfig>,
         playlist_state: Option<Arc<PlaylistStorageState>>,
     ) -> PlaylistProcessingContext<NoopSink> {
@@ -2844,7 +2846,7 @@ mod curation_effect_gate {
         TargetPlaylistPersistOptions { publication_plan, ..TargetPlaylistPersistOptions::default() }
     }
 
-    fn file_snapshot(root: &Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
+    pub(super) fn file_snapshot(root: &Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
         fn collect(root: &Path, path: &Path, snapshot: &mut BTreeMap<std::path::PathBuf, Vec<u8>>) {
             let Ok(entries) = std::fs::read_dir(path) else { return };
             for entry in entries.flatten() {
@@ -2892,10 +2894,35 @@ mod curation_effect_gate {
 
     #[tokio::test]
     async fn unavailable_curation_retains_seeded_artifacts_cache_and_watch_state() {
+        assert_curation_retains_seeded_state(None).await;
+    }
+
+    #[tokio::test]
+    async fn tmdb_and_mixed_failures_preserve_files_ids_cache_and_watches_under_full_and_curated() {
+        for policy in ["full", "curated"] {
+            for mixed in [false, true] {
+                let (url, server) = empty_trakt_server().await;
+                let mut value = serde_json::json!({"catalog_selection": policy, "tmdb": {"trending": [{"kind": "movie", "time_window": "week", "limit": 100, "category_name": "TMDB"}]}});
+                if mixed {
+                    value["trakt"] = serde_json::json!({"api": {"api_key": "test-client", "url": url}, "charts": [{"kind": "movies", "chart": "popular", "category_name": "Trakt"}]});
+                }
+                let mut dto: shared::model::CurationConfigDto = serde_json::from_value(value).unwrap();
+                dto.prepare(&[TargetOutputDto::Xtream(XtreamTargetOutputDto::default())]).unwrap();
+                assert_curation_retains_seeded_state(Some(dto)).await;
+                if mixed {
+                    server.await.unwrap();
+                } else {
+                    server.abort();
+                }
+            }
+        }
+    }
+
+    async fn assert_curation_retains_seeded_state(canonical: Option<shared::model::CurationConfigDto>) {
         let directory = tempdir().expect("tempdir");
         let app_config = app_config(directory.path());
         let playlist_state = Arc::new(PlaylistStorageState::new());
-        let target = ConfigTarget::from(&ConfigTargetDto {
+        let mut target = ConfigTarget::from(&ConfigTargetDto {
             name: "curation-effect-gate".to_string(),
             output: vec![
                 TargetOutputDto::Xtream(XtreamTargetOutputDto {
@@ -2922,6 +2949,12 @@ mod curation_effect_gate {
             use_memory_cache: true,
             ..ConfigTargetDto::default()
         });
+        if let Some(canonical) = canonical {
+            target.curation = Some(CurationConfig::from(&canonical));
+            if let tuliprox_core::model::TargetOutput::Xtream(output) = &mut target.output[0] {
+                output.trakt = None;
+            }
+        }
         let mut seeded = vec![PlaylistGroup {
             id: 1,
             title: "Movies".intern(),
@@ -3061,6 +3094,68 @@ mod curation_effect_gate {
             tuliprox_core::utils::binary_deserialize(&std::fs::read(watch_index).expect("empty watch index"))
                 .expect("decode empty watch index");
         assert!(after.is_empty());
+    }
+}
+
+#[test]
+fn tmdb_complete_target_selection_preserves_live_and_keeps_xtream_aliases_out_of_normal_outputs() {
+    for has_xtream in [false, true] {
+        let mut value = serde_json::json!({"name": "discovery", "output": [{"type": "m3u"}],
+            "curation": {"catalog_selection": "curated", "tmdb": {"trending": [{"kind": "movie", "time_window": "week", "limit": 100, "create_xtream_category": has_xtream, "category_name": "TMDB"}]}}});
+        if has_xtream {
+            value["output"].as_array_mut().unwrap().push(serde_json::json!({"type": "xtream"}));
+        }
+        let mut dto: ConfigTargetDto = serde_json::from_value(value).unwrap();
+        dto.prepare(1, None, None).unwrap();
+        let target = ConfigTarget::from(&dto);
+        let id = shared::utils::hash_string("selected");
+        let live_id = shared::utils::hash_string("live");
+        let playlist = vec![
+            PlaylistGroup {
+                id: 1,
+                title: "Live".intern(),
+                xtream_cluster: XtreamCluster::Live,
+                channels: vec![catalog_test_item("Live", live_id, PlaylistItemType::Live, XtreamCluster::Live, None)],
+            },
+            PlaylistGroup {
+                id: 2,
+                title: "Movies".intern(),
+                xtream_cluster: XtreamCluster::Video,
+                channels: vec![
+                    catalog_test_item("Selected", id, PlaylistItemType::Video, XtreamCluster::Video, None),
+                    catalog_test_item(
+                        "Other",
+                        shared::utils::hash_string("other"),
+                        PlaylistItemType::Video,
+                        XtreamCluster::Video,
+                        None,
+                    ),
+                ],
+            },
+        ];
+        let config = target.effective_curation().unwrap();
+        let outcome = CurationRunOutcome::Complete(complete_catalog_evaluation(vec![catalog_membership(
+            id,
+            CurationMediaKind::Movie,
+            0,
+        )]));
+        let views = target::curation_playlist_views(&target, playlist.clone(), &config, outcome).unwrap();
+        assert_eq!(
+            views.base.iter().flat_map(|g| &g.channels).map(|i| i.header.uuid).collect::<Vec<_>>(),
+            [live_id, id]
+        );
+        if has_xtream {
+            let groups = views.xtream.unwrap();
+            let projected = groups.iter().find(|g| g.title.as_ref() == "TMDB").unwrap();
+            assert_ne!(projected.channels[0].header.uuid, id);
+        } else {
+            assert!(views.xtream.is_none());
+        }
+        let empty = CurationRunOutcome::Complete(complete_catalog_evaluation(Vec::new()));
+        let empty_views = target::curation_playlist_views(&target, playlist, &config, empty).unwrap();
+        assert_eq!(empty_views.base.len(), 1);
+        assert_eq!(empty_views.base[0].xtream_cluster, XtreamCluster::Live);
+        assert_ne!(empty_views.publication_plan, PlaylistPublicationPlan::Ordinary);
     }
 }
 
@@ -3245,7 +3340,8 @@ fn xtream_base_and_selector_category_projection_are_independent() {
     };
     let config = TraktConfig::from(&dto);
 
-    let views = build_curated_playlist_views(playlist.clone(), &evaluation, &config, false);
+    let views =
+        build_curated_playlist_views(playlist.clone(), &evaluation, &CurationConfig::from(&config), false, true);
 
     assert_eq!(views.base.len(), 1);
     assert_eq!(views.base[0].channels.len(), 1);
@@ -3264,7 +3360,13 @@ fn xtream_base_and_selector_category_projection_are_independent() {
     compatible_dto.include_xtream_base_categories = true;
     compatible_dto.lists[0].create_xtream_category = false;
     compatible_dto.lists[0].category_name = None;
-    let compatible = build_curated_playlist_views(playlist, &evaluation, &TraktConfig::from(&compatible_dto), false);
+    let compatible = build_curated_playlist_views(
+        playlist,
+        &evaluation,
+        &CurationConfig::from(&TraktConfig::from(&compatible_dto)),
+        false,
+        true,
+    );
     assert_eq!(compatible.base[0].channels.len(), 2);
     assert_eq!(compatible.xtream.expect("Xtream view").len(), 1, "selection-only selector creates no category");
 }
@@ -3313,7 +3415,8 @@ fn curation_policy_truth_table_covers_a_through_h() {
             charts: Vec::new(),
         });
 
-        let views = build_curated_playlist_views(playlist.clone(), &evaluation, &config, false);
+        let views =
+            build_curated_playlist_views(playlist.clone(), &evaluation, &CurationConfig::from(&config), false, true);
         let base_items = views.base.iter().flat_map(|group| &group.channels).collect::<Vec<_>>();
         let expected_base_count = if catalog_selection == TraktCatalogSelection::Full { 2 } else { 1 };
         assert_eq!(base_items.len(), expected_base_count, "case {case} selected catalog");
@@ -3402,7 +3505,7 @@ fn large_catalog_projection_smoke_keeps_two_explicit_views_bounded() {
         ..TraktConfigDto::default()
     });
 
-    let views = build_curated_playlist_views(playlist, &evaluation, &config, false);
+    let views = build_curated_playlist_views(playlist, &evaluation, &CurationConfig::from(&config), false, true);
 
     assert_eq!(views.base[0].channels.len(), CATALOG_SIZE);
     let xtream = views.xtream.expect("Xtream view");
@@ -3881,6 +3984,7 @@ mod quality_rejection_fallback {
 
     fn xtream_target(use_memory_cache: bool) -> Arc<ConfigTarget> {
         Arc::new(ConfigTarget {
+            curation: None,
             id: 1,
             enabled: true,
             name: "quality-target".to_string(),

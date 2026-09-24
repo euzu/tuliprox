@@ -2,7 +2,7 @@ use crate::model::{
     config::{favourites::ConfigFavourites, trakt::TraktConfig},
     macros,
     mapping::CompiledMapping,
-    ConfigRename, ConfigSort,
+    ConfigRename, ConfigSort, CurationConfig,
 };
 use arc_swap::ArcSwapOption;
 use shared::{
@@ -14,7 +14,7 @@ use shared::{
         TargetType, TraktConfigDto, XtreamTargetOutputDto,
     },
 };
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 
 create_bitset!(u8, XtreamTargetFlags, SkipLiveDirectSource, SkipVideoDirectSource, SkipSeriesDirectSource);
 create_bitset!(u8, StrmTargetFlags, Flat, UnderscoreWhitespace, Cleanup, AddQualityToFilename, UseMetadata);
@@ -328,6 +328,7 @@ pub struct ConfigTarget {
     pub sort: Option<ConfigSort>,
     pub filter: StagedFilter,
     pub output: Vec<TargetOutput>,
+    pub curation: Option<CurationConfig>,
     pub rename: Option<Vec<ConfigRename>>,
     pub mapping_ids: Option<Vec<String>>,
     pub mapping: Arc<ArcSwapOption<CompiledTargetMappings>>,
@@ -339,6 +340,15 @@ pub struct ConfigTarget {
 }
 
 impl ConfigTarget {
+    /// Normalize only for execution; the original config declaration remains untouched.
+    pub fn effective_curation(&self) -> Option<Cow<'_, CurationConfig>> {
+        self.curation.as_ref().map(Cow::Borrowed).or_else(|| {
+            self.get_xtream_output()
+                .and_then(|output| output.trakt.as_ref())
+                .map(|legacy| Cow::Owned(CurationConfig::from(legacy)))
+        })
+    }
+
     pub fn filter(&self, provider: &ValueProvider) -> bool {
         self.filter.processing.as_ref().is_none_or(|filter| filter.filter(provider))
     }
@@ -388,6 +398,7 @@ impl From<&ConfigTargetDto> for ConfigTarget {
             sort: dto.sort.as_ref().map(Into::into),
             filter: StagedFilter { processing: dto.filter.t_processing.clone(), persist: dto.filter.t_persist.clone() },
             output: dto.output.iter().map(Into::into).collect(),
+            curation: dto.curation.as_ref().map(Into::into),
             rename: dto.rename.as_ref().map(|l| l.iter().map(Into::into).collect()),
             mapping_ids: dto.mapping.clone(),
             mapping: Arc::new(ArcSwapOption::new(None)),
@@ -420,6 +431,30 @@ impl From<&ConfigTargetDto> for ConfigTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effective_curation_retains_canonical_owner_and_credentials_without_legacy_output() {
+        let mut dto: ConfigTargetDto = serde_json::from_value(serde_json::json!({"name": "discovery", "output": [{"type": "m3u"}],
+            "curation": {"catalog_selection": "curated", "tmdb": {"api": {"access_token": "test-token"}, "trending": [{"kind": "tv", "time_window": "day", "limit": 37, "create_xtream_category": false}]}}})).unwrap();
+        dto.prepare(1, None, None).unwrap();
+        let target = ConfigTarget::from(&dto);
+        assert!(matches!(target.effective_curation(), Some(Cow::Borrowed(_))));
+        assert_eq!(shared::model::CurationConfigDto::from(target.curation.as_ref().unwrap()), dto.curation.unwrap());
+        assert!(target.get_xtream_output().is_none());
+        assert!(!format!("{target:?}").contains("test-token"));
+    }
+
+    #[test]
+    fn effective_curation_normalizes_legacy_only_for_execution() {
+        let mut dto: ConfigTargetDto = serde_json::from_value(serde_json::json!({"name": "legacy", "output": [{"type": "xtream", "trakt": {"enabled": false, "catalog_selection": "curated"}}]})).unwrap();
+        dto.prepare(1, None, None).unwrap();
+        let target = ConfigTarget::from(&dto);
+        assert!(matches!(target.effective_curation(), Some(Cow::Owned(_))));
+        assert!(target.curation.is_none());
+        assert!(!target.effective_curation().unwrap().enabled);
+        assert!(target.effective_curation().unwrap().catalog_selection.is_curated());
+        assert_eq!(TargetOutputDto::from(&target.output[0]), dto.output[0]);
+    }
 
     #[test]
     fn execution_plan_compiles_processing_order() {

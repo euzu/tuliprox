@@ -3448,6 +3448,7 @@ async fn dash_stream_request_remains_redirect_and_preserves_provider_affinity() 
         ..ConfigInput::default()
     });
     let target = Arc::new(ConfigTarget {
+        curation: None,
         id: 1,
         name: "target_dash".to_string(),
         enabled: true,
@@ -5859,6 +5860,7 @@ async fn activate_session_before_stream_open_does_not_commit_user_lease_before_p
 
 fn create_test_shared_target() -> ConfigTarget {
     ConfigTarget {
+        curation: None,
         id: 1,
         enabled: true,
         name: "shared".to_string(),
@@ -7464,6 +7466,7 @@ async fn local_stream_response_registers_active_local_stream() {
     let input = ConfigInput { input_type: InputType::Library, ..ConfigInput::default() };
     let user = ProxyUserCredentials::default();
     let target = ConfigTarget {
+        curation: None,
         id: 1,
         enabled: true,
         name: "test".to_string(),
@@ -7523,6 +7526,7 @@ async fn local_stream_response_rechecks_limits_before_registering_socket_bound_s
     user.username = "local-limit-user".to_string();
     user.max_connections = 1;
     let target = ConfigTarget {
+        curation: None,
         id: 1,
         enabled: true,
         name: "test".to_string(),
@@ -7848,6 +7852,7 @@ async fn stream_response_rolls_back_provisional_user_activation_when_provider_op
     let input_name = "provider_1".intern();
     let input = app_state.app_config.get_input_by_name(&input_name).expect("provider input should exist");
     let target = Arc::new(ConfigTarget {
+        curation: None,
         id: 1,
         enabled: true,
         name: "test".to_string(),
@@ -8008,6 +8013,7 @@ async fn local_stream_response_disables_response_compression() {
     let input = ConfigInput { input_type: InputType::Library, ..ConfigInput::default() };
     let user = ProxyUserCredentials::default();
     let target = ConfigTarget {
+        curation: None,
         id: 1,
         enabled: true,
         name: "test".to_string(),
@@ -8056,6 +8062,7 @@ async fn local_stream_response_reuses_stable_playback_session_token_across_reope
     let input = ConfigInput { input_type: InputType::Library, ..ConfigInput::default() };
     let user = ProxyUserCredentials::default();
     let target = ConfigTarget {
+        curation: None,
         id: 1,
         enabled: true,
         name: "test".to_string(),
@@ -8130,6 +8137,7 @@ async fn local_stream_response_allows_exhausted_reopen_for_same_playback_session
     user.username = "user1".to_string();
     user.max_connections = 1;
     let target = ConfigTarget {
+        curation: None,
         id: 1,
         enabled: true,
         name: "test".to_string(),
@@ -8207,6 +8215,7 @@ async fn local_stream_response_preserves_soft_kind_across_reopens() {
     user.max_connections = 1;
     user.soft_connections = 1;
     let target = ConfigTarget {
+        curation: None,
         id: 1,
         enabled: true,
         name: "test".to_string(),

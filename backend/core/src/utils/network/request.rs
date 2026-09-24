@@ -3007,8 +3007,11 @@ pub async fn get_input_json_content_as_stream(
 }
 
 pub fn create_client_with_redirect(cfg: &AppConfig, redirect_policy: Policy) -> reqwest::ClientBuilder {
-    let config = cfg.config.load();
-    log_proxy_diagnostics(&config);
+    configured_client(&cfg.config.load(), redirect_policy)
+}
+
+fn configured_client(config: &Config, redirect_policy: Policy) -> reqwest::ClientBuilder {
+    log_proxy_diagnostics(config);
     let mut client = reqwest::Client::builder()
         .redirect(redirect_policy)
         .pool_idle_timeout(Duration::from_secs(30))
@@ -3067,6 +3070,41 @@ pub fn create_client_with_redirect(cfg: &AppConfig, redirect_policy: Policy) -> 
 
 pub fn create_client(cfg: &AppConfig) -> reqwest::ClientBuilder {
     create_client_with_redirect(cfg, Policy::limited(10))
+}
+
+/// Dedicated discovery profile. Callers must propagate construction failure, never
+/// fall back to an unconfigured client. Builder access permits local CA/DNS fixtures.
+pub fn create_tmdb_client(cfg: &AppConfig) -> Result<reqwest::ClientBuilder, TuliproxError> {
+    let config = cfg.config.load();
+    let invalid_proxy = || TuliproxError::Config("TMDB HTTP profile has invalid proxy configuration".to_string());
+    // The general factory historically logs malformed proxies and continues. TMDB
+    // must fail closed, using the same snapshot and proxy transformations instead.
+    if let Some(proxy) = &config.proxy {
+        let mut url = Url::parse(&proxy.url).map_err(|_| invalid_proxy())?;
+        match url.scheme() {
+            "socks5" | "socks5h" => {
+                if let Some(user) = &proxy.username {
+                    url.set_username(user).map_err(|()| invalid_proxy())?;
+                }
+                if let Some(pass) = &proxy.password {
+                    url.set_password(Some(pass)).map_err(|()| invalid_proxy())?;
+                }
+            }
+            "http" | "https" => {}
+            _ => return Err(invalid_proxy()),
+        }
+        reqwest::Proxy::all(url.as_str()).map_err(|_| invalid_proxy())?;
+    }
+    // Discovery carries its own Bearer credential: never inherit the generic TLS bypass.
+    // Keep configured proxy/auth and trusted roots, including hostname verification.
+    let mut builder = configured_client(&config, Policy::none())
+        .danger_accept_invalid_certs(false)
+        .retry(reqwest::retry::never())
+        .http1_only();
+    if config.connect_timeout_secs > 0 {
+        builder = builder.connect_timeout(Duration::from_secs(u64::from(config.connect_timeout_secs)));
+    }
+    Ok(builder)
 }
 
 /// Redirect hops allowed for a resource fetch. The same bound the general client uses.
@@ -3204,6 +3242,8 @@ pub fn should_trigger_failover(status: StatusCode) -> bool {
 
 #[cfg(test)]
 mod tests {
+    mod tmdb_profile;
+
     use super::{
         classify_ip, download_text_content, download_text_content_with_headers_and_options,
         get_input_epg_content_as_file, get_remote_content_as_stream, is_safe_cross_origin_redirect_header,

@@ -1369,6 +1369,7 @@ sources:
 | `sort`             | Object        |    No    |           | Defines ordering for groups and channels after transformations. This affects the final playlist structure seen by clients and can significantly improve navigation quality in IPTV players.                                  |
 | `options`          | Object        |    No    |           | Target-level behavior switches such as logo suppression, duplicate removal, and shared live-stream handling. These options influence memory usage, playlist cleanliness, and reverse-proxy behavior.                         |
 | `output`           | List          |   Yes    |           | Mandatory list of output formats. A single target can generate multiple output representations (e.g., `xtream`, `m3u`, `strm`, `hdhomerun`) from the same transformed result set.                                            |
+| `curation`         | Object        |    No    |           | Optional target-wide catalog policy with Trakt and/or TMDB Trending sources. Mutually exclusive with legacy `output[].trakt`; see [target-wide curation](#target-wide-curation-curation).                                    |
 | `favourites`       | List          |    No    |           | Duplicates final transformed channels into dedicated favorite groups after processing is complete. This adds curated views without changing the original group structure.                                                    |
 | `watch`            | List          |    No    |           | Defines watched group patterns. If matching groups change during updates, Tuliprox emits Messaging events so operational changes become observable automatically.                                                            |
 | `use_memory_cache` | Bool          |    No    | `false`   | If enabled, the final compiled playlist is cached in RAM. This reduces disk access and improves delivery speed, especially for M3U downloads, but increases memory consumption.                                              |
@@ -1419,7 +1420,7 @@ filter:
 ```
 
 `processing` runs at the normal `F` position. The target then applies favourites, merges groups, performs post-merge
-content deduplication, evaluates any configured Trakt selectors, and derives the base and Xtream appearance views.
+content deduplication, evaluates any configured curation selectors (Trakt and/or TMDB), and derives the base and Xtream appearance views.
 `persist` runs after each view is sorted, numbered, and counted, immediately before output filters, watch evaluation, and
 persistence. Output-level filters remain plain strings and have no configurable stage.
 
@@ -1794,6 +1795,205 @@ visible IDs change.
 
 ---
 
+### Target-wide curation (`curation`)
+
+Curation is operator-configured discovery over content already available in this target. It neither imports new playback
+sources nor uses personal watch history, progress, OAuth or recommendations. TMDB Trending works without a Trakt Client ID.
+Legacy [`output[].trakt`](#trakt-object-in-xtream-output) remains supported; existing configurations need no migration.
+
+Start with `catalog_selection: full` to retain the ordinary catalog and add Xtream categories for locally available matches:
+
+```yaml
+# A target under sources[].targets, linked to your authorized movie/TV inputs.
+name: discovery
+curation:
+  catalog_selection: full
+  include_xtream_base_categories: true
+  tmdb:
+    api:
+      access_token: "${env:TMDB_READ_ACCESS_TOKEN}"
+    trending:
+      - kind: movie
+        time_window: week
+        limit: 100
+        category_name: TMDB Weekly Movies
+      - kind: tv
+        time_window: day
+        limit: 100
+        category_name: TMDB Daily TV
+output:
+  - type: xtream
+  - type: m3u
+    filename: discovery.m3u
+```
+
+Obtain your application's **API Read Access Token** from [TMDB API settings](https://www.themoviedb.org/settings/api).
+Configure the raw token without a `Bearer` prefix, preferably through an environment variable. It is sent as a sensitive
+Authorization header, never as a query parameter. There is no bundled discovery token, `api_key` alias, configurable TMDB
+origin, or fallback to `metadata_update.tmdb`. Discovery credentials and enablement are independent of metadata enrichment.
+Missing/blank credentials or values that cannot form an HTTP header leave configuration readable but make an enabled
+selector unavailable without a request. Rejected/expired credentials also fail the refresh, rather than yielding an empty feed.
+
+#### Curation policy and source parameters
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `true` | Enables the whole curation block. |
+| `catalog_selection` | `full` | `full` retains the eligible catalog; `curated` keeps the union of selected VOD/series subjects and series children, plus Live. |
+| `include_xtream_base_categories` | `true` | Includes ordinary VOD/Series groups in Xtream alongside projections. Does not affect Live or M3U/STRM grouping. |
+| `trakt` | absent | Optional source with `enabled`, `api`, `lists`, `charts`; reuses the [Trakt selector parameters](#trakt-parameters). |
+| `tmdb` | absent | Optional TMDB Trending source. |
+| `trakt.enabled`, `tmdb.enabled` | `true` | Disabled sources make no requests and contribute no required selectors. |
+| `tmdb.api.access_token` | empty | Explicit TMDB application Read Access Token, required for an active fetch. |
+| `tmdb.trending` | `[]` | Configured Trending selectors. Each active entry is required. |
+| `tmdb.trending[].kind` | required | `movie` or `tv`; no mixed/person endpoint. |
+| `tmdb.trending[].time_window` | required | `day` or `week`. |
+| `tmdb.trending[].limit` | `100` | Integer **1..=500**: up to this many unique remote references, before local matching. |
+| `tmdb.trending[].create_xtream_category` | `true` | Projects a category in Xtream; false makes the selector selection-only. |
+| `tmdb.trending[].category_name` | absent | Nonblank name required for an active projection; retained but unused for selection-only entries. |
+
+There is one catalog policy per target, not one per provider or output. `curation.trakt` does not accept its own
+`catalog_selection` or `include_xtream_base_categories`. An active projection, or suppression of Xtream base categories,
+requires an Xtream output. Projection names involving TMDB must be unique within each media cluster after trimming,
+lowercasing and accent removal, including overlaps with Trakt selectors. A Trakt `both` list reserves both clusters;
+selection-only and disabled sources reserve neither. Existing Trakt-only and ordinary base-group merging is unchanged.
+Category names still participate in alias identity: renaming them does not promise stable virtual IDs.
+
+An enabled non-default policy without active selectors is rejected. An all-default source-less block is a no-op.
+Disabling the whole block preserves incomplete category/credential edits without executing them. Required enum fields
+(`kind`, `time_window`), unknown-field checks and declaration ownership checks still apply to disabled drafts. `limit` must
+remain an integer in range even when the target, block or source is disabled: null, zero, negatives, fractions, quoted
+numbers and overflow are errors, not defaults or clamped values. Saving omits the default 100 and retains non-default limits.
+
+#### Bounded discovery, matching and failure behavior
+
+TMDB requests `/3/trending/movie/{day|week}` or `/3/trending/tv/{day|week}`, with `language=en-US&page=p`, sequentially
+from page 1. Pagination is internal transport, not operator configuration. There is no remote `limit` parameter, Discover
+filtering or details lookup. N counts unique **(movie/TV kind, positive TMDB ID)** references, not local titles, versions,
+aliases or episodes. An unavailable local title still consumes a reference; Tuliprox does not keep searching for N matches.
+
+Selection stops at the Nth unique reference, but the entire last response is read and validated, including duplicates and
+the suffix beyond N. An invalid record anywhere fails the selector. Duplicates keep the first text and rank. Rank is the
+observed row ordinal across actual page lengths, including duplicates, not an ordinal among unique IDs or a fixed page-size
+calculation. No extra page is requested after N or a valid end. A valid end before N is also complete.
+
+Each response must echo the requested page and have coherent totals. A short page alone is not an end. Totals may change;
+the current page's last-page indication is used without assuming a remote snapshot. An empty response is valid only on
+page 1 with zero results and total pages 0 or 1. A later empty page, or a later page with no new IDs (even the last page),
+fails rather than publishing a partial prefix. This deliberately conservative rule can reject a legitimately overlapping
+page. Trending pagination has empirical support; TMDB's public Trending references do not currently document the `page`
+query parameter. If its behavior changes, these checks fail closed, not back to first-page discovery.
+
+Internal guards are independent of `limit` and cannot be configured:
+
+| Resource | Per request | Per TMDB selector | Shared TMDB acquisition batch per target/run |
+| --- | --- | --- | --- |
+| Admitted GET attempts | 1 | 32 | 128 |
+| Absolute deadline | 15 seconds | 60 seconds | 180 seconds |
+| Decoded bytes consumed | 1 MiB | 8 MiB | 32 MiB |
+
+The dedicated configured HTTP profile preserves proxy/authentication, trusted CAs and connect timeout, but always verifies
+TLS certificates and hostnames, even when `accept_insecure_ssl_certificates: true`. A TLS-inspecting proxy with an untrusted
+certificate cannot complete TMDB discovery until valid CA trust is established. This exception does not change Trakt,
+metadata or playback clients. The profile never follows redirects or replays requests. Client construction failures have
+no unconfigured fallback. Attempts are counted before
+sending, and consumed decoded bytes include duplicate/suffix rows and failed bodies; size detection may consume one extra
+byte on failure, never on success. These are not TLS/compressed-byte or total-memory limits. Deadlines cover headers,
+decoding and normalization, do not restart per page/chunk, and are checked before success. They bound TMDB acquisition,
+not inputs, Trakt, local matching or the entire refresh. Acquisition finishes before local matching. There is no feed
+cache or stale-feed fallback. A valid N may not fit these guards: needing another request or byte after exhaustion fails;
+completing exactly at a request/byte boundary succeeds. Do not assume 100 references always require five pages or yield
+100 matches.
+
+Matching is exact by positive TMDB ID **and** movie/TV kind; there is no title/year fuzzy fallback for TMDB. Local items
+without a matching ID are not selected. Distinct local subjects sharing an ID remain distinct; duplicate feed entries keep
+the first rank. Day/week selectors keep independent ranks and memberships; their base selection is unioned by local
+subject, not remote ID. Changing only the limit preserves surviving subject/alias identities when local UUID and category
+name remain unchanged. Remote order applies within each projected category, without globally reordering the base catalog.
+Existing target sorting and filters still apply afterwards. M3U and STRM consume selected ordinary entries, not the new
+Xtream aliases; HDHomeRun follows its existing underlying output.
+
+All enabled Trakt and TMDB selectors, including selection-only selectors, must complete before publication in **both**
+`full` and `curated`. A timeout, resource exhaustion, unsuccessful status, malformed/inconsistent page, invalid ID/media
+kind, lack of pagination progress or any redirect prevents changes to finalized target IDs, files, caches and watches. Successful sibling
+feeds do not authorize partial publication. The first failed run publishes nothing; later failures retain prior artifacts.
+`full` does not make configured discovery optional. Writers remain best-effort after successful curation admission; this
+is not a cross-output storage transaction.
+
+A valid initial empty page and a complete selection with **no local matches are successes**, not errors. In `curated`, either can clear
+published VOD/Series while retaining eligible Live. This can happen when the library lacks trending titles or TMDB IDs.
+Enrichment is separate: rebuild the target after IDs become available. Start with `full` if this narrowing is not intended.
+
+#### Selection-only and mixed sources
+
+M3U/STRM-only targets are supported by explicitly disabling Xtream projection:
+
+```yaml
+name: weekly-m3u
+curation:
+  catalog_selection: curated
+  tmdb:
+    api:
+      access_token: "${env:TMDB_READ_ACCESS_TOKEN}"
+    trending:
+      - kind: movie
+        time_window: week
+        limit: 100
+        create_xtream_category: false
+output:
+  - type: m3u
+    filename: weekly.m3u
+```
+
+To combine sources, add a Trakt source inside the same `curation` block. For example:
+
+```yaml
+trakt:
+  api:
+    api_key: "${env:TRAKT_CLIENT_ID}"
+  charts:
+    - kind: movies
+      chart: popular
+      category_name: Trakt Popular Movies
+      tmdb_only: true
+```
+
+Both providers read the same eligible pre-projection catalog. In `curated`, their selected subjects are unioned once for
+normal outputs; each projected Xtream category retains its own memberships/rank. Either provider failing blocks the run.
+
+#### Explicit migration and Source Editor
+
+At most one non-null declaration surface is allowed: `target.curation` **or** legacy `output[].trakt`. Declaring both is
+an error even if one is disabled, empty or uses only defaults. Null is equivalent to absence. There is no implicit merge,
+precedence or automatic migration.
+
+To migrate an existing Trakt target deliberately:
+
+1. Move its whole-block `enabled`, `catalog_selection` and `include_xtream_base_categories` to `target.curation`.
+2. Move its `api`, `lists` and `charts` into `curation.trakt`; leave this source enabled (the default).
+3. Remove `output[].trakt`. Leave the rest of the output configuration in place.
+
+This preserves the original policy, including a globally disabled block, and the legacy matching/category identity rules.
+Equivalent canonical Trakt-only configurations keep their existing aliases/virtual IDs. Add TMDB only after deliberately
+choosing the shared policy; all newly enabled selectors become required.
+
+The new block is YAML-owned. Source Editor shows a read-only target summary, preserves the block when editing other
+fields, and hides legacy Trakt controls on its connected outputs. Edit provider/policy settings in YAML; there is no TMDB
+query-builder or migration wizard. Read/save/reload preserves configured meaning and ownership, not YAML formatting or
+spelling of defaults/aliases. Backend validation still rejects conflicting declarations introduced by graph edits.
+
+#### TMDB attribution and usage terms
+
+The dashboard version card's **Credits** button displays an approved TMDB logo and the required notice:
+
+> This product uses the TMDB API but is not endorsed or certified by TMDB.
+
+The developer API is free for non-commercial use with attribution. Commercial deployments must assess TMDB's commercial
+licensing requirements; configuring a token does not grant unrestricted commercial use or rights to playback content.
+See the [TMDB FAQ](https://developer.themoviedb.org/docs/faq),
+[branding guidance](https://www.themoviedb.org/about/logos-attribution) and
+[commercial API information](https://www.themoviedb.org/api-for-business).
+
 ### 3.2.7 Output Formats (`output`)
 
 A target can be exported to multiple formats simultaneously. The target-level filter, rename, mapping, and sort
@@ -1864,6 +2064,9 @@ output:
 > IP masking, and failover logic for those streams.
 
 #### `trakt` Object in Xtream Output
+
+This is the compatible legacy declaration. For TMDB or combined sources use
+[target-wide `curation`](#target-wide-curation-curation) instead; do not declare both surfaces on one target.
 
 Trakt.tv is an online platform for tracking, organizing, and discovering movies and TV shows. Tuliprox evaluates every
 configured list and chart against the target's merged, deduplicated VOD and series catalog. The resulting exact-entry

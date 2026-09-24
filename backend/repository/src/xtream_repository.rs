@@ -2955,6 +2955,7 @@ mod tests {
 
     fn target_writer_config() -> ConfigTarget {
         ConfigTarget {
+            curation: None,
             id: 1,
             enabled: true,
             name: "target-empty-cluster-guard".to_string(),

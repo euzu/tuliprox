@@ -49,14 +49,14 @@ use tokio::{
 use tuliprox_core::{
     model::{
         is_valid, retain_filtered_playlist, AppConfig, ClusterForceUpdate, ClusterUpdateRejection, CompiledMapping,
-        ConfigFavourites, ConfigInput, ConfigInputFlags, ConfigInputOptions, ConfigRename, ConfigTarget, Epg,
-        FilterOutcome, MappingProgram, ProcessTargets, ProviderIdType, ResolveReason, ReverseProxyDisabledHeaderConfig,
-        TraktConfig, TransformStage, UpdateGuard, UpdateTask,
+        ConfigFavourites, ConfigInput, ConfigInputFlags, ConfigInputOptions, ConfigRename, ConfigTarget,
+        CurationConfig, Epg, FilterOutcome, MappingProgram, ProcessTargets, ProviderIdType, ResolveReason,
+        ReverseProxyDisabledHeaderConfig, TransformStage, UpdateGuard, UpdateTask,
     },
     utils::{debug_if_enabled, log_memory_snapshot, trace_if_enabled, StepMeasure, StepMeasureCallback},
 };
 use tuliprox_curation::{
-    evaluate_trakt_curation, project_trakt_categories, CurationEvaluation, CurationFailure, CurationRunOutcome,
+    evaluate_curation, project_curation_categories, CurationEvaluation, CurationFailure, CurationRunOutcome,
     SelectorOutcome,
 };
 use tuliprox_iptv::{

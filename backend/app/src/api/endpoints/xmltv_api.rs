@@ -1056,6 +1056,7 @@ mod tests {
 
     fn test_target_with_xtream_and_m3u() -> ConfigTarget {
         ConfigTarget {
+            curation: None,
             id: 1,
             enabled: true,
             name: "mixed-target".to_string(),
@@ -1088,6 +1089,7 @@ mod tests {
 
     fn test_target_with_xtream_only() -> ConfigTarget {
         ConfigTarget {
+            curation: None,
             id: 1,
             enabled: true,
             name: "xtream-only".to_string(),

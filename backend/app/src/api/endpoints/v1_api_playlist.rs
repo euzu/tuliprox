@@ -1509,6 +1509,7 @@ mod tests {
 
     fn playlist_update_target(id: u16, name: &str) -> Arc<ConfigTarget> {
         Arc::new(ConfigTarget {
+            curation: None,
             id,
             enabled: true,
             name: name.to_string(),
@@ -2456,6 +2457,7 @@ mod tests {
             ConfigSource {
                 inputs: vec!["input-a".intern()],
                 targets: vec![Arc::new(ConfigTarget {
+                    curation: None,
                     id: 11,
                     enabled: true,
                     name: "stable-target".to_string(),
@@ -2565,6 +2567,7 @@ mod tests {
         let input_b = Arc::new(ConfigInput { id: 8, name: "input-b".intern(), ..Default::default() });
         let target = |id, name: &str| {
             Arc::new(ConfigTarget {
+                curation: None,
                 id,
                 enabled: true,
                 name: name.to_string(),
@@ -2801,6 +2804,7 @@ mod tests {
             execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
             watch: None,
             use_memory_cache: false,
+            curation: None,
         });
         let source = ConfigSource { inputs: vec![Arc::clone(&input.name)], targets: vec![target] };
         let app_config = test_app_config(input, source);
@@ -2866,6 +2870,7 @@ mod tests {
             execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
             watch: None,
             use_memory_cache: false,
+            curation: None,
         });
         let source = ConfigSource { inputs: vec![Arc::clone(&input.name)], targets: vec![target] };
         let app_config = test_app_config(input, source);
@@ -2902,6 +2907,7 @@ mod tests {
             ..Default::default()
         });
         let target = Arc::new(ConfigTarget {
+            curation: None,
             id: 11,
             enabled: true,
             name: "target".to_string(),

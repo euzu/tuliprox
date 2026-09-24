@@ -68,6 +68,10 @@ metadata_update:
 | `custom_stream_response_enabled`      | Bool   |    No    | `true`                 | Enables configured custom MPEG-TS fallback videos for stream errors. When `false`, factories skip the video body and call sites return `custom_stream_response_error_status`; useful behind reverse proxies that intercept 4xx/5xx responses instead of keeping fallback sockets open.                                                                                                                                                                                                                                                                      |
 | `custom_stream_response_error_status` | Int    |    No    | `502`                  | HTTP status code returned when `custom_stream_response_enabled` is `false`. Must be a 4xx or 5xx code (the `prepare()` step rejects anything outside that range; `0` is silently clamped to `502`). Common choices: `404` (channel not found), `502` (bad gateway — upstream failed), `503` (service unavailable — overloaded).                                                                                                                                                                                                                             |
 
+**TMDB discovery exception:** [TMDB curation discovery](source.md#target-wide-curation-curation) always verifies TLS
+certificates and hostnames, even with `accept_insecure_ssl_certificates: true`. TLS-inspecting proxies require valid CA
+trust to complete discovery. Trakt, metadata and playback clients retain this flag's behavior.
+
 ---
 
 #### ⚠️ Important: `config_hot_reload` & Bind-Mounts

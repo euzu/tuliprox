@@ -1304,6 +1304,53 @@ mod tests {
     use tempfile::tempdir;
     use tuliprox_core::utils::resolve_env_var;
 
+    #[tokio::test]
+    async fn curation_item_limits_survive_source_load_sanitize_save_reload() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("source.yml");
+        let document = r#"
+inputs: []
+sources:
+  - inputs: []
+    targets:
+      - name: discovery
+        enabled: false
+        output:
+          - type: xtream
+        curation:
+          enabled: false
+          tmdb:
+            enabled: false
+            api:
+              access_token: synthetic-test-token
+            trending:
+              - kind: movie
+                time_window: week
+                limit: 37
+                create_xtream_category: false
+                category_name: Saved label
+              - kind: tv
+                time_window: day
+                limit: 100
+              - kind: movie
+                time_window: day
+"#;
+        tokio::fs::write(&path, document).await.unwrap();
+        let dto = super::parse_sources_file_from_path(&path, false).await.unwrap();
+        let expected = dto.sources[0].targets[0].curation.clone();
+        let sanitized = sanitize_sources_for_persist(dto).await;
+        super::save_sources_config(path.to_str().unwrap(), dir.path().join("backup").to_str().unwrap(), &sanitized)
+            .await
+            .unwrap();
+        let restored = super::parse_sources_file_from_path(&path, false).await.unwrap();
+        assert_eq!(restored.sources[0].targets[0].curation, expected);
+        let yaml = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(yaml.contains("limit: 37"));
+        assert!(!yaml.contains("limit: 100"));
+        tokio::fs::write(&path, document.replace("limit: 37", "scope: first_page")).await.unwrap();
+        assert!(super::parse_sources_file_from_path(&path, false).await.is_err());
+    }
+
     #[test]
     #[allow(clippy::manual_unwrap_or_default)]
     fn test_resolve() {

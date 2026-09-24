@@ -463,9 +463,49 @@ fn finalize_playlist_view(
     playlist
 }
 
+// Keep construction and its diagnostic seam private to the processing boundary.
+// Only fixed phase labels can reach the reporter, never dependency error details.
+pub(super) fn build_target_tmdb_client(
+    target: &ConfigTarget,
+    configure: impl FnOnce() -> Result<reqwest::ClientBuilder, TuliproxError>,
+    report: impl FnOnce(&'static str),
+) -> Option<reqwest::Client> {
+    let needs_tmdb = target.curation.as_ref().is_some_and(|config| {
+        config.enabled && config.tmdb.as_ref().is_some_and(|source| source.enabled && !source.trending.is_empty())
+    });
+    if !needs_tmdb {
+        return None;
+    }
+    let Ok(builder) = configure() else {
+        report("phase=profile_configuration");
+        return None;
+    };
+    if let Ok(client) = builder.build() {
+        Some(client)
+    } else {
+        report("phase=client_build");
+        None
+    }
+}
 pub(crate) async fn finalize_prepared_target<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
     ctx: Arc<PlaylistProcessingContext<E, M>>,
     prepared: PreparedTarget,
+) -> (Result<(), Vec<TuliproxError>>, Vec<TuliproxError>) {
+    // No generic-client fallback: unavailable transport participates in the same admission gate.
+    let tmdb_client = build_target_tmdb_client(
+        &prepared.target,
+        || tuliprox_core::utils::network::request::create_tmdb_client(&ctx.config),
+        |phase| {
+            warn!("TMDB discovery client unavailable: target_id={} run_id={} {phase}", prepared.target.id, ctx.run_id);
+        },
+    );
+    finalize_prepared_target_with_tmdb(ctx, prepared, tmdb_client.as_ref()).await
+}
+
+pub(super) async fn finalize_prepared_target_with_tmdb<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: Arc<PlaylistProcessingContext<E, M>>,
+    prepared: PreparedTarget,
+    tmdb_client: Option<&reqwest::Client>,
 ) -> (Result<(), Vec<TuliproxError>>, Vec<TuliproxError>) {
     let target = &prepared.target;
     let mut new_playlist = prepared.playlist;
@@ -488,7 +528,7 @@ pub(crate) async fn finalize_prepared_target<E: EventSink + Clone + 'static, M: 
     }
 
     let eligible_catalog = prepare_eligible_catalog(target, new_playlist, &mut step);
-    let views = match prepare_target_playlist_views(&ctx.client, target, eligible_catalog).await {
+    let views = match prepare_target_playlist_views(&ctx.client, tmdb_client, target, eligible_catalog).await {
         Ok(views) => views,
         Err(error) => {
             step.stop("Curation failed; skipping persist to preserve finalized artifacts");
@@ -864,20 +904,24 @@ pub(crate) struct TargetPlaylistViews {
 pub(crate) fn build_curated_playlist_views(
     playlist: Vec<PlaylistGroup>,
     evaluation: &CurationEvaluation,
-    trakt_config: &TraktConfig,
+    config: &CurationConfig,
     appearance_filter_configured: bool,
+    has_xtream_output: bool,
 ) -> TargetPlaylistViews {
-    let curated_catalog = trakt_config.catalog_selection.is_curated();
-    let mut categories = project_trakt_categories(evaluation, &playlist, trakt_config);
+    let curated_catalog = config.catalog_selection.is_curated();
+    let categories = has_xtream_output.then(|| project_curation_categories(evaluation, &playlist, config));
     let base = select_target_catalog(playlist, evaluation, curated_catalog);
-    let mut xtream = if trakt_config.include_xtream_base_categories { base.clone() } else { live_only(&base) };
-    xtream.append(&mut categories);
+    let xtream = categories.map(|mut categories| {
+        let mut view = if config.include_xtream_base_categories { base.clone() } else { live_only(&base) };
+        view.append(&mut categories);
+        view
+    });
     TargetPlaylistViews {
         base,
-        xtream: Some(xtream),
+        xtream,
         publication_plan: PlaylistPublicationPlan::complete_curation_with_filter(
             curated_catalog,
-            !trakt_config.include_xtream_base_categories,
+            has_xtream_output && !config.include_xtream_base_categories,
             appearance_filter_configured,
         ),
     }
@@ -885,10 +929,11 @@ pub(crate) fn build_curated_playlist_views(
 
 pub(crate) async fn prepare_target_playlist_views(
     client: &reqwest::Client,
+    tmdb_client: Option<&reqwest::Client>,
     target: &ConfigTarget,
     playlist: Vec<PlaylistGroup>,
 ) -> Result<TargetPlaylistViews, TuliproxError> {
-    let Some(trakt_config) = target.get_xtream_output().and_then(|xtream| xtream.trakt.as_ref()) else {
+    let Some(config) = target.effective_curation() else {
         return Ok(TargetPlaylistViews {
             base: playlist,
             xtream: None,
@@ -896,7 +941,17 @@ pub(crate) async fn prepare_target_playlist_views(
         });
     };
 
-    match evaluate_trakt_curation(client, &playlist, &target.name, trakt_config).await {
+    let outcome = evaluate_curation(client, tmdb_client, &playlist, &target.name, &config).await;
+    curation_playlist_views(target, playlist, &config, outcome)
+}
+
+pub(super) fn curation_playlist_views(
+    target: &ConfigTarget,
+    playlist: Vec<PlaylistGroup>,
+    config: &CurationConfig,
+    outcome: CurationRunOutcome,
+) -> Result<TargetPlaylistViews, TuliproxError> {
+    match outcome {
         CurationRunOutcome::NotConfigured => Ok(TargetPlaylistViews {
             base: playlist,
             xtream: None,
@@ -904,8 +959,13 @@ pub(crate) async fn prepare_target_playlist_views(
         }),
         CurationRunOutcome::Failed(failure) => Err(curation_failure_error(&target.name, &failure)),
         CurationRunOutcome::Complete(evaluation) => {
-            let views =
-                build_curated_playlist_views(playlist, &evaluation, trakt_config, target.filter.persist.is_some());
+            let views = build_curated_playlist_views(
+                playlist,
+                &evaluation,
+                config,
+                target.filter.persist.is_some(),
+                target.get_xtream_output().is_some(),
+            );
             info!(
                 "Target '{}' curation completed with {} memberships and {} Xtream groups",
                 target.name,
@@ -916,7 +976,6 @@ pub(crate) async fn prepare_target_playlist_views(
         }
     }
 }
-
 fn curation_failure_error(target_name: &str, failure: &CurationFailure) -> TuliproxError {
     let mut complete = 0usize;
     let mut incomplete = 0usize;

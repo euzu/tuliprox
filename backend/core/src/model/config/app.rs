@@ -617,6 +617,7 @@ mod tests {
 
     fn target_with_mapping_id(mapping_id: &str) -> Arc<ConfigTarget> {
         Arc::new(ConfigTarget {
+            curation: None,
             id: 1,
             enabled: true,
             name: "target".to_string(),
