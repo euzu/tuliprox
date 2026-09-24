@@ -1,5 +1,5 @@
 use crate::stalker::session::StalkerSession;
-use serde::Deserialize;
+use serde::{de::Error, Deserialize, Deserializer};
 use shared::{
     model::stalker::{
         StalkerAuthMode, StalkerBootstrapRecipe, StalkerEndpointPreference, StalkerMagPreset, StalkerPlaybackMode,
@@ -7,7 +7,7 @@ use shared::{
     },
     utils::deserialize_as_option_string,
 };
-use std::{fmt, time::Duration};
+use std::{fmt, str::FromStr, time::Duration};
 use tuliprox_core::model::{StalkerInputConfig, StalkerSizeCaps};
 
 /// Information the `get_profile` action returns about the underlying portal account. We
@@ -24,11 +24,11 @@ pub struct StalkerRawProviderProfile {
     pub login: Option<String>,
     #[serde(default, deserialize_with = "deserialize_as_option_string")]
     pub password: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_profile_number")]
     pub status: Option<i32>,
     #[serde(default, deserialize_with = "deserialize_as_option_string")]
     pub expiration: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_profile_number")]
     pub max_connections: Option<u16>,
     #[serde(default, deserialize_with = "deserialize_as_option_string")]
     pub storage_usage: Option<String>,
@@ -44,6 +44,26 @@ pub struct StalkerRawProviderProfile {
     pub tariff_plan: Option<String>,
     #[serde(default, deserialize_with = "deserialize_as_option_string")]
     pub portal_url: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ProfileNumber<T> {
+    Number(T),
+    Text(String),
+}
+
+fn deserialize_optional_profile_number<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + FromStr,
+    T::Err: fmt::Display,
+{
+    match Option::<ProfileNumber<T>>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(ProfileNumber::Number(value)) => Ok(Some(value)),
+        Some(ProfileNumber::Text(value)) => value.parse().map(Some).map_err(D::Error::custom),
+    }
 }
 
 impl fmt::Debug for StalkerRawProviderProfile {
@@ -270,5 +290,34 @@ mod tests {
         assert_eq!(raw.expiration.as_deref(), Some("0"));
         assert_eq!(raw.storage_usage.as_deref(), Some("0"));
         assert_eq!(raw.portal_url.as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn raw_profile_accepts_mixed_numeric_field_types() {
+        let raw: StalkerRawProviderProfile = serde_json::from_value(serde_json::json!({
+            "status": "0",
+            "max_connections": 2,
+            "city_id": "0",
+            "playback_limit": 0
+        }))
+        .expect("profile should deserialize");
+        assert_eq!(raw.status, Some(0));
+        assert_eq!(raw.max_connections, Some(2));
+
+        let raw: StalkerRawProviderProfile = serde_json::from_value(serde_json::json!({
+            "status": 1,
+            "max_connections": "2"
+        }))
+        .expect("profile should deserialize");
+        assert_eq!(raw.status, Some(1));
+        assert_eq!(raw.max_connections, Some(2));
+    }
+
+    #[test]
+    fn raw_profile_rejects_invalid_numeric_fields() {
+        for value in [serde_json::json!("blocked"), serde_json::json!([])] {
+            let result = serde_json::from_value::<StalkerRawProviderProfile>(serde_json::json!({ "status": value }));
+            assert!(result.is_err());
+        }
     }
 }

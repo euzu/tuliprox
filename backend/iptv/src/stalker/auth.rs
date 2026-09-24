@@ -42,8 +42,7 @@ pub struct StalkerHandshakeJs {
 }
 
 /// Drive the full handshake against the configured portal. The function iterates through
-/// the recipe chain derived from the user-supplied auth mode, re-issuing the handshake
-/// call against the next recipe on any 4xx/5xx. Once a recipe succeeds we follow up with
+/// the recipe chain derived from the user-supplied auth mode. Once a recipe succeeds we follow up with
 /// a `get_profile` call to extract account info and a `get_capabilities` call (best
 /// effort) to populate the `StalkerPortalCapabilitiesDto`.
 pub async fn handshake<Tr: StalkerTransport, C: Clock>(
@@ -66,15 +65,18 @@ pub async fn handshake<Tr: StalkerTransport, C: Clock>(
             }
             Err(err) => {
                 warn!("Stalker handshake recipe {recipe:?} failed: {err}");
-                // The loop body intentionally does not short-circuit on token rejection
-                // or `HandshakeFailed` — those errors are still recorded as `last_err`
-                // and the next recipe is tried, so the eventual caller sees the most
-                // recent error from the full recipe chain.
+                if stops_bootstrap(&err) {
+                    return Err(err);
+                }
                 last_err = Some(err);
             }
         }
     }
     Err(last_err.unwrap_or_else(|| StalkerError::RecipesExhausted { portal: safe_stalker_url(client.portal_url()) }))
+}
+
+fn stops_bootstrap(err: &StalkerError) -> bool {
+    matches!(err, StalkerError::BodyDecode { .. } | StalkerError::BadStatus { status: 429, .. })
 }
 
 /// Move the remembered recipe to the front of `chain`, keeping the rest in order.
@@ -109,6 +111,9 @@ async fn attempt_recipe<Tr: StalkerTransport, C: Clock>(
                 if spec.emit_handshake_extra {
                     if let Err(err) = perform_handshake_extra(client, &mut session, &load_url, &spec).await {
                         warn!("Stalker handshake-extra failed: {err}");
+                        if stops_bootstrap(&err) {
+                            return Err(err);
+                        }
                         last_err = Some(err);
                         continue;
                     }
@@ -116,6 +121,9 @@ async fn attempt_recipe<Tr: StalkerTransport, C: Clock>(
                 if spec.require_portal_handshake {
                     if let Err(err) = perform_portal_handshake(client, &session, &load_url, &spec).await {
                         warn!("Stalker portal handshake failed: {err}");
+                        if stops_bootstrap(&err) {
+                            return Err(err);
+                        }
                         last_err = Some(err);
                         continue;
                     }
@@ -123,16 +131,20 @@ async fn attempt_recipe<Tr: StalkerTransport, C: Clock>(
                 if let Some((login, password)) = account_credentials(client) {
                     if let Err(err) = perform_do_auth(client, &session, &load_url, &spec, &login, &password).await {
                         warn!("Stalker do_auth failed: {err}");
+                        if stops_bootstrap(&err) {
+                            return Err(err);
+                        }
                         last_err = Some(err);
                         continue;
                     }
                 }
-                // A profile failure on this endpoint should not abort the whole recipe:
-                // fall through to the next load-url candidate instead.
                 let raw_profile = match fetch_profile(client, &session, &load_url, &spec).await {
                     Ok(profile) => profile,
                     Err(err) => {
                         warn!("Stalker get_profile failed: {err}");
+                        if stops_bootstrap(&err) {
+                            return Err(err);
+                        }
                         last_err = Some(err);
                         continue;
                     }
@@ -155,6 +167,9 @@ async fn attempt_recipe<Tr: StalkerTransport, C: Clock>(
                 return Ok(StalkerHandshake { session, profile });
             }
             Err(err) => {
+                if stops_bootstrap(&err) {
+                    return Err(err);
+                }
                 last_err = Some(err);
             }
         }
@@ -185,6 +200,13 @@ async fn perform_handshake_against<Tr: StalkerTransport, C: Clock>(
         .await?;
     client.ingest_response_cookies(&response);
     let status = response.status();
+    if status.as_u16() == 429 {
+        return Err(StalkerError::BadStatus {
+            status: 429,
+            action: StalkerAction::Handshake,
+            body_snippet: String::new(),
+        });
+    }
     let body = client
         .read_body_with_cap(response, StalkerAction::Handshake, client.cap_for_action(StalkerAction::Handshake))
         .await?;
@@ -397,6 +419,64 @@ async fn fetch_capabilities<Tr: StalkerTransport, C: Clock>(
     };
     serde_json::from_value::<StalkerPortalCapabilitiesDto>(capabilities_value)
         .map_err(|err| StalkerError::BodyDecode { message: format!("get_capabilities decode: {err}") })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stalker::transport::testing::{FakeTransport, Reply};
+    use std::sync::Arc;
+    use tuliprox_core::{model::StalkerInputConfig, utils::ManualClock};
+
+    fn client(transport: Arc<FakeTransport>) -> StalkerApiClient<Arc<FakeTransport>, ManualClock> {
+        StalkerApiClient::with_parts(
+            transport,
+            ManualClock::new(10_000_000),
+            "http://portal.example/stalker_portal/c/".to_string(),
+            StalkerInputConfig::default(),
+        )
+        .expect("portal URL is valid")
+    }
+
+    #[tokio::test]
+    async fn string_status_profile_completes_first_recipe() {
+        let transport = Arc::new(FakeTransport::new([
+            Reply::ok(r#"{"js":{"token":"token"}}"#),
+            Reply::ok(r#"{"js":{"status":"0","max_connections":"2","city_id":"0","playback_limit":0}}"#),
+            Reply::ok("{}"),
+        ]));
+        let handshake = client(Arc::clone(&transport)).handshake().await.expect("profile is accepted");
+        assert_eq!(handshake.profile.status, Some(0));
+        assert_eq!(handshake.profile.max_connections, Some(2));
+        assert_eq!(handshake.profile.bootstrap_recipe, StalkerBootstrapRecipe::GenericSafe);
+        assert_eq!(transport.requested().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn invalid_profile_stops_after_authenticated_recipe() {
+        let transport =
+            Arc::new(FakeTransport::new([Reply::ok(r#"{"js":{"token":"token"}}"#), Reply::ok(r#""invalid profile""#)]));
+        let err = client(Arc::clone(&transport)).handshake().await.expect_err("profile cannot be decoded");
+        assert!(matches!(err, StalkerError::BodyDecode { .. }));
+        assert_eq!(transport.requested().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn rate_limit_stops_before_more_endpoints_or_recipes() {
+        let transport = Arc::new(FakeTransport::new([Reply::Http(429, String::new())]));
+        let err = client(Arc::clone(&transport)).handshake().await.expect_err("portal is rate limiting");
+        assert!(matches!(err, StalkerError::BadStatus { status: 429, .. }));
+        assert_eq!(transport.requested().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn profile_rate_limit_stops_after_authenticated_recipe() {
+        let transport =
+            Arc::new(FakeTransport::new([Reply::ok(r#"{"js":{"token":"token"}}"#), Reply::Http(429, String::new())]));
+        let err = client(Arc::clone(&transport)).handshake().await.expect_err("portal is rate limiting");
+        assert!(matches!(err, StalkerError::BadStatus { status: 429, action: StalkerAction::GetProfile, .. }));
+        assert_eq!(transport.requested().len(), 2);
+    }
 }
 
 // Re-export to keep callers from having to know about the inner submodule path.
