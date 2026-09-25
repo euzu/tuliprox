@@ -14,7 +14,8 @@ async fn missing_transport_fails_every_tmdb_selector_including_selection_only_af
             shared::model::CurationCatalogSelection::Full
         };
         config.tmdb.as_mut().unwrap().trending[0].create_xtream_category = false;
-        let outcome = evaluate_curation(&reqwest::Client::new(), None, &catalog(), "test", &config).await;
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let outcome = evaluate_curation(&http, None, &catalog(), "test", &config).await;
         let CurationRunOutcome::Failed(failure) = outcome else { panic!("missing transport must fail admission") };
         assert_eq!(failure.selector_outcomes.len(), 3);
         assert!(matches!(&failure.selector_outcomes[0], SelectorOutcome::Complete { key, memberships, .. }
