@@ -33,7 +33,8 @@ impl TuliproxObserver {
         let date = chrono::DateTime::from_timestamp(timestamp, 0)
             .ok_or_else(|| TestkitError::Protocol("invalid stream history session timestamp".to_owned()))?
             .format("%Y-%m-%d");
-        self.get_json(&format!("stream-history?from={date}")).await
+        let today = chrono::Utc::now().format("%Y-%m-%d");
+        self.get_json(&format!("stream-history?from={date}&to={today}")).await
     }
 
     pub async fn runtime_snapshot(&self) -> Result<RuntimeSnapshot, TestkitError> {
