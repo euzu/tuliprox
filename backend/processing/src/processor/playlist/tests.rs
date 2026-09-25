@@ -1443,12 +1443,54 @@ fn staged_m3u_unknown_streams_do_not_match_positional_category_id() {
         vec![staged_new],
     );
 
-    assert_eq!(groups.len(), 2);
-    assert_eq!(groups[0].title.as_ref(), "Sports");
-    assert_eq!(groups[0].channels[0].header.id.as_ref(), "100");
-    assert_eq!(groups[1].title.as_ref(), "New");
-    assert_eq!(groups[1].channels[0].header.id.as_ref(), "300");
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].title.as_ref(), "New");
+    assert_eq!(groups[0].channels[0].header.id.as_ref(), "300");
     assert_unique_category_ids(&groups);
+}
+
+#[test]
+fn staged_m3u_replaces_selected_xtream_groups_and_keeps_other_clusters() {
+    let provider = ConfigInput {
+        name: "provider".intern(),
+        input_type: InputType::Xtream,
+        url: "http://provider.example".to_string(),
+        username: Some("real-user".to_string()),
+        password: Some("real-pass".to_string()),
+        ..Default::default()
+    };
+    let mut provider_news = test_group(XtreamCluster::Live, "Provider News", "provider");
+    provider_news.id = 5;
+    provider_news.channels[0].header.id = "100".intern();
+    let mut provider_sports = test_group(XtreamCluster::Live, "Provider Sports", "provider");
+    provider_sports.id = 7;
+    provider_sports.channels[0].header.id = "200".intern();
+    provider_sports.channels[0].header.url = "http://provider.example/direct/200.ts".intern();
+    let mut provider_kids = test_group(XtreamCluster::Live, "Provider Kids", "provider");
+    provider_kids.id = 9;
+    provider_kids.channels[0].header.id = "300".intern();
+    let provider_vod = test_group(XtreamCluster::Video, "Provider VOD", "provider");
+    let mut staged_custom = test_group(XtreamCluster::Live, "My Channels", "staged");
+    staged_custom.channels[0].header.id = "200".intern();
+    let mut staged_news = test_group(XtreamCluster::Live, "My News", "staged");
+    staged_news.channels[0].header.id = "100".intern();
+
+    let groups = super::apply_staged_overlay_groups(
+        &provider,
+        StagedInputType::M3u,
+        ClusterFlags::Live,
+        vec![provider_news, provider_sports, provider_kids, provider_vod],
+        vec![staged_custom, staged_news],
+    );
+
+    assert_eq!(groups.len(), 3);
+    assert_eq!(groups[0].title.as_ref(), "My Channels");
+    assert_eq!(groups[0].channels[0].header.id.as_ref(), "200");
+    assert_eq!(groups[0].channels[0].header.input_name.as_ref(), "provider");
+    assert_eq!(groups[0].channels[0].header.url.as_ref(), "http://provider.example/direct/200.ts");
+    assert_eq!(groups[1].title.as_ref(), "My News");
+    assert_eq!(groups[1].channels[0].header.id.as_ref(), "100");
+    assert_eq!(groups[2].title.as_ref(), "Provider VOD");
 }
 
 #[test]

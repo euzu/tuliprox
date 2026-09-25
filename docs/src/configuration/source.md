@@ -999,9 +999,9 @@ the actual streams are still opened against the Xtream or M3U provider.
 **Data flow:**
 
 * `staged input -> provider input`: the staged input is an overlay for that provider. Inside the clusters listed in
-  `staged.clusters`, each staged group of an `xtream` provider replaces the provider category it belongs to; provider
-  categories that the staged playlist does not represent stay as they are. For any other provider type the listed
-  clusters are replaced entirely by the staged groups. Clusters not listed are loaded from the provider input itself.
+  `staged.clusters`, an `m3u` staged playlist determines all groups and channels. An `xtream` staged playlist replaces
+  matching provider categories and keeps unmatched provider categories. Clusters not listed are loaded from the provider
+  input itself.
   The merged playlist is persisted under the provider input, and streaming/API requests still target the provider input.
 * `staged input -> target` is not supported. Use a normal `m3u` or `xtream` input if the source should be connected
   directly to a target.
@@ -1014,12 +1014,14 @@ the actual streams are still opened against the Xtream or M3U provider.
   known, an `xtream` staged group is resolved by category ID; an `m3u` staged group skips that step because its category
   IDs are positional. The group title acts as a last resort. A group title therefore never overrides a stream ID match,
   so a renamed or split group cannot take over an unrelated category by accident.
-* The overlaid category keeps its own category ID; the staged playlist supplies the group name and the channel order.
+* The overlaid category keeps its own category ID; the staged playlist supplies the group name and channel order.
+  With `staged_type: m3u`, it also supplies the group order.
 * Known streams keep their provider playback URL, including a direct source URL. New streams use the provider address and
   credentials; for VOD, the staged stream's container metadata supplies the extension when available.
 * Every staged channel needs a numeric provider stream ID in its `header.id`, either from an `xui-id` / `cuid`
   attribute or from the numeric last URL segment. Rows without one are skipped, a single warning per group reports how
-  many rows were dropped, and the provider category stays in place instead of being emptied.
+  many rows were dropped. A group with no usable channels is omitted for `m3u` staged input; for `xtream` staged input,
+  a matching provider category stays in place.
 * A staged group that matches no provider category is added as a new category. Its category ID is reused when it is
   still free, otherwise Tuliprox assigns an unused ID, so two groups of one cluster never share an ID.
 
@@ -1064,9 +1066,9 @@ inputs:
 `staged.clusters` names the clusters whose categories are overlaid from the staged input.
 
 * The referenced provider supplies all clusters not listed in `staged.clusters`.
-* Inside a listed cluster of an `xtream` provider, only the categories represented by the staged playlist are overlaid;
-  provider categories without a staged counterpart stay available. For any other provider type the listed clusters are
-  replaced entirely.
+* Inside a listed cluster of an `xtream` provider, an `m3u` staged playlist determines which groups and channels appear.
+  Provider categories without an `m3u` staged counterpart are omitted. With `staged_type: xtream`, unmatched provider
+  categories remain available. For any other provider type the listed clusters are replaced entirely.
 * `staged.for_input` must reference an existing non-staged `m3u` or `xtream` input.
 * Each provider input can have at most one staged overlay.
 * `staged.clusters` must not be empty.

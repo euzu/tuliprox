@@ -1212,6 +1212,14 @@ struct HeldPlayback {
     task: tokio::task::JoinHandle<Result<PlaybackOutcome, TestkitError>>,
 }
 
+fn matches_expected_eviction(
+    playback_id: &str,
+    expected_terminations: &HashSet<String>,
+    outcome: &PlaybackOutcome,
+) -> bool {
+    expected_terminations.contains(playback_id) && matches!(outcome, PlaybackOutcome::UnexpectedEof { .. })
+}
+
 #[derive(Clone)]
 pub struct OriginObserver {
     control_base_url: String,
@@ -2571,8 +2579,12 @@ async fn execute_scenario_steps<'a>(
                     events.push((event_playback_id, "unexpected_clean_terminal"));
                     any_failed = true;
                 }
-                Ok(Ok(Ok(_))) => events.push((event_playback_id, "evicted")),
-                Ok(Ok(Err(_)) | Err(_)) => {
+                Ok(Ok(Ok(outcome)))
+                    if matches_expected_eviction(&held.playback_id, &expected_terminations, &outcome) =>
+                {
+                    events.push((event_playback_id, "evicted"));
+                }
+                Ok(Ok(Ok(_) | Err(_)) | Err(_)) => {
                     events.push((event_playback_id, "unexpected_eviction_terminal"));
                     any_failed = true;
                 }
@@ -2926,6 +2938,20 @@ fn marker_from_url(url: &str) -> Result<u32, TestkitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expected_eviction_requires_matching_playback_eof() {
+        let expected = HashSet::from(["playback-a".to_owned()]);
+        let eof = PlaybackOutcome::UnexpectedEof { frames: 3, bytes: 100 };
+        assert!(matches_expected_eviction("playback-a", &expected, &eof));
+        assert!(!matches_expected_eviction("playback-b", &expected, &eof));
+        assert!(!matches_expected_eviction("playback-a", &expected, &PlaybackOutcome::IdleTimeout));
+        assert!(!matches_expected_eviction(
+            "playback-a",
+            &expected,
+            &PlaybackOutcome::TransportError { message: "connection failed".to_owned() },
+        ));
+    }
 
     fn test_origin_state(run_id: &str) -> OriginState {
         OriginState {

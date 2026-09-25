@@ -542,8 +542,8 @@ fn prepare_staged_xtream_group(
 /// names may differ, the ids do not. Staged groups are therefore resolved against the provider groups
 /// by id, never by name ([`match_staged_groups`]). An overlaid group keeps the provider category id;
 /// a staged group that introduces a new category keeps its own id only when that id is still free. A
-/// staged group whose channels carry no numeric stream id leaves the provider category untouched, so
-/// unusable overlay rows cannot remove provider content.
+/// staged group whose channels carry no numeric stream id leaves the provider category untouched for
+/// Xtream staged input, while an M3U staged input remains authoritative for the selected clusters.
 pub(crate) fn apply_staged_overlay_groups(
     provider: &ConfigInput,
     staged_type: StagedInputType,
@@ -619,6 +619,10 @@ pub(crate) fn apply_staged_overlay_groups(
     let mut used_ids = GroupCategoryIds::from_groups(&provider_groups);
     let assignment = match_staged_groups(&provider_groups, &staged_selected, staged_type, clusters);
 
+    if staged_type == StagedInputType::M3u {
+        return apply_staged_m3u_template(provider_groups, staged_selected, &assignment, clusters, used_ids);
+    }
+
     let mut result: Vec<PlaylistGroup> = Vec::with_capacity(provider_groups.len() + staged_selected.len());
 
     for (provider_idx, provider_group) in provider_groups.into_iter().enumerate() {
@@ -629,8 +633,6 @@ pub(crate) fn apply_staged_overlay_groups(
 
         let matched = assignment.staged_of(provider_idx).and_then(|staged_idx| staged_selected[staged_idx].take());
         let Some(mut staged) = matched.filter(|staged| !staged.channels.is_empty()) else {
-            // A staged group whose channels carried no numeric stream id keeps the provider category,
-            // so the overlaid cluster is never emptied by unusable overlay rows.
             result.push(provider_group);
             continue;
         };
@@ -645,21 +647,40 @@ pub(crate) fn apply_staged_overlay_groups(
 
     // Append newly introduced staged groups that had no corresponding provider group.
     for mut staged in staged_selected.into_iter().flatten().filter(|staged| !staged.channels.is_empty()) {
-        if staged.id == 0 {
-            // A staged group without a category id introduces a new category, so it only needs a free id.
-            staged.id = used_ids.allocate(staged.xtream_cluster);
-        } else if !used_ids.claim(staged.xtream_cluster, staged.id) {
-            let allocated = used_ids.allocate(staged.xtream_cluster);
-            warn!(
-                "Staged group '{}' uses category id {} which is already taken in {}; renumbered to {allocated}",
-                staged.title, staged.id, staged.xtream_cluster
-            );
-            staged.id = allocated;
-        }
+        used_ids.assign_new_group(&mut staged);
         sync_channel_category_id(&mut staged);
         result.push(staged);
     }
 
+    result
+}
+
+fn apply_staged_m3u_template(
+    provider_groups: Vec<PlaylistGroup>,
+    staged_groups: Vec<Option<PlaylistGroup>>,
+    assignment: &StagedOverlayAssignment,
+    clusters: ClusterFlags,
+    mut used_ids: GroupCategoryIds,
+) -> Vec<PlaylistGroup> {
+    let mut result = Vec::with_capacity(provider_groups.len() + staged_groups.len());
+    for (staged_idx, staged) in staged_groups.into_iter().enumerate() {
+        let Some(mut staged) = staged.filter(|group| !group.channels.is_empty()) else {
+            continue;
+        };
+        if let Some(provider_idx) = assignment.provider_by_staged[staged_idx] {
+            let provider_group = &provider_groups[provider_idx];
+            staged.id = if provider_group.id == 0 {
+                used_ids.allocate(provider_group.xtream_cluster)
+            } else {
+                provider_group.id
+            };
+        } else {
+            used_ids.assign_new_group(&mut staged);
+        }
+        sync_channel_category_id(&mut staged);
+        result.push(staged);
+    }
+    result.extend(provider_groups.into_iter().filter(|group| !cluster_selected(group.xtream_cluster, clusters)));
     result
 }
 
@@ -896,6 +917,19 @@ impl GroupCategoryIds {
     /// Claims `id` for `cluster`; a zero id or an id already in use is not claimable.
     fn claim(&mut self, cluster: XtreamCluster, id: u32) -> bool {
         id != 0 && self.used.entry(cluster).or_default().insert(id)
+    }
+
+    fn assign_new_group(&mut self, group: &mut PlaylistGroup) {
+        if group.id == 0 {
+            group.id = self.allocate(group.xtream_cluster);
+        } else if !self.claim(group.xtream_cluster, group.id) {
+            let allocated = self.allocate(group.xtream_cluster);
+            warn!(
+                "Staged group '{}' uses category id {} which is already taken in {}; renumbered to {allocated}",
+                group.title, group.id, group.xtream_cluster
+            );
+            group.id = allocated;
+        }
     }
 
     /// Reserves and returns the next free id of `cluster`.

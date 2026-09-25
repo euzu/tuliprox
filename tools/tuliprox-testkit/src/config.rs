@@ -448,9 +448,15 @@ impl Scenario {
             if start.expect_evicted {
                 if step.expect.is_rejected()
                     || self.actors.iter().any(|actor| actor.id == start.actor && actor.agent != "local")
+                    || ((start.vod_object.is_some()
+                        || start.range.is_some()
+                        || start.read_limit_bytes.is_some()
+                        || start.method.is_some())
+                        && (start.post_read_action.is_some_and(|action| action != PostReadAction::KeepOpen)
+                            || start.method.as_deref() == Some("HEAD")))
                 {
                     return Err(TestkitError::Configuration(
-                        "expect_evicted requires a streaming playback on a local actor".to_owned(),
+                        "expect_evicted requires a held streaming playback on a local actor".to_owned(),
                     ));
                 }
                 expected_evictions.insert(start.playback_id.as_str());
@@ -591,6 +597,43 @@ pub fn lease_duration(millis: u64) -> Duration { Duration::from_millis(millis.ma
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expected_eviction_requires_held_vod_playback() -> Result<(), TestkitError> {
+        let mut scenario: Scenario = serde_saphyr::from_str(
+            r"
+schema_version: 1
+name: vod-eviction-validation
+tuliprox: { base_url: http://example.invalid, execution_mode: existing_instance }
+actors: [{ id: a, agent: local }]
+steps:
+  - command_id: start
+    start: { actor: a, playback_id: vod, session_group: vod, vod_object: movie.mkv, expect_evicted: true, post_read_action: close }
+",
+        )
+        .map_err(|error| TestkitError::Configuration(error.to_string()))?;
+        assert!(scenario.validate().is_err());
+
+        scenario.steps[0]
+            .start
+            .as_mut()
+            .ok_or_else(|| TestkitError::Configuration("missing start".to_owned()))?
+            .post_read_action = Some(PostReadAction::Pause);
+        assert!(scenario.validate().is_err());
+        scenario.steps[0]
+            .start
+            .as_mut()
+            .ok_or_else(|| TestkitError::Configuration("missing start".to_owned()))?
+            .post_read_action = Some(PostReadAction::KeepOpen);
+        assert!(scenario.validate().is_ok());
+        scenario.steps[0]
+            .start
+            .as_mut()
+            .ok_or_else(|| TestkitError::Configuration("missing start".to_owned()))?
+            .method = Some("HEAD".to_owned());
+        assert!(scenario.validate().is_err());
+        Ok(())
+    }
 
     #[test]
     fn duplicate_playbacks_are_rejected() {
