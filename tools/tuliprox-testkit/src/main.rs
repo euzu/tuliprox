@@ -1128,7 +1128,17 @@ async fn run_agent_until_released(
             chunk = tokio::time::timeout(PLAYBACK_IDLE_TIMEOUT, body.next()) => {
                 let chunk = match chunk {
                     Ok(Some(Ok(chunk))) => chunk,
-                    Ok(Some(Err(err))) => return Ok(PlaybackOutcome::TransportError { message: err.to_string() }),
+                    Ok(Some(Err(err))) => {
+                        return Ok(if ready.is_none() {
+                            PlaybackOutcome::StreamInterrupted {
+                                frames: received_frames,
+                                bytes: received_bytes,
+                                message: err.to_string(),
+                            }
+                        } else {
+                            PlaybackOutcome::TransportError { message: err.to_string() }
+                        });
+                    }
                     Ok(None) => return Ok(PlaybackOutcome::UnexpectedEof { frames: received_frames, bytes: received_bytes }),
                     Err(_) => return Ok(PlaybackOutcome::IdleTimeout),
                 };
@@ -1217,7 +1227,8 @@ fn matches_expected_eviction(
     expected_terminations: &HashSet<String>,
     outcome: &PlaybackOutcome,
 ) -> bool {
-    expected_terminations.contains(playback_id) && matches!(outcome, PlaybackOutcome::UnexpectedEof { .. })
+    expected_terminations.contains(playback_id)
+        && matches!(outcome, PlaybackOutcome::UnexpectedEof { .. } | PlaybackOutcome::StreamInterrupted { .. })
 }
 
 #[derive(Clone)]
@@ -2940,10 +2951,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn expected_eviction_requires_matching_playback_eof() {
+    fn expected_eviction_requires_matching_playback_stream_termination() {
         let expected = HashSet::from(["playback-a".to_owned()]);
         let eof = PlaybackOutcome::UnexpectedEof { frames: 3, bytes: 100 };
         assert!(matches_expected_eviction("playback-a", &expected, &eof));
+        let interrupted = PlaybackOutcome::StreamInterrupted {
+            frames: 3,
+            bytes: 100,
+            message: "error decoding response body".to_owned(),
+        };
+        assert!(matches_expected_eviction("playback-a", &expected, &interrupted));
+        assert!(!matches_expected_eviction("playback-b", &expected, &interrupted));
         assert!(!matches_expected_eviction("playback-b", &expected, &eof));
         assert!(!matches_expected_eviction("playback-a", &expected, &PlaybackOutcome::IdleTimeout));
         assert!(!matches_expected_eviction(

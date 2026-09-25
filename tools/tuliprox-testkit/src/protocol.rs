@@ -105,6 +105,7 @@ pub enum PlaybackOutcome {
     AdmissionRejected { reason: RejectionReason },
     HttpError { status: u16 },
     TransportError { message: String },
+    StreamInterrupted { frames: u64, bytes: u64, message: String },
     InvalidData { message: String },
     UnexpectedEof { frames: u64, bytes: u64 },
     IdleTimeout,
@@ -127,6 +128,9 @@ impl std::fmt::Display for PlaybackOutcome {
             Self::AdmissionRejected { reason } => write!(f, "rejected({reason})"),
             Self::HttpError { status } => write!(f, "http_error({status})"),
             Self::TransportError { message } => write!(f, "transport_error({message})"),
+            Self::StreamInterrupted { frames, bytes, message } => {
+                write!(f, "stream_interrupted({frames} frames, {bytes} bytes, {message})")
+            }
             Self::InvalidData { message } => write!(f, "invalid_data({message})"),
             Self::UnexpectedEof { frames, bytes } => write!(f, "unexpected_eof({frames} frames, {bytes} bytes)"),
             Self::IdleTimeout => write!(f, "idle_timeout"),
