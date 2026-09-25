@@ -27,7 +27,14 @@ impl TuliproxObserver {
 
     pub async fn streams(&self) -> Result<Value, TestkitError> { self.get_json("streams").await }
 
-    pub async fn stream_history(&self) -> Result<Value, TestkitError> { self.get_json("stream-history").await }
+    pub async fn stream_history(&self, session_id: u64) -> Result<Value, TestkitError> {
+        let timestamp = i64::try_from(session_id >> 32)
+            .map_err(|error| TestkitError::Protocol(format!("invalid stream history session timestamp: {error}")))?;
+        let date = chrono::DateTime::from_timestamp(timestamp, 0)
+            .ok_or_else(|| TestkitError::Protocol("invalid stream history session timestamp".to_owned()))?
+            .format("%Y-%m-%d");
+        self.get_json(&format!("stream-history?from={date}")).await
+    }
 
     pub async fn runtime_snapshot(&self) -> Result<RuntimeSnapshot, TestkitError> {
         let (status, streams) = tokio::join!(self.status(), self.streams());
