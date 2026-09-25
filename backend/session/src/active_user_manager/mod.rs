@@ -1586,17 +1586,9 @@ impl ActiveUserManager {
         };
         let mut addr_counts = HashMap::new();
         for stream in &connection_data.streams {
-            // Preserved streams do not occupy a counted slot — exclude from addr counts.
-            // They are still valid eviction candidates (see filter below), but they don't
-            // consume connection capacity, so they don't contribute to the "singleton addr" logic.
-            let contributes_to_count = if stream.preserved {
-                false
-            } else if let Some(token) = stream.session_token.as_deref() {
-                connection_data.sessions.iter().any(|s| s.token == token && s.lifecycle.is_counted())
-            } else {
-                true // orphan streams without a session are counted
-            };
-            if contributes_to_count {
+            // The stream kind is the charged slot. Session lifecycle may lag behind
+            // the stream registration, so it cannot determine eviction eligibility.
+            if !stream.preserved && connection_data.stream_kinds.contains_key(&stream.uid) {
                 addr_counts
                     .entry(stream.addr)
                     .and_modify(|count: &mut u8| *count = count.saturating_add(1))
@@ -1606,14 +1598,7 @@ impl ActiveUserManager {
         let candidates: Vec<_> = connection_data
             .streams
             .iter()
-            .filter(|stream| {
-                if let Some(token) = stream.session_token.as_deref() {
-                    connection_data.sessions.iter().any(|s| s.token == token && s.lifecycle.is_counted())
-                        || stream.preserved
-                } else {
-                    true
-                }
-            })
+            .filter(|stream| stream.preserved || connection_data.stream_kinds.contains_key(&stream.uid))
             .filter(|stream| {
                 let addr_count = addr_counts.get(&stream.addr).copied().unwrap_or(0);
                 if stream.preserved {

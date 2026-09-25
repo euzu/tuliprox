@@ -1128,7 +1128,17 @@ async fn run_agent_until_released(
             chunk = tokio::time::timeout(PLAYBACK_IDLE_TIMEOUT, body.next()) => {
                 let chunk = match chunk {
                     Ok(Some(Ok(chunk))) => chunk,
-                    Ok(Some(Err(err))) => return Ok(PlaybackOutcome::TransportError { message: err.to_string() }),
+                    Ok(Some(Err(err))) => {
+                        return Ok(if ready.is_none() {
+                            PlaybackOutcome::StreamInterrupted {
+                                frames: received_frames,
+                                bytes: received_bytes,
+                                message: err.to_string(),
+                            }
+                        } else {
+                            PlaybackOutcome::TransportError { message: err.to_string() }
+                        });
+                    }
                     Ok(None) => return Ok(PlaybackOutcome::UnexpectedEof { frames: received_frames, bytes: received_bytes }),
                     Err(_) => return Ok(PlaybackOutcome::IdleTimeout),
                 };
@@ -1210,6 +1220,62 @@ struct HeldPlayback {
     playback_id: String,
     release: oneshot::Sender<()>,
     task: tokio::task::JoinHandle<Result<PlaybackOutcome, TestkitError>>,
+}
+
+fn matches_expected_eviction(
+    playback_id: &str,
+    expected_terminations: &HashSet<String>,
+    outcome: &PlaybackOutcome,
+    kicked_session: bool,
+) -> bool {
+    expected_terminations.contains(playback_id)
+        && (matches!(outcome, PlaybackOutcome::UnexpectedEof { .. })
+            || (kicked_session && matches!(outcome, PlaybackOutcome::StreamInterrupted { .. })))
+}
+
+fn observe_new_stream_session(
+    streams: &serde_json::Value,
+    username: &str,
+    seen_uids: &mut HashSet<u32>,
+) -> Option<u64> {
+    let mut session_id = None;
+    for stream in streams.as_array()? {
+        let (Some(uid), Some(ts)) = (stream["uid"].as_u64(), stream["ts"].as_u64()) else {
+            continue;
+        };
+        let (Ok(uid), Ok(ts)) = (u32::try_from(uid), u32::try_from(ts)) else {
+            continue;
+        };
+        if seen_uids.insert(uid) && stream["username"].as_str() == Some(username) {
+            if session_id.is_some() {
+                return None;
+            }
+            session_id = Some((u64::from(ts) << 32) | u64::from(uid));
+        }
+    }
+    session_id
+}
+
+fn history_confirms_kick(history: &serde_json::Value, session_id: u64) -> bool {
+    history["items"].as_array().is_some_and(|items| {
+        items.iter().any(|item| {
+            item["session_id"].as_u64() == Some(session_id)
+                && item["disconnect_reason"].as_str() == Some("client_kicked")
+        })
+    })
+}
+
+async fn wait_for_kicked_session(observer: &TuliproxObserver, session_id: u64) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if observer.stream_history(session_id).await.is_ok_and(|history| history_confirms_kick(&history, session_id)) {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 
 #[derive(Clone)]
@@ -2181,6 +2247,8 @@ async fn execute_scenario_steps<'a>(
     let mut remote_playbacks: HashMap<String, String> = HashMap::new();
     let mut expected_terminations = HashSet::new();
     let mut playback_users = HashMap::new();
+    let mut seen_stream_uids = HashSet::new();
+    let mut playback_session_ids = HashMap::new();
     let mut admission_oracles = scenario.policy_contract.as_ref().map(|contract| {
         contract
             .users
@@ -2473,6 +2541,9 @@ async fn execute_scenario_steps<'a>(
                     start.playback_id.as_str(),
                     if step.expect.is_streaming() { "received_valid_frames" } else { "rejected_as_expected" },
                 ));
+                if start.expect_evicted && actual_streaming {
+                    expected_terminations.insert(start.playback_id.clone());
+                }
                 if remote_outcome.as_ref().is_some_and(PlaybackOutcome::is_streaming) {
                     remote_playbacks.insert(start.playback_id.clone(), actor.agent.clone());
                 }
@@ -2520,6 +2591,15 @@ async fn execute_scenario_steps<'a>(
             }
             if let Ok(snapshot) = observer.runtime_snapshot().await {
                 events.push((start.playback_id.as_str(), "runtime_observed"));
+                if actual_streaming && actor.agent == "local" {
+                    if let Some(username) = actor.username.as_deref() {
+                        if let Some(session_id) =
+                            observe_new_stream_session(&snapshot.streams, username, &mut seen_stream_uids)
+                        {
+                            playback_session_ids.insert(start.playback_id.clone(), session_id);
+                        }
+                    }
+                }
                 if let Some(policy) = &scenario.policy_contract {
                     if let Ok(slots) = provider_slot_count(&snapshot.status) {
                         if policy.provider_capacity().is_some_and(|limit| slots > limit) {
@@ -2568,7 +2648,23 @@ async fn execute_scenario_steps<'a>(
                     events.push((event_playback_id, "unexpected_clean_terminal"));
                     any_failed = true;
                 }
-                Ok(Ok(Ok(_))) => events.push((event_playback_id, "evicted")),
+                Ok(Ok(Ok(outcome))) => {
+                    let kicked_session = if matches!(outcome, PlaybackOutcome::StreamInterrupted { .. }) {
+                        if let Some(session_id) = playback_session_ids.get(&held.playback_id) {
+                            wait_for_kicked_session(observer, *session_id).await
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if matches_expected_eviction(&held.playback_id, &expected_terminations, &outcome, kicked_session) {
+                        events.push((event_playback_id, "evicted"));
+                    } else {
+                        events.push((event_playback_id, "unexpected_eviction_terminal"));
+                        any_failed = true;
+                    }
+                }
                 Ok(Ok(Err(_)) | Err(_)) => {
                     events.push((event_playback_id, "unexpected_eviction_terminal"));
                     any_failed = true;
@@ -2923,6 +3019,49 @@ fn marker_from_url(url: &str) -> Result<u32, TestkitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expected_eviction_requires_matching_playback_stream_termination() {
+        let expected = HashSet::from(["playback-a".to_owned()]);
+        let eof = PlaybackOutcome::UnexpectedEof { frames: 3, bytes: 100 };
+        assert!(matches_expected_eviction("playback-a", &expected, &eof, false));
+        let interrupted = PlaybackOutcome::StreamInterrupted {
+            frames: 3,
+            bytes: 100,
+            message: "error decoding response body".to_owned(),
+        };
+        assert!(!matches_expected_eviction("playback-a", &expected, &interrupted, false));
+        assert!(matches_expected_eviction("playback-a", &expected, &interrupted, true));
+        assert!(!matches_expected_eviction("playback-b", &expected, &interrupted, true));
+        assert!(!matches_expected_eviction("playback-b", &expected, &eof, false));
+        assert!(!matches_expected_eviction("playback-a", &expected, &PlaybackOutcome::IdleTimeout, true));
+        assert!(!matches_expected_eviction(
+            "playback-a",
+            &expected,
+            &PlaybackOutcome::TransportError { message: "connection failed".to_owned() },
+            true,
+        ));
+    }
+
+    #[test]
+    fn interrupted_stream_needs_matching_kick_record() {
+        let streams = serde_json::json!([
+            {"uid": 17, "ts": 123, "username": "alice"},
+            {"uid": 18, "ts": 123, "username": "bob"}
+        ]);
+        let mut seen = HashSet::new();
+        let session_id = observe_new_stream_session(&streams, "alice", &mut seen);
+        assert_eq!(session_id, Some((123_u64 << 32) | 17));
+        let history = serde_json::json!({"items": [
+            {"session_id": (123_u64 << 32) | 18, "disconnect_reason": "client_kicked"},
+            {"session_id": (123_u64 << 32) | 17, "disconnect_reason": "client_closed"}
+        ]});
+        assert!(!history_confirms_kick(&history, session_id.unwrap_or_default()));
+        let kicked = serde_json::json!({"items": [
+            {"session_id": (123_u64 << 32) | 17, "disconnect_reason": "client_kicked"}
+        ]});
+        assert!(history_confirms_kick(&kicked, session_id.unwrap_or_default()));
+    }
 
     fn test_origin_state(run_id: &str) -> OriginState {
         OriginState {

@@ -340,6 +340,8 @@ pub struct Start {
     pub playback_id: String,
     pub session_group: String,
     #[serde(default)]
+    pub expect_evicted: bool,
+    #[serde(default)]
     pub url: Option<String>,
     #[serde(default)]
     pub channel: Option<String>,
@@ -383,6 +385,7 @@ impl Scenario {
         Ok(scenario)
     }
 
+    #[allow(clippy::too_many_lines)]
     pub fn validate(&self) -> Result<(), TestkitError> {
         if self.schema_version != 1 {
             return Err(TestkitError::Configuration("unsupported scenario schema version".to_owned()));
@@ -412,6 +415,7 @@ impl Scenario {
         let mut command_ids = HashSet::new();
         let mut playback_ids = HashSet::new();
         let mut seen_playback_ids = HashSet::new();
+        let mut expected_evictions = HashSet::new();
         for step in &steps {
             if !command_ids.insert(step.command_id.as_str()) || step.command_id.is_empty() {
                 return Err(TestkitError::Configuration("command IDs must be unique and non-empty".to_owned()));
@@ -429,11 +433,33 @@ impl Scenario {
                         stop.playback_id
                     )));
                 }
+                if expected_evictions.contains(stop.playback_id.as_str()) {
+                    return Err(TestkitError::Configuration(format!(
+                        "playback {} expects eviction and cannot be explicitly stopped",
+                        stop.playback_id
+                    )));
+                }
                 playback_ids.remove(stop.playback_id.as_str());
                 continue;
             };
             if !actor_ids.contains(start.actor.as_str()) {
                 return Err(TestkitError::Configuration(format!("unknown actor {}", start.actor)));
+            }
+            if start.expect_evicted {
+                if step.expect.is_rejected()
+                    || self.actors.iter().any(|actor| actor.id == start.actor && actor.agent != "local")
+                    || ((start.vod_object.is_some()
+                        || start.range.is_some()
+                        || start.read_limit_bytes.is_some()
+                        || start.method.is_some())
+                        && (start.post_read_action.is_some_and(|action| action != PostReadAction::KeepOpen)
+                            || start.method.as_deref() == Some("HEAD")))
+                {
+                    return Err(TestkitError::Configuration(
+                        "expect_evicted requires a held streaming playback on a local actor".to_owned(),
+                    ));
+                }
+                expected_evictions.insert(start.playback_id.as_str());
             }
             if start.playback_id.is_empty() || start.session_group.is_empty() {
                 return Err(TestkitError::Configuration("start requires playback_id and session_group".to_owned()));
@@ -573,6 +599,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn expected_eviction_requires_held_vod_playback() -> Result<(), TestkitError> {
+        let mut scenario: Scenario = serde_saphyr::from_str(
+            r"
+schema_version: 1
+name: vod-eviction-validation
+tuliprox: { base_url: http://example.invalid, execution_mode: existing_instance }
+actors: [{ id: a, agent: local }]
+steps:
+  - command_id: start
+    start: { actor: a, playback_id: vod, session_group: vod, vod_object: movie.mkv, expect_evicted: true, post_read_action: close }
+",
+        )
+        .map_err(|error| TestkitError::Configuration(error.to_string()))?;
+        assert!(scenario.validate().is_err());
+
+        scenario.steps[0]
+            .start
+            .as_mut()
+            .ok_or_else(|| TestkitError::Configuration("missing start".to_owned()))?
+            .post_read_action = Some(PostReadAction::Pause);
+        assert!(scenario.validate().is_err());
+        scenario.steps[0]
+            .start
+            .as_mut()
+            .ok_or_else(|| TestkitError::Configuration("missing start".to_owned()))?
+            .post_read_action = Some(PostReadAction::KeepOpen);
+        assert!(scenario.validate().is_ok());
+        scenario.steps[0]
+            .start
+            .as_mut()
+            .ok_or_else(|| TestkitError::Configuration("missing start".to_owned()))?
+            .method = Some("HEAD".to_owned());
+        assert!(scenario.validate().is_err());
+        Ok(())
+    }
+
+    #[test]
     fn duplicate_playbacks_are_rejected() {
         let scenario = Scenario {
             schema_version: 1,
@@ -639,6 +702,7 @@ mod tests {
             "vod-range-reopen-strict-cap.yml",
             "vod-reopen-backpressured-body.yml",
             "live-ts-same-channel-retry-latest-wins.yml",
+            "live-ts-channel-switch-single-user-two-provider-slots.yml",
             "reentry-suppresses-evicted-retry.yml",
             "soft-slot-precedes-eviction.yml",
             "soft-slot-exhausts-without-upstream-leak.yml",
