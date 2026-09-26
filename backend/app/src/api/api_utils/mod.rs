@@ -34,13 +34,13 @@ use crate::{
     },
     repository::load_input_m3u_stream_url,
     utils::{
-        async_file_reader, async_file_writer, classify_output_resource_url, create_new_file_for_write,
-        debug_if_enabled, get_file_extension, request,
+        async_file_reader, async_file_writer, classify_output_resource_url, classify_resource_hop,
+        create_new_file_for_write, debug_if_enabled, get_file_extension, request,
         request::{
             classify_resource_destination, content_type_from_ext, parse_range, send_with_retry_and_provider,
             ResourceDestination,
         },
-        trace_if_enabled,
+        trace_if_enabled, ResourceHop,
     },
     BUILD_TIMESTAMP,
 };
@@ -3740,9 +3740,11 @@ async fn build_resource_stream_response(
 /// requests a provider or EPG entry can trigger through one resource link stays bounded.
 const RESOURCE_REDIRECT_LIMIT: u8 = 5;
 
-/// Whether a destination may be fetched through this instance's resources - the client cannot reach
-/// it, or it is local to this host and must not be reached at all.
-fn is_proxied_destination(policy: ResourceOutputPolicy) -> bool { policy != ResourceOutputPolicy::Direct }
+/// Whether outbound requests of this configuration may leave through a proxy, including one provided by
+/// the environment, because the public resource client honours both.
+fn proxy_in_use(app_state: &Arc<AppState>) -> bool {
+    app_state.app_config.config.load().proxy.is_some() || crate::model::proxy_env_present()
+}
 
 async fn fetch_resource_with_retry(
     app_state: &Arc<AppState>,
@@ -3764,16 +3766,14 @@ async fn fetch_resource_with_retry(
     let mut method = input.map_or(InputFetchMethod::GET, |i| i.method);
 
     for redirects in 0..=RESOURCE_REDIRECT_LIMIT {
-        // Every hop is classified on its own: a hop that can leave the local network must go through
-        // the configured proxy, because a direct request would disclose this host's address to the
-        // destination. A hop that cannot be reached from outside connects directly, because a proxy
-        // has no route to it and its address has to be validated while the connection is built.
-        let hop_policy = classify_output_resource_url(current_url.as_str()).await;
-        if hop_policy == ResourceOutputPolicy::Blocked {
+        // Every hop is routed on its own, so a redirect cannot move a request to an egress the hop
+        // itself would not have used.
+        let hop = classify_resource_hop(current_url.as_str(), proxy_in_use(app_state)).await;
+        if hop == ResourceHop::Blocked {
             debug!("Refused resource destination local to this host: {}", sanitize_sensitive_info(resource_url));
             return None;
         }
-        let proxied_hop = is_proxied_destination(hop_policy);
+        let use_proxy_aware_client = hop == ResourceHop::ViaProxy;
         let provider_config = current_input.and_then(|i| i.get_resolve_provider(current_url.as_str()));
         let response = match send_with_retry_and_provider(
             &app_state.app_config,
@@ -3783,10 +3783,10 @@ async fn fetch_resource_with_retry(
             // every hop is classified and no client-side redirect policy decides where the request ends.
             true,
             |resolved_url| {
-                let http_client = if proxied_hop {
-                    app_state.resource_http_client_no_redirect.load()
-                } else {
+                let http_client = if use_proxy_aware_client {
                     app_state.resource_public_http_client_no_redirect.load()
+                } else {
+                    app_state.resource_http_client_no_redirect.load()
                 };
                 request::get_client_request(
                     &http_client,

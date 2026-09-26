@@ -453,6 +453,8 @@ impl TryFrom<&SourcesConfigDto> for SourcesConfig {
             }
         }
 
+        check_unique_member_names(&inputs)?;
+
         let inputs: Vec<Arc<ConfigInput>> = inputs.into_iter().map(Arc::new).collect();
         let group_lookup = build_group_lookup(&inputs);
 
@@ -469,6 +471,34 @@ impl TryFrom<&SourcesConfigDto> for SourcesConfig {
 
         Ok(Self { batch_files, templates: dto.templates.clone(), provider, inputs, sources, group_lookup })
     }
+}
+
+/// Rejects duplicate input and alias names.
+///
+/// Input names and alias names share one namespace: both name a member in `group_lookup`, and that map
+/// decides which input a member belongs to. A duplicate would silently resolve to whichever member was
+/// inserted last, so a request would run against another input's playlist, credentials, and limits.
+/// Such a configuration is a load error, and it must be reported while the sources are read - a reload
+/// that returns an error leaves the running configuration in place.
+fn check_unique_member_names(inputs: &[ConfigInput]) -> Result<(), TuliproxError> {
+    let mut seen: HashMap<&str, &str> = HashMap::with_capacity(inputs.len());
+    for input in inputs {
+        if seen.insert(input.name.as_ref(), "input").is_some() {
+            return Err(TuliproxError::ConfigSource(format!("input names should be unique: {}", input.name)));
+        }
+    }
+    for input in inputs {
+        for alias in input.aliases.iter().flatten() {
+            if let Some(owner) = seen.get(alias.name.as_ref()) {
+                return Err(TuliproxError::ConfigSource(format!(
+                    "input alias names should be unique: '{}' of input '{}' already names an {owner}",
+                    alias.name, input.name
+                )));
+            }
+            seen.insert(alias.name.as_ref(), "alias");
+        }
+    }
+    Ok(())
 }
 
 impl SourcesConfig {
@@ -576,9 +606,104 @@ impl SourcesConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::ConfigProvider;
-    use shared::model::{ConfigProviderDto, ProviderUrlSelectionPolicy};
+    use super::{ConfigProvider, SourcesConfig};
+    use shared::model::{
+        ConfigInputAliasDto, ConfigInputDto, ConfigProviderDto, ProviderUrlSelectionPolicy, SourcesConfigDto,
+    };
     use std::net::IpAddr;
+
+    fn sources_dto() -> SourcesConfigDto {
+        SourcesConfigDto {
+            templates: None,
+            provider: None,
+            inputs: vec![ConfigInputDto {
+                name: "first-input".into(),
+                url: "https://provider.example/playlist.m3u".to_string(),
+                ..ConfigInputDto::default()
+            }],
+            sources: Vec::new(),
+        }
+    }
+
+    /// A duplicate member name silently resolves to whichever entry was inserted last, so a request
+    /// would run against another input.
+    #[test]
+    fn duplicate_input_names_fail_the_config_load() {
+        let mut dto = sources_dto();
+        dto.inputs.push(ConfigInputDto {
+            name: "first-input".into(),
+            url: "https://other.example/playlist.m3u".to_string(),
+            ..ConfigInputDto::default()
+        });
+
+        let error = SourcesConfig::try_from(&dto).expect_err("duplicate input name must be rejected");
+
+        assert!(error.to_string().contains("input names should be unique"), "{error}");
+    }
+
+    #[test]
+    fn duplicate_alias_names_fail_the_config_load() {
+        let mut dto = sources_dto();
+        dto.inputs[0].aliases = Some(vec![ConfigInputAliasDto {
+            name: "shared-alias".into(),
+            url: "https://provider.example/alias.m3u".to_string(),
+            ..ConfigInputAliasDto::default()
+        }]);
+        dto.inputs.push(ConfigInputDto {
+            name: "second-input".into(),
+            url: "https://second.example/playlist.m3u".to_string(),
+            aliases: Some(vec![ConfigInputAliasDto {
+                name: "shared-alias".into(),
+                url: "https://second.example/alias.m3u".to_string(),
+                ..ConfigInputAliasDto::default()
+            }]),
+            ..ConfigInputDto::default()
+        });
+
+        let error = SourcesConfig::try_from(&dto).expect_err("duplicate alias name must be rejected");
+
+        assert!(error.to_string().contains("input alias names should be unique"), "{error}");
+    }
+
+    #[test]
+    fn an_alias_name_colliding_with_an_input_name_fails_the_config_load() {
+        let mut dto = sources_dto();
+        dto.inputs.push(ConfigInputDto {
+            name: "second-input".into(),
+            url: "https://second.example/playlist.m3u".to_string(),
+            aliases: Some(vec![ConfigInputAliasDto {
+                name: "first-input".into(),
+                url: "https://second.example/alias.m3u".to_string(),
+                ..ConfigInputAliasDto::default()
+            }]),
+            ..ConfigInputDto::default()
+        });
+
+        let error = SourcesConfig::try_from(&dto).expect_err("alias shadowing an input name must be rejected");
+
+        assert!(error.to_string().contains("already names an input"), "{error}");
+    }
+
+    #[test]
+    fn distinct_member_names_load() {
+        let mut dto = sources_dto();
+        dto.inputs.push(ConfigInputDto {
+            name: "second-input".into(),
+            url: "https://second.example/playlist.m3u".to_string(),
+            aliases: Some(vec![ConfigInputAliasDto {
+                name: "second-alias".into(),
+                url: "https://second.example/alias.m3u".to_string(),
+                ..ConfigInputAliasDto::default()
+            }]),
+            ..ConfigInputDto::default()
+        });
+
+        let sources = SourcesConfig::try_from(&dto).expect("distinct member names must load");
+
+        assert_eq!(sources.inputs.len(), 2);
+        assert!(sources.group_lookup.contains_key("first-input"));
+        assert!(sources.group_lookup.contains_key("second-input"));
+    }
 
     #[test]
     fn hostnames_from_urls_preserve_definition_order() {

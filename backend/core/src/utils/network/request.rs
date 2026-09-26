@@ -103,22 +103,71 @@ async fn lookup_socket_addrs(host: &str, port: u16) -> std::io::Result<Vec<Socke
     Ok(tokio::net::lookup_host((host, port)).await?.collect())
 }
 
+/// Hosts of the proxies an outbound request may be routed through.
+///
+/// A resource client that honours the configured proxy asks its resolver about the proxy host as well,
+/// and a proxy commonly lives on the loopback interface (`http://localhost:8118`). That name is exempt
+/// from the local-address guard, because a proxy on this host is a valid destination for this host.
+fn proxy_hosts(app_config: &AppConfig) -> Vec<Arc<str>> {
+    const ENV_KEYS: [&str; 3] = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"];
+    let mut hosts = Vec::new();
+    let config = app_config.config.load();
+    if let Some(proxy) = config.proxy.as_ref() {
+        if let Some(host) =
+            crate::model::parse_proxy_url_with_http_fallback(&proxy.url).and_then(|url| url.host_str().map(Arc::from))
+        {
+            hosts.push(host);
+        }
+    }
+    drop(config);
+    for (key, value) in std::env::vars_os() {
+        let (Some(key), Some(value)) = (key.to_str(), value.to_str()) else {
+            continue;
+        };
+        if !ENV_KEYS.iter().any(|candidate| candidate.eq_ignore_ascii_case(key)) {
+            continue;
+        }
+        if let Some(host) =
+            crate::model::parse_proxy_url_with_http_fallback(value).and_then(|url| url.host_str().map(Arc::from))
+        {
+            hosts.push(host);
+        }
+    }
+    hosts
+}
+
 /// DNS layer of the proxied resource client.
 ///
 /// Classifying a destination leaves a window: a name can resolve to a public address while it is
 /// classified and to a local one while the connection is built. This resolver closes that window,
 /// because the addresses it validates are the addresses reqwest connects to. It deliberately does not
 /// consult [`DestinationCache`]: a remembered verdict would reopen exactly that window.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ResourceDestinationResolver;
+///
+/// The proxy hosts are exempt: they are resolved without the guard, so a proxy on the loopback
+/// interface stays usable. Nothing else is, because everything else is a destination a client picked.
+#[derive(Debug, Clone, Default)]
+pub struct ResourceDestinationResolver {
+    allowed_hosts: Arc<[Arc<str>]>,
+}
+
+impl ResourceDestinationResolver {
+    /// Resolver that resolves the proxy hosts of this configuration and guards every other name.
+    pub fn allowing_proxy_hosts(app_config: &AppConfig) -> Self {
+        Self { allowed_hosts: proxy_hosts(app_config).into() }
+    }
+}
 
 impl reqwest::dns::Resolve for ResourceDestinationResolver {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
         let host = name.as_str().to_owned();
+        let allowed = self.allowed_hosts.iter().any(|allowed| allowed.as_ref().eq_ignore_ascii_case(&host));
         Box::pin(async move {
-            let addresses = resolve_resource_socket_addrs(&host, 0)
-                .await
-                .map_err(|err| Box::new(err) as Box<dyn std::error::Error + Send + Sync>)?;
+            let addresses = if allowed {
+                lookup_socket_addrs(&host, 0).await
+            } else {
+                resolve_resource_socket_addrs(&host, 0).await
+            }
+            .map_err(|err| Box::new(err) as Box<dyn std::error::Error + Send + Sync>)?;
             Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
         })
     }
@@ -234,6 +283,9 @@ const RESOURCE_DESTINATION_LOOKUP_TIMEOUT: Duration = Duration::from_millis(250)
 
 struct RememberedDestination {
     verdict: ResourceDestination,
+    /// Whether the verdict came from a resolved answer. A name whose lookup produced none stays
+    /// non-public, but nothing is known about it either.
+    answered: bool,
     expires_at: Instant,
 }
 
@@ -266,10 +318,10 @@ impl DestinationCache {
         SHARED.get_or_init(DestinationCache::new)
     }
 
-    fn verdict(&self, host: &str) -> Option<ResourceDestination> {
+    fn verdict_and_answer(&self, host: &str) -> Option<(ResourceDestination, bool)> {
         let mut destinations = self.destinations.lock().unwrap_or_else(PoisonError::into_inner);
         match destinations.get(host) {
-            Some(entry) if entry.expires_at > Instant::now() => Some(entry.verdict),
+            Some(entry) if entry.expires_at > Instant::now() => Some((entry.verdict, entry.answered)),
             Some(_) => {
                 destinations.pop(host);
                 None
@@ -278,9 +330,10 @@ impl DestinationCache {
         }
     }
 
-    fn remember(&self, host: &str, verdict: ResourceDestination, ttl: Duration) {
+    fn remember(&self, host: &str, verdict: ResourceDestination, answered: bool, ttl: Duration) {
         let mut destinations = self.destinations.lock().unwrap_or_else(PoisonError::into_inner);
-        destinations.put(host.to_owned(), RememberedDestination { verdict, expires_at: Instant::now() + ttl });
+        let entry = RememberedDestination { verdict, answered, expires_at: Instant::now() + ttl };
+        destinations.put(host.to_owned(), entry);
     }
 }
 
@@ -290,12 +343,19 @@ impl DestinationCache {
 /// per verdict lifetime and remembered in the process-wide memo. A name that cannot be resolved is
 /// reported as [`ResourceDestination::Private`]: callers must not hand a possibly internal name to a
 /// client, and the fetch attempt itself decides whether the destination is reachable.
-pub async fn classify_resource_destination(host: &str) -> ResourceDestination {
+pub async fn classify_resource_destination(host: &str) -> ResourceDestination { classify_host(host).await.0 }
+
+/// Classifies a destination and reports whether the verdict came from a resolved answer.
+///
+/// The second value separates "proven to be local" from "nothing was proven": both keep a client away
+/// from the destination, but only the first says the destination cannot be reached from outside.
+pub(crate) async fn classify_host(host: &str) -> (ResourceDestination, bool) {
     if let Ok(address) = host_literal(host).parse::<IpAddr>() {
-        return classify_ip(address);
+        // An IP literal is decided by its address alone, so the answer is factual either way.
+        return (classify_ip(address), true);
     }
     let cache = DestinationCache::shared();
-    if let Some(verdict) = cache.verdict(host) {
+    if let Some(verdict) = cache.verdict_and_answer(host) {
         return verdict;
     }
 
@@ -304,8 +364,9 @@ pub async fn classify_resource_destination(host: &str) -> ResourceDestination {
         resolved.extend(addresses.map(|address| address.ip()));
     }
     let (verdict, ttl) = verdict_for_addresses(&resolved);
-    cache.remember(host, verdict, ttl);
-    verdict
+    let answered = !resolved.is_empty();
+    cache.remember(host, verdict, answered, ttl);
+    (verdict, answered)
 }
 
 /// Aggregates the addresses a name resolved to into a single verdict, and the time that verdict may be
@@ -3376,6 +3437,24 @@ mod tests {
     }
 
     #[test]
+    fn proxy_hosts_are_exempt_from_the_connect_time_local_address_guard() {
+        use crate::{model::Config, utils::request::proxy_hosts};
+
+        // `localhost` is what a proxy on this host is usually configured as, and reqwest asks the
+        // resolver for the proxy host as well: guarding it would break every fetch through such a proxy.
+        let app_config = make_test_app_config(Config {
+            proxy: Some(crate::model::ProxyConfig {
+                url: "http://localhost:8118".to_string(),
+                username: None,
+                password: None,
+            }),
+            ..Config::default()
+        });
+
+        assert_eq!(proxy_hosts(&app_config), vec![Arc::from("localhost")]);
+    }
+
+    #[test]
     fn resolved_address_sets_are_aggregated_for_exposure() {
         use super::{
             verdict_for_addresses, RESOURCE_DESTINATION_PRIVATE_TTL, RESOURCE_DESTINATION_PUBLIC_TTL,
@@ -3415,7 +3494,7 @@ mod tests {
         use reqwest::dns::Resolve;
         use std::str::FromStr;
 
-        let resolver = ResourceDestinationResolver;
+        let resolver = ResourceDestinationResolver::default();
         let name = reqwest::dns::Name::from_str("127.0.0.1").expect("valid destination name");
         let result = resolver.resolve(name).await;
 
@@ -3423,6 +3502,14 @@ mod tests {
             Ok(_) => panic!("local-only destination must be refused"),
             Err(error) => assert!(error.to_string().contains("local to this host"), "{error}"),
         }
+
+        // Only the proxy hosts are exempt, so a proxy on the loopback interface stays usable while a
+        // destination that resolves to the loopback interface is still refused.
+        let resolver = ResourceDestinationResolver { allowed_hosts: vec![Arc::from("localhost")].into() };
+        let name = reqwest::dns::Name::from_str("localhost").expect("valid proxy name");
+        assert!(resolver.resolve(name).await.is_ok(), "the configured proxy host must resolve");
+        let name = reqwest::dns::Name::from_str("127.0.0.1").expect("valid destination name");
+        assert!(resolver.resolve(name).await.is_err(), "a destination may not use the exemption");
     }
 
     fn make_test_app_config(config: Config) -> Arc<AppConfig> {

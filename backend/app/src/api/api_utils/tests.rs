@@ -4697,7 +4697,13 @@ async fn no_redirect_resource_ignores_configured_proxy() {
     }));
     let client = crate::api::model::create_resource_http_client_no_redirect(&app_state.app_config)
         .expect("resource HTTP client");
-    let _ = client.get("http://192.0.2.1/icon.png").timeout(std::time::Duration::from_millis(100)).send().await;
+    // 192.0.2.1 (TEST-NET-1) is not routable, so a direct attempt fails by timing out or refusing the
+    // connection. A response would mean the request was answered by the proxy after all.
+    let result = client.get("http://192.0.2.1/icon.png").timeout(std::time::Duration::from_millis(100)).send().await;
+    assert!(
+        result.as_ref().is_err_and(|err| err.is_timeout() || err.is_connect()),
+        "the direct path must be attempted: {result:?}"
+    );
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(100), proxy_task).await.is_err(),
         "resource client must not send requests through the configured proxy"
@@ -4713,6 +4719,64 @@ async fn public_resource_client_honours_the_configured_proxy() {
     let (proxy_addr, proxy_task) = spawn_legacy_hls_test_origin(response_head.to_string(), b"png".to_vec()).await;
     app_state.app_config.config.store(Arc::new(Config {
         proxy: Some(crate::model::ProxyConfig { url: format!("http://{proxy_addr}"), username: None, password: None }),
+        ..Config::default()
+    }));
+    let client = crate::api::model::create_resource_public_http_client_no_redirect(&app_state.app_config)
+        .expect("resource HTTP client");
+
+    let response = client.get("http://8.8.8.8/icon.png").send().await.expect("request reaches the proxy");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let request = tokio::time::timeout(std::time::Duration::from_secs(2), proxy_task)
+        .await
+        .expect("request must reach proxy")
+        .expect("proxy task");
+    assert!(request.starts_with("GET http://8.8.8.8/icon.png HTTP/1.1\r\n"), "{request}");
+}
+
+#[tokio::test]
+async fn an_unresolved_resource_name_is_fetched_through_the_configured_proxy() {
+    // A resource name that does not resolve locally is still resolvable through a configured proxy (for
+    // example with remote DNS), so the fetch must not be pinned to the direct client.
+    let app_state = create_test_app_state();
+    let response_head = "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 3\r\nConnection: close\r\n\r\n";
+    let (proxy_addr, proxy_task) = spawn_legacy_hls_test_origin(response_head.to_string(), b"png".to_vec()).await;
+    app_state.app_config.config.store(Arc::new(Config {
+        proxy: Some(crate::model::ProxyConfig { url: format!("http://{proxy_addr}"), username: None, password: None }),
+        ..Config::default()
+    }));
+    let client = reqwest::Client::builder()
+        .proxy(reqwest::Proxy::all(format!("http://{proxy_addr}")).expect("test proxy"))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("mock proxy client");
+    app_state.resource_public_http_client_no_redirect.store(Arc::new(client));
+
+    let response =
+        resource_proxy_response(&app_state, "http://unresolved.invalid/logo.png", &HeaderMap::new(), None).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.into_body().collect().await.expect("image body").to_bytes(), Bytes::from_static(b"png"));
+    let request = tokio::time::timeout(std::time::Duration::from_secs(2), proxy_task)
+        .await
+        .expect("request must reach proxy")
+        .expect("proxy task");
+    assert!(request.starts_with("GET http://unresolved.invalid/logo.png HTTP/1.1\r\n"), "{request}");
+}
+
+#[tokio::test]
+async fn public_resource_client_reaches_a_proxy_on_loopback() {
+    // A proxy is commonly configured on the loopback interface (`http://localhost:8118`), so the
+    // connect-time guard of the public resource client must not reject the proxy host itself.
+    let app_state = create_test_app_state();
+    let response_head = "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 3\r\nConnection: close\r\n\r\n";
+    let (proxy_addr, proxy_task) = spawn_legacy_hls_test_origin(response_head.to_string(), b"png".to_vec()).await;
+    app_state.app_config.config.store(Arc::new(Config {
+        proxy: Some(crate::model::ProxyConfig {
+            url: format!("http://localhost:{}", proxy_addr.port()),
+            username: None,
+            password: None,
+        }),
         ..Config::default()
     }));
     let client = crate::api::model::create_resource_public_http_client_no_redirect(&app_state.app_config)

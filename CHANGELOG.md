@@ -1041,8 +1041,16 @@
   reached through a redirect - goes through the configured `proxy` block. Resource requests therefore cannot disclose
   the operator's address to a resource host. A redirect to a destination local to the Tuliprox host is refused without
   being requested, and both resource clients refuse such an address again while the connection is built, so a name that
-  was classified as public cannot resolve to a local address afterwards. Redirects are followed one hop at a time,
-  bounded to five hops.
+  was classified as public cannot resolve to a local address afterwards. The configured proxy hosts are exempt from
+  that guard, so a proxy on the loopback interface (`proxy: http://localhost:8118`) keeps working instead of making
+  every public resource fetch fail. A resource name that does not resolve locally is fetched through the configured
+  proxy, which can still resolve it (for example with remote DNS); a destination that resolves to a private address
+  keeps connecting directly. Redirects are followed one hop at a time, bounded to five hops.
+
+- **Duplicate input and alias names fail the configuration load again.** Input names and alias names share one
+  namespace, and a duplicate silently resolved to whichever member was inserted last, so a request could run against
+  another input's playlist, credentials, and limits. The check that rejects such a configuration is part of the sources
+  load again, which also means an invalid reload is reported instead of replacing the running configuration.
 
 - **Streaming and connection management: resolved silent async hang / deadlock during client kicks and concurrent stream load.**
   Under concurrent stream traffic, `tuliprox` would occasionally stop logging and serving requests (the Web UI became

@@ -297,7 +297,7 @@ pub fn create_resource_http_client_no_redirect(app_config: &AppConfig) -> Result
     let config = app_config.config.load();
     let mut builder = create_client_with_redirect(app_config, reqwest::redirect::Policy::none())
         .no_proxy()
-        .dns_resolver(ResourceDestinationResolver)
+        .dns_resolver(ResourceDestinationResolver::default())
         .http1_only();
     if config.connect_timeout_secs > 0 {
         builder = builder.connect_timeout(Duration::from_secs(u64::from(config.connect_timeout_secs)));
@@ -312,7 +312,7 @@ pub fn create_resource_http_client_no_redirect(app_config: &AppConfig) -> Result
 /// addresses local to this host, so a name that was classified as public cannot resolve to a local
 /// address while the connection is built.
 pub fn create_resource_public_http_client_no_redirect(app_config: &AppConfig) -> Result<Client, TuliproxError> {
-    create_no_redirect_client(app_config, Some(Arc::new(ResourceDestinationResolver)))
+    create_no_redirect_client(app_config, Some(Arc::new(ResourceDestinationResolver::allowing_proxy_hosts(app_config))))
 }
 
 fn create_no_redirect_client(

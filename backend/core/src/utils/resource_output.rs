@@ -1,7 +1,14 @@
-use crate::utils::request::{classify_resource_destination, ResourceDestination};
+use crate::utils::request::{classify_host, ResourceDestination};
+use futures::{stream, StreamExt};
 use shared::model::{ResourceOutputPolicy, XtreamMappingFlags, XtreamMappingOptions, XtreamPlaylistItem};
 use std::borrow::Cow;
 use url::Url;
+
+/// How many destinations of one item are classified at the same time.
+///
+/// An item can carry a whole season list of icons, and a lookup has its own budget, so classifying one
+/// host after the other would multiply that budget by the field count.
+const RESOURCE_HOST_CLASSIFY_CONCURRENCY: usize = 8;
 
 /// Host of a resource URL without parsing it, for the shape provider data actually uses.
 ///
@@ -40,6 +47,49 @@ fn resource_host(resource_url: &str) -> Option<Cow<'_, str>> {
     matches!(url.scheme(), "http" | "https").then(|| url.host_str().map(|host| Cow::Owned(host.to_owned())))?
 }
 
+/// Where a hop of a resource fetch must be routed.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ResourceHop {
+    /// The destination can leave the local network: fetched through the client that honours the
+    /// configured proxy, so the request cannot disclose the address of this host.
+    ViaProxy,
+    /// The destination is only reachable from here: fetched by connecting directly, because a proxy has
+    /// no route to it and its address is validated while the connection is built.
+    Direct,
+    /// The destination is local to this host: refused, because the fetch would turn this instance into
+    /// a reader for itself.
+    Blocked,
+}
+
+/// Routes a hop of a resource fetch.
+///
+/// [`classify_output_resource_url`] answers what a client may be handed; this answers who fetches it.
+/// The class of the destination decides, with one case decided by what is *not* known: a name whose
+/// lookup produced no answer is neither reachable directly nor provably public. The configured proxy is
+/// then the only egress that can still resolve it, so it is used when there is one - which also keeps
+/// this host's address out of the request. Without a proxy nothing changes: the direct client tries and
+/// fails, as it would have anyway.
+pub async fn classify_resource_hop(resource_url: &str, proxy_configured: bool) -> ResourceHop {
+    let Some(host) = resource_host(resource_url) else {
+        return ResourceHop::Blocked;
+    };
+    match classify_host(&host).await {
+        (ResourceDestination::Public, _) => ResourceHop::ViaProxy,
+        (ResourceDestination::Blocked, _) => ResourceHop::Blocked,
+        // A destination that is not provably public connects directly: that is what keeps a
+        // self-hosted server on the local network reachable, and a name that resolved to a private
+        // address is exactly that. Only a name that produced no answer at all is fetched through the
+        // configured proxy, because the direct client cannot resolve it either.
+        (ResourceDestination::Private, answered) => {
+            if answered || !proxy_configured {
+                ResourceHop::Direct
+            } else {
+                ResourceHop::ViaProxy
+            }
+        }
+    }
+}
+
 /// Classifies a resource URL that is about to be written into player output.
 ///
 /// This decides what a client may reach, so the URL is read with the same parser a client uses rather
@@ -60,7 +110,12 @@ pub async fn classify_output_resource_url(resource_url: &str) -> ResourceOutputP
     let Some(host) = url.host_str() else {
         return ResourceOutputPolicy::Blocked;
     };
-    match classify_resource_destination(host).await {
+    classify_resource_host(host).await
+}
+
+/// Output policy of a single destination host.
+async fn classify_resource_host(host: &str) -> ResourceOutputPolicy {
+    match crate::utils::request::classify_resource_destination(host).await {
         ResourceDestination::Public => ResourceOutputPolicy::Direct,
         ResourceDestination::Private => ResourceOutputPolicy::Proxy,
         ResourceDestination::Blocked => ResourceOutputPolicy::Blocked,
@@ -92,12 +147,15 @@ pub async fn prepare_xtream_resource_hosts(item: &XtreamPlaylistItem, options: &
         }
         unresolved.push(host.into_owned());
     });
-    for host in unresolved {
-        let policy = match classify_resource_destination(&host).await {
-            ResourceDestination::Public => ResourceOutputPolicy::Direct,
-            ResourceDestination::Private => ResourceOutputPolicy::Proxy,
-            ResourceDestination::Blocked => ResourceOutputPolicy::Blocked,
-        };
+    let classified: Vec<_> = stream::iter(unresolved)
+        .map(|host| async move {
+            let policy = classify_resource_host(&host).await;
+            (host, policy)
+        })
+        .buffered(RESOURCE_HOST_CLASSIFY_CONCURRENCY)
+        .collect()
+        .await;
+    for (host, policy) in classified {
         options.resource_host_policies.insert(host, policy);
     }
 }
@@ -113,6 +171,23 @@ mod tests {
         utils::Internable,
     };
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn an_unanswered_name_is_routed_through_a_configured_proxy() {
+        use super::{classify_resource_hop, ResourceHop};
+
+        // `.invalid` is reserved and never resolves: the destination is neither reachable directly nor
+        // provably local, so a configured proxy is the only egress that can still resolve it.
+        assert_eq!(classify_resource_hop("http://unresolved.invalid/logo.png", false).await, ResourceHop::Direct);
+        assert_eq!(classify_resource_hop("http://unresolved.invalid/logo.png", true).await, ResourceHop::ViaProxy);
+        // A destination on a private network is reachable directly and not through a proxy, so it stays
+        // direct however a proxy is configured.
+        assert_eq!(classify_resource_hop("http://192.168.1.20/logo.png", true).await, ResourceHop::Direct);
+        // A local destination is refused, and a public one always uses the client that honours the proxy.
+        assert_eq!(classify_resource_hop("http://127.0.0.1/logo.png", true).await, ResourceHop::Blocked);
+        assert_eq!(classify_resource_hop("http://8.8.8.8/logo.png", true).await, ResourceHop::ViaProxy);
+        assert_eq!(classify_resource_hop("media-server://image/plex/server/item", true).await, ResourceHop::Blocked);
+    }
 
     #[test]
     fn resource_host_reads_the_same_host_a_parser_reads() {
