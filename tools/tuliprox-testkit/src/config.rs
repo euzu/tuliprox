@@ -132,6 +132,8 @@ pub struct FixtureStalker {
     pub refuse_create_link_once: bool,
     /// Channels whose `create_link` is always refused with the same stale-session body.
     pub refuse_create_link_markers: Vec<u32>,
+    /// Serve a distinct `cmd_1` descriptor command alongside the raw `cmd`.
+    pub separate_descriptor_command: bool,
 }
 
 impl FixtureStalker {
@@ -145,6 +147,7 @@ impl Default for FixtureStalker {
             mag_preset: "generic_safe".to_owned(),
             refuse_create_link_once: false,
             refuse_create_link_markers: Vec::new(),
+            separate_descriptor_command: false,
         }
     }
 }
@@ -377,6 +380,12 @@ pub struct AssertOrigin {
     /// playback resolved the requested channel's own stored command.
     #[serde(default)]
     pub stalker_create_link_markers: Option<Vec<u32>>,
+    /// Markers resolved through the portal's `cmd_1` descriptor command.
+    #[serde(default)]
+    pub stalker_descriptor_markers: Option<Vec<u32>>,
+    /// Markers resolved through the raw `cmd` fallback command.
+    #[serde(default)]
+    pub stalker_raw_command_markers: Option<Vec<u32>>,
 }
 
 /// Per-step assertions against the SUT runtime status (`/api/v1/status`).

@@ -55,6 +55,8 @@ pub struct StalkerRawItem {
     #[serde(default)]
     pub cmd: Option<String>,
     #[serde(default)]
+    pub cmd_1: Option<String>,
+    #[serde(default)]
     pub logo: Option<String>,
     #[serde(default)]
     pub stream_icon: Option<String>,

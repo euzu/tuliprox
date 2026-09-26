@@ -350,6 +350,9 @@ impl IsolatedFixture {
         if input.stalker.refuse_create_link_once {
             origin_cmd.arg("--stalker-refuse-create-link-once");
         }
+        if input.stalker.separate_descriptor_command {
+            origin_cmd.arg("--stalker-separate-descriptor-command");
+        }
         if !input.stalker.refuse_create_link_markers.is_empty() {
             let markers =
                 input.stalker.refuse_create_link_markers.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
@@ -606,6 +609,7 @@ mod tests {
             mag_preset: "ministra_modern".to_owned(),
             refuse_create_link_once: true,
             refuse_create_link_markers: vec![19],
+            separate_descriptor_command: false,
         };
         let plan = FixtureInputPlan { input_type: crate::config::FixtureInputType::Stalker, stalker: &stalker };
         let source = render_sources(

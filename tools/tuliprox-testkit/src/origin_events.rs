@@ -100,6 +100,8 @@ pub struct StalkerPortalStats {
     pub token_refusals: u64,
     /// Markers the portal answered with a stream URL, sorted and deduplicated.
     pub resolved_markers: Vec<u32>,
+    pub resolved_descriptor_markers: Vec<u32>,
+    pub resolved_raw_command_markers: Vec<u32>,
 }
 
 #[must_use]

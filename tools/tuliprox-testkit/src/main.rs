@@ -126,6 +126,8 @@ enum Command {
         /// Markers whose `create_link` the emulated Stalker portal always refuses.
         #[arg(long, value_delimiter = ',')]
         stalker_refuse_create_link_markers: Vec<u32>,
+        #[arg(long)]
+        stalker_separate_descriptor_command: bool,
     },
     /// Execute a local, sequential scenario against Tuliprox URLs.
     Controller {
@@ -188,16 +190,28 @@ struct StalkerPortal {
     /// the session recovery this fixture exists for.
     stale_session: bool,
     refuse_markers: Vec<u32>,
+    command_layout: StalkerCommandLayout,
+}
+
+#[derive(Clone, Copy)]
+enum StalkerCommandLayout {
+    Shared,
+    Separate,
 }
 
 impl StalkerPortal {
-    fn new(refuse_once: bool, refuse_markers: Vec<u32>) -> Self {
+    fn new(refuse_once: bool, refuse_markers: Vec<u32>, separate_descriptor_command: bool) -> Self {
         Self {
             stats: StalkerPortalStats::default(),
             refuse_once,
             refuse_once_armed: refuse_once,
             stale_session: false,
             refuse_markers,
+            command_layout: if separate_descriptor_command {
+                StalkerCommandLayout::Separate
+            } else {
+                StalkerCommandLayout::Shared
+            },
         }
     }
 
@@ -232,10 +246,21 @@ impl StalkerPortal {
         true
     }
 
-    fn record_resolution(&mut self, marker: u32) {
+    fn record_resolution(&mut self, marker: u32, command_source: Option<&str>) {
         if !self.stats.resolved_markers.contains(&marker) {
             self.stats.resolved_markers.push(marker);
             self.stats.resolved_markers.sort_unstable();
+        }
+        let markers = match command_source {
+            Some("descriptor") => Some(&mut self.stats.resolved_descriptor_markers),
+            Some("raw") => Some(&mut self.stats.resolved_raw_command_markers),
+            _ => None,
+        };
+        if let Some(markers) = markers {
+            if !markers.contains(&marker) {
+                markers.push(marker);
+                markers.sort_unstable();
+            }
         }
     }
 }
@@ -279,6 +304,7 @@ async fn run(cli: Cli) -> Result<RunExit, TestkitError> {
             limit_mode,
             stalker_refuse_create_link_once,
             stalker_refuse_create_link_markers,
+            stalker_separate_descriptor_command,
         } => {
             markers.sort_unstable();
             markers.dedup();
@@ -306,6 +332,7 @@ async fn run(cli: Cli) -> Result<RunExit, TestkitError> {
                     stalker: Arc::new(Mutex::new(StalkerPortal::new(
                         stalker_refuse_create_link_once,
                         stalker_refuse_create_link_markers,
+                        stalker_separate_descriptor_command,
                     ))),
                     tracker,
                 },
@@ -737,11 +764,13 @@ async fn stalker_load(
         }))
         .into_response(),
         ("itv", "get_ordered_list") => {
+            let separate_descriptor_command =
+                matches!(state.stalker.lock().await.command_layout, StalkerCommandLayout::Separate);
             let channels = state
                 .markers
                 .iter()
                 .map(|marker| {
-                    json!({
+                    let mut channel = json!({
                         "id": marker.to_string(),
                         "name": format!("Test channel {marker}"),
                         "number": marker.to_string(),
@@ -750,7 +779,12 @@ async fn stalker_load(
                         "cmd": format!("ffmpeg http://{host}/ch/{marker}"),
                         "logo": format!("http://{host}/logo/{marker}.png"),
                         "tv_archive": 0,
-                    })
+                    });
+                    if separate_descriptor_command {
+                        channel["cmd"] = json!(format!("ffmpeg http://{host}/raw/{marker}"));
+                        channel["cmd_1"] = json!(format!("ffmpeg http://{host}/descriptor/{marker}"));
+                    }
+                    channel
                 })
                 .collect::<Vec<_>>();
             let count = channels.len();
@@ -760,8 +794,8 @@ async fn stalker_load(
             .into_response()
         }
         ("itv", "create_link") => {
-            let Some(marker) = query
-                .get("cmd")
+            let command = query.get("cmd");
+            let Some(marker) = command
                 .and_then(|cmd| cmd.split('?').next())
                 .and_then(|cmd| cmd.trim_end_matches('/').rsplit('/').next())
                 .and_then(|segment| segment.parse::<u32>().ok())
@@ -776,7 +810,8 @@ async fn stalker_load(
                 // A stale session: Ministra reports it inside a `200 OK` body.
                 return Json(json!({ "code": 44, "text": "Authorization failed" })).into_response();
             }
-            portal.record_resolution(marker);
+            let command_source = command.and_then(|cmd| cmd.trim_end_matches('/').rsplit('/').nth(1));
+            portal.record_resolution(marker, command_source);
             drop(portal);
             let url = format!("http://{host}/live/{marker}.ts?run={}", state.run_id.0);
             let cmd = BASE64.encode(format!("ffmpeg {url}"));
@@ -2418,6 +2453,8 @@ async fn check_stalker_assertions<'a>(
         && assert_origin.stalker_create_links_at_least.is_none()
         && assert_origin.stalker_token_refusals_at_least.is_none()
         && assert_origin.stalker_create_link_markers.is_none()
+        && assert_origin.stalker_descriptor_markers.is_none()
+        && assert_origin.stalker_raw_command_markers.is_none()
     {
         return;
     }
@@ -2445,6 +2482,24 @@ async fn check_stalker_assertions<'a>(
         if expected != stats.resolved_markers {
             *any_failed = true;
             events.push((step_id, "stalker_resolved_markers_mismatch"));
+        }
+    }
+    if let Some(expected) = assert_origin.stalker_descriptor_markers.as_ref() {
+        let mut expected = expected.clone();
+        expected.sort_unstable();
+        expected.dedup();
+        if expected != stats.resolved_descriptor_markers {
+            *any_failed = true;
+            events.push((step_id, "stalker_descriptor_markers_mismatch"));
+        }
+    }
+    if let Some(expected) = assert_origin.stalker_raw_command_markers.as_ref() {
+        let mut expected = expected.clone();
+        expected.sort_unstable();
+        expected.dedup();
+        if expected != stats.resolved_raw_command_markers {
+            *any_failed = true;
+            events.push((step_id, "stalker_raw_command_markers_mismatch"));
         }
     }
 }
@@ -3328,7 +3383,7 @@ mod tests {
 
     #[test]
     fn a_stale_session_is_refused_until_a_new_handshake_arrives() {
-        let mut portal = StalkerPortal::new(true, Vec::new());
+        let mut portal = StalkerPortal::new(true, Vec::new(), false);
         portal.note_handshake();
 
         assert!(portal.refuses(17), "the first resolution meets the stale session");
@@ -3347,7 +3402,7 @@ mod tests {
 
     #[test]
     fn a_listed_channel_is_refused_every_time_without_staling_the_session() {
-        let mut portal = StalkerPortal::new(false, vec![19]);
+        let mut portal = StalkerPortal::new(false, vec![19], false);
 
         assert!(portal.refuses(19));
         assert!(portal.refuses(19));
@@ -3359,11 +3414,14 @@ mod tests {
 
     #[test]
     fn a_resolved_marker_is_recorded_once() {
-        let mut portal = StalkerPortal::new(false, Vec::new());
-        portal.record_resolution(19);
-        portal.record_resolution(17);
-        portal.record_resolution(19);
+        let mut portal = StalkerPortal::new(false, Vec::new(), false);
+        portal.record_resolution(19, Some("descriptor"));
+        portal.record_resolution(17, Some("raw"));
+        portal.record_resolution(19, Some("descriptor"));
+        portal.record_resolution(19, Some("raw"));
         assert_eq!(portal.stats.resolved_markers, vec![17, 19]);
+        assert_eq!(portal.stats.resolved_descriptor_markers, vec![19]);
+        assert_eq!(portal.stats.resolved_raw_command_markers, vec![17, 19]);
     }
 
     fn test_origin_state(run_id: &str) -> OriginState {
@@ -3375,7 +3433,7 @@ mod tests {
             observations: Arc::new(Mutex::new(Vec::new())),
             faults: Arc::new(Mutex::new(FaultSchedule::default())),
             hls_sequences: Arc::new(Mutex::new(HashMap::from([(17, 9)]))),
-            stalker: Arc::new(Mutex::new(StalkerPortal::new(false, Vec::new()))),
+            stalker: Arc::new(Mutex::new(StalkerPortal::new(false, Vec::new(), false))),
             tracker: OriginTracker::new(run_id, OriginPolicy::default()),
         }
     }

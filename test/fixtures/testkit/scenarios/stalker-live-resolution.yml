@@ -5,8 +5,8 @@ name: stalker-live-resolution
 # The emulated portal answers with the fixture's stream URL, which lives on loopback. The SUT
 # refuses that destination on purpose — a portal-supplied URL must never make the proxy talk to
 # a private address — so this scenario asserts the resolution chain, not the media: the portal
-# has to see one `create_link` per requested channel, carrying that channel's own stored `cmd`.
-# A playback that resolved the wrong catalog item would show up as a different marker here.
+# has to see one `create_link` per requested channel, carrying its descriptor's `cmd_1`.
+# The raw `cmd` resolves the same marker, so the source check catches fallback regressions.
 tuliprox:
   base_url: http://fixture.invalid
   execution_mode: isolated_fixture
@@ -18,6 +18,7 @@ tuliprox:
   stalker:
     mac_address: '00:1A:79:00:00:01'
     mag_preset: generic_safe
+    separate_descriptor_command: true
 origin:
   run_id: stalker-live-resolution
 actors:
@@ -42,6 +43,8 @@ steps:
       stalker_create_links_at_least: 1
       stalker_token_refusals_at_least: 0
       stalker_create_link_markers: [17]
+      stalker_descriptor_markers: [17]
+      stalker_raw_command_markers: []
   - command_id: resolve-19
     start:
       actor: tv-a
@@ -54,3 +57,5 @@ steps:
       stalker_create_links_at_least: 2
       stalker_token_refusals_at_least: 0
       stalker_create_link_markers: [17, 19]
+      stalker_descriptor_markers: [17, 19]
+      stalker_raw_command_markers: []
