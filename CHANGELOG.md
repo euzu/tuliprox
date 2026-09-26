@@ -1024,6 +1024,23 @@
 
 ## 🐛 Fixes
 
+- **Stalker playback resolution now says why it failed, retries a rejected session, and can fall back to the stored
+  command.** A playback request that could not be resolved reported a single message naming the requested item's portal
+  id, while the actual cause — no published catalog for the configured portal identity, an item missing from the active
+  generation, an item without a playback descriptor, or a `create_link` refusal — was written to the debug log or
+  nowhere at all, which made a portal refusal look like a mismatched stream id. Each of these stages now logs at warning
+  level with the input name, stream id, item name and the portal's sanitized error, and the resolution reports the
+  portal's reason once its candidates are exhausted. A portal that rejects the session (HTTP 204/401/403/456, or a
+  Ministra `code` of 44 / 440..=449 inside a `200 OK`) no longer ends as "could not be resolved": the cached session is
+  dropped, a fresh handshake is issued and the request is retried once, which is the recovery the typed token-rejection
+  error was introduced for but nothing called. Items whose persisted playback descriptor is empty now resolve through
+  their stored `cmd`, so a row that still carries the portal command stays playable.
+- **A playback request no longer discards the published Stalker catalog.** The active-manifest lookup used by playback
+  resolution and by the disk playlist sources replaced the published manifest with an empty one and deleted the refresh
+  checkpoint whenever the stored identity did not match the configured one — for example after editing the input's
+  Stalker block or changing the MAG preset. The catalog files survived but nothing could resolve, and the running
+  refresh lost its resume point. Read paths now report "no published catalog for this identity" and leave the
+  publication state to the refresh that owns it.
 - **Resource URLs no longer expose internal destinations.** Resource URLs are classified before they are written into
   playlist or EPG output: only a provably public destination is handed to the client, everything else (`tvg-logo`,
   `tvg-logo-small`, Xtream covers and backdrops, EPG channel and programme icons, Web UI item icons) is replaced by an
@@ -1568,6 +1585,19 @@
 
 ## 🛠 Maintenance
 
+- **The testkit can now drive a Stalker/Ministra input.** The fixture origin emulates a portal
+  (`handshake`, `get_profile`, `get_genres`, `get_ordered_list`, `create_link`), a scenario selects it with
+  `input_type: stalker` plus a `stalker:` block (MAC, MAG preset, scripted `create_link` refusals), and the
+  generated `source.yml` points the input at it. Playback resolution is asserted where it is observable — on the
+  portal: `assert_origin` gained `stalker_handshakes_at_least`, `stalker_create_links_at_least`,
+  `stalker_token_refusals_at_least` and `stalker_create_link_markers` (set comparison, so a playback that resolved
+  another catalog item's command fails). Three scenarios use it: `stalker-live-resolution` (each channel resolves
+  through its own stored `cmd`), `stalker-session-refused-once` (a stale-session refusal is recovered by a
+  re-handshake and retry; fails without that recovery) and `stalker-refused-channel-keeps-catalog` (a permanently
+  refused channel is reported and the catalog keeps serving the others). The fixture portal answers with a loopback
+  stream URL on purpose: the SUT's destination guard refuses it, so the scenarios assert the resolution chain and
+  the guard instead of pretending a portal-supplied private URL is playable. Asserting a hard upstream failure
+  needed a new expectation, `expect: { http_error: <status> }`.
 - **Playlist curation now has a dedicated capability boundary**: matching and ordered membership evaluation live in the
   source-neutral `tuliprox-curation` kernel, while Trakt HTTP/JSON handling translates records at the edge and the
   category-scoped compatibility projector remains separate from membership identity. Existing category identity and

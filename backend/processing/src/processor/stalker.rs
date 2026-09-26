@@ -11,15 +11,17 @@
 #![allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
 
 use super::stalker_refresh::{advance_stalker_refresh, StalkerRefreshMode, StalkerRefreshOutcome, StalkerRefreshPlan};
-use log::{debug, info, warn};
+use log::{info, warn};
 use lru::LruCache;
 use parking_lot::Mutex;
 use shared::{
     error::TuliproxError,
     model::{
-        stalker::StalkerStreamKind, stalker_item::StalkerPlaylistItem, PlaylistGroup, PlaylistItem, UpdateQualityPolicy,
+        stalker::{StalkerPlaybackMode, StalkerStreamKind},
+        stalker_item::StalkerPlaylistItem,
+        PlaylistGroup, PlaylistItem, UpdateQualityPolicy,
     },
-    utils::Internable,
+    utils::{sanitize_sensitive_info, Internable},
 };
 use std::{
     borrow::Cow,
@@ -34,7 +36,7 @@ use tuliprox_iptv::{
     stalker::{client::StalkerApiClient, error::StalkerError, parser},
 };
 use tuliprox_repository::{
-    stalker_generation_repository::{load_active_manifest, load_checkpoint},
+    stalker_generation_repository::{load_active_manifest, load_checkpoint, readable_active_manifest},
     stalker_repository::{ensure_stalker_storage_path, load_stalker_items_at, read_stalker_item_at},
 };
 
@@ -467,6 +469,34 @@ fn cached_runtime_stalker_client(
     Ok(client)
 }
 
+/// Portal commands a Stalker item can be resolved with, most specific first.
+///
+/// The persisted playback descriptor is authoritative. When it is absent or holds no usable
+/// command, the item's raw `cmd` column is still enough to call `create_link`, so an item is
+/// not declared unplayable while its stored command would have resolved.
+fn playback_candidates(item: &StalkerPlaylistItem) -> Vec<(&str, StalkerPlaybackMode)> {
+    let mut candidates: Vec<(&str, StalkerPlaybackMode)> = item
+        .playback_descriptor
+        .as_ref()
+        .map(|descriptor| {
+            descriptor
+                .candidates
+                .iter()
+                .filter(|candidate| !candidate.cmd.trim().is_empty())
+                .map(|candidate| (candidate.cmd.as_str(), candidate.playback_mode))
+                .collect()
+        })
+        .unwrap_or_default();
+    if candidates.is_empty() && !item.cmd.trim().is_empty() {
+        let primary_mode = item
+            .playback_descriptor
+            .as_ref()
+            .map_or(StalkerPlaybackMode::DirectUrl, |descriptor| descriptor.primary_mode);
+        candidates.push((item.cmd.as_ref(), primary_mode));
+    }
+    candidates
+}
+
 pub async fn re_resolve_stalker_url(
     app_config: &Arc<AppConfig>,
     http_client: &reqwest::Client,
@@ -484,7 +514,15 @@ pub async fn re_resolve_stalker_url(
     let portal_url = resolve_stalker_portal_url(input)?;
     let identity_fingerprint = stalker_cfg.identity_fingerprint(&portal_url);
     let storage_path = ensure_stalker_storage_path(app_config, &input.name).await?;
-    let manifest = load_active_manifest(&storage_path, identity_fingerprint).await?;
+    // Read-only manifest lookup: a playback request must never start (or destroy) a refresh.
+    let (manifest, published) = readable_active_manifest(&storage_path, identity_fingerprint).await?;
+    if !published {
+        warn!(
+            "Stalker playback resolution for input '{}' found no published catalog for the configured portal identity; run a playlist update for this input",
+            input.name
+        );
+        return Ok(None);
+    }
     let generation_and_path = match kind {
         StalkerStreamKind::Live | StalkerStreamKind::Archive => {
             manifest.live.as_ref().map(|files| (files.generation, &files.data))
@@ -492,53 +530,67 @@ pub async fn re_resolve_stalker_url(
         StalkerStreamKind::Movie => manifest.vod.as_ref().map(|files| (files.generation, &files.data)),
         StalkerStreamKind::Episode => manifest.series.as_ref().map(|files| (files.generation, &files.episodes)),
     };
-    let Some((generation, item_path)) = generation_and_path else { return Ok(None) };
+    let Some((generation, item_path)) = generation_and_path else {
+        warn!(
+            "Stalker playback resolution for input '{}' has no published {kind:?} catalog; run a playlist update with that cluster enabled",
+            input.name
+        );
+        return Ok(None);
+    };
     let link_key = RuntimeLinkKey { fingerprint: identity_fingerprint, generation, provider_id, kind };
     if let Some(url) = cached_resolved_link(link_key, force_refresh) {
         return Ok(Some(url));
     }
     let Some(item) = read_stalker_item_at(app_config, item_path, provider_id).await? else {
+        warn!(
+            "Stalker playback resolution for input '{}' found no {kind:?} item with provider id {provider_id} in generation {generation}",
+            input.name
+        );
         return Ok(None);
     };
-    let Some(descriptor) = item.playback_descriptor.as_ref() else {
-        debug!("Stalker re-resolve skipped: stream_id={} has no playback_descriptor", item.stream_id);
-        return Ok(None);
-    };
-    if descriptor.candidates.is_empty() {
-        debug!("Stalker re-resolve skipped: stream_id={} descriptor has no candidate", item.stream_id);
-        return Ok(None);
-    }
-    if descriptor.candidates.iter().all(|candidate| candidate.cmd.trim().is_empty()) {
-        debug!("Stalker re-resolve skipped: stream_id={} descriptor candidates are empty", item.stream_id);
+    // The descriptor is the canonical candidate list; the raw `cmd` column is the fallback for
+    // rows that carry no usable descriptor (older generations, partially written selections).
+    let candidates = playback_candidates(&item);
+    if candidates.is_empty() {
+        warn!(
+            "Stalker runtime re-resolve skipped: stream_id={} ({}) has neither a playback descriptor candidate nor a stored cmd",
+            item.stream_id, item.name
+        );
         return Ok(None);
     }
     let api_client = cached_runtime_stalker_client(http_client, portal_url, stalker_cfg)?;
-    let handshake = api_client.handshake().await.map_err(stalker_err_to_repo)?;
     let series_number = (kind == StalkerStreamKind::Episode).then_some(item.number);
 
-    for candidate in &descriptor.candidates {
-        if candidate.cmd.trim().is_empty() {
-            continue;
-        }
-        match api_client
-            .create_link(&handshake, kind, candidate.playback_mode, &candidate.cmd, series_number, None, None)
-            .await
-        {
+    let mut last_error: Option<String> = None;
+    for (cmd, mode) in &candidates {
+        let handshake = api_client.handshake().await.map_err(stalker_err_to_repo)?;
+        match api_client.create_link(&handshake, kind, *mode, cmd, series_number, None, None).await {
             Ok(resolved) => {
                 let url = Internable::intern(resolved.stream_url);
                 cache_resolved_link(link_key, Arc::clone(&url));
                 return Ok(Some(url));
             }
             Err(err) => {
-                debug!(
-                    "Stalker runtime re-resolve candidate failed for stream_id={}, mode={:?}: {err}",
-                    item.stream_id, candidate.playback_mode
+                // Playback failing silently is what makes a portal refusal indistinguishable
+                // from a missing catalog; the reason belongs in the operator's log.
+                warn!(
+                    "Stalker create_link failed for input '{}' stream_id={} ({}) mode={mode:?}: {}",
+                    input.name,
+                    item.stream_id,
+                    item.name,
+                    sanitize_sensitive_info(&err.to_string())
                 );
+                last_error = Some(sanitize_sensitive_info(&err.to_string()).into_owned());
             }
         }
     }
 
-    warn!("Stalker runtime re-resolve failed for stream_id={}, invalidating stale stream_url", item.stream_id);
+    warn!(
+        "Stalker runtime re-resolve failed for stream_id={} ({}); invalidating stale stream_url (last portal error: {})",
+        item.stream_id,
+        item.name,
+        last_error.as_deref().unwrap_or("none")
+    );
     RUNTIME_STALKER_LINKS.lock().pop(&link_key);
     Ok(None)
 }
@@ -548,6 +600,75 @@ mod tests {
     use super::*;
 
     fn runtime_cfg() -> StalkerInputConfig { StalkerInputConfig::default() }
+
+    fn stalker_item(cmd: &str, descriptor: Option<StalkerPlaybackMode>) -> StalkerPlaylistItem {
+        let mut item = StalkerPlaylistItem { stream_id: 1063, cmd: cmd.into(), ..StalkerPlaylistItem::default() };
+        if let Some(mode) = descriptor {
+            item.playback_descriptor = Some(shared::model::stalker::StalkerPlaybackDescriptorDto {
+                primary_mode: mode,
+                candidates: vec![shared::model::stalker::StalkerCommandVariantDto {
+                    cmd: cmd.to_string(),
+                    playback_mode: mode,
+                    ..Default::default()
+                }],
+                capabilities: None,
+            });
+        }
+        item
+    }
+
+    #[test]
+    fn playback_candidates_prefers_the_persisted_descriptor() {
+        let item = stalker_item("ffrt http://portal.example/ch/1063", Some(StalkerPlaybackMode::TempLinkFlussonic));
+
+        let candidates = playback_candidates(&item);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].0, "ffrt http://portal.example/ch/1063");
+        assert_eq!(candidates[0].1, StalkerPlaybackMode::TempLinkFlussonic);
+    }
+
+    #[test]
+    fn playback_candidates_falls_back_to_the_stored_cmd() {
+        let item = stalker_item("ffrt http://portal.example/ch/1063", None);
+
+        let candidates = playback_candidates(&item);
+
+        assert_eq!(candidates.len(), 1, "an item without a descriptor is still resolvable from its stored cmd");
+        assert_eq!(candidates[0].0, "ffrt http://portal.example/ch/1063");
+        assert_eq!(candidates[0].1, StalkerPlaybackMode::DirectUrl);
+    }
+
+    #[test]
+    fn playback_candidates_skips_blank_candidates() {
+        let mut item = stalker_item("ffrt http://portal.example/ch/1063", None);
+        item.playback_descriptor = Some(shared::model::stalker::StalkerPlaybackDescriptorDto {
+            primary_mode: StalkerPlaybackMode::TempLinkNginx,
+            candidates: vec![shared::model::stalker::StalkerCommandVariantDto {
+                cmd: "   ".to_string(),
+                playback_mode: StalkerPlaybackMode::TempLinkNginx,
+                ..Default::default()
+            }],
+            capabilities: None,
+        });
+
+        let candidates = playback_candidates(&item);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].1,
+            StalkerPlaybackMode::TempLinkNginx,
+            "the descriptor still names the mode the portal expects"
+        );
+        assert_eq!(candidates[0].0, "ffrt http://portal.example/ch/1063");
+    }
+
+    #[test]
+    fn playback_candidates_are_empty_without_any_command() {
+        let item = stalker_item("", None);
+
+        assert!(playback_candidates(&item).is_empty());
+    }
 
     #[test]
     fn raw_group_catalog_is_published_at_the_input_storage_root() {

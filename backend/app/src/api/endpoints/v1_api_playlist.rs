@@ -3553,6 +3553,121 @@ mod tests {
         server_handle.abort();
     }
 
+    /// The playback endpoints resolve a Stalker item from the catalog through the item's own
+    /// provider id. This is the path behind `Failed to resolve initial Stalker playback URL`,
+    /// so it needs the real id -> item -> `create_link` chain against a portal, not just the
+    /// Web UI preview route.
+    #[tokio::test]
+    async fn initial_stalker_playback_resolution_uses_the_requested_items_own_command() {
+        let temp_dir = tempdir().expect("temp dir");
+        let (base_url, server_handle) = spawn_stalker_mock_server().await;
+        let input = Arc::new(ConfigInput {
+            id: 7,
+            name: "stalker".intern(),
+            input_type: InputType::Stalker,
+            url: base_url,
+            enabled: true,
+            options: Some(ConfigInputOptions {
+                flags: crate::model::ConfigInputFlagsSet::new(),
+                update_quality: ConfigInputUpdateQuality::default(),
+                resolve_delay: shared::defaults::default_resolve_delay_secs(),
+                probe_delay: shared::defaults::default_probe_delay_secs(),
+                probe_live_interval_hours: 120,
+                resolve_filter: None,
+                probe_filter: None,
+            }),
+            stalker: Some(crate::model::StalkerInputConfig {
+                device: None,
+                auth_mode: shared::model::StalkerAuthMode::Auto,
+                mag_preset: shared::model::StalkerMagPreset::GenericSafe,
+                endpoint_preference: shared::model::StalkerEndpointPreference::ServerLoad,
+                size_caps: None,
+                catalog_max_pages: None,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let source = ConfigSource { inputs: vec![Arc::clone(&input.name)], targets: vec![] };
+        let app_config = test_app_config(Arc::clone(&input), source);
+        app_config.config.store(Arc::new(Config {
+            storage_dir: temp_dir.path().to_string_lossy().to_string(),
+            ..Default::default()
+        }));
+        let app_state = test_app_state(Arc::new(app_config));
+        let router = super::v1_api_playlist_register_protected(super::v1_api_playlist_register_public(Router::new()))
+            .with_state(Arc::clone(&app_state));
+
+        // The catalog import publishes the generation the playback path reads.
+        let response = router
+            .clone()
+            .into_service::<Body>()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/playlist/live")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"Input":"stalker"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("catalog response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let live_input = app_state.app_config.get_input_by_name(&"stalker".intern()).expect("stalker input");
+        let unresolved: Arc<str> = "".intern();
+        let live = shared::model::PlaylistItemType::Live;
+        let resolve = |provider_id: u32| {
+            let app_state = Arc::clone(&app_state);
+            let live_input = Arc::clone(&live_input);
+            let unresolved = Arc::clone(&unresolved);
+            async move {
+                crate::api::api_utils::resolve_initial_stalker_playback_url(
+                    &app_state,
+                    &live_input,
+                    provider_id,
+                    XtreamCluster::Live,
+                    live,
+                    &unresolved,
+                )
+                .await
+            }
+        };
+
+        // An id that is not in the catalog must not resolve, and must not invalidate the
+        // published generation the next request reads.
+        let err = resolve(999_999).await.expect_err("an unknown provider id cannot be resolved");
+        assert!(err.to_string().contains("999999"), "{err}");
+
+        // Each item resolves through its own stored cmd: the mock portal answers a different
+        // destination per cmd, so a provider id that picked the wrong item would surface here.
+        assert_eq!(
+            resolve(101).await.expect("item 101 resolves").as_ref(),
+            "http://8.8.8.8/live/101",
+            "the resolved url must come from item 101's own cmd"
+        );
+        assert_eq!(
+            resolve(102).await.expect("item 102 resolves").as_ref(),
+            "http://127.0.0.1/live/102",
+            "the resolved url must come from item 102's own cmd"
+        );
+
+        // An item that already carries a url is served as is.
+        let resolved_url: Arc<str> = "http://stream.example/already-resolved.ts".intern();
+        let passthrough = crate::api::api_utils::resolve_initial_stalker_playback_url(
+            &app_state,
+            &live_input,
+            101,
+            XtreamCluster::Live,
+            live,
+            &resolved_url,
+        )
+        .await
+        .expect("a resolved url is passed through");
+        assert!(Arc::ptr_eq(&passthrough, &resolved_url));
+
+        server_handle.abort();
+    }
+
     #[tokio::test]
     async fn playlist_epg_input_route_returns_cached_provider_epg() {
         let temp_dir = tempdir().expect("temp dir");

@@ -154,7 +154,7 @@ where
 }
 
 fn build_descriptor_from_raw(raw: &StalkerRawItem) -> Option<StalkerPlaybackDescriptorDto> {
-    let cmd = raw.cmd.clone().filter(|s| !s.is_empty())?;
+    let cmd = raw.cmd_1.as_ref().filter(|s| !s.is_empty()).or(raw.cmd.as_ref().filter(|s| !s.is_empty()))?.clone();
     let mode = playback_mode_from_flags(StalkerTempLinkFlags::from(raw));
     let candidates = vec![StalkerCommandVariantDto { cmd, playback_mode: mode, source_key: None, priority: 0 }];
     Some(StalkerPlaybackDescriptorDto { primary_mode: mode, candidates, capabilities: None })
@@ -648,5 +648,24 @@ mod tests {
         };
         let desc = build_descriptor_from_raw(&raw).expect("descriptor");
         assert_eq!(desc.primary_mode, StalkerPlaybackMode::DirectUrl);
+    }
+
+    #[test]
+    fn alternate_command_is_persisted_separately_from_the_raw_fallback() {
+        let raw = StalkerRawItem {
+            cmd: Some("ffmpeg http://portal/raw/17".to_string()),
+            cmd_1: Some("ffmpeg http://portal/descriptor/17".to_string()),
+            ..Default::default()
+        };
+        let item = map_stalker_to_playlist_item(&raw, None, StalkerStreamKind::Live, 0);
+
+        assert_eq!(item.cmd.as_ref(), "ffmpeg http://portal/raw/17");
+        assert_eq!(
+            item.playback_descriptor
+                .as_ref()
+                .and_then(|descriptor| descriptor.candidates.first())
+                .map(|candidate| candidate.cmd.as_str()),
+            Some("ffmpeg http://portal/descriptor/17")
+        );
     }
 }
