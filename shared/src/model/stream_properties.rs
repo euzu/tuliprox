@@ -2,9 +2,9 @@ use crate::{
     model::{info_doc_utils::InfoDocUtils, PlaylistEntry, XtreamSeriesInfo, XtreamSeriesInfoDoc, XtreamVideoInfo},
     utils::{
         arc_str_none_default_on_null, arc_str_null_is_none_serde, arc_str_option_null_if_empty_serde,
-        arc_str_option_serde, deserialize_as_option_arc_str, deserialize_json_as_opt_string,
-        deserialize_number_from_string, deserialize_number_from_string_or_zero, serialize_json_as_opt_string,
-        Internable, CONSTANTS,
+        arc_str_option_serde, deserialize_as_option_arc_str, deserialize_as_string_array,
+        deserialize_json_as_opt_string, deserialize_number_from_string, deserialize_number_from_string_or_zero,
+        serialize_json_as_opt_string, Internable, CONSTANTS,
     },
 };
 use log::warn;
@@ -138,7 +138,7 @@ pub struct LiveStreamProperties {
     pub category_id: u32,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub stream_id: u32,
-    #[serde(default, deserialize_with = "crate::model::deserialize_untrusted_resource_arc")]
+    #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
     pub stream_icon: Arc<str>,
     #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
     pub direct_source: Arc<str>,
@@ -219,9 +219,9 @@ pub struct VideoStreamDetailProperties {
     pub kinopoisk_url: Option<Arc<str>>,
     #[serde(default, with = "arc_str_option_serde")]
     pub o_name: Option<Arc<str>>,
-    #[serde(default, deserialize_with = "crate::model::deserialize_untrusted_resource_option")]
+    #[serde(default, with = "arc_str_option_serde")]
     pub cover_big: Option<Arc<str>>,
-    #[serde(default, deserialize_with = "crate::model::deserialize_untrusted_resource_option")]
+    #[serde(default, with = "arc_str_option_serde")]
     pub movie_image: Option<Arc<str>>,
     #[serde(default, with = "arc_str_option_serde")]
     pub release_date: Option<Arc<str>>,
@@ -249,7 +249,7 @@ pub struct VideoStreamDetailProperties {
     pub country: Option<Arc<str>>,
     #[serde(default, with = "arc_str_option_serde")]
     pub genre: Option<Arc<str>>,
-    #[serde(default, deserialize_with = "crate::model::deserialize_untrusted_resource_array")]
+    #[serde(default, deserialize_with = "deserialize_as_string_array")]
     pub backdrop_path: Option<Vec<Arc<str>>>,
     #[serde(default, with = "arc_str_option_serde")]
     pub duration_secs: Option<Arc<str>>,
@@ -283,7 +283,7 @@ pub struct VideoStreamProperties {
     pub category_id: u32,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub stream_id: u32,
-    #[serde(default, deserialize_with = "crate::model::deserialize_untrusted_resource_arc")]
+    #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
     pub stream_icon: Arc<str>,
     #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
     pub direct_source: Arc<str>,
@@ -321,11 +321,11 @@ pub struct SeriesStreamDetailSeasonProperties {
     pub overview: Option<Arc<str>>,
     #[serde(default, deserialize_with = "deserialize_as_option_arc_str")]
     pub air_date: Option<Arc<str>>,
-    #[serde(default, deserialize_with = "crate::model::deserialize_untrusted_resource_option")]
+    #[serde(default, deserialize_with = "deserialize_as_option_arc_str")]
     pub cover: Option<Arc<str>>,
-    #[serde(default, deserialize_with = "crate::model::deserialize_untrusted_resource_option")]
+    #[serde(default, deserialize_with = "deserialize_as_option_arc_str")]
     pub cover_tmdb: Option<Arc<str>>,
-    #[serde(default, deserialize_with = "crate::model::deserialize_untrusted_resource_option")]
+    #[serde(default, deserialize_with = "deserialize_as_option_arc_str")]
     pub cover_big: Option<Arc<str>>,
     #[serde(default, deserialize_with = "deserialize_as_option_arc_str")]
     pub duration: Option<Arc<str>>,
@@ -363,7 +363,7 @@ pub struct SeriesStreamDetailEpisodeProperties {
     pub duration_secs: u32,
     #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
     pub duration: Arc<str>,
-    #[serde(default, deserialize_with = "crate::model::deserialize_untrusted_resource_arc")]
+    #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
     pub movie_image: Arc<str>,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub bitrate: u32,
@@ -413,11 +413,11 @@ pub struct SeriesStreamProperties {
     pub category_id: u32,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub series_id: u32,
-    #[serde(default, deserialize_with = "crate::model::deserialize_untrusted_resource_array")]
+    #[serde(default, deserialize_with = "deserialize_as_string_array")]
     pub backdrop_path: Option<Vec<Arc<str>>>,
     #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
     pub cast: Arc<str>,
-    #[serde(default, deserialize_with = "crate::model::deserialize_untrusted_resource_arc")]
+    #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
     pub cover: Arc<str>,
     #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
     pub director: Arc<str>,
@@ -461,7 +461,7 @@ pub struct EpisodeStreamProperties {
     pub plot: Option<Arc<str>>,
     #[serde(default, deserialize_with = "deserialize_number_from_string")]
     pub tmdb: Option<u32>,
-    #[serde(default, deserialize_with = "crate::model::deserialize_untrusted_resource_arc")]
+    #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
     pub movie_image: Arc<str>,
     #[serde(default, deserialize_with = "arc_str_null_is_none_serde::deserialize")]
     pub container_extension: Arc<str>,
@@ -488,117 +488,6 @@ pub enum StreamProperties {
 }
 
 impl StreamProperties {
-    pub fn visit_resource_values(&self, visitor: &mut impl FnMut(&Arc<str>)) {
-        fn visit_optional(value: &Option<Arc<str>>, visitor: &mut impl FnMut(&Arc<str>)) {
-            if let Some(value) = value {
-                visitor(value);
-            }
-        }
-        fn visit_many(values: &Option<Vec<Arc<str>>>, visitor: &mut impl FnMut(&Arc<str>)) {
-            if let Some(values) = values {
-                values.iter().for_each(visitor);
-            }
-        }
-        match self {
-            Self::Live(live) => visitor(&live.stream_icon),
-            Self::Video(video) => {
-                visitor(&video.stream_icon);
-                if let Some(details) = &video.details {
-                    visit_optional(&details.cover_big, visitor);
-                    visit_optional(&details.movie_image, visitor);
-                    visit_many(&details.backdrop_path, visitor);
-                }
-            }
-            Self::Series(series) => {
-                visitor(&series.cover);
-                visit_many(&series.backdrop_path, visitor);
-                if let Some(details) = &series.details {
-                    if let Some(seasons) = &details.seasons {
-                        for season in seasons {
-                            visit_optional(&season.cover, visitor);
-                            visit_optional(&season.cover_tmdb, visitor);
-                            visit_optional(&season.cover_big, visitor);
-                        }
-                    }
-                    if let Some(episodes) = &details.episodes {
-                        for episode in episodes {
-                            visitor(&episode.movie_image);
-                        }
-                    }
-                }
-            }
-            Self::Episode(episode) => visitor(&episode.movie_image),
-        }
-    }
-
-    /// Visits every resource value that can be selected by [`Self::resolve_resource_url`].
-    /// Ingestion validation and endpoint lookup intentionally share this implementation surface.
-    pub fn visit_resource_values_mut(&mut self, visitor: &mut impl FnMut(&mut Arc<str>)) {
-        fn visit_optional(value: &mut Option<Arc<str>>, visitor: &mut impl FnMut(&mut Arc<str>)) {
-            if let Some(value) = value {
-                visitor(value);
-            }
-        }
-        fn visit_many(values: &mut Option<Vec<Arc<str>>>, visitor: &mut impl FnMut(&mut Arc<str>)) {
-            if let Some(values) = values {
-                values.iter_mut().for_each(visitor);
-            }
-        }
-
-        match self {
-            Self::Live(live) => visitor(&mut live.stream_icon),
-            Self::Video(video) => {
-                visitor(&mut video.stream_icon);
-                if let Some(details) = &mut video.details {
-                    visit_optional(&mut details.cover_big, visitor);
-                    visit_optional(&mut details.movie_image, visitor);
-                    visit_many(&mut details.backdrop_path, visitor);
-                }
-            }
-            Self::Series(series) => {
-                visitor(&mut series.cover);
-                visit_many(&mut series.backdrop_path, visitor);
-                if let Some(details) = &mut series.details {
-                    if let Some(seasons) = &mut details.seasons {
-                        for season in seasons {
-                            visit_optional(&mut season.cover, visitor);
-                            visit_optional(&mut season.cover_tmdb, visitor);
-                            visit_optional(&mut season.cover_big, visitor);
-                        }
-                    }
-                    if let Some(episodes) = &mut details.episodes {
-                        for episode in episodes {
-                            visitor(&mut episode.movie_image);
-                        }
-                    }
-                }
-            }
-            Self::Episode(episode) => visitor(&mut episode.movie_image),
-        }
-    }
-
-    /// Applies the provider-ingress boundary to all resource-bearing nested fields.
-    pub fn ingest_resource_values(&mut self, input_name: &Arc<str>) -> usize {
-        let mut rejected = 0;
-        self.visit_resource_values_mut(&mut |value| {
-            if super::ingest_resource_value(value, input_name).is_err() {
-                rejected += 1;
-            }
-        });
-        rejected
-    }
-
-    pub fn normalize_internal_resource_values(&mut self, input_name: &Arc<str>) -> usize {
-        let mut rejected = 0;
-        self.visit_resource_values_mut(&mut |value| {
-            if super::normalize_internal_resource_value(value, input_name).is_err() {
-                *value = Arc::from("");
-                rejected += 1;
-            }
-        });
-        rejected
-    }
-
     fn episode_value<T, F>(&self, selector: F) -> Option<T>
     where
         F: FnOnce(&EpisodeStreamProperties) -> T,
@@ -876,6 +765,9 @@ impl StreamProperties {
                                     if field == "cover_big" {
                                         return season.cover_big.as_ref().map(Arc::clone);
                                     }
+                                    if field == "overview" {
+                                        return season.overview.as_ref().map(Arc::clone);
+                                    }
                                 }
                             }
                         }
@@ -909,6 +801,9 @@ impl StreamProperties {
 
 /// Field names accepted by resource-proxy endpoints. This is deliberately defined beside the
 /// resource traversal and selector so adding a new endpoint-visible resource has one review site.
+///
+/// Stream URLs are not resources: serving them here would sidestep the stream routes and their
+/// admission accounting.
 pub fn is_resource_field_name(field: &str) -> bool {
     if matches!(field, "logo" | "logo_small" | "cover" | "movie_image" | "nfo_cover_big" | "nfo_movie_image")
         || field.starts_with("backdrop_path")
@@ -1513,5 +1408,26 @@ mod tests {
         assert_eq!(current.bitrate, 2_500_000);
         assert_eq!(current.last_probed_timestamp, Some(200));
         assert_eq!(current.last_success_timestamp, Some(150));
+    }
+
+    #[test]
+    fn resource_field_names_exclude_stream_urls() {
+        for resource in [
+            "logo",
+            "logo_small",
+            "cover",
+            "movie_image",
+            "nfo_cover_big",
+            "backdrop_path",
+            "backdrop_path1",
+            "nfo_backdrop_path",
+            "nfo_s_2_cover",
+            "nfo_ep_2_5_movie_image",
+        ] {
+            assert!(is_resource_field_name(resource), "{resource}");
+        }
+        for not_a_resource in ["url", "name", "chno", "caption", "epg_channel_id", "stream_url", "nfo_s_2_title"] {
+            assert!(!is_resource_field_name(not_a_resource), "{not_a_resource}");
+        }
     }
 }

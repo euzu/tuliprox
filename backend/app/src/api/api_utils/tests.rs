@@ -1,9 +1,9 @@
 use super::*;
 use crate::{
     api::model::{
-        empty_resource_client_set, ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager,
-        EventManager, MetadataUpdateManager, PlaylistStorageState, ProviderConfig as RuntimeProviderConfig,
-        ProviderConfigConnection, ResourceClientSet, SharedStreamManager,
+        ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, EventManager,
+        MetadataUpdateManager, PlaylistStorageState, ProviderConfig as RuntimeProviderConfig, ProviderConfigConnection,
+        SharedStreamManager,
     },
     auth::Fingerprint,
     model::{
@@ -27,10 +27,9 @@ use shared::{
     defaults::{default_catchup_session_ttl_secs, default_hls_session_ttl_secs},
     foundation::Filter,
     model::{
-        provider_saturation::build_group_lookup, AdmissionStrategy, ClusterFlags, ConfigPaths, ConfigProviderDto,
-        ConfigTargetOptions, GeoIpUnavailablePolicy, InputFetchMethod, InputType, PlaylistItem, PlaylistItemHeader,
-        PlaylistItemType, ProcessingOrder, ProviderUrlSelectionPolicy, ProxyType, ResourcePolicyDto, StreamChannel,
-        TargetType, XtreamCluster,
+        AdmissionStrategy, ClusterFlags, ConfigPaths, ConfigProviderDto, ConfigTargetOptions, GeoIpUnavailablePolicy,
+        InputFetchMethod, InputType, PlaylistItem, PlaylistItemHeader, PlaylistItemType, ProcessingOrder,
+        ProviderUrlSelectionPolicy, ProxyType, StreamChannel, TargetType, XtreamCluster,
     },
     utils::Internable,
 };
@@ -40,10 +39,7 @@ use tokio::{
     net::TcpListener,
     sync::{mpsc, RwLock},
 };
-use tuliprox_core::{
-    model::{public_only_policy, ResourceClientKey, ResourcePolicy, ResourcePolicyError, ResourceRedirectMode},
-    utils::{resource_cache_key, response_compression::should_compress_response},
-};
+use tuliprox_core::utils::response_compression::should_compress_response;
 use tuliprox_session::{
     admission::{evaluate_remaining_strategies_after_grace, get_effective_admission_strategies},
     AdmissionRejectionReason, GraceResolutionContext,
@@ -4459,83 +4455,6 @@ fn create_test_app_config() -> AppConfig {
     }
 }
 
-/// App config whose only input carries `policy` and one enabled alias.
-fn create_policy_app_config(policy: ResourcePolicyDto) -> AppConfig {
-    let config = create_test_app_config();
-    let policy = Arc::new(ResourcePolicy::from_dto(&policy).expect("test policy"));
-    let input = Arc::new(ConfigInput {
-        id: 1,
-        name: "main-input".intern(),
-        input_type: InputType::M3u,
-        url: "https://provider.example/playlist.m3u".to_string(),
-        enabled: true,
-        resource_policy: Some(policy),
-        aliases: Some(vec![ConfigInputAlias {
-            id: 2,
-            name: "aliased-input".intern(),
-            url: "https://provider.example/alias.m3u".to_string(),
-            username: None,
-            password: None,
-            priority: 0,
-            max_connections: 1,
-            exp_date: None,
-            enabled: true,
-            stalker: None,
-        }]),
-        ..ConfigInput::default()
-    });
-    let inputs = vec![Arc::clone(&input)];
-    let sources = SourcesConfig { inputs, group_lookup: build_group_lookup(&[input]), ..SourcesConfig::default() };
-    config.sources.store(Arc::new(sources));
-    config
-}
-
-#[test]
-fn resource_authorization_uses_the_main_input_policy_for_an_alias() {
-    let app_config = create_policy_app_config(ResourcePolicyDto {
-        allowed_hosts: vec!["media.home.arpa".to_string()],
-        allowed_networks: vec!["192.168.50.20/32".to_string()],
-    });
-    let input_name = Arc::from("aliased-input");
-    let authorization = resolve_resource_authorization(&app_config, Some(&input_name)).expect("authorized");
-
-    assert_eq!(authorization.input_name.as_deref(), Some("main-input"));
-    assert!(authorization.policy.allows_host("media.home.arpa"));
-    assert_ne!(authorization.policy_digest, public_only_policy().digest());
-}
-
-#[test]
-fn resource_authorization_rejects_an_unknown_or_disabled_origin() {
-    let app_config = create_policy_app_config(ResourcePolicyDto::default());
-    let input_name = Arc::from("removed-input");
-    let error = resolve_resource_authorization(&app_config, Some(&input_name)).expect_err("rejected");
-
-    assert_eq!(error, ResourcePolicyError::UnknownOrigin("removed-input".to_string()));
-    assert_eq!(rejection_status(&error), StatusCode::BAD_REQUEST);
-}
-
-#[test]
-fn resource_authorization_follows_a_config_change_without_regenerating_links() {
-    let app_config = create_policy_app_config(ResourcePolicyDto {
-        allowed_hosts: vec!["first.home.arpa".to_string()],
-        allowed_networks: vec!["192.168.50.20/32".to_string()],
-    });
-    let input_name = Arc::from("main-input");
-    let before = resolve_resource_authorization(&app_config, Some(&input_name)).expect("authorized");
-
-    let reloaded = create_policy_app_config(ResourcePolicyDto {
-        allowed_hosts: vec!["second.home.arpa".to_string()],
-        allowed_networks: vec!["10.0.0.0/8".to_string()],
-    });
-    app_config.sources.store(Arc::clone(&reloaded.sources.load()));
-
-    let after = resolve_resource_authorization(&app_config, Some(&input_name)).expect("authorized");
-
-    assert_ne!(before.policy_digest, after.policy_digest);
-    assert!(after.policy.allows_host("second.home.arpa"));
-    assert!(!after.policy.allows_host("first.home.arpa"));
-}
-
 fn create_test_provider_app_config() -> AppConfig {
     let input = Arc::new(ConfigInput {
         id: 1,
@@ -4685,7 +4604,8 @@ fn create_test_app_state_for_config(app_cfg: Arc<AppConfig>) -> Arc<AppState> {
         http_client: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
         http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
         public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-        resource_clients: empty_resource_client_set(),
+        resource_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+        resource_public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
         downloads: Arc::new(crate::api::model::DownloadQueue::new()),
         cache: Arc::new(ArcSwapOption::default()),
         shared_stream_manager,
@@ -4716,30 +4636,8 @@ fn create_test_fingerprint(addr: std::net::SocketAddr) -> Fingerprint {
     Fingerprint::new(format!("fp-{addr}"), addr.ip().to_string(), addr)
 }
 
-#[test]
-fn resource_credential_context_separates_configured_and_inbound_credentials() {
-    let mut input = ConfigInput {
-        name: "input".into(),
-        username: Some("user".to_string()),
-        password: Some("password-a".to_string()),
-        ..ConfigInput::default()
-    };
-    let no_headers = HashMap::new();
-    let configured_a = resource_credential_context(Some(&input), &no_headers);
-    input.password = Some("password-b".to_string());
-    let configured_b = resource_credential_context(Some(&input), &no_headers);
-    assert_ne!(configured_a, configured_b);
-
-    let mut request_headers = HashMap::new();
-    request_headers.insert("authorization".to_string(), b"Bearer a".to_vec());
-    let inbound_a = resource_credential_context(None, &request_headers);
-    request_headers.insert("authorization".to_string(), b"Bearer b".to_vec());
-    let inbound_b = resource_credential_context(None, &request_headers);
-    assert_ne!(inbound_a, inbound_b);
-}
-
 #[tokio::test]
-async fn resource_cache_is_scoped_to_the_authorizing_policy() {
+async fn resource_cache_is_used_only_by_matching_public_fetch_policy() {
     const CACHED_BODY: &[u8] = b"cached image";
     const UPSTREAM_BODY: &[u8] = b"upstream image";
 
@@ -4748,18 +4646,9 @@ async fn resource_cache_is_scoped_to_the_authorizing_policy() {
     let cache_dir = temp_dir.path().to_string_lossy();
     let mut cache = LRUResourceCache::new(1024, cache_dir.as_ref());
     let resource_url = "http://1.1.1.1/icon.png";
-
-    // An entry stored under the public-only scope: it must never answer a request authorized by a
-    // policy that is allowed to reach private destinations.
-    let public_only_scope = resource_cache_key(
-        public_only_policy().digest().as_str(),
-        "",
-        &resource_credential_context(None, &HashMap::new()),
-        resource_url,
-    );
-    let cached_path = cache.store_path(&public_only_scope, Some("image/png"));
+    let cached_path = cache.store_path(resource_url, Some("image/png"));
     tokio::fs::write(&cached_path, CACHED_BODY).await.expect("write cached image");
-    cache.add_content(&public_only_scope, Some("image/png".to_string()), CACHED_BODY.len()).expect("cache entry");
+    cache.add_content(resource_url, Some("image/png".to_string()), CACHED_BODY.len()).expect("register cached image");
     app_state.cache.store(Some(Arc::new(RwLock::new(cache))));
 
     let response_head = format!(
@@ -4768,162 +4657,442 @@ async fn resource_cache_is_scoped_to_the_authorizing_policy() {
     );
     let (upstream_addr, upstream_task) = spawn_legacy_hls_test_origin(response_head, UPSTREAM_BODY.to_vec()).await;
     let proxy = reqwest::Proxy::http(format!("http://{upstream_addr}")).expect("mock proxy URL");
-    let mock_client = reqwest::Client::builder().proxy(proxy).build().expect("mock upstream client");
+    let mock_client = Arc::new(reqwest::Client::builder().proxy(proxy).build().expect("mock upstream client"));
+    // The destination is public, so the hop is fetched through the public resource client; both resource
+    // clients are mocked so the assertion below is about the cache, not about which client performed the
+    // request.
+    app_state.resource_public_http_client_no_redirect.store(Arc::clone(&mock_client));
+    app_state.resource_http_client_no_redirect.store(mock_client);
 
-    let public_only = ResolvedResourceAuthorization::public_only();
-    let private_policy = Arc::new(
-        ResourcePolicy::from_dto(&shared::model::ResourcePolicyDto {
-            allowed_hosts: vec!["media.home.arpa".to_string()],
-            allowed_networks: vec!["192.168.50.20/32".to_string()],
-        })
-        .expect("policy"),
-    );
-    let scoped = ResolvedResourceAuthorization::for_input("private".into(), Some(&private_policy));
-    assert_ne!(public_only.policy_digest, scoped.policy_digest);
-
-    let mut clients = HashMap::new();
-    for key in [
-        ResourceClientKey::new(public_only.policy_digest.clone(), ResourceRedirectMode::Bounded),
-        ResourceClientKey::new(scoped.policy_digest.clone(), ResourceRedirectMode::Bounded),
-    ] {
-        clients.insert(key, mock_client.clone());
-    }
-    app_state.resource_clients.store(Arc::new(ResourceClientSet::from_clients(clients)));
-
-    let cached_response = resource_response(
-        &app_state,
-        ResourceFetchOptions::cached(public_only.clone()),
-        resource_url,
-        &HeaderMap::new(),
-        None,
-    )
-    .await
-    .into_response();
-    assert_eq!(cached_response.status(), StatusCode::OK);
-    let cached_body = cached_response.into_body().collect().await.expect("read cached image").to_bytes();
-    assert_eq!(cached_body, Bytes::from_static(CACHED_BODY));
-
-    let fresh_response =
-        resource_response(&app_state, ResourceFetchOptions::cached(scoped), resource_url, &HeaderMap::new(), None)
+    let public_response =
+        resource_response(&app_state, ResourceFetchPolicy::Public, resource_url, &HeaderMap::new(), None)
             .await
             .into_response();
-    assert_eq!(fresh_response.status(), StatusCode::OK);
-    let fresh_body = fresh_response.into_body().collect().await.expect("read upstream image").to_bytes();
-    assert_eq!(fresh_body, Bytes::from_static(UPSTREAM_BODY));
-    assert_ne!(fresh_body, Bytes::from_static(CACHED_BODY));
+    assert_eq!(public_response.status(), StatusCode::OK);
+    let public_body = public_response.into_body().collect().await.expect("read cached image").to_bytes();
+    assert_eq!(public_body, Bytes::from_static(CACHED_BODY));
+
+    let response = resource_response(&app_state, ResourceFetchPolicy::NonPublic, resource_url, &HeaderMap::new(), None)
+        .await
+        .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let response_body = response.into_body().collect().await.expect("read upstream image").to_bytes();
+    assert_eq!(response_body, Bytes::from_static(UPSTREAM_BODY));
+    assert_ne!(response_body, Bytes::from_static(CACHED_BODY));
 
     let upstream_request = upstream_task.await.expect("mock upstream task completes");
     assert!(upstream_request.starts_with("GET http://1.1.1.1/icon.png HTTP/1.1\r\n"));
 }
 
 #[tokio::test]
-async fn resource_response_bypasses_shared_cache_for_forwarded_authorization() {
-    const CACHED_BODY: &[u8] = b"cached private image";
-    const UPSTREAM_BODY: &[u8] = b"upstream private image";
-
+async fn no_redirect_resource_ignores_configured_proxy() {
     let app_state = create_test_app_state();
-    let temp_dir = tempfile::tempdir().expect("tempdir");
-    let cache_dir = temp_dir.path().to_string_lossy();
-    let mut cache = LRUResourceCache::new(1024, cache_dir.as_ref());
-    let resource_url = "http://1.1.1.1/private-icon.png";
-    let authorization = ResolvedResourceAuthorization::public_only();
-    let credential_headers = HashMap::from([("authorization".to_string(), b"Bearer private".to_vec())]);
-    let cache_key = resource_cache_key(
-        authorization.policy_digest.as_str(),
-        "",
-        &resource_credential_context(None, &credential_headers),
-        resource_url,
+    let response_head =
+        "HTTP/1.1 302 Found\r\nLocation: http://10.0.0.2/other.png\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    let (proxy_addr, proxy_task) = spawn_legacy_hls_test_origin(response_head.to_string(), Vec::new()).await;
+    app_state.app_config.config.store(Arc::new(Config {
+        proxy: Some(crate::model::ProxyConfig { url: format!("http://{proxy_addr}"), username: None, password: None }),
+        ..Config::default()
+    }));
+    let client = crate::api::model::create_resource_http_client_no_redirect(&app_state.app_config)
+        .expect("resource HTTP client");
+    // 192.0.2.1 (TEST-NET-1) is not routable, so a direct attempt fails by timing out or refusing the
+    // connection. A response would mean the request was answered by the proxy after all.
+    let result = client.get("http://192.0.2.1/icon.png").timeout(std::time::Duration::from_millis(100)).send().await;
+    assert!(
+        result.as_ref().is_err_and(|err| err.is_timeout() || err.is_connect()),
+        "the direct path must be attempted: {result:?}"
     );
-    let cached_path = cache.store_path(&cache_key, Some("image/png"));
-    tokio::fs::write(&cached_path, CACHED_BODY).await.expect("write cached image");
-    cache.add_content(&cache_key, Some("image/png".to_string()), CACHED_BODY.len()).expect("cache entry");
-    app_state.cache.store(Some(Arc::new(RwLock::new(cache))));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), proxy_task).await.is_err(),
+        "resource client must not send requests through the configured proxy"
+    );
+}
 
-    let response_head = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nCache-Control: public, max-age=60\r\nConnection: close\r\n\r\n",
-        UPSTREAM_BODY.len()
-    );
-    let (upstream_addr, upstream_task) = spawn_legacy_hls_test_origin(response_head, UPSTREAM_BODY.to_vec()).await;
-    let proxy = reqwest::Proxy::http(format!("http://{upstream_addr}")).expect("mock proxy URL");
-    let mock_client = reqwest::Client::builder().proxy(proxy).build().expect("mock upstream client");
-    let mut clients = HashMap::new();
-    clients.insert(
-        ResourceClientKey::new(authorization.policy_digest.clone(), ResourceRedirectMode::Bounded),
-        mock_client,
-    );
-    app_state.resource_clients.store(Arc::new(ResourceClientSet::from_clients(clients)));
+#[tokio::test]
+async fn public_resource_client_honours_the_configured_proxy() {
+    // Counterpart of `no_redirect_resource_ignores_configured_proxy`: a resource hop that can leave the
+    // local network must go through the configured proxy, or the fetch discloses this host's address.
+    let app_state = create_test_app_state();
+    let response_head = "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 3\r\nConnection: close\r\n\r\n";
+    let (proxy_addr, proxy_task) = spawn_legacy_hls_test_origin(response_head.to_string(), b"png".to_vec()).await;
+    app_state.app_config.config.store(Arc::new(Config {
+        proxy: Some(crate::model::ProxyConfig { url: format!("http://{proxy_addr}"), username: None, password: None }),
+        ..Config::default()
+    }));
+    let client = crate::api::model::create_resource_public_http_client_no_redirect(&app_state.app_config)
+        .expect("resource HTTP client");
 
-    let mut request_headers = HeaderMap::new();
-    request_headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer private"));
-    let response = resource_response(
-        &app_state,
-        ResourceFetchOptions::cached(authorization),
-        resource_url,
-        &request_headers,
-        None,
-    )
-    .await
-    .into_response();
+    let response = client.get("http://8.8.8.8/icon.png").send().await.expect("request reaches the proxy");
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response.headers().get(header::CACHE_CONTROL).and_then(|value| value.to_str().ok()),
-        Some("private, no-store")
-    );
-    let body = response.into_body().collect().await.expect("read upstream image").to_bytes();
-    assert_eq!(body, Bytes::from_static(UPSTREAM_BODY));
-    assert_ne!(body, Bytes::from_static(CACHED_BODY));
-
-    let upstream_request = tokio::time::timeout(std::time::Duration::from_secs(1), upstream_task)
+    let request = tokio::time::timeout(std::time::Duration::from_secs(2), proxy_task)
         .await
-        .expect("credential-varying request was not sent")
-        .expect("mock upstream task completes");
-    assert!(upstream_request.to_ascii_lowercase().contains("authorization: bearer private\r\n"));
+        .expect("request must reach proxy")
+        .expect("proxy task");
+    assert!(request.starts_with("GET http://8.8.8.8/icon.png HTTP/1.1\r\n"), "{request}");
 }
 
 #[tokio::test]
-async fn resource_response_rejects_blocked_ip_literal_before_request() {
+async fn an_unresolved_resource_name_is_fetched_through_the_configured_proxy() {
+    // A resource name that does not resolve locally is still resolvable through a configured proxy (for
+    // example with remote DNS), so the fetch must not be pinned to the direct client.
     let app_state = create_test_app_state();
-    let response_head = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string();
-    let (origin_addr, mut origin_task) = spawn_legacy_hls_test_origin(response_head, Vec::new()).await;
-    let authorization = ResolvedResourceAuthorization::public_only();
-    let mut clients = HashMap::new();
-    clients.insert(
-        ResourceClientKey::new(authorization.policy_digest.clone(), ResourceRedirectMode::Bounded),
-        reqwest::Client::builder().no_proxy().build().expect("test resource client"),
+    let response_head = "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 3\r\nConnection: close\r\n\r\n";
+    let (proxy_addr, proxy_task) = spawn_legacy_hls_test_origin(response_head.to_string(), b"png".to_vec()).await;
+    app_state.app_config.config.store(Arc::new(Config {
+        proxy: Some(crate::model::ProxyConfig { url: format!("http://{proxy_addr}"), username: None, password: None }),
+        ..Config::default()
+    }));
+    let client = reqwest::Client::builder()
+        .proxy(reqwest::Proxy::all(format!("http://{proxy_addr}")).expect("test proxy"))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("mock proxy client");
+    app_state.resource_public_http_client_no_redirect.store(Arc::new(client));
+
+    let response =
+        resource_proxy_response(&app_state, "http://unresolved.invalid/logo.png", &HeaderMap::new(), None).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.into_body().collect().await.expect("image body").to_bytes(), Bytes::from_static(b"png"));
+    let request = tokio::time::timeout(std::time::Duration::from_secs(2), proxy_task)
+        .await
+        .expect("request must reach proxy")
+        .expect("proxy task");
+    assert!(request.starts_with("GET http://unresolved.invalid/logo.png HTTP/1.1\r\n"), "{request}");
+}
+
+#[tokio::test]
+async fn public_resource_client_reaches_a_proxy_on_loopback() {
+    // A proxy is commonly configured on the loopback interface (`http://localhost:8118`), so the
+    // connect-time guard of the public resource client must not reject the proxy host itself.
+    let app_state = create_test_app_state();
+    let response_head = "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 3\r\nConnection: close\r\n\r\n";
+    let (proxy_addr, proxy_task) = spawn_legacy_hls_test_origin(response_head.to_string(), b"png".to_vec()).await;
+    app_state.app_config.config.store(Arc::new(Config {
+        proxy: Some(crate::model::ProxyConfig {
+            url: format!("http://localhost:{}", proxy_addr.port()),
+            username: None,
+            password: None,
+        }),
+        ..Config::default()
+    }));
+    let client = crate::api::model::create_resource_public_http_client_no_redirect(&app_state.app_config)
+        .expect("resource HTTP client");
+
+    let response = client.get("http://8.8.8.8/icon.png").send().await.expect("request reaches the proxy");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let request = tokio::time::timeout(std::time::Duration::from_secs(2), proxy_task)
+        .await
+        .expect("request must reach proxy")
+        .expect("proxy task");
+    assert!(request.starts_with("GET http://8.8.8.8/icon.png HTTP/1.1\r\n"), "{request}");
+}
+
+#[tokio::test]
+async fn no_redirect_resource_refuses_destinations_local_to_this_host() {
+    let app_state = create_test_app_state();
+    let (proxy_addr, proxy_task) =
+        spawn_legacy_hls_test_origin("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".to_string(), Vec::new()).await;
+    app_state.app_config.config.store(Arc::new(Config {
+        proxy: Some(crate::model::ProxyConfig { url: format!("http://{proxy_addr}"), username: None, password: None }),
+        ..Config::default()
+    }));
+    let client = crate::api::model::create_resource_http_client_no_redirect(&app_state.app_config)
+        .expect("resource HTTP client");
+    app_state.resource_http_client_no_redirect.store(Arc::new(client));
+
+    for local_only in ["http://127.0.0.1/icon.png", "http://169.254.169.254/latest/meta-data/", "http://[::1]/icon.png"]
+    {
+        let response =
+            resource_response(&app_state, ResourceFetchPolicy::NonPublic, local_only, &HeaderMap::new(), None)
+                .await
+                .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{local_only}");
+    }
+
+    // The guard rejects before a request is built, so nothing may reach the configured proxy.
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), proxy_task).await.is_err(),
+        "no request may reach the proxy for local-only destinations"
     );
-    app_state.resource_clients.store(Arc::new(ResourceClientSet::from_clients(clients)));
-
-    let response = resource_response(
-        &app_state,
-        ResourceFetchOptions::cached(authorization),
-        &format!("http://{origin_addr}/icon.png"),
-        &HeaderMap::new(),
-        None,
-    )
-    .await
-    .into_response();
-
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-    let origin_result = tokio::time::timeout(std::time::Duration::from_millis(250), &mut origin_task).await;
-    origin_task.abort();
-    assert!(origin_result.is_err(), "blocked loopback request reached the test origin");
 }
 
 #[tokio::test]
-async fn resource_response_rejects_a_policy_without_a_current_client() {
+async fn resource_redirect_hides_private_destination_and_upstream_location() {
     let app_state = create_test_app_state();
+    let response_head = "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nLocation: http://10.0.0.2/private\r\nContent-Length: 3\r\nConnection: close\r\n\r\n";
+    let (proxy_addr, proxy_task) = spawn_legacy_hls_test_origin(response_head.to_string(), b"png".to_vec()).await;
+    let client = reqwest::Client::builder()
+        .proxy(reqwest::Proxy::all(format!("http://{proxy_addr}")).expect("test proxy"))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("mock upstream client");
+    app_state.resource_http_client_no_redirect.store(Arc::new(client));
+
+    let private = resource_redirect_or_proxy(&app_state, "http://10.0.0.1/icon.png", &HeaderMap::new(), None).await;
+    assert_eq!(private.status(), StatusCode::OK);
+    assert!(private.headers().get("location").is_none());
+    assert_eq!(private.into_body().collect().await.expect("private icon body").to_bytes(), Bytes::from_static(b"png"));
+    let request = proxy_task.await.expect("mock request");
+    assert!(request.starts_with("GET http://10.0.0.1/icon.png HTTP/1.1\r\n"));
+
+    let public = resource_redirect_or_proxy(&app_state, "http://8.8.8.8/icon.png", &HeaderMap::new(), None).await;
+    assert_eq!(public.status(), StatusCode::FOUND);
+    assert_eq!(public.headers().get("location").and_then(|value| value.to_str().ok()), Some("http://8.8.8.8/icon.png"));
+
+    let local_thumbnail =
+        resource_redirect_or_proxy(&app_state, "/api/v1/library/thumbnail/item", &HeaderMap::new(), None).await;
+    assert_eq!(local_thumbnail.status(), StatusCode::FOUND);
+    assert_eq!(
+        local_thumbnail.headers().get("location").and_then(|value| value.to_str().ok()),
+        Some("/api/v1/library/thumbnail/item")
+    );
+
+    let blocked = resource_redirect_or_proxy(&app_state, "http://127.0.0.1/icon.png", &HeaderMap::new(), None).await;
+    assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+    assert!(blocked.headers().get("location").is_none());
+}
+
+#[tokio::test]
+async fn proxied_m3u_logo_follows_private_redirect_without_forwarding_credentials() {
+    let app_state = create_test_app_state();
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("mock proxy binds");
+    let proxy_addr = listener.local_addr().expect("mock proxy address");
+    let proxy_task = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for response in [
+            "HTTP/1.1 302 Found\r\nLocation: http://10.0.0.2/icon.png\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 3\r\nConnection: close\r\n\r\npng",
+        ] {
+            let (mut socket, _) = listener.accept().await.expect("mock proxy accepts request");
+            let mut request = Vec::new();
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let mut chunk = [0_u8; 1024];
+                let read = socket.read(&mut chunk).await.expect("mock proxy reads request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            socket.write_all(response.as_bytes()).await.expect("mock proxy writes response");
+            requests.push(String::from_utf8_lossy(&request).into_owned());
+        }
+        requests
+    });
+    let client = reqwest::Client::builder()
+        .proxy(reqwest::Proxy::all(format!("http://{proxy_addr}")).expect("mock proxy URL"))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("mock resource client");
+    app_state.resource_http_client_no_redirect.store(Arc::new(client));
+    let input = ConfigInput {
+        url: "http://10.0.0.1/playlist.m3u".to_string(),
+        headers: HashMap::from([("Authorization".to_string(), "Bearer secret".to_string())]),
+        ..ConfigInput::default()
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer player-secret"));
+
+    let response = resource_proxy_response(&app_state, "http://10.0.0.1/logo.png", &headers, Some(&input)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.into_body().collect().await.expect("image body").to_bytes(), Bytes::from_static(b"png"));
+
+    let requests = proxy_task.await.expect("mock proxy task");
+    assert!(requests[0].starts_with("GET http://10.0.0.1/logo.png HTTP/1.1\r\n"));
+    assert!(requests[0].to_ascii_lowercase().contains("authorization: bearer secret"));
+    assert!(!requests[0].contains("player-secret"));
+    assert!(requests[1].starts_with("GET http://10.0.0.2/icon.png HTTP/1.1\r\n"));
+    assert!(!requests[1].to_ascii_lowercase().contains("authorization:"));
+}
+
+#[test]
+fn configured_resource_headers_are_limited_to_the_input_origin() {
+    let input = ConfigInput { url: "http://10.0.0.1:8080/playlist.m3u".to_string(), ..ConfigInput::default() };
+    assert!(resource_input_for_url(Some(&input), "http://10.0.0.1:8080/logo.png").is_some());
+    assert!(resource_input_for_url(Some(&input), "http://10.0.0.2:8080/logo.png").is_none());
+    assert!(resource_input_for_url(Some(&input), "http://10.0.0.1:8081/logo.png").is_none());
+    assert!(resource_input_for_url(Some(&input), "https://10.0.0.1:8080/logo.png").is_none());
+}
+
+#[tokio::test]
+async fn public_resource_is_fetched_through_the_configured_proxy() {
+    // Regression lock: a resource fetch that leaves the local network must use the configured proxy,
+    // otherwise it discloses the operator's address to the resource host. The Web UI resource route
+    // reaches this path, because it wraps every icon of a public destination into a proxy link.
+    let app_state = create_test_app_state();
+    let response_head = "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 3\r\nConnection: close\r\n\r\n";
+    let (proxy_addr, proxy_task) = spawn_legacy_hls_test_origin(response_head.to_string(), b"png".to_vec()).await;
+    let client = reqwest::Client::builder()
+        .proxy(reqwest::Proxy::all(format!("http://{proxy_addr}")).expect("test proxy"))
+        .build()
+        .expect("mock proxy client");
+    app_state.resource_public_http_client_no_redirect.store(Arc::new(client));
+
+    let response = resource_proxy_response(&app_state, "http://8.8.8.8/logo.png", &HeaderMap::new(), None).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.into_body().collect().await.expect("image body").to_bytes(), Bytes::from_static(b"png"));
+    let request = tokio::time::timeout(std::time::Duration::from_secs(2), proxy_task)
+        .await
+        .expect("request must reach proxy")
+        .expect("proxy task");
+    assert!(request.starts_with("GET http://8.8.8.8/logo.png HTTP/1.1\r\n"), "{request}");
+}
+
+#[tokio::test]
+async fn proxied_resource_follows_a_redirect_into_the_public_network_through_the_configured_proxy() {
+    // Regression lock: the hop decides which client is used. A network-internal destination that
+    // redirects to a public host must not make the follow-up request directly, or the redirect would
+    // disclose the operator's address to that host despite a configured proxy.
+    let app_state = create_test_app_state();
+    let redirect_head =
+        "HTTP/1.1 302 Found\r\nLocation: http://8.8.8.8/logo.png\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    let (private_proxy_addr, private_proxy_task) =
+        spawn_legacy_hls_test_origin(redirect_head.to_string(), Vec::new()).await;
+    let private_client = reqwest::Client::builder()
+        .proxy(reqwest::Proxy::all(format!("http://{private_proxy_addr}")).expect("test proxy"))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("mock private client");
+    app_state.resource_http_client_no_redirect.store(Arc::new(private_client));
+
+    let response_head = "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 3\r\nConnection: close\r\n\r\n";
+    let (public_proxy_addr, public_proxy_task) =
+        spawn_legacy_hls_test_origin(response_head.to_string(), b"png".to_vec()).await;
+    let public_client = reqwest::Client::builder()
+        .proxy(reqwest::Proxy::all(format!("http://{public_proxy_addr}")).expect("test proxy"))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("mock public client");
+    app_state.resource_public_http_client_no_redirect.store(Arc::new(public_client));
+
+    let response = resource_proxy_response(&app_state, "http://10.0.0.1/logo.png", &HeaderMap::new(), None).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.into_body().collect().await.expect("image body").to_bytes(), Bytes::from_static(b"png"));
+    let first_hop = private_proxy_task.await.expect("first hop request");
+    assert!(first_hop.starts_with("GET http://10.0.0.1/logo.png HTTP/1.1\r\n"), "{first_hop}");
+    let second_hop = tokio::time::timeout(std::time::Duration::from_secs(2), public_proxy_task)
+        .await
+        .expect("public hop must be fetched")
+        .expect("public hop request");
+    assert!(second_hop.starts_with("GET http://8.8.8.8/logo.png HTTP/1.1\r\n"), "{second_hop}");
+}
+
+#[tokio::test]
+async fn public_resource_redirect_to_a_destination_local_to_this_host_is_refused() {
+    // Regression lock: a public host that redirects to loopback, link-local, or a cloud metadata
+    // endpoint must not turn the resource route into a reader for this host. The redirect target is
+    // never requested, and its location is never relayed to the client.
+    let app_state = create_test_app_state();
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("mock proxy binds");
+    let proxy_addr = listener.local_addr().expect("mock proxy address");
+    let proxy_task = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        loop {
+            let Ok(accepted) = tokio::time::timeout(std::time::Duration::from_millis(500), listener.accept()).await
+            else {
+                break;
+            };
+            let Ok((mut socket, _)) = accepted else { break };
+            let mut request = Vec::new();
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let mut chunk = [0_u8; 1024];
+                match socket.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => request.extend_from_slice(&chunk[..read]),
+                }
+            }
+            requests.push(String::from_utf8_lossy(&request).into_owned());
+            let head = "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1/secret\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let _ = socket.write_all(head.as_bytes()).await;
+        }
+        requests
+    });
+    let client = reqwest::Client::builder()
+        .proxy(reqwest::Proxy::all(format!("http://{proxy_addr}")).expect("test proxy"))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("mock client");
+    app_state.resource_public_http_client_no_redirect.store(Arc::new(client));
+
+    let response = resource_proxy_response(&app_state, "http://8.8.8.8/logo.png", &HeaderMap::new(), None).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert!(response.headers().get("location").is_none(), "the local destination must not be relayed");
+    let requests = proxy_task.await.expect("mock proxy task");
+    assert_eq!(requests.len(), 1, "the local destination must not be requested: {requests:?}");
+}
+
+#[tokio::test]
+async fn no_redirect_resource_does_not_relay_upstream_error_details() {
+    let app_state = create_test_app_state();
+    let body = b"<html>internal service error</html>".to_vec();
+    let response_head =
+        format!("HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n", body.len());
+    let (proxy_addr, proxy_task) = spawn_legacy_hls_test_origin(response_head, body.clone()).await;
+    app_state.app_config.config.store(Arc::new(Config {
+        proxy: Some(crate::model::ProxyConfig { url: format!("http://{proxy_addr}"), username: None, password: None }),
+        ..Config::default()
+    }));
+    let client = reqwest::Client::builder()
+        .proxy(reqwest::Proxy::all(format!("http://{proxy_addr}")).expect("test proxy"))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("mock upstream client");
+    app_state.resource_http_client_no_redirect.store(Arc::new(client));
+
     let response = resource_response(
         &app_state,
-        ResourceFetchOptions::cached(ResolvedResourceAuthorization::public_only()),
-        "http://1.1.1.1/icon.png",
+        ResourceFetchPolicy::NonPublic,
+        "http://10.0.0.1/icon.png",
         &HeaderMap::new(),
         None,
     )
     .await
     .into_response();
 
+    // The client learns that the fetch failed, not what the destination answered.
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let relayed = response.into_body().collect().await.expect("response body").to_bytes();
+    assert!(relayed.is_empty(), "upstream error body must not be relayed: {relayed:?}");
+
+    let request = tokio::time::timeout(std::time::Duration::from_secs(2), proxy_task)
+        .await
+        .expect("request must reach proxy")
+        .expect("proxy task");
+    assert!(request.starts_with("GET http://10.0.0.1/icon.png HTTP/1.1\r\n"), "{request}");
+}
+
+#[tokio::test]
+async fn resource_client_refuses_names_that_resolve_to_local_addresses() {
+    let app_state = create_test_app_state();
+    let (origin_addr, _origin_task) =
+        spawn_legacy_hls_test_origin("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".to_string(), Vec::new()).await;
+    let guarded = crate::api::model::create_resource_http_client_no_redirect(&app_state.app_config)
+        .expect("resource HTTP client");
+
+    // `localhost` resolves to loopback on the client's DNS layer, so the request must fail while the
+    // name is resolved and never reach the origin that is listening on that loopback address.
+    let error = guarded
+        .get(format!("http://localhost:{}/icon.png", origin_addr.port()))
+        .send()
+        .await
+        .expect_err("a name resolving to a local address must be refused");
+
+    // reqwest only reports the outer failure, so the cause chain has to be walked to see the refusal.
+    let mut causes = error.to_string();
+    let mut source = std::error::Error::source(&error);
+    while let Some(cause) = source {
+        causes.push_str(&format!(" | {cause}"));
+        source = cause.source();
+    }
+    assert!(causes.contains("local to this host"), "{causes}");
 }
 
 fn create_test_fingerprint_with_user_agent(addr: std::net::SocketAddr, user_agent: &str) -> Fingerprint {

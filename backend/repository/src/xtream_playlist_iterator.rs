@@ -2,11 +2,11 @@ use crate::{
     get_file_path_for_db_index, open_playlist_reader, user_get_bouquet_filter, xtream_get_file_path,
     xtream_get_storage_path, LockedReceiverStream,
 };
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use log::error;
 use shared::{
     error::TuliproxError,
-    model::{PlaylistItemType, TargetType, XtreamCluster, XtreamMappingOptions, XtreamPlaylistItem},
+    model::{PlaylistItemType, TargetType, XtreamCluster, XtreamPlaylistItem},
 };
 use std::{
     collections::HashSet,
@@ -15,7 +15,10 @@ use std::{
     task::{Context, Poll},
 };
 use tokio::{sync::mpsc, task};
-use tuliprox_core::model::{xtream_mapping_option_from_target_options, AppConfig, ConfigTarget, ProxyUserCredentials};
+use tuliprox_core::{
+    model::{xtream_mapping_option_from_target_options, AppConfig, ConfigTarget, ProxyUserCredentials},
+    utils::prepare_xtream_resource_hosts,
+};
 
 pub struct XtreamPlaylistIterator {
     inner: LockedReceiverStream<Result<(XtreamPlaylistItem, bool), TuliproxError>>,
@@ -183,9 +186,10 @@ impl Stream for XtreamPlaylistIterator {
     }
 }
 
+type XtreamJsonStream = Pin<Box<dyn Stream<Item = Result<(String, bool), TuliproxError>> + Send>>;
+
 pub struct XtreamPlaylistJsonIterator {
-    inner: XtreamPlaylistIterator,
-    options: Option<XtreamMappingOptions>,
+    inner: XtreamJsonStream,
 }
 
 impl XtreamPlaylistJsonIterator {
@@ -200,34 +204,35 @@ impl XtreamPlaylistJsonIterator {
             TuliproxError::Config(format!("Unexpected: xtream output required for target {}", target.name))
         })?;
         if !is_cluster_allowed_for_user(user, cluster) {
-            return Ok(Self { inner: XtreamPlaylistIterator::empty(), options: None });
+            return Ok(Self { inner: Box::pin(futures::stream::empty()) });
         }
         let encrypt_secret = app_config.get_encrypt_secret();
-        let options =
-            xtream_mapping_option_from_target_options(target, xtream_output, app_config, user, encrypt_secret)?;
-        Ok(Self {
-            inner: XtreamPlaylistIterator::new(cluster, app_config, target, category_id, user).await?,
-            options: Some(options),
-        })
+        let options = Arc::new(xtream_mapping_option_from_target_options(
+            target,
+            xtream_output,
+            app_config,
+            user,
+            encrypt_secret,
+        )?);
+        let raw = XtreamPlaylistIterator::new(cluster, app_config, target, category_id, user).await?;
+        let inner = raw.then(move |entry| {
+            let options = Arc::clone(&options);
+            async move {
+                let (item, has_next) = entry?;
+                prepare_xtream_resource_hosts(&item, &options).await;
+                let json = serde_json::to_string(&item.to_document(&options))
+                    .map_err(|error| TuliproxError::RepositoryXtream(error.to_string()))?;
+                Ok((json, has_next))
+            }
+        });
+        Ok(Self { inner: Box::pin(inner) })
     }
 }
 
 impl Stream for XtreamPlaylistJsonIterator {
     type Item = Result<(String, bool), TuliproxError>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match Pin::new(&mut self.inner).poll_next(cx) {
-            Poll::Ready(Some(Ok((pli, has_next)))) => {
-                let Some(options) = self.options.as_ref() else {
-                    return Poll::Ready(None);
-                };
-                let json = serde_json::to_string(&pli.to_document(options))
-                    .map_err(|error| TuliproxError::RepositoryXtream(error.to_string()));
-                Poll::Ready(Some(json.map(|json| (json, has_next))))
-            }
-            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending,
-        }
+        self.inner.as_mut().poll_next(cx)
     }
 }
 

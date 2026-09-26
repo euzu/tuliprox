@@ -9,7 +9,6 @@ use shared::{
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
-    sync::Arc,
 };
 use tuliprox_core::{
     model::{ConfigInput, EpgSource, EpgSourceType, PersistedEpgSource, PersistedEpgSourceKind},
@@ -201,7 +200,7 @@ pub async fn get_xmltv<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
                 match download_epg_file(epg_source, ctx, input, headers, storage_dir).await {
                     Ok(file_path) => {
                         stored_file_paths.push(file_path.clone());
-                        match persisted_source_from_config(epg_source, file_path, input) {
+                        match persisted_source_from_config(epg_source, file_path) {
                             Ok(persisted) => file_paths.push(persisted),
                             Err(err) => errors.push(err),
                         }
@@ -230,7 +229,6 @@ pub async fn get_xmltv<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
 fn persisted_source_from_config(
     epg_source: &EpgSource,
     file_path: PathBuf,
-    input: &ConfigInput,
 ) -> Result<PersistedEpgSource, TuliproxError> {
     let kind = match epg_source.source_type {
         EpgSourceType::Xmltv => PersistedEpgSourceKind::Xmltv,
@@ -248,13 +246,7 @@ fn persisted_source_from_config(
         }
     };
 
-    Ok(PersistedEpgSource {
-        file_path,
-        priority: epg_source.priority,
-        logo_override: epg_source.logo_override,
-        kind,
-        input_name: Some(Arc::clone(&input.name)),
-    })
+    Ok(PersistedEpgSource { file_path, priority: epg_source.priority, logo_override: epg_source.logo_override, kind })
 }
 
 #[cfg(test)]

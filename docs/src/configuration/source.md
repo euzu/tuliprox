@@ -144,7 +144,6 @@ inputs:
 | `aliases`               | List   |    No    |         | Connection pooling / Sub-accounts (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                                          |
 | `staged`                | Object |    No    |         | Staged overlay settings. Only valid when `type: staged` (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                    |
 | `panel_api`             | Object |    No    |         | Automated reseller account generation (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                                      |
-| `resource_policy`       | Object | No       |         | Trusted private destinations for resource URLs supplied by this input (see [below](#27-resource-policy-resource_policy)).                                                                                                                                                                                                                                                                                                                 |
 
 #### Minimal Stalker Input Example
 
@@ -208,15 +207,14 @@ logic.
 
 ### Input Subsections (Object Keys)
 
-| Block             | Description                                                                | Link                                                       |
-| :---------------- | :------------------------------------------------------------------------- | :--------------------------------------------------------- |
-| `headers`         | Custom HTTP request headers for playlist and EPG downloads.                | [See Headers](#21-headers-headers)                         |
-| `options`         | Behavior controls for metadata resolution, stream probing, and skip logic. | [See Options](#22-input-options-options)                   |
-| `epg`             | XMLTV source management and Smart Match fuzzy logic settings.              | [See EPG](#23-epg-assignment--smart-match-epg)             |
-| `aliases`         | Connection pooling for multiple subscriptions from the same provider.      | [See Aliases](#24-provider-aliases-aliases--batch)         |
-| `staged`          | Overlay settings for first-class staged inputs.                            | [See Staged](#25-staged-sources-staged)                    |
-| `panel_api`       | Automated reseller panel integration (provisioning/renewal).               | [See Panel API](#26-provider-panel-api-panel_api)          |
-| `resource_policy` | Trusted private destinations for resource URLs supplied by this input.     | [See Resource Policy](#27-resource-policy-resource_policy) |
+| Block       | Description                                                                | Link                                               |
+|:------------|:---------------------------------------------------------------------------|:---------------------------------------------------|
+| `headers`   | Custom HTTP request headers for playlist and EPG downloads.                | [See Headers](#21-headers-headers)                 |
+| `options`   | Behavior controls for metadata resolution, stream probing, and skip logic. | [See Options](#22-input-options-options)           |
+| `epg`       | XMLTV source management and Smart Match fuzzy logic settings.              | [See EPG](#23-epg-assignment--smart-match-epg)     |
+| `aliases`   | Connection pooling for multiple subscriptions from the same provider.      | [See Aliases](#24-provider-aliases-aliases--batch) |
+| `staged`    | Overlay settings for first-class staged inputs.                            | [See Staged](#25-staged-sources-staged)            |
+| `panel_api` | Automated reseller panel integration (provisioning/renewal).               | [See Panel API](#26-provider-panel-api-panel_api)  |
 
 ---
 
@@ -1178,104 +1176,6 @@ Tuliprox processes all Panel API responses as JSON and strictly requires `status
 * **`client_renew`**: Updates the expiration date without modifying existing credentials.
 * **`client_adult_content`**: Optionally executed after `client_new` or `client_renew` to toggle adult content settings
   on the provider side. Requires `status: true` for success.
-
----
-
-### 2.7 Resource Policy (`resource_policy`)
-
-Restricts which destinations Tuliprox may reach when it proxies a resource URL that came from this input, including
-channel logos, EPG channel and programme icons, covers, posters, episode images, backdrops, and nested Xtream
-metadata resources.
-
-Without a policy, every resource URL is treated as **public-only**: only publicly routable destinations are
-fetched. An internal logo host therefore stops working until it is listed here.
-
-```yaml
-inputs:
-  - name: local-playlist
-    type: m3u
-    url: /data/local-playlist.m3u
-    resource_policy:
-      allowed_hosts:
-        - media.home.arpa
-      allowed_networks:
-        - 192.168.50.20/32
-```
-
-#### Configure it in the Web UI
-
-1. Open the **Source Editor** and select the input that supplies the resource.
-2. Open the **Resource Policy** page using the shield icon.
-3. Add the exact DNS names under **Allowed Resource Hosts**. Enter host names only, without a scheme, path, port,
-   wildcard, or IP address.
-4. Add the smallest required private CIDR ranges under **Allowed Resource Networks**.
-5. Apply the input changes and save the source configuration.
-
-For a private DNS destination, configure both a matching host and network. A private IP literal needs only a
-matching network. Removing every host and network removes the policy from the input and restores the public-only
-default.
-
-#### Parameters
-
-| Parameter              | Type | Required | Default | Technical Impact & Background                                                                                                                                                                                                                                                                           |
-| :--------------------- | :--- | :------: | :------ | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **`allowed_hosts`**    | List |    No    | `[]`    | Exact DNS names that may resolve to a private address. Matched case-insensitively and without a trailing dot. Wildcards, ports, schemes, paths, and IP literals are rejected while the configuration is loaded.                                                                                         |
-| **`allowed_networks`** | List |    No    | `[]`    | Private CIDR ranges a destination address may fall into (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7` and subnets of them). Anything broader, and every public or special-use range, is rejected while the configuration is loaded. Use `/32`, `/128`, or the smallest practical subnet. |
-
-#### What a policy authorizes
-
-* A **publicly routable** destination is always allowed, with or without a policy.
-* A **private DNS destination** requires both: the exact host name in `allowed_hosts` **and** the resolved address
-  inside `allowed_networks`. Listing one without the other authorizes nothing.
-* A **private IP literal** in the URL (for example `http://192.168.1.1/logo.png`) is authorized by
-  `allowed_networks` alone, because a literal has no host name to match.
-* Loopback, link-local, cloud-metadata, unspecified, multicast, CGNAT, documentation, benchmarking, broadcast, and
-  reserved addresses are always rejected, even when a matching CIDR is configured.
-* Redirects are re-checked on every hop with the same policy, and redirect hops are bounded.
-* `allowed_hosts` and `allowed_networks` contain no port, so an authorized host is reachable on **every** port that
-  serves `http` or `https`. This is deliberate: providers serve images on non-standard ports, and the address
-  policy is the actual restriction, not the port.
-
-#### Where the policy comes from
-
-The policy is looked up on the input that supplied the concrete resource URL, not on the target, the item, or the
-record that contains it. Two consequences matter in practice:
-
-* Items delivered through an alias are authorized with the policy of their main input; aliases inherit it.
-* `logo_override: true` copies an EPG icon into a playlist logo. That logo keeps the EPG input as its origin and is
-  authorized with the **EPG input's** policy, not the playlist input's.
-
-The canonical input name is the authorization identity of a resource origin. Configured input and alias names are
-non-empty, globally unique strings: no two inputs — and no input and alias — may share a name, and the loader rejects
-a configuration that does. Internal numeric IDs and generated playlist UUIDs are managed separately from these names.
-Renaming an input invalidates the links that were issued for it, and reusing a name for a different input would hand
-it the authority of the old input, so treat a rename as a new identity.
-
-#### Legacy data and links
-
-Legacy raw resources stored on playlist and Xtream items use the containing item's input. Legacy EPG resources and
-external links without an authoritative input remain public-only until the data is regenerated. An origin that
-names an input which no longer exists or is disabled is rejected with `400`; it is never silently downgraded to
-public-only.
-
-Tuliprox stores ownership internally in a value beginning with `resource://`. This scheme is reserved and must not
-appear in provider data, playlists, EPG documents, metadata, or mapping configuration. Provider-supplied and mapped
-values using the reserved scheme are discarded so they cannot claim another input's network policy. External M3U,
-XMLTV, Xtream, and Web UI responses always contain either the original HTTP(S) URL or a Tuliprox proxy URL, never the
-internal representation.
-
-#### Proxy interaction
-
-Resource proxying always connects directly, so the destination policy can be enforced while the connection is
-established. A configured proxy, and the `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` environment variables, are
-ignored for these requests; Tuliprox logs a warning at startup and on reload when one is configured. Provider
-fetches, playlist and EPG downloads, and streams keep using the proxy.
-
-#### Cache
-
-Proxied resources are cached per policy scope. An entry fetched under one policy is never served to a request
-authorized by another, and the resource cache starts cold once on upgrade because the cache key layout changes.
-The cache size limits are unchanged.
 
 ---
 

@@ -153,7 +153,6 @@ pub fn parse_xtream_series_info(
                         ..Default::default()
                     },
                 };
-                item.header.ingest_resource_values(&input.name);
                 item.header.freeze_input_stream_id();
                 item
             })
@@ -281,7 +280,6 @@ pub async fn parse_xtream(
                                 ..Default::default()
                             },
                         };
-                        item.header.ingest_resource_values(&input_name);
                         item.header.freeze_input_stream_id();
                         group.add(item);
                     }
@@ -512,7 +510,6 @@ where
             ..Default::default()
         },
     };
-    item.header.ingest_resource_values(input_name);
     item.header.freeze_input_stream_id();
 
     // if let Some(StreamProperties::Series(props)) = item.header.additional_properties.as_mut() {

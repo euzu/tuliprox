@@ -22,7 +22,7 @@ use tuliprox_core::{
         ClusterForceUpdate, ConfigInput, ConfigInputFlags, ConfigTarget, InputSource, ProxyUserCredentials,
         XtreamTargetOutput,
     },
-    utils::request,
+    utils::{prepare_xtream_resource_hosts, request},
 };
 use tuliprox_parser::{xtream, xtream::parse_xtream_series_info};
 use tuliprox_repository::{
@@ -87,6 +87,7 @@ pub async fn get_xtream_stream_info(
     let app_config = &app_config;
     let encrypt_secret = app_config.get_encrypt_secret();
     let options = xtream_mapping_option_from_target_options(target, xtream_output, app_config, user, encrypt_secret)?;
+    prepare_xtream_resource_hosts(pli, &options).await;
 
     if let Some(content) = pli.get_resolved_info_document(&options) {
         return serde_json::to_string(&content).map_err(|err| TuliproxError::ApiXtream(format!("{err}")));
@@ -148,7 +149,9 @@ pub async fn get_xtream_stream_info(
                                     target,
                                     xtream_output,
                                     &vod_pli,
-                                ) {
+                                )
+                                .await
+                                {
                                     return value;
                                 }
                             }
@@ -293,7 +296,9 @@ pub async fn get_xtream_stream_info(
                                                 target,
                                                 xtream_output,
                                                 &series_pli,
-                                            ) {
+                                            )
+                                            .await
+                                            {
                                                 return value;
                                             }
                                         }
@@ -318,7 +323,7 @@ pub async fn get_xtream_stream_info(
     )))
 }
 
-fn xtream_resolve_stream_info(
+async fn xtream_resolve_stream_info(
     app_config: &Arc<AppConfig>,
     _playlists: &PlaylistStorageState,
     user: &ProxyUserCredentials,
@@ -333,6 +338,7 @@ fn xtream_resolve_stream_info(
             Ok(options) => options,
             Err(err) => return Some(Err(err)),
         };
+    prepare_xtream_resource_hosts(pli, &options).await;
     if let Some(content) = pli.get_resolved_info_document(&options) {
         return Some(
             serde_json::to_string(&content)

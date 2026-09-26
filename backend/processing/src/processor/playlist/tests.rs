@@ -2425,7 +2425,6 @@ mod mapping_stage {
                         match_names: vec!["BBC One".intern()],
                         config: Box::new(IcsEpgSourceConfig::default()),
                     },
-                    input_name: None,
                 }]);
 
                 let mut playlist = FetchedPlaylist {
@@ -2521,7 +2520,6 @@ match {
                         match_names: vec![],
                         config: Box::new(IcsEpgSourceConfig::default()),
                     },
-                    input_name: None,
                 }]);
                 let mut playlist = FetchedPlaylist {
                     input: &input,
