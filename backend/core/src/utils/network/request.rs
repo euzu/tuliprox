@@ -8,8 +8,7 @@ pub const STREAM_IDLE_TIMEOUT: u64 = 60;
 use crate::{
     model::{
         resolve_provider_scheme_url_with_provider_index, AppConfig, Config, ConfigInput, ConfigProvider, InputSource,
-        ResourcePolicy, ResourcePolicyError, ResourceRedirectMode, ResourceRetryConfig,
-        ReverseProxyDisabledHeaderConfig,
+        ResourceRetryConfig, ReverseProxyDisabledHeaderConfig,
     },
     utils::{
         async_file_reader, async_file_writer,
@@ -27,6 +26,7 @@ use crate::{
 };
 use futures::StreamExt;
 use log::{debug, error, log_enabled, trace, warn, Level};
+use lru::LruCache;
 use regex::Regex;
 use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue, HOST},
@@ -43,16 +43,17 @@ use std::{
     collections::{HashMap, HashSet},
     io::{Error, ErrorKind},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    num::NonZeroUsize,
     path::{Path, PathBuf},
-    sync::{Arc, Once},
-    time::Duration,
+    sync::{Arc, Mutex, Once, PoisonError},
+    time::{Duration, Instant},
 };
 use tokio::{
     fs::File,
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt},
-    time::sleep,
+    time::{sleep, timeout},
 };
-use url::{Host, Url};
+use url::Url;
 
 static PROXY_DIAGNOSTICS_ONCE: Once = Once::new();
 
@@ -71,27 +72,51 @@ impl reqwest::dns::Resolve for PublicIpResolver {
     }
 }
 
-/// Resolves a host and keeps only the addresses the policy authorizes.
+pub async fn resolve_public_socket_addrs(host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+    let addresses = lookup_socket_addrs(host, port).await?;
+    if addresses.is_empty() || addresses.iter().any(|address| !is_public_ip(address.ip())) {
+        return Err(Error::new(ErrorKind::PermissionDenied, "destination resolves to a non-public address"));
+    }
+    Ok(addresses)
+}
+
+/// Resolves a resource destination, refusing addresses that are local to this host.
 ///
-/// The resolver is the connection-time enforcement point for host names. It runs on every
-/// connection, so a DNS answer that changes between requests is re-evaluated instead of being
-/// trusted from a one-time pre-check. IP literals in a URL bypass DNS entirely, which is why
-/// `ResourcePolicy::validate_initial_url` and the redirect policy classify them separately.
-#[derive(Debug, Clone)]
-pub struct PolicyIpResolver {
-    policy: Arc<ResourcePolicy>,
+/// Private network destinations stay allowed: self-hosted services are a normal resource source.
+pub async fn resolve_resource_socket_addrs(host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+    let addresses = lookup_socket_addrs(host, port).await?;
+    if addresses.is_empty() {
+        return Err(Error::new(ErrorKind::PermissionDenied, "destination does not resolve"));
+    }
+    if addresses.iter().any(|address| classify_ip(address.ip()) == ResourceDestination::Blocked) {
+        return Err(Error::new(ErrorKind::PermissionDenied, "destination is local to this host"));
+    }
+    Ok(addresses)
 }
 
-impl PolicyIpResolver {
-    pub fn new(policy: Arc<ResourcePolicy>) -> Self { Self { policy } }
+/// Resolves a host name or IP literal, bracketed IPv6 included. An unresolvable name yields an empty
+/// result so that every policy decides on its own how to report it.
+async fn lookup_socket_addrs(host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+    if let Ok(address) = host_literal(host).parse::<IpAddr>() {
+        return Ok(vec![SocketAddr::new(address, port)]);
+    }
+    Ok(tokio::net::lookup_host((host, port)).await?.collect())
 }
 
-impl reqwest::dns::Resolve for PolicyIpResolver {
+/// DNS layer of the proxied resource client.
+///
+/// Classifying a destination leaves a window: a name can resolve to a public address while it is
+/// classified and to a local one while the connection is built. This resolver closes that window,
+/// because the addresses it validates are the addresses reqwest connects to. It deliberately does not
+/// consult [`DestinationCache`]: a remembered verdict would reopen exactly that window.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ResourceDestinationResolver;
+
+impl reqwest::dns::Resolve for ResourceDestinationResolver {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
-        let host = name.as_str().to_string();
-        let policy = Arc::clone(&self.policy);
+        let host = name.as_str().to_owned();
         Box::pin(async move {
-            let addresses = resolve_policy_socket_addrs(&host, 0, &policy)
+            let addresses = resolve_resource_socket_addrs(&host, 0)
                 .await
                 .map_err(|err| Box::new(err) as Box<dyn std::error::Error + Send + Sync>)?;
             Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
@@ -99,95 +124,55 @@ impl reqwest::dns::Resolve for PolicyIpResolver {
     }
 }
 
-pub async fn resolve_policy_socket_addrs(
-    host: &str,
-    port: u16,
-    policy: &ResourcePolicy,
-) -> std::io::Result<Vec<SocketAddr>> {
-    let addresses: Vec<SocketAddr> = if let Ok(address) = host.parse::<IpAddr>() {
-        vec![SocketAddr::new(address, port)]
-    } else {
-        tokio::net::lookup_host((host, port)).await?.collect()
-    };
-
-    if addresses.is_empty() {
-        return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "destination did not resolve to an address"));
-    }
-
-    // Mixed answers keep only the approved addresses: a blocked entry must never be left in the
-    // list as a usable fallback, and an approved one must not be dropped because a sibling entry
-    // was rejected.
-    let literal = host.parse::<IpAddr>().ok();
-    let mut approved = Vec::with_capacity(addresses.len());
-    let mut rejection = None;
-    for address in addresses {
-        // A literal has no host name to match, so it is judged by the address policy alone. IP
-        // literals normally never reach a resolver; this keeps the decision consistent if one does.
-        let decision = match literal {
-            Some(literal) => policy.authorize_literal(literal),
-            None => policy.authorize_resolved(host, address.ip()),
-        };
-        match decision {
-            Ok(()) => approved.push(address),
-            Err(err) => rejection = Some(err),
-        }
-    }
-
-    if approved.is_empty() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            rejection.map_or_else(|| "destination is not authorized".to_string(), |err| err.to_string()),
-        ));
-    }
-    Ok(approved)
-}
-
-pub async fn resolve_public_socket_addrs(host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
-    let addresses = if let Ok(address) = host.parse::<IpAddr>() {
-        vec![SocketAddr::new(address, port)]
-    } else {
-        tokio::net::lookup_host((host, port)).await?.collect()
-    };
-    if addresses.is_empty() || addresses.iter().any(|address| !is_public_ip(address.ip())) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "destination resolves to a non-public address",
-        ));
-    }
-    Ok(addresses)
-}
-
-/// How a destination address is treated when a resource policy decides on it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AddressClass {
-    /// Routable on the public internet.
+/// Reachability class of a resource destination.
+///
+/// Resource URLs are supplied by providers and third-party EPG data, so they are untrusted input.
+/// The class answers two separate questions: may a client be handed the URL as-is (any non-public
+/// destination would expose an internal address), and may the proxy fetch it (a destination local
+/// to the proxy host would turn the proxy into a reader for the host itself).
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ResourceDestination {
+    /// Publicly routable: safe to expose to clients and to fetch.
     Public,
-    /// RFC 1918 or IPv6 ULA: reachable only through an explicit policy entry.
+    /// Non-public but routable, which is normal for self-hosted services on the local network
+    /// (RFC1918, unique local addresses, carrier NAT, reserved ranges). Never exposed to clients.
     Private,
-    /// Never reachable, with or without a policy.
+    /// Local to the proxy host or its segment: loopback, link-local (including the cloud metadata
+    /// endpoints), unspecified, multicast or broadcast. Never exposed and never fetched.
     Blocked,
 }
 
-/// Classifies an address, canonicalizing IPv4-mapped IPv6 first so a mapped private address is
-/// judged as the IPv4 address it represents.
-pub fn classify_ip(address: IpAddr) -> AddressClass {
-    match canonicalize_ip(address) {
+/// Reachability class of an address. Single place that decides which range belongs to which class.
+pub fn classify_ip(address: IpAddr) -> ResourceDestination {
+    match address {
         IpAddr::V4(address) => classify_ipv4(address),
         IpAddr::V6(address) => classify_ipv6(address),
     }
 }
 
-/// Collapses an IPv4-mapped IPv6 address to the IPv4 address it represents.
-///
-/// Policy entries are stored as either family, so both the classification and the network
-/// containment check have to see the same family the operator wrote down.
-pub fn canonicalize_ip(address: IpAddr) -> IpAddr {
-    match address {
-        IpAddr::V6(address) => address.to_ipv4_mapped().map_or(IpAddr::V6(address), IpAddr::V4),
-        IpAddr::V4(address) => IpAddr::V4(address),
+fn classify_ipv4(address: Ipv4Addr) -> ResourceDestination {
+    let [first, second, _, _] = address.octets();
+    if address.is_loopback()
+        || address.is_link_local()
+        || address.is_unspecified()
+        || address.is_multicast()
+        || address.is_broadcast()
+        || first == 0
+    {
+        ResourceDestination::Blocked
+    } else if address.is_private()
+        || address.is_documentation()
+        || (first == 100 && (64..=127).contains(&second))
+        || (first == 198 && matches!(second, 18 | 19))
+        || first >= 240
+    {
+        ResourceDestination::Private
+    } else {
+        ResourceDestination::Public
     }
 }
 
+/// IPv4 address carried inside an IPv6 address: IPv4-compatible, NAT64 (`64:ff9b::/96`) or 6to4.
 fn embedded_ipv4(address: Ipv6Addr) -> Option<Ipv4Addr> {
     let segments = address.segments();
     let (high, low) = if segments[..6] == [0, 0, 0, 0, 0, 0] || segments[..6] == [0x0064, 0xff9b, 0, 0, 0, 0] {
@@ -202,49 +187,140 @@ fn embedded_ipv4(address: Ipv6Addr) -> Option<Ipv4Addr> {
     Some(Ipv4Addr::new(a, b, c, d))
 }
 
-fn classify_ipv4(address: Ipv4Addr) -> AddressClass {
-    let [a, b, _, _] = address.octets();
-    if address.is_private() {
-        return AddressClass::Private;
-    }
-    if address.is_loopback()
-        || address.is_link_local()
-        || address.is_broadcast()
-        || address.is_documentation()
-        || address.is_multicast()
-        || address.is_unspecified()
-        || a == 0
-        || (a == 100 && (64..=127).contains(&b))
-        || (a == 198 && matches!(b, 18 | 19))
-        || a >= 240
-    {
-        return AddressClass::Blocked;
-    }
-    AddressClass::Public
-}
-
-fn classify_ipv6(address: Ipv6Addr) -> AddressClass {
-    if let Some(address) = embedded_ipv4(address) {
-        return classify_ipv4(address);
-    }
+fn classify_ipv6(address: Ipv6Addr) -> ResourceDestination {
     let segments = address.segments();
-    if segments[0] & 0xfe00 == 0xfc00 {
-        // fc00::/7 unique local addresses.
-        return AddressClass::Private;
-    }
+    let embedded = address.to_ipv4_mapped().or_else(|| embedded_ipv4(address));
     if address.is_loopback()
         || address.is_unspecified()
         || address.is_multicast()
         || segments[0] & 0xffc0 == 0xfe80
+        || embedded.is_some_and(|mapped| classify_ipv4(mapped) == ResourceDestination::Blocked)
+    {
+        ResourceDestination::Blocked
+    } else if segments[0] & 0xfe00 == 0xfc00
         || segments[0] & 0xffc0 == 0xfec0
         || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+        || embedded.is_some_and(|mapped| classify_ipv4(mapped) == ResourceDestination::Private)
     {
-        return AddressClass::Blocked;
+        ResourceDestination::Private
+    } else {
+        ResourceDestination::Public
     }
-    AddressClass::Public
 }
 
-pub fn is_public_ip(address: IpAddr) -> bool { matches!(classify_ip(address), AddressClass::Public) }
+/// Whether an address is publicly routable.
+///
+/// Derived from [`classify_ip`] so classification and this answer cannot drift apart.
+pub fn is_public_ip(address: IpAddr) -> bool { classify_ip(address) == ResourceDestination::Public }
+
+/// Strips the brackets of an IPv6 literal so that it parses as an address.
+fn host_literal(host: &str) -> &str { host.strip_prefix('[').and_then(|value| value.strip_suffix(']')).unwrap_or(host) }
+
+/// How long a verdict that allows a URL to be handed to a client is remembered.
+const RESOURCE_DESTINATION_PUBLIC_TTL: Duration = Duration::from_secs(60);
+/// How long a verdict that keeps a destination away from clients is remembered. Both classes fail
+/// closed, so they can be cached longer than the one that decides exposure.
+const RESOURCE_DESTINATION_PRIVATE_TTL: Duration = Duration::from_secs(300);
+/// Upper bound for remembered verdicts, evicted least-recently-used.
+const RESOURCE_DESTINATION_CACHE_CAPACITY: usize = 4096;
+/// Resolution budget when classifying a destination given as a name.
+const RESOURCE_DESTINATION_LOOKUP_TIMEOUT: Duration = Duration::from_millis(250);
+
+struct RememberedDestination {
+    verdict: ResourceDestination,
+    expires_at: Instant,
+}
+
+/// Memoizes destination verdicts so that rendering a playlist or EPG does not resolve the same host
+/// per icon.
+///
+/// Owned by the caller instead of being a global so that its lifetime is explicit: a caller may keep
+/// it for its whole runtime or start fresh, and tests stay isolated.
+///
+/// This is a hot-path memo, not policy state: the verdict decides whether a URL may be exposed, and
+/// the resource client resolves and validates again while the connection is built, so a stale entry
+/// can never open a connection to a local address.
+pub struct DestinationCache {
+    destinations: Mutex<LruCache<String, RememberedDestination>>,
+}
+
+impl Default for DestinationCache {
+    fn default() -> Self { Self::new() }
+}
+
+impl DestinationCache {
+    pub fn new() -> Self {
+        Self {
+            destinations: Mutex::new(LruCache::new(
+                NonZeroUsize::new(RESOURCE_DESTINATION_CACHE_CAPACITY).unwrap_or(NonZeroUsize::MIN),
+            )),
+        }
+    }
+
+    fn verdict(&self, host: &str) -> Option<ResourceDestination> {
+        let mut destinations = self.destinations.lock().unwrap_or_else(PoisonError::into_inner);
+        match destinations.get(host) {
+            Some(entry) if entry.expires_at > Instant::now() => Some(entry.verdict),
+            Some(_) => {
+                destinations.pop(host);
+                None
+            }
+            None => None,
+        }
+    }
+
+    fn remember(&self, host: &str, verdict: ResourceDestination) {
+        let ttl = match verdict {
+            ResourceDestination::Public => RESOURCE_DESTINATION_PUBLIC_TTL,
+            ResourceDestination::Private | ResourceDestination::Blocked => RESOURCE_DESTINATION_PRIVATE_TTL,
+        };
+        let mut destinations = self.destinations.lock().unwrap_or_else(PoisonError::into_inner);
+        destinations.put(host.to_owned(), RememberedDestination { verdict, expires_at: Instant::now() + ttl });
+    }
+}
+
+/// Classifies a resource destination given as host name or IP literal, bracketed IPv6 included.
+///
+/// Names are resolved once per verdict lifetime and remembered in `cache`. A name that cannot be
+/// resolved is reported as [`ResourceDestination::Private`]: callers must not hand a possibly
+/// internal name to a client, and the fetch attempt itself decides whether the destination is
+/// reachable.
+pub async fn classify_resource_destination(host: &str, cache: &DestinationCache) -> ResourceDestination {
+    if let Ok(address) = host_literal(host).parse::<IpAddr>() {
+        return classify_ip(address);
+    }
+    if let Some(verdict) = cache.verdict(host) {
+        return verdict;
+    }
+
+    let mut resolved = Vec::new();
+    if let Ok(Ok(addresses)) = timeout(RESOURCE_DESTINATION_LOOKUP_TIMEOUT, tokio::net::lookup_host((host, 0))).await {
+        resolved.extend(addresses.map(|address| address.ip()));
+    }
+    let verdict = classify_resolved_addresses(&resolved);
+    cache.remember(host, verdict);
+    verdict
+}
+
+/// Aggregates the addresses a name resolved to into a single verdict.
+///
+/// One local-only address blocks the whole destination, and one private address keeps it non-public:
+/// a client must not be able to reach the destination by any of its addresses. An empty answer is
+/// non-public, because nothing was proven.
+fn classify_resolved_addresses(addresses: &[IpAddr]) -> ResourceDestination {
+    if addresses.is_empty() {
+        return ResourceDestination::Private;
+    }
+    let mut verdict = ResourceDestination::Public;
+    for address in addresses {
+        match classify_ip(*address) {
+            ResourceDestination::Blocked => return ResourceDestination::Blocked,
+            ResourceDestination::Private => verdict = ResourceDestination::Private,
+            ResourceDestination::Public => {}
+        }
+    }
+    verdict
+}
 
 /// Options applied at the final boundary of every physical request attempt.
 #[derive(Debug, Clone, Copy, Default)]
@@ -3107,84 +3183,6 @@ pub fn create_tmdb_client(cfg: &AppConfig) -> Result<reqwest::ClientBuilder, Tul
     Ok(builder)
 }
 
-/// Redirect hops allowed for a resource fetch. The same bound the general client uses.
-pub const RESOURCE_REDIRECT_LIMIT: usize = 10;
-
-/// Redirect policy for resource fetches.
-///
-/// reqwest's engine stays in place so method rewriting, `Referer` handling, and stripping of
-/// sensitive cross-origin headers keep working. The policy only adds the two checks reqwest
-/// cannot do itself: a hop bound and the IP-literal check for redirect targets, which never reach
-/// the DNS resolver.
-pub fn resource_redirect_policy(policy: Arc<ResourcePolicy>, mode: ResourceRedirectMode) -> Policy {
-    match mode {
-        ResourceRedirectMode::NoRedirect => Policy::none(),
-        ResourceRedirectMode::Bounded => Policy::custom(move |attempt| {
-            if attempt.previous().len() >= RESOURCE_REDIRECT_LIMIT {
-                return attempt.error(ResourcePolicyError::TooManyRedirects);
-            }
-            match attempt.url().host() {
-                None => attempt.error(ResourcePolicyError::MissingHost),
-                Some(Host::Ipv4(address)) => match policy.authorize_literal(IpAddr::V4(address)) {
-                    Ok(()) => attempt.follow(),
-                    Err(err) => attempt.error(err),
-                },
-                Some(Host::Ipv6(address)) => match policy.authorize_literal(IpAddr::V6(address)) {
-                    Ok(()) => attempt.follow(),
-                    Err(err) => attempt.error(err),
-                },
-                Some(Host::Domain(_)) => attempt.follow(),
-            }
-        }),
-    }
-}
-
-/// Warns once per client build that resource-proxy fetches ignore the configured proxy.
-///
-/// A proxy resolves names on its own side, which would bypass connection-time destination
-/// validation, so every policy-checked resource fetch connects directly. This applies to
-/// public-only resources as well, which is why it is not tied to a `resource_policy` being set.
-pub fn warn_resource_proxy_bypass(config: &Config) {
-    let proxy_configured = config.proxy.is_some();
-    let env_proxy_configured = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]
-        .iter()
-        .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()));
-
-    if proxy_configured {
-        warn!(
-            "A proxy is configured, but server-side resource-proxy fetches connect directly so \
-             destination policy can be enforced at connection time"
-        );
-    }
-    if env_proxy_configured {
-        warn!(
-            "HTTP_PROXY/HTTPS_PROXY/ALL_PROXY are set, but server-side resource-proxy fetches \
-             ignore environment proxies so destination policy can be enforced at connection time"
-        );
-    }
-}
-
-/// Builds a client for one normalized policy and redirect mode.
-///
-/// Resource clients always connect directly: the policy resolver must see the real destination
-/// address, and a proxy would resolve it elsewhere.
-pub fn create_resource_http_client(
-    cfg: &AppConfig,
-    policy: Arc<ResourcePolicy>,
-    mode: ResourceRedirectMode,
-) -> Result<reqwest::Client, TuliproxError> {
-    let config = cfg.config.load();
-    let redirect_policy = resource_redirect_policy(Arc::clone(&policy), mode);
-    let mut builder = create_client_with_redirect(cfg, redirect_policy)
-        .no_proxy()
-        .dns_resolver(PolicyIpResolver::new(policy))
-        .http1_only();
-    if config.connect_timeout_secs > 0 {
-        builder = builder.connect_timeout(Duration::from_secs(u64::from(config.connect_timeout_secs)));
-    }
-    builder.build().map_err(|err| TuliproxError::Config(format!("Failed to create resource HTTP client: {err}")))
-}
-
 pub fn parse_range(range: &str) -> Option<(u64, Option<u64>)> {
     // expect: "bytes=START-END"
     if !range.starts_with("bytes=") {
@@ -3245,16 +3243,16 @@ mod tests {
     mod tmdb_profile;
 
     use super::{
-        classify_ip, download_text_content, download_text_content_with_headers_and_options,
+        classify_resource_destination, download_text_content, download_text_content_with_headers_and_options,
         get_input_epg_content_as_file, get_remote_content_as_stream, is_safe_cross_origin_redirect_header,
         next_provider_url_index, preview_request_diagnostics_for_logging, preview_request_target_for_logging,
-        resolve_attempt_target, same_origin,
+        resolve_attempt_target, resolve_resource_socket_addrs, same_origin,
         send_input_with_retry_and_provider_policy_with_manual_redirects_and_options_result,
         send_input_with_retry_and_provider_policy_with_options_result, send_with_retry_and_provider,
         send_with_retry_and_provider_policy, should_retry_text_body_error, should_try_next_ip_on_connect_error,
-        strip_sensitive_headers_for_cross_origin_redirect, text_response_error_log_label, AddressClass,
-        InputEpgFileRequest, PublicIpResolver, RequestFetchOptions, TextContentBodyOptions, TextContentFetchOptions,
-        STREAM_IDLE_TIMEOUT,
+        strip_sensitive_headers_for_cross_origin_redirect, text_response_error_log_label, DestinationCache,
+        InputEpgFileRequest, PublicIpResolver, RequestFetchOptions, ResourceDestination, ResourceDestinationResolver,
+        TextContentBodyOptions, TextContentFetchOptions, STREAM_IDLE_TIMEOUT,
     };
     use crate::{
         model::{
@@ -3299,28 +3297,101 @@ mod tests {
     use url::Url;
 
     #[test]
-    fn embedded_ipv4_destinations_use_ipv4_classification() {
-        for (address, expected) in [
-            ("64:ff9b::a00:1", AddressClass::Private),
-            ("64:ff9b::808:808", AddressClass::Public),
-            ("2002:a00:1::", AddressClass::Private),
-            ("2002:808:808::", AddressClass::Public),
-            ("::a00:1", AddressClass::Private),
-            ("::808:808", AddressClass::Public),
-            ("64:ff9b::7f00:1", AddressClass::Blocked),
-        ] {
-            assert_eq!(classify_ip(address.parse::<IpAddr>().expect("valid IP address")), expected, "{address}");
+    fn ipv6_addresses_embedding_private_ipv4_are_not_public() {
+        for address in ["::10.0.0.1", "64:ff9b::a00:1", "2002:0a00:0001::", "::ffff:10.0.0.1"] {
+            assert!(address.parse::<IpAddr>().is_ok_and(|ip| !super::is_public_ip(ip)), "{address}");
         }
     }
 
     #[test]
-    fn native_ipv6_destinations_keep_ipv6_classification() {
+    fn resource_destinations_are_classified_by_reachability() {
         for (address, expected) in [
-            ("2001:4860:4860::8888", AddressClass::Public),
-            ("fc00::1", AddressClass::Private),
-            ("2001:db8::1", AddressClass::Blocked),
+            ("1.1.1.1", ResourceDestination::Public),
+            ("8.8.8.8", ResourceDestination::Public),
+            ("64:ff9b::808:808", ResourceDestination::Public),
+            ("2002:808:808::", ResourceDestination::Public),
+            ("::808:808", ResourceDestination::Public),
+            ("10.0.0.1", ResourceDestination::Private),
+            ("172.16.5.5", ResourceDestination::Private),
+            ("192.168.1.20", ResourceDestination::Private),
+            ("100.64.0.1", ResourceDestination::Private),
+            ("fc00::1", ResourceDestination::Private),
+            ("64:ff9b::a00:1", ResourceDestination::Private),
+            ("2002:0a00:0001::", ResourceDestination::Private),
+            ("::a00:1", ResourceDestination::Private),
+            ("::ffff:10.0.0.1", ResourceDestination::Private),
+            ("0.0.0.0", ResourceDestination::Blocked),
+            ("127.0.0.1", ResourceDestination::Blocked),
+            ("169.254.1.1", ResourceDestination::Blocked),
+            ("169.254.169.254", ResourceDestination::Blocked),
+            ("255.255.255.255", ResourceDestination::Blocked),
+            ("224.0.0.1", ResourceDestination::Blocked),
+            ("::", ResourceDestination::Blocked),
+            ("::1", ResourceDestination::Blocked),
+            ("fe80::1", ResourceDestination::Blocked),
+            ("ff02::1", ResourceDestination::Blocked),
+            ("::ffff:127.0.0.1", ResourceDestination::Blocked),
+            ("64:ff9b::7f00:1", ResourceDestination::Blocked),
+            ("2002:7f00:1::", ResourceDestination::Blocked),
         ] {
-            assert_eq!(classify_ip(address.parse::<IpAddr>().expect("valid IP address")), expected, "{address}");
+            let address = address.parse::<IpAddr>().expect("valid IP address");
+            assert_eq!(super::classify_ip(address), expected, "{address}");
+        }
+    }
+
+    #[tokio::test]
+    async fn resource_destination_names_are_classified_without_resolving_ip_literals() {
+        let destinations = DestinationCache::new();
+
+        assert_eq!(classify_resource_destination("192.168.1.20", &destinations).await, ResourceDestination::Private);
+        assert_eq!(classify_resource_destination("[::1]", &destinations).await, ResourceDestination::Blocked);
+        assert_eq!(
+            classify_resource_destination("[64:ff9b::7f00:1]", &destinations).await,
+            ResourceDestination::Blocked
+        );
+        assert_eq!(classify_resource_destination("8.8.8.8", &destinations).await, ResourceDestination::Public);
+    }
+
+    #[tokio::test]
+    async fn resource_destination_resolution_refuses_addresses_local_to_this_host() {
+        let private = resolve_resource_socket_addrs("10.0.0.1", 80).await.expect("private destination is allowed");
+        assert_eq!(private.len(), 1);
+
+        for local_only in ["127.0.0.1", "169.254.169.254", "[::1]", "fe80::1", "0.0.0.0"] {
+            let error = resolve_resource_socket_addrs(local_only, 80)
+                .await
+                .expect_err("local-only destination must be refused");
+            assert_eq!(error.kind(), ErrorKind::PermissionDenied, "{local_only}");
+        }
+    }
+
+    #[test]
+    fn resolved_address_sets_are_aggregated_for_exposure() {
+        let public: IpAddr = "8.8.8.8".parse().expect("valid public address");
+        let private: IpAddr = "10.0.0.1".parse().expect("valid private address");
+        let blocked: IpAddr = "127.0.0.1".parse().expect("valid loopback address");
+
+        assert_eq!(super::classify_resolved_addresses(&[public]), ResourceDestination::Public);
+        assert_eq!(super::classify_resolved_addresses(&[public, public]), ResourceDestination::Public);
+        assert_eq!(super::classify_resolved_addresses(&[private]), ResourceDestination::Private);
+        assert_eq!(super::classify_resolved_addresses(&[public, private]), ResourceDestination::Private);
+        assert_eq!(super::classify_resolved_addresses(&[public, blocked]), ResourceDestination::Blocked);
+        assert_eq!(super::classify_resolved_addresses(&[private, blocked]), ResourceDestination::Blocked);
+        assert_eq!(super::classify_resolved_addresses(&[]), ResourceDestination::Private);
+    }
+
+    #[tokio::test]
+    async fn resource_destination_resolver_refuses_local_only_names() {
+        use reqwest::dns::Resolve;
+        use std::str::FromStr;
+
+        let resolver = ResourceDestinationResolver;
+        let name = reqwest::dns::Name::from_str("127.0.0.1").expect("valid destination name");
+        let result = resolver.resolve(name).await;
+
+        match result {
+            Ok(_) => panic!("local-only destination must be refused"),
+            Err(error) => assert!(error.to_string().contains("local to this host"), "{error}"),
         }
     }
 

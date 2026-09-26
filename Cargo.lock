@@ -3784,6 +3784,7 @@ dependencies = [
 name = "shared"
 version = "3.3.122"
 dependencies = [
+ "aes",
  "base64 0.23.1",
  "bitflags 2.13.1",
  "blake3",
@@ -3792,6 +3793,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "ciborium",
+ "ctr",
  "dashmap",
  "deunicode",
  "fastrand",
@@ -4546,6 +4548,7 @@ dependencies = [
  "ipnet",
  "libc",
  "log",
+ "lru",
  "parking_lot",
  "paste",
  "path-clean",

@@ -56,10 +56,24 @@ reverse_proxy:
 
 | Parameter | Type | Default | Technical Impact & Background |
 | :--- | :--- | :--- | :--- |
-| `resource_rewrite_disabled` | Bool | `false` | Normally, Tuliprox rewrites all image URLs in playlists to point to itself (e.g., `http://tuliprox:8901/resource/...`). If set to `true`, original URLs are kept (clients load images directly from the provider). **Warning:** Local caching will stop working if this is enabled! |
+| `resource_rewrite_disabled` | Bool | `false` | Normally, Tuliprox rewrites image URLs in playlists to point to itself (e.g., `http://tuliprox:8901/resource/...`). If set to `true`, only provably public image URLs are kept; private destinations still use Tuliprox resource links so external clients can load them. Public images bypass local caching in this mode. |
 | `rewrite_secret` | String | `""` | A 32-character Hex string (16 bytes). Tuliprox encrypts/signs the original image URLs during the rewrite process. To prevent image URLs from becoming invalid after a server restart, you MUST enter a static secret here. |
 | `stream_history` | Block | `null` | Optional stream telemetry block that persists raw connect/disconnect/startup-failure events to daily history files. |
 | `qos_aggregation` | Block | `null` | Optional background worker that aggregates stream history into compact per-stream QoS snapshots. |
+
+**Internal destinations are never exposed through the resource route.** When resource rewriting is disabled, channel
+logos, Xtream covers and backdrops, and EPG image links are classified before they are written into player output.
+Only a provably public destination is handed to the client while `resource_rewrite_disabled: true`; a
+destination on a private network or a name that cannot be resolved is replaced by an
+authenticated `/resource/...` link, so the internal address never reaches the client. This holds in both modes, and it is
+what makes images hosted on a local media server work without publishing their address. Destinations local to the Tuliprox
+host — loopback, link-local (including cloud metadata endpoints) — are dropped from the output and refused by the resource
+route, because they can only reach Tuliprox itself. The resource route checks that while the connection is built as well,
+so a name cannot resolve to a public address during the check and to a local one afterwards.
+
+**Player metadata follows the resource setting independently of stream redirects.** The `tvg-logo`, cover and backdrop
+fields of M3U and Xtream output use Tuliprox links for private destinations even when stream URLs are redirected.
+`mask_redirect_url` controls stream URLs; keep it enabled when clients should not see the original stream destination.
 
 > **Note:** You can generate a random secret using:
 

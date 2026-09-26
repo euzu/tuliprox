@@ -90,6 +90,7 @@ pub fn xtream_mapping_option_from_target_options(
         base_url,
         web_ui_request: user.t_is_api_user,
         encrypt_secret,
+        resource_host_policies: Arc::default(),
     })
 }
 

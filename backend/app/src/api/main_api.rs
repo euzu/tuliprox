@@ -19,8 +19,8 @@ use crate::{
         http_layers::create_cors_layer,
         model::{
             create_cache, create_http_client, create_http_client_no_redirect, create_public_http_client_no_redirect,
-            create_resource_client_set, exec_provider_dns, exec_qos_aggregation, load_playlists_into_memory_cache,
-            recording_rule_scheduler::spawn_recording_rule_scheduler,
+            create_resource_http_client_no_redirect, exec_provider_dns, exec_qos_aggregation,
+            load_playlists_into_memory_cache, recording_rule_scheduler::spawn_recording_rule_scheduler,
             recording_supervisor::start_recording_supervisors, ActiveProviderManager, ActiveUserManager, AppState,
             CancelTokens, ConnectionManager, DownloadQueue, EventManager, EventMessage, HdHomerunAppState,
             HlsProvisioningState, ManualPlaylistUpdateRequest, MetadataUpdateManager, PlaylistStorageState,
@@ -430,7 +430,7 @@ async fn create_shared_data(
     let client = create_http_client(app_config)?;
     let client_no_redirect = create_http_client_no_redirect(app_config)?;
     let public_client_no_redirect = create_public_http_client_no_redirect(app_config)?;
-    let resource_clients = create_resource_client_set(app_config)?;
+    let resource_client_no_redirect = create_resource_http_client_no_redirect(app_config)?;
 
     let tokens = CancelTokens::default();
     let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
@@ -451,7 +451,8 @@ async fn create_shared_data(
         http_client: Arc::new(ArcSwap::from_pointee(client)),
         http_client_no_redirect: Arc::new(ArcSwap::from_pointee(client_no_redirect)),
         public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(public_client_no_redirect)),
-        resource_clients: Arc::new(ArcSwap::from_pointee(resource_clients)),
+        resource_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(resource_client_no_redirect)),
+        resource_destinations: Arc::new(crate::utils::request::DestinationCache::new()),
         downloads: Arc::new(DownloadQueue::new_with_state_file(Some(downloads_state_file))),
         cache: Arc::new(ArcSwapOption::from(cache)),
         shared_stream_manager,
@@ -1123,10 +1124,9 @@ mod tests {
         use super::super::ready;
         use crate::{
             api::model::{
-                empty_resource_client_set, ActiveProviderManager, ActiveUserManager, AppState, CancelTokens,
-                ConnectionKind, ConnectionManager, DownloadQueue, EventManager, HlsProvisioningState, HlsProxyManager,
-                ManualPlaylistUpdateRequest, MetadataUpdateManager, PlaylistStorageState, ProviderHandle,
-                SharedStreamManager, UpdateGuard,
+                ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionKind, ConnectionManager,
+                DownloadQueue, EventManager, HlsProvisioningState, HlsProxyManager, ManualPlaylistUpdateRequest,
+                MetadataUpdateManager, PlaylistStorageState, ProviderHandle, SharedStreamManager, UpdateGuard,
             },
             model::{AppConfig, Config, ConfigInput, MediaToolCapabilities, ProcessTargets, SourcesConfig},
             repository::GeoIp,
@@ -1225,7 +1225,8 @@ mod tests {
                 http_client: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
                 http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
                 public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-                resource_clients: empty_resource_client_set(),
+                resource_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+                resource_destinations: Arc::new(crate::utils::request::DestinationCache::new()),
                 downloads: Arc::new(DownloadQueue::new()),
                 cache: Arc::new(ArcSwapOption::default()),
                 shared_stream_manager,

@@ -8,9 +8,10 @@ use shared::{
     create_bitset,
     error::TuliproxError,
     model::{
-        ConfigTargetOptions, M3uPlaylistItem, PlaylistItemType, ProxyType, StreamProperties, TargetType, XtreamCluster,
+        ConfigTargetOptions, M3uPlaylistItem, PlaylistItemType, ProxyType, ResourceOutputPolicy, StreamProperties,
+        TargetType, XtreamCluster,
     },
-    utils::{extract_extension_from_url, sanitize_sensitive_info, Internable, PROVIDER_SCHEME_PREFIX},
+    utils::{concat_path, extract_extension_from_url, sanitize_sensitive_info, Internable, PROVIDER_SCHEME_PREFIX},
 };
 use std::{
     borrow::Cow,
@@ -20,7 +21,10 @@ use std::{
     task::{Context, Poll},
 };
 use tokio::{sync::mpsc, task};
-use tuliprox_core::model::{AppConfig, ConfigTarget, ProxyUserCredentials};
+use tuliprox_core::{
+    model::{AppConfig, ConfigTarget, ProxyUserCredentials},
+    utils::{classify_output_resource_url, request::DestinationCache},
+};
 use tuliprox_parser::m3u_format::{build_m3u_catchup_rewrite, flussonic_proxy_live_file};
 
 create_bitset!(u8, M3uPlaylistIteratorFlags, MaskRedirectUrl, IncludeTypeInUrl, RewriteResource);
@@ -135,6 +139,8 @@ fn apply_rewrite(
     flags: M3uPlaylistIteratorFlagsSet,
     proxy_type: ProxyType,
 ) -> M3uPlaylistItem {
+    m3u_pli.logo = shared::model::persisted_resource_arc(&m3u_pli.logo);
+    m3u_pli.logo_small = shared::model::persisted_resource_arc(&m3u_pli.logo_small);
     let is_redirect = proxy_type.is_redirect(m3u_pli.item_type)
         || target_options.and_then(|o| o.force_redirect.as_ref()).is_some_and(|f| f.has_cluster(m3u_pli.item_type));
     let should_rewrite_urls =
@@ -210,21 +216,18 @@ fn apply_rewrite(
                 shared::concat_string!(&base, "/", live_file)
             },
         );
-        let resource_url = if flags.contains(M3uPlaylistIteratorFlags::RewriteResource) {
-            let source_url = if m3u_pli.logo.is_empty() { m3u_pli.logo_small.as_ref() } else { m3u_pli.logo.as_ref() };
-            Some(build_rewritten_url(ctx, source_url, &m3u_pli, false, storage_const::M3U_RESOURCE_PATH, false))
-        } else {
-            None
-        };
         m3u_pli.t_stream_url = stream_url.intern();
-        m3u_pli.t_resource_url = resource_url;
     } else {
         m3u_pli.t_stream_url = match effective_source_url {
             Cow::Borrowed(_) => Arc::clone(&m3u_pli.url),
             Cow::Owned(url) => url.intern(),
         };
-        m3u_pli.t_resource_url = None;
     }
+
+    m3u_pli.t_resource_url = flags.contains(M3uPlaylistIteratorFlags::RewriteResource).then(|| {
+        let source_url = if m3u_pli.logo.is_empty() { m3u_pli.logo_small.as_ref() } else { m3u_pli.logo.as_ref() };
+        build_rewritten_url(ctx, source_url, &m3u_pli, false, storage_const::M3U_RESOURCE_PATH, false)
+    });
 
     if let Some(rewrite) = catchup_rewrite {
         m3u_pli.t_catchup_mode = Some(rewrite.mode);
@@ -235,6 +238,41 @@ fn apply_rewrite(
     }
 
     m3u_pli
+}
+
+fn player_resource_url(
+    item: &M3uPlaylistItem,
+    source_url: &Arc<str>,
+    field: &str,
+    ctx: &UrlRewriteContext<'_>,
+    policy: ResourceOutputPolicy,
+) -> Arc<str> {
+    match policy {
+        ResourceOutputPolicy::Direct if source_url.starts_with("/api/v1/library/thumbnail/") => {
+            concat_path(ctx.base_url, source_url).intern()
+        }
+        ResourceOutputPolicy::Direct => Arc::clone(source_url),
+        ResourceOutputPolicy::Proxy => {
+            let base = build_rewritten_url(ctx, source_url, item, false, storage_const::M3U_RESOURCE_PATH, false);
+            shared::concat_string!(&base, "/", field).intern()
+        }
+        ResourceOutputPolicy::Blocked => "".intern(),
+    }
+}
+
+async fn rewrite_player_resources_for_output(
+    item: &mut M3uPlaylistItem,
+    ctx: &UrlRewriteContext<'_>,
+    destinations: &DestinationCache,
+) {
+    if !item.logo.is_empty() {
+        let policy = classify_output_resource_url(&item.logo, destinations).await;
+        item.logo = player_resource_url(item, &item.logo, "logo", ctx, policy);
+    }
+    if !item.logo_small.is_empty() {
+        let policy = classify_output_resource_url(&item.logo_small, destinations).await;
+        item.logo_small = player_resource_url(item, &item.logo_small, "logo_small", ctx, policy);
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -282,6 +320,8 @@ impl M3uPlaylistIterator {
 
         let m3u_path = m3u_path.clone();
         let index_path = get_file_path_for_db_index(&m3u_path);
+        let destinations = DestinationCache::new();
+        let runtime = tokio::runtime::Handle::current();
         let (tx, rx) = mpsc::channel::<Result<(M3uPlaylistItem, bool), TuliproxError>>(256);
 
         let m3u_path_for_log = m3u_path.clone();
@@ -333,7 +373,7 @@ impl M3uPlaylistIterator {
 
                 let rewrite_ctx = UrlRewriteContext { base_url: &base_url, username: &username, password: &password };
 
-                let item = apply_rewrite(
+                let mut item = apply_rewrite(
                     item,
                     &rewrite_ctx,
                     target_id,
@@ -343,6 +383,10 @@ impl M3uPlaylistIterator {
                     flags,
                     proxy_type,
                 );
+
+                if !flags.contains(M3uPlaylistIteratorFlags::RewriteResource) {
+                    runtime.block_on(rewrite_player_resources_for_output(&mut item, &rewrite_ctx, &destinations));
+                }
 
                 if let Some(prev) = pending.replace(item) {
                     if tx.blocking_send(Ok((prev, true))).is_err() {
@@ -448,10 +492,11 @@ impl Stream for M3uPlaylistM3uTextIterator {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_rewrite, build_proxy_xmltv_url_tvg, M3uPlaylistIterator, M3uPlaylistIteratorFlags,
-        M3uPlaylistIteratorFlagsSet, M3uPlaylistM3uTextIterator, UrlRewriteContext,
+        apply_rewrite, build_proxy_xmltv_url_tvg, rewrite_player_resources_for_output, M3uPlaylistIterator,
+        M3uPlaylistIteratorFlags, M3uPlaylistIteratorFlagsSet, M3uPlaylistM3uTextIterator, UrlRewriteContext,
     };
     use crate::LockedReceiverStream;
+    use base64::Engine;
     use futures::StreamExt;
     use shared::{
         model::{
@@ -465,7 +510,10 @@ mod tests {
         sync::{atomic::AtomicUsize, Arc},
     };
     use tokio::sync::mpsc;
-    use tuliprox_core::model::{ConfigInput, ConfigProvider, ProviderDnsCache};
+    use tuliprox_core::{
+        model::{ConfigInput, ConfigProvider, ProviderDnsCache},
+        utils::request::DestinationCache,
+    };
 
     fn provider_input() -> Arc<ConfigInput> {
         Arc::new(ConfigInput {
@@ -546,6 +594,51 @@ mod tests {
         );
 
         assert_eq!(rewritten.t_stream_url.as_ref(), "http://example.com/live/user/pass/813294.ts");
+    }
+
+    #[test]
+    fn redirect_without_mask_still_rewrites_private_logo() {
+        let input_by_name = HashMap::new();
+        let ctx = UrlRewriteContext { base_url: "https://example.com", username: "user", password: "pass" };
+        let mut item = m3u_item("http://example.com/live/813294.ts");
+        item.logo = "http://192.168.1.20/logo.png".intern();
+        let mut flags = M3uPlaylistIteratorFlagsSet::new();
+        flags.set(M3uPlaylistIteratorFlags::RewriteResource);
+
+        let rewritten = apply_rewrite(item, &ctx, 1, &[7u8; 16], &input_by_name, None, flags, ProxyType::Redirect);
+
+        assert_eq!(rewritten.t_stream_url.as_ref(), "http://example.com/live/813294.ts");
+        assert_eq!(rewritten.t_resource_url.as_deref(), Some("https://example.com/resource/m3u/user/pass/813294"));
+        assert!(!rewritten.to_m3u(None, true).contains("192.168.1.20"));
+    }
+
+    #[tokio::test]
+    async fn disabled_resource_rewrite_keeps_public_logo_and_proxies_private_logo() {
+        let input_by_name = HashMap::new();
+        let ctx = UrlRewriteContext { base_url: "https://proxy.example", username: "user", password: "pass" };
+        let mut item = m3u_item("http://provider.example/live/813294.ts");
+        let old_locator =
+            rmp_serde::to_vec(&("example1", "http://192.168.1.20/logo.png")).expect("persisted logo locator");
+        item.logo =
+            format!("resource://v1/{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(old_locator)).intern();
+        item.logo_small = "http://8.8.8.8/public.png".intern();
+        let mut item = apply_rewrite(
+            item,
+            &ctx,
+            1,
+            &[7u8; 16],
+            &input_by_name,
+            None,
+            M3uPlaylistIteratorFlagsSet::new(),
+            ProxyType::Redirect,
+        );
+
+        rewrite_player_resources_for_output(&mut item, &ctx, &DestinationCache::new()).await;
+
+        let playlist = item.to_m3u(None, true);
+        assert!(playlist.contains("tvg-logo=\"https://proxy.example/resource/m3u/user/pass/813294/logo\""));
+        assert!(playlist.contains("tvg-logo-small=\"http://8.8.8.8/public.png\""));
+        assert!(!playlist.contains("192.168.1.20"));
     }
 
     #[test]

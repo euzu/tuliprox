@@ -9,10 +9,9 @@ use super::{
 };
 use crate::{
     api::model::{
-        empty_resource_client_set, recording_notification::LifecycleEvent, ActiveProviderManager, ActiveUserManager,
-        AppState, CancelTokens, ConnectionManager, DownloadControl, DownloadKind, DownloadQueue, DownloadState,
-        EventManager, EventMessage, FileDownload, MetadataUpdateManager, PlaylistStorageState, SharedStreamManager,
-        UpdateGuard,
+        recording_notification::LifecycleEvent, ActiveProviderManager, ActiveUserManager, AppState, CancelTokens,
+        ConnectionManager, DownloadControl, DownloadKind, DownloadQueue, DownloadState, EventManager, EventMessage,
+        FileDownload, MetadataUpdateManager, PlaylistStorageState, SharedStreamManager, UpdateGuard,
     },
     model::{
         ApiProxyConfig, ApiProxyServerInfo, AppConfig, Config, ConfigInput, MediaToolCapabilities, MessageContent,
@@ -578,7 +577,8 @@ fn create_test_app_state_with_downloads(downloads: Arc<DownloadQueue>) -> Arc<Ap
         http_client: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
         http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
         public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-        resource_clients: empty_resource_client_set(),
+        resource_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+        resource_destinations: Arc::new(crate::utils::request::DestinationCache::new()),
         downloads,
         cache: Arc::new(ArcSwapOption::default()),
         shared_stream_manager,

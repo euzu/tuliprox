@@ -1,7 +1,7 @@
 use shared::{
     concat_string,
     defaults::{HLS_EXT, HLS_PREFIX},
-    utils::{deobfuscate_text, extract_extension_from_url, obfuscate_text, CONSTANTS},
+    utils::{extract_extension_from_url, open_hls_resource_url, seal_hls_resource_url, CONSTANTS},
 };
 use std::{borrow::Cow, str};
 use tuliprox_core::model::ProxyUserCredentials;
@@ -12,16 +12,16 @@ pub mod origin_manifest;
 const TOKEN_SEPARATOR: char = '\x1F';
 const TOKEN_SEPARATOR_STR: &str = "\x1F";
 
-fn create_hls_session_token_and_url(secret: &[u8], session_token: &str, stream_url: &str) -> String {
-    let cookie_value = obfuscate_text(secret, &concat_string!(session_token, TOKEN_SEPARATOR_STR, stream_url));
+fn create_hls_session_token_and_url(secret: &[u8; 16], session_token: &str, stream_url: &str) -> String {
+    let cookie_value = seal_hls_resource_url(secret, &concat_string!(session_token, TOKEN_SEPARATOR_STR, stream_url));
     if let Some(ext) = extract_extension_from_url(stream_url) {
         return concat_string!(&cookie_value, ext);
     }
     cookie_value
 }
 
-fn create_hls_url_without_session_token(secret: &[u8], stream_url: &str) -> String {
-    let token = obfuscate_text(secret, stream_url);
+fn create_hls_url_without_session_token(secret: &[u8; 16], stream_url: &str) -> String {
+    let token = seal_hls_resource_url(secret, stream_url);
     if let Some(ext) = extract_extension_from_url(stream_url) {
         return concat_string!(&token, ext);
     }
@@ -34,8 +34,8 @@ fn remove_any_ext(s: &str) -> &str {
         None => s,
     }
 }
-pub fn get_hls_session_token_and_url_from_token(secret: &[u8], token: &str) -> Option<(Option<String>, String)> {
-    if let Ok(decrypted) = deobfuscate_text(secret, remove_any_ext(token)) {
+pub fn get_hls_session_token_and_url_from_token(secret: &[u8; 16], token: &str) -> Option<(Option<String>, String)> {
+    if let Ok(decrypted) = open_hls_resource_url(secret, remove_any_ext(token)) {
         let parts: Vec<&str> = decrypted.split(TOKEN_SEPARATOR).collect();
         if parts.len() == 2 {
             let session_token: String = parts[0].to_string();

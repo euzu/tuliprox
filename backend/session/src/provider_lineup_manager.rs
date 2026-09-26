@@ -1065,7 +1065,6 @@ mod tests {
             provider_configs: None,
             cache_duration_seconds: 0,
             stalker: None,
-            resource_policy: None,
         }
     }
 

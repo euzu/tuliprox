@@ -3,15 +3,14 @@
 use crate::{
     api::{
         api_utils::{
-            create_api_proxy_user, decode_resource_link, json_or_bin_response, log_resource_rejection,
-            rejection_status, resolve_resource, resource_response, try_option_bad_request, try_result_bad_request,
-            try_unwrap_body, ResourceFetchOptions,
+            create_api_proxy_user, json_or_bin_response, resource_response, try_option_bad_request,
+            try_result_bad_request, try_unwrap_body, ResourceFetchPolicy,
         },
         auth_middleware::{check_permission, permission_layer, VerifiedClaims},
         endpoints::{
             api_playlist_utils::{
                 get_playlist_for_custom_provider, get_playlist_for_input, get_playlist_for_target,
-                rewrite_resource_url, STALKER_RESOURCE_SCHEME,
+                STALKER_RESOURCE_SCHEME,
             },
             extract_accept_header::ExtractAcceptHeader,
             m3u_api::m3u_api_stream_loaded,
@@ -55,15 +54,15 @@ use shared::{
     error::TuliproxError,
     foundation::{get_filter_detailed, Filter, ValueProvider},
     model::{
-        ingest_resource_value, permission::Permission, stalker::StalkerStreamKind, EpgChannel,
-        InputPlaylistUpdateStatusDto, InputType, InputUpdateAction, InputUpdateCapabilities, InputUpdateRequest,
-        OperationRunAccepted, PersistedPlaylistUpdateClusterState, PersistedPlaylistUpdateClusterStatusDto,
+        permission::Permission, stalker::StalkerStreamKind, EpgChannel, InputPlaylistUpdateStatusDto, InputType,
+        InputUpdateAction, InputUpdateCapabilities, InputUpdateRequest, OperationRunAccepted,
+        PersistedPlaylistUpdateClusterState, PersistedPlaylistUpdateClusterStatusDto,
         PersistedPlaylistUpdateInputResult, PlaylistEpgRequest, PlaylistItem, PlaylistRequest,
         PlaylistUpdateRequestDto, PlaylistUpdateRequestPayload, PlaylistUpdateRunId, PlaylistUpdateState,
         PlaylistUpdateStatusDto, PlaylistUrlResolveRequest, ProxyType, TargetType, UiPlaylistItem, VirtualId,
         XtreamCluster,
     },
-    utils::{concat_path_leading_slash, deobfuscate_text, sanitize_sensitive_info, Internable},
+    utils::{concat_path_leading_slash, open_web_ui_resource_url, sanitize_sensitive_info, Internable},
 };
 use std::{path::Path, str::FromStr, sync::Arc};
 use tokio_stream::StreamExt;
@@ -467,17 +466,7 @@ async fn load_epg_channels_for_input(
         };
 
         let source_channels = match source_result {
-            Ok(channels) => channels
-                .into_iter()
-                .map(|mut channel| {
-                    if let Some(icon) = &mut channel.icon {
-                        if ingest_resource_value(icon, &input.name).is_err() {
-                            channel.icon = None;
-                        }
-                    }
-                    channel
-                })
-                .collect(),
+            Ok(channels) => channels,
             Err(err) => {
                 debug!(
                     "Skipping EPG source {}: {}",
@@ -1100,36 +1089,15 @@ async fn playlist_resource(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> impl IntoResponse + Send {
     let encrypt_secret = app_state.get_encrypt_secret();
-    // This route decodes only its own two formats: the authenticated token for new links, and the
-    // XOR-based `deobfuscate_text` encoding for links issued before origin tracking.
-    let decoded = decode_resource_link(&encrypt_secret, &resource, |secret, value| {
-        deobfuscate_text(secret, value).map_err(|_| ())
-    });
-
-    let resource_value = match decoded {
-        Ok(decoded) => decoded,
-        Err(status) => return status.into_response(),
-    };
-
-    // Stalker locators are playback references resolved by a dedicated path, not resource URLs.
-    if let Some((input_id, cluster, provider_id)) = parse_stalker_resource(&resource_value) {
-        return stalker_resource_response(&app_state, input_id, cluster, provider_id).await;
-    }
-
-    match resolve_resource(&app_state.app_config, &resource_value, None) {
-        Ok(resolved) => resource_response(
-            &app_state,
-            ResourceFetchOptions::cached(resolved.authorization),
-            &resolved.url,
-            &req_headers,
-            None,
-        )
-        .await
-        .into_response(),
-        Err(err) => {
-            log_resource_rejection(None, &err, &resource_value);
-            rejection_status(&err).into_response()
+    if let Ok(resource_url) = open_web_ui_resource_url(&encrypt_secret, &resource) {
+        if let Some((input_id, cluster, provider_id)) = parse_stalker_resource(&resource_url) {
+            return stalker_resource_response(&app_state, input_id, cluster, provider_id).await;
         }
+        resource_response(&app_state, ResourceFetchPolicy::NoRedirect, &resource_url, &req_headers, None)
+            .await
+            .into_response()
+    } else {
+        axum::http::StatusCode::BAD_REQUEST.into_response()
     }
 }
 
@@ -1423,17 +1391,7 @@ async fn playlist_episode_item(
                     )
                     .await
                     {
-                        let config = app_state.app_config.config.load();
-                        let web_ui_path =
-                            config.web_ui.as_ref().and_then(|web_ui| web_ui.path.as_ref()).map_or("", String::as_str);
-                        let resource_url =
-                            shared::utils::concat_path_leading_slash(web_ui_path, "api/v1/playlist/resource");
-                        let item = rewrite_resource_url(
-                            &app_state.get_encrypt_secret(),
-                            &resource_url,
-                            UiPlaylistItem::from(pli),
-                        );
-                        return axum::Json(json!(item)).into_response();
+                        return axum::Json(json!(UiPlaylistItem::from(pli))).into_response();
                     }
                 }
             }
@@ -1447,9 +1405,9 @@ mod tests {
     use super::resolve_provider_url_for_request;
     use crate::{
         api::model::{
-            empty_resource_client_set, recording::recording_source_resolution::resolve_recording_config,
-            ActiveProviderManager, ActiveUserManager, AppState, ConnectionManager, DownloadQueue, EventManager,
-            MetadataUpdateManager, PlaylistStorageState, SharedStreamManager,
+            recording::recording_source_resolution::resolve_recording_config, ActiveProviderManager, ActiveUserManager,
+            AppState, ConnectionManager, DownloadQueue, EventManager, MetadataUpdateManager, PlaylistStorageState,
+            SharedStreamManager,
         },
         model::{
             AppConfig, Config, ConfigInput, ConfigInputOptions, ConfigInputUpdateQuality, ConfigProvider, ConfigSource,
@@ -2672,7 +2630,8 @@ mod tests {
             http_client: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
             http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
             public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-            resource_clients: empty_resource_client_set(),
+            resource_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+            resource_destinations: Arc::new(crate::utils::request::DestinationCache::new()),
             downloads: Arc::new(crate::api::model::DownloadQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,
@@ -3534,11 +3493,22 @@ mod tests {
             .expect("malformed response");
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
+        let legacy = shared::utils::obfuscate_text(&app_state.get_encrypt_secret(), "http://10.0.0.1/icon.png");
+        let response = router
+            .clone()
+            .into_service::<Body>()
+            .oneshot(
+                Request::get(format!("/playlist/resource/{legacy}")).body(Body::empty()).expect("legacy token request"),
+            )
+            .await
+            .expect("legacy token response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
         for locator in [
             format!("{}99/live/101", super::STALKER_RESOURCE_SCHEME),
             format!("{}8/live/101", super::STALKER_RESOURCE_SCHEME),
         ] {
-            let resource = shared::utils::obfuscate_text(&app_state.get_encrypt_secret(), &locator);
+            let resource = shared::utils::seal_web_ui_resource_url(&app_state.get_encrypt_secret(), &locator);
             let response = router
                 .clone()
                 .into_service::<Body>()
@@ -3552,7 +3522,7 @@ mod tests {
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{locator}");
         }
 
-        let resource = shared::utils::obfuscate_text(
+        let resource = shared::utils::seal_web_ui_resource_url(
             &app_state.get_encrypt_secret(),
             &format!("{}7/live/102", super::STALKER_RESOURCE_SCHEME),
         );

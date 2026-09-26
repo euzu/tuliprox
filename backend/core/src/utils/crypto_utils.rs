@@ -13,8 +13,11 @@ use rand::{rngs::OsRng, RngCore, TryRngCore};
 use shared::{error::TuliproxError, utils::encode_base64_string};
 
 type Aes128Ctr = ctr::Ctr128BE<Aes128>;
+#[cfg(test)]
 const AUTH_TOKEN_VERSION: u8 = 1;
+#[cfg(test)]
 const AES_128_CTR_IV_LEN: usize = 16;
+#[cfg(test)]
 const BLAKE3_MAC_LEN: usize = 32;
 
 pub fn encode_base64_hash(text: &str) -> String {
@@ -29,6 +32,7 @@ fn apply_aes_128_ctr(secret: &[u8; 16], iv: &[u8], data: &mut [u8]) -> Result<()
     Ok(())
 }
 
+#[cfg(test)]
 fn derive_authenticated_token_mac_key(secret: &[u8; 16], domain: &[u8]) -> [u8; BLAKE3_MAC_LEN] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"tuliprox.authenticated-token.mac.v1");
@@ -38,84 +42,13 @@ fn derive_authenticated_token_mac_key(secret: &[u8; 16], domain: &[u8]) -> [u8; 
     *hasher.finalize().as_bytes()
 }
 
+#[cfg(test)]
 fn authenticated_token_mac(secret: &[u8; 16], domain: &[u8], data: &[u8]) -> blake3::Hash {
     let mac_key = derive_authenticated_token_mac_key(secret, domain);
     blake3::keyed_hash(&mac_key, data)
 }
 
-/// Derives the AES-CTR IV synthetically (SIV) from the secret, the domain and the plaintext,
-/// so that encoding the same payload twice yields the same token.
-///
-/// The IV stays unpredictable to anyone without `secret`, and distinct payloads (or domains)
-/// still get distinct IVs, so the CTR keystream is never reused across different plaintexts.
-/// Encoding the same payload twice deliberately produces an identical token: these tokens are
-/// stable per-item URLs (STRM files, M3U catchup URLs), and equality of two tokens reveals only
-/// that they point at the same item — which their surrounding filename/playlist entry already says.
-fn derive_synthetic_iv(secret: &[u8; 16], domain: &[u8], plaintext: &[u8]) -> [u8; AES_128_CTR_IV_LEN] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"tuliprox.authenticated-token.siv.v1");
-    hasher.update(&(domain.len() as u64).to_be_bytes());
-    hasher.update(domain);
-    hasher.update(secret);
-    hasher.update(plaintext);
-    let mut iv = [0u8; AES_128_CTR_IV_LEN];
-    iv.copy_from_slice(&hasher.finalize().as_bytes()[..AES_128_CTR_IV_LEN]);
-    iv
-}
-
-pub fn obscure_authenticated_bytes(
-    secret: &[u8; 16],
-    domain: &[u8],
-    plaintext: &[u8],
-) -> Result<String, TuliproxError> {
-    let iv = derive_synthetic_iv(secret, domain, plaintext);
-
-    let data_len = 1 + AES_128_CTR_IV_LEN + plaintext.len();
-    let mut out = Vec::with_capacity(data_len + BLAKE3_MAC_LEN);
-    out.push(AUTH_TOKEN_VERSION);
-    out.extend_from_slice(&iv);
-    out.extend_from_slice(plaintext);
-    apply_aes_128_ctr(secret, &iv, &mut out[1 + AES_128_CTR_IV_LEN..])?;
-
-    let mac = authenticated_token_mac(secret, domain, &out);
-    out.extend_from_slice(mac.as_bytes());
-    Ok(general_purpose::URL_SAFE_NO_PAD.encode(out))
-}
-
-pub fn deobscure_authenticated_bytes(
-    secret: &[u8; 16],
-    domain: &[u8],
-    encoded: &str,
-) -> Result<Vec<u8>, TuliproxError> {
-    let data = general_purpose::URL_SAFE_NO_PAD
-        .decode(encoded)
-        .map_err(|_| TuliproxError::Crypto("Can't decode authenticated token".to_string()))?;
-
-    let min_len = 1 + AES_128_CTR_IV_LEN + BLAKE3_MAC_LEN;
-    if data.len() < min_len {
-        return Err(TuliproxError::Crypto("Authenticated token is too short".to_string()));
-    }
-    if data[0] != AUTH_TOKEN_VERSION {
-        return Err(TuliproxError::Crypto("Unsupported authenticated token version".to_string()));
-    }
-
-    let mac_offset = data.len() - BLAKE3_MAC_LEN;
-    let (authenticated_data, token_mac) = data.split_at(mac_offset);
-    let expected_mac = authenticated_token_mac(secret, domain, authenticated_data);
-    let token_mac = <[u8; BLAKE3_MAC_LEN]>::try_from(token_mac)
-        .map(blake3::Hash::from_bytes)
-        .map_err(|_| TuliproxError::Crypto("Invalid authenticated token MAC".to_string()))?;
-    if expected_mac != token_mac {
-        return Err(TuliproxError::Crypto("Authenticated token MAC mismatch".to_string()));
-    }
-
-    let iv_end = 1 + AES_128_CTR_IV_LEN;
-    let iv = &authenticated_data[1..iv_end];
-    let ciphertext = &authenticated_data[iv_end..];
-    let mut plaintext = ciphertext.to_vec();
-    apply_aes_128_ctr(secret, iv, &mut plaintext)?;
-    Ok(plaintext)
-}
+pub use shared::utils::{deobscure_authenticated_bytes, obscure_authenticated_bytes};
 
 pub fn obscure_text(secret: &[u8; 16], url: &str) -> Result<String, TuliproxError> {
     let mut iv = [0u8; 16];

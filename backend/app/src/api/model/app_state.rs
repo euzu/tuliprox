@@ -16,7 +16,9 @@ use crate::{
     repository::{get_geoip_path, GeoIp},
     utils::{
         reload_logger,
-        request::{create_client, create_client_with_redirect, create_resource_http_client, PublicIpResolver},
+        request::{
+            create_client, create_client_with_redirect, DestinationCache, PublicIpResolver, ResourceDestinationResolver,
+        },
         LRUResourceCache,
     },
 };
@@ -36,7 +38,6 @@ use std::{
 };
 use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
-use tuliprox_core::model::{public_only_policy, PolicyDigest, ResourceClientKey, ResourcePolicy, ResourceRedirectMode};
 use tuliprox_hls::api::HlsProxyManager;
 use tuliprox_metadata::manager::MetadataUpdateManager;
 use tuliprox_repository::{identity_registry::IdentityRegistry, token_revocations::TokenRevocations};
@@ -284,7 +285,34 @@ pub fn create_http_client(app_config: &AppConfig) -> Result<Client, TuliproxErro
 ///
 /// Handling Streaming and Proxy with http/2 is hard, so we strictly use only http/1.1
 pub fn create_http_client_no_redirect(app_config: &AppConfig) -> Result<Client, TuliproxError> {
-    let builder = create_client_with_redirect(app_config, reqwest::redirect::Policy::none()).http1_only();
+    create_no_redirect_client(app_config, None)
+}
+
+/// Creates the no-redirect client used by the proxied resource route.
+///
+/// Its DNS layer refuses addresses local to this host, so a destination cannot resolve to a local
+/// address while the connection is built. Private network destinations stay allowed, because
+/// self-hosted media servers are the reason this route exists.
+pub fn create_resource_http_client_no_redirect(app_config: &AppConfig) -> Result<Client, TuliproxError> {
+    let config = app_config.config.load();
+    let mut builder = create_client_with_redirect(app_config, reqwest::redirect::Policy::none())
+        .no_proxy()
+        .dns_resolver(ResourceDestinationResolver)
+        .http1_only();
+    if config.connect_timeout_secs > 0 {
+        builder = builder.connect_timeout(Duration::from_secs(u64::from(config.connect_timeout_secs)));
+    }
+    builder.build().map_err(|err| TuliproxError::Config(format!("Failed to create resource HTTP client: {err}")))
+}
+
+fn create_no_redirect_client(
+    app_config: &AppConfig,
+    resolver: Option<Arc<dyn reqwest::dns::Resolve>>,
+) -> Result<Client, TuliproxError> {
+    let mut builder = create_client_with_redirect(app_config, reqwest::redirect::Policy::none()).http1_only();
+    if let Some(resolver) = resolver.clone() {
+        builder = builder.dns_resolver(resolver);
+    }
     let config = app_config.config.load();
     build_http_client_with_fallback(
         builder,
@@ -292,14 +320,15 @@ pub fn create_http_client_no_redirect(app_config: &AppConfig) -> Result<Client, 
         "Failed to create HTTP client (no redirect) with proxy configuration; refusing to fall back to unconfigured client",
         "HTTP client (no redirect) creation failed with proxy configured",
         "Failed to create HTTP client (no redirect), using unconfigured http client",
-        || {
-            Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .unwrap_or_else(|err| {
-                    error!("Failed to create fallback HTTP client (no redirect): {err}");
-                    Client::new()
-                })
+        move || {
+            let mut fallback = Client::builder().redirect(reqwest::redirect::Policy::none());
+            if let Some(resolver) = resolver {
+                fallback = fallback.dns_resolver(resolver);
+            }
+            fallback.build().unwrap_or_else(|err| {
+                error!("Failed to create fallback HTTP client (no redirect): {err}");
+                Client::new()
+            })
         },
     )
 }
@@ -317,71 +346,6 @@ pub fn create_public_http_client_no_redirect(app_config: &AppConfig) -> Result<C
         builder = builder.connect_timeout(Duration::from_secs(u64::from(config.connect_timeout_secs)));
     }
     builder.build().map_err(|err| TuliproxError::Config(format!("Failed to create public-only HTTP client: {err}")))
-}
-
-/// One client per policy and redirect mode, plus the policy each digest stands for.
-///
-/// The redirect policy is a property of the reqwest client, so EPG delivery (no redirect) and the
-/// cached resource routes (bounded redirect) cannot share a client even for the same policy. The
-/// set is bounded by `2 × (1 + unique non-empty policies)` and replaced atomically on reload; the
-/// request path never builds or re-normalizes a policy.
-#[derive(Default)]
-pub struct ResourceClientSet {
-    clients: HashMap<ResourceClientKey, Client>,
-    policies: HashMap<PolicyDigest, Arc<ResourcePolicy>>,
-}
-
-impl ResourceClientSet {
-    /// Client for a policy digest and redirect mode, or `None` when the policy is not configured
-    /// any more. A miss is answered with a rejection, never with a broader fallback.
-    pub fn client(&self, digest: &PolicyDigest, mode: ResourceRedirectMode) -> Option<&Client> {
-        self.clients.get(&ResourceClientKey::new(digest.clone(), mode))
-    }
-
-    pub fn policy(&self, digest: &PolicyDigest) -> Option<&Arc<ResourcePolicy>> { self.policies.get(digest) }
-
-    pub fn is_empty(&self) -> bool { self.clients.is_empty() }
-
-    /// Set with pre-built clients, for tests that inject a mock transport.
-    #[cfg(test)]
-    pub fn from_clients(clients: HashMap<ResourceClientKey, Client>) -> Self {
-        Self { clients, policies: HashMap::new() }
-    }
-}
-
-/// Empty client set, used by states that never exercise the resource proxy.
-pub fn empty_resource_client_set() -> Arc<ArcSwap<ResourceClientSet>> {
-    Arc::new(ArcSwap::from_pointee(ResourceClientSet::default()))
-}
-
-/// Builds the resource client set for the currently configured inputs.
-///
-/// Only primary inputs carry a policy; aliases inherit it, and every other input shares the
-/// public-only client.
-pub fn create_resource_client_set(app_config: &AppConfig) -> Result<ResourceClientSet, TuliproxError> {
-    let config = app_config.config.load();
-    tuliprox_core::utils::request::warn_resource_proxy_bypass(&config);
-    drop(config);
-
-    let sources = app_config.sources.load();
-    let mut policies: HashMap<PolicyDigest, Arc<ResourcePolicy>> = HashMap::new();
-    let public_only = public_only_policy();
-    policies.insert(public_only.digest(), Arc::clone(&public_only));
-    for input in &sources.inputs {
-        if let Some(policy) = input.resource_policy.as_ref().filter(|policy| !policy.is_empty()) {
-            policies.entry(policy.digest()).or_insert_with(|| Arc::clone(policy));
-        }
-    }
-    drop(sources);
-
-    let mut clients = HashMap::with_capacity(policies.len() * 2);
-    for policy in policies.values() {
-        for redirect_mode in [ResourceRedirectMode::NoRedirect, ResourceRedirectMode::Bounded] {
-            let client = create_resource_http_client(app_config, Arc::clone(policy), redirect_mode)?;
-            clients.insert(ResourceClientKey::new(policy.digest(), redirect_mode), client);
-        }
-    }
-    Ok(ResourceClientSet { clients, policies })
 }
 
 fn build_http_client_with_fallback(
@@ -496,8 +460,12 @@ pub struct AppState {
     pub http_client: Arc<ArcSwap<Client>>,
     pub http_client_no_redirect: Arc<ArcSwap<Client>>,
     pub public_http_client_no_redirect: Arc<ArcSwap<Client>>,
-    /// Policy- and redirect-mode-keyed clients used by the resource proxy.
-    pub resource_clients: Arc<ArcSwap<ResourceClientSet>>,
+    /// No-redirect client of the proxied resource route: its DNS layer refuses addresses local to
+    /// this host, while private network destinations stay allowed.
+    pub resource_http_client_no_redirect: Arc<ArcSwap<Client>>,
+    /// Remembers resource destination verdicts so that rendering does not resolve the same host per
+    /// icon. The resource client deliberately does not read it: it validates again while connecting.
+    pub resource_destinations: Arc<DestinationCache>,
     pub downloads: Arc<DownloadQueue>,
     pub cache: Arc<ArcSwapOption<RwLock<LRUResourceCache>>>,
     pub shared_stream_manager: Arc<SharedStreamManager>,
@@ -599,7 +567,8 @@ pub(crate) fn create_test_app_state(config: Config) -> Arc<AppState> {
         http_client: Arc::new(ArcSwap::from_pointee(Client::new())),
         http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
         public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
-        resource_clients: Arc::new(ArcSwap::from_pointee(ResourceClientSet::default())),
+        resource_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
+        resource_destinations: Arc::new(DestinationCache::new()),
         downloads: Arc::new(DownloadQueue::new()),
         cache: Arc::new(ArcSwapOption::default()),
         shared_stream_manager,
@@ -677,7 +646,8 @@ impl AppState {
         self.http_client_no_redirect.store(Arc::new(client_no_redirect));
         let public_client_no_redirect = create_public_http_client_no_redirect(&self.app_config)?;
         self.public_http_client_no_redirect.store(Arc::new(public_client_no_redirect));
-        self.resource_clients.store(Arc::new(create_resource_client_set(&self.app_config)?));
+        let resource_client_no_redirect = create_resource_http_client_no_redirect(&self.app_config)?;
+        self.resource_http_client_no_redirect.store(Arc::new(resource_client_no_redirect));
 
         // cache
         let config = self.app_config.config.load();
@@ -720,7 +690,6 @@ impl AppState {
         }
         self.app_config.set_sources(sources)?;
         self.active_provider.update_config(&self.app_config);
-        self.resource_clients.store(Arc::new(create_resource_client_set(&self.app_config)?));
 
         shared::model::REGEX_CACHE.sweep();
         Ok(changes)
