@@ -46,31 +46,49 @@ pub async fn create_link<Tr: StalkerTransport, C: Clock>(
     archive_start: Option<&str>,
     archive_end: Option<&str>,
 ) -> StalkerResult<StalkerResolvedStream> {
-    let spec = recipe_spec_for(handshake.profile.bootstrap_recipe);
-    let candidates = client.ordered_load_urls();
-    let mut last_err: Option<StalkerError> = None;
-    for load_url in candidates {
-        let builder = build_create_link_builder(
-            client,
-            &load_url,
-            handshake,
-            &spec,
-            kind,
-            cmd,
-            series_number,
-            archive_start,
-            archive_end,
-        );
-        match client.send_json::<StalkerCreateLinkResponse>(builder, StalkerAction::CreateLink).await {
-            Ok(resp) => {
-                return resolve_response(resp, kind, requested_mode, cmd);
-            }
-            Err(err) => {
-                last_err = Some(err);
+    let mut handshake = handshake.clone();
+    // A rejected token invalidates every endpoint candidate at once, so the whole chain is
+    // retried once against a fresh session instead of failing the item.
+    let mut allow_session_retry = true;
+    'session: loop {
+        let spec = recipe_spec_for(handshake.profile.bootstrap_recipe);
+        let candidates = client.ordered_load_urls();
+        let mut last_err: Option<StalkerError> = None;
+        for load_url in candidates {
+            let builder = build_create_link_builder(
+                client,
+                &load_url,
+                &handshake,
+                &spec,
+                kind,
+                cmd,
+                series_number,
+                archive_start,
+                archive_end,
+            );
+            match client.send_json::<StalkerCreateLinkResponse>(builder, StalkerAction::CreateLink).await {
+                Ok(resp) => {
+                    return resolve_response(resp, kind, requested_mode, cmd);
+                }
+                Err(err) => {
+                    if allow_session_retry && err.is_token_rejected() {
+                        // Ministra reports a stale token either as 401/403/204/456 or inside a
+                        // `200 OK` body (`code` 44 / 440..=449). The session we handshook with is
+                        // gone, so drop it, handshake again and retry the chain once.
+                        warn!("Stalker create_link token was rejected; re-handshaking and retrying the request");
+                        client.invalidate_session();
+                        handshake = client.handshake().await?;
+                        allow_session_retry = false;
+                        continue 'session;
+                    }
+                    last_err = Some(err);
+                }
             }
         }
+        return Err(
+            last_err.unwrap_or_else(|| StalkerError::NoEndpoint { portal: safe_stalker_url(client.portal_url()) })
+        );
     }
-    Err(last_err.unwrap_or_else(|| StalkerError::NoEndpoint { portal: safe_stalker_url(client.portal_url()) }))
 }
 
 #[allow(clippy::too_many_arguments)]

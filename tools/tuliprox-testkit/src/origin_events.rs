@@ -87,6 +87,21 @@ pub struct OriginStats {
     pub total_bytes_emitted: u64,
 }
 
+/// What the emulated Stalker portal was asked for during a run.
+///
+/// Playback resolution is only observable through the portal: a scenario asserts that the
+/// requested channel's `create_link` was attempted, that a stale-session refusal was
+/// followed by a re-handshake and a retry, and which markers actually resolved.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StalkerPortalStats {
+    pub handshakes: u64,
+    /// Every `create_link` request, refusals included.
+    pub create_links: u64,
+    pub token_refusals: u64,
+    /// Markers the portal answered with a stream URL, sorted and deduplicated.
+    pub resolved_markers: Vec<u32>,
+}
+
 #[must_use]
 pub fn redact_path_and_query(raw: &str) -> String {
     let Some((path, query)) = raw.split_once('?') else {

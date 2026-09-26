@@ -159,9 +159,6 @@ inputs:
       device:
         mac_address: '00:1A:79:12:34:56'
     enabled: true
-    options:
-      stalker_pre_resolve_playback: false
-      stalker_runtime_resolve_playback: true
 ```
 
 Stalker refreshes write pages into an unpublished generation. Live, VOD, series, and EPG selected for one refresh
@@ -171,9 +168,9 @@ previous complete snapshot; a first import exposes no partial catalog. A saved c
 When `process_parallel` is enabled, progress messages include the input name. Targets wait for every enabled input in
 their source and begin as soon as that source is ready, without waiting for unrelated sources.
 
-Use `stalker_pre_resolve_playback: true` if you want Tuliprox to materialize playback URLs during refresh whenever the portal already grants them.
-Keep `stalker_runtime_resolve_playback: true` when the portal uses expiring or session-bound temp links that may need a fresh `create_link`
-call later during playback.
+Stalker playback is resolved on demand: the catalog is imported without materializing stream URLs, and a playback
+request runs `create_link` against the portal when the item has no usable URL yet. A stale portal session is
+re-handshaken once and the request is retried.
 
 Stalker supports four authentication modes:
 
@@ -260,8 +257,6 @@ specific provider.
 | `resolve_delay` / `probe_delay`            | Int      | `2`     | **Ban Protection:** Hard wait time (in seconds) between API or Probe requests to the *same* provider! Prevents API spamming.                                                                                                           |
 | `resolve_filter`                           | String   | -       | Filter expression to selectively resolve only entries matching the condition. Uses the same Filter syntax.                                                                                                                             |
 | `probe_filter`                             | String   | -       | Filter expression to selectively probe only entries matching the condition. Uses the same Filter syntax.                                                                                                                               |
-| `stalker_pre_resolve_playback`             | Bool     | `false` | Stalker-only: resolves `create_link` during playlist processing and persists the returned playback URL when the portal already grants one. Useful when you want the playlist/export step to materialize playable stream URLs up front. |
-| `stalker_runtime_resolve_playback`         | Bool     | `false` | Stalker-only: lets the reverse-proxy retry `create_link` during playback when a persisted Stalker URL has gone stale or is rejected by the portal. This is the recovery path for temp links and expired session-bound stream URLs.     |
 
 > **Note:** For `resolve_vod` and `resolve_series`, data is cached per input and only new or changed entries are
 > updated.
@@ -335,18 +330,24 @@ again when the process restarts. Shared playback uses the identity of the shared
 #### Stalker playback notes
 
 * Stalker playlist preview in the Web UI now works through the same protected playlist endpoints used for other input types.
-* `stalker_pre_resolve_playback` and `stalker_runtime_resolve_playback` are complementary:
-  * `stalker_pre_resolve_playback: true` tries to turn portal `cmd` values into concrete playback URLs during refresh.
-  * `stalker_runtime_resolve_playback: true` retries `create_link` later if the stored playback URL is stale, temp-link based, or rejected after processing.
+* Stalker items are imported with their portal metadata and playback descriptor but without a materialized stream URL, so the
+  exported playlist never exposes the raw portal `cmd`.
+* Playback resolves the item on demand: the reverse-proxy path runs `create_link` for the item's descriptor candidates and
+  falls back to the item's stored `cmd` when no descriptor candidate is usable.
 * Temp-link variants (`nginx_secure_link`, `flussonic_tmp_link`, `wowza_tmp_link`) are persisted as explicit playback modes
   and reused during runtime refresh, instead of being flattened into a generic direct-URL path.
-* When pre-resolve does not materialize a URL, Tuliprox keeps the Stalker item metadata and playback descriptor but does
-  not leak the raw `cmd` into the exported playlist URL field.
-* If pre-resolve is disabled or the portal refuses to resolve a specific item during refresh, the item can still remain playable
-  later through runtime resolution, assuming the reverse-proxy path is used and runtime resolve is enabled.
 * Runtime refresh reuses a cached Stalker client per input configuration and treats the session TTL as a soft re-handshake boundary.
-  If refresh still cannot resolve a playable URL, Tuliprox invalidates the stale persisted URL instead of continuing to serve it indefinitely.
-* Stalker EPG import now also consumes the portal bulk-EPG endpoint during processing when Stalker playback pre-resolve is enabled.
+  A portal that rejects the session (HTTP 401/403/204/456, or a `code` 44 / 440..449 body) triggers one re-handshake and retry;
+  a portal that refuses the request again is reported with the portal's reason in the log.
+* A playback request only ever reads the published catalog generation. If the input has no published catalog for the configured
+  portal identity, playback fails with a log line naming that input instead of starting or discarding a refresh.
+* Stalker EPG import also consumes the portal bulk-EPG endpoint during processing.
+* The bulk-EPG path is streamed and batch-persisted to reduce peak memory pressure on large portals, but portal-specific
+  tuning for pathological datasets is still a separate follow-up topic.
+* Supported Stalker playback transports are currently `http` and `https` only. `rtmp://` / `rtsp://` commands are rejected
+  explicitly because Tuliprox's reverse-proxy path does not relay those schemes.
+* Fresh temp-link resolution is implemented. The still-open edge case is whether a specific portal also requires extra forwarded
+  cookies or headers on the final media request after temp-link resolution.
 * The bulk-EPG path is streamed and batch-persisted to reduce peak memory pressure on large portals, but portal-specific
   tuning for pathological datasets is still a separate follow-up topic.
 * Supported Stalker playback transports are currently `http` and `https` only. `rtmp://` / `rtsp://` commands are rejected

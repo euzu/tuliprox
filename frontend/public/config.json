@@ -7,6 +7,7 @@
     "authUrl": "/auth/"
   },
   "discord": "https://discord.gg/gkzCmWw9Tf",
+  "releases": "https://github.com/euzu/tuliprox/pkgs/container/tuliprox-alpine",
   "documentation": "static/docs/",
   "wsUrl" : "/ws",
   "protocolVersion": 1

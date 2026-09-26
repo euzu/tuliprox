@@ -1,0 +1,52 @@
+schema_version: 1
+name: stalker-refused-channel-keeps-catalog
+# One channel's `create_link` is refused every time, the other resolves. The failing playback
+# must be reported (the SUT answers 502 for an unresolvable item) without damaging the
+# published catalog: the second channel still resolves through its own stored `cmd`, and the
+# portal never answered a stream URL for the refused marker.
+tuliprox:
+  base_url: http://fixture.invalid
+  execution_mode: isolated_fixture
+  input_type: stalker
+  bootstrap:
+    command: "${env:TULIPROX_TESTKIT_SUT_BINARY}"
+    arguments: ["-s", "-c", "{config_file}", "-i", "{source_file}", "-a", "{api_proxy_file}"]
+    readiness_url: "{base_url}/healthcheck"
+  stalker:
+    mac_address: '00:1A:79:00:00:01'
+    mag_preset: generic_safe
+    refuse_create_link_markers: [19]
+origin:
+  run_id: stalker-refused-channel-keeps-catalog
+actors:
+  - id: tv-a
+    agent: local
+    username: testkit
+    user_agent: tuliprox-testkit/tv-a
+channels:
+  live-17: { origin_marker: 17, protocol: xtream_ts }
+  live-19: { origin_marker: 19, protocol: xtream_ts }
+steps:
+  - command_id: refused-19
+    start:
+      actor: tv-a
+      playback_id: playback-19
+      session_group: playback-19
+      channel: live-19
+    # No stream URL for this item: the m3u endpoint reports the resolution failure.
+    expect:
+      http_error: 502
+    assert_origin:
+      stalker_token_refusals_at_least: 2
+      stalker_create_links_at_least: 2
+      stalker_create_link_markers: []
+  - command_id: healthy-17
+    start:
+      actor: tv-a
+      playback_id: playback-17
+      session_group: playback-17
+      channel: live-17
+    expect:
+      http_error: 400
+    assert_origin:
+      stalker_create_link_markers: [17]

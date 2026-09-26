@@ -848,7 +848,9 @@ mod transport_tests {
         session::StalkerSession,
         transport::testing::{FakeTransport, Reply},
     };
-    use shared::model::stalker::{StalkerBootstrapRecipe, StalkerPortalCapabilitiesDto};
+    use shared::model::stalker::{
+        StalkerBootstrapRecipe, StalkerPlaybackMode, StalkerPortalCapabilitiesDto, StalkerStreamKind,
+    };
     use tuliprox_core::utils::ManualClock;
 
     const PORTAL: &str = "http://portal.example/stalker_portal/";
@@ -946,6 +948,71 @@ mod transport_tests {
             vec!["/stalker_portal/server/load.php".to_string(), "/stalker_portal/portal.php".to_string()],
             "both candidates should have been tried, in priority order"
         );
+    }
+
+    /// Portals invalidate sessions out of band (another device on the same MAC, a short TTL),
+    /// and then answer `create_link` with a stale-token refusal. Treating that as "this item
+    /// cannot be resolved" is what made playback fail without a usable reason.
+    #[tokio::test]
+    async fn create_link_rehandshakes_once_when_the_portal_rejects_the_session() {
+        let transport = std::sync::Arc::new(FakeTransport::new([
+            // create_link against the stale session.
+            Reply::ok(r#"{"code": 44, "text": "Authorization failed"}"#),
+            // Re-handshake: handshake, get_profile, capabilities.
+            Reply::ok(r#"{"js":{"token":"fresh"}}"#),
+            Reply::ok(r#"{"js":{"status":"1","max_connections":"1"}}"#),
+            Reply::ok("{}"),
+            // create_link retried with the fresh session.
+            Reply::ok(r#"{"js":{"cmd":"ffmpeg http://line.example/live/7.ts"}}"#),
+        ]));
+        let client = client_with(std::sync::Arc::clone(&transport), StalkerInputConfig::default());
+
+        let resolved = client
+            .create_link(
+                &handshake(),
+                StalkerStreamKind::Live,
+                StalkerPlaybackMode::DirectUrl,
+                "ffmpeg http://portal.example/ch/7",
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("the item resolves after the session is refreshed");
+
+        assert_eq!(resolved.stream_url, "http://line.example/live/7.ts");
+        assert_eq!(transport.requested().len(), 5, "one refused create_link, one re-handshake, one resolved retry");
+    }
+
+    /// A fresh session that is refused as well must be reported, not retried forever.
+    #[tokio::test]
+    async fn create_link_reports_a_session_rejected_twice() {
+        let transport = std::sync::Arc::new(FakeTransport::new([
+            Reply::ok(r#"{"code": 44, "text": "Authorization failed"}"#),
+            Reply::ok(r#"{"js":{"token":"fresh"}}"#),
+            Reply::ok(r#"{"js":{"status":"1","max_connections":"1"}}"#),
+            Reply::ok("{}"),
+            Reply::ok(r#"{"code": 44, "text": "Authorization failed"}"#),
+            Reply::ok(r#"{"code": 44, "text": "Authorization failed"}"#),
+            Reply::ok(r#"{"code": 44, "text": "Authorization failed"}"#),
+        ]));
+        let client = client_with(std::sync::Arc::clone(&transport), StalkerInputConfig::default());
+
+        let err = client
+            .create_link(
+                &handshake(),
+                StalkerStreamKind::Live,
+                StalkerPlaybackMode::DirectUrl,
+                "ffmpeg http://portal.example/ch/7",
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect_err("a portal that keeps refusing the session cannot resolve the item");
+
+        assert!(err.is_token_rejected(), "the refusal must stay classifiable: {err}");
+        assert_eq!(transport.requested().len(), 7, "at most one re-handshake per call");
     }
 
     /// Every candidate failing must surface the last real error, not a synthetic one.
