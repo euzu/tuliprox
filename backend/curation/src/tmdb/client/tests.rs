@@ -73,6 +73,24 @@ fn encoded_response(bytes: &[u8]) -> Vec<u8> {
 fn padded(body: &str, length: usize) -> String { format!("{body}{}", " ".repeat(length - body.len())) }
 
 #[tokio::test]
+async fn tmdb_url_configuration_failures_are_classified_without_requests_or_sensitive_details() {
+    let server = TestServer::new(http_response(200, EMPTY)).await;
+    let api = TmdbCurationApiConfig { access_token: TOKEN.into() };
+    let http = Client::new();
+    assert!(matches!(TmdbClient::for_test(&http, &api, "not a URL"), Err(TmdbFailure::Configuration)));
+    assert_eq!(TmdbClient::new(&http, &api).unwrap().origin.as_str(), TMDB_ORIGIN);
+    let mut client = client(&server);
+    client.origin = Url::parse("mailto:private@example.invalid").unwrap();
+    let mut batch = client.batch_budget();
+    let error = client.trending(&selector(1), &mut batch).await.unwrap_err();
+    assert_eq!(error, TmdbFailure::Configuration);
+    assert_eq!(format!("{error:?}"), "Configuration");
+    assert_eq!(batch.requests, 0);
+    assert_eq!(batch.bytes, 0);
+    assert!(server.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn tmdb_item_limit_cuts_unique_references_with_first_text_and_observed_row_rank() {
     for (limit, expected_ids, expected_ranks, requests) in [
         (1, vec![7], vec![1], 1),
