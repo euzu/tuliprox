@@ -1,9 +1,50 @@
-use crate::utils::request::{classify_resource_destination, DestinationCache, ResourceDestination};
+use crate::utils::request::{classify_resource_destination, ResourceDestination};
 use shared::model::{ResourceOutputPolicy, XtreamMappingFlags, XtreamMappingOptions, XtreamPlaylistItem};
-use std::collections::HashSet;
+use std::borrow::Cow;
 use url::Url;
 
-pub async fn classify_output_resource_url(resource_url: &str, destinations: &DestinationCache) -> ResourceOutputPolicy {
+/// Host of a resource URL without parsing it, for the shape provider data actually uses.
+///
+/// Returns `None` for anything a plain scan could read differently than a full parse would - user
+/// info, an uppercase label, a percent escape, a backslash - so those go through [`Url::parse`].
+/// Callers must treat `None` as "no host found", never as "no destination": the fallback needs to run
+/// for them to get an answer. A host that the fast path reads but the parser would read differently can
+/// only cause a cache miss, and a miss fails closed to a proxy link.
+fn plain_resource_host(resource_url: &str) -> Option<&str> {
+    let rest = resource_url.strip_prefix("http://").or_else(|| resource_url.strip_prefix("https://"))?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    // An IPv6 literal goes through the parser: it is written with the brackets a consumer of the host
+    // expects, and the parser normalizes its spelling.
+    if authority.is_empty() || authority.starts_with('[') {
+        return None;
+    }
+    // A colon separates the port, and an authority with two of them is not a plain host.
+    let (host, port) = authority.split_once(':').map_or((authority, ""), |(host, port)| (host, port));
+    let is_label_byte = |byte: u8| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-');
+    if host.is_empty()
+        || host.contains(':')
+        || !host.bytes().all(is_label_byte)
+        || !port.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(host)
+}
+
+/// Host of a resource URL that a client could fetch, if it has one.
+fn resource_host(resource_url: &str) -> Option<Cow<'_, str>> {
+    if let Some(host) = plain_resource_host(resource_url) {
+        return Some(Cow::Borrowed(host));
+    }
+    let url = Url::parse(resource_url).ok()?;
+    matches!(url.scheme(), "http" | "https").then(|| url.host_str().map(|host| Cow::Owned(host.to_owned())))?
+}
+
+/// Classifies a resource URL that is about to be written into player output.
+///
+/// This decides what a client may reach, so the URL is read with the same parser a client uses rather
+/// than with the cheaper scan [`resource_host`] offers for the hint path.
+pub async fn classify_output_resource_url(resource_url: &str) -> ResourceOutputPolicy {
     if resource_url.starts_with("/api/v1/library/thumbnail/") {
         return ResourceOutputPolicy::Direct;
     }
@@ -19,33 +60,40 @@ pub async fn classify_output_resource_url(resource_url: &str, destinations: &Des
     let Some(host) = url.host_str() else {
         return ResourceOutputPolicy::Blocked;
     };
-    match classify_resource_destination(host, destinations).await {
+    match classify_resource_destination(host).await {
         ResourceDestination::Public => ResourceOutputPolicy::Direct,
         ResourceDestination::Private => ResourceOutputPolicy::Proxy,
         ResourceDestination::Blocked => ResourceOutputPolicy::Blocked,
     }
 }
 
-pub async fn prepare_xtream_resource_hosts(
-    item: &XtreamPlaylistItem,
-    options: &XtreamMappingOptions,
-    destinations: &DestinationCache,
-) {
+/// Records the output policy of every destination this item carries, so that rendering it needs no
+/// name resolution.
+///
+/// Xtream output is written field by field (`to_document`), which has no place to await a lookup.
+/// The item's destinations are collected and classified once here; a field for a destination that is
+/// not in the map fails closed to a proxy link.
+pub async fn prepare_xtream_resource_hosts(item: &XtreamPlaylistItem, options: &XtreamMappingOptions) {
     if options.web_ui_request || options.flags.contains(XtreamMappingFlags::RewriteResourceUrl) {
         return;
     }
-    let mut hosts = HashSet::new();
+    // The map is the dedupe: a host classified by an earlier item is skipped, so a warm map costs no
+    // allocation per item. Only hosts that are new to this item are collected, and the host is read
+    // without parsing the URL, because this runs for every resource field of every item.
+    let mut unresolved: Vec<String> = Vec::new();
     item.visit_resource_urls(|resource_url| {
-        if let Ok(url) = Url::parse(resource_url) {
-            if matches!(url.scheme(), "http" | "https") {
-                if let Some(host) = url.host_str() {
-                    hosts.insert(host.to_string());
-                }
-            }
+        let Some(host) = resource_host(resource_url) else {
+            return;
+        };
+        if options.resource_host_policies.contains_key(host.as_ref())
+            || unresolved.iter().any(|known| known == host.as_ref())
+        {
+            return;
         }
+        unresolved.push(host.into_owned());
     });
-    for host in hosts {
-        let policy = match classify_resource_destination(&host, destinations).await {
+    for host in unresolved {
+        let policy = match classify_resource_destination(&host).await {
             ResourceDestination::Public => ResourceOutputPolicy::Direct,
             ResourceDestination::Private => ResourceOutputPolicy::Proxy,
             ResourceDestination::Blocked => ResourceOutputPolicy::Blocked,
@@ -57,7 +105,6 @@ pub async fn prepare_xtream_resource_hosts(
 #[cfg(test)]
 mod tests {
     use super::{classify_output_resource_url, prepare_xtream_resource_hosts};
-    use crate::utils::request::DestinationCache;
     use shared::{
         model::{
             PlaylistItemType, PlaylistItemTypeSet, ResourceOutputPolicy, VirtualId, XtreamCluster,
@@ -67,23 +114,51 @@ mod tests {
     };
     use std::sync::Arc;
 
+    #[test]
+    fn resource_host_reads_the_same_host_a_parser_reads() {
+        use super::{plain_resource_host, resource_host};
+        use url::Url;
+
+        // Every accepted URL either agrees with the parser, or the fast path declines and the parser
+        // answers. Both directions are checked, so the shortcut can never decide a different host.
+        let urls = [
+            "http://cdn.example.com/logo.png",
+            "https://cdn.example.com:8443/logo.png",
+            "http://192.168.1.20/logo.png",
+            "http://[2001:db8::1]:8080/logo.png",
+            "http://example.com",
+            "http://example.com?x=1",
+            "http://example.com#fragment",
+            "http://user:pass@example.com/logo.png",
+            "http://Example.COM/logo.png",
+            "http://evil.example\\@trusted.example/logo.png",
+            "http://ex%41mple.com/logo.png",
+            "http://example.com:abc/logo.png",
+            "http://a:b:80/logo.png",
+            "http:///logo.png",
+            "http://.",
+            "/relative/path/logo.png",
+            "media-server://image/plex/server/item",
+            "ftp://example.com/logo.png",
+            "data:image/png;base64,AAAA",
+        ];
+        for url in urls {
+            let parsed = Url::parse(url).ok().filter(|parsed| matches!(parsed.scheme(), "http" | "https"));
+            let expected = parsed.as_ref().and_then(Url::host_str);
+            match plain_resource_host(url) {
+                Some(host) => assert_eq!(Some(host), expected, "fast path must agree for {url}"),
+                None => assert_eq!(resource_host(url).as_deref(), expected, "fallback must answer for {url}"),
+            }
+        }
+    }
+
     #[tokio::test]
     async fn private_resources_require_a_proxy_even_when_public_resources_do_not() {
-        let destinations = DestinationCache::new();
+        assert_eq!(classify_output_resource_url("http://192.168.1.20/logo.png").await, ResourceOutputPolicy::Proxy);
+        assert_eq!(classify_output_resource_url("http://8.8.8.8/logo.png").await, ResourceOutputPolicy::Direct);
+        assert_eq!(classify_output_resource_url("http://127.0.0.1/logo.png").await, ResourceOutputPolicy::Blocked);
         assert_eq!(
-            classify_output_resource_url("http://192.168.1.20/logo.png", &destinations).await,
-            ResourceOutputPolicy::Proxy
-        );
-        assert_eq!(
-            classify_output_resource_url("http://8.8.8.8/logo.png", &destinations).await,
-            ResourceOutputPolicy::Direct
-        );
-        assert_eq!(
-            classify_output_resource_url("http://127.0.0.1/logo.png", &destinations).await,
-            ResourceOutputPolicy::Blocked
-        );
-        assert_eq!(
-            classify_output_resource_url("media-server://image/plex/server/item", &destinations).await,
+            classify_output_resource_url("media-server://image/plex/server/item").await,
             ResourceOutputPolicy::Proxy
         );
     }
@@ -125,7 +200,7 @@ mod tests {
             resource_host_policies: Arc::default(),
         };
 
-        prepare_xtream_resource_hosts(&item, &options, &DestinationCache::new()).await;
+        prepare_xtream_resource_hosts(&item, &options).await;
 
         assert_eq!(
             options.get_resource_url(XtreamCluster::Live, PlaylistItemType::Live, item.virtual_id, &item.logo, "logo",),

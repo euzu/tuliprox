@@ -4181,7 +4181,7 @@ fn test_app_state_with_hls_proxy_and_inputs(
         )),
         public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
         resource_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-        resource_destinations: Arc::new(crate::utils::request::DestinationCache::new()),
+        resource_public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
         downloads: Arc::new(crate::api::model::DownloadQueue::new()),
         cache: Arc::new(ArcSwapOption::default()),
         shared_stream_manager,

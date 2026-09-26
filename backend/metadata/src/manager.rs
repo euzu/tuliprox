@@ -2589,7 +2589,6 @@ impl InputWorker {
         false
     }
 
-    // Changed to static method
     async fn flush_batch_static<E: EventSink + Clone + 'static>(
         input_name: &str,
         bound_ctx: Option<&MetadataUpdateCtx<E>>,

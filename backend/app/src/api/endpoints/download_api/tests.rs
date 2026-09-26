@@ -578,7 +578,7 @@ fn create_test_app_state_with_downloads(downloads: Arc<DownloadQueue>) -> Arc<Ap
         http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
         public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
         resource_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-        resource_destinations: Arc::new(crate::utils::request::DestinationCache::new()),
+        resource_public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
         downloads,
         cache: Arc::new(ArcSwapOption::default()),
         shared_stream_manager,

@@ -4605,7 +4605,7 @@ fn create_test_app_state_for_config(app_cfg: Arc<AppConfig>) -> Arc<AppState> {
         http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
         public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
         resource_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-        resource_destinations: Arc::new(crate::utils::request::DestinationCache::new()),
+        resource_public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
         downloads: Arc::new(crate::api::model::DownloadQueue::new()),
         cache: Arc::new(ArcSwapOption::default()),
         shared_stream_manager,
@@ -4637,7 +4637,7 @@ fn create_test_fingerprint(addr: std::net::SocketAddr) -> Fingerprint {
 }
 
 #[tokio::test]
-async fn resource_cache_is_used_only_by_matching_standard_fetch_policy() {
+async fn resource_cache_is_used_only_by_matching_public_fetch_policy() {
     const CACHED_BODY: &[u8] = b"cached image";
     const UPSTREAM_BODY: &[u8] = b"upstream image";
 
@@ -4657,21 +4657,24 @@ async fn resource_cache_is_used_only_by_matching_standard_fetch_policy() {
     );
     let (upstream_addr, upstream_task) = spawn_legacy_hls_test_origin(response_head, UPSTREAM_BODY.to_vec()).await;
     let proxy = reqwest::Proxy::http(format!("http://{upstream_addr}")).expect("mock proxy URL");
-    let mock_client = reqwest::Client::builder().proxy(proxy).build().expect("mock upstream client");
-    app_state.resource_http_client_no_redirect.store(Arc::new(mock_client));
+    let mock_client = Arc::new(reqwest::Client::builder().proxy(proxy).build().expect("mock upstream client"));
+    // The destination is public, so the hop is fetched through the public resource client; both resource
+    // clients are mocked so the assertion below is about the cache, not about which client performed the
+    // request.
+    app_state.resource_public_http_client_no_redirect.store(Arc::clone(&mock_client));
+    app_state.resource_http_client_no_redirect.store(mock_client);
 
-    let standard_response =
-        resource_response(&app_state, ResourceFetchPolicy::Standard, resource_url, &HeaderMap::new(), None)
+    let public_response =
+        resource_response(&app_state, ResourceFetchPolicy::Public, resource_url, &HeaderMap::new(), None)
             .await
             .into_response();
-    assert_eq!(standard_response.status(), StatusCode::OK);
-    let standard_body = standard_response.into_body().collect().await.expect("read cached image").to_bytes();
-    assert_eq!(standard_body, Bytes::from_static(CACHED_BODY));
+    assert_eq!(public_response.status(), StatusCode::OK);
+    let public_body = public_response.into_body().collect().await.expect("read cached image").to_bytes();
+    assert_eq!(public_body, Bytes::from_static(CACHED_BODY));
 
-    let response =
-        resource_response(&app_state, ResourceFetchPolicy::NoRedirect, resource_url, &HeaderMap::new(), None)
-            .await
-            .into_response();
+    let response = resource_response(&app_state, ResourceFetchPolicy::NonPublic, resource_url, &HeaderMap::new(), None)
+        .await
+        .into_response();
 
     assert_eq!(response.status(), StatusCode::OK);
     let response_body = response.into_body().collect().await.expect("read upstream image").to_bytes();
@@ -4702,6 +4705,30 @@ async fn no_redirect_resource_ignores_configured_proxy() {
 }
 
 #[tokio::test]
+async fn public_resource_client_honours_the_configured_proxy() {
+    // Counterpart of `no_redirect_resource_ignores_configured_proxy`: a resource hop that can leave the
+    // local network must go through the configured proxy, or the fetch discloses this host's address.
+    let app_state = create_test_app_state();
+    let response_head = "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 3\r\nConnection: close\r\n\r\n";
+    let (proxy_addr, proxy_task) = spawn_legacy_hls_test_origin(response_head.to_string(), b"png".to_vec()).await;
+    app_state.app_config.config.store(Arc::new(Config {
+        proxy: Some(crate::model::ProxyConfig { url: format!("http://{proxy_addr}"), username: None, password: None }),
+        ..Config::default()
+    }));
+    let client = crate::api::model::create_resource_public_http_client_no_redirect(&app_state.app_config)
+        .expect("resource HTTP client");
+
+    let response = client.get("http://8.8.8.8/icon.png").send().await.expect("request reaches the proxy");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let request = tokio::time::timeout(std::time::Duration::from_secs(2), proxy_task)
+        .await
+        .expect("request must reach proxy")
+        .expect("proxy task");
+    assert!(request.starts_with("GET http://8.8.8.8/icon.png HTTP/1.1\r\n"), "{request}");
+}
+
+#[tokio::test]
 async fn no_redirect_resource_refuses_destinations_local_to_this_host() {
     let app_state = create_test_app_state();
     let (proxy_addr, proxy_task) =
@@ -4717,7 +4744,7 @@ async fn no_redirect_resource_refuses_destinations_local_to_this_host() {
     for local_only in ["http://127.0.0.1/icon.png", "http://169.254.169.254/latest/meta-data/", "http://[::1]/icon.png"]
     {
         let response =
-            resource_response(&app_state, ResourceFetchPolicy::NoRedirect, local_only, &HeaderMap::new(), None)
+            resource_response(&app_state, ResourceFetchPolicy::NonPublic, local_only, &HeaderMap::new(), None)
                 .await
                 .into_response();
 
@@ -4829,6 +4856,116 @@ fn configured_resource_headers_are_limited_to_the_input_origin() {
 }
 
 #[tokio::test]
+async fn public_resource_is_fetched_through_the_configured_proxy() {
+    // Regression lock: a resource fetch that leaves the local network must use the configured proxy,
+    // otherwise it discloses the operator's address to the resource host. The Web UI resource route
+    // reaches this path, because it wraps every icon of a public destination into a proxy link.
+    let app_state = create_test_app_state();
+    let response_head = "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 3\r\nConnection: close\r\n\r\n";
+    let (proxy_addr, proxy_task) = spawn_legacy_hls_test_origin(response_head.to_string(), b"png".to_vec()).await;
+    let client = reqwest::Client::builder()
+        .proxy(reqwest::Proxy::all(format!("http://{proxy_addr}")).expect("test proxy"))
+        .build()
+        .expect("mock proxy client");
+    app_state.resource_public_http_client_no_redirect.store(Arc::new(client));
+
+    let response = resource_proxy_response(&app_state, "http://8.8.8.8/logo.png", &HeaderMap::new(), None).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.into_body().collect().await.expect("image body").to_bytes(), Bytes::from_static(b"png"));
+    let request = tokio::time::timeout(std::time::Duration::from_secs(2), proxy_task)
+        .await
+        .expect("request must reach proxy")
+        .expect("proxy task");
+    assert!(request.starts_with("GET http://8.8.8.8/logo.png HTTP/1.1\r\n"), "{request}");
+}
+
+#[tokio::test]
+async fn proxied_resource_follows_a_redirect_into_the_public_network_through_the_configured_proxy() {
+    // Regression lock: the hop decides which client is used. A network-internal destination that
+    // redirects to a public host must not make the follow-up request directly, or the redirect would
+    // disclose the operator's address to that host despite a configured proxy.
+    let app_state = create_test_app_state();
+    let redirect_head =
+        "HTTP/1.1 302 Found\r\nLocation: http://8.8.8.8/logo.png\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    let (private_proxy_addr, private_proxy_task) =
+        spawn_legacy_hls_test_origin(redirect_head.to_string(), Vec::new()).await;
+    let private_client = reqwest::Client::builder()
+        .proxy(reqwest::Proxy::all(format!("http://{private_proxy_addr}")).expect("test proxy"))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("mock private client");
+    app_state.resource_http_client_no_redirect.store(Arc::new(private_client));
+
+    let response_head = "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 3\r\nConnection: close\r\n\r\n";
+    let (public_proxy_addr, public_proxy_task) =
+        spawn_legacy_hls_test_origin(response_head.to_string(), b"png".to_vec()).await;
+    let public_client = reqwest::Client::builder()
+        .proxy(reqwest::Proxy::all(format!("http://{public_proxy_addr}")).expect("test proxy"))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("mock public client");
+    app_state.resource_public_http_client_no_redirect.store(Arc::new(public_client));
+
+    let response = resource_proxy_response(&app_state, "http://10.0.0.1/logo.png", &HeaderMap::new(), None).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.into_body().collect().await.expect("image body").to_bytes(), Bytes::from_static(b"png"));
+    let first_hop = private_proxy_task.await.expect("first hop request");
+    assert!(first_hop.starts_with("GET http://10.0.0.1/logo.png HTTP/1.1\r\n"), "{first_hop}");
+    let second_hop = tokio::time::timeout(std::time::Duration::from_secs(2), public_proxy_task)
+        .await
+        .expect("public hop must be fetched")
+        .expect("public hop request");
+    assert!(second_hop.starts_with("GET http://8.8.8.8/logo.png HTTP/1.1\r\n"), "{second_hop}");
+}
+
+#[tokio::test]
+async fn public_resource_redirect_to_a_destination_local_to_this_host_is_refused() {
+    // Regression lock: a public host that redirects to loopback, link-local, or a cloud metadata
+    // endpoint must not turn the resource route into a reader for this host. The redirect target is
+    // never requested, and its location is never relayed to the client.
+    let app_state = create_test_app_state();
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("mock proxy binds");
+    let proxy_addr = listener.local_addr().expect("mock proxy address");
+    let proxy_task = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        loop {
+            let Ok(accepted) = tokio::time::timeout(std::time::Duration::from_millis(500), listener.accept()).await
+            else {
+                break;
+            };
+            let Ok((mut socket, _)) = accepted else { break };
+            let mut request = Vec::new();
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let mut chunk = [0_u8; 1024];
+                match socket.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => request.extend_from_slice(&chunk[..read]),
+                }
+            }
+            requests.push(String::from_utf8_lossy(&request).into_owned());
+            let head = "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1/secret\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let _ = socket.write_all(head.as_bytes()).await;
+        }
+        requests
+    });
+    let client = reqwest::Client::builder()
+        .proxy(reqwest::Proxy::all(format!("http://{proxy_addr}")).expect("test proxy"))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("mock client");
+    app_state.resource_public_http_client_no_redirect.store(Arc::new(client));
+
+    let response = resource_proxy_response(&app_state, "http://8.8.8.8/logo.png", &HeaderMap::new(), None).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert!(response.headers().get("location").is_none(), "the local destination must not be relayed");
+    let requests = proxy_task.await.expect("mock proxy task");
+    assert_eq!(requests.len(), 1, "the local destination must not be requested: {requests:?}");
+}
+
+#[tokio::test]
 async fn no_redirect_resource_does_not_relay_upstream_error_details() {
     let app_state = create_test_app_state();
     let body = b"<html>internal service error</html>".to_vec();
@@ -4848,7 +4985,7 @@ async fn no_redirect_resource_does_not_relay_upstream_error_details() {
 
     let response = resource_response(
         &app_state,
-        ResourceFetchPolicy::NoRedirect,
+        ResourceFetchPolicy::NonPublic,
         "http://10.0.0.1/icon.png",
         &HeaderMap::new(),
         None,

@@ -43,7 +43,7 @@ use crate::{
     },
     utils::{
         apply_timeshift, debug_if_enabled, file_exists_async, parse_timeshift, prepare_xtream_resource_hosts, request,
-        request::DestinationCache, trace_if_enabled,
+        trace_if_enabled,
     },
 };
 use axum::{http::HeaderMap, response::IntoResponse};
@@ -1101,9 +1101,10 @@ async fn xtream_player_api_resource(
                 }
             } else {
                 trace_if_enabled!("Resource request to {}", sanitize_sensitive_info(&url));
+                // The response narrows the input to the resource origin itself; passing the input of
+                // the item keeps that decision in one place.
                 let input = app_state.app_config.get_input_by_name(&pli.input_name);
-                let input = api_utils::resource_input_for_url(input.as_deref(), &url);
-                resource_proxy_response(app_state, &url, req_headers, input).await
+                resource_proxy_response(app_state, &url, req_headers, input.as_deref()).await
             }
         }
     }
@@ -1337,7 +1338,7 @@ pub async fn xtream_get_stream_info_response(
                 return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
             }
         };
-        prepare_xtream_resource_hosts(&pli, &options, &DestinationCache::new()).await;
+        prepare_xtream_resource_hosts(&pli, &options).await;
         return axum::Json(pli.to_info_document(&options)).into_response();
     }
 

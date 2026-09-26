@@ -16,9 +16,7 @@ use crate::{
     repository::{get_geoip_path, GeoIp},
     utils::{
         reload_logger,
-        request::{
-            create_client, create_client_with_redirect, DestinationCache, PublicIpResolver, ResourceDestinationResolver,
-        },
+        request::{create_client, create_client_with_redirect, PublicIpResolver, ResourceDestinationResolver},
         LRUResourceCache,
     },
 };
@@ -288,11 +286,13 @@ pub fn create_http_client_no_redirect(app_config: &AppConfig) -> Result<Client, 
     create_no_redirect_client(app_config, None)
 }
 
-/// Creates the no-redirect client used by the proxied resource route.
+/// Creates the no-redirect client used for a resource hop that can be reached only from the local
+/// network.
 ///
-/// Its DNS layer refuses addresses local to this host, so a destination cannot resolve to a local
-/// address while the connection is built. Private network destinations stay allowed, because
-/// self-hosted media servers are the reason this route exists.
+/// It connects directly, because a configured proxy has no route to such a destination, and its DNS
+/// layer refuses addresses local to this host, so a destination cannot resolve to a local address
+/// while the connection is built. Private network destinations stay allowed, because self-hosted
+/// media servers are the reason this route exists.
 pub fn create_resource_http_client_no_redirect(app_config: &AppConfig) -> Result<Client, TuliproxError> {
     let config = app_config.config.load();
     let mut builder = create_client_with_redirect(app_config, reqwest::redirect::Policy::none())
@@ -303,6 +303,16 @@ pub fn create_resource_http_client_no_redirect(app_config: &AppConfig) -> Result
         builder = builder.connect_timeout(Duration::from_secs(u64::from(config.connect_timeout_secs)));
     }
     builder.build().map_err(|err| TuliproxError::Config(format!("Failed to create resource HTTP client: {err}")))
+}
+
+/// Creates the no-redirect client used for a resource hop that can leave the local network.
+///
+/// It honours the configured proxy, because a resource fetch must not disclose this host's address to
+/// a destination that a proxy was configured to hide it from. Its DNS layer additionally refuses
+/// addresses local to this host, so a name that was classified as public cannot resolve to a local
+/// address while the connection is built.
+pub fn create_resource_public_http_client_no_redirect(app_config: &AppConfig) -> Result<Client, TuliproxError> {
+    create_no_redirect_client(app_config, Some(Arc::new(ResourceDestinationResolver)))
 }
 
 fn create_no_redirect_client(
@@ -460,12 +470,12 @@ pub struct AppState {
     pub http_client: Arc<ArcSwap<Client>>,
     pub http_client_no_redirect: Arc<ArcSwap<Client>>,
     pub public_http_client_no_redirect: Arc<ArcSwap<Client>>,
-    /// No-redirect client of the proxied resource route: its DNS layer refuses addresses local to
-    /// this host, while private network destinations stay allowed.
+    /// No-redirect client for a resource hop reachable only from the local network: connects directly
+    /// and refuses addresses local to this host.
     pub resource_http_client_no_redirect: Arc<ArcSwap<Client>>,
-    /// Remembers resource destination verdicts so that rendering does not resolve the same host per
-    /// icon. The resource client deliberately does not read it: it validates again while connecting.
-    pub resource_destinations: Arc<DestinationCache>,
+    /// No-redirect client for a resource hop that can leave the local network: honours the configured
+    /// proxy and refuses addresses local to this host.
+    pub resource_public_http_client_no_redirect: Arc<ArcSwap<Client>>,
     pub downloads: Arc<DownloadQueue>,
     pub cache: Arc<ArcSwapOption<RwLock<LRUResourceCache>>>,
     pub shared_stream_manager: Arc<SharedStreamManager>,
@@ -568,7 +578,7 @@ pub(crate) fn create_test_app_state(config: Config) -> Arc<AppState> {
         http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
         public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
         resource_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
-        resource_destinations: Arc::new(DestinationCache::new()),
+        resource_public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
         downloads: Arc::new(DownloadQueue::new()),
         cache: Arc::new(ArcSwapOption::default()),
         shared_stream_manager,
@@ -648,6 +658,8 @@ impl AppState {
         self.public_http_client_no_redirect.store(Arc::new(public_client_no_redirect));
         let resource_client_no_redirect = create_resource_http_client_no_redirect(&self.app_config)?;
         self.resource_http_client_no_redirect.store(Arc::new(resource_client_no_redirect));
+        let public_resource_client_no_redirect = create_resource_public_http_client_no_redirect(&self.app_config)?;
+        self.resource_public_http_client_no_redirect.store(Arc::new(public_resource_client_no_redirect));
 
         // cache
         let config = self.app_config.config.load();

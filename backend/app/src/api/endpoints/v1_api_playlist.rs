@@ -3,14 +3,14 @@
 use crate::{
     api::{
         api_utils::{
-            create_api_proxy_user, json_or_bin_response, resource_response, try_option_bad_request,
-            try_result_bad_request, try_unwrap_body, ResourceFetchPolicy,
+            create_api_proxy_user, json_or_bin_response, resource_proxy_response, try_option_bad_request,
+            try_result_bad_request, try_unwrap_body,
         },
         auth_middleware::{check_permission, permission_layer, VerifiedClaims},
         endpoints::{
             api_playlist_utils::{
                 get_playlist_for_custom_provider, get_playlist_for_input, get_playlist_for_target,
-                STALKER_RESOURCE_SCHEME,
+                rewrite_resource_url, STALKER_RESOURCE_SCHEME,
             },
             extract_accept_header::ExtractAcceptHeader,
             m3u_api::m3u_api_stream_loaded,
@@ -1093,9 +1093,11 @@ async fn playlist_resource(
         if let Some((input_id, cluster, provider_id)) = parse_stalker_resource(&resource_url) {
             return stalker_resource_response(&app_state, input_id, cluster, provider_id).await;
         }
-        resource_response(&app_state, ResourceFetchPolicy::NoRedirect, &resource_url, &req_headers, None)
-            .await
-            .into_response()
+        // This route serves every icon the Web UI shows, so it is classified like the player routes:
+        // a public destination goes out through the proxy-aware fetch, which honours a configured
+        // proxy, while one that is not provably public is fetched directly so the request cannot leave
+        // through a proxy that has no route to it.
+        resource_proxy_response(&app_state, &resource_url, &req_headers, None).await.into_response()
     } else {
         axum::http::StatusCode::BAD_REQUEST.into_response()
     }
@@ -1391,7 +1393,19 @@ async fn playlist_episode_item(
                     )
                     .await
                     {
-                        return axum::Json(json!(UiPlaylistItem::from(pli))).into_response();
+                        // The icon is wrapped like on every other Web UI path: the item carries the
+                        // destination as it was stored, which may name a host internal to this instance.
+                        let config = app_state.app_config.config.load();
+                        let web_ui_path =
+                            config.web_ui.as_ref().and_then(|web_ui| web_ui.path.as_ref()).map_or("", String::as_str);
+                        let resource_url = concat_path_leading_slash(web_ui_path, "api/v1/playlist/resource");
+                        drop(config);
+                        let item = rewrite_resource_url(
+                            &app_state.get_encrypt_secret(),
+                            &resource_url,
+                            UiPlaylistItem::from(pli),
+                        );
+                        return axum::Json(json!(item)).into_response();
                     }
                 }
             }
@@ -2631,7 +2645,7 @@ mod tests {
             http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
             public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
             resource_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-            resource_destinations: Arc::new(crate::utils::request::DestinationCache::new()),
+            resource_public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
             downloads: Arc::new(crate::api::model::DownloadQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,

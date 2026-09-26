@@ -22,7 +22,7 @@ use crate::{
     utils::{
         canonicalize_output_epg_id, canonicalize_untrusted_epg_id, deobscure_authenticated_bytes, file_exists_async,
         format_xmltv_time_utc, get_epg_processing_options, lowercase_xmltv_text, obscure_authenticated_bytes,
-        request::{classify_resource_destination, DestinationCache, ResourceDestination},
+        request::{classify_resource_destination, ResourceDestination},
         EpgIdOutputCase, EpgProcessingOptions, EpgTimeShift,
     },
 };
@@ -288,12 +288,10 @@ async fn write_programme_metadata_tags<W: AsyncWrite + Unpin>(
 
 /// Everything needed to turn an EPG icon into the URL that is written to the output.
 ///
-/// Bundled so that the writer chain does not gain a parameter per concern, and owning the destination
-/// cache so the rendering task can keep it without borrowing the application state.
+/// Bundled so that the writer chain does not gain a parameter per concern.
 struct EpgIconOutput<'a> {
     options: &'a EpgProcessingOptions,
     base_url: Option<&'a str>,
-    destinations: Arc<DestinationCache>,
 }
 
 /// Where an EPG icon URL can be used.
@@ -308,7 +306,7 @@ enum IconDestination {
     Unusable,
 }
 
-async fn classify_icon_destination(icon_url: &str, destinations: &DestinationCache) -> IconDestination {
+async fn classify_icon_destination(icon_url: &str) -> IconDestination {
     let Ok(url) = Url::parse(icon_url) else {
         return IconDestination::Unusable;
     };
@@ -316,7 +314,7 @@ async fn classify_icon_destination(icon_url: &str, destinations: &DestinationCac
         return IconDestination::Unusable;
     }
     match url.host_str() {
-        Some(host) => match classify_resource_destination(host, destinations).await {
+        Some(host) => match classify_resource_destination(host).await {
             ResourceDestination::Public => IconDestination::Public,
             ResourceDestination::Private => IconDestination::Proxied,
             ResourceDestination::Blocked => IconDestination::Unusable,
@@ -335,7 +333,7 @@ impl EpgIconOutput<'_> {
     /// leak the internal destination, which is exactly what must not happen.
     async fn url<'i>(&self, icon_url: &'i str) -> Option<Cow<'i, str>> {
         let icon_url = shared::model::persisted_resource_url(icon_url)?;
-        match classify_icon_destination(icon_url.as_ref(), &self.destinations).await {
+        match classify_icon_destination(icon_url.as_ref()).await {
             IconDestination::Unusable => None,
             IconDestination::Public if !self.options.rewrite_urls => Some(icon_url),
             IconDestination::Public | IconDestination::Proxied => {
@@ -428,9 +426,8 @@ async fn serve_epg_with_rewrites(
     });
 
     let (mut tx, rx) = tokio::io::duplex(8192);
-    let destinations = Arc::clone(&app_state.resource_destinations);
     tokio::spawn(async move {
-        let icons = EpgIconOutput { options: &epg_processing_options, base_url: base_url.as_deref(), destinations };
+        let icons = EpgIconOutput { options: &epg_processing_options, base_url: base_url.as_deref() };
         // Work-Around BytesText DocType escape, see below
         if let Err(err) = tx.write_all(XML_PREAMBLE.as_ref()).await {
             error!("EPG: Failed to write xml header {err}");
@@ -993,7 +990,7 @@ async fn epg_api_resource(
     if !Url::parse(&resource_url).is_ok_and(|url| matches!(url.scheme(), "http" | "https")) {
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
-    resource_response(&app_state, ResourceFetchPolicy::NoRedirect, &resource_url, &req_headers, None)
+    resource_response(&app_state, ResourceFetchPolicy::NonPublic, &resource_url, &req_headers, None)
         .await
         .into_response()
 }
@@ -1580,10 +1577,10 @@ mod tests {
         assert!(live_pos < new_pos);
     }
 
-    /// Icon output for tests: every test gets its own destination cache, so verdicts cannot leak
-    /// between tests.
+    /// Icon output for tests. Destination verdicts come from the process-wide memo, so the icons used
+    /// here are IP literals that are decided without resolving a name.
     fn icon_output<'a>(options: &'a EpgProcessingOptions, base_url: Option<&'a str>) -> EpgIconOutput<'a> {
-        EpgIconOutput { options, base_url, destinations: Arc::new(crate::utils::request::DestinationCache::new()) }
+        EpgIconOutput { options, base_url }
     }
 
     #[tokio::test]

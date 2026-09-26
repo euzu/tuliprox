@@ -1024,18 +1024,25 @@
 
 ## 🐛 Fixes
 
-- **Resource URLs no longer expose internal destinations.** Resource links served through `/resource/...` and the Web UI
-  resource route are classified before they are written into playlist or EPG output: only a provably public destination
-  is handed to the client, everything else is replaced by an authenticated resource link. This also covers the redirect
-  mode (`resource_rewrite_disabled: true`), where a network-internal image is proxied instead of being published, and an
-  image without a client-visible base URL is dropped rather than written through. Destinations local to the Tuliprox
-  host — loopback, link-local, cloud metadata — are refused by the resource route, and an upstream failure is reported as
-  a generic `502 Bad Gateway` instead of relaying the destination's error response. The refusal also happens while the
-  connection is built, so a destination cannot resolve to a public address during the check and to a local one
-  afterwards. Note that the `tvg-logo`, cover and backdrop fields of the M3U and Xtream API output still follow the
-  `resource_rewrite_disabled` and `mask_redirect_url` settings: with resource rewriting disabled, or in redirect mode
-  without `mask_redirect_url`, the client receives the provider's original URLs, including private ones, exactly like
-  the stream URLs in redirect mode.
+- **Resource URLs no longer expose internal destinations.** Resource URLs are classified before they are written into
+  playlist or EPG output: only a provably public destination is handed to the client, everything else (`tvg-logo`,
+  `tvg-logo-small`, Xtream covers and backdrops, EPG channel and programme icons, Web UI item icons) is replaced by an
+  authenticated resource link. This also covers redirect mode (`resource_rewrite_disabled: true`), where a
+  network-internal image is proxied instead of being published, and an image without a client-visible base URL is dropped
+  rather than written through. Destinations local to the Tuliprox host — loopback, link-local, cloud metadata — are
+  dropped from the output and refused by the resource route, and an upstream failure is reported as a generic
+  `502 Bad Gateway` instead of relaying the destination's error response. The refusal also happens while the connection
+  is built, so a destination cannot resolve to a public address during the check and to a local one afterwards. A name
+  whose lookup produced no answer stays non-public for ten seconds rather than for minutes, so a resolver hiccup does
+  not pin a destination to the proxy for the rest of its verdict lifetime.
+- **Resource proxying keeps respecting the configured proxy.** Every redirect hop of a resource URL is classified on
+  its own: a hop that is not provably public connects directly, so a self-hosted media server on the local network stays
+  reachable, while every other hop - including the public destinations of the Web UI resource route and a public hop
+  reached through a redirect - goes through the configured `proxy` block. Resource requests therefore cannot disclose
+  the operator's address to a resource host. A redirect to a destination local to the Tuliprox host is refused without
+  being requested, and both resource clients refuse such an address again while the connection is built, so a name that
+  was classified as public cannot resolve to a local address afterwards. Redirects are followed one hop at a time,
+  bounded to five hops.
 
 - **Streaming and connection management: resolved silent async hang / deadlock during client kicks and concurrent stream load.**
   Under concurrent stream traffic, `tuliprox` would occasionally stop logging and serving requests (the Web UI became

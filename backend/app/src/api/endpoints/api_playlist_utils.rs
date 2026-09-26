@@ -97,7 +97,11 @@ pub(in crate::api::endpoints) async fn get_playlist_for_target(
     (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Invalid Arguments"}))).into_response()
 }
 
-fn rewrite_resource_url(encrypt_secret: &[u8; 16], resource_url: &str, item: UiPlaylistItem) -> UiPlaylistItem {
+pub(in crate::api::endpoints) fn rewrite_resource_url(
+    encrypt_secret: &[u8; 16],
+    resource_url: &str,
+    item: UiPlaylistItem,
+) -> UiPlaylistItem {
     if item.logo.is_empty() {
         return item;
     }

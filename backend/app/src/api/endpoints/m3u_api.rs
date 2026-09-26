@@ -953,9 +953,10 @@ async fn m3u_api_resource(
                     }
                 }
             } else {
+                // The response narrows the input to the resource origin itself; passing the input of
+                // the item keeps that decision in one place.
                 let input = app_state.app_config.get_input_by_name(&m3u_item.input_name);
-                let input = crate::api::api_utils::resource_input_for_url(input.as_deref(), &url);
-                resource_proxy_response(&app_state, &url, &req_headers, input).await
+                resource_proxy_response(&app_state, &url, &req_headers, input.as_deref()).await
             }
         }
     }

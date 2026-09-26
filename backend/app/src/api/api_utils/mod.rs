@@ -3677,7 +3677,7 @@ async fn build_resource_stream_response(
     let has_content_range = response.headers().contains_key(header::CONTENT_RANGE);
     for (key, value) in response.headers() {
         if !is_hop_by_hop_response_header(key)
-            && (fetch_policy == ResourceFetchPolicy::Standard
+            && (fetch_policy == ResourceFetchPolicy::Public
                 || matches!(
                     *key,
                     header::CONTENT_TYPE
@@ -3736,9 +3736,16 @@ async fn build_resource_stream_response(
     try_unwrap_body!(response_builder.body(axum::body::Body::from_stream(byte_stream)))
 }
 
+/// Upper bound of redirect hops a resource route follows. Every hop is classified, so the number of
+/// requests a provider or EPG entry can trigger through one resource link stays bounded.
+const RESOURCE_REDIRECT_LIMIT: u8 = 5;
+
+/// Whether a destination may be fetched through this instance's resources - the client cannot reach
+/// it, or it is local to this host and must not be reached at all.
+fn is_proxied_destination(policy: ResourceOutputPolicy) -> bool { policy != ResourceOutputPolicy::Direct }
+
 async fn fetch_resource_with_retry(
     app_state: &Arc<AppState>,
-    http_client: &reqwest::Client,
     url: &Url,
     fetch_policy: ResourceFetchPolicy,
     resource_url: &str,
@@ -3756,16 +3763,33 @@ async fn fetch_resource_with_retry(
     let mut current_input = input;
     let mut method = input.map_or(InputFetchMethod::GET, |i| i.method);
 
-    for redirects in 0..=5 {
+    for redirects in 0..=RESOURCE_REDIRECT_LIMIT {
+        // Every hop is classified on its own: a hop that can leave the local network must go through
+        // the configured proxy, because a direct request would disclose this host's address to the
+        // destination. A hop that cannot be reached from outside connects directly, because a proxy
+        // has no route to it and its address has to be validated while the connection is built.
+        let hop_policy = classify_output_resource_url(current_url.as_str()).await;
+        if hop_policy == ResourceOutputPolicy::Blocked {
+            debug!("Refused resource destination local to this host: {}", sanitize_sensitive_info(resource_url));
+            return None;
+        }
+        let proxied_hop = is_proxied_destination(hop_policy);
         let provider_config = current_input.and_then(|i| i.get_resolve_provider(current_url.as_str()));
         let response = match send_with_retry_and_provider(
             &app_state.app_config,
             &current_url,
             provider_config.as_ref(),
-            fetch_policy == ResourceFetchPolicy::NoRedirect,
+            // Hand redirects back instead of retrying them: the loop below follows them itself, so that
+            // every hop is classified and no client-side redirect policy decides where the request ends.
+            true,
             |resolved_url| {
+                let http_client = if proxied_hop {
+                    app_state.resource_http_client_no_redirect.load()
+                } else {
+                    app_state.resource_public_http_client_no_redirect.load()
+                };
                 request::get_client_request(
-                    http_client,
+                    &http_client,
                     method,
                     current_input.map(|i| &i.headers),
                     resolved_url,
@@ -3789,8 +3813,8 @@ async fn fetch_resource_with_retry(
         };
 
         let status = response.status();
-        if fetch_policy == ResourceFetchPolicy::NoRedirect && status.is_redirection() {
-            if redirects == 5 {
+        if status.is_redirection() {
+            if redirects == RESOURCE_REDIRECT_LIMIT {
                 debug!("Resource redirect limit reached for {}", sanitize_sensitive_info(resource_url));
                 return None;
             }
@@ -3803,12 +3827,6 @@ async fn fetch_resource_with_retry(
                 debug!("Resource redirect has no usable location for {}", sanitize_sensitive_info(resource_url));
                 return None;
             };
-            if classify_output_resource_url(next_url.as_str(), &app_state.resource_destinations).await
-                == ResourceOutputPolicy::Blocked
-            {
-                debug!("Resource redirect was blocked for {}", sanitize_sensitive_info(resource_url));
-                return None;
-            }
             let same_origin = response.url().scheme() == next_url.scheme()
                 && response.url().host_str() == next_url.host_str()
                 && response.url().port_or_known_default() == next_url.port_or_known_default();
@@ -3845,10 +3863,18 @@ async fn fetch_resource_with_retry(
     None
 }
 
+/// How the client-visible answer of a resource route is shaped.
+///
+/// The variant mirrors the classification of the destination the route serves: a [`Public`] destination
+/// may be handed to the client as it was fetched, a [`NonPublic`] one is relayed with a sanitized
+/// answer. Which client performs a hop is decided per hop, not by this policy.
+///
+/// [`Public`]: ResourceFetchPolicy::Public
+/// [`NonPublic`]: ResourceFetchPolicy::NonPublic
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResourceFetchPolicy {
-    Standard,
-    NoRedirect,
+    Public,
+    NonPublic,
 }
 
 pub fn resource_input_for_url<'a>(input: Option<&'a ConfigInput>, resource_url: &str) -> Option<&'a ConfigInput> {
@@ -3875,7 +3901,7 @@ pub async fn resource_redirect_or_proxy(
         return redirect(resource_url).into_response();
     }
     if resource_url.starts_with("media-server://image/") {
-        return resource_response(app_state, ResourceFetchPolicy::NoRedirect, resource_url, req_headers, None)
+        return resource_response(app_state, ResourceFetchPolicy::NonPublic, resource_url, req_headers, None)
             .await
             .into_response();
     }
@@ -3888,7 +3914,7 @@ pub async fn resource_redirect_or_proxy(
     let Some(host) = url.host_str() else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    if classify_resource_destination(host, &app_state.resource_destinations).await == ResourceDestination::Public {
+    if classify_resource_destination(host).await == ResourceDestination::Public {
         redirect(resource_url).into_response()
     } else {
         resource_proxy_response(app_state, resource_url, req_headers, resource_input_for_url(input, resource_url)).await
@@ -3906,17 +3932,17 @@ pub async fn resource_proxy_response(
     };
     let resource_url = resource_url.as_ref();
     let input = resource_input_for_url(input, resource_url);
-    match classify_output_resource_url(resource_url, &app_state.resource_destinations).await {
+    match classify_output_resource_url(resource_url).await {
         ResourceOutputPolicy::Direct if resource_url.starts_with("/api/v1/library/thumbnail/") => {
             redirect(resource_url).into_response()
         }
         ResourceOutputPolicy::Direct => {
-            resource_response(app_state, ResourceFetchPolicy::Standard, resource_url, req_headers, input)
+            resource_response(app_state, ResourceFetchPolicy::Public, resource_url, req_headers, input)
                 .await
                 .into_response()
         }
         ResourceOutputPolicy::Proxy => {
-            resource_response(app_state, ResourceFetchPolicy::NoRedirect, resource_url, req_headers, input)
+            resource_response(app_state, ResourceFetchPolicy::NonPublic, resource_url, req_headers, input)
                 .await
                 .into_response()
         }
@@ -3927,18 +3953,18 @@ pub async fn resource_proxy_response(
 impl ResourceFetchPolicy {
     const fn cache_key(self, resource_url: &str) -> Option<&str> {
         match self {
-            Self::Standard => Some(resource_url),
-            Self::NoRedirect => None,
+            Self::Public => Some(resource_url),
+            Self::NonPublic => None,
         }
     }
 
     /// Whether an upstream response may be relayed to the client.
     ///
-    /// The standard policy forwards what the upstream answered, because the request came from the
-    /// user's own configuration. A resource proxy whose destination is deliberately hidden from the
-    /// client must not become a reader for that destination: status, headers and body of an upstream
-    /// error can disclose more about the internal service than the link itself.
-    const fn relays_upstream_response(self) -> bool { matches!(self, Self::Standard) }
+    /// A public destination was chosen by the user's own configuration, so what it answered is what
+    /// the client asked for. A resource proxy whose destination is deliberately hidden from the client
+    /// must not become a reader for that destination: status, headers and body of an upstream error can
+    /// disclose more about the internal service than the link itself.
+    const fn relays_upstream_response(self) -> bool { matches!(self, Self::Public) }
 }
 
 /// Callers must pass an already-decoded resource URL (not a `resource://v1/` locator).
@@ -3991,29 +4017,19 @@ pub async fn resource_response(
     }
     trace_if_enabled!("Try to fetch resource {}", sanitize_sensitive_info(resource_url));
     if let Ok(url) = Url::parse(resource_url) {
-        if fetch_policy == ResourceFetchPolicy::NoRedirect {
-            // A proxied resource URL is chosen by playlist or EPG content, so the destination is
-            // never fetched blindly: an address local to this host (loopback, link-local, cloud
-            // metadata) would turn the proxy into a reader for the proxy host itself. Private
-            // network destinations stay allowed, because self-hosted services are the reason this
-            // route exists.
-            let Some(host) = url.host_str() else {
-                return StatusCode::BAD_REQUEST.into_response();
-            };
-            if classify_resource_destination(host, &app_state.resource_destinations).await
-                == ResourceDestination::Blocked
-            {
-                debug!("Refused resource destination local to this host: {}", sanitize_sensitive_info(resource_url));
-                return StatusCode::FORBIDDEN.into_response();
-            }
-        }
-        let http_client = match fetch_policy {
-            ResourceFetchPolicy::Standard => app_state.http_client.load(),
-            ResourceFetchPolicy::NoRedirect => app_state.resource_http_client_no_redirect.load(),
+        // A resource URL is chosen by playlist or EPG content, so the destination is never fetched
+        // blindly: an address local to this host (loopback, link-local, cloud metadata) would turn
+        // the proxy into a reader for the proxy host itself. Private network destinations stay
+        // allowed, because self-hosted services are the reason this route exists.
+        let Some(host) = url.host_str() else {
+            return StatusCode::BAD_REQUEST.into_response();
         };
+        if classify_resource_destination(host).await == ResourceDestination::Blocked {
+            debug!("Refused resource destination local to this host: {}", sanitize_sensitive_info(resource_url));
+            return StatusCode::FORBIDDEN.into_response();
+        }
         if let Some(resp) =
-            fetch_resource_with_retry(app_state, &http_client, &url, fetch_policy, resource_url, &req_headers, input)
-                .await
+            fetch_resource_with_retry(app_state, &url, fetch_policy, resource_url, &req_headers, input).await
         {
             return resp;
         }

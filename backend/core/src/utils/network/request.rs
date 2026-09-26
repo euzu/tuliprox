@@ -45,7 +45,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     num::NonZeroUsize,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, Once, PoisonError},
+    sync::{Arc, Mutex, Once, OnceLock, PoisonError},
     time::{Duration, Instant},
 };
 use tokio::{
@@ -221,6 +221,12 @@ const RESOURCE_DESTINATION_PUBLIC_TTL: Duration = Duration::from_secs(60);
 /// How long a verdict that keeps a destination away from clients is remembered. Both classes fail
 /// closed, so they can be cached longer than the one that decides exposure.
 const RESOURCE_DESTINATION_PRIVATE_TTL: Duration = Duration::from_secs(300);
+/// How long a name that produced no answer within the resolution budget is remembered.
+///
+/// The cause - a resolver that is slow, overloaded, or briefly unreachable - is transient, so such a
+/// name must not be pinned to a non-public verdict for minutes. It stays non-public while it is
+/// remembered, because nothing was proven.
+const RESOURCE_DESTINATION_UNANSWERED_TTL: Duration = Duration::from_secs(10);
 /// Upper bound for remembered verdicts, evicted least-recently-used.
 const RESOURCE_DESTINATION_CACHE_CAPACITY: usize = 4096;
 /// Resolution budget when classifying a destination given as a name.
@@ -234,27 +240,30 @@ struct RememberedDestination {
 /// Memoizes destination verdicts so that rendering a playlist or EPG does not resolve the same host
 /// per icon.
 ///
-/// Owned by the caller instead of being a global so that its lifetime is explicit: a caller may keep
-/// it for its whole runtime or start fresh, and tests stay isolated.
+/// The verdict is a property of the host, so one memo serves the whole process: every route and
+/// every rendering path has to reach the same answer, and a per-request memo would put a DNS lookup
+/// on the playlist path for each request instead of once per host.
 ///
 /// This is a hot-path memo, not policy state: the verdict decides whether a URL may be exposed, and
 /// the resource client resolves and validates again while the connection is built, so a stale entry
 /// can never open a connection to a local address.
-pub struct DestinationCache {
+struct DestinationCache {
     destinations: Mutex<LruCache<String, RememberedDestination>>,
 }
 
-impl Default for DestinationCache {
-    fn default() -> Self { Self::new() }
-}
-
 impl DestinationCache {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
             destinations: Mutex::new(LruCache::new(
                 NonZeroUsize::new(RESOURCE_DESTINATION_CACHE_CAPACITY).unwrap_or(NonZeroUsize::MIN),
             )),
         }
+    }
+
+    /// The process-wide memo.
+    fn shared() -> &'static Self {
+        static SHARED: OnceLock<DestinationCache> = OnceLock::new();
+        SHARED.get_or_init(DestinationCache::new)
     }
 
     fn verdict(&self, host: &str) -> Option<ResourceDestination> {
@@ -269,11 +278,7 @@ impl DestinationCache {
         }
     }
 
-    fn remember(&self, host: &str, verdict: ResourceDestination) {
-        let ttl = match verdict {
-            ResourceDestination::Public => RESOURCE_DESTINATION_PUBLIC_TTL,
-            ResourceDestination::Private | ResourceDestination::Blocked => RESOURCE_DESTINATION_PRIVATE_TTL,
-        };
+    fn remember(&self, host: &str, verdict: ResourceDestination, ttl: Duration) {
         let mut destinations = self.destinations.lock().unwrap_or_else(PoisonError::into_inner);
         destinations.put(host.to_owned(), RememberedDestination { verdict, expires_at: Instant::now() + ttl });
     }
@@ -281,14 +286,15 @@ impl DestinationCache {
 
 /// Classifies a resource destination given as host name or IP literal, bracketed IPv6 included.
 ///
-/// Names are resolved once per verdict lifetime and remembered in `cache`. A name that cannot be
-/// resolved is reported as [`ResourceDestination::Private`]: callers must not hand a possibly
-/// internal name to a client, and the fetch attempt itself decides whether the destination is
-/// reachable.
-pub async fn classify_resource_destination(host: &str, cache: &DestinationCache) -> ResourceDestination {
+/// An IP literal is decided by its address alone, without resolving anything. Names are resolved once
+/// per verdict lifetime and remembered in the process-wide memo. A name that cannot be resolved is
+/// reported as [`ResourceDestination::Private`]: callers must not hand a possibly internal name to a
+/// client, and the fetch attempt itself decides whether the destination is reachable.
+pub async fn classify_resource_destination(host: &str) -> ResourceDestination {
     if let Ok(address) = host_literal(host).parse::<IpAddr>() {
         return classify_ip(address);
     }
+    let cache = DestinationCache::shared();
     if let Some(verdict) = cache.verdict(host) {
         return verdict;
     }
@@ -297,29 +303,38 @@ pub async fn classify_resource_destination(host: &str, cache: &DestinationCache)
     if let Ok(Ok(addresses)) = timeout(RESOURCE_DESTINATION_LOOKUP_TIMEOUT, tokio::net::lookup_host((host, 0))).await {
         resolved.extend(addresses.map(|address| address.ip()));
     }
-    let verdict = classify_resolved_addresses(&resolved);
-    cache.remember(host, verdict);
+    let (verdict, ttl) = verdict_for_addresses(&resolved);
+    cache.remember(host, verdict, ttl);
     verdict
 }
 
-/// Aggregates the addresses a name resolved to into a single verdict.
+/// Aggregates the addresses a name resolved to into a single verdict, and the time that verdict may be
+/// remembered.
 ///
 /// One local-only address blocks the whole destination, and one private address keeps it non-public:
 /// a client must not be able to reach the destination by any of its addresses. An empty answer is
-/// non-public, because nothing was proven.
-fn classify_resolved_addresses(addresses: &[IpAddr]) -> ResourceDestination {
+/// non-public, because nothing was proven, and is remembered only briefly: unlike a resolved address,
+/// it does not prove anything about the destination, so the name may well be reachable once the
+/// resolver answers again.
+fn verdict_for_addresses(addresses: &[IpAddr]) -> (ResourceDestination, Duration) {
     if addresses.is_empty() {
-        return ResourceDestination::Private;
+        return (ResourceDestination::Private, RESOURCE_DESTINATION_UNANSWERED_TTL);
     }
     let mut verdict = ResourceDestination::Public;
     for address in addresses {
         match classify_ip(*address) {
-            ResourceDestination::Blocked => return ResourceDestination::Blocked,
+            ResourceDestination::Blocked => {
+                return (ResourceDestination::Blocked, RESOURCE_DESTINATION_PRIVATE_TTL);
+            }
             ResourceDestination::Private => verdict = ResourceDestination::Private,
             ResourceDestination::Public => {}
         }
     }
-    verdict
+    let ttl = match verdict {
+        ResourceDestination::Public => RESOURCE_DESTINATION_PUBLIC_TTL,
+        ResourceDestination::Private | ResourceDestination::Blocked => RESOURCE_DESTINATION_PRIVATE_TTL,
+    };
+    (verdict, ttl)
 }
 
 /// Options applied at the final boundary of every physical request attempt.
@@ -3250,8 +3265,8 @@ mod tests {
         send_input_with_retry_and_provider_policy_with_manual_redirects_and_options_result,
         send_input_with_retry_and_provider_policy_with_options_result, send_with_retry_and_provider,
         send_with_retry_and_provider_policy, should_retry_text_body_error, should_try_next_ip_on_connect_error,
-        strip_sensitive_headers_for_cross_origin_redirect, text_response_error_log_label, DestinationCache,
-        InputEpgFileRequest, PublicIpResolver, RequestFetchOptions, ResourceDestination, ResourceDestinationResolver,
+        strip_sensitive_headers_for_cross_origin_redirect, text_response_error_log_label, InputEpgFileRequest,
+        PublicIpResolver, RequestFetchOptions, ResourceDestination, ResourceDestinationResolver,
         TextContentBodyOptions, TextContentFetchOptions, STREAM_IDLE_TIMEOUT,
     };
     use crate::{
@@ -3341,15 +3356,10 @@ mod tests {
 
     #[tokio::test]
     async fn resource_destination_names_are_classified_without_resolving_ip_literals() {
-        let destinations = DestinationCache::new();
-
-        assert_eq!(classify_resource_destination("192.168.1.20", &destinations).await, ResourceDestination::Private);
-        assert_eq!(classify_resource_destination("[::1]", &destinations).await, ResourceDestination::Blocked);
-        assert_eq!(
-            classify_resource_destination("[64:ff9b::7f00:1]", &destinations).await,
-            ResourceDestination::Blocked
-        );
-        assert_eq!(classify_resource_destination("8.8.8.8", &destinations).await, ResourceDestination::Public);
+        assert_eq!(classify_resource_destination("192.168.1.20").await, ResourceDestination::Private);
+        assert_eq!(classify_resource_destination("[::1]").await, ResourceDestination::Blocked);
+        assert_eq!(classify_resource_destination("[64:ff9b::7f00:1]").await, ResourceDestination::Blocked);
+        assert_eq!(classify_resource_destination("8.8.8.8").await, ResourceDestination::Public);
     }
 
     #[tokio::test]
@@ -3367,17 +3377,37 @@ mod tests {
 
     #[test]
     fn resolved_address_sets_are_aggregated_for_exposure() {
+        use super::{
+            verdict_for_addresses, RESOURCE_DESTINATION_PRIVATE_TTL, RESOURCE_DESTINATION_PUBLIC_TTL,
+            RESOURCE_DESTINATION_UNANSWERED_TTL,
+        };
+
         let public: IpAddr = "8.8.8.8".parse().expect("valid public address");
         let private: IpAddr = "10.0.0.1".parse().expect("valid private address");
         let blocked: IpAddr = "127.0.0.1".parse().expect("valid loopback address");
 
-        assert_eq!(super::classify_resolved_addresses(&[public]), ResourceDestination::Public);
-        assert_eq!(super::classify_resolved_addresses(&[public, public]), ResourceDestination::Public);
-        assert_eq!(super::classify_resolved_addresses(&[private]), ResourceDestination::Private);
-        assert_eq!(super::classify_resolved_addresses(&[public, private]), ResourceDestination::Private);
-        assert_eq!(super::classify_resolved_addresses(&[public, blocked]), ResourceDestination::Blocked);
-        assert_eq!(super::classify_resolved_addresses(&[private, blocked]), ResourceDestination::Blocked);
-        assert_eq!(super::classify_resolved_addresses(&[]), ResourceDestination::Private);
+        assert_eq!(verdict_for_addresses(&[public]), (ResourceDestination::Public, RESOURCE_DESTINATION_PUBLIC_TTL));
+        assert_eq!(
+            verdict_for_addresses(&[public, public]),
+            (ResourceDestination::Public, RESOURCE_DESTINATION_PUBLIC_TTL)
+        );
+        assert_eq!(verdict_for_addresses(&[private]), (ResourceDestination::Private, RESOURCE_DESTINATION_PRIVATE_TTL));
+        assert_eq!(
+            verdict_for_addresses(&[public, private]),
+            (ResourceDestination::Private, RESOURCE_DESTINATION_PRIVATE_TTL)
+        );
+        assert_eq!(
+            verdict_for_addresses(&[public, blocked]),
+            (ResourceDestination::Blocked, RESOURCE_DESTINATION_PRIVATE_TTL)
+        );
+        assert_eq!(
+            verdict_for_addresses(&[private, blocked]),
+            (ResourceDestination::Blocked, RESOURCE_DESTINATION_PRIVATE_TTL)
+        );
+        // An unanswered name stays non-public, but only briefly: a resolver hiccup must not pin the
+        // destination to the proxy for minutes.
+        assert_eq!(verdict_for_addresses(&[]), (ResourceDestination::Private, RESOURCE_DESTINATION_UNANSWERED_TTL));
+        assert!(RESOURCE_DESTINATION_UNANSWERED_TTL < RESOURCE_DESTINATION_PRIVATE_TTL);
     }
 
     #[tokio::test]

@@ -19,8 +19,9 @@ use crate::{
         http_layers::create_cors_layer,
         model::{
             create_cache, create_http_client, create_http_client_no_redirect, create_public_http_client_no_redirect,
-            create_resource_http_client_no_redirect, exec_provider_dns, exec_qos_aggregation,
-            load_playlists_into_memory_cache, recording_rule_scheduler::spawn_recording_rule_scheduler,
+            create_resource_http_client_no_redirect, create_resource_public_http_client_no_redirect, exec_provider_dns,
+            exec_qos_aggregation, load_playlists_into_memory_cache,
+            recording_rule_scheduler::spawn_recording_rule_scheduler,
             recording_supervisor::start_recording_supervisors, ActiveProviderManager, ActiveUserManager, AppState,
             CancelTokens, ConnectionManager, DownloadQueue, EventManager, EventMessage, HdHomerunAppState,
             HlsProvisioningState, ManualPlaylistUpdateRequest, MetadataUpdateManager, PlaylistStorageState,
@@ -431,6 +432,7 @@ async fn create_shared_data(
     let client_no_redirect = create_http_client_no_redirect(app_config)?;
     let public_client_no_redirect = create_public_http_client_no_redirect(app_config)?;
     let resource_client_no_redirect = create_resource_http_client_no_redirect(app_config)?;
+    let resource_public_client_no_redirect = create_resource_public_http_client_no_redirect(app_config)?;
 
     let tokens = CancelTokens::default();
     let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
@@ -452,7 +454,7 @@ async fn create_shared_data(
         http_client_no_redirect: Arc::new(ArcSwap::from_pointee(client_no_redirect)),
         public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(public_client_no_redirect)),
         resource_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(resource_client_no_redirect)),
-        resource_destinations: Arc::new(crate::utils::request::DestinationCache::new()),
+        resource_public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(resource_public_client_no_redirect)),
         downloads: Arc::new(DownloadQueue::new_with_state_file(Some(downloads_state_file))),
         cache: Arc::new(ArcSwapOption::from(cache)),
         shared_stream_manager,
@@ -1226,7 +1228,7 @@ mod tests {
                 http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
                 public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
                 resource_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-                resource_destinations: Arc::new(crate::utils::request::DestinationCache::new()),
+                resource_public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
                 downloads: Arc::new(DownloadQueue::new()),
                 cache: Arc::new(ArcSwapOption::default()),
                 shared_stream_manager,

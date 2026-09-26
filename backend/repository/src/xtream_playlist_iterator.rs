@@ -17,7 +17,7 @@ use std::{
 use tokio::{sync::mpsc, task};
 use tuliprox_core::{
     model::{xtream_mapping_option_from_target_options, AppConfig, ConfigTarget, ProxyUserCredentials},
-    utils::{prepare_xtream_resource_hosts, request::DestinationCache},
+    utils::prepare_xtream_resource_hosts,
 };
 
 pub struct XtreamPlaylistIterator {
@@ -214,14 +214,12 @@ impl XtreamPlaylistJsonIterator {
             user,
             encrypt_secret,
         )?);
-        let destinations = Arc::new(DestinationCache::new());
         let raw = XtreamPlaylistIterator::new(cluster, app_config, target, category_id, user).await?;
         let inner = raw.then(move |entry| {
             let options = Arc::clone(&options);
-            let destinations = Arc::clone(&destinations);
             async move {
                 let (item, has_next) = entry?;
-                prepare_xtream_resource_hosts(&item, &options, &destinations).await;
+                prepare_xtream_resource_hosts(&item, &options).await;
                 let json = serde_json::to_string(&item.to_document(&options))
                     .map_err(|error| TuliproxError::RepositoryXtream(error.to_string()))?;
                 Ok((json, has_next))
