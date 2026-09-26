@@ -348,12 +348,6 @@ again when the process restarts. Shared playback uses the identity of the shared
   explicitly because Tuliprox's reverse-proxy path does not relay those schemes.
 * Fresh temp-link resolution is implemented. The still-open edge case is whether a specific portal also requires extra forwarded
   cookies or headers on the final media request after temp-link resolution.
-* The bulk-EPG path is streamed and batch-persisted to reduce peak memory pressure on large portals, but portal-specific
-  tuning for pathological datasets is still a separate follow-up topic.
-* Supported Stalker playback transports are currently `http` and `https` only. `rtmp://` / `rtsp://` commands are rejected
-  explicitly because Tuliprox's reverse-proxy path does not relay those schemes.
-* Fresh temp-link resolution is implemented. The still-open edge case is whether a specific portal also requires extra forwarded
-  cookies or headers on the final media request after temp-link resolution.
 
 ---
 

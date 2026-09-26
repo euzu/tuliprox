@@ -559,11 +559,11 @@ pub async fn re_resolve_stalker_url(
         return Ok(None);
     }
     let api_client = cached_runtime_stalker_client(http_client, portal_url, stalker_cfg)?;
-    let handshake = api_client.handshake().await.map_err(stalker_err_to_repo)?;
     let series_number = (kind == StalkerStreamKind::Episode).then_some(item.number);
 
     let mut last_error: Option<String> = None;
     for (cmd, mode) in &candidates {
+        let handshake = api_client.handshake().await.map_err(stalker_err_to_repo)?;
         match api_client.create_link(&handshake, kind, *mode, cmd, series_number, None, None).await {
             Ok(resolved) => {
                 let url = Internable::intern(resolved.stream_url);
