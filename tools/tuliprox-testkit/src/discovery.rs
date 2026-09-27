@@ -71,7 +71,10 @@ fn marker_from_extinf(line: &str) -> Option<u32> {
 
 fn name_from_extinf(line: &str) -> Option<String> {
     let value = line.split("tvg-id=\"").nth(1)?.split('"').next()?;
-    value.strip_prefix("test-vod-").map(str::to_owned)
+    value.strip_prefix("test-vod-").map(str::to_owned).or_else(|| {
+        let title = line.split("tvg-name=\"").nth(1)?.split('"').next()?;
+        (title == "Test Series S01E01").then(|| "episode.mkv".to_owned())
+    })
 }
 
 /// Extract the numeric virtual ID from the last path segment of a URL.
@@ -99,6 +102,16 @@ fn extract_virtual_id_from_url(url: &str) -> Result<u64, TestkitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovers_synthetic_series_episode_without_tvg_id() {
+        let playlist = "#EXTM3U\n#EXTINF:-1 tvg-id=\"\" tvg-name=\"Test Series S01E01\" group-title=\"Series\",Test Series S01E01\nhttp://tuliprox/series/abc/def/7.mkv\n";
+        let map = VirtualIdMap::from_m3u(playlist).expect("series episode discovery");
+        assert_eq!(
+            map.named_playback_url("episode.mkv").expect("series episode URL"),
+            "http://tuliprox/series/abc/def/7.mkv"
+        );
+    }
 
     #[test]
     fn discovers_virtual_playback_urls_without_assuming_their_ids() {

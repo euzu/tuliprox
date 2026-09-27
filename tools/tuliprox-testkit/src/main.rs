@@ -720,6 +720,11 @@ fn catalog_m3u(state: &OriginState, host: &str, account: Option<&str>) -> String
     }
     let _ = writeln!(catalog, "#EXTINF:-1 tvg-id=\"test-vod-movie.mkv\" tvg-type=\"movie\",Test Movie");
     let _ = writeln!(catalog, "http://{host}/vod/movie.mkv?run={}{}", state.run_id.0, account_query);
+    let _ = writeln!(
+        catalog,
+        "#EXTINF:0 tvg-id=\"test-vod-episode.mkv\" tvg-type=\"series\" group-title=\"Test Series\",Test Series S01E01"
+    );
+    let _ = writeln!(catalog, "http://{host}/vod/episode.mkv?run={}{}", state.run_id.0, account_query);
     catalog
 }
 

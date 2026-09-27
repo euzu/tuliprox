@@ -414,14 +414,24 @@ pub async fn persist_input_m3u_playlist(
         tree.store(&m3u_path_clone).map_err(|err| cant_write_result!(RepositoryM3u, "m3u", &m3u_path_clone, err))?;
 
         let mut indexed_urls: HashMap<Arc<str>, Option<Arc<str>>> = HashMap::new();
-        for item in &playlist_items {
-            let Some(identity) = m3u_stream_url_identity(&item.url) else { continue };
+        let mut index_url = |url: &Arc<str>| {
+            let Some(identity) = m3u_stream_url_identity(url) else { return };
             if let Some(indexed_url) = indexed_urls.get_mut(identity.as_str()) {
-                if indexed_url.as_ref().is_some_and(|url| url.as_ref() != item.url.as_ref()) {
+                if indexed_url.as_ref().is_some_and(|indexed| indexed.as_ref() != url.as_ref()) {
                     *indexed_url = None;
                 }
             } else {
-                indexed_urls.insert(identity.into(), Some(Arc::clone(&item.url)));
+                indexed_urls.insert(identity.into(), Some(Arc::clone(url)));
+            }
+        };
+        for item in &playlist_items {
+            index_url(&item.url);
+            if let Some(StreamProperties::Series(series)) = &item.additional_properties {
+                if let Some(episodes) = series.details.as_ref().and_then(|details| details.episodes.as_ref()) {
+                    for episode in episodes {
+                        index_url(&episode.direct_source);
+                    }
+                }
             }
         }
 
@@ -568,6 +578,7 @@ mod tests {
     use shared::{
         model::{
             ConfigPaths, LiveStreamProperties, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType,
+            SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties, SeriesStreamProperties,
             StreamProperties, XtreamCluster,
         },
         utils::Internable,
@@ -683,6 +694,59 @@ mod tests {
         assert_eq!(properties.last_probed_timestamp, Some(100));
         assert_eq!(properties.last_success_timestamp, Some(90));
         assert_eq!(properties.bitrate, 2_500_000);
+    }
+
+    #[tokio::test]
+    async fn persisted_stream_url_index_resolves_series_episode_alias_token() {
+        let temp = tempfile::tempdir().expect("temp dir should be created");
+        let app_config = test_app_config();
+        let config = Config { storage_dir: temp.path().to_string_lossy().into_owned(), ..Config::default() };
+        app_config.config.store(Arc::new(config));
+
+        let alias_name = "backup-account".intern();
+        let storage_path = get_input_storage_path(&alias_name, &app_config.config.load().storage_dir)
+            .await
+            .expect("alias storage should be created");
+        let playlist_path = get_input_m3u_playlist_file_path(&storage_path, &alias_name);
+        let playlist = vec![PlaylistGroup {
+            id: 1,
+            title: "Series".intern(),
+            channels: vec![PlaylistItem {
+                header: PlaylistItemHeader {
+                    id: "series-1".intern(),
+                    url: "".intern(),
+                    item_type: PlaylistItemType::SeriesInfo,
+                    xtream_cluster: XtreamCluster::Series,
+                    additional_properties: Some(StreamProperties::Series(Box::new(SeriesStreamProperties {
+                        details: Some(SeriesStreamDetailProperties::new(
+                            None,
+                            Vec::new(),
+                            Some(vec![SeriesStreamDetailEpisodeProperties {
+                                direct_source: "http://stream.example/vod/episode.mkv?token=backup-stream-token"
+                                    .intern(),
+                                ..SeriesStreamDetailEpisodeProperties::default()
+                            }]),
+                        )),
+                        ..SeriesStreamProperties::default()
+                    }))),
+                    ..PlaylistItemHeader::default()
+                },
+            }],
+            xtream_cluster: XtreamCluster::Series,
+        }];
+        persist_input_m3u_playlist(&app_config, &playlist_path, &playlist)
+            .await
+            .expect("alias playlist should persist");
+
+        let resolved = load_input_m3u_stream_url(
+            &app_config,
+            &alias_name,
+            "http://stream.example/vod/episode.mkv?token=primary-stream-token",
+        )
+        .await
+        .expect("alias episode URL lookup should succeed");
+
+        assert_eq!(resolved.as_deref(), Some("http://stream.example/vod/episode.mkv?token=backup-stream-token"));
     }
 
     #[tokio::test]
