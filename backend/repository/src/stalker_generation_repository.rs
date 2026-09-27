@@ -163,6 +163,35 @@ pub async fn save_active_manifest(storage_path: &Path, manifest: &StalkerActiveM
     atomic_write_json(storage_path.join(ACTIVE_MANIFEST), manifest).await
 }
 
+/// Read the published manifest for `identity_fingerprint` without changing publication state.
+///
+/// [`load_active_manifest`] starts a fresh generation when the stored manifest belongs to a
+/// different identity, which is what a refresh needs. Read paths (playback resolution, the
+/// disk playlist sources) must not do that: a mismatched identity there only means "this
+/// instance cannot serve the published catalog yet", and overwriting the manifest also
+/// deletes the resume checkpoint of the refresh that owns it.
+pub async fn lookup_active_manifest(
+    storage_path: &Path,
+    identity_fingerprint: u64,
+) -> Result<Option<StalkerActiveManifest>, TuliproxError> {
+    let path = storage_path.join(ACTIVE_MANIFEST);
+    let manifest = load_json::<StalkerActiveManifest>(&path).await?;
+    Ok(manifest
+        .filter(|manifest| manifest.schema == SCHEMA_VERSION && manifest.identity_fingerprint == identity_fingerprint))
+}
+
+/// Manifest for a read path: the published one when it belongs to `identity_fingerprint`,
+/// otherwise an empty manifest that is never written to disk.
+pub async fn readable_active_manifest(
+    storage_path: &Path,
+    identity_fingerprint: u64,
+) -> Result<(StalkerActiveManifest, bool), TuliproxError> {
+    match lookup_active_manifest(storage_path, identity_fingerprint).await? {
+        Some(manifest) => Ok((manifest, true)),
+        None => Ok((StalkerActiveManifest::empty(identity_fingerprint), false)),
+    }
+}
+
 pub async fn load_active_manifest(
     storage_path: &Path,
     identity_fingerprint: u64,
@@ -377,6 +406,33 @@ mod tests {
             })
         );
         assert!(active.epg.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_read_path_lookup_never_replaces_the_published_manifest() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let mut manifest = StalkerActiveManifest::empty(17);
+        manifest.live = Some(ClusterFiles { generation: 1, data: "live-1.db".into() });
+        save_active_manifest(temp.path(), &manifest).await?;
+        save_checkpoint(temp.path(), &StalkerCheckpoint::new(17, 2, 1, 123)).await?;
+
+        assert_eq!(lookup_active_manifest(temp.path(), 17).await?.as_ref(), Some(&manifest));
+        assert!(lookup_active_manifest(temp.path(), 18).await?.is_none(), "a foreign identity is not this instance's");
+        assert_eq!(
+            load_active_manifest(temp.path(), 17).await?,
+            manifest,
+            "a lookup must leave the published manifest untouched"
+        );
+        assert!(
+            load_checkpoint(temp.path(), 17).await?.is_some(),
+            "a lookup must leave the owning refresh checkpoint in place"
+        );
+
+        let (empty, published) = readable_active_manifest(temp.path(), 18).await?;
+        assert!(!published);
+        assert_eq!(empty, StalkerActiveManifest::empty(18));
+        assert_eq!(load_active_manifest(temp.path(), 17).await?, manifest, "the fallback manifest must stay in memory");
         Ok(())
     }
 

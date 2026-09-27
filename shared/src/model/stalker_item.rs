@@ -24,7 +24,7 @@ pub struct StalkerPlaylistItem {
     #[serde(with = "arc_str_serde")]
     pub category_name: Arc<str>,
     pub number: u32,
-    #[serde(default, deserialize_with = "crate::model::deserialize_untrusted_resource_option")]
+    #[serde(default)]
     pub logo_url: Option<Arc<str>>,
     #[serde(default)]
     pub epg_channel_id: Option<Arc<str>>,
@@ -53,7 +53,7 @@ pub struct StalkerPlaylistItem {
     pub rating: f32,
     #[serde(default)]
     pub tmdb_id: Option<i64>,
-    #[serde(default, deserialize_with = "crate::model::deserialize_untrusted_resource_option")]
+    #[serde(default)]
     pub backdrop_url: Option<Arc<str>>,
     /// Unix timestamp in seconds when the item was first persisted.
     #[serde(default)]
@@ -138,19 +138,6 @@ impl Default for StalkerPlaylistItem {
 }
 
 impl StalkerPlaylistItem {
-    pub fn ingest_resource_values(&mut self, input_name: &Arc<str>) -> usize {
-        let mut rejected = 0;
-        for value in [&mut self.logo_url, &mut self.backdrop_url] {
-            if let Some(resource) = value {
-                if crate::model::ingest_resource_value(resource, input_name).is_err() {
-                    *value = None;
-                    rejected += 1;
-                }
-            }
-        }
-        rejected
-    }
-
     /// Whether this item is a series root (no individual playback URL).
     pub fn is_series_root(&self) -> bool { self.is_series }
 
@@ -175,21 +162,10 @@ pub struct StalkerSeasonItem {
     pub season_number: i32,
     #[serde(with = "arc_str_serde")]
     pub name: Arc<str>,
-    #[serde(default, deserialize_with = "crate::model::deserialize_untrusted_resource_option")]
+    #[serde(default)]
     pub cover_url: Option<Arc<str>>,
     #[serde(with = "arc_str_vec_serde", default)]
     pub episodes: Vec<Arc<str>>,
-}
-
-impl StalkerSeasonItem {
-    pub fn ingest_resource_values(&mut self, input_name: &Arc<str>) -> usize {
-        let Some(cover) = &mut self.cover_url else { return 0 };
-        if crate::model::ingest_resource_value(cover, input_name).is_err() {
-            self.cover_url = None;
-            return 1;
-        }
-        0
-    }
 }
 
 /// Lightweight episode record that keeps the actual `StalkerPlaylistItem`

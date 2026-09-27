@@ -8,9 +8,10 @@ use crate::{
     },
     utils::{
         arc_str_option_serde, arc_str_serde, concat_path, extract_extension_from_url, generate_provider_playlist_uuid,
-        generate_runtime_playlist_uuid, get_provider_id, obfuscate_text, Internable,
+        generate_runtime_playlist_uuid, get_provider_id, seal_web_ui_resource_url, Internable,
     },
 };
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::{
     fmt::{Display, Formatter, Write},
@@ -435,51 +436,6 @@ impl Default for PlaylistItemHeader {
 }
 
 impl PlaylistItemHeader {
-    pub fn visit_resource_values(&self, visitor: &mut impl FnMut(&Arc<str>)) {
-        visitor(&self.logo);
-        visitor(&self.logo_small);
-        if let Some(properties) = &self.additional_properties {
-            properties.visit_resource_values(visitor);
-        }
-    }
-
-    pub fn visit_resource_values_mut(&mut self, visitor: &mut impl FnMut(&mut Arc<str>)) {
-        visitor(&mut self.logo);
-        visitor(&mut self.logo_small);
-        if let Some(properties) = &mut self.additional_properties {
-            properties.visit_resource_values_mut(visitor);
-        }
-    }
-
-    /// Validates and wraps every resource carried by this item at provider ingress.
-    pub fn ingest_resource_values(&mut self, input_name: &Arc<str>) -> usize {
-        let mut rejected = 0;
-        for value in [&mut self.logo, &mut self.logo_small] {
-            if crate::model::ingest_resource_value(value, input_name).is_err() {
-                rejected += 1;
-            }
-        }
-        if let Some(properties) = &mut self.additional_properties {
-            rejected += properties.ingest_resource_values(input_name);
-        }
-        rejected
-    }
-
-    pub fn normalize_internal_resource_values(&mut self) -> usize {
-        let input_name = Arc::clone(&self.input_name);
-        let mut rejected = 0;
-        for value in [&mut self.logo, &mut self.logo_small] {
-            if crate::model::normalize_internal_resource_value(value, &input_name).is_err() {
-                *value = Arc::from("");
-                rejected += 1;
-            }
-        }
-        if let Some(properties) = &mut self.additional_properties {
-            rejected += properties.normalize_internal_resource_values(&input_name);
-        }
-        rejected
-    }
-
     /// Captures the input playlist item ID at the input-processing boundary.
     ///
     /// This must run before target transformations and must not be used to recover an identity
@@ -537,10 +493,7 @@ macro_rules! to_m3u_non_empty_fields {
     ($header:expr, $line:expr, $(($prop:ident, $field:expr)),*;) => {
         $(
             if !$header.$prop.is_empty() {
-                let value = crate::model::external_resource_value(&$header.$prop);
-                if !value.is_empty() {
-                    let _ = write!($line," {}=\"{}\"", $field, value);
-                }
+                let _ = write!($line," {}=\"{}\"", $field, $header.$prop );
             }
          )*
     };
@@ -622,12 +575,7 @@ impl crate::model::FieldGetAccessor for crate::model::PlaylistItemHeader {
     #[inline]
     fn get_field(&self, field: &str) -> Option<Arc<str>> {
         use crate::model::FieldGet;
-        let field = HeaderField::parse(field)?;
-        match field {
-            HeaderField::Logo => Some(crate::model::external_resource_value(&self.logo)),
-            HeaderField::LogoSmall => Some(crate::model::external_resource_value(&self.logo_small)),
-            _ => self.get(field).map(|value| value.to_arc()),
-        }
+        self.get(HeaderField::parse(field)?).map(|value| value.to_arc())
     }
 }
 
@@ -939,7 +887,13 @@ impl crate::model::FieldGetAccessor for M3uPlaylistItem {
     #[inline]
     fn get_field(&self, field: &str) -> Option<Arc<str>> {
         use crate::model::FieldGet;
-        self.get(HeaderField::parse(field)?).map(|value| value.to_arc())
+        let field = HeaderField::parse(field)?;
+        let value = self.get(field)?.to_arc();
+        Some(if matches!(field, HeaderField::Logo | HeaderField::LogoSmall) {
+            super::persisted_resource_arc(&value)
+        } else {
+            value
+        })
     }
 }
 
@@ -966,6 +920,14 @@ pub struct XtreamMappingOptions {
     pub base_url: String,
     pub web_ui_request: bool,
     pub encrypt_secret: [u8; 16],
+    pub resource_host_policies: Arc<DashMap<String, ResourceOutputPolicy>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourceOutputPolicy {
+    Direct,
+    Proxy,
+    Blocked,
 }
 
 impl XtreamMappingOptions {
@@ -982,9 +944,10 @@ impl XtreamMappingOptions {
         xtream_cluster: XtreamCluster,
         item_type: PlaylistItemType,
         virtual_id: VirtualId,
+        force_proxy: bool,
     ) -> Option<String> {
         let proxy_resource = self.resource_proxy_item_types.is_set(item_type);
-        if proxy_resource && self.flags.contains(XtreamMappingFlags::RewriteResourceUrl) {
+        if force_proxy || (proxy_resource && self.flags.contains(XtreamMappingFlags::RewriteResourceUrl)) {
             Some(format!(
                 "{}/resource/{}/{}/{}/{}",
                 self.base_url,
@@ -998,6 +961,34 @@ impl XtreamMappingOptions {
         }
     }
 
+    fn resource_output_policy(&self, resource_url: &str) -> ResourceOutputPolicy {
+        if self.flags.contains(XtreamMappingFlags::RewriteResourceUrl) {
+            return ResourceOutputPolicy::Proxy;
+        }
+        if resource_url.starts_with("media-server://image/") {
+            return ResourceOutputPolicy::Proxy;
+        }
+        let Ok(url) = url::Url::parse(resource_url) else {
+            return if resource_url.starts_with("//")
+                || resource_url.starts_with("http:")
+                || resource_url.starts_with("https:")
+            {
+                ResourceOutputPolicy::Blocked
+            } else {
+                ResourceOutputPolicy::Direct
+            };
+        };
+        if !matches!(url.scheme(), "http" | "https") {
+            return ResourceOutputPolicy::Blocked;
+        }
+        let Some(host) = url.host_str() else {
+            return ResourceOutputPolicy::Blocked;
+        };
+        // A host missing from the prepared set still needs a proxy link; a new resource
+        // field must not expose its origin before the output classifier knows the host.
+        self.resource_host_policies.get(host).map_or(ResourceOutputPolicy::Proxy, |entry| *entry)
+    }
+
     pub fn get_resource_url(
         &self,
         xtream_cluster: XtreamCluster,
@@ -1006,31 +997,11 @@ impl XtreamMappingOptions {
         resource_url: &str,
         resource_field: &str,
     ) -> String {
-        if !self.web_ui_request && Self::is_trusted_web_ui_resource_path(resource_url) {
-            return concat_path(&self.base_url, resource_url);
-        }
-
-        if self.web_ui_request {
-            if resource_url.is_empty() {
-                return resource_url.to_string();
-            }
-            if Self::is_trusted_web_ui_resource_path(resource_url) {
-                return resource_url.to_string();
-            }
-            let rewrite_url = concat_path(&self.base_url, &obfuscate_text(&self.encrypt_secret, resource_url));
-            return rewrite_url;
-        }
-
-        let external_resource = crate::model::external_resource_value(resource_url);
-        let rewrite_url = self.build_reverse_proxy_base_url(xtream_cluster, item_type, virtual_id);
-
-        if let Some(url) = rewrite_url {
-            if external_resource.starts_with("http://") || external_resource.starts_with("https://") {
-                return format!("{url}/{resource_field}");
-            }
-        }
-        external_resource.to_string()
+        self.rewrite_resource_url_inner(xtream_cluster, item_type, virtual_id, resource_url, |base| {
+            format!("{base}/{resource_field}")
+        })
     }
+
     pub fn get_bd_path_resource_url(
         &self,
         xtream_cluster: XtreamCluster,
@@ -1040,6 +1011,23 @@ impl XtreamMappingOptions {
         resource_field: &str,
         index: usize,
     ) -> String {
+        self.rewrite_resource_url_inner(xtream_cluster, item_type, virtual_id, resource_url, |base| {
+            format!("{base}/{resource_field}{}_{index}", xtream_const::XC_PROP_BACKDROP_PATH)
+        })
+    }
+
+    fn rewrite_resource_url_inner(
+        &self,
+        xtream_cluster: XtreamCluster,
+        item_type: PlaylistItemType,
+        virtual_id: VirtualId,
+        resource_url: &str,
+        proxy_suffix: impl FnOnce(&str) -> String,
+    ) -> String {
+        let Some(resource_url) = super::persisted_resource_url(resource_url) else {
+            return String::new();
+        };
+        let resource_url = resource_url.as_ref();
         if !self.web_ui_request && Self::is_trusted_web_ui_resource_path(resource_url) {
             return concat_path(&self.base_url, resource_url);
         }
@@ -1051,19 +1039,29 @@ impl XtreamMappingOptions {
             if Self::is_trusted_web_ui_resource_path(resource_url) {
                 return resource_url.to_string();
             }
-            let rewrite_url = concat_path(&self.base_url, &obfuscate_text(&self.encrypt_secret, resource_url));
-            return rewrite_url;
+            return concat_path(&self.base_url, &seal_web_ui_resource_url(&self.encrypt_secret, resource_url));
         }
 
-        let external_resource = crate::model::external_resource_value(resource_url);
-        let rewrite_url = self.build_reverse_proxy_base_url(xtream_cluster, item_type, virtual_id);
+        let policy = self.resource_output_policy(resource_url);
+        if policy == ResourceOutputPolicy::Blocked {
+            return String::new();
+        }
+        let rewrite_url = self.build_reverse_proxy_base_url(
+            xtream_cluster,
+            item_type,
+            virtual_id,
+            policy == ResourceOutputPolicy::Proxy,
+        );
 
         if let Some(url) = rewrite_url {
-            if external_resource.starts_with("http://") || external_resource.starts_with("https://") {
-                return format!("{url}/{resource_field}{}_{index}", xtream_const::XC_PROP_BACKDROP_PATH);
+            if resource_url.starts_with("http://")
+                || resource_url.starts_with("https://")
+                || resource_url.starts_with("media-server://image/")
+            {
+                return proxy_suffix(&url);
             }
         }
-        external_resource.to_string()
+        resource_url.to_string()
     }
 }
 
@@ -1148,14 +1146,72 @@ impl XtreamPlaylistItem {
         self.additional_properties.as_ref().is_some_and(super::stream_properties::StreamProperties::has_details)
     }
 
+    pub fn visit_resource_urls(&self, mut visit: impl FnMut(&str)) {
+        let mut visit_persisted = |value: &str| {
+            if let Some(url) = super::persisted_resource_url(value) {
+                visit(url.as_ref());
+            }
+        };
+        visit_persisted(&self.logo);
+        visit_persisted(&self.logo_small);
+        match self.additional_properties.as_ref() {
+            Some(StreamProperties::Live(live)) => visit_persisted(&live.stream_icon),
+            Some(StreamProperties::Video(video)) => {
+                visit_persisted(&video.stream_icon);
+                if let Some(details) = video.details.as_ref() {
+                    if let Some(url) = details.cover_big.as_deref() {
+                        visit_persisted(url);
+                    }
+                    if let Some(url) = details.movie_image.as_deref() {
+                        visit_persisted(url);
+                    }
+                    if let Some(backdrops) = details.backdrop_path.as_ref() {
+                        for url in backdrops {
+                            visit_persisted(url);
+                        }
+                    }
+                }
+            }
+            Some(StreamProperties::Series(series)) => {
+                visit_persisted(&series.cover);
+                if let Some(backdrops) = series.backdrop_path.as_ref() {
+                    for url in backdrops {
+                        visit_persisted(url);
+                    }
+                }
+                if let Some(details) = series.details.as_ref() {
+                    if let Some(seasons) = details.seasons.as_ref() {
+                        for season in seasons {
+                            for url in [&season.cover, &season.cover_tmdb, &season.cover_big].into_iter().flatten() {
+                                visit_persisted(url);
+                            }
+                        }
+                    }
+                    if let Some(episodes) = details.episodes.as_ref() {
+                        for episode in episodes {
+                            visit_persisted(&episode.movie_image);
+                        }
+                    }
+                }
+            }
+            Some(StreamProperties::Episode(episode)) => visit_persisted(&episode.movie_image),
+            None => {}
+        }
+    }
+
     pub fn resolve_resource_url(&self, field: &str) -> Option<Arc<str>> {
         let bytes = field.as_bytes();
-        if bytes.eq_ignore_ascii_case(b"logo") && !self.logo.is_empty() {
-            return Some(Arc::clone(&self.logo));
+        let url = if bytes.eq_ignore_ascii_case(b"logo") && !self.logo.is_empty() {
+            Some(Arc::clone(&self.logo))
         } else if bytes.eq_ignore_ascii_case(b"logo_small") && !self.logo_small.is_empty() {
-            return Some(Arc::clone(&self.logo_small));
-        }
-        self.additional_properties.as_ref().and_then(|a| a.resolve_resource_url(field))
+            Some(Arc::clone(&self.logo_small))
+        } else {
+            self.additional_properties.as_ref().and_then(|a| a.resolve_resource_url(field))
+        }?;
+        super::persisted_resource_url(&url).map(|decoded| match decoded {
+            std::borrow::Cow::Borrowed(_) => Arc::clone(&url),
+            std::borrow::Cow::Owned(value) => Arc::from(value),
+        })
     }
 }
 
@@ -1782,7 +1838,73 @@ mod tests {
             web_ui_request: true,
             flags: XtreamMappingFlags::RewriteResourceUrl.into(),
             encrypt_secret: [3u8; 16],
+            resource_host_policies: Arc::default(),
         }
+    }
+
+    #[test]
+    fn disabled_resource_rewrite_proxies_private_xtream_images() {
+        let mut options = sample_options();
+        options.web_ui_request = false;
+        options.base_url = "https://proxy.example".to_string();
+        options.flags = XtreamMappingFlagsSet::new();
+        options.resource_host_policies.insert("192.168.1.20".to_string(), ResourceOutputPolicy::Proxy);
+        options.resource_host_policies.insert("8.8.8.8".to_string(), ResourceOutputPolicy::Direct);
+        options.resource_host_policies.insert("127.0.0.1".to_string(), ResourceOutputPolicy::Blocked);
+
+        assert_eq!(
+            options.get_resource_url(
+                XtreamCluster::Live,
+                PlaylistItemType::Live,
+                VirtualId::new(1),
+                "http://192.168.1.20/logo.png",
+                "logo",
+            ),
+            "https://proxy.example/resource/live/user/pass/1/logo"
+        );
+        assert_eq!(
+            options.get_resource_url(
+                XtreamCluster::Live,
+                PlaylistItemType::Live,
+                VirtualId::new(1),
+                "http://8.8.8.8/logo.png",
+                "logo",
+            ),
+            "http://8.8.8.8/logo.png"
+        );
+        assert_eq!(
+            options.get_resource_url(
+                XtreamCluster::Live,
+                PlaylistItemType::Live,
+                VirtualId::new(1),
+                "http://127.0.0.1/logo.png",
+                "logo",
+            ),
+            ""
+        );
+        assert_eq!(
+            options.get_bd_path_resource_url(
+                XtreamCluster::Live,
+                PlaylistItemType::Live,
+                VirtualId::new(1),
+                "http://192.168.1.20/backdrop.png",
+                "",
+                0,
+            ),
+            "https://proxy.example/resource/live/user/pass/1/backdrop_path_0"
+        );
+
+        options.resource_proxy_item_types = PlaylistItemTypeSet::empty();
+        assert_eq!(
+            options.get_resource_url(
+                XtreamCluster::Live,
+                PlaylistItemType::Live,
+                VirtualId::new(1),
+                "http://192.168.1.20/logo.png",
+                "logo",
+            ),
+            "https://proxy.example/resource/live/user/pass/1/logo"
+        );
     }
 
     #[test]
@@ -1872,7 +1994,7 @@ mod tests {
                 resource_url,
                 "logo",
             ),
-            concat_path(&options.base_url, &obfuscate_text(&options.encrypt_secret, resource_url)),
+            concat_path(&options.base_url, &seal_web_ui_resource_url(&options.encrypt_secret, resource_url)),
         );
     }
 
@@ -1897,29 +2019,6 @@ mod tests {
     }
 
     #[test]
-    fn get_resource_url_never_exposes_internal_locator_to_xtream_clients() {
-        let mut options = sample_options();
-        options.web_ui_request = false;
-        options.reverse_item_types = PlaylistItemTypeSet::empty();
-        options.resource_proxy_item_types = PlaylistItemTypeSet::empty();
-        let locator =
-            crate::model::ResourceLocator::new(Arc::from("input"), Arc::from("https://provider.example/logo.png"))
-                .and_then(|locator| locator.encode())
-                .expect("locator");
-
-        assert_eq!(
-            options.get_resource_url(
-                XtreamCluster::Live,
-                PlaylistItemType::Live,
-                VirtualId::new(2017),
-                &locator,
-                "logo",
-            ),
-            "https://provider.example/logo.png",
-        );
-    }
-
-    #[test]
     fn get_resource_url_does_not_bypass_untrusted_root_relative_paths_for_web_ui_requests() {
         let options = sample_options();
         let resource_url = "/provider-controlled/poster.jpg";
@@ -1932,7 +2031,7 @@ mod tests {
                 resource_url,
                 "logo",
             ),
-            concat_path(&options.base_url, &obfuscate_text(&options.encrypt_secret, resource_url)),
+            concat_path(&options.base_url, &seal_web_ui_resource_url(&options.encrypt_secret, resource_url)),
         );
     }
 
@@ -1949,7 +2048,7 @@ mod tests {
                 resource_url,
                 "logo",
             ),
-            concat_path(&options.base_url, &obfuscate_text(&options.encrypt_secret, resource_url)),
+            concat_path(&options.base_url, &seal_web_ui_resource_url(&options.encrypt_secret, resource_url)),
         );
     }
 
@@ -2371,194 +2470,5 @@ mod tests {
         assert!(item.to_m3u(None, false).contains("#EXTVLCOPT:http-user-agent=Provider-UA\n"));
         item.upstream_user_agent = None;
         assert!(!item.to_m3u(None, false).contains("#EXTVLCOPT:http-user-agent="));
-    }
-}
-
-/// Append-only compatibility of the persisted playlist records.
-///
-/// The B+Tree stores these structs with `rmp_serde::to_vec` in its compact positional form, so a
-/// field added anywhere but the end would shift the meaning of every following byte. These tests
-/// encode the field list as it was before origin tracking and decode it with the current struct.
-#[cfg(test)]
-mod persistence_compatibility {
-    use super::{
-        M3uPlaylistItem, PlaylistItemHeader, PlaylistItemType, StreamProperties, VirtualId, XtreamCluster,
-        XtreamPlaylistItem,
-    };
-    use crate::utils::Internable;
-    use serde::Serialize;
-    use std::sync::Arc;
-
-    /// The `M3uPlaylistItem` field list without the appended origin fields.
-    #[derive(Serialize)]
-    struct LegacyM3u {
-        virtual_id: VirtualId,
-        provider_id: Arc<str>,
-        name: Arc<str>,
-        chno: u32,
-        logo: Arc<str>,
-        logo_small: Arc<str>,
-        group: Arc<str>,
-        title: Arc<str>,
-        parent_code: Arc<str>,
-        audio_track: Arc<str>,
-        time_shift: Arc<str>,
-        rec: Arc<str>,
-        url: Arc<str>,
-        epg_channel_id: Option<Arc<str>>,
-        input_name: Arc<str>,
-        item_type: PlaylistItemType,
-        source_ordinal: u32,
-        additional_properties: Option<StreamProperties>,
-        input_stream_id: Arc<str>,
-        upstream_user_agent: Option<Arc<str>>,
-    }
-
-    /// The `XtreamPlaylistItem` field list without the appended origin fields.
-    #[derive(Serialize)]
-    struct LegacyXtream {
-        virtual_id: VirtualId,
-        provider_id: u32,
-        name: Arc<str>,
-        logo: Arc<str>,
-        logo_small: Arc<str>,
-        group: Arc<str>,
-        title: Arc<str>,
-        parent_code: Arc<str>,
-        rec: Arc<str>,
-        url: Arc<str>,
-        epg_channel_id: Option<Arc<str>>,
-        xtream_cluster: XtreamCluster,
-        additional_properties: Option<StreamProperties>,
-        item_type: PlaylistItemType,
-        category_id: u32,
-        input_name: Arc<str>,
-        channel_no: u32,
-        source_ordinal: u32,
-        input_stream_id: Arc<str>,
-        upstream_user_agent: Option<Arc<str>>,
-    }
-
-    #[test]
-    fn m3u_record_written_before_origin_tracking_still_decodes() {
-        let legacy = LegacyM3u {
-            virtual_id: VirtualId::new(7),
-            provider_id: "1".intern(),
-            name: "Channel".intern(),
-            chno: 1,
-            logo: "https://cdn.example.com/logo.png".intern(),
-            logo_small: "https://cdn.example.com/small.png".intern(),
-            group: "Group".intern(),
-            title: "".intern(),
-            parent_code: "".intern(),
-            audio_track: "".intern(),
-            time_shift: "".intern(),
-            rec: "".intern(),
-            url: "http://provider.example/stream/1".intern(),
-            epg_channel_id: Some("channel".intern()),
-            input_name: "provider".intern(),
-            item_type: PlaylistItemType::Live,
-            source_ordinal: 0,
-            additional_properties: None,
-            input_stream_id: "1".intern(),
-            upstream_user_agent: None,
-        };
-        let bytes = rmp_serde::to_vec(&legacy).expect("encode legacy record");
-
-        let decoded: M3uPlaylistItem = rmp_serde::from_slice(&bytes).expect("legacy record still decodes");
-
-        assert_eq!(decoded.name, "Channel".intern());
-        assert_eq!(decoded.input_name, "provider".intern());
-    }
-
-    #[test]
-    fn xtream_record_written_before_origin_tracking_still_decodes() {
-        let legacy = LegacyXtream {
-            virtual_id: VirtualId::new(9),
-            provider_id: 2,
-            name: "Movie".intern(),
-            logo: "https://cdn.example.com/movie.png".intern(),
-            logo_small: "".intern(),
-            group: "Movies".intern(),
-            title: "".intern(),
-            parent_code: "".intern(),
-            rec: "".intern(),
-            url: "http://provider.example/movie/2".intern(),
-            epg_channel_id: None,
-            xtream_cluster: XtreamCluster::Video,
-            additional_properties: None,
-            item_type: PlaylistItemType::Video,
-            category_id: 4,
-            input_name: "provider".intern(),
-            channel_no: 0,
-            source_ordinal: 0,
-            input_stream_id: "2".intern(),
-            upstream_user_agent: Some("Agent/1".intern()),
-        };
-        let bytes = rmp_serde::to_vec(&legacy).expect("encode legacy record");
-
-        let decoded: XtreamPlaylistItem = rmp_serde::from_slice(&bytes).expect("legacy record still decodes");
-
-        assert_eq!(decoded.provider_id, 2);
-        assert_eq!(decoded.upstream_user_agent.as_deref(), Some("Agent/1"));
-    }
-
-    #[test]
-    fn header_written_before_origin_tracking_still_decodes() {
-        #[derive(Serialize)]
-        struct LegacyHeader {
-            id: Arc<str>,
-            name: Arc<str>,
-            logo: Arc<str>,
-            logo_small: Arc<str>,
-            group: Arc<str>,
-            title: Arc<str>,
-            parent_code: Arc<str>,
-            audio_track: Arc<str>,
-            time_shift: Arc<str>,
-            rec: Arc<str>,
-            url: Arc<str>,
-            epg_channel_id: Option<Arc<str>>,
-            input_name: Arc<str>,
-            additional_properties: Option<StreamProperties>,
-            virtual_id: VirtualId,
-            chno: u32,
-            category_id: u32,
-            source_ordinal: u32,
-            xtream_cluster: XtreamCluster,
-            item_type: PlaylistItemType,
-            input_stream_id: Arc<str>,
-            upstream_user_agent: Option<Arc<str>>,
-        }
-
-        let legacy = LegacyHeader {
-            id: "1".intern(),
-            name: "Channel".intern(),
-            logo: "https://cdn.example.com/logo.png".intern(),
-            logo_small: "".intern(),
-            group: "Group".intern(),
-            title: "".intern(),
-            parent_code: "".intern(),
-            audio_track: "".intern(),
-            time_shift: "".intern(),
-            rec: "".intern(),
-            url: "http://provider.example/stream/1".intern(),
-            epg_channel_id: None,
-            input_name: "provider".intern(),
-            additional_properties: None,
-            virtual_id: VirtualId::new(1),
-            chno: 0,
-            category_id: 0,
-            source_ordinal: 0,
-            xtream_cluster: XtreamCluster::Live,
-            item_type: PlaylistItemType::Live,
-            input_stream_id: "1".intern(),
-            upstream_user_agent: None,
-        };
-        let bytes = rmp_serde::to_vec(&legacy).expect("encode legacy header");
-
-        let decoded: PlaylistItemHeader = rmp_serde::from_slice(&bytes).expect("legacy header still decodes");
-
-        assert_eq!(decoded.logo, "https://cdn.example.com/logo.png".intern());
     }
 }

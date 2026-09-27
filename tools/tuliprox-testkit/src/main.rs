@@ -11,6 +11,7 @@ use bytes::BytesMut;
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
 use serde::Serialize;
+use serde_json::json;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fmt::Write,
@@ -38,7 +39,7 @@ use tuliprox_testkit::{
     hls::read_segments,
     observation::TuliproxObserver,
     oracle::{AdmissionOracle, Decision as AdmissionDecision, Request as AdmissionRequest},
-    origin_events::{BodyCloseReason, OriginEvent, OriginEventKind, OriginStats},
+    origin_events::{BodyCloseReason, OriginEvent, OriginEventKind, OriginStats, StalkerPortalStats},
     origin_transport::{
         serve_tracked_media_listener, OriginConnectionMeta, OriginLimitMode, OriginPolicy, OriginTracker,
     },
@@ -119,6 +120,14 @@ enum Command {
         account_limit: Option<usize>,
         #[arg(long, default_value = "observe_only")]
         limit_mode: String,
+        /// Refuse the first `create_link` the emulated Stalker portal receives.
+        #[arg(long)]
+        stalker_refuse_create_link_once: bool,
+        /// Markers whose `create_link` the emulated Stalker portal always refuses.
+        #[arg(long, value_delimiter = ',')]
+        stalker_refuse_create_link_markers: Vec<u32>,
+        #[arg(long)]
+        stalker_separate_descriptor_command: bool,
     },
     /// Execute a local, sequential scenario against Tuliprox URLs.
     Controller {
@@ -159,7 +168,101 @@ struct OriginState {
     observations: Arc<Mutex<Vec<OriginObservation>>>,
     faults: Arc<Mutex<FaultSchedule>>,
     hls_sequences: Arc<Mutex<HashMap<u32, u64>>>,
+    stalker: Arc<Mutex<StalkerPortal>>,
     tracker: OriginTracker,
+}
+
+/// The emulated Ministra portal: its identity-independent script plus what it was asked for.
+///
+/// The fixture portal accepts any MAC (the input's device identity is not validated), offers
+/// every marker of the run as a live channel, and answers `create_link` with the fixture's own
+/// stream URL — a loopback destination, which the SUT's Stalker destination guard then refuses.
+/// That refusal is part of the contract under test, not an accident: a portal-supplied URL must
+/// never make the proxy talk to a private destination.
+struct StalkerPortal {
+    stats: StalkerPortalStats,
+    refuse_once: bool,
+    refuse_once_armed: bool,
+    /// Set when a configured refusal makes the portal treat the SUT's current session as
+    /// stale: every `create_link` is refused until a new handshake arrives, which is how a
+    /// portal that invalidated the session out of band behaves. A refusal that only hit one
+    /// endpoint candidate would be recovered by the endpoint fallback instead of exercising
+    /// the session recovery this fixture exists for.
+    stale_session: bool,
+    refuse_markers: Vec<u32>,
+    command_layout: StalkerCommandLayout,
+}
+
+#[derive(Clone, Copy)]
+enum StalkerCommandLayout {
+    Shared,
+    Separate,
+}
+
+impl StalkerPortal {
+    fn new(refuse_once: bool, refuse_markers: Vec<u32>, separate_descriptor_command: bool) -> Self {
+        Self {
+            stats: StalkerPortalStats::default(),
+            refuse_once,
+            refuse_once_armed: refuse_once,
+            stale_session: false,
+            refuse_markers,
+            command_layout: if separate_descriptor_command {
+                StalkerCommandLayout::Separate
+            } else {
+                StalkerCommandLayout::Shared
+            },
+        }
+    }
+
+    fn reset(&mut self) {
+        self.stats = StalkerPortalStats::default();
+        self.refuse_once_armed = self.refuse_once;
+        self.stale_session = false;
+    }
+
+    /// A handshake replaces the session, so a stale one becomes usable again.
+    fn note_handshake(&mut self) {
+        self.stats.handshakes += 1;
+        self.stale_session = false;
+    }
+
+    /// Whether this `create_link` is answered with a stale-session body instead of a URL.
+    ///
+    /// A marker listed in `refuse_create_link_markers` is refused every time; the
+    /// `refuse_create_link_once` switch makes the session stale for the first resolution that
+    /// would otherwise succeed, so a scenario can let one channel fail for good and still test
+    /// the session recovery.
+    fn refuses(&mut self, marker: u32) -> bool {
+        let always = self.refuse_markers.contains(&marker);
+        if !always && self.refuse_once_armed {
+            self.refuse_once_armed = false;
+            self.stale_session = true;
+        }
+        if !always && !self.stale_session {
+            return false;
+        }
+        self.stats.token_refusals += 1;
+        true
+    }
+
+    fn record_resolution(&mut self, marker: u32, command_source: Option<&str>) {
+        if !self.stats.resolved_markers.contains(&marker) {
+            self.stats.resolved_markers.push(marker);
+            self.stats.resolved_markers.sort_unstable();
+        }
+        let markers = match command_source {
+            Some("descriptor") => Some(&mut self.stats.resolved_descriptor_markers),
+            Some("raw") => Some(&mut self.stats.resolved_raw_command_markers),
+            _ => None,
+        };
+        if let Some(markers) = markers {
+            if !markers.contains(&marker) {
+                markers.push(marker);
+                markers.sort_unstable();
+            }
+        }
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -191,7 +294,18 @@ async fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> Result<RunExit, TestkitError> {
     match cli.command {
-        Command::Origin { listen, control_listen, run_id, bitrate, mut markers, account_limit, limit_mode } => {
+        Command::Origin {
+            listen,
+            control_listen,
+            run_id,
+            bitrate,
+            mut markers,
+            account_limit,
+            limit_mode,
+            stalker_refuse_create_link_once,
+            stalker_refuse_create_link_markers,
+            stalker_separate_descriptor_command,
+        } => {
             markers.sort_unstable();
             markers.dedup();
             if markers.is_empty() {
@@ -215,6 +329,11 @@ async fn run(cli: Cli) -> Result<RunExit, TestkitError> {
                     observations: Arc::new(Mutex::new(Vec::new())),
                     faults: Arc::new(Mutex::new(FaultSchedule::default())),
                     hls_sequences: Arc::new(Mutex::new(HashMap::new())),
+                    stalker: Arc::new(Mutex::new(StalkerPortal::new(
+                        stalker_refuse_create_link_once,
+                        stalker_refuse_create_link_markers,
+                        stalker_separate_descriptor_command,
+                    ))),
                     tracker,
                 },
             )
@@ -559,6 +678,9 @@ async fn serve_origin(
     let media_listener = TcpListener::bind(media_listen).await?;
     let media_app = Router::new()
         .route("/catalog/input.m3u", get(catalog))
+        .route("/stalker_portal/server/load.php", get(stalker_load))
+        .route("/stalker_portal/portal.php", get(stalker_load))
+        .route("/stalker_portal/c/", get(stalker_load))
         .route("/live/{*stream}", get(live))
         .route("/hls/{*resource}", get(hls))
         .route("/vod/{*object}", get(vod).head(vod_head))
@@ -571,6 +693,7 @@ async fn serve_origin(
         .route("/v1/runs/{run_id}/connections", get(origin_connections))
         .route("/v1/runs/{run_id}/events", get(origin_events))
         .route("/v1/runs/{run_id}/stats", get(origin_stats))
+        .route("/v1/runs/{run_id}/stalker", get(stalker_stats))
         .route("/v1/runs/{run_id}/faults/{fault_id}", put(set_fault).delete(clear_fault))
         .with_state(state.clone());
 
@@ -602,6 +725,100 @@ fn catalog_m3u(state: &OriginState, host: &str, account: Option<&str>) -> String
 
 fn origin_account(query: &HashMap<String, String>) -> Option<&str> {
     query.get("account").or_else(|| query.get("token")).map(String::as_str)
+}
+
+/// The emulated Ministra/Stalker portal endpoint.
+///
+/// Answers the actions the SUT's catalog import and playback resolution use: the STB
+/// handshake/profile pair, the live genres and ordered list, and `create_link`. Everything
+/// else gets an empty `js` object, which is what a portal answers for an action it does not
+/// implement. The portal is deliberately stateless apart from its request counters — the
+/// SUT is expected to carry the session itself.
+async fn stalker_load(
+    State(state): State<OriginState>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let action = query.get("action").map_or("", String::as_str);
+    let portal_type = query.get("type").map_or("", String::as_str);
+    let host = headers.get(header::HOST).and_then(|value| value.to_str().ok()).unwrap_or("127.0.0.1");
+    match (portal_type, action) {
+        ("stb", "handshake") => {
+            let mut portal = state.stalker.lock().await;
+            portal.note_handshake();
+            let token = format!("testkit-token-{}", portal.stats.handshakes);
+            drop(portal);
+            Json(json!({ "js": { "token": token, "random": "testkit" } })).into_response()
+        }
+        ("stb", "get_profile") => {
+            Json(json!({ "js": { "id": "testkit", "status": 1, "max_connections": 8, "phone": "0000000000" } }))
+                .into_response()
+        }
+        ("itv", "get_genres") => Json(json!({ "js": [{ "id": "1", "title": "Testkit Live" }] })).into_response(),
+        // The fixture portal serves live channels only: VOD and series answer an empty, valid
+        // collection so the catalog refresh completes those clusters instead of pausing on a
+        // response it cannot parse.
+        ("vod" | "series", "get_genres") => Json(json!({ "js": [] })).into_response(),
+        ("vod" | "series", "get_ordered_list") => Json(json!({
+            "js": { "total_items": 0, "max_page_items": 0, "data": [] }
+        }))
+        .into_response(),
+        ("itv", "get_ordered_list") => {
+            let separate_descriptor_command =
+                matches!(state.stalker.lock().await.command_layout, StalkerCommandLayout::Separate);
+            let channels = state
+                .markers
+                .iter()
+                .map(|marker| {
+                    let mut channel = json!({
+                        "id": marker.to_string(),
+                        "name": format!("Test channel {marker}"),
+                        "number": marker.to_string(),
+                        "category_id": "1",
+                        "epg_channel_id": format!("test-{marker}"),
+                        "cmd": format!("ffmpeg http://{host}/ch/{marker}"),
+                        "logo": format!("http://{host}/logo/{marker}.png"),
+                        "tv_archive": 0,
+                    });
+                    if separate_descriptor_command {
+                        channel["cmd"] = json!(format!("ffmpeg http://{host}/raw/{marker}"));
+                        channel["cmd_1"] = json!(format!("ffmpeg http://{host}/descriptor/{marker}"));
+                    }
+                    channel
+                })
+                .collect::<Vec<_>>();
+            let count = channels.len();
+            Json(json!({
+                "js": { "total_items": count, "max_page_items": count, "data": channels }
+            }))
+            .into_response()
+        }
+        ("itv", "create_link") => {
+            let command = query.get("cmd");
+            let Some(marker) = command
+                .and_then(|cmd| cmd.split('?').next())
+                .and_then(|cmd| cmd.trim_end_matches('/').rsplit('/').next())
+                .and_then(|segment| segment.parse::<u32>().ok())
+                .filter(|marker| state.markers.contains(marker))
+            else {
+                return Json(json!({ "js": { "error": "unknown cmd" } })).into_response();
+            };
+            let mut portal = state.stalker.lock().await;
+            portal.stats.create_links += 1;
+            if portal.refuses(marker) {
+                drop(portal);
+                // A stale session: Ministra reports it inside a `200 OK` body.
+                return Json(json!({ "code": 44, "text": "Authorization failed" })).into_response();
+            }
+            let command_source = command.and_then(|cmd| cmd.trim_end_matches('/').rsplit('/').nth(1));
+            portal.record_resolution(marker, command_source);
+            drop(portal);
+            let url = format!("http://{host}/live/{marker}.ts?run={}", state.run_id.0);
+            let cmd = BASE64.encode(format!("ffmpeg {url}"));
+            Json(json!({ "js": { "id": marker.to_string(), "cmd": cmd, "error": "" } })).into_response()
+        }
+        _ => Json(json!({ "js": {} })).into_response(),
+    }
 }
 
 async fn catalog(
@@ -779,6 +996,13 @@ async fn origin_stats(Path(run_id): Path<String>, State(state): State<OriginStat
     Json(state.tracker.stats().await).into_response()
 }
 
+async fn stalker_stats(Path(run_id): Path<String>, State(state): State<OriginState>) -> Response {
+    if run_id != state.run_id.0 {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    Json(state.stalker.lock().await.stats.clone()).into_response()
+}
+
 async fn origin_instance(State(state): State<OriginState>) -> Json<OriginInstance> {
     Json(OriginInstance { run_id: state.run_id.0.clone() })
 }
@@ -790,6 +1014,7 @@ async fn reset_origin_run(Path(run_id): Path<String>, State(state): State<Origin
     *state.stream_counter.lock().await = 0;
     state.hls_sequences.lock().await.clear();
     state.observations.lock().await.clear();
+    state.stalker.lock().await.reset();
     state.tracker.reset().await;
     StatusCode::NO_CONTENT
 }
@@ -1128,7 +1353,17 @@ async fn run_agent_until_released(
             chunk = tokio::time::timeout(PLAYBACK_IDLE_TIMEOUT, body.next()) => {
                 let chunk = match chunk {
                     Ok(Some(Ok(chunk))) => chunk,
-                    Ok(Some(Err(err))) => return Ok(PlaybackOutcome::TransportError { message: err.to_string() }),
+                    Ok(Some(Err(err))) => {
+                        return Ok(if ready.is_none() {
+                            PlaybackOutcome::StreamInterrupted {
+                                frames: received_frames,
+                                bytes: received_bytes,
+                                message: err.to_string(),
+                            }
+                        } else {
+                            PlaybackOutcome::TransportError { message: err.to_string() }
+                        });
+                    }
                     Ok(None) => return Ok(PlaybackOutcome::UnexpectedEof { frames: received_frames, bytes: received_bytes }),
                     Err(_) => return Ok(PlaybackOutcome::IdleTimeout),
                 };
@@ -1212,6 +1447,62 @@ struct HeldPlayback {
     task: tokio::task::JoinHandle<Result<PlaybackOutcome, TestkitError>>,
 }
 
+fn matches_expected_eviction(
+    playback_id: &str,
+    expected_terminations: &HashSet<String>,
+    outcome: &PlaybackOutcome,
+    kicked_session: bool,
+) -> bool {
+    expected_terminations.contains(playback_id)
+        && (matches!(outcome, PlaybackOutcome::UnexpectedEof { .. })
+            || (kicked_session && matches!(outcome, PlaybackOutcome::StreamInterrupted { .. })))
+}
+
+fn observe_new_stream_session(
+    streams: &serde_json::Value,
+    username: &str,
+    seen_uids: &mut HashSet<u32>,
+) -> Option<u64> {
+    let mut session_id = None;
+    for stream in streams.as_array()? {
+        let (Some(uid), Some(ts)) = (stream["uid"].as_u64(), stream["ts"].as_u64()) else {
+            continue;
+        };
+        let (Ok(uid), Ok(ts)) = (u32::try_from(uid), u32::try_from(ts)) else {
+            continue;
+        };
+        if seen_uids.insert(uid) && stream["username"].as_str() == Some(username) {
+            if session_id.is_some() {
+                return None;
+            }
+            session_id = Some((u64::from(ts) << 32) | u64::from(uid));
+        }
+    }
+    session_id
+}
+
+fn history_confirms_kick(history: &serde_json::Value, session_id: u64) -> bool {
+    history["items"].as_array().is_some_and(|items| {
+        items.iter().any(|item| {
+            item["session_id"].as_u64() == Some(session_id)
+                && item["disconnect_reason"].as_str() == Some("client_kicked")
+        })
+    })
+}
+
+async fn wait_for_kicked_session(observer: &TuliproxObserver, session_id: u64) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if observer.stream_history(session_id).await.is_ok_and(|history| history_confirms_kick(&history, session_id)) {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 #[derive(Clone)]
 pub struct OriginObserver {
     control_base_url: String,
@@ -1232,6 +1523,15 @@ impl OriginObserver {
         }
         let stats = resp.json::<OriginStats>().await?;
         Ok(stats)
+    }
+
+    pub async fn stalker_stats(&self, run_id: &str) -> Result<StalkerPortalStats, TestkitError> {
+        let url = format!("{}/v1/runs/{run_id}/stalker", self.control_base_url);
+        let resp = self.client.get(&url).send().await?;
+        if !resp.status().is_success() {
+            return Err(TestkitError::Protocol(format!("stalker portal stats error: {}", resp.status())));
+        }
+        Ok(resp.json::<StalkerPortalStats>().await?)
     }
 
     pub async fn events(&self, run_id: &str) -> Result<Vec<OriginEvent>, TestkitError> {
@@ -1638,6 +1938,10 @@ async fn run_controller(
                 &scenario.channels,
                 &scenario.tuliprox.fixture_stream,
                 scenario.tuliprox.playback_endpoint == tuliprox_testkit::config::PlaybackEndpoint::Xtream,
+                &tuliprox_testkit::bootstrap::FixtureInputPlan {
+                    input_type: scenario.tuliprox.input_type,
+                    stalker: &scenario.tuliprox.stalker,
+                },
             )
             .await
             {
@@ -2106,6 +2410,16 @@ async fn check_origin_assertions<'a>(
                         events.push((step_id, "origin_events_unavailable"));
                     }
                 }
+                check_stalker_assertions(
+                    step_id,
+                    assert_origin,
+                    obs,
+                    origin_run_id,
+                    events,
+                    any_failed,
+                    observations_incomplete,
+                )
+                .await;
                 break;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
@@ -2116,6 +2430,76 @@ async fn check_origin_assertions<'a>(
                 break;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+}
+
+/// Verifies what the emulated Stalker portal was asked for.
+///
+/// Playback resolution is only observable there: the portal sees one `create_link` per
+/// resolution attempt and knows which markers were answered, so a scenario can prove that a
+/// playback resolved the requested channel's own stored command — and that a stale-session
+/// refusal was followed by a re-handshake and a retry.
+async fn check_stalker_assertions<'a>(
+    step_id: &'a str,
+    assert_origin: &tuliprox_testkit::config::AssertOrigin,
+    obs: &OriginObserver,
+    origin_run_id: &str,
+    events: &mut Vec<(&'a str, &'static str)>,
+    any_failed: &mut bool,
+    observations_incomplete: &mut bool,
+) {
+    if assert_origin.stalker_handshakes_at_least.is_none()
+        && assert_origin.stalker_create_links_at_least.is_none()
+        && assert_origin.stalker_token_refusals_at_least.is_none()
+        && assert_origin.stalker_create_link_markers.is_none()
+        && assert_origin.stalker_descriptor_markers.is_none()
+        && assert_origin.stalker_raw_command_markers.is_none()
+    {
+        return;
+    }
+    let Ok(stats) = obs.stalker_stats(origin_run_id).await else {
+        *observations_incomplete = true;
+        events.push((step_id, "stalker_portal_stats_unavailable"));
+        return;
+    };
+    if assert_origin.stalker_handshakes_at_least.is_some_and(|expected| stats.handshakes < expected) {
+        *any_failed = true;
+        events.push((step_id, "stalker_handshakes_below_expected"));
+    }
+    if assert_origin.stalker_create_links_at_least.is_some_and(|expected| stats.create_links < expected) {
+        *any_failed = true;
+        events.push((step_id, "stalker_create_links_below_expected"));
+    }
+    if assert_origin.stalker_token_refusals_at_least.is_some_and(|expected| stats.token_refusals < expected) {
+        *any_failed = true;
+        events.push((step_id, "stalker_token_refusals_below_expected"));
+    }
+    if let Some(expected) = assert_origin.stalker_create_link_markers.as_ref() {
+        let mut expected = expected.clone();
+        expected.sort_unstable();
+        expected.dedup();
+        if expected != stats.resolved_markers {
+            *any_failed = true;
+            events.push((step_id, "stalker_resolved_markers_mismatch"));
+        }
+    }
+    if let Some(expected) = assert_origin.stalker_descriptor_markers.as_ref() {
+        let mut expected = expected.clone();
+        expected.sort_unstable();
+        expected.dedup();
+        if expected != stats.resolved_descriptor_markers {
+            *any_failed = true;
+            events.push((step_id, "stalker_descriptor_markers_mismatch"));
+        }
+    }
+    if let Some(expected) = assert_origin.stalker_raw_command_markers.as_ref() {
+        let mut expected = expected.clone();
+        expected.sort_unstable();
+        expected.dedup();
+        if expected != stats.resolved_raw_command_markers {
+            *any_failed = true;
+            events.push((step_id, "stalker_raw_command_markers_mismatch"));
         }
     }
 }
@@ -2181,6 +2565,8 @@ async fn execute_scenario_steps<'a>(
     let mut remote_playbacks: HashMap<String, String> = HashMap::new();
     let mut expected_terminations = HashSet::new();
     let mut playback_users = HashMap::new();
+    let mut seen_stream_uids = HashSet::new();
+    let mut playback_session_ids = HashMap::new();
     let mut admission_oracles = scenario.policy_contract.as_ref().map(|contract| {
         contract
             .users
@@ -2473,6 +2859,9 @@ async fn execute_scenario_steps<'a>(
                     start.playback_id.as_str(),
                     if step.expect.is_streaming() { "received_valid_frames" } else { "rejected_as_expected" },
                 ));
+                if start.expect_evicted && actual_streaming {
+                    expected_terminations.insert(start.playback_id.clone());
+                }
                 if remote_outcome.as_ref().is_some_and(PlaybackOutcome::is_streaming) {
                     remote_playbacks.insert(start.playback_id.clone(), actor.agent.clone());
                 }
@@ -2520,6 +2909,15 @@ async fn execute_scenario_steps<'a>(
             }
             if let Ok(snapshot) = observer.runtime_snapshot().await {
                 events.push((start.playback_id.as_str(), "runtime_observed"));
+                if actual_streaming && actor.agent == "local" {
+                    if let Some(username) = actor.username.as_deref() {
+                        if let Some(session_id) =
+                            observe_new_stream_session(&snapshot.streams, username, &mut seen_stream_uids)
+                        {
+                            playback_session_ids.insert(start.playback_id.clone(), session_id);
+                        }
+                    }
+                }
                 if let Some(policy) = &scenario.policy_contract {
                     if let Ok(slots) = provider_slot_count(&snapshot.status) {
                         if policy.provider_capacity().is_some_and(|limit| slots > limit) {
@@ -2568,7 +2966,23 @@ async fn execute_scenario_steps<'a>(
                     events.push((event_playback_id, "unexpected_clean_terminal"));
                     any_failed = true;
                 }
-                Ok(Ok(Ok(_))) => events.push((event_playback_id, "evicted")),
+                Ok(Ok(Ok(outcome))) => {
+                    let kicked_session = if matches!(outcome, PlaybackOutcome::StreamInterrupted { .. }) {
+                        if let Some(session_id) = playback_session_ids.get(&held.playback_id) {
+                            wait_for_kicked_session(observer, *session_id).await
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if matches_expected_eviction(&held.playback_id, &expected_terminations, &outcome, kicked_session) {
+                        events.push((event_playback_id, "evicted"));
+                    } else {
+                        events.push((event_playback_id, "unexpected_eviction_terminal"));
+                        any_failed = true;
+                    }
+                }
                 Ok(Ok(Err(_)) | Err(_)) => {
                     events.push((event_playback_id, "unexpected_eviction_terminal"));
                     any_failed = true;
@@ -2924,6 +3338,92 @@ fn marker_from_url(url: &str) -> Result<u32, TestkitError> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn expected_eviction_requires_matching_playback_stream_termination() {
+        let expected = HashSet::from(["playback-a".to_owned()]);
+        let eof = PlaybackOutcome::UnexpectedEof { frames: 3, bytes: 100 };
+        assert!(matches_expected_eviction("playback-a", &expected, &eof, false));
+        let interrupted = PlaybackOutcome::StreamInterrupted {
+            frames: 3,
+            bytes: 100,
+            message: "error decoding response body".to_owned(),
+        };
+        assert!(!matches_expected_eviction("playback-a", &expected, &interrupted, false));
+        assert!(matches_expected_eviction("playback-a", &expected, &interrupted, true));
+        assert!(!matches_expected_eviction("playback-b", &expected, &interrupted, true));
+        assert!(!matches_expected_eviction("playback-b", &expected, &eof, false));
+        assert!(!matches_expected_eviction("playback-a", &expected, &PlaybackOutcome::IdleTimeout, true));
+        assert!(!matches_expected_eviction(
+            "playback-a",
+            &expected,
+            &PlaybackOutcome::TransportError { message: "connection failed".to_owned() },
+            true,
+        ));
+    }
+
+    #[test]
+    fn interrupted_stream_needs_matching_kick_record() {
+        let streams = serde_json::json!([
+            {"uid": 17, "ts": 123, "username": "alice"},
+            {"uid": 18, "ts": 123, "username": "bob"}
+        ]);
+        let mut seen = HashSet::new();
+        let session_id = observe_new_stream_session(&streams, "alice", &mut seen);
+        assert_eq!(session_id, Some((123_u64 << 32) | 17));
+        let history = serde_json::json!({"items": [
+            {"session_id": (123_u64 << 32) | 18, "disconnect_reason": "client_kicked"},
+            {"session_id": (123_u64 << 32) | 17, "disconnect_reason": "client_closed"}
+        ]});
+        assert!(!history_confirms_kick(&history, session_id.unwrap_or_default()));
+        let kicked = serde_json::json!({"items": [
+            {"session_id": (123_u64 << 32) | 17, "disconnect_reason": "client_kicked"}
+        ]});
+        assert!(history_confirms_kick(&kicked, session_id.unwrap_or_default()));
+    }
+
+    #[test]
+    fn a_stale_session_is_refused_until_a_new_handshake_arrives() {
+        let mut portal = StalkerPortal::new(true, Vec::new(), false);
+        portal.note_handshake();
+
+        assert!(portal.refuses(17), "the first resolution meets the stale session");
+        assert!(portal.refuses(17), "every endpoint candidate of that session is refused too");
+
+        portal.note_handshake();
+        assert!(!portal.refuses(17), "a fresh handshake makes the session usable again");
+        assert_eq!(portal.stats.token_refusals, 2);
+        assert_eq!(portal.stats.handshakes, 2);
+        assert!(portal.stats.resolved_markers.is_empty(), "a refusal is not a resolution");
+
+        portal.reset();
+        assert_eq!(portal.stats.token_refusals, 0);
+        assert!(portal.refuses(17), "a reset run re-arms the configured refusal");
+    }
+
+    #[test]
+    fn a_listed_channel_is_refused_every_time_without_staling_the_session() {
+        let mut portal = StalkerPortal::new(false, vec![19], false);
+
+        assert!(portal.refuses(19));
+        assert!(portal.refuses(19));
+        portal.note_handshake();
+        assert!(portal.refuses(19), "the refusal is bound to the channel, not to the session");
+        assert!(!portal.refuses(17), "other channels resolve normally");
+        assert_eq!(portal.stats.token_refusals, 3);
+    }
+
+    #[test]
+    fn a_resolved_marker_is_recorded_once() {
+        let mut portal = StalkerPortal::new(false, Vec::new(), false);
+        portal.record_resolution(19, Some("descriptor"));
+        portal.record_resolution(17, Some("raw"));
+        portal.record_resolution(19, Some("descriptor"));
+        portal.record_resolution(19, Some("raw"));
+        assert_eq!(portal.stats.resolved_markers, vec![17, 19]);
+        assert_eq!(portal.stats.resolved_descriptor_markers, vec![19]);
+        assert_eq!(portal.stats.resolved_raw_command_markers, vec![17, 19]);
+    }
+
     fn test_origin_state(run_id: &str) -> OriginState {
         OriginState {
             run_id: RunId::new(run_id),
@@ -2933,6 +3433,7 @@ mod tests {
             observations: Arc::new(Mutex::new(Vec::new())),
             faults: Arc::new(Mutex::new(FaultSchedule::default())),
             hls_sequences: Arc::new(Mutex::new(HashMap::from([(17, 9)]))),
+            stalker: Arc::new(Mutex::new(StalkerPortal::new(false, Vec::new(), false))),
             tracker: OriginTracker::new(run_id, OriginPolicy::default()),
         }
     }

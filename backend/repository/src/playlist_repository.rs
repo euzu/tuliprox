@@ -1252,11 +1252,20 @@ pub async fn load_input_playlist(
                 TuliproxError::ConfigInput(format!("Stalker input '{}' has no Stalker configuration", input.name))
             })?;
             let portal_url = input.resolve_url(&input.url)?.into_owned();
-            let manifest = crate::stalker_generation_repository::load_active_manifest(
+            // A read path: when the published manifest belongs to a different identity the
+            // input simply has nothing to serve yet, so fall back to an empty manifest
+            // instead of replacing the publication state of the refresh that owns it.
+            let (manifest, published) = crate::stalker_generation_repository::readable_active_manifest(
                 &stalker_path,
                 stalker_config.identity_fingerprint(&portal_url),
             )
             .await?;
+            if !published {
+                debug!(
+                    "Stalker input '{}' has no published catalog for its current identity; serving an empty playlist",
+                    input.name
+                );
+            }
             if disk_based_processing {
                 let source = PlaylistSource::stalker_disk(
                     StalkerDiskPlaylistSource::new(app_config, &stalker_path, Arc::clone(&input.name), manifest)

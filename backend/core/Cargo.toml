@@ -31,6 +31,7 @@ futures.workspace = true
 indexmap.workspace = true
 ipnet = "2"
 log.workspace = true
+lru = "0.16.4"
 parking_lot = "0.12.5"
 paste.workspace = true
 path-clean.workspace = true

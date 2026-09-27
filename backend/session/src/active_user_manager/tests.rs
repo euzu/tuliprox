@@ -1485,6 +1485,47 @@ async fn eviction_candidates_ignore_ambiguous_socket_addrs() {
 }
 
 #[tokio::test]
+async fn eviction_candidates_include_charged_stream_with_uncounted_session() {
+    let config = Config::default();
+    let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+    let event_manager = Arc::new(EventManager::new());
+    let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+    let addr: SocketAddr = "127.0.0.1:55034".parse().unwrap();
+    let fingerprint = Fingerprint::new("fp-switch".to_string(), "10.41.41.170".to_string(), addr);
+    let username = "switch-user";
+    manager.add_connection(&addr).await;
+    manager
+        .update_connection(ActiveUserConnectionParams {
+            uid: 34,
+            meter_uid: 0,
+            username,
+            max_connections: 1,
+            soft_connections: 0,
+            connection_kind: ConnectionKind::Normal,
+            priority: 0,
+            soft_priority: 0,
+            fingerprint: &fingerprint,
+            provider: "provider-a".intern(),
+            stream_channel: &test_channel(1034),
+            user_agent: Cow::Borrowed("ua"),
+            session_token: Some("missing-session"),
+        })
+        .await;
+
+    assert_eq!(manager.user_connections(username).await, 1);
+    assert_eq!(manager.connection_permission(username, 1, 0).await, UserConnectionPermission::Exhausted);
+
+    let candidates = manager.get_eviction_candidates(username, &fingerprint.client_ip).await;
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].addr, addr);
+    assert_eq!(candidates[0].client_ip, fingerprint.client_ip);
+
+    manager.release_connection_as_kicked(&addr).await;
+    assert_eq!(manager.connection_permission(username, 1, 0).await, UserConnectionPermission::Allowed);
+}
+
+#[tokio::test]
 async fn eviction_candidates_include_other_ips_for_user_wide_rules() {
     let config = Config::default();
     let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());

@@ -619,6 +619,7 @@ mod tests {
             base_url: "http://proxy.example".to_string(),
             web_ui_request: false,
             encrypt_secret: [0u8; 16],
+            resource_host_policies: Arc::default(),
         }
     }
 

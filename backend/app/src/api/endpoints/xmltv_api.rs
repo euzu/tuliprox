@@ -1,10 +1,9 @@
 use crate::{
     api::{
         api_utils::{
-            coalesce_byte_stream, create_api_proxy_user, decode_resource_link, empty_json_response_as_array,
-            get_user_target, get_user_target_by_credentials, internal_server_error, log_resource_rejection,
-            rejection_status, resolve_resource, resource_response, stream_json_or_bin_response_try_stream,
-            try_unwrap_body, ResourceFetchOptions,
+            coalesce_byte_stream, create_api_proxy_user, empty_json_response_as_array, get_user_target,
+            get_user_target_by_credentials, internal_server_error, resource_response,
+            stream_json_or_bin_response_try_stream, try_unwrap_body, ResourceFetchPolicy,
         },
         model::{AppState, UserApiRequest, UserApiRequestQueryOrBody},
         static_headers::CT_XML,
@@ -21,23 +20,24 @@ use crate::{
     },
     utils,
     utils::{
-        canonicalize_output_epg_id, canonicalize_untrusted_epg_id, deobscure_text, encode_resource_token,
-        file_exists_async, format_xmltv_time_utc, get_epg_processing_options, lowercase_xmltv_text, obscure_text,
+        canonicalize_output_epg_id, canonicalize_untrusted_epg_id, deobscure_authenticated_bytes, file_exists_async,
+        format_xmltv_time_utc, get_epg_processing_options, lowercase_xmltv_text, obscure_authenticated_bytes,
+        request::{classify_resource_destination, ResourceDestination},
         EpgIdOutputCase, EpgProcessingOptions, EpgTimeShift,
     },
 };
 use axum::response::IntoResponse;
 use chrono::{DateTime, TimeZone};
-use log::{debug, error, trace};
+use log::{error, trace};
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use shared::{
     concat_string,
+    error::TuliproxError,
     model::{
-        resolve_resource_value, ConfigTargetOptions, EpgChannel, EpgProgramme, EpgProgrammeDto, ResourceToken,
-        ShortEpgDto, ShortEpgResultDto, StreamEpgEntry, StreamEpgItemRequest, StreamEpgRequest, StreamEpgResponse,
-        TargetType,
+        ConfigTargetOptions, EpgChannel, EpgProgramme, EpgProgrammeDto, ShortEpgDto, ShortEpgResultDto, StreamEpgEntry,
+        StreamEpgItemRequest, StreamEpgRequest, StreamEpgResponse, TargetType,
     },
-    utils::{concat_path, concat_path_leading_slash, obfuscate_text, Internable},
+    utils::{concat_path, concat_path_leading_slash, seal_web_ui_resource_url, Internable},
 };
 use std::{
     borrow::Cow,
@@ -52,6 +52,27 @@ use tokio::{
 };
 use tokio_stream::StreamExt;
 use tokio_util::io::ReaderStream;
+use url::Url;
+
+const XMLTV_RESOURCE_TOKEN_DOMAIN: &[u8] = b"tuliprox.xmltv.resource.v1";
+/// Largest accepted token, checked against the encoded form before it is decoded.
+const MAX_XMLTV_RESOURCE_TOKEN_LEN: usize = 16_384;
+
+/// Seals an icon URL for the proxy route.
+///
+/// The token is the only place the destination appears in a client-visible URL: it is
+/// authenticated and encrypted with the instance secret, so a client cannot read or forge it.
+fn encode_xmltv_resource_url(secret: &[u8; 16], url: &str) -> Result<String, TuliproxError> {
+    obscure_authenticated_bytes(secret, XMLTV_RESOURCE_TOKEN_DOMAIN, url.as_bytes())
+}
+
+fn decode_xmltv_resource_url(secret: &[u8; 16], encoded: &str) -> Result<String, TuliproxError> {
+    if encoded.len() > MAX_XMLTV_RESOURCE_TOKEN_LEN {
+        return Err(TuliproxError::Crypto("XMLTV resource token is too long".to_string()));
+    }
+    let url = deobscure_authenticated_bytes(secret, XMLTV_RESOURCE_TOKEN_DOMAIN, encoded)?;
+    String::from_utf8(url).map_err(|_| TuliproxError::Crypto("Invalid XMLTV resource URL".to_string()))
+}
 
 pub fn get_empty_epg_response() -> axum::response::Response {
     try_unwrap_body!(axum::response::Response::builder()
@@ -201,42 +222,28 @@ pub fn rewrite_epg_channel_resource_url(
     resource_url: &str,
     mut channel: EpgChannel,
 ) -> EpgChannel {
-    let Some(icon) = channel.icon.as_ref() else {
-        return channel;
-    };
-    if icon.is_empty() || icon.starts_with('/') {
-        return channel;
+    // Programme icons are part of the same response: a channel without an icon must not keep its
+    // programmes exposed either.
+    for programme in &mut channel.programmes {
+        programme.icon = rewrite_epg_resource_icon(encrypt_secret, resource_url, programme.icon.take());
     }
-    let encoded = encode_resource_link(encrypt_secret, icon).unwrap_or_else(|| {
-        let external = external_resource_url(icon);
-        obfuscate_text(encrypt_secret, external.as_ref())
-    });
-    channel.icon = Some(concat_path(resource_url, &encoded).intern());
+    channel.icon = rewrite_epg_resource_icon(encrypt_secret, resource_url, channel.icon.take());
     channel
 }
 
-/// Encodes a resource link that carries its origin.
+/// Wraps an EPG icon into a proxy link, so the client never receives the destination itself.
 ///
-/// `None` means the link could not carry the origin, for example because the URL is longer than a
-/// token may be. Those links keep the legacy encoding and are therefore public-only, which fails
-/// closed instead of authorizing an unchecked destination.
-pub fn encode_resource_link(encrypt_secret: &[u8; 16], resource: &str) -> Option<String> {
-    let token = ResourceToken { resource: resource.to_string() };
-    match encode_resource_token(encrypt_secret, &token) {
-        Ok(encoded) => Some(encoded),
-        Err(err) => {
-            debug!("Falling back to a legacy resource link: {err}");
-            None
-        }
+/// Empty and instance-relative paths are already served by this instance and stay untouched.
+fn rewrite_epg_resource_icon(
+    encrypt_secret: &[u8; 16],
+    resource_url: &str,
+    icon: Option<Arc<str>>,
+) -> Option<Arc<str>> {
+    let icon = shared::model::persisted_resource_arc(&icon?);
+    if icon.is_empty() || icon.starts_with('/') {
+        return Some(icon);
     }
-}
-
-fn external_resource_url(value: &str) -> Cow<'_, str> {
-    match resolve_resource_value(value) {
-        Ok(Some(locator)) => Cow::Owned(locator.url.to_string()),
-        Ok(None) => Cow::Borrowed(value),
-        Err(_) => Cow::Borrowed(""),
-    }
+    Some(concat_path(resource_url, &seal_web_ui_resource_url(encrypt_secret, &icon)).intern())
 }
 
 macro_rules! continue_on_err {
@@ -250,8 +257,7 @@ macro_rules! continue_on_err {
 async fn write_programme_metadata_tags<W: AsyncWrite + Unpin>(
     writer: &mut quick_xml::Writer<W>,
     programme: &EpgProgramme,
-    epg_processing_options: &EpgProcessingOptions,
-    base_url: Option<&str>,
+    icons: &EpgIconOutput<'_>,
 ) -> Result<(), quick_xml::Error> {
     for category in &programme.categories {
         let mut elem = BytesStart::new(EPG_TAG_CATEGORY);
@@ -264,10 +270,11 @@ async fn write_programme_metadata_tags<W: AsyncWrite + Unpin>(
     }
 
     if let Some(icon_url) = programme.icon.as_deref() {
-        let icon = rewrite_xmltv_icon_url(epg_processing_options, base_url, icon_url);
-        let mut elem = BytesStart::new(EPG_TAG_ICON);
-        elem.push_attribute((EPG_ATTRIB_SRC, icon.as_ref()));
-        writer.write_event_async(Event::Empty(elem)).await?;
+        if let Some(icon) = icons.url(icon_url).await {
+            let mut elem = BytesStart::new(EPG_TAG_ICON);
+            elem.push_attribute((EPG_ATTRIB_SRC, icon.as_ref()));
+            writer.write_event_async(Event::Empty(elem)).await?;
+        }
     }
 
     if programme.is_live {
@@ -279,22 +286,62 @@ async fn write_programme_metadata_tags<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
-fn rewrite_xmltv_icon_url<'a>(
-    epg_processing_options: &EpgProcessingOptions,
-    base_url: Option<&str>,
-    icon_url: &'a str,
-) -> Cow<'a, str> {
-    if epg_processing_options.rewrite_urls {
-        if let Some(base) = base_url {
-            if let Some(encoded) = encode_resource_link(&epg_processing_options.encrypt_secret, icon_url) {
-                return Cow::Owned(concat_string!(base, "/", &encoded));
-            }
-            if let Ok(enc) = obscure_text(&epg_processing_options.encrypt_secret, icon_url) {
-                return Cow::Owned(concat_string!(base, "/", &enc));
+/// Everything needed to turn an EPG icon into the URL that is written to the output.
+///
+/// Bundled so that the writer chain does not gain a parameter per concern.
+struct EpgIconOutput<'a> {
+    options: &'a EpgProcessingOptions,
+    base_url: Option<&'a str>,
+}
+
+/// Where an EPG icon URL can be used.
+enum IconDestination {
+    /// Provably public: the client may fetch the URL itself.
+    Public,
+    /// Not provably public (private network, reserved range, unresolved name): the URL must never
+    /// reach a client, because it can name an internal destination. Only the proxy fetches it.
+    Proxied,
+    /// Not an http(s) URL, or local to the proxy host (loopback, link-local, metadata endpoints):
+    /// there is nothing the client could use and nothing the proxy would fetch.
+    Unusable,
+}
+
+async fn classify_icon_destination(icon_url: &str) -> IconDestination {
+    let Ok(url) = Url::parse(icon_url) else {
+        return IconDestination::Unusable;
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return IconDestination::Unusable;
+    }
+    match url.host_str() {
+        Some(host) => match classify_resource_destination(host).await {
+            ResourceDestination::Public => IconDestination::Public,
+            ResourceDestination::Private => IconDestination::Proxied,
+            ResourceDestination::Blocked => IconDestination::Unusable,
+        },
+        None => IconDestination::Unusable,
+    }
+}
+
+impl EpgIconOutput<'_> {
+    /// Builds the URL written into the EPG for an icon, or `None` when the icon must be dropped.
+    ///
+    /// Only a provably public destination may be handed to the client as-is, and only while the client
+    /// fetches resources itself (no reverse-proxy rewriting). Every other destination is replaced by an
+    /// authenticated proxy link, which keeps icons from internal hosts working without exposing their
+    /// address. Without a client-visible base URL the icon is dropped: writing the original URL would
+    /// leak the internal destination, which is exactly what must not happen.
+    async fn url<'i>(&self, icon_url: &'i str) -> Option<Cow<'i, str>> {
+        let icon_url = shared::model::persisted_resource_url(icon_url)?;
+        match classify_icon_destination(icon_url.as_ref()).await {
+            IconDestination::Unusable => None,
+            IconDestination::Public if !self.options.rewrite_urls => Some(icon_url),
+            IconDestination::Public | IconDestination::Proxied => {
+                let encoded = encode_xmltv_resource_url(&self.options.encrypt_secret, icon_url.as_ref()).ok()?;
+                self.base_url.map(|base| Cow::Owned(concat_string!(base, "/", &encoded)))
             }
         }
     }
-    external_resource_url(icon_url)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -314,22 +361,17 @@ async fn serve_epg_with_rewrites(
         target.options.as_ref().is_some_and(ConfigTargetOptions::lowercase_xmltv_display_names);
 
     let server_info = app_state.app_config.get_user_server_info(user);
-    let base_url =
-        if !matches!(epg_processing_options.time_shift, EpgTimeShift::None) || epg_processing_options.rewrite_urls {
-            server_info.as_ref().map(|si| {
-                concat_string!(
-                    &si.get_base_url(),
-                    "/",
-                    storage_const::EPG_RESOURCE_PATH,
-                    "/",
-                    &user.username,
-                    "/",
-                    &user.password
-                )
-            })
-        } else {
-            None
-        };
+    let base_url = server_info.as_ref().map(|si| {
+        concat_string!(
+            &si.get_base_url(),
+            "/",
+            storage_const::EPG_RESOURCE_PATH,
+            "/",
+            &user.username,
+            "/",
+            &user.password
+        )
+    });
 
     let generator_info = server_info.as_ref().map(ApiProxyServerInfo::get_base_url).unwrap_or_default();
 
@@ -385,6 +427,7 @@ async fn serve_epg_with_rewrites(
 
     let (mut tx, rx) = tokio::io::duplex(8192);
     tokio::spawn(async move {
+        let icons = EpgIconOutput { options: &epg_processing_options, base_url: base_url.as_deref() };
         // Work-Around BytesText DocType escape, see below
         if let Err(err) = tx.write_all(XML_PREAMBLE.as_ref()).await {
             error!("EPG: Failed to write xml header {err}");
@@ -433,12 +476,12 @@ async fn serve_epg_with_rewrites(
                 continue_on_err!(writer.write_event_async(Event::End(elem)).await);
 
                 if let Some(icon_url) = &channel.icon {
-                    let icon = rewrite_xmltv_icon_url(&epg_processing_options, base_url.as_deref(), icon_url.as_ref());
-
-                    let mut elem = BytesStart::new("icon");
-                    elem.push_attribute(("src", icon.as_ref()));
-                    if (writer.write_event_async(Event::Empty(elem)).await).is_err() {
-                        // ignore
+                    if let Some(icon) = icons.url(icon_url.as_ref()).await {
+                        let mut elem = BytesStart::new("icon");
+                        elem.push_attribute(("src", icon.as_ref()));
+                        if (writer.write_event_async(Event::Empty(elem)).await).is_err() {
+                            // ignore
+                        }
                     }
                 }
 
@@ -476,14 +519,7 @@ async fn serve_epg_with_rewrites(
                         continue_on_err!(writer.write_event_async(Event::End(BytesEnd::new("desc"))).await);
                     }
 
-                    if let Err(err) = write_programme_metadata_tags(
-                        &mut writer,
-                        programme,
-                        &epg_processing_options,
-                        base_url.as_deref(),
-                    )
-                    .await
-                    {
+                    if let Err(err) = write_programme_metadata_tags(&mut writer, programme, &icons).await {
                         error!("EPG programme metadata write failed: {err}");
                     }
 
@@ -948,33 +984,15 @@ async fn epg_api_resource(
         return e.into_player_response(auth_status);
     }
 
-    let encrypt_secret = app_state.get_encrypt_secret();
-    // This route decodes only its own two formats: the authenticated token for new links, and the
-    // AES-based `obscure_text` encoding for links issued before origin tracking.
-    let decoded =
-        decode_resource_link(&encrypt_secret, &resource, |secret, value| deobscure_text(secret, value).map_err(|_| ()));
-
-    let resource_value = match decoded {
-        Ok(decoded) => decoded,
-        Err(status) => return status.into_response(),
+    let Ok(resource_url) = decode_xmltv_resource_url(&app_state.get_encrypt_secret(), &resource) else {
+        return axum::http::StatusCode::BAD_REQUEST.into_response();
     };
-
-    // Legacy links and EPG icons without a recorded origin stay public-only.
-    match resolve_resource(&app_state.app_config, &resource_value, None) {
-        Ok(resolved) => resource_response(
-            &app_state,
-            ResourceFetchOptions::epg(resolved.authorization),
-            &resolved.url,
-            &req_headers,
-            None,
-        )
-        .await
-        .into_response(),
-        Err(err) => {
-            log_resource_rejection(None, &err, &resource_value);
-            rejection_status(&err).into_response()
-        }
+    if !Url::parse(&resource_url).is_ok_and(|url| matches!(url.scheme(), "http" | "https")) {
+        return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
+    resource_response(&app_state, ResourceFetchPolicy::NonPublic, &resource_url, &req_headers, None)
+        .await
+        .into_response()
 }
 
 /// Registers the XMLTV EPG API routes for handling HTTP GET requests.
@@ -1001,10 +1019,11 @@ pub fn xmltv_api_register() -> axum::Router<Arc<AppState>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        empty_stream_epg_entries, from_programme, get_epg_path_for_target, get_epg_path_for_target_by_type,
-        group_stream_epg_items, prepare_stream_epg_request, rewrite_epg_channel_resource_url, serve_epg,
-        serve_epg_web_ui, serve_short_epg, serve_stream_epg, stream_epg_api, stream_epg_programmes_for_channel,
-        write_programme_metadata_tags, MAX_STREAM_EPG_CHANNEL_ID_BYTES, MAX_STREAM_EPG_ITEMS,
+        decode_xmltv_resource_url, empty_stream_epg_entries, encode_xmltv_resource_url, from_programme,
+        get_epg_path_for_target, get_epg_path_for_target_by_type, group_stream_epg_items, prepare_stream_epg_request,
+        rewrite_epg_channel_resource_url, serve_epg, serve_epg_web_ui, serve_short_epg, serve_stream_epg,
+        stream_epg_api, stream_epg_programmes_for_channel, write_programme_metadata_tags, EpgIconOutput,
+        MAX_STREAM_EPG_CHANNEL_ID_BYTES, MAX_STREAM_EPG_ITEMS,
     };
     use crate::{
         api::model::{create_test_app_state, AppState},
@@ -1014,7 +1033,10 @@ mod tests {
         },
         processing::parser::ics::parse_ics_file_to_channel,
         repository::{epg_write_file, BPlusTree},
-        utils::{lowercase_xmltv_text, EpgIdOutputCase, EpgProcessingOptions, EpgTimeShift},
+        utils::{
+            lowercase_xmltv_text, obscure_authenticated_bytes, obscure_text, EpgIdOutputCase, EpgProcessingOptions,
+            EpgTimeShift,
+        },
     };
     use arc_swap::ArcSwapOption;
     use axum::response::IntoResponse;
@@ -1023,9 +1045,9 @@ mod tests {
         foundation::Filter,
         model::{
             ConfigTargetOptions, EpgCategory, EpgChannel, EpgOutputOptions, EpgProgramme, ProcessingOrder,
-            ResourceLocator, StreamEpgItemRequest, StreamEpgRequest, TargetType,
+            StreamEpgItemRequest, StreamEpgRequest, TargetType,
         },
-        utils::Internable,
+        utils::{concat_path, seal_web_ui_resource_url, Internable},
     };
     use std::{
         collections::HashMap,
@@ -1036,7 +1058,6 @@ mod tests {
     };
     use tempfile::tempdir;
     use tokio::io::AsyncWrite;
-    use tuliprox_core::utils::{decode_resource_token, has_resource_token_prefix};
 
     struct ErroringWriter;
 
@@ -1513,7 +1534,7 @@ mod tests {
         ];
         programme.is_live = true;
         programme.is_new = true;
-        programme.icon = Some("https://example.com/programme.jpg".intern());
+        programme.icon = Some("https://8.8.8.8/programme.jpg".intern());
         write_test_epg_db(
             &epg_path,
             EpgChannel {
@@ -1539,7 +1560,7 @@ mod tests {
         assert!(!xml.contains("<title>news &amp; updates</title>"));
         assert!(xml.contains(r#"<category lang="en">News &amp; Analysis</category>"#));
         assert!(xml.contains("<category>Sports</category>"));
-        assert!(xml.contains(r#"<icon src="https://example.com/programme.jpg"/>"#));
+        assert!(xml.contains(r#"<icon src="https://8.8.8.8/programme.jpg"/>"#));
         assert!(xml.contains("<live/>"));
         assert!(xml.contains("<new/>"));
 
@@ -1556,6 +1577,12 @@ mod tests {
         assert!(live_pos < new_pos);
     }
 
+    /// Icon output for tests. Destination verdicts come from the process-wide memo, so the icons used
+    /// here are IP literals that are decided without resolving a name.
+    fn icon_output<'a>(options: &'a EpgProcessingOptions, base_url: Option<&'a str>) -> EpgIconOutput<'a> {
+        EpgIconOutput { options, base_url }
+    }
+
     #[tokio::test]
     async fn programme_metadata_writer_propagates_io_errors() {
         let mut programme = EpgProgramme::new(100, 200, "channel".intern());
@@ -1564,7 +1591,7 @@ mod tests {
         let options =
             EpgProcessingOptions { rewrite_urls: false, time_shift: EpgTimeShift::None, encrypt_secret: [0; 16] };
 
-        assert!(write_programme_metadata_tags(&mut writer, &programme, &options, None).await.is_err());
+        assert!(write_programme_metadata_tags(&mut writer, &programme, &icon_output(&options, None)).await.is_err());
     }
 
     #[tokio::test]
@@ -1575,21 +1602,157 @@ mod tests {
         let base_url = "http://localhost/epg/user/password";
         let original_url = "https://example.com/programme.jpg";
         let mut programme = EpgProgramme::new(100, 200, "channel".intern());
-        programme.icon = Some(
-            ResourceLocator::new("epg-input".into(), original_url.into()).expect("locator").encode().expect("encode"),
-        );
+        programme.icon = Some(original_url.intern());
         let mut writer = quick_xml::Writer::new(Vec::new());
-        write_programme_metadata_tags(&mut writer, &programme, &options, Some(base_url)).await?;
+        write_programme_metadata_tags(&mut writer, &programme, &icon_output(&options, Some(base_url))).await?;
         let xml = String::from_utf8(writer.into_inner())?;
         let resource = xml
             .strip_prefix(&format!(r#"<icon src="{base_url}/"#))
             .and_then(|value| value.strip_suffix(r#""/>"#))
             .unwrap_or_default();
 
-        let token = decode_resource_token(&secret, resource).expect("token decodes");
-        let locator = ResourceLocator::decode(&token.resource).expect("locator decodes");
-        assert_eq!(locator.url.as_ref(), original_url);
-        assert_eq!(locator.input_name.as_ref(), "epg-input");
+        assert_eq!(decode_xmltv_resource_url(&secret, resource)?, original_url);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn xmltv_icon_output_keeps_public_url_and_proxies_private_url() -> Result<(), Box<dyn std::error::Error>> {
+        let secret = [9; 16];
+        let options =
+            EpgProcessingOptions { rewrite_urls: false, time_shift: EpgTimeShift::None, encrypt_secret: secret };
+        let base = "https://user.example/resource/epg/user/password";
+
+        let public = icon_output(&options, Some(base)).url("https://8.8.8.8/icon.png").await;
+        assert_eq!(public.as_deref(), Some("https://8.8.8.8/icon.png"));
+
+        for private_url in ["http://10.0.0.1/icon.png", "http://192.168.1.20/icon.png", "http://[fd00::1]/icon.png"] {
+            let rewritten = icon_output(&options, Some(base)).url(private_url).await;
+            let rewritten = rewritten.expect("private icon is proxied");
+            let encoded = rewritten.strip_prefix(&format!("{base}/")).expect("user server URL");
+            assert_eq!(decode_xmltv_resource_url(&secret, encoded)?, private_url);
+            assert!(!rewritten.contains("10.0.0.1") && !rewritten.contains("192.168.1.20"), "{rewritten}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn xmltv_icon_output_drops_destinations_that_are_never_usable() {
+        let options =
+            EpgProcessingOptions { rewrite_urls: false, time_shift: EpgTimeShift::None, encrypt_secret: [9; 16] };
+        let base = "https://user.example/resource/epg/user/password";
+
+        for unusable in [
+            "http://127.0.0.1/icon.png",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[::1]/icon.png",
+            "http://0.0.0.0/icon.png",
+            "ftp://example.com/icon.png",
+            "/local/icon.png",
+        ] {
+            assert!(
+                icon_output(&options, Some(base)).url(unusable).await.is_none(),
+                "icon must be dropped: {unusable}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn xmltv_icon_output_never_writes_a_private_url_without_client_base_url() {
+        let private_url = "http://192.168.1.20/icon.png";
+        let rewrite_mode =
+            EpgProcessingOptions { rewrite_urls: true, time_shift: EpgTimeShift::None, encrypt_secret: [9; 16] };
+        let redirect_mode =
+            EpgProcessingOptions { rewrite_urls: false, time_shift: EpgTimeShift::None, encrypt_secret: [9; 16] };
+
+        assert!(icon_output(&rewrite_mode, None).url(private_url).await.is_none());
+        assert!(icon_output(&redirect_mode, None).url(private_url).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn xmltv_icon_output_proxies_public_url_in_reverse_mode() {
+        let options =
+            EpgProcessingOptions { rewrite_urls: true, time_shift: EpgTimeShift::None, encrypt_secret: [9; 16] };
+        let rewritten = icon_output(&options, Some("https://user.example/resource/epg/user/password"))
+            .url("https://8.8.8.8/icon.png")
+            .await;
+
+        let rewritten = rewritten.expect("public icon is proxied in reverse mode");
+        assert!(rewritten.starts_with("https://user.example/resource/epg/user/password/"));
+        assert!(!rewritten.contains("8.8.8.8"), "{rewritten}");
+    }
+
+    #[test]
+    fn epg_channel_resource_rewrite_wraps_channel_and_programme_icons() {
+        let secret = [7u8; 16];
+        let base = "/api/v1/playlist/resource";
+        let icon_url = "http://192.168.1.20/programme.png";
+        let mut programme_with_icon = EpgProgramme::new(100, 200, "example.channel".intern());
+        programme_with_icon.icon = Some(icon_url.intern());
+
+        let channel = EpgChannel {
+            id: "example.channel".intern(),
+            title: None,
+            icon: None,
+            programmes: vec![programme_with_icon, EpgProgramme::new(200, 300, "example.channel".intern())],
+        };
+
+        let rewritten = rewrite_epg_channel_resource_url(&secret, base, channel);
+
+        let programme_icon = rewritten.programmes[0].icon.as_deref().expect("programme icon is wrapped");
+        assert!(programme_icon.starts_with(base), "{programme_icon}");
+        assert!(!programme_icon.contains("192.168.1.20"), "{programme_icon}");
+        assert!(programme_icon.ends_with(&seal_web_ui_resource_url(&secret, icon_url)), "{programme_icon}");
+        assert!(rewritten.programmes[1].icon.is_none());
+        assert!(rewritten.icon.is_none(), "a channel without an icon stays without one");
+    }
+
+    #[tokio::test]
+    async fn xmltv_icon_output_never_contains_a_private_icon_destination() {
+        let dir = tempdir().expect("temp dir");
+        let epg_path = dir.path().join("epg.db");
+        let mut programme = EpgProgramme::new(100, 200, "example.channel".intern());
+        programme.icon = Some("http://10.0.0.1/programme.png".intern());
+        write_test_epg_db(
+            &epg_path,
+            EpgChannel {
+                id: "example.channel".intern(),
+                title: Some("Example Network".intern()),
+                icon: Some("http://10.0.0.1/channel.png".intern()),
+                programmes: vec![programme],
+            },
+        );
+        let app_state = test_app_state();
+        let target = Arc::new(test_target_with_epg_options(true, true));
+
+        let response = serve_epg(&app_state, &epg_path, &ProxyUserCredentials::default(), &target, None).await;
+        let xml = response_body_text(response).await;
+
+        assert!(!xml.contains("10.0.0.1"), "internal destination leaked into XMLTV output: {xml}");
+        assert!(!xml.contains("<icon"), "an icon that cannot be proxied client-visibly has to be dropped: {xml}");
+    }
+
+    #[test]
+    fn xmltv_resource_token_rejects_legacy_modified_and_foreign_values() -> Result<(), Box<dyn std::error::Error>> {
+        let secret = [9; 16];
+        let icon_url = "http://10.0.0.1/icon.png";
+
+        let legacy = obscure_text(&secret, icon_url)?;
+        assert!(decode_xmltv_resource_url(&secret, &legacy).is_err(), "legacy obfuscation must be rejected");
+
+        let mut authenticated = encode_xmltv_resource_url(&secret, icon_url)?;
+        authenticated.replace_range(4..5, if &authenticated[4..5] == "A" { "B" } else { "A" });
+        assert!(decode_xmltv_resource_url(&secret, &authenticated).is_err(), "tampered token must be rejected");
+
+        let foreign_domain = obscure_authenticated_bytes(&secret, b"tuliprox.other.domain.v1", icon_url.as_bytes())?;
+        assert!(
+            decode_xmltv_resource_url(&secret, &foreign_domain).is_err(),
+            "a token of another domain must not decode"
+        );
+
+        let other_secret = encode_xmltv_resource_url(&[8; 16], icon_url)?;
+        assert!(decode_xmltv_resource_url(&secret, &other_secret).is_err(), "a foreign secret must be rejected");
+
+        assert_eq!(decode_xmltv_resource_url(&secret, &encode_xmltv_resource_url(&secret, icon_url)?)?, icon_url);
         Ok(())
     }
 
@@ -1907,26 +2070,20 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_epg_channel_resource_url_wraps_external_icon_with_its_origin() {
+    fn rewrite_epg_channel_resource_url_wraps_external_icon() {
         let secret = [9u8; 16];
         let resource_url = "/api/v1/playlist/resource";
-        let mut channel = sample_channel(None);
-        channel.icon = Some(
-            ResourceLocator::new("epg-input".into(), "https://cdn.example.com/logo.png".into())
-                .expect("locator")
-                .encode()
-                .expect("encode"),
-        );
+        let channel = sample_channel(Some("https://cdn.example.com/logo.png"));
 
         let rewritten = rewrite_epg_channel_resource_url(&secret, resource_url, channel);
 
-        let link = rewritten.icon.as_deref().expect("rewritten icon");
-        let encoded = link.rsplit('/').next().expect("encoded part");
-        assert!(has_resource_token_prefix(encoded));
-        let token = decode_resource_token(&secret, encoded).expect("token decodes");
-        let locator = ResourceLocator::decode(&token.resource).expect("locator decodes");
-        assert_eq!(locator.url.as_ref(), "https://cdn.example.com/logo.png");
-        assert_eq!(locator.input_name.as_ref(), "epg-input");
+        assert_eq!(
+            rewritten.icon.as_deref(),
+            Some(
+                concat_path(resource_url, &seal_web_ui_resource_url(&secret, "https://cdn.example.com/logo.png"))
+                    .as_str()
+            )
+        );
     }
 
     #[test]

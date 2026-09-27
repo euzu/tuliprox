@@ -4,37 +4,12 @@
 
 ## ⚠️ Breaking Changes
 
-- **Proxied resource URLs are now restricted to public destinations by default.** Tuliprox proxies external
-  resource URLs that come from provider, playlist, and EPG content: channel and small logos, EPG channel and
-  programme icons, cover images, posters, and backdrops. These requests now enforce a destination policy on every
-  route that serves them (`/resource/m3u/...`, the Xtream resource routes, `/resource/epg/...`, and
-  `/api/v1/playlist/resource/...`), where previously three of them fetched any destination reachable by the
-  configured HTTP client.
-  - A resource URL whose DNS host name resolves to a private address (RFC 1918 or IPv6 ULA) is rejected unless the
-    input that supplied it lists the exact host name in `resource_policy.allowed_hosts` **and** the address in
-    `resource_policy.allowed_networks`. A private IP literal requires only a matching
-    `resource_policy.allowed_networks` entry because IP literals are not valid `allowed_hosts` values. Add the policy
-    to the input that provides the logo or icon; for icons that `logo_override` copies out of EPG, that is the EPG
-    input.
-  - Loopback, link-local, cloud-metadata, CGNAT, multicast, and reserved addresses stay blocked with or without a
-    policy. Redirects are re-checked on every hop and are bounded.
-  - Resource ownership is stored generically with each URL, including nested cover, poster, backdrop, and episode
-    image fields. Legacy raw playlist/Xtream item resources use their containing item's input; legacy EPG resources
-    without an authoritative input remain public-only until regenerated.
-  - `resource://` is an internal reserved scheme. Provider data and mapping configuration must never supply it;
-    such values are rejected rather than interpreted as authorization claims.
-  - The canonical input name is the authorization identity of a resource origin. Configured input and alias names
-    must be non-empty, globally unique strings; a configuration with duplicate input names, duplicate alias names,
-    or an alias name that shadows an input name is now rejected while loading. Internal IDs are managed separately.
-  - The resource cache is keyed by the policy that authorized the entry, so an entry fetched under one policy is
-    never served to another. The cache starts cold once on upgrade because the key layout changes.
-  - Resource proxying now always connects directly: a configured proxy and the `HTTP_PROXY` / `HTTPS_PROXY` /
-    `ALL_PROXY` environment variables are ignored for these requests, and Tuliprox logs a warning at startup and on
-    reload when one is set. Provider fetches, playlist and EPG downloads, and streams keep using the proxy.
-  - The Source Editor exposes the policy on every input under the shield-shaped **Resource Policy** page. Empty host
-    and network lists restore the public-only default and omit the policy from the saved input.
-  - See [Resource Policy](docs/src/configuration/source.md#27-resource-policy-resource_policy) for the parameters
-    and the exact host-plus-network rule.
+- **The per-input resource policy is gone again.** `resource_policy` (with `allowed_hosts` / `allowed_networks`) is no
+  longer a valid input field, so configurations written for that feature are rejected while loading, and resource links
+  minted by it are no longer accepted. Resource destinations are classified instead of configured: a destination on a
+  private network is proxied, a public one may be handed to the client directly. Resource links that were issued
+  before this change (the `obscure_text` format) are rejected as well, so an EPG a client has already cached shows
+  broken icons until the EPG is fetched again.
 
 - **The Web UI WebSocket protocol is now version 4.** Playlist update completion messages carry the correlated
   run ID and execution order instead of a bare status. Reload existing browser tabs after upgrading the server;
@@ -1050,6 +1025,51 @@
 
 ## 🐛 Fixes
 
+- **Stalker playback resolution now says why it failed, retries a rejected session, and can fall back to the stored
+  command.** A playback request that could not be resolved reported a single message naming the requested item's portal
+  id, while the actual cause — no published catalog for the configured portal identity, an item missing from the active
+  generation, an item without a playback descriptor, or a `create_link` refusal — was written to the debug log or
+  nowhere at all, which made a portal refusal look like a mismatched stream id. Each of these stages now logs at warning
+  level with the input name, stream id, item name and the portal's sanitized error, and the resolution reports the
+  portal's reason once its candidates are exhausted. A portal that rejects the session (HTTP 204/401/403/456, or a
+  Ministra `code` of 44 / 440..=449 inside a `200 OK`) no longer ends as "could not be resolved": the cached session is
+  dropped, a fresh handshake is issued and the request is retried once, which is the recovery the typed token-rejection
+  error was introduced for but nothing called. Items whose persisted playback descriptor is empty now resolve through
+  their stored `cmd`, so a row that still carries the portal command stays playable.
+- **A playback request no longer discards the published Stalker catalog.** The active-manifest lookup used by playback
+  resolution and by the disk playlist sources replaced the published manifest with an empty one and deleted the refresh
+  checkpoint whenever the stored identity did not match the configured one — for example after editing the input's
+  Stalker block or changing the MAG preset. The catalog files survived but nothing could resolve, and the running
+  refresh lost its resume point. Read paths now report "no published catalog for this identity" and leave the
+  publication state to the refresh that owns it.
+- **Resource URLs no longer expose internal destinations.** Resource URLs are classified before they are written into
+  playlist or EPG output: only a provably public destination is handed to the client, everything else (`tvg-logo`,
+  `tvg-logo-small`, Xtream covers and backdrops, EPG channel and programme icons, Web UI item icons) is replaced by an
+  authenticated resource link. This also covers redirect mode (`resource_rewrite_disabled: true`), where a
+  network-internal image is proxied instead of being published, and an image without a client-visible base URL is dropped
+  rather than written through. Destinations local to the Tuliprox host — loopback, link-local, cloud metadata — are
+  dropped from the output and refused by the resource route, and an upstream failure is reported as a generic
+  `502 Bad Gateway` instead of relaying the destination's error response. The refusal also happens while the connection
+  is built, so a destination cannot resolve to a public address during the check and to a local one afterwards. A name
+  whose lookup produced no answer stays non-public for ten seconds rather than for minutes, so a resolver hiccup does
+  not pin a destination to the proxy for the rest of its verdict lifetime.
+- **Resource proxying keeps respecting the configured proxy.** Every redirect hop of a resource URL is classified on
+  its own: a hop that is not provably public connects directly, so a self-hosted media server on the local network stays
+  reachable, while every other hop - including the public destinations of the Web UI resource route and a public hop
+  reached through a redirect - goes through the configured `proxy` block. Resource requests therefore cannot disclose
+  the operator's address to a resource host. A redirect to a destination local to the Tuliprox host is refused without
+  being requested, and both resource clients refuse such an address again while the connection is built, so a name that
+  was classified as public cannot resolve to a local address afterwards. The configured proxy hosts are exempt from
+  that guard, so a proxy on the loopback interface (`proxy: http://localhost:8118`) keeps working instead of making
+  every public resource fetch fail. A resource name that does not resolve locally is fetched through the configured
+  proxy, which can still resolve it (for example with remote DNS); a destination that resolves to a private address
+  keeps connecting directly. Redirects are followed one hop at a time, bounded to five hops.
+
+- **Duplicate input and alias names fail the configuration load again.** Input names and alias names share one
+  namespace, and a duplicate silently resolved to whichever member was inserted last, so a request could run against
+  another input's playlist, credentials, and limits. The check that rejects such a configuration is part of the sources
+  load again, which also means an invalid reload is reported instead of replacing the running configuration.
+
 - **Streaming and connection management: resolved silent async hang / deadlock during client kicks and concurrent stream load.**
   Under concurrent stream traffic, `tuliprox` would occasionally stop logging and serving requests (the Web UI became
   unreachable and active streams dropped) while the container remained in a running state with near-zero CPU and memory
@@ -1418,14 +1438,6 @@
 
 ## ⚙️ New Settings
 
-- **source.yml (input `resource_policy`)**: Added an optional per-input policy for private resource destinations.
-  - `allowed_hosts` (list of exact DNS names, default empty) and `allowed_networks` (list of private CIDR ranges,
-    default empty) authorize a private address only together: the host name must match and the resolved address must
-    fall inside one of the networks. An IP literal is authorized by `allowed_networks` alone. An absent or empty
-    policy means public-only.
-  - Invalid entries (scheme, path, port, wildcard, IP literal in `allowed_hosts`; a range outside
-    `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, or `fc00::/7`) are rejected while the configuration is loaded.
-
 - **Runtime diagnostics (environment variables)**:
   - `TULIPROX_WATCHDOG` (default unset = off) is a mode selector: `1` (`true`/`on`/`yes`/`enabled`) observes and logs
     stalls, `2` (`restart`) additionally exits the process after the stall persists so a supervisor restarts it.
@@ -1574,6 +1586,19 @@
 
 ## 🛠 Maintenance
 
+- **The testkit can now drive a Stalker/Ministra input.** The fixture origin emulates a portal
+  (`handshake`, `get_profile`, `get_genres`, `get_ordered_list`, `create_link`), a scenario selects it with
+  `input_type: stalker` plus a `stalker:` block (MAC, MAG preset, scripted `create_link` refusals), and the
+  generated `source.yml` points the input at it. Playback resolution is asserted where it is observable — on the
+  portal: `assert_origin` gained `stalker_handshakes_at_least`, `stalker_create_links_at_least`,
+  `stalker_token_refusals_at_least` and `stalker_create_link_markers` (set comparison, so a playback that resolved
+  another catalog item's command fails). Three scenarios use it: `stalker-live-resolution` (each channel resolves
+  through its own stored `cmd`), `stalker-session-refused-once` (a stale-session refusal is recovered by a
+  re-handshake and retry; fails without that recovery) and `stalker-refused-channel-keeps-catalog` (a permanently
+  refused channel is reported and the catalog keeps serving the others). The fixture portal answers with a loopback
+  stream URL on purpose: the SUT's destination guard refuses it, so the scenarios assert the resolution chain and
+  the guard instead of pretending a portal-supplied private URL is playable. Asserting a hard upstream failure
+  needed a new expectation, `expect: { http_error: <status> }`.
 - **Playlist curation now has a dedicated capability boundary**: matching and ordered membership evaluation live in the
   source-neutral `tuliprox-curation` kernel, while Trakt HTTP/JSON handling translates records at the edge and the
   category-scoped compatibility projector remains separate from membership identity. Existing category identity and

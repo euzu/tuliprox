@@ -1,0 +1,46 @@
+schema_version: 1
+name: stalker-session-refused-once
+# A portal that invalidates the session out of band answers the first `create_link` with a
+# stale-session body (`code` 44 inside a `200 OK`). The playback path has to drop the cached
+# session, handshake again and retry, instead of reporting the item as unresolvable.
+#
+# The portal counters are the assertion: without the retry the fixture sees one `create_link`
+# that resolved nothing and no second handshake. The client-visible status is the destination
+# guard refusing the fixture's loopback stream URL, which is unrelated to the session and stays
+# 400 either way — the recovered resolution is what the portal statistics prove.
+tuliprox:
+  base_url: http://fixture.invalid
+  execution_mode: isolated_fixture
+  input_type: stalker
+  bootstrap:
+    command: "${env:TULIPROX_TESTKIT_SUT_BINARY}"
+    arguments: ["-s", "-c", "{config_file}", "-i", "{source_file}", "-a", "{api_proxy_file}"]
+    readiness_url: "{base_url}/healthcheck"
+  stalker:
+    mac_address: '00:1A:79:00:00:01'
+    mag_preset: ministra_modern
+    refuse_create_link_once: true
+origin:
+  run_id: stalker-session-refused-once
+actors:
+  - id: tv-a
+    agent: local
+    username: testkit
+    user_agent: tuliprox-testkit/tv-a
+channels:
+  live-17: { origin_marker: 17, protocol: xtream_ts }
+steps:
+  - command_id: recover-17
+    start:
+      actor: tv-a
+      playback_id: playback-17
+      session_group: playback-17
+      channel: live-17
+    expect:
+      http_error: 400
+    assert_origin:
+      # One refusal, then a re-handshake and a retried resolution that the portal answered.
+      stalker_token_refusals_at_least: 1
+      stalker_handshakes_at_least: 1
+      stalker_create_links_at_least: 2
+      stalker_create_link_markers: [17]
