@@ -1,3 +1,6 @@
+mod admission;
+mod ownership;
+
 use super::*;
 use crate::{
     kernel::{CurationMediaKind, CurationUnavailableReason},
