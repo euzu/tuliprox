@@ -10846,6 +10846,7 @@ fn stats_provider_test_user_session(provider: &str) -> UserSession {
         provider: Arc::from(provider),
         stream_url: Arc::from("http://origin.example.com/live/12345.m3u8"),
         provider_session_headers: HashMap::new(),
+        media_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         user_agent_stream_index: None,
         addr: test_addr(),
         socket_bound: false,

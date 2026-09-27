@@ -691,8 +691,26 @@ impl ActiveProviderManager {
     fn get_reserved_provider_for_owner(&self, input_name: &Arc<str>, session_owner: &str) -> Option<Arc<str>> {
         let mut leases = self.write_leases();
         Self::prune_expired_leases(&mut leases);
-        let provider_name = leases.provider_for_owner(session_owner)?;
-        self.providers.is_provider_for_input(&provider_name, input_name).then_some(provider_name)
+        let lease = leases.lease_of_owner(session_owner)?;
+        let provider_name = Arc::clone(&lease.provider_name);
+        let confirmed = lease.state.is_confirmed();
+        drop(leases);
+        (self.providers.is_provider_for_input(&provider_name, input_name)
+            && (confirmed || self.has_active_owner_for_provider(&provider_name, session_owner)))
+        .then_some(provider_name)
+    }
+
+    /// A provisional lease only pins its provider while its allocation is active.
+    /// Once an unstarted request releases its slot, the next attempt may use another alias.
+    pub fn should_reuse_playback_provider(&self, session_owner: &str, provider_name: &Arc<str>) -> bool {
+        let _transition = self.lock_capacity_transition();
+        let mut leases = self.write_leases();
+        Self::prune_expired_leases(&mut leases);
+        let confirmed = leases
+            .lease_of_owner(session_owner)
+            .is_some_and(|lease| lease.provider_name == *provider_name && lease.state.is_confirmed());
+        drop(leases);
+        confirmed || self.has_active_owner_for_provider(provider_name, session_owner)
     }
 
     /// True when `session_owner` already backs a live allocation on `provider_name`,
@@ -3316,6 +3334,54 @@ mod tests {
 
         manager.release_connection(&client_1_addr);
         manager.release_connection(&client_2_addr);
+    }
+
+    #[tokio::test]
+    async fn unstarted_series_retry_uses_free_alias_while_started_playback_stays_pinned() {
+        let app_cfg = create_test_app_config_with_dual_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+        let input = "provider_1".intern();
+        let owner = "series-playback";
+        let first_addr: SocketAddr = "127.0.0.1:41010".parse().unwrap();
+        let busy_addr: SocketAddr = "127.0.0.1:41011".parse().unwrap();
+        let retry_addr: SocketAddr = "127.0.0.1:41012".parse().unwrap();
+
+        let failed_start = manager
+            .acquire_connection_with_lease_for_session(
+                &input,
+                &first_addr,
+                false,
+                0,
+                ConnectionKind::Normal,
+                Some(PlaybackLeaseRef::new(owner, PlaybackKind::Series)),
+            )
+            .expect("first series allocation");
+        assert!(manager.should_reuse_playback_provider(owner, &input));
+        manager.release_handle(&failed_start);
+        assert!(!manager.should_reuse_playback_provider(owner, &input));
+
+        let busy = manager
+            .acquire_connection(&input, &busy_addr, 0, ConnectionKind::Normal)
+            .expect("other playback occupies first provider");
+        let retry = manager
+            .acquire_connection_with_lease_for_session(
+                &input,
+                &retry_addr,
+                false,
+                0,
+                ConnectionKind::Normal,
+                Some(PlaybackLeaseRef::new(owner, PlaybackKind::Series)),
+            )
+            .expect("retry should use free alias");
+        let alias = retry.allocation.get_provider_name().expect("alias name");
+        assert_eq!(alias.as_ref(), "provider_2");
+        assert!(manager.should_reuse_playback_provider(owner, &alias));
+        manager.refresh_adaptive_playback_lease(&alias, owner, PlaybackKind::Series, 15);
+        manager.confirm_identified_playback_activity(owner, retry.playback_request_id.expect("request id"));
+        manager.release_handle(&retry);
+        assert!(manager.should_reuse_playback_provider(owner, &alias));
+        manager.release_handle(&busy);
     }
 
     #[tokio::test]

@@ -137,6 +137,8 @@ pub struct UserSession {
     pub provider: Arc<str>,
     pub stream_url: Arc<str>,
     pub provider_session_headers: HashMap<String, String>,
+    /// Shared with the response body so media confirmation survives a released VOD lease.
+    pub media_started: Arc<AtomicBool>,
     /// Stable suffix appended to upstream User-Agent headers for this playback session.
     pub user_agent_stream_index: Option<u64>,
     pub addr: SocketAddr,
@@ -1961,6 +1963,7 @@ impl ActiveUserManager {
             provider: params.provider.intern(),
             stream_url: params.stream_url.intern(),
             provider_session_headers: HashMap::new(),
+            media_started: Arc::new(AtomicBool::new(false)),
             user_agent_stream_index: None,
             addr: *params.addr,
             socket_bound: params.socket_bound,
@@ -3092,6 +3095,17 @@ impl ActiveUserManager {
 
     pub async fn get_and_update_user_session(&self, username: &str, token: &str) -> Option<UserSession> {
         self.update_user_session(username, token).await
+    }
+
+    pub async fn media_started_flag(&self, username: &str, token: &str) -> Option<Arc<AtomicBool>> {
+        let users = self.connections.read().await;
+        users
+            .by_key
+            .get(username)?
+            .sessions
+            .iter()
+            .find(|session| session.token == token)
+            .map(|session| Arc::clone(&session.media_started))
     }
 
     /// Session for target-scoped `virtual_id` and request token (used to recover leaked relative DVR segment paths).

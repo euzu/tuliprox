@@ -2155,12 +2155,13 @@ pub async fn force_provider_stream_response(
         cleanup_forced_reopen_addrs(app_state, &user_session.token, &cleanup_addrs).await;
     }
 
-    // In the normal case, provider-affine playback (such as VOD, series, or catchup) must remain pinned
-    // to its original provider account across seeks and range reconnects.
-    // However, if the pinned provider account is currently exhausted or unavailable, allowing fallback
-    // to lineup allocation acts as an emergency failover switch ("Notfallweiche") to prevent immediate
-    // playback disruption when another account in the provider pool has available capacity.
-    let preferred_provider = Some(&user_session.provider);
+    // A provider stays preferred after real media flows or while its allocation is active.
+    // A start that produced no media may choose another alias on its next request.
+    // An exhausted preferred account can still fall back to the lineup.
+    let preferred_provider = (item_type.is_live()
+        || user_session.media_started.load(std::sync::atomic::Ordering::Acquire)
+        || app_state.active_provider.should_reuse_playback_provider(&user_session.token, &user_session.provider))
+    .then_some(&user_session.provider);
     let allow_forced_provider_fallback = true;
     // Never allow provider-side grace for forced seek/session reacquire.
     // Over-allocation here would break provider-side one-connection limits.
@@ -2188,8 +2189,8 @@ pub async fn force_provider_stream_response(
         connection_kind,
         true,
         Some(user_session.token.as_str()),
-        Some(&user_session.provider_session_headers),
-        true,
+        preferred_provider.map(|_| &user_session.provider_session_headers),
+        preferred_provider.is_some(),
         grace_mode.map(|mode| matches!(mode, crate::api::model::GraceMode::Hold)),
         None,
     )
@@ -2467,6 +2468,13 @@ pub(crate) async fn stream_response(
 
     let stream_options = get_stream_options(&app_state.app_config);
     let session_state = app_state.active_users.get_and_update_user_session(&user.username, session_token).await;
+    let pinned_provider = pinned_provider.filter(|provider| {
+        item_type.is_live()
+            || session_state
+                .as_ref()
+                .is_some_and(|session| session.media_started.load(std::sync::atomic::Ordering::Acquire))
+            || app_state.active_provider.should_reuse_playback_provider(session_token, provider)
+    });
     let mut stream_details = match create_stream_response_details(
         app_state,
         &stream_options,
@@ -2663,6 +2671,35 @@ pub(crate) async fn stream_response(
             stream_details.shared_subscriber_id =
                 pending_shared_cleanup.as_ref().map(tuliprox_session::PendingSharedSubscriberCleanup::capability);
         }
+        // In the no-limits path there may be no placeholder yet. The body needs the
+        // session's media flag before its first byte; create that session now.
+        let created_media_session = if !is_stream_shared
+            && !item_type.is_live()
+            && item_type.requires_provider_affinity()
+            && app_state.active_users.media_started_flag(&user.username, session_token).await.is_none()
+        {
+            if let Some(provider) = provider_name.as_deref() {
+                app_state
+                    .active_users
+                    .ensure_user_session_placeholder(crate::api::model::CreateUserSessionParams {
+                        user,
+                        session_token,
+                        virtual_id,
+                        provider,
+                        stream_url: actual_request_url.as_ref(),
+                        addr: &fingerprint.addr,
+                        connection_permission,
+                        connection_kind: Some(connection_kind),
+                        socket_bound,
+                    })
+                    .await;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         let stream = match create_active_client_stream(crate::api::model::ActiveClientStreamParams {
             stream_details,
             app_state,
@@ -2681,15 +2718,19 @@ pub(crate) async fn stream_response(
         {
             Ok(stream) => stream,
             Err(error) => {
-                app_state
-                    .active_users
-                    .release_unbound_session_reservation(
-                        &user.username,
-                        session_token,
-                        activation.placeholder_transition_version,
-                        activation.placeholder_transition_version.is_some(),
-                    )
-                    .await;
+                if created_media_session {
+                    app_state.active_users.terminate_session(&user.username, session_token).await;
+                } else {
+                    app_state
+                        .active_users
+                        .release_unbound_session_reservation(
+                            &user.username,
+                            session_token,
+                            activation.placeholder_transition_version,
+                            activation.placeholder_transition_version.is_some(),
+                        )
+                        .await;
+                }
                 return stream_admission_rejected_response(error, &user.username);
             }
         };
