@@ -43,7 +43,7 @@ steps:
       vod_object: episode.mkv
       method: HEAD
       expected_status: 200
-    assert_origin: { active_body: 1 }
+    assert_origin: { active_body: 1, latest_request_account: account-b }
   - command_id: release-series-probe
     stop: { playback_id: series-head-b }
     assert_origin: { active_body: 1 }
