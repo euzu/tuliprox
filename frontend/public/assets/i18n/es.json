@@ -1365,6 +1365,7 @@
     "RECORDING": "Grabación",
     "RECORDING_ACTION_CANCEL": "Cancelar",
     "RECORDING_ACTION_DELETE": "Eliminar",
+    "RECORDING_ACTION_REMOVE_ENTRY": "Quitar entrada (conservar archivo)",
     "RECORDING_ACTION_EDIT": "Editar",
     "RECORDING_COLUMN_ACTIONS": "Acciones",
     "RECORDING_COLUMN_CHANNEL": "Canal",
@@ -1883,8 +1884,11 @@
       "TASK_RESUMED": "Grabación reanudada.",
       "TASK_REMOVED": "Grabación eliminada.",
       "TASK_RETRIED": "Grabación puesta en cola de nuevo.",
+      "RANGE_UNSUPPORTED": "El proveedor no permite reanudar esta descarga.",
+      "CONFIRM_RESTART_FROM_BEGINNING": "El proveedor no admite descargas parciales. ¿Iniciar de nuevo esta grabación desde el principio? Se descartará la descarga parcial guardada.",
       "CONFIRM_CANCEL": "¿Realmente desea detener esta grabación?",
-      "CONFIRM_REMOVE": "¿Realmente desea eliminar esta entrada?"
+      "CONFIRM_REMOVE": "¿Quitar esta entrada de la lista? Se conservará el archivo guardado.",
+      "CONFIRM_DELETE_FILE": "¿Eliminar esta grabación y el archivo guardado?"
     },
     "RBAC": {
       "ADMIN_HINT": "El usuario es Administrador — los grupos adicionales no tienen efecto.",

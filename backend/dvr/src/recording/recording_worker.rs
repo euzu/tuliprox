@@ -2,7 +2,11 @@ use crate::recording::recording_queue::{RecordingControl, RecordingTask};
 use log::debug;
 use shared::model::RecordingContainerFormat;
 use std::path::{Path, PathBuf};
-use tokio::sync::{Notify, RwLock};
+use tokio::{
+    io::AsyncWriteExt,
+    sync::{Notify, RwLock},
+    time::{timeout, Duration},
+};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,8 +130,9 @@ pub fn build_recording_args(
     container_format: RecordingContainerFormat,
 ) -> Vec<String> {
     vec![
-        "-nostdin".to_string(),
         "-hide_banner".to_string(),
+        "-user_agent".to_string(),
+        shared::model::RECORDING_STREAM_USER_AGENT.to_string(),
         "-loglevel".to_string(),
         "warning".to_string(),
         "-i".to_string(),
@@ -164,6 +169,32 @@ async fn recording_resume_or_retry_is_unsupported(download: &RecordingTask) -> b
 /// permission errors are swallowed because the next attempt's `-y` flag
 /// will overwrite any survivor anyway.
 async fn cleanup_partial(partial_path: &Path) { let _ = tokio::fs::remove_file(partial_path).await; }
+
+async fn finalize_stopped_recording(
+    output: Result<std::io::Result<std::process::Output>, tokio::time::error::Elapsed>,
+    partial_path: &Path,
+    final_path: &Path,
+) -> RecordingExecutionResult {
+    match output {
+        Ok(Ok(output)) if output.status.success() => {
+            if tokio::fs::metadata(partial_path).await.is_ok_and(|metadata| metadata.len() > 0) {
+                return match tuliprox_core::utils::finalize_no_replace(partial_path, final_path).await {
+                    Ok(()) => RecordingExecutionResult::Completed,
+                    Err(err) => {
+                        RecordingExecutionResult::Failed(format!("Failed to finalize stopped recording: {err}"))
+                    }
+                };
+            }
+            RecordingExecutionResult::Failed("Stopped recording has no data".to_string())
+        }
+        Ok(Ok(output)) => RecordingExecutionResult::Failed(format!(
+            "FFmpeg could not finalize stopped recording: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+        Ok(Err(err)) => RecordingExecutionResult::Failed(format!("Failed to stop ffmpeg: {err}")),
+        Err(_) => RecordingExecutionResult::Failed("FFmpeg did not stop within 10 seconds".to_string()),
+    }
+}
 
 pub fn recording_start_missed_window(download: &RecordingTask, now_ts: i64) -> bool {
     download
@@ -211,13 +242,19 @@ pub async fn run_recording_with_binary(
     let args = build_recording_args(download, effective_duration_secs, &partial_path, container_format);
     debug!("recording spawn: {} {}", ffmpeg_binary.display(), args.join(" "));
     let mut command = tokio::process::Command::new(ffmpeg_binary);
-    command.args(args).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
+    command
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
 
-    let child = match command.spawn() {
+    let mut child = match command.spawn() {
         Ok(child) => child,
         Err(err) => return RecordingExecutionResult::Failed(format!("Failed to spawn ffmpeg: {err}")),
     };
 
+    let mut stdin = child.stdin.take();
     let mut wait_future = Box::pin(child.wait_with_output());
 
     loop {
@@ -233,16 +270,39 @@ pub async fn run_recording_with_binary(
                 cleanup_partial(&partial_path).await;
                 return RecordingExecutionResult::Preempted;
             }
-            () = control_notify.notified() => {
-                let result = match *control_signal.read().await {
-                    RecordingControl::Pause => Some(RecordingExecutionResult::Paused),
-                    RecordingControl::Cancel => Some(RecordingExecutionResult::Cancelled),
-                    RecordingControl::Restart => Some(RecordingExecutionResult::Preempted),
-                    RecordingControl::None => None,
-                };
-                if let Some(result) = result {
-                    cleanup_partial(&partial_path).await;
-                    return result;
+            () = async {
+                let notified = control_notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if *control_signal.read().await == RecordingControl::None {
+                    notified.await;
+                }
+            } => {
+                match *control_signal.read().await {
+                    RecordingControl::Cancel => {
+                        // FFmpeg writes the container trailer when it receives
+                        // `q`. Abruptly dropping the child loses the recording,
+                        // and MP4 files in particular may then be unplayable.
+                        if let Some(mut input) = stdin.take() {
+                            let _ = input.write_all(b"q\n").await;
+                            drop(input);
+                        }
+                        return finalize_stopped_recording(
+                            timeout(Duration::from_secs(10), &mut wait_future).await,
+                            &partial_path,
+                            &download.file_path,
+                        )
+                        .await;
+                    }
+                    RecordingControl::Pause => {
+                        cleanup_partial(&partial_path).await;
+                        return RecordingExecutionResult::Paused;
+                    }
+                    RecordingControl::Restart => {
+                        cleanup_partial(&partial_path).await;
+                        return RecordingExecutionResult::Preempted;
+                    }
+                    RecordingControl::None => {}
                 }
             }
             output = &mut wait_future => {
@@ -541,6 +601,108 @@ mod tests {
         assert!(!recording_partial_path(&recording.file_path).exists());
         let _ = fs::remove_file(script);
         let _ = fs::remove_file(&recording.file_path);
+        let _ = fs::remove_dir_all(&recording.file_dir);
+    }
+
+    #[tokio::test]
+    async fn stopping_live_recording_finalizes_bytes_on_disk() {
+        let script = fake_ffmpeg_script(
+            "stop",
+            "#!/bin/sh\nfor arg in \"$@\"; do output=\"$arg\"; done\nprintf 'recorded' > \"$output\"\nread -r command\n[ \"$command\" = q ]\n",
+        );
+        let control_signal = std::sync::Arc::new(RwLock::new(RecordingControl::None));
+        let control_notify = std::sync::Arc::new(Notify::new());
+        let recording = make_recording(chrono::Utc::now().timestamp(), 30);
+        let partial = recording_partial_path(&recording.file_path);
+        let signal = control_signal.clone();
+        let notify = control_notify.clone();
+        let stopper = tokio::spawn(async move {
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while !partial.exists() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("FFmpeg never wrote partial output");
+            *signal.write().await = RecordingControl::Cancel;
+            notify.notify_one();
+        });
+
+        let result = run_recording_with_binary(
+            &script,
+            &recording,
+            &control_signal,
+            &control_notify,
+            None,
+            RecordingContainerFormat::default(),
+        )
+        .await;
+        stopper.await.expect("stopper task");
+
+        assert_eq!(result, RecordingExecutionResult::Completed);
+        assert_eq!(tokio::fs::read(&recording.file_path).await.expect("read saved recording"), b"recorded");
+        assert!(!recording_partial_path(&recording.file_path).exists());
+        let _ = fs::remove_file(script);
+        let _ = fs::remove_dir_all(&recording.file_dir);
+    }
+
+    #[tokio::test]
+    async fn stop_requested_before_wait_begins_is_not_lost() {
+        let script = fake_ffmpeg_script(
+            "early-stop",
+            "#!/bin/sh\nfor arg in \"$@\"; do output=\"$arg\"; done\nprintf 'recorded' > \"$output\"\nread -r command\n[ \"$command\" = q ]\n",
+        );
+        let control_signal = RwLock::new(RecordingControl::Cancel);
+        let control_notify = Notify::new();
+        let recording = make_recording(chrono::Utc::now().timestamp(), 30);
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            run_recording_with_binary(
+                &script,
+                &recording,
+                &control_signal,
+                &control_notify,
+                None,
+                RecordingContainerFormat::default(),
+            ),
+        )
+        .await
+        .expect("early stop was missed");
+
+        assert_eq!(result, RecordingExecutionResult::Completed);
+        assert_eq!(tokio::fs::read(&recording.file_path).await.expect("read saved recording"), b"recorded");
+        let _ = fs::remove_file(script);
+        let _ = fs::remove_dir_all(&recording.file_dir);
+    }
+
+    #[tokio::test]
+    async fn failed_stop_keeps_partial_and_reports_failure() {
+        let script = fake_ffmpeg_script(
+            "failed-stop",
+            "#!/bin/sh\nfor arg in \"$@\"; do output=\"$arg\"; done\nprintf 'partial' > \"$output\"\nread -r command\nprintf 'trailer failed' >&2\nexit 1\n",
+        );
+        let control_signal = RwLock::new(RecordingControl::Cancel);
+        let control_notify = Notify::new();
+        let recording = make_recording(chrono::Utc::now().timestamp(), 30);
+
+        let result = run_recording_with_binary(
+            &script,
+            &recording,
+            &control_signal,
+            &control_notify,
+            None,
+            RecordingContainerFormat::default(),
+        )
+        .await;
+
+        assert!(matches!(result, RecordingExecutionResult::Failed(error) if error.contains("trailer failed")));
+        assert_eq!(
+            tokio::fs::read(recording_partial_path(&recording.file_path)).await.expect("partial data"),
+            b"partial"
+        );
+        assert!(!recording.file_path.exists());
+        let _ = fs::remove_file(script);
         let _ = fs::remove_dir_all(&recording.file_dir);
     }
 

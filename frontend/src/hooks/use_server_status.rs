@@ -996,6 +996,7 @@ mod tests {
             total_bytes: Some(1024),
             next_retry_at: None,
             error: None,
+            restart_from_beginning_required: false,
             owner_id: None,
             visibility: RecordingVisibility::Private,
             channel_id: None,

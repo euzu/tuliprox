@@ -437,6 +437,20 @@ impl RecordingService {
         Ok(())
     }
 
+    /// POST /recording/materializations/{id}/restart after explicit consent.
+    pub async fn restart_task(&self, id: &str) -> Result<(), RecordingError> {
+        let req = RecordingTaskId { id: id.to_string() };
+        let _ = request_post::<&RecordingTaskId, serde_json::Value>(
+            &format!("{}/restart", self.materialization_path(id)),
+            &req,
+            None,
+            Some(Encoding::Json),
+        )
+        .await
+        .map_err(network)?;
+        Ok(())
+    }
+
     /// DELETE /recording/requests/{id} — the caller leaves their own
     /// entry. The file survives while anyone else is still attached.
     pub async fn remove_task(&self, id: &str) -> Result<(), RecordingError> {

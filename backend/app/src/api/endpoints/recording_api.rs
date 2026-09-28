@@ -388,6 +388,32 @@ pub async fn retry_recording_task(
     }
 }
 
+/// POST /api/v1/recording/materializations/{id}/restart
+///
+/// The UI calls this only after the viewer confirms discarding a partial
+/// whose provider ignored a byte-range request.
+pub async fn restart_recording_task(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    State(app_state): State<Arc<AppState>>,
+    AuthClaims(claims): AuthClaims,
+) -> impl IntoResponse {
+    if !is_admin(&claims) {
+        return error_response(StatusCode::FORBIDDEN, "recording_forbidden");
+    }
+    let service = RecordingService::new(app_state.recordings.clone(), app_state.app_config.clone());
+    match service.restart_recording(&claims, &id).await {
+        Ok(true) => {
+            if let Err(error) = start_recording_worker_if_needed(&app_state).await {
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, error);
+            }
+            let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => service_error_response(&ServiceError::InvalidState),
+        Err(err) => service_error_response(&err),
+    }
+}
+
 /// DELETE /api/v1/recording/tasks/{id}
 pub async fn remove_recording_task(
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -1137,6 +1163,7 @@ pub fn recording_api_register(router: Router<Arc<AppState>>) -> axum::Router<Arc
         .route("/materializations/{id}/pause", post(pause_recording_task))
         .route("/materializations/{id}/resume", post(resume_recording_task))
         .route("/materializations/{id}/retry", post(retry_recording_task))
+        .route("/materializations/{id}/restart", post(restart_recording_task))
         .route("/materializations/{id}", axum::routing::delete(delete_recording_task))
         .route("/conflicts/preview", post(preview_recording_conflicts))
         .route("/health", get(get_recording_health))

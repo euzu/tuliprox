@@ -677,6 +677,8 @@ impl RecordingTask {
             total_bytes: self.total_size,
             next_retry_at: self.next_retry_at,
             error: self.error.clone(),
+            restart_from_beginning_required: self.state == RecordingTaskState::Failed
+                && self.error.as_deref() == Some(super::recording_transfer::RANGE_UNSUPPORTED_ERROR),
             owner_id: is_owner.then(|| meta.owner_id().clone()),
             visibility: meta.visibility,
             channel_id: meta.channel_id.clone(),

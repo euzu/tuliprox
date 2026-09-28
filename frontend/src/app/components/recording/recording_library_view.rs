@@ -20,7 +20,7 @@ use shared::{
     model::{Permission, ProtocolMessage, RecordingKind, RecordingTaskDto, SortOrder, TransferStatusDto},
     utils::unix_ts_to_str,
 };
-use std::{cmp::Ordering, rc::Rc};
+use std::{cmp::Ordering, collections::HashSet, rc::Rc};
 use yew::{platform::spawn_local, prelude::*};
 
 const HEADERS: [&str; 9] = [
@@ -47,6 +47,7 @@ struct RecordingActionAvailability {
     resume: bool,
     cancel: bool,
     remove: bool,
+    delete_file: bool,
     retry: bool,
 }
 
@@ -73,12 +74,16 @@ fn collect_tasks_for_tab(tab: RecordingTab, tasks: &Rc<Vec<RecordingTaskDto>>) -
 }
 
 fn sort_tasks(items: &mut [Rc<RecordingTaskDto>], sort: Option<(usize, SortOrder)>) {
-    if let Some((col, order)) = sort {
+    if let Some((col, order @ (SortOrder::Asc | SortOrder::Desc))) = sort {
         items.sort_by(|a, b| match order {
             SortOrder::Asc => compare_tasks(a, b, col),
             SortOrder::Desc => compare_tasks(b, a, col),
             SortOrder::None => Ordering::Equal,
         });
+    } else {
+        // IDs begin with a fixed-width creation timestamp, so this also
+        // orders VOD tasks that have no scheduled programme time.
+        items.sort_by(|a, b| b.id.cmp(&a.id));
     }
 }
 
@@ -144,10 +149,15 @@ fn format_duration(task: &RecordingTaskDto) -> String {
         .unwrap_or_default()
 }
 
-fn format_error_parts(task: &RecordingTaskDto, attempt_label: &str, next_retry_label: &str) -> String {
+fn format_error_parts(
+    task: &RecordingTaskDto,
+    attempt_label: &str,
+    next_retry_label: &str,
+    error_override: Option<&str>,
+) -> String {
     let mut parts = Vec::new();
-    if let Some(error) = task.error.as_ref().filter(|error| !error.is_empty()) {
-        parts.push(error.clone());
+    if let Some(error) = error_override.or(task.error.as_deref()).filter(|error| !error.is_empty()) {
+        parts.push(error.to_string());
     }
     if task.retry_attempts > 0 {
         parts.push(format!("{attempt_label} {}", task.retry_attempts));
@@ -159,7 +169,8 @@ fn format_error_parts(task: &RecordingTaskDto, attempt_label: &str, next_retry_l
 }
 
 fn format_error(translate: &crate::i18n::YewI18n, task: &RecordingTaskDto) -> String {
-    format_error_parts(task, &translate.t("LABEL.ATTEMPT"), &translate.t("LABEL.NEXT_RETRY"))
+    let localized = task.restart_from_beginning_required.then(|| translate.t("MESSAGES.RECORDING.RANGE_UNSUPPORTED"));
+    format_error_parts(task, &translate.t("LABEL.ATTEMPT"), &translate.t("LABEL.NEXT_RETRY"), localized.as_deref())
 }
 
 fn compare_tasks(a: &RecordingTaskDto, b: &RecordingTaskDto, col: usize) -> Ordering {
@@ -190,6 +201,7 @@ fn action_availability(can_manage: bool, can_delete: bool, task: &RecordingTaskD
         resume: can_manage && allowed.resume,
         cancel: can_manage && allowed.cancel,
         remove: can_delete && allowed.remove,
+        delete_file: can_delete && allowed.remove,
         retry: can_manage && allowed.retry,
     }
 }
@@ -202,7 +214,9 @@ enum TaskControl {
     Resume,
     Cancel,
     Remove,
+    DeleteFile,
     Retry,
+    Restart,
 }
 
 impl TaskControl {
@@ -211,7 +225,8 @@ impl TaskControl {
         match self {
             Self::Cancel => Some("MESSAGES.RECORDING.CONFIRM_CANCEL"),
             Self::Remove => Some("MESSAGES.RECORDING.CONFIRM_REMOVE"),
-            Self::Pause | Self::Resume | Self::Retry => None,
+            Self::DeleteFile => Some("MESSAGES.RECORDING.CONFIRM_DELETE_FILE"),
+            Self::Pause | Self::Resume | Self::Retry | Self::Restart => None,
         }
     }
 
@@ -221,7 +236,8 @@ impl TaskControl {
             Self::Resume => "MESSAGES.RECORDING.TASK_RESUMED",
             Self::Cancel => "MESSAGES.RECORDING.TASK_CANCELLED",
             Self::Remove => "MESSAGES.RECORDING.TASK_REMOVED",
-            Self::Retry => "MESSAGES.RECORDING.TASK_RETRIED",
+            Self::DeleteFile => "MESSAGES.RECORDING.TASK_DELETED",
+            Self::Retry | Self::Restart => "MESSAGES.RECORDING.TASK_RETRIED",
         }
     }
 }
@@ -233,7 +249,9 @@ async fn run_control(control: TaskControl, id: &str) -> Result<(), crate::servic
         TaskControl::Resume => service.resume_task(id).await,
         TaskControl::Cancel => service.cancel_task(id).await,
         TaskControl::Remove => service.remove_task(id).await,
+        TaskControl::DeleteFile => service.delete_task(id).await,
         TaskControl::Retry => service.retry_task(id).await,
+        TaskControl::Restart => service.restart_task(id).await,
     }
 }
 
@@ -251,12 +269,10 @@ fn format_quota_pool(used_bytes: u64, limit_bytes: Option<u64>) -> String {
 
 /// Whether an arriving snapshot should replace what is rendered.
 ///
-/// Revisions are global, so gaps are normal and carry no meaning. Going
-/// backwards does: that is a reordered delivery, and applying it would
-/// regress the list to a state the server has already moved past. `None`
-/// means nothing has been rendered yet, or a reconnect has just discarded
-/// what was.
-fn should_apply_snapshot(seen: Option<u64>, incoming: u64) -> bool { seen.is_none_or(|last| incoming > last) }
+/// Revisions advance for queue changes, while in-memory byte progress keeps
+/// the same revision. WebSocket frames arrive in order on one connection, so
+/// a repeated revision can carry newer progress. Older revisions are stale.
+fn should_apply_snapshot(seen: Option<u64>, incoming: u64) -> bool { seen.is_none_or(|last| incoming >= last) }
 
 pub const fn should_request_recording_snapshot(active: bool, recording_enabled: bool, has_loaded: bool) -> bool {
     active && recording_enabled && !has_loaded
@@ -277,6 +293,7 @@ pub fn recording_library_view(props: &RecordingLibraryViewProps) -> Html {
         config_ctx.as_ref().and_then(|ctx| ctx.config.as_ref()).is_some_and(|cfg| cfg.is_recording_enabled());
     let dialog = use_context::<DialogService>().expect("Dialog service not found");
     let can_manage = services.auth.has_permission(Permission::RecordingManage);
+    let can_restart = services.auth.is_admin();
     let can_delete = services.auth.has_permission(Permission::RecordingDelete);
     let active_tab = use_state(|| RecordingTab::Current);
     let tasks_state = use_state(|| Rc::new(Vec::<RecordingTaskDto>::new()));
@@ -296,6 +313,7 @@ pub fn recording_library_view(props: &RecordingLibraryViewProps) -> Html {
     // Stale data is more useful than no data, but it has to be labelled.
     let connected = use_state(|| true);
     let has_loaded = use_mut_ref(|| false);
+    let prompted_restart_ids = use_mut_ref(HashSet::<String>::new);
 
     let request_snapshot = {
         let services = services.clone();
@@ -380,22 +398,71 @@ pub fn recording_library_view(props: &RecordingLibraryViewProps) -> Html {
         });
     }
 
+    {
+        let dialog = dialog.clone();
+        let translate = translate.clone();
+        let services = services.clone();
+        let request_snapshot = request_snapshot.clone();
+        let prompted_restart_ids = prompted_restart_ids.clone();
+        use_effect_with((props.active, (*tasks_state).clone()), move |(active, tasks)| {
+            if *active && can_restart {
+                let next = tasks.iter().find(|task| {
+                    task.restart_from_beginning_required && !prompted_restart_ids.borrow().contains(&task.id)
+                });
+                if let Some(task) = next {
+                    let id = task.id.clone();
+                    prompted_restart_ids.borrow_mut().insert(id.clone());
+                    let dialog = dialog.clone();
+                    let translate = translate.clone();
+                    let services = services.clone();
+                    let request_snapshot = request_snapshot.clone();
+                    spawn_local(async move {
+                        if dialog.confirm(&translate.t("MESSAGES.RECORDING.CONFIRM_RESTART_FROM_BEGINNING")).await
+                            == DialogResult::Ok
+                        {
+                            match RecordingService::new().restart_task(&id).await {
+                                Ok(()) => services.toastr.success(translate.t("MESSAGES.RECORDING.TASK_RETRIED")),
+                                Err(error) => services.toastr.error(translate.t(error.i18n_key())),
+                            }
+                            request_snapshot.emit(());
+                        }
+                    });
+                }
+            }
+            || ()
+        });
+    }
+
     let control_handler = {
         let request_snapshot = request_snapshot.clone();
         let services = services.clone();
         let translate = translate.clone();
         let dialog = dialog.clone();
+        let tasks_state = tasks_state.clone();
         move |control: TaskControl| {
             let request_snapshot = request_snapshot.clone();
             let services = services.clone();
             let translate = translate.clone();
             let dialog = dialog.clone();
+            let tasks_state = tasks_state.clone();
             Callback::from(move |id: String| {
                 let request_snapshot = request_snapshot.clone();
                 let services = services.clone();
                 let translate = translate.clone();
                 let dialog = dialog.clone();
+                let restart_required = control == TaskControl::Retry
+                    && tasks_state.iter().any(|task| task.id == id && task.restart_from_beginning_required);
                 spawn_local(async move {
+                    let control = if restart_required {
+                        if dialog.confirm(&translate.t("MESSAGES.RECORDING.CONFIRM_RESTART_FROM_BEGINNING")).await
+                            != DialogResult::Ok
+                        {
+                            return;
+                        }
+                        TaskControl::Restart
+                    } else {
+                        control
+                    };
                     if let Some(key) = control.confirm_key() {
                         if dialog.confirm(&translate.t(key)).await != DialogResult::Ok {
                             return;
@@ -415,6 +482,7 @@ pub fn recording_library_view(props: &RecordingLibraryViewProps) -> Html {
     let handle_resume = control_handler(TaskControl::Resume);
     let handle_cancel = control_handler(TaskControl::Cancel);
     let handle_remove = control_handler(TaskControl::Remove);
+    let handle_delete_file = control_handler(TaskControl::DeleteFile);
     let handle_retry = control_handler(TaskControl::Retry);
 
     let render_header_cell = {
@@ -432,6 +500,7 @@ pub fn recording_library_view(props: &RecordingLibraryViewProps) -> Html {
         let handle_resume = handle_resume.clone();
         let handle_cancel = handle_cancel.clone();
         let handle_remove = handle_remove.clone();
+        let handle_delete_file = handle_delete_file.clone();
         let handle_retry = handle_retry.clone();
         Callback::<(usize, usize, Rc<RecordingTaskDto>), Html>::from(
             move |(_row, col, dto): (usize, usize, Rc<RecordingTaskDto>)| match col {
@@ -444,11 +513,13 @@ pub fn recording_library_view(props: &RecordingLibraryViewProps) -> Html {
                     let cancel_id = dto.id.clone();
                     let retry_id = dto.id.clone();
                     let remove_id = dto.id.clone();
+                    let delete_file_id = dto.id.clone();
                     let pause_handle = handle_pause.clone();
                     let resume_handle = handle_resume.clone();
                     let cancel_handle = handle_cancel.clone();
                     let retry_handle = handle_retry.clone();
                     let remove_handle = handle_remove.clone();
+                    let delete_file_handle = handle_delete_file.clone();
                     html! {
                         <div class="tp__recording-table__actions">
                             if actions.pause {
@@ -460,18 +531,23 @@ pub fn recording_library_view(props: &RecordingLibraryViewProps) -> Html {
                             if actions.cancel {
                                 <IconButton name="Cancel" icon="Stop" onclick={Callback::from(move |_| cancel_handle.emit(cancel_id.clone()))} />
                             }
-                            if actions.retry {
+                            if actions.retry && can_restart {
                                 <IconButton name={retry_label} icon={retry_icon} onclick={Callback::from(move |_| retry_handle.emit(retry_id.clone()))} />
                             }
                             if actions.remove {
-                                <IconButton name="Remove" icon="Delete" onclick={Callback::from(move |_| remove_handle.emit(remove_id.clone()))} />
+                                <IconButton name={translate.t("LABEL.RECORDING_ACTION_REMOVE_ENTRY")} icon="Close" onclick={Callback::from(move |_| remove_handle.emit(remove_id.clone()))} />
+                            }
+                            if actions.delete_file {
+                                <IconButton name={translate.t("LABEL.DELETE")} icon="Delete" onclick={Callback::from(move |_| delete_file_handle.emit(delete_file_id.clone()))} />
                             }
                         </div>
                     }
                 }
                 1 => html! { <span class="tp__table__nowrap">{dto.title.clone()}</span> },
                 2 => html! { format_recording_kind(&translate, dto.kind) },
-                3 => html! { <TaskStatusBadge status={dto.status} detail={dto.error.clone()} /> },
+                3 => {
+                    html! { <TaskStatusBadge status={dto.status} detail={dto.restart_from_beginning_required.then(|| translate.t("MESSAGES.RECORDING.RANGE_UNSUPPORTED")).or_else(|| dto.error.clone())} /> }
+                }
                 4 => render_progress(&dto),
                 5 => {
                     html! { <span class="tp__table__nowrap">{dto.total_bytes.map_or_else(String::new, format_bytes)}</span> }
@@ -611,6 +687,7 @@ mod tests {
             total_bytes: None,
             next_retry_at: None,
             error: None,
+            restart_from_beginning_required: false,
             owner_id: None,
             visibility: RecordingVisibility::Private,
             channel_id: None,
@@ -683,11 +760,9 @@ mod tests {
     }
 
     #[test]
-    fn an_older_or_repeated_snapshot_is_ignored() {
-        // Reordered delivery. Applying it would regress the list to a state
-        // the server has already moved past.
+    fn an_older_snapshot_is_ignored_but_same_revision_progress_is_applied() {
         assert!(!should_apply_snapshot(Some(7), 6));
-        assert!(!should_apply_snapshot(Some(7), 7), "the same revision has nothing new to say");
+        assert!(should_apply_snapshot(Some(7), 7), "bytes can grow without a queue mutation");
     }
 
     #[test]
@@ -741,6 +816,18 @@ mod tests {
     }
 
     #[test]
+    fn default_order_shows_newest_recording_first() {
+        let tasks = Rc::new(vec![
+            task("0001", RecordingKind::Live, TransferStatusDto::Completed),
+            task("0003", RecordingKind::Vod, TransferStatusDto::Completed),
+            task("0002", RecordingKind::Live, TransferStatusDto::Completed),
+        ]);
+        let sorted = collect_sorted_tasks_for_tab(RecordingTab::Completed, &tasks, None);
+        let ids: Vec<_> = sorted.iter().map(|task| task.id.as_str()).collect();
+        assert_eq!(ids, ["0003", "0002", "0001"]);
+    }
+
+    #[test]
     fn completed_tab_falls_back_to_current_while_work_runs() {
         let tasks = vec![task("a", RecordingKind::Vod, TransferStatusDto::Running)];
         assert_eq!(normalize_tab(RecordingTab::Completed, &tasks), RecordingTab::Current);
@@ -775,6 +862,7 @@ mod tests {
         assert!(!action_availability(true, false, &allowed).remove);
         assert!(!action_availability(false, true, &allowed).cancel);
         assert!(action_availability(false, true, &allowed).remove);
+        assert!(action_availability(false, true, &allowed).delete_file);
     }
 
     #[test]
@@ -801,7 +889,7 @@ mod tests {
         let mut t = task("t", RecordingKind::Vod, TransferStatusDto::RetryWaiting);
         t.error = Some("boom".to_string());
         t.retry_attempts = 2;
-        let text = format_error_parts(&t, "Attempt", "Next");
+        let text = format_error_parts(&t, "Attempt", "Next", None);
         assert!(text.starts_with("boom | Attempt 2"), "{text}");
     }
 

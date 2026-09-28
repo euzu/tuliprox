@@ -54,6 +54,7 @@ const DOWNLOAD_SNAPSHOT_UPDATE_BYTES: u64 = 4 * 1024 * 1024;
 // race where a control change fires while a chunk is being written (notify is not
 // persisted), so it does not need to run on every chunk.
 const DOWNLOAD_CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(200);
+pub(crate) const RANGE_UNSUPPORTED_ERROR: &str = "range_unsupported";
 const RECORDING_PROGRESS_UPDATE_INTERVAL: Duration = Duration::from_secs(5);
 type ProviderCapacities = Vec<(Arc<str>, usize, usize)>;
 
@@ -281,7 +282,12 @@ async fn send_download_request(
         return Err(result);
     }
 
-    let mut request = client.get(url.clone());
+    // The resume offset refers to bytes stored on disk, so neither the
+    // provider nor the internal proxy may change the response encoding.
+    let mut request = client
+        .get(url.clone())
+        .header(reqwest::header::USER_AGENT, shared::model::RECORDING_STREAM_USER_AGENT)
+        .header(reqwest::header::ACCEPT_ENCODING, "identity");
     if offset > 0 {
         request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
     }
@@ -393,7 +399,7 @@ async fn download_file<E: EventSink>(
     let worker_uuid = file_download.uuid.as_str();
     let url = file_download.url.clone();
     let file_path = http_transfer_path(&file_download);
-    let mut existing_size = tokio::fs::metadata(&file_path).await.map_or(0, |metadata| metadata.len());
+    let existing_size = tokio::fs::metadata(&file_path).await.map_or(0, |metadata| metadata.len());
     let response_result = send_download_request(
         client,
         &url,
@@ -405,7 +411,7 @@ async fn download_file<E: EventSink>(
     .await;
 
     match response_result {
-        Ok(mut response) => {
+        Ok(response) => {
             if existing_size > 0 {
                 // The validators were captured when the first byte was written.
                 // Without them a provider that replaces the file between an
@@ -420,7 +426,6 @@ async fn download_file<E: EventSink>(
                 };
                 match validate_resume_response(&ResponseSnapshot::from_response(&response), &validator) {
                     Ok(()) => {}
-                    Err(ResumeValidationError::IgnoredRange) => existing_size = 0,
                     Err(ResumeValidationError::Unsatisfiable { complete: true }) => {
                         return match finalize_http_transfer(&file_download.file_path, &file_path).await {
                             Ok(()) => DownloadExecutionResult::Completed,
@@ -430,30 +435,13 @@ async fn download_file<E: EventSink>(
                             )),
                         };
                     }
+                    Err(ResumeValidationError::IgnoredRange) => {
+                        return DownloadExecutionResult::Failed(RANGE_UNSUPPORTED_ERROR.to_string());
+                    }
                     Err(error) => {
-                        warn!("Discarding unsafe resume response for {url}: {error}; restarting from byte zero");
-                        response = match send_download_request(
-                            client,
-                            &url,
-                            0,
-                            &control_signal,
-                            &control_notify,
-                            provider_cancel_token.as_ref(),
-                        )
-                        .await
-                        {
-                            Ok(response) => response,
-                            Err(result) => return result,
-                        };
-                        existing_size = 0;
-                        if let Err(error) = validate_resume_response(
-                            &ResponseSnapshot::from_response(&response),
-                            &ResumeValidator::default(),
-                        ) {
-                            return DownloadExecutionResult::Failed(format!(
-                                "Unsafe fresh download response for {url}: {error}"
-                            ));
-                        }
+                        return DownloadExecutionResult::Failed(format!(
+                            "Cannot resume download at byte {existing_size} for {url}: {error}; partial file preserved"
+                        ));
                     }
                 }
             }
@@ -474,7 +462,7 @@ async fn download_file<E: EventSink>(
             let captured = capture_resume_validators(&response);
 
             if total_size.is_some() || existing_size == 0 {
-                let changed = update_active_download_for_worker(&active, worker_uuid, |download| {
+                update_active_download_for_worker(&active, worker_uuid, |download| {
                     if let Some(total) = total_size {
                         download.total_size = Some(total);
                     }
@@ -487,11 +475,6 @@ async fn download_file<E: EventSink>(
                     true
                 })
                 .await;
-                if changed {
-                    if let Some(event_manager) = event_manager {
-                        publish_recording_change(event_manager);
-                    }
-                }
             }
 
             match fs::create_dir_all(&file_download.file_dir).await {
@@ -690,9 +673,6 @@ async fn download_file<E: EventSink>(
                                                                 }
                                                                 last_progress_log_at = now;
                                                                 last_progress_logged_bytes = downloaded;
-                                                                if let Some(event_manager) = event_manager {
-                                                                    publish_recording_change(event_manager);
-                                                                }
                                                             }
                                                         } else {
                                                             saw_first_chunk = true;
@@ -702,17 +682,15 @@ async fn download_file<E: EventSink>(
                                                                 );
                                                             last_progress_log_at = Instant::now();
                                                             last_progress_logged_bytes = downloaded;
-                                                            if let Some(event_manager) = event_manager {
-                                                                publish_recording_change(event_manager);
-                                                            }
                                                         }
-                                                        let should_update_snapshot = downloaded
-                                                            .saturating_sub(last_snapshot_update_bytes)
-                                                            >= DOWNLOAD_SNAPSHOT_UPDATE_BYTES
+                                                        let should_update_snapshot = (last_snapshot_update_bytes == 0
+                                                            && downloaded > 0)
+                                                            || downloaded.saturating_sub(last_snapshot_update_bytes)
+                                                                >= DOWNLOAD_SNAPSHOT_UPDATE_BYTES
                                                             || Instant::now().duration_since(last_snapshot_update_at)
                                                                 >= DOWNLOAD_SNAPSHOT_UPDATE_INTERVAL;
                                                         if should_update_snapshot {
-                                                            update_active_download_for_worker(
+                                                            let changed = update_active_download_for_worker(
                                                                 &active,
                                                                 worker_uuid,
                                                                 |download| {
@@ -721,6 +699,11 @@ async fn download_file<E: EventSink>(
                                                                 },
                                                             )
                                                             .await;
+                                                            if changed {
+                                                                if let Some(event_manager) = event_manager {
+                                                                    publish_recording_progress(event_manager);
+                                                                }
+                                                            }
                                                             last_snapshot_update_at = Instant::now();
                                                             last_snapshot_update_bytes = downloaded;
                                                         }
@@ -1582,10 +1565,16 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
                                             }
                                         }
                                     };
+                                    let final_progress_path = if matches!(&result, RecordingExecutionResult::Completed)
+                                    {
+                                        &execution_download.file_path
+                                    } else {
+                                        &progress_path
+                                    };
                                     refresh_recording_progress(
                                         &dq.active,
                                         &worker_uuid,
-                                        &progress_path,
+                                        final_progress_path,
                                         &event_manager,
                                     )
                                     .await;
@@ -1876,7 +1865,7 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
                         let mut running = dq.worker_running.write().await;
                         if dq.queue.lock().await.is_empty() {
                             *running = false;
-                            break;
+                            return;
                         }
                         drop(running);
                         // Nothing runnable right now means the next submission
@@ -2001,10 +1990,22 @@ fn start_recording_scheduler<E: EventSink + Clone + 'static>(
                 () = scheduler_cancel_token.cancelled() => break,
                 _ = interval.tick() => {}
             }
-            if scheduler_recordings.promote_due_scheduled_now().await == 0 {
+            let promoted = scheduler_recordings.promote_due_scheduled_now().await;
+            if promoted > 0 {
+                publish_recording_change(&event_manager);
+            }
+            // A worker can exit while a resume or enqueue observes its old
+            // running flag. Heal runnable work even when no scheduled task is due.
+            let active_runnable =
+                scheduler_recordings.active.read().await.as_ref().map(|active| !active.paused && !active.finished);
+            let needs_worker = !*scheduler_recordings.worker_running.read().await
+                && match active_runnable {
+                    Some(runnable) => runnable,
+                    None => !scheduler_recordings.queue.lock().await.is_empty(),
+                };
+            if !needs_worker {
                 continue;
             }
-            publish_recording_change(&event_manager);
             let _ = ensure_recording_worker_running(
                 &app_config,
                 &recording_cfg,
@@ -2021,8 +2022,9 @@ fn start_recording_scheduler<E: EventSink + Clone + 'static>(
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_recording_worker_running, finalize_http_transfer, http_transfer_path, recording_deadline_instant,
-        wait_for_provider_slot, DISK_GONE_BEFORE_START, LIVE_CAPACITY_WINDOW_CLOSED,
+        download_file, ensure_recording_worker_running, finalize_http_transfer, http_transfer_path,
+        recording_deadline_instant, refresh_recording_progress, start_recording_scheduler, wait_for_provider_slot,
+        DownloadExecutionResult, DISK_GONE_BEFORE_START, LIVE_CAPACITY_WINDOW_CLOSED,
     };
     use crate::recording::{
         recording_capacity::{stub::StubCapacity, RecordingCapacityPort},
@@ -2032,17 +2034,33 @@ mod tests {
         },
     };
     use shared::model::{
-        NoopSink, RecordingKind, RecordingMetadata, RecordingOwner, RecordingSource, RecordingTaskState,
-        RecordingVisibility, UserId,
+        EventMessage, EventSink, NoopSink, RecordingKind, RecordingMetadata, RecordingOwner, RecordingSource,
+        RecordingTaskState, RecordingVisibility, UserId,
     };
     use std::{
+        io::{Read, Write},
+        net::TcpListener,
         path::{Path, PathBuf},
-        sync::Arc,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
         time::Duration,
     };
     use tempfile::TempDir;
     use tokio::sync::{Notify, RwLock};
     use tuliprox_core::model::RecordingConfig;
+
+    #[derive(Clone, Default)]
+    struct ProgressSink(Arc<AtomicUsize>);
+
+    impl EventSink for ProgressSink {
+        fn emit(&self, event: EventMessage) {
+            if matches!(event, EventMessage::RecordingProgress) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
 
     /// A task whose Live window runs from `program_start` for `duration_secs`.
     fn scheduled_task(kind: RecordingKind, program_start: i64, duration_secs: i64) -> RecordingTask {
@@ -2077,6 +2095,118 @@ mod tests {
             recording: meta,
         })
         .expect("valid fixture")
+    }
+
+    fn serve_range_fixture(ignore_range: bool) -> (reqwest::Url, std::thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
+        let url = reqwest::Url::parse(&format!("http://{}/download", listener.local_addr().expect("server address")))
+            .expect("fixture URL");
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept download request");
+            socket.set_read_timeout(Some(Duration::from_secs(5))).expect("read timeout");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = socket.read(&mut chunk).expect("read download request");
+                assert!(read > 0, "request ended before headers");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let request = String::from_utf8(request).expect("request headers");
+            let (status, headers, body) = if ignore_range {
+                ("200 OK", "", b"0123456789".as_slice())
+            } else {
+                ("206 Partial Content", "Content-Range: bytes 4-9/10\r\n", b"456789".as_slice())
+            };
+            let response =
+                format!("HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            socket.write_all(response.as_bytes()).expect("write response headers");
+            socket.write_all(body).expect("write response body");
+            request
+        });
+        (url, server)
+    }
+
+    #[tokio::test]
+    async fn vod_and_series_resume_at_the_saved_byte_offset() {
+        for kind in [RecordingKind::Vod, RecordingKind::Series] {
+            let dir = TempDir::new().expect("recording directory");
+            let (url, server) = serve_range_fixture(false);
+            let mut task = scheduled_task(kind, chrono::Utc::now().timestamp(), 900);
+            task.file_dir = dir.path().to_path_buf();
+            task.file_path = dir.path().join("recording.mp4");
+            task.url = url;
+            task.total_size = Some(10);
+            let partial = http_transfer_path(&task);
+            tokio::fs::write(&partial, b"0123").await.expect("saved partial");
+            let active = Arc::new(RwLock::new(Some(task.clone())));
+            let result = download_file::<NoopSink>(
+                active,
+                task.clone(),
+                &reqwest::Client::new(),
+                Arc::new(RwLock::new(RecordingControl::None)),
+                Arc::new(Notify::new()),
+                None,
+                None,
+            )
+            .await;
+            assert!(matches!(result, DownloadExecutionResult::Completed));
+            assert_eq!(tokio::fs::read(&task.file_path).await.expect("completed recording"), b"0123456789");
+            assert!(!partial.exists());
+            let request = server.join().expect("fixture server").to_ascii_lowercase();
+            assert!(request.contains("range: bytes=4-\r\n"), "missing resume Range: {request}");
+            assert!(request.contains("accept-encoding: identity\r\n"), "missing identity encoding: {request}");
+        }
+    }
+
+    #[tokio::test]
+    async fn ignored_range_preserves_vod_and_series_partials() {
+        for kind in [RecordingKind::Vod, RecordingKind::Series] {
+            let dir = TempDir::new().expect("recording directory");
+            let (url, server) = serve_range_fixture(true);
+            let mut task = scheduled_task(kind, chrono::Utc::now().timestamp(), 900);
+            task.file_dir = dir.path().to_path_buf();
+            task.file_path = dir.path().join("recording.mp4");
+            task.url = url;
+            task.total_size = Some(10);
+            let partial = http_transfer_path(&task);
+            tokio::fs::write(&partial, b"0123").await.expect("saved partial");
+            let result = download_file::<NoopSink>(
+                Arc::new(RwLock::new(Some(task.clone()))),
+                task.clone(),
+                &reqwest::Client::new(),
+                Arc::new(RwLock::new(RecordingControl::None)),
+                Arc::new(Notify::new()),
+                None,
+                None,
+            )
+            .await;
+            assert!(
+                matches!(result, DownloadExecutionResult::Failed(error) if error == super::RANGE_UNSUPPORTED_ERROR)
+            );
+            assert_eq!(tokio::fs::read(&partial).await.expect("partial preserved"), b"0123");
+            assert!(!task.file_path.exists());
+            assert!(server.join().expect("fixture server").to_ascii_lowercase().contains("range: bytes=4-\r\n"));
+        }
+    }
+
+    #[tokio::test]
+    async fn live_byte_progress_is_visible_without_a_queue_revision_change() {
+        let dir = TempDir::new().expect("tempdir");
+        let partial = dir.path().join("capture.ts.partial");
+        std::fs::write(&partial, b"growing capture").expect("write partial recording");
+        let queue = RecordingQueue::new();
+        *queue.active.write().await = Some(scheduled_task(RecordingKind::Live, 0, 60));
+        let events = ProgressSink::default();
+
+        refresh_recording_progress(&queue.active, "task", &partial, &events).await;
+        let (revision, tasks) = queue.committed_snapshot().await;
+
+        assert_eq!(revision.0, 0);
+        assert_eq!(tasks[0].size, b"growing capture".len() as u64);
+        assert_eq!(events.0.load(Ordering::Relaxed), 1);
+
+        refresh_recording_progress(&queue.active, "task", &partial, &events).await;
+        assert_eq!(events.0.load(Ordering::Relaxed), 1, "unchanged bytes need no second event");
     }
 
     #[test]
@@ -2333,6 +2463,51 @@ mod tests {
 
     fn spawn_count(log: &Path) -> usize {
         std::fs::read_to_string(log).map_or(0, |text| text.lines().filter(|line| !line.is_empty()).count())
+    }
+
+    #[tokio::test]
+    async fn scheduler_starts_a_queued_transfer_after_worker_exit() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let queue = Arc::new(RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open repository"));
+        let mut transfer = scheduled_task(RecordingKind::Vod, chrono::Utc::now().timestamp(), 300);
+        transfer.state = RecordingTaskState::Queued;
+        transfer.input_name = Some(Arc::from("provider"));
+        let persisted = RecordingQueue::to_persisted(&transfer);
+        crate::recording::recording_queue::mutate(&queue, move |candidate| {
+            candidate.queue.push(persisted.clone());
+            Ok(())
+        })
+        .await
+        .expect("seed queue");
+
+        let capacity: Arc<dyn RecordingCapacityPort> = StubCapacity::full();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        start_recording_scheduler(
+            Arc::new(bare_app_config()),
+            RecordingConfig::from(&shared::model::RecordingConfigDto { enabled: true, ..Default::default() }),
+            &queue,
+            NoopSink,
+            capacity,
+            cancel.clone(),
+        );
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if queue
+                    .active
+                    .read()
+                    .await
+                    .as_ref()
+                    .is_some_and(|task| task.state == RecordingTaskState::WaitingForCapacity)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("scheduler did not restart the stranded transfer");
+        cancel.cancel();
     }
 
     #[tokio::test(start_paused = true)]

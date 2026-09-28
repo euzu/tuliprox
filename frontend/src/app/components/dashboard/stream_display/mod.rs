@@ -4,9 +4,8 @@ mod meter;
 
 use self::{
     helpers::{
-        filter_visible_streams, get_adaptive_session_ttl_secs, is_background_transfer_stream,
-        is_stream_metrics_enabled, refresh_adaptive_last_seen, update_timestamps,
-        ADAPTIVE_STREAM_CLEANUP_INTERVAL_MILLIS,
+        filter_visible_streams, get_adaptive_session_ttl_secs, is_recording_stream, is_stream_metrics_enabled,
+        refresh_adaptive_last_seen, update_timestamps, ADAPTIVE_STREAM_CLEANUP_INTERVAL_MILLIS,
     },
     item::StreamDisplayItem,
 };
@@ -21,6 +20,7 @@ use crate::{
 };
 use gloo_timers::callback::Interval;
 pub use helpers::get_stream_info_config;
+pub(super) use helpers::is_background_transfer_stream;
 use shared::{
     defaults::default_kick_secs,
     model::{
@@ -214,7 +214,7 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
         Callback::from(move |(name, _): (String, _)| {
             if let Ok(action) = StreamDisplayAction::from_str(&name) {
                 if let Some(dto) = (*selected_dto).as_ref() {
-                    if is_background_transfer_stream(dto) {
+                    if is_background_transfer_stream(dto) || is_recording_stream(dto) {
                         popup_is_open_state.set(false);
                         return;
                     }

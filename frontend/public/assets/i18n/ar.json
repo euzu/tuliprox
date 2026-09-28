@@ -1755,6 +1755,7 @@
     "RECORDING": "تسجيل",
     "RECORDING_ACTION_CANCEL": "إلغاء",
     "RECORDING_ACTION_DELETE": "حذف",
+    "RECORDING_ACTION_REMOVE_ENTRY": "إزالة الإدخال (الاحتفاظ بالملف)",
     "RECORDING_ACTION_EDIT": "تحرير",
     "RECORDING_COLUMN_ACTIONS": "إجراءات",
     "RECORDING_COLUMN_CHANNEL": "القناة",
@@ -1949,8 +1950,11 @@
       "TASK_RESUMED": "تم استئناف التسجيل.",
       "TASK_REMOVED": "تمت إزالة التسجيل.",
       "TASK_RETRIED": "تمت إعادة التسجيل إلى الطابور.",
+      "RANGE_UNSUPPORTED": "لا يدعم المزوّد استئناف هذا التنزيل.",
+      "CONFIRM_RESTART_FROM_BEGINNING": "لا يدعم المزوّد التنزيل الجزئي. هل تريد بدء هذا التسجيل من البداية؟ سيتم حذف الجزء المحفوظ من التنزيل.",
       "CONFIRM_CANCEL": "هل تريد بالتأكيد إيقاف هذا التسجيل؟",
-      "CONFIRM_REMOVE": "هل تريد بالتأكيد إزالة هذا العنصر؟"
+      "CONFIRM_REMOVE": "هل تريد إزالة هذا الإدخال من القائمة؟ سيبقى الملف المحفوظ.",
+      "CONFIRM_DELETE_FILE": "هل تريد حذف هذا التسجيل وملفه المحفوظ؟"
     },
     "RBAC": {
       "ADMIN_HINT": "المستخدم مسؤول — المجموعات الإضافية ليس لها تأثير.",

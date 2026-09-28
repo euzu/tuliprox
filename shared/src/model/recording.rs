@@ -92,6 +92,10 @@ pub struct RecordingTaskDto {
     pub next_retry_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The provider ignored a byte-range request. Restarting from zero needs
+    /// the viewer's explicit confirmation before the partial is discarded.
+    #[serde(default)]
+    pub restart_from_beginning_required: bool,
     /// `Some` only when the viewer owns the task; never another user's id.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner_id: Option<UserId>,
@@ -677,6 +681,7 @@ mod tests {
             total_bytes: Some(4096),
             next_retry_at: None,
             error: None,
+            restart_from_beginning_required: false,
             owner_id: Some(UserId::from("web:abc")),
             visibility: RecordingVisibility::Private,
             channel_id: None,

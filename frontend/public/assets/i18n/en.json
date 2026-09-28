@@ -1427,6 +1427,7 @@
     "RECORDING": "Recording",
     "RECORDING_ACTION_CANCEL": "Cancel",
     "RECORDING_ACTION_DELETE": "Delete",
+    "RECORDING_ACTION_REMOVE_ENTRY": "Remove entry (keep file)",
     "RECORDING_ACTION_EDIT": "Edit",
     "RECORDING_COLUMN_ACTIONS": "Actions",
     "RECORDING_COLUMN_CHANNEL": "Channel",
@@ -1982,8 +1983,11 @@
       "TASK_RESUMED": "Recording resumed.",
       "TASK_REMOVED": "Recording removed.",
       "TASK_RETRIED": "Recording queued again.",
+      "RANGE_UNSUPPORTED": "The provider does not support resuming this download.",
+      "CONFIRM_RESTART_FROM_BEGINNING": "The provider does not support partial downloads. Start this recording again from the beginning? The saved partial download will be discarded.",
       "CONFIRM_CANCEL": "Do you really want to stop this recording?",
-      "CONFIRM_REMOVE": "Do you really want to remove this entry?"
+      "CONFIRM_REMOVE": "Remove this entry from the list? The saved file will be kept.",
+      "CONFIRM_DELETE_FILE": "Delete this recording and its saved file?"
     },
     "RBAC": {
       "ADMIN_HINT": "User is Admin — additional groups have no effect.",

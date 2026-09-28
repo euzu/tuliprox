@@ -761,6 +761,21 @@ impl RecordingService {
     /// Requeue a finished VOD/Series transfer. Live is rejected by the
     /// queue itself: its programme window is gone.
     pub async fn retry_recording(&self, claims: &shared::model::Claims, uuid: &str) -> Result<bool, ServiceError> {
+        self.retry_recording_inner(claims, uuid, false).await
+    }
+
+    /// Discard a partial only after the caller confirmed that a provider
+    /// without byte-range support should download the file from the start.
+    pub async fn restart_recording(&self, claims: &shared::model::Claims, uuid: &str) -> Result<bool, ServiceError> {
+        self.retry_recording_inner(claims, uuid, true).await
+    }
+
+    async fn retry_recording_inner(
+        &self,
+        claims: &shared::model::Claims,
+        uuid: &str,
+        restart_from_beginning: bool,
+    ) -> Result<bool, ServiceError> {
         let owner_id = Self::subject_id(claims)?;
         mutate(&self.recordings, |candidate| {
             authorize_task_in_candidate(candidate, uuid, claims, &owner_id, RecordingAction::Edit)?;
@@ -770,9 +785,31 @@ impl RecordingService {
             if !candidate.finished[pos].kind.is_resumable() {
                 return Err(QueueMutationError::StateNotEditable);
             }
+            let range_unsupported =
+                candidate.finished[pos].error.as_deref() == Some(super::recording_transfer::RANGE_UNSUPPORTED_ERROR);
+            if range_unsupported && !restart_from_beginning {
+                return Err(QueueMutationError::StateNotEditable);
+            }
+            if restart_from_beginning {
+                let failed = &candidate.finished[pos];
+                if !range_unsupported {
+                    return Err(QueueMutationError::StateNotEditable);
+                }
+                let partial = crate::recording::recording_worker::recording_partial_path(&failed.file_path);
+                match std::fs::remove_file(partial) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(QueueMutationError::from_io(error)),
+                }
+            }
             let mut task = candidate.finished.remove(pos);
             task.finished = false;
             task.size = 0;
+            if restart_from_beginning {
+                task.total_size = None;
+                task.recording.resume_etag = None;
+                task.recording.resume_last_modified = None;
+            }
             task.paused = false;
             task.error = None;
             task.state = RecordingTaskState::Queued;
@@ -1917,6 +1954,101 @@ mod tests {
 
         assert!(matches!(result, Err(ServiceError::InvalidState)));
         assert_eq!(committed_records(&downloads).await, persisted_before);
+    }
+
+    #[tokio::test]
+    async fn unsupported_range_requires_confirmation_before_vod_or_series_partial_is_discarded() {
+        for kind in [RecordingKind::Vod, RecordingKind::Series] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let queue = Arc::new(RecordingQueue::new_persistent(dir.path(), dir.path()).expect("recording repository"));
+            let mut task =
+                persisted_media("recording", "web:alice", RecordingVisibility::Private, "http://provider/film.mp4");
+            task.kind = kind;
+            task.file_dir = dir.path().to_path_buf();
+            task.file_path = dir.path().join("recording.mp4");
+            task.state = RecordingTaskState::Failed;
+            task.finished = true;
+            task.size = 4;
+            task.total_size = Some(10);
+            task.error = Some(super::super::recording_transfer::RANGE_UNSUPPORTED_ERROR.to_string());
+            task.recording.resume_etag = Some("\"old-etag\"".to_string());
+            let partial = crate::recording::recording_worker::recording_partial_path(&task.file_path);
+            std::fs::write(&partial, b"0123").expect("saved partial");
+            mutate(&queue, move |candidate| {
+                candidate.finished.push(task.clone());
+                Ok(())
+            })
+            .await
+            .expect("seed failed recording");
+            let service = RecordingService::new(Arc::clone(&queue), test_app_config());
+            let claims = shared::model::Claims {
+                username: "alice".to_string(),
+                iss: "tuliprox".to_string(),
+                iat: 0,
+                exp: 0,
+                roles: shared::model::RoleSet::new(),
+                permissions: Permission::RecordingManage.into(),
+                pwd_version: 0,
+                subject_id: Some(UserId::from("web:alice")),
+                permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,
+            };
+
+            assert!(matches!(service.retry_recording(&claims, "recording").await, Err(ServiceError::InvalidState)));
+            assert_eq!(std::fs::read(&partial).expect("partial kept without consent"), b"0123");
+            assert!(queue.finished.read().await[0].to_view(true).restart_from_beginning_required);
+
+            assert!(service.restart_recording(&claims, "recording").await.expect("confirmed restart"));
+            assert!(!partial.exists());
+            assert!(queue.finished.read().await.is_empty());
+            let queued = queue.queue.lock().await.front().cloned().expect("queued transfer");
+            assert_eq!(queued.state, RecordingTaskState::Queued);
+            assert_eq!(queued.size, 0);
+            assert_eq!(queued.total_size, None);
+            assert_eq!(queued.recording.resume_etag, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn removing_a_terminal_entry_keeps_its_owned_file() {
+        for state in [RecordingTaskState::Completed, RecordingTaskState::Cancelled] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let queue = Arc::new(RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open repository"));
+            let mut task =
+                persisted_media("recording", "web:alice", RecordingVisibility::Private, "http://provider/film.mp4");
+            task.file_dir = dir.path().to_path_buf();
+            task.file_path = dir.path().join("recording.mp4");
+            task.state = state;
+            task.finished = true;
+            let owned_path = if state == RecordingTaskState::Completed {
+                task.file_path.clone()
+            } else {
+                crate::recording::recording_worker::recording_partial_path(&task.file_path)
+            };
+            std::fs::write(&owned_path, b"recorded bytes").expect("write recorded file");
+            let task = RecordingQueue::to_persisted(&RecordingQueue::from_persisted(task).expect("valid task"));
+            mutate(&queue, move |candidate| {
+                candidate.finished.push(task.clone());
+                Ok(())
+            })
+            .await
+            .expect("seed recording");
+            let service = RecordingService::new(Arc::clone(&queue), test_app_config());
+            let claims = shared::model::Claims {
+                username: "alice".to_string(),
+                iss: "tuliprox".to_string(),
+                iat: 0,
+                exp: 0,
+                roles: shared::model::RoleSet::new(),
+                permissions: Permission::RecordingDelete.into(),
+                pwd_version: 0,
+                subject_id: Some(UserId::from("web:alice")),
+                permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,
+            };
+
+            assert!(service.remove_recording_task(&claims, "recording").await.expect("remove recording"));
+            assert!(owned_path.exists(), "{state:?} file was deleted while only removing the entry");
+            assert!(queue.finished.read().await.is_empty());
+        }
     }
 
     #[tokio::test]
