@@ -128,12 +128,11 @@ impl StalkerClusterSelection {
 }
 
 /// Requested clusters and the publication policy applied once their generation is complete.
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct StalkerRefreshPlan {
     selection: StalkerClusterSelection,
     update_quality: ConfigInputUpdateQuality,
     quality_bypass_mask: u8,
-    input_name: Arc<str>,
 }
 
 impl StalkerRefreshPlan {
@@ -144,7 +143,7 @@ impl StalkerRefreshPlan {
         let quality_bypass_mask = matches!(quality_policy, UpdateQualityPolicy::Bypass)
             .then_some(selection.mask() & MEDIA_SELECTION)
             .unwrap_or(0);
-        Self { selection, update_quality, quality_bypass_mask, input_name: Arc::clone(&input.name) }
+        Self { selection, update_quality, quality_bypass_mask }
     }
 }
 
@@ -560,16 +559,13 @@ fn map_items(
     categories: &HashMap<u32, StalkerCategory>,
     kind: StalkerStreamKind,
     added_at: i64,
-    input_name: &Arc<str>,
 ) -> Vec<StalkerPlaylistItem> {
     raw_items
         .iter()
         .map(|raw| {
             let category =
                 raw.category_id().and_then(|value| value.parse::<u32>().ok()).and_then(|id| categories.get(&id));
-            let mut item = parser::map_stalker_to_playlist_item(raw, category, kind, added_at);
-            item.ingest_resource_values(input_name);
-            item
+            parser::map_stalker_to_playlist_item(raw, category, kind, added_at)
         })
         .collect()
 }
@@ -640,7 +636,7 @@ pub async fn advance_stalker_refresh(
     identity_fingerprint: u64,
     mut budget: StalkerRefreshBudget,
 ) -> Result<StalkerRefreshOutcome, TuliproxError> {
-    let StalkerRefreshPlan { selection, update_quality, quality_bypass_mask, input_name } = refresh_plan;
+    let StalkerRefreshPlan { selection, update_quality, quality_bypass_mask } = refresh_plan;
     let mut checkpoint =
         load_or_start_checkpoint(storage_path, identity_fingerprint, selection, quality_bypass_mask).await?;
     if checkpoint.phase == StalkerRefreshPhase::Terminal {
@@ -677,7 +673,7 @@ pub async fn advance_stalker_refresh(
                         checkpoint.retry_count = 0;
                     }
                     Ok(raw) => {
-                        let items = map_items(&raw, categories, StalkerStreamKind::Live, added_at, &input_name);
+                        let items = map_items(&raw, categories, StalkerStreamKind::Live, added_at);
                         let path =
                             generation_data_path(storage_path, checkpoint.generation, StalkerGenerationData::Live);
                         snapshot_stalker_items_at(app_config, path.clone(), &items).await?;
@@ -711,7 +707,7 @@ pub async fn advance_stalker_refresh(
                 {
                     return yield_after_error(storage_path, checkpoint, err).await;
                 }
-                let items = map_items(&response.items, categories, StalkerStreamKind::Live, added_at, &input_name);
+                let items = map_items(&response.items, categories, StalkerStreamKind::Live, added_at);
                 let path = generation_data_path(storage_path, checkpoint.generation, StalkerGenerationData::Live);
                 upsert_stalker_items_at(app_config, &path, &items).await?;
                 checkpoint.processed = checkpoint.processed.saturating_add(items.len() as u64);
@@ -743,7 +739,7 @@ pub async fn advance_stalker_refresh(
                 {
                     return yield_after_error(storage_path, checkpoint, err).await;
                 }
-                let items = map_items(&response.items, categories, StalkerStreamKind::Movie, added_at, &input_name);
+                let items = map_items(&response.items, categories, StalkerStreamKind::Movie, added_at);
                 let path = generation_data_path(storage_path, checkpoint.generation, StalkerGenerationData::Vod);
                 upsert_stalker_items_at(app_config, &path, &items).await?;
                 checkpoint.processed = checkpoint.processed.saturating_add(items.len() as u64);
@@ -790,7 +786,6 @@ pub async fn advance_stalker_refresh(
                         root.flussonic_tmp_link = capabilities.flussonic_temporary_link;
                         root.wowza_tmp_link = capabilities.wowza_temporary_link;
                         root.use_http_tmp_link = capabilities.use_http_temporary_link;
-                        root.ingest_resource_values(&input_name);
                         root
                     })
                     .collect();
@@ -835,10 +830,7 @@ pub async fn advance_stalker_refresh(
                             used_episode_ids
                                 .insert(prepare_stalker_episode_series_at(app_config, &path, series_id).await?)
                         };
-                        let mut episodes = parser::map_stalker_series_details(&details, &root, added_at, used);
-                        for episode in &mut episodes {
-                            episode.ingest_resource_values(&input_name);
-                        }
+                        let episodes = parser::map_stalker_series_details(&details, &root, added_at, used);
                         upsert_stalker_items_at(app_config, &path, &episodes).await?;
                         checkpoint.processed = checkpoint.processed.saturating_add(episodes.len() as u64);
                         checkpoint.phase = StalkerRefreshPhase::SeriesDetails { provider_id: Some(root.stream_id) };
@@ -1529,7 +1521,7 @@ mod tests {
             StalkerCategory { id: "10".to_string(), title: "News".to_string(), alias: None, number: 1 },
         )]);
 
-        let items = map_items(&[raw], &categories, StalkerStreamKind::Live, 0, &Arc::from("stalker-input"));
+        let items = map_items(&[raw], &categories, StalkerStreamKind::Live, 0);
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].category_id, 10);

@@ -90,6 +90,7 @@ pub fn xtream_mapping_option_from_target_options(
         base_url,
         web_ui_request: user.t_is_api_user,
         encrypt_secret,
+        resource_host_policies: Arc::default(),
     })
 }
 
@@ -184,6 +185,7 @@ mod tests {
     fn create_test_target() -> (ConfigTarget, XtreamTargetOutput) {
         let xtream_output = XtreamTargetOutput { flags: XtreamTargetFlagsSet::default(), trakt: None, filter: None };
         let target = ConfigTarget {
+            curation: None,
             id: 1,
             enabled: true,
             name: "xtream-target".to_string(),

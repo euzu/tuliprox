@@ -2502,6 +2502,7 @@ mod tests {
             mapping: Arc::default(),
             favourites: None,
             processing_order: shared::model::ProcessingOrder::default(),
+            curation: None,
             execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
             watch: None,
             use_memory_cache: false,

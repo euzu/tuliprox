@@ -434,6 +434,7 @@ mod tests {
             mapping: Arc::default(),
             favourites: None,
             processing_order: ProcessingOrder::default(),
+            curation: None,
             execution_plan: crate::model::TargetExecutionPlan::default(),
             watch: None,
             use_memory_cache: false,

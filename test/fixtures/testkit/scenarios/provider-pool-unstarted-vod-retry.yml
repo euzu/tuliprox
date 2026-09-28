@@ -1,0 +1,77 @@
+schema_version: 1
+name: provider-pool-unstarted-vod-retry
+tuliprox:
+  base_url: http://fixture.invalid
+  execution_mode: isolated_fixture
+  bootstrap:
+    command: "${env:TULIPROX_TESTKIT_SUT_BINARY}"
+    arguments: ["-s", "-c", "{config_file}", "-i", "{source_file}", "-a", "{api_proxy_file}"]
+    readiness_url: "{base_url}/healthcheck"
+origin:
+  run_id: provider-pool-unstarted-vod-retry
+  account_limit: 2
+  limit_mode: reject_new
+actors:
+  - id: vod-viewer
+    agent: local
+    username: viewer
+    user_agent: tuliprox-testkit/vod-viewer
+    client_ip: { mode: forwarded, value: 10.31.0.10 }
+  - id: live-blocker
+    agent: local
+    username: blocker
+    user_agent: tuliprox-testkit/live-blocker
+    client_ip: { mode: forwarded, value: 10.31.0.11 }
+channels:
+  blocker-channel: { origin_marker: 17, protocol: xtream_ts }
+steps:
+  - command_id: occupy-first-account
+    start:
+      actor: live-blocker
+      playback_id: blocker-a
+      session_group: blocker
+      channel: blocker-channel
+    await: { valid_frames: 3 }
+    assert_origin:
+      active_body: 1
+      latest_request_account: account-a
+  - command_id: probe-vod-on-second-account-without-media
+    start:
+      actor: vod-viewer
+      playback_id: vod-head-b
+      session_group: movie
+      vod_object: movie.mkv
+      method: HEAD
+      expected_status: 200
+    assert_origin: { active_body: 1, latest_request_account: account-b }
+  - command_id: release-vod-probe
+    stop: { playback_id: vod-head-b }
+    assert_origin: { active_body: 1 }
+  - command_id: release-first-account
+    stop: { playback_id: blocker-a }
+    assert_origin: { active_body: 0 }
+  - command_id: retry-vod-on-free-first-account
+    start:
+      actor: vod-viewer
+      playback_id: vod-retry-a
+      session_group: movie
+      vod_object: movie.mkv
+      range: "bytes=0-524287"
+      read_limit_bytes: 32768
+      post_read_action: pause
+    assert_origin:
+      active_body: 1
+      latest_request_account: account-a
+      no_limit_rejections: true
+  - command_id: release-vod-retry
+    stop: { playback_id: vod-retry-a }
+    assert_origin: { active_body: 0 }
+policy_contract:
+  user_access_control: true
+  users:
+    viewer: { max_connections: 1 }
+    blocker: { max_connections: 1 }
+  admission_strategies: []
+  provider_pool:
+    - { name: account-a, max_connections: 1 }
+    - { name: account-b, max_connections: 1 }

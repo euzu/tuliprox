@@ -108,7 +108,7 @@ Collect all processed inputs for the target
 Configured favourite aliases -> Merge groups -> Post-merge content deduplication
   |
   v
-Evaluate required Trakt selectors -> Select catalog -> Derive base and Xtream appearances
+Evaluate required curation selectors (Trakt and/or TMDB) -> Select catalog -> Derive base and Xtream appearances
   |
   v
 Sort -> Assign channel numbers -> Mapping counters -> Persist/output filters -> Persistence -> Watches
@@ -117,7 +117,7 @@ Sort -> Assign channel numbers -> Mapping counters -> Persist/output filters -> 
 `processing_order` controls only the order of filter (`F`), rename (`R`), and the default mapping position (`M`).
 `after_epg` is a separate stage outside that configurable pipe. Mapping counters are also outside the pipe and run on
 each finalized appearance after the target has merged and deduplicated the curation-eligible catalog, then sorted and
-assigned initial channel numbers. Trakt curation never changes which mapper stage runs.
+assigned initial channel numbers. Target curation never changes which mapper stage runs.
 
 The configured order and mapping-stage indexes are compiled when configuration is loaded. During a refresh, the F/R/M
 pipe materializes each input into one item buffer, preserves the historical grouping order between stages, and rebuilds

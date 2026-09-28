@@ -27,7 +27,7 @@ use std::{
     net::SocketAddr,
     pin::Pin,
     sync::{
-        atomic::{AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
         Arc,
     },
     task::{Context, Poll},
@@ -265,6 +265,7 @@ struct ActiveClientStreamState {
     /// Playback lease owner (session token) whose provider slot is confirmed once real
     /// media bytes reach the client. `None` when this stream has no provider lease.
     lease_owner: Option<Arc<str>>,
+    media_started: Option<Arc<AtomicBool>>,
     /// Guards against emitting the confirmation more than once per stream.
     lease_confirmed: bool,
     lease_request_id: Option<tuliprox_core::model::PlaybackRequestId>,
@@ -361,6 +362,9 @@ impl ActiveClientStreamState {
             return;
         };
         self.lease_confirmed = true;
+        if let Some(media_started) = &self.media_started {
+            media_started.store(true, Ordering::Release);
+        }
         let request_id = self.lease_request_id.or_else(|| {
             self.provider_handle.as_ref().and_then(|managed| managed.handle()).and_then(|h| h.playback_request_id)
         });
@@ -1106,6 +1110,11 @@ pub(crate) async fn create_active_client_stream(
     let lease_owner: Option<Arc<str>> = session_token
         .filter(|_| stream_details.provider_handle.is_some() || stream_details.has_deferred_provider_open())
         .map(Arc::<str>::from);
+    let media_started = if let Some(owner) = lease_owner.as_deref() {
+        app_state.active_users.media_started_flag(&user.username, owner).await
+    } else {
+        None
+    };
     let owned_grace_ctx = stream_details.grace_resolution_context.clone();
     let lease_request_id = stream_details
         .provider_handle
@@ -1230,6 +1239,7 @@ pub(crate) async fn create_active_client_stream(
         provider_http_status: None,
         provider_reconnect_count: AtomicU8::new(0),
         lease_owner,
+        media_started,
         lease_confirmed: false,
         lease_request_id,
         request_cleanup: registered_request.into_body_cleanup(),
@@ -1587,9 +1597,9 @@ mod tests {
     };
     use crate::{
         api::model::{
-            connection_manager::PROVIDER_END_NOT_SET, empty_resource_client_set, ActiveProviderManager,
-            ActiveUserManager, AppState, BoxedProviderStream, CancelTokens, ConnectionManager, CreateUserSessionParams,
-            CustomVideoStreamType, EventManager, GraceResolutionContext, MetadataUpdateManager, PlaylistStorageState,
+            connection_manager::PROVIDER_END_NOT_SET, ActiveProviderManager, ActiveUserManager, AppState,
+            BoxedProviderStream, CancelTokens, ConnectionManager, CreateUserSessionParams, CustomVideoStreamType,
+            EventManager, GraceResolutionContext, MetadataUpdateManager, PlaylistStorageState,
             ProviderContentRepresentationMode, ProviderHandle, RecordingQueue, SharedStreamManager, StreamDetails,
             StreamError, UpdateGuard,
         },
@@ -1723,7 +1733,8 @@ mod tests {
             http_client: Arc::new(ArcSwap::from_pointee(Client::new())),
             http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
             public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
-            resource_clients: empty_resource_client_set(),
+            resource_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+            resource_public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
             recordings: Arc::new(RecordingQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,
@@ -1807,7 +1818,8 @@ mod tests {
             http_client: Arc::new(ArcSwap::from_pointee(Client::new())),
             http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
             public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
-            resource_clients: empty_resource_client_set(),
+            resource_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+            resource_public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
             recordings: Arc::new(RecordingQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,
@@ -2187,6 +2199,7 @@ mod tests {
             provider_http_status: None,
             provider_reconnect_count: AtomicU8::new(0),
             lease_owner: None,
+            media_started: None,
             lease_confirmed: false,
             lease_request_id: None,
             request_cleanup: None,
@@ -2731,6 +2744,7 @@ mod tests {
             provider_http_status: None,
             provider_reconnect_count: AtomicU8::new(0),
             lease_owner: None,
+            media_started: None,
             lease_confirmed: false,
             lease_request_id: None,
             request_cleanup: None,

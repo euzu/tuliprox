@@ -38,6 +38,18 @@ type PreemptionCandidate = (PriorityOwner, AllocationId, i8, Instant);
 type PriorityKey = (i8, Reverse<Instant>, AllocationId);
 
 const PREEMPTION_COMPLETION_TIMEOUT: Duration = Duration::from_millis(1500);
+const EVICTED_PROVIDER_RELEASE_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProviderReleaseSnapshot {
+    pub addr: SocketAddr,
+    single_allocations: Vec<AllocationId>,
+    shared_subscribers: Vec<SharedSubscriberId>,
+}
+
+impl ProviderReleaseSnapshot {
+    pub fn is_empty(&self) -> bool { self.single_allocations.is_empty() && self.shared_subscribers.is_empty() }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionKind {
@@ -118,6 +130,7 @@ impl AcquireProviderParams<'_> {
 #[derive(Debug, Clone)]
 struct SharedAllocation {
     allocation_id: AllocationId,
+    origin_subscriber_id: SharedSubscriberId,
     allocation: ProviderAllocation,
     /// Keyed by unique subscriber id, never by socket: two external clients behind one
     /// reverse proxy must not collapse into a single entry.
@@ -444,6 +457,85 @@ impl std::ops::Deref for ActiveProviderManager {
 }
 
 impl ActiveProviderManager {
+    fn has_connections_for_addr(&self, addr: &SocketAddr) -> bool {
+        let _transition = self.lock_capacity_transition();
+        let connections = self.read_connections();
+        connections.single.values().any(|info| info.client_addr == *addr)
+            || connections
+                .shared
+                .by_key
+                .values()
+                .any(|shared| shared.connections.values().any(|subscriber| subscriber.addr == *addr))
+    }
+
+    /// Waits for every allocation currently using an address to leave the registry.
+    /// Admission handoffs use `wait_for_snapshot_release` to ignore later allocations at that address.
+    pub async fn wait_for_addr_release(&self, addr: &SocketAddr, timeout: Duration) -> bool {
+        let deadline = TokioInstant::now() + timeout;
+        loop {
+            if !self.has_connections_for_addr(addr) {
+                return true;
+            }
+            let now = TokioInstant::now();
+            if now >= deadline {
+                return false;
+            }
+            tokio::time::sleep_until((now + EVICTED_PROVIDER_RELEASE_POLL_INTERVAL).min(deadline)).await;
+        }
+    }
+
+    pub(crate) fn release_snapshot_for_addr(&self, addr: &SocketAddr) -> ProviderReleaseSnapshot {
+        let _transition = self.lock_capacity_transition();
+        let connections = self.read_connections();
+        let single_allocations = connections
+            .single
+            .values()
+            .filter_map(|info| (info.client_addr == *addr).then_some(info.allocation_id))
+            .collect();
+        let shared_subscribers = connections
+            .shared
+            .by_key
+            .values()
+            .flat_map(|shared| {
+                shared.connections.iter().filter_map(|(id, subscriber)| (subscriber.addr == *addr).then_some(*id))
+            })
+            .collect();
+        ProviderReleaseSnapshot { addr: *addr, single_allocations, shared_subscribers }
+    }
+
+    fn has_connections_from_snapshot(&self, snapshot: &ProviderReleaseSnapshot) -> bool {
+        let _transition = self.lock_capacity_transition();
+        let connections = self.read_connections();
+        snapshot.single_allocations.iter().any(|id| {
+            connections.single.contains_key(id)
+                || connections.shared.shared_by_allocation_id.get(id).is_some_and(|key| {
+                    connections.shared.by_key.get(key).is_some_and(|shared| {
+                        connections.shared.key_by_subscriber.get(&shared.origin_subscriber_id) == Some(key)
+                    })
+                })
+        }) || snapshot.shared_subscribers.iter().any(|id| connections.shared.key_by_subscriber.contains_key(id))
+    }
+
+    /// Waits for the kicked transport's original provider allocations to leave the registry.
+    /// The socket close may be signalled before its response bodies and provider handles are dropped.
+    pub(crate) async fn wait_for_snapshot_release(
+        &self,
+        snapshot: &ProviderReleaseSnapshot,
+        timeout: Duration,
+    ) -> bool {
+        let deadline = TokioInstant::now() + timeout;
+        loop {
+            if !self.has_connections_from_snapshot(snapshot) {
+                return true;
+            }
+            let now = TokioInstant::now();
+            if now >= deadline {
+                return false;
+            }
+            tokio::time::sleep_until((now + EVICTED_PROVIDER_RELEASE_POLL_INTERVAL).min(deadline)).await;
+        }
+    }
+
     fn upsert_priority_entry(
         connections: &mut Connections,
         provider_name: &Arc<str>,
@@ -599,8 +691,26 @@ impl ActiveProviderManager {
     fn get_reserved_provider_for_owner(&self, input_name: &Arc<str>, session_owner: &str) -> Option<Arc<str>> {
         let mut leases = self.write_leases();
         Self::prune_expired_leases(&mut leases);
-        let provider_name = leases.provider_for_owner(session_owner)?;
-        self.providers.is_provider_for_input(&provider_name, input_name).then_some(provider_name)
+        let lease = leases.lease_of_owner(session_owner)?;
+        let provider_name = Arc::clone(&lease.provider_name);
+        let confirmed = lease.state.is_confirmed();
+        drop(leases);
+        (self.providers.is_provider_for_input(&provider_name, input_name)
+            && (confirmed || self.has_active_owner_for_provider(&provider_name, session_owner)))
+        .then_some(provider_name)
+    }
+
+    /// A provisional lease only pins its provider while its allocation is active.
+    /// Once an unstarted request releases its slot, the next attempt may use another alias.
+    pub fn should_reuse_playback_provider(&self, session_owner: &str, provider_name: &Arc<str>) -> bool {
+        let _transition = self.lock_capacity_transition();
+        let mut leases = self.write_leases();
+        Self::prune_expired_leases(&mut leases);
+        let confirmed = leases
+            .lease_of_owner(session_owner)
+            .is_some_and(|lease| lease.provider_name == *provider_name && lease.state.is_confirmed());
+        drop(leases);
+        confirmed || self.has_active_owner_for_provider(provider_name, session_owner)
     }
 
     /// True when `session_owner` already backs a live allocation on `provider_name`,
@@ -2552,6 +2662,7 @@ impl ActiveProviderManager {
             Arc::clone(&shared_key),
             SharedAllocation {
                 allocation_id: handle.allocation_id,
+                origin_subscriber_id: subscriber_id,
                 allocation: info.allocation,
                 connections: HashMap::from([(
                     subscriber_id,
@@ -2669,7 +2780,7 @@ impl ActiveProviderManager {
 #[cfg(test)]
 mod tests {
     use super::{ActiveProviderManager, ConnectionKind, PlaybackLeaseRef};
-    use crate::{EventManager, SharedStreamManager};
+    use crate::{ActiveUserManager, EventManager, SharedStreamManager};
     use arc_swap::{ArcSwap, ArcSwapOption};
     use shared::{
         defaults::{default_probe_user_priority, default_user_priority},
@@ -2908,6 +3019,66 @@ mod tests {
         manager.release_handle(&replacement);
         manager.release_handle(&other);
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn release_snapshot_tracks_original_allocation_after_addr_reuse() {
+        let app_cfg = create_test_app_config_with_pool(2, 3);
+        let events = Arc::new(EventManager::new());
+        let provider = ActiveProviderManager::new(&app_cfg, &events);
+        let addr = SocketAddr::from(([127, 0, 0, 1], 50_022));
+        let input = "provider_1".intern();
+        let original = provider
+            .acquire_connection_with_grace_for_session(&input, &addr, false, 0, ConnectionKind::Normal, Some("old"))
+            .expect("original allocation");
+        let original_snapshot = provider.release_snapshot_for_addr(&addr);
+        assert!(!provider.wait_for_snapshot_release(&original_snapshot, Duration::ZERO).await);
+
+        provider.release_handle(&original);
+        let replacement = provider
+            .acquire_connection_with_grace_for_session(&input, &addr, false, 0, ConnectionKind::Normal, Some("new"))
+            .expect("replacement allocation");
+        let replacement_snapshot = provider.release_snapshot_for_addr(&addr);
+        assert!(provider.wait_for_snapshot_release(&original_snapshot, Duration::ZERO).await);
+        assert!(!provider.wait_for_snapshot_release(&replacement_snapshot, Duration::ZERO).await);
+
+        let geoip = Arc::new(ArcSwapOption::default());
+        let users = ActiveUserManager::new(&Config::default(), &geoip, &events);
+        users.set_pending_provider_release("user", original_snapshot.clone()).await;
+        users.set_pending_provider_release("user", replacement_snapshot.clone()).await;
+        assert!(!users.clear_pending_provider_release("user", &original_snapshot).await);
+        assert_eq!(users.pending_provider_release("user").await, Some(replacement_snapshot.clone()));
+        assert!(users.clear_pending_provider_release("user", &replacement_snapshot).await);
+        assert_eq!(users.pending_provider_release("user").await, None);
+        provider.release_handle(&replacement);
+    }
+
+    #[tokio::test]
+    async fn release_snapshot_tracks_shared_subscriber_without_waiting_for_other_subscribers() {
+        let app_cfg = create_test_app_config_single_provider_pool();
+        let events = Arc::new(EventManager::new());
+        let provider = ActiveProviderManager::new(&app_cfg, &events);
+        let input = "provider_1".intern();
+        let first_addr = SocketAddr::from(([127, 0, 0, 1], 50_023));
+        let second_addr = SocketAddr::from(([127, 0, 0, 1], 50_024));
+        let first = SharedSubscriberId::from_stream_uid(50_023);
+        let second = SharedSubscriberId::from_stream_uid(50_024);
+        let origin =
+            provider.acquire_connection(&input, &first_addr, 0, ConnectionKind::Normal).expect("shared origin");
+        let before_promotion = provider.release_snapshot_for_addr(&first_addr);
+        assert!(provider.make_shared_connection(&origin, "shared-release", first));
+        provider
+            .add_shared_connection(&second_addr, second, "shared-release", 0, ConnectionKind::Normal)
+            .expect("second subscriber");
+        let snapshot = provider.release_snapshot_for_addr(&first_addr);
+        assert!(!provider.wait_for_snapshot_release(&before_promotion, Duration::ZERO).await);
+        assert!(!provider.wait_for_snapshot_release(&snapshot, Duration::ZERO).await);
+
+        provider.release_connection(&first_addr);
+        assert!(provider.wait_for_snapshot_release(&before_promotion, Duration::ZERO).await);
+        assert!(provider.wait_for_snapshot_release(&snapshot, Duration::ZERO).await);
+        assert_eq!(provider.get_provider_connections_count(), 1);
+        provider.release_connection(&second_addr);
     }
 
     #[tokio::test(start_paused = true)]
@@ -3200,6 +3371,54 @@ mod tests {
 
         manager.release_connection(&client_1_addr);
         manager.release_connection(&client_2_addr);
+    }
+
+    #[tokio::test]
+    async fn unstarted_series_retry_uses_free_alias_while_started_playback_stays_pinned() {
+        let app_cfg = create_test_app_config_with_dual_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+        let input = "provider_1".intern();
+        let owner = "series-playback";
+        let first_addr: SocketAddr = "127.0.0.1:41010".parse().unwrap();
+        let busy_addr: SocketAddr = "127.0.0.1:41011".parse().unwrap();
+        let retry_addr: SocketAddr = "127.0.0.1:41012".parse().unwrap();
+
+        let failed_start = manager
+            .acquire_connection_with_lease_for_session(
+                &input,
+                &first_addr,
+                false,
+                0,
+                ConnectionKind::Normal,
+                Some(PlaybackLeaseRef::new(owner, PlaybackKind::Series)),
+            )
+            .expect("first series allocation");
+        assert!(manager.should_reuse_playback_provider(owner, &input));
+        manager.release_handle(&failed_start);
+        assert!(!manager.should_reuse_playback_provider(owner, &input));
+
+        let busy = manager
+            .acquire_connection(&input, &busy_addr, 0, ConnectionKind::Normal)
+            .expect("other playback occupies first provider");
+        let retry = manager
+            .acquire_connection_with_lease_for_session(
+                &input,
+                &retry_addr,
+                false,
+                0,
+                ConnectionKind::Normal,
+                Some(PlaybackLeaseRef::new(owner, PlaybackKind::Series)),
+            )
+            .expect("retry should use free alias");
+        let alias = retry.allocation.get_provider_name().expect("alias name");
+        assert_eq!(alias.as_ref(), "provider_2");
+        assert!(manager.should_reuse_playback_provider(owner, &alias));
+        manager.refresh_adaptive_playback_lease(&alias, owner, PlaybackKind::Series, 15);
+        manager.confirm_identified_playback_activity(owner, retry.playback_request_id.expect("request id"));
+        manager.release_handle(&retry);
+        assert!(manager.should_reuse_playback_provider(owner, &alias));
+        manager.release_handle(&busy);
     }
 
     #[tokio::test]

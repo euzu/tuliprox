@@ -139,21 +139,14 @@ fn to_playlist_item(
 ) {
     match &entry.metadata {
         MediaMetadata::Movie(_) => {
-            let mut item = build_movie_playlist_item(entry, input_name, group_name, api_base_path);
-            item.header.ingest_resource_values(input_name);
-            channels.push(item);
+            channels.push(build_movie_playlist_item(entry, input_name, group_name, api_base_path));
         }
         MediaMetadata::Series(_) => {
             if let Some((series_info, episodes)) =
                 build_series_playlist_items(entry, input_name, group_name, api_base_path)
             {
-                let mut series_info = series_info;
-                series_info.header.ingest_resource_values(input_name);
                 channels.push(series_info);
-                channels.extend(episodes.into_iter().map(|mut episode| {
-                    episode.header.ingest_resource_values(input_name);
-                    episode
-                }));
+                channels.extend(episodes);
             }
         }
     }

@@ -17,7 +17,7 @@ mod ordinal;
 mod provider_resolve_token;
 mod recording_paths;
 pub mod request_headers;
-mod resource_token;
+mod resource_output;
 pub mod response_compression;
 pub mod runtime_liveness;
 mod step_measure;
@@ -84,7 +84,7 @@ pub use self::{
     ordinal::*,
     provider_resolve_token::*,
     recording_paths::*,
-    resource_token::*,
+    resource_output::*,
     step_measure::*,
     sys_utils::*,
     telegram::*,

@@ -1,0 +1,18 @@
+.tp__custom-dialog.tp__content-dialog:has(.tp__version-credits) {
+  min-width: 0;
+  max-width: min(38rem, 90vw);
+  box-sizing: border-box;
+}
+
+.tp__version-credits {
+  max-width: 36rem;
+
+  img {
+    display: block;
+    max-width: 100%;
+    height: auto;
+  }
+
+  &__app-logo { width: 160px; }
+  &__tmdb-logo { width: 120px; }
+}

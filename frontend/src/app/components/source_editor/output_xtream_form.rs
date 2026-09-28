@@ -222,16 +222,14 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
 
     let trakt_lists_state = use_state(Vec::<TraktListConfigDto>::new);
     let trakt_charts_state = use_state(Vec::<TraktChartConfigDto>::new);
-    let catalog_selection_options = use_memo(trakt_state.form.catalog_selection, {
-        let translate = translate.clone();
-        move |selection| {
+    let catalog_selection_options =
+        use_memo((trakt_state.form.catalog_selection, translate.clone()), |(selection, translate)| {
             build_options(
                 [TraktCatalogSelection::Full, TraktCatalogSelection::Curated],
                 selection,
                 |value| html! { translate.t(trakt_catalog_selection_label_key(*value)) },
             )
-        }
-    });
+        });
     let show_trakt_list_form_state = use_state(|| false);
     let show_trakt_chart_form_state = use_state(|| false);
     let editing_trakt_list_index_state = use_state(|| None::<usize>);
@@ -451,6 +449,9 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
     };
 
     let render_trakt = || {
+        if source_editor_ctx.output_curation_managed {
+            return html! { <Card class="tp__config-view__card"><p>{translate.t("LABEL.CURATION_YAML_NOTICE")}</p></Card> };
+        }
         let trakt_lists = trakt_lists_state.clone();
         let trakt_charts = trakt_charts_state.clone();
         let trakt_form = trakt_state.clone();
@@ -667,14 +668,16 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
 
             let trakt_lists = (*trakt_lists_state).clone();
             let trakt_charts = (*trakt_charts_state).clone();
-            output.trakt = build_trakt_output_config(
-                trakt_state.data().enabled,
-                trakt_state.data().catalog_selection,
-                trakt_state.data().include_xtream_base_categories,
-                trakt_api_state.data().clone(),
-                trakt_lists,
-                trakt_charts,
-            );
+            if !source_editor_ctx.output_curation_managed {
+                output.trakt = build_trakt_output_config(
+                    trakt_state.data().enabled,
+                    trakt_state.data().catalog_selection,
+                    trakt_state.data().include_xtream_base_categories,
+                    trakt_api_state.data().clone(),
+                    trakt_lists,
+                    trakt_charts,
+                );
+            }
 
             source_editor_ctx
                 .on_form_change

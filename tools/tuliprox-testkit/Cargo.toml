@@ -13,6 +13,7 @@ base64.workspace = true
 blake3.workspace = true
 bytes.workspace = true
 clap = { version = "4.6.6", features = ["derive"] }
+chrono.workspace = true
 crc32fast = "1.5.1"
 futures.workspace = true
 reqwest = { version = "0.13.4", features = ["json", "stream", "rustls"] }

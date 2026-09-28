@@ -606,12 +606,19 @@ pub enum CloseConnectionSignal {
     WithReason(SocketAddr, DisconnectReason),
 }
 
+#[derive(Debug)]
+enum SocketCloseState {
+    Open(tokio::sync::oneshot::Sender<DisconnectReason>),
+    Closing,
+}
+
 pub struct ConnectionManager {
     pub user_manager: Arc<ActiveUserManager>,
     pub provider_manager: Arc<ActiveProviderManager>,
     pub shared_stream_manager: Arc<SharedStreamManager>,
     event_manager: Arc<EventManager>,
     close_socket_signal_tx: tokio::sync::broadcast::Sender<CloseConnectionSignal>,
+    socket_closers: std::sync::Mutex<HashMap<SocketAddr, SocketCloseState>>,
     cleanup_sender: BackpressureSender<CleanupEvent>,
     control_cleanup_tx: mpsc::Sender<CleanupEvent>,
     socket_activity_tracker: SocketActivityTracker,
@@ -838,6 +845,7 @@ impl ConnectionManager {
             shared_stream_manager: Arc::clone(shared_stream_manager),
             event_manager: Arc::clone(event_manager),
             close_socket_signal_tx,
+            socket_closers: std::sync::Mutex::new(HashMap::new()),
             cleanup_sender: BackpressureSender::new(cleanup_tx, "cleanup", cleanup_capacity),
             control_cleanup_tx: control_cleanup_tx.clone(),
             socket_activity_tracker: socket_activity_tracker.clone(),
@@ -1180,7 +1188,24 @@ impl ConnectionManager {
             self.user_manager.get_username_for_addr(addr).await.unwrap_or_default(),
             sanitize_sensitive_info(&addr.to_string())
         );
-        self.close_connection_with_reason_and_block(addr, virtual_id, block_secs, DisconnectReason::ClientKicked).await
+        if block_secs > 0 {
+            self.user_manager.block_user_for_stream(addr, virtual_id, block_secs).await;
+        }
+        self.release_connection_as_kicked(addr).await
+    }
+
+    pub fn register_close_socket(&self, addr: SocketAddr) -> tokio::sync::oneshot::Receiver<DisconnectReason> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if let Ok(mut closers) = self.socket_closers.lock() {
+            closers.insert(addr, SocketCloseState::Open(tx));
+        }
+        rx
+    }
+
+    pub fn unregister_close_socket(&self, addr: &SocketAddr) {
+        if let Ok(mut closers) = self.socket_closers.lock() {
+            closers.remove(addr);
+        }
     }
 
     pub async fn close_connection_with_reason_and_block(
@@ -1193,14 +1218,7 @@ impl ConnectionManager {
         if block_secs > 0 {
             self.user_manager.block_user_for_stream(addr, virtual_id, block_secs).await;
         }
-        if let Err(e) = self.close_socket_signal_tx.send(CloseConnectionSignal::WithReason(*addr, reason)) {
-            debug_if_enabled!(
-                "No active receivers for close signal ({}): {e:?}",
-                sanitize_sensitive_info(&addr.to_string())
-            );
-            return false;
-        }
-        true
+        self.close_connection_with_reason(addr, reason)
     }
 
     pub fn close_connection_signal(&self, addr: &SocketAddr) -> bool {
@@ -1212,14 +1230,27 @@ impl ConnectionManager {
     }
 
     pub fn close_connection_with_reason(&self, addr: &SocketAddr, reason: DisconnectReason) -> bool {
-        if let Err(e) = self.close_socket_signal_tx.send(CloseConnectionSignal::WithReason(*addr, reason)) {
-            debug_if_enabled!(
-                "No active receivers for close signal ({}): {e:?}",
-                sanitize_sensitive_info(&addr.to_string())
-            );
-            return false;
-        }
-        true
+        let target_sent = if let Ok(mut closers) = self.socket_closers.lock() {
+            match closers.remove(addr) {
+                Some(SocketCloseState::Open(tx)) => {
+                    if tx.send(reason).is_ok() {
+                        closers.insert(*addr, SocketCloseState::Closing);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                Some(SocketCloseState::Closing) => {
+                    closers.insert(*addr, SocketCloseState::Closing);
+                    true
+                }
+                None => false,
+            }
+        } else {
+            false
+        };
+        let _ = self.close_socket_signal_tx.send(CloseConnectionSignal::WithReason(*addr, reason));
+        target_sent
     }
 
     pub async fn release_connection(&self, addr: &SocketAddr) {
@@ -1230,9 +1261,13 @@ impl ConnectionManager {
         release_connection_with_reason(self, addr, reason, true).await;
     }
 
-    pub async fn release_connection_as_kicked(&self, addr: &SocketAddr) {
-        let _ = self.close_connection_with_reason(addr, DisconnectReason::ClientKicked);
-        release_connection_with_reason(self, addr, DisconnectReason::ClientKicked, true).await;
+    pub async fn release_connection_as_kicked(&self, addr: &SocketAddr) -> bool {
+        self.release_user_sessions_only(addr).await;
+        let closed = self.close_connection_with_reason(addr, DisconnectReason::ClientKicked);
+        if !closed {
+            self.release_provider_deferred(addr).await;
+        }
+        closed
     }
 
     /// Releases the provider connection for `addr` after `tcp_close_notify` is notified.
@@ -1932,9 +1967,142 @@ mod tests {
         let manager = create_test_connection_manager();
         let mut rx = manager.get_close_connection_channel();
         let addr: SocketAddr = "127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!());
+        let _close_rx = manager.register_close_socket(addr);
 
         assert!(manager.kick_connection(&addr, shared::model::VirtualId::new(1), 0).await);
         assert_eq!(rx.recv().await.ok(), Some(CloseConnectionSignal::WithReason(addr, DisconnectReason::ClientKicked)));
+    }
+
+    #[tokio::test]
+    async fn kick_connection_returns_false_without_receivers() {
+        let manager = create_test_connection_manager();
+        let addr: SocketAddr = "127.0.0.1:1235".parse().unwrap_or_else(|_| unreachable!());
+        assert!(!manager.kick_connection(&addr, shared::model::VirtualId::new(1), 0).await);
+    }
+
+    #[tokio::test]
+    async fn close_connection_with_reason_returns_false_for_dropped_oneshot_receiver() {
+        let manager = create_test_connection_manager();
+        let addr: SocketAddr = "127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!());
+        let close_rx = manager.register_close_socket(addr);
+        drop(close_rx);
+
+        assert!(
+            !manager.close_connection_with_reason(&addr, DisconnectReason::ClientKicked),
+            "must return false when target oneshot receiver was dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_connection_with_reason_returns_false_when_only_broadcast_receiver_exists() {
+        let manager = create_test_connection_manager();
+        let mut broadcast_rx = manager.get_close_connection_channel();
+        let addr: SocketAddr = "127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!());
+
+        assert!(
+            !manager.close_connection_with_reason(&addr, DisconnectReason::ClientKicked),
+            "must return false when only broadcast receiver exists without registered target socket"
+        );
+        assert_eq!(
+            broadcast_rx.recv().await.ok(),
+            Some(CloseConnectionSignal::WithReason(addr, DisconnectReason::ClientKicked))
+        );
+    }
+
+    #[tokio::test]
+    async fn close_connection_with_reason_returns_false_for_unrelated_addr_even_with_broadcast_receivers() {
+        let manager = create_test_connection_manager();
+        let _broadcast_rx = manager.get_close_connection_channel();
+        let active_addr: SocketAddr = "127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!());
+        let unrelated_addr: SocketAddr = "127.0.0.1:5678".parse().unwrap_or_else(|_| unreachable!());
+
+        let _close_rx = manager.register_close_socket(active_addr);
+
+        assert!(
+            !manager.close_connection_with_reason(&unrelated_addr, DisconnectReason::ClientKicked),
+            "unrelated address must not report success just because another socket is registered"
+        );
+        assert!(
+            manager.close_connection_with_reason(&active_addr, DisconnectReason::ClientKicked),
+            "target address registered must report success"
+        );
+    }
+
+    #[tokio::test]
+    async fn release_connection_as_kicked_cleans_provider_when_unreceived() {
+        let manager = create_test_connection_manager();
+        let addr: SocketAddr = "127.0.0.1:2236".parse().unwrap_or_else(|_| unreachable!());
+        let input_name = "provider_1".intern();
+        let handle = manager
+            .provider_manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &addr,
+                false,
+                0,
+                crate::ConnectionKind::Normal,
+                Some("test-owner"),
+            )
+            .expect("acquire provider");
+        assert_eq!(manager.provider_manager.get_provider_connections_count(), 1);
+
+        let closed = manager.release_connection_as_kicked(&addr).await;
+        assert!(!closed, "should return false when no receiver is subscribed");
+        assert_eq!(manager.provider_manager.get_provider_connections_count(), 0);
+
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn release_connection_as_kicked_does_not_release_provider_prematurely_on_repeated_kick() {
+        let manager = create_test_connection_manager();
+        let addr: SocketAddr = "127.0.0.1:2237".parse().unwrap_or_else(|_| unreachable!());
+        let input_name = "provider_1".intern();
+        let handle = manager
+            .provider_manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &addr,
+                false,
+                0,
+                crate::ConnectionKind::Normal,
+                Some("test-owner"),
+            )
+            .expect("acquire provider");
+        assert_eq!(manager.provider_manager.get_provider_connections_count(), 1);
+
+        let mut close_rx = manager.register_close_socket(addr);
+
+        // First kick sends close signal to socket and transitions to Closing
+        let closed_first = manager.release_connection_as_kicked(&addr).await;
+        assert!(closed_first, "first kick must report success when socket is registered");
+        assert_eq!(
+            manager.provider_manager.get_provider_connections_count(),
+            1,
+            "provider must remain allocated after first kick while socket is in Closing state"
+        );
+
+        // Second kick while socket is still Closing must not prematurely release provider
+        let closed_second = manager.release_connection_as_kicked(&addr).await;
+        assert!(closed_second, "second kick during Closing state must report success");
+        assert_eq!(
+            manager.provider_manager.get_provider_connections_count(),
+            1,
+            "provider must not be released prematurely by second kick before socket finishes"
+        );
+
+        // Now simulate the socket processing the signal and finishing its cleanup
+        let reason = close_rx.try_recv().expect("close signal must be pending in oneshot");
+        assert_eq!(reason, DisconnectReason::ClientKicked);
+        manager.release_provider_deferred(&addr).await;
+        manager.unregister_close_socket(&addr);
+        assert_eq!(
+            manager.provider_manager.get_provider_connections_count(),
+            0,
+            "provider must be released after socket finishes and unregisters"
+        );
+
+        drop(handle);
     }
 
     #[tokio::test]
@@ -1951,10 +2119,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn release_connection_as_kicked_is_idempotent() {
+        let manager = create_test_connection_manager();
+        let mut rx = manager.get_close_connection_channel();
+        let addr: SocketAddr = "127.0.0.1:2235".parse().unwrap_or_else(|_| unreachable!());
+
+        manager.add_connection(&addr).await;
+        manager.release_connection_as_kicked(&addr).await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(100), rx.recv()).await.ok().and_then(Result::ok),
+            Some(CloseConnectionSignal::WithReason(addr, DisconnectReason::ClientKicked))
+        );
+
+        manager.release_connection_as_kicked(&addr).await;
+    }
+
+    #[tokio::test]
     async fn close_connection_signal_sends_generic_close_signal() {
         let manager = create_test_connection_manager();
         let mut rx = manager.get_close_connection_channel();
         let addr: SocketAddr = "127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!());
+        let _close_rx = manager.register_close_socket(addr);
 
         assert!(manager.close_connection_signal(&addr));
         assert_eq!(rx.recv().await.ok(), Some(CloseConnectionSignal::WithReason(addr, DisconnectReason::ClientClosed)));
@@ -1965,6 +2150,7 @@ mod tests {
         let manager = create_test_connection_manager();
         let mut rx = manager.get_close_connection_channel();
         let addr: SocketAddr = "127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!());
+        let _close_rx = manager.register_close_socket(addr);
 
         assert!(
             manager

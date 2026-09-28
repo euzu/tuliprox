@@ -35,6 +35,31 @@ sources:
             mpeg_ts: true
         mapping:
           - iptv-org
+      # Link this example to your authorized VOD/Series input with TMDB IDs, not just the demo Live feed.
+      - name: tmdb-discovery-example
+        enabled: false
+        curation:
+          # Enable target and curation after providing your own application Read Access Token.
+          enabled: false
+          catalog_selection: full
+          include_xtream_base_categories: true
+          tmdb:
+            api:
+              # See docs for the TMDB_READ_ACCESS_TOKEN environment-variable example; no metadata-key fallback.
+              access_token: ""
+            trending:
+              - kind: movie
+                time_window: week
+                limit: 100 # Unique remote references, not local matches; optional (1..=500).
+                category_name: TMDB Weekly Movies
+              - kind: tv
+                time_window: day
+                limit: 100
+                category_name: TMDB Daily TV
+        output:
+          - type: xtream
+          - type: m3u
+            filename: tmdb-discovery.m3u
       - name: iptv-trakt-example
         output:
           - type: xtream

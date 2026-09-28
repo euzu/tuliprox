@@ -471,6 +471,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn changed_page_count_or_changed_or_missing_item_count_rejects_a_prefix() {
+        for later_metadata in [(Some(2), Some(3)), (Some(3), Some(2)), (Some(3), None)] {
+            let client =
+                TraktClient::new(reqwest::Client::new(), api_config("http://127.0.0.1:9".to_string(), "test-key"))
+                    .expect("client");
+            let error = client
+                .paginate_items("list", "changing-pagination".to_string(), |page| async move {
+                    let item = serde_json::from_str::<TraktListItem>(&trakt_movie_json(page)).expect("fixture");
+                    let (page_count, item_count) = if page == 1 { (Some(3), Some(3)) } else { later_metadata };
+                    Ok(TraktListItemsPage { items: vec![item], page_count, item_count })
+                })
+                .await
+                .expect_err("changed pagination cannot admit a prefix");
+            assert_eq!(error.kind, TraktFetchFailureKind::PaginationTruncated);
+            assert!(error.message().contains("pagination metadata changed or disappeared"));
+        }
+    }
+
+    #[tokio::test]
     async fn missing_pagination_metadata_on_later_page_is_incomplete() {
         let client = TraktClient::new(reqwest::Client::new(), api_config("http://127.0.0.1:9".to_string(), "test-key"))
             .expect("client");

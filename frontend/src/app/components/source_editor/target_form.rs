@@ -14,7 +14,7 @@ use shared::{
     error::TuliproxError,
     model::{
         permission::Permission, ClusterFlags, ConfigTargetDto, ConfigTargetFilterDto, ConfigTargetOptions,
-        ProcessingOrder, TargetBouquetMode, TargetBouquetStatusDto,
+        CurationCatalogSelection, CurationConfigDto, ProcessingOrder, TargetBouquetMode, TargetBouquetStatusDto,
     },
     utils::Internable,
 };
@@ -47,12 +47,29 @@ const LABEL_LOWERCASE_XMLTV_DISPLAY_NAMES: &str = "LABEL.LOWERCASE_XMLTV_DISPLAY
 const LABEL_MAIN: &str = "LABEL.MAIN_CONFIG";
 const LABEL_OPTIONS: &str = "LABEL.OPTIONS";
 const LABEL_BOUQUETS: &str = "LABEL.BOUQUETS";
+const LABEL_CURATION_CATALOG_SELECTION_FULL: &str = "LABEL.TRAKT_CATALOG_SELECTION_FULL";
+const LABEL_CURATION_CATALOG_SELECTION_CURATED: &str = "LABEL.TRAKT_CATALOG_SELECTION_CURATED";
 
 #[derive(Clone, PartialEq)]
 enum BouquetStatus {
     Loading,
     Ready(Option<TargetBouquetStatusDto>),
     Unavailable,
+}
+
+fn curation_catalog_selection_label_key(selection: CurationCatalogSelection) -> &'static str {
+    match selection {
+        CurationCatalogSelection::Full => LABEL_CURATION_CATALOG_SELECTION_FULL,
+        CurationCatalogSelection::Curated => LABEL_CURATION_CATALOG_SELECTION_CURATED,
+    }
+}
+
+fn curation_summary(curation: &CurationConfigDto, catalog_selection: &str) -> String {
+    format!(
+        "{catalog_selection} · Trakt: {} · TMDB: {}",
+        curation.trakt.as_ref().map_or(0, |source| source.lists.len() + source.charts.len()),
+        curation.tmdb.as_ref().map_or(0, |source| source.trending.len())
+    )
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -594,6 +611,19 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
     let render_edit_mode = || {
         html! {
             <div class="tp__source-editor-form__body">
+            if let Some(curation) = &target_form_state.form.curation {
+                <Card class="tp__config-view__card">
+                    <p>{translate.t("LABEL.CURATION_YAML_NOTICE")}</p>
+                    { config_field_bool!(curation, translate.t(LABEL_ENABLED), enabled) }
+                    { config_field_custom!(
+                        translate.t("LABEL.CURATION"),
+                        curation_summary(
+                            curation,
+                            &translate.t(curation_catalog_selection_label_key(curation.catalog_selection))
+                        )
+                    ) }
+                </Card>
+            }
             <div class="tp__source-editor-form__body__pages">
                 <Panel value={TargetFormPage::Main.intern()} active={view_visible.intern()}>
                 {render_target()}
@@ -664,12 +694,50 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
 #[cfg(test)]
 mod tests {
     use super::{ConfigTargetOptionsFormAction, ConfigTargetOptionsFormState};
-    use shared::model::ConfigTargetOptions;
+    use shared::model::{ConfigTargetOptions, CurationCatalogSelection, CurationConfigDto};
     use std::rc::Rc;
     use yew::prelude::Reducible;
 
     fn default_options_state() -> Rc<ConfigTargetOptionsFormState> {
         ConfigTargetOptionsFormState { form: ConfigTargetOptions::default(), modified: false }.into()
+    }
+
+    #[test]
+    fn target_form_name_edits_preserve_yaml_curation() {
+        let dto: shared::model::ConfigTargetDto = serde_json::from_value(serde_json::json!({"name": "before", "curation": {"enabled": false, "tmdb": {"enabled": false, "api": {"access_token": "test-token"}, "trending": [
+            {"kind": "movie", "time_window": "week", "limit": 500, "create_xtream_category": false, "category_name": "Saved"},
+            {"kind": "tv", "time_window": "day", "limit": 100, "category_name": "Shows"},
+            {"kind": "movie", "time_window": "day", "category_name": "Movies"}
+        ]}}})).unwrap();
+        let state = Rc::new(super::ConfigTargetFormState { form: dto.clone(), modified: false });
+        let state = state.reduce(super::ConfigTargetFormAction::Name("after".to_string()));
+        assert_eq!(state.form.curation, dto.curation);
+        assert_eq!(state.form.name, "after");
+    }
+
+    #[test]
+    fn target_curation_summary_localizes_selection_and_preserves_provider_counts() {
+        let curation: CurationConfigDto = serde_json::from_value(serde_json::json!({
+            "catalog_selection": "curated",
+            "trakt": {
+                "lists": [{"user": "alice", "list_slug": "watchlist", "content_type": "vod", "create_xtream_category": false}],
+                "charts": [{"kind": "movies", "chart": "popular", "create_xtream_category": false}]
+            },
+            "tmdb": {
+                "trending": [{"kind": "movie", "time_window": "week", "limit": 500, "create_xtream_category": false}]
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            super::curation_catalog_selection_label_key(CurationCatalogSelection::Full),
+            "LABEL.TRAKT_CATALOG_SELECTION_FULL"
+        );
+        assert_eq!(
+            super::curation_catalog_selection_label_key(curation.catalog_selection),
+            "LABEL.TRAKT_CATALOG_SELECTION_CURATED"
+        );
+        assert_eq!(super::curation_summary(&curation, "Curated catalog"), "Curated catalog · Trakt: 2 · TMDB: 1");
     }
 
     #[test]

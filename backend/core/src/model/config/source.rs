@@ -1,4 +1,4 @@
-use crate::model::{macros, ConfigInput, ConfigTarget, ProcessTargets, ResourcePolicy};
+use crate::model::{macros, ConfigInput, ConfigTarget, ProcessTargets};
 use indexmap::IndexMap;
 use parking_lot::RwLock;
 use shared::{
@@ -433,12 +433,6 @@ impl TryFrom<&SourcesConfigDto> for SourcesConfig {
             .unwrap_or_default();
 
         for input_dto in &dto.inputs {
-            // Reject an invalid policy instead of falling back to a partially normalized
-            // allowlist; a typo in a host or CIDR must not silently widen or narrow access.
-            if let Some(policy_dto) = &input_dto.resource_policy {
-                ResourcePolicy::from_dto(policy_dto)
-                    .map_err(|err| TuliproxError::ConfigInput(format!("input '{}': {err}", input_dto.name)))?;
-            }
             let mut input = ConfigInput::from(input_dto);
             // Prepare input
             if let Some(path) = input.prepare(&provider)? {
@@ -447,8 +441,6 @@ impl TryFrom<&SourcesConfigDto> for SourcesConfig {
             input_names.insert(input.name.clone());
             inputs.push(input);
         }
-
-        check_unique_member_names(&inputs)?;
 
         // Resolve staged playlist inputs to their configured download type.
         // The provider link is kept for overlay routing and must not affect staged playlist fetching.
@@ -460,6 +452,8 @@ impl TryFrom<&SourcesConfigDto> for SourcesConfig {
                 input.resolve_staged_download_type();
             }
         }
+
+        check_unique_member_names(&inputs)?;
 
         let inputs: Vec<Arc<ConfigInput>> = inputs.into_iter().map(Arc::new).collect();
         let group_lookup = build_group_lookup(&inputs);
@@ -481,9 +475,11 @@ impl TryFrom<&SourcesConfigDto> for SourcesConfig {
 
 /// Rejects duplicate input and alias names.
 ///
-/// The canonical input name is the identity a resource origin resolves to, and aliases share that
-/// namespace through `group_lookup`. A duplicate would silently resolve to whichever entry was
-/// inserted last, which would authorize a resource against the wrong policy, so it is a load error.
+/// Input names and alias names share one namespace: both name a member in `group_lookup`, and that map
+/// decides which input a member belongs to. A duplicate would silently resolve to whichever member was
+/// inserted last, so a request would run against another input's playlist, credentials, and limits.
+/// Such a configuration is a load error, and it must be reported while the sources are read - a reload
+/// that returns an error leaves the running configuration in place.
 fn check_unique_member_names(inputs: &[ConfigInput]) -> Result<(), TuliproxError> {
     let mut seen: HashMap<&str, &str> = HashMap::with_capacity(inputs.len());
     for input in inputs {
@@ -612,57 +608,30 @@ impl SourcesConfig {
 mod tests {
     use super::{ConfigProvider, SourcesConfig};
     use shared::model::{
-        ConfigInputDto, ConfigProviderDto, ProviderUrlSelectionPolicy, ResourcePolicyDto, SourcesConfigDto,
+        ConfigInputAliasDto, ConfigInputDto, ConfigProviderDto, ProviderUrlSelectionPolicy, SourcesConfigDto,
     };
     use std::net::IpAddr;
 
-    fn sources_dto(resource_policy: Option<ResourcePolicyDto>) -> SourcesConfigDto {
+    fn sources_dto() -> SourcesConfigDto {
         SourcesConfigDto {
             templates: None,
             provider: None,
             inputs: vec![ConfigInputDto {
-                name: "policy-input".into(),
+                name: "first-input".into(),
                 url: "https://provider.example/playlist.m3u".to_string(),
-                resource_policy,
                 ..ConfigInputDto::default()
             }],
             sources: Vec::new(),
         }
     }
 
-    #[test]
-    fn a_valid_resource_policy_loads_into_the_runtime_input() {
-        let dto = sources_dto(Some(ResourcePolicyDto {
-            allowed_hosts: vec!["Media.Home.Arpa".to_string()],
-            allowed_networks: vec!["192.168.50.20/32".to_string()],
-        }));
-
-        let sources = SourcesConfig::try_from(&dto).expect("policy should be accepted");
-        let input = sources.inputs.first().expect("input");
-        let policy = input.resource_policy.as_ref().expect("policy");
-
-        assert!(policy.allows_host("media.home.arpa"));
-        assert_eq!(policy.allowed_networks.len(), 1);
-    }
-
-    #[test]
-    fn an_invalid_resource_policy_fails_the_config_load() {
-        for invalid in [
-            ResourcePolicyDto { allowed_hosts: vec!["https://host/path".to_string()], allowed_networks: Vec::new() },
-            ResourcePolicyDto { allowed_hosts: Vec::new(), allowed_networks: vec!["0.0.0.0/0".to_string()] },
-            ResourcePolicyDto { allowed_hosts: Vec::new(), allowed_networks: vec!["public.example/24".to_string()] },
-        ] {
-            let dto = sources_dto(Some(invalid.clone()));
-            let error = SourcesConfig::try_from(&dto).expect_err("invalid policy must be rejected");
-            assert!(error.to_string().contains("resource_policy"), "error should name the policy: {error}");
-        }
-    }
-
+    /// A duplicate member name silently resolves to whichever entry was inserted last, so a request
+    /// would run against another input.
     #[test]
     fn duplicate_input_names_fail_the_config_load() {
-        let mut dto = sources_dto(None);
+        let mut dto = sources_dto();
         dto.inputs.push(ConfigInputDto {
-            name: "policy-input".into(),
+            name: "first-input".into(),
             url: "https://other.example/playlist.m3u".to_string(),
             ..ConfigInputDto::default()
         });
@@ -674,19 +643,19 @@ mod tests {
 
     #[test]
     fn duplicate_alias_names_fail_the_config_load() {
-        let mut dto = sources_dto(None);
-        dto.inputs[0].aliases = Some(vec![shared::model::ConfigInputAliasDto {
+        let mut dto = sources_dto();
+        dto.inputs[0].aliases = Some(vec![ConfigInputAliasDto {
             name: "shared-alias".into(),
             url: "https://provider.example/alias.m3u".to_string(),
-            ..shared::model::ConfigInputAliasDto::default()
+            ..ConfigInputAliasDto::default()
         }]);
         dto.inputs.push(ConfigInputDto {
             name: "second-input".into(),
             url: "https://second.example/playlist.m3u".to_string(),
-            aliases: Some(vec![shared::model::ConfigInputAliasDto {
+            aliases: Some(vec![ConfigInputAliasDto {
                 name: "shared-alias".into(),
                 url: "https://second.example/alias.m3u".to_string(),
-                ..shared::model::ConfigInputAliasDto::default()
+                ..ConfigInputAliasDto::default()
             }]),
             ..ConfigInputDto::default()
         });
@@ -698,14 +667,14 @@ mod tests {
 
     #[test]
     fn an_alias_name_colliding_with_an_input_name_fails_the_config_load() {
-        let mut dto = sources_dto(None);
+        let mut dto = sources_dto();
         dto.inputs.push(ConfigInputDto {
             name: "second-input".into(),
             url: "https://second.example/playlist.m3u".to_string(),
-            aliases: Some(vec![shared::model::ConfigInputAliasDto {
-                name: "policy-input".into(),
+            aliases: Some(vec![ConfigInputAliasDto {
+                name: "first-input".into(),
                 url: "https://second.example/alias.m3u".to_string(),
-                ..shared::model::ConfigInputAliasDto::default()
+                ..ConfigInputAliasDto::default()
             }]),
             ..ConfigInputDto::default()
         });
@@ -716,12 +685,24 @@ mod tests {
     }
 
     #[test]
-    fn an_input_without_a_resource_policy_has_none() {
-        let dto = sources_dto(None);
+    fn distinct_member_names_load() {
+        let mut dto = sources_dto();
+        dto.inputs.push(ConfigInputDto {
+            name: "second-input".into(),
+            url: "https://second.example/playlist.m3u".to_string(),
+            aliases: Some(vec![ConfigInputAliasDto {
+                name: "second-alias".into(),
+                url: "https://second.example/alias.m3u".to_string(),
+                ..ConfigInputAliasDto::default()
+            }]),
+            ..ConfigInputDto::default()
+        });
 
-        let sources = SourcesConfig::try_from(&dto).expect("load");
+        let sources = SourcesConfig::try_from(&dto).expect("distinct member names must load");
 
-        assert!(sources.inputs.first().expect("input").resource_policy.is_none());
+        assert_eq!(sources.inputs.len(), 2);
+        assert!(sources.group_lookup.contains_key("first-input"));
+        assert!(sources.group_lookup.contains_key("second-input"));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 # **tuliprox** — Self-Hosted Media Gateway & Playlist Processor
 
+![tuliprox logo](https://github.com/user-attachments/assets/8ef9ea79-62ff-4298-978f-22326c5c3d02)
 `tuliprox` is a high-performance, self-hosted media gateway for bringing IPTV providers, media servers, playlists, EPG data,  
 and local media libraries together behind one clean and controllable interface.
 
@@ -8,6 +9,14 @@ media sources, normalizes and enriches their metadata, filters and reorganizes t
 and publishes the result in the formats your clients already understand.
 
 **One service. Multiple sources. Multiple users. Multiple output formats. Full control.**
+
+> **Legal Notice**
+>
+> `tuliprox` does not provide, host, sell, or distribute media content or access credentials.
+> Users are solely responsible for ensuring that they have the necessary rights and authorization to access, process,
+> proxy, record, or redistribute any media sources configured with `tuliprox`.
+>
+> The software is intended for use with legally obtained and properly authorized content and services.
 
 ## ✨ Why Tuliprox?
 
@@ -39,16 +48,6 @@ Tuliprox is built for more than playlist conversion. It is designed to become th
 | **Operations** | Web UI, REST API, scheduler, health/readiness probes, notifications, QoS, stream history, watchdog           |
 | **Storage**    | Embedded B+Tree engine, WAL protection, mmap scans, compression, compaction — no external DB required        |
 | **Deployment** | Docker, Docker Compose templates, Raspberry Pi, NAS, VPS, x86 and ARM                                        |
-
-> **Legal Notice**
->
-> `tuliprox` does not provide, host, sell, or distribute media content or access credentials.
-> Users are solely responsible for ensuring that they have the necessary rights and authorization to access, process,
-> proxy, record, or redistribute any media sources configured with `tuliprox`.
->
-> The software is intended for use with legally obtained and properly authorized content and services.
-
-![tuliprox logo](https://github.com/user-attachments/assets/8ef9ea79-62ff-4298-978f-22326c5c3d02)
 
 ## 🏆 Key Features
 
@@ -127,7 +126,7 @@ Tuliprox can transform provider data into the structure you actually want to use
 - Output filters for the final playlist state
 - Favorites/bouquet management through `add_favourite(group_name)`
 - Target-specific bouquet whitelist/blacklist editing directly from the Web UI
-- Trakt-based auto-curated bouquets such as trending and popular content
+- Target-wide Trakt and TMDB Trending curation, with optional Xtream bouquets over locally available content
 
 **Benefit:** providers supply the raw catalog; Tuliprox decides what your users actually see and how it is organized.
 

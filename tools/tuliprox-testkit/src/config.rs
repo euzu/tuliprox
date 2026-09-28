@@ -105,12 +105,63 @@ impl PolicyContract {
     }
 }
 
+/// Which provider protocol the isolated fixture imports from.
+///
+/// `m3u` (default) keeps the generated playlist input. `stalker` points the input at the
+/// Ministra portal the fixture origin emulates, so the import, the runtime `create_link`
+/// resolution and the destination guard can be exercised against a scripted portal.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FixtureInputType {
+    #[default]
+    M3u,
+    Stalker,
+}
+
+/// The emulated portal's identity and its scripted refusals.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FixtureStalker {
+    /// MAC the fixture input authenticates with. The emulated portal accepts any MAC.
+    pub mac_address: String,
+    /// MAG preset written into the fixture input. Must be one of the four presets.
+    pub mag_preset: String,
+    /// Refuse the first `create_link` with a stale-session body (`code` 44) and answer the
+    /// retry. A portal that invalidates the session out of band behaves this way; the
+    /// playback path has to re-handshake instead of reporting the item as unresolvable.
+    pub refuse_create_link_once: bool,
+    /// Channels whose `create_link` is always refused with the same stale-session body.
+    pub refuse_create_link_markers: Vec<u32>,
+    /// Serve a distinct `cmd_1` descriptor command alongside the raw `cmd`.
+    pub separate_descriptor_command: bool,
+}
+
+impl FixtureStalker {
+    pub const PRESETS: [&'static str; 4] = ["generic_safe", "mag250_legacy", "mag254_strict", "ministra_modern"];
+}
+
+impl Default for FixtureStalker {
+    fn default() -> Self {
+        Self {
+            mac_address: "00:1A:79:00:00:01".to_owned(),
+            mag_preset: "generic_safe".to_owned(),
+            refuse_create_link_once: false,
+            refuse_create_link_markers: Vec::new(),
+            separate_descriptor_command: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TuliproxConfig {
     pub base_url: String,
     #[serde(default)]
     pub api_base_url: Option<String>,
+    #[serde(default)]
+    pub input_type: FixtureInputType,
+    #[serde(default)]
+    pub stalker: FixtureStalker,
     #[serde(default)]
     pub admin_username: Option<String>,
     #[serde(default)]
@@ -252,6 +303,11 @@ pub enum ExpectedPlayback {
     /// A recently evicted playback retried and the SUT terminated it quietly
     /// (HTTP 204, no custom error video, no connection-denied event).
     Suppressed,
+    /// The SUT answered with a plain HTTP failure instead of a stream — the SUT's own
+    /// rejection statuses are covered by [`Self::Rejected`]. Used where the stream cannot
+    /// be served for a reason the SUT reports as an error, such as a Stalker `create_link`
+    /// target the destination guard refuses.
+    HttpError(u16),
 }
 
 impl ExpectedPlayback {
@@ -259,7 +315,9 @@ impl ExpectedPlayback {
     pub fn is_streaming(&self) -> bool { matches!(self, Self::Streaming) }
 
     #[must_use]
-    pub fn is_rejected(&self) -> bool { matches!(self, Self::Rejected | Self::RejectedWith(_) | Self::Suppressed) }
+    pub fn is_rejected(&self) -> bool {
+        matches!(self, Self::Rejected | Self::RejectedWith(_) | Self::Suppressed | Self::HttpError(_))
+    }
 
     #[must_use]
     pub fn matches_outcome(&self, outcome: &crate::protocol::PlaybackOutcome) -> bool {
@@ -272,6 +330,7 @@ impl ExpectedPlayback {
             | (Self::Suppressed, PlaybackOutcome::AdmissionRejected { reason: RejectionReason::HttpStatus(204) }) => {
                 true
             }
+            (Self::HttpError(expected), PlaybackOutcome::HttpError { status }) => expected == status,
             (Self::RejectedWith(expected), PlaybackOutcome::AdmissionRejected { reason }) => match reason {
                 RejectionReason::CustomVideo(kind) => {
                     expected.custom_video.is_none_or(|expected_kind| expected_kind == *kind)
@@ -308,6 +367,25 @@ pub struct AssertOrigin {
     pub no_limit_rejections: Option<bool>,
     #[serde(default)]
     pub latest_request_account: Option<String>,
+    /// Portal handshakes the emulated Stalker portal answered at least.
+    #[serde(default)]
+    pub stalker_handshakes_at_least: Option<u64>,
+    /// `create_link` requests the portal received at least, refusals included.
+    #[serde(default)]
+    pub stalker_create_links_at_least: Option<u64>,
+    /// `create_link` requests the portal refused with a stale-session body, at least.
+    #[serde(default)]
+    pub stalker_token_refusals_at_least: Option<u64>,
+    /// Markers the portal answered with a stream URL, compared as a set. Proves that a
+    /// playback resolved the requested channel's own stored command.
+    #[serde(default)]
+    pub stalker_create_link_markers: Option<Vec<u32>>,
+    /// Markers resolved through the portal's `cmd_1` descriptor command.
+    #[serde(default)]
+    pub stalker_descriptor_markers: Option<Vec<u32>>,
+    /// Markers resolved through the raw `cmd` fallback command.
+    #[serde(default)]
+    pub stalker_raw_command_markers: Option<Vec<u32>>,
 }
 
 /// Per-step assertions against the SUT runtime status (`/api/v1/status`).
@@ -339,6 +417,8 @@ pub struct Start {
     pub actor: String,
     pub playback_id: String,
     pub session_group: String,
+    #[serde(default)]
+    pub expect_evicted: bool,
     #[serde(default)]
     pub url: Option<String>,
     #[serde(default)]
@@ -383,6 +463,7 @@ impl Scenario {
         Ok(scenario)
     }
 
+    #[allow(clippy::too_many_lines)]
     pub fn validate(&self) -> Result<(), TestkitError> {
         if self.schema_version != 1 {
             return Err(TestkitError::Configuration("unsupported scenario schema version".to_owned()));
@@ -412,6 +493,7 @@ impl Scenario {
         let mut command_ids = HashSet::new();
         let mut playback_ids = HashSet::new();
         let mut seen_playback_ids = HashSet::new();
+        let mut expected_evictions = HashSet::new();
         for step in &steps {
             if !command_ids.insert(step.command_id.as_str()) || step.command_id.is_empty() {
                 return Err(TestkitError::Configuration("command IDs must be unique and non-empty".to_owned()));
@@ -429,11 +511,33 @@ impl Scenario {
                         stop.playback_id
                     )));
                 }
+                if expected_evictions.contains(stop.playback_id.as_str()) {
+                    return Err(TestkitError::Configuration(format!(
+                        "playback {} expects eviction and cannot be explicitly stopped",
+                        stop.playback_id
+                    )));
+                }
                 playback_ids.remove(stop.playback_id.as_str());
                 continue;
             };
             if !actor_ids.contains(start.actor.as_str()) {
                 return Err(TestkitError::Configuration(format!("unknown actor {}", start.actor)));
+            }
+            if start.expect_evicted {
+                if step.expect.is_rejected()
+                    || self.actors.iter().any(|actor| actor.id == start.actor && actor.agent != "local")
+                    || ((start.vod_object.is_some()
+                        || start.range.is_some()
+                        || start.read_limit_bytes.is_some()
+                        || start.method.is_some())
+                        && (start.post_read_action.is_some_and(|action| action != PostReadAction::KeepOpen)
+                            || start.method.as_deref() == Some("HEAD")))
+                {
+                    return Err(TestkitError::Configuration(
+                        "expect_evicted requires a held streaming playback on a local actor".to_owned(),
+                    ));
+                }
+                expected_evictions.insert(start.playback_id.as_str());
             }
             if start.playback_id.is_empty() || start.session_group.is_empty() {
                 return Err(TestkitError::Configuration("start requires playback_id and session_group".to_owned()));
@@ -475,6 +579,7 @@ impl Scenario {
         }
         self.validate_policy_contract()?;
         self.validate_playback_endpoint()?;
+        self.validate_stalker_fixture()?;
         Ok(())
     }
 
@@ -499,6 +604,49 @@ impl Scenario {
                         channel.protocol
                     )));
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// The emulated Stalker portal only serves what the fixture can answer for: the
+    /// channels the scenario declares, the presets the SUT knows, and no multi-account
+    /// pool (Stalker aliases carry their own portal identities, which the fixture does
+    /// not model).
+    fn validate_stalker_fixture(&self) -> Result<(), TestkitError> {
+        if self.tuliprox.input_type != FixtureInputType::Stalker {
+            if self.tuliprox.stalker.refuse_create_link_once
+                || !self.tuliprox.stalker.refuse_create_link_markers.is_empty()
+            {
+                return Err(TestkitError::Configuration(
+                    "stalker portal refusals require input_type: stalker".to_owned(),
+                ));
+            }
+            return Ok(());
+        }
+        if !FixtureStalker::PRESETS.contains(&self.tuliprox.stalker.mag_preset.as_str()) {
+            return Err(TestkitError::Configuration(format!(
+                "unknown mag_preset '{}'; expected one of {:?}",
+                self.tuliprox.stalker.mag_preset,
+                FixtureStalker::PRESETS
+            )));
+        }
+        if self.tuliprox.stalker.mac_address.trim().is_empty() {
+            return Err(TestkitError::Configuration("stalker.mac_address cannot be empty".to_owned()));
+        }
+        if self.policy_contract.as_ref().is_some_and(|contract| !contract.provider_pool.is_empty()) {
+            return Err(TestkitError::Configuration(
+                "a provider_pool is not supported for input_type: stalker (the fixture portal has one identity)"
+                    .to_owned(),
+            ));
+        }
+        let markers =
+            self.channels.values().map(|channel| channel.origin_marker).collect::<std::collections::HashSet<_>>();
+        for marker in &self.tuliprox.stalker.refuse_create_link_markers {
+            if !markers.contains(marker) {
+                return Err(TestkitError::Configuration(format!(
+                    "stalker.refuse_create_link_markers names marker {marker}, which no channel of this scenario uses"
+                )));
             }
         }
         Ok(())
@@ -573,6 +721,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn expected_eviction_requires_held_vod_playback() -> Result<(), TestkitError> {
+        let mut scenario: Scenario = serde_saphyr::from_str(
+            r"
+schema_version: 1
+name: vod-eviction-validation
+tuliprox: { base_url: http://example.invalid, execution_mode: existing_instance }
+actors: [{ id: a, agent: local }]
+steps:
+  - command_id: start
+    start: { actor: a, playback_id: vod, session_group: vod, vod_object: movie.mkv, expect_evicted: true, post_read_action: close }
+",
+        )
+        .map_err(|error| TestkitError::Configuration(error.to_string()))?;
+        assert!(scenario.validate().is_err());
+
+        scenario.steps[0]
+            .start
+            .as_mut()
+            .ok_or_else(|| TestkitError::Configuration("missing start".to_owned()))?
+            .post_read_action = Some(PostReadAction::Pause);
+        assert!(scenario.validate().is_err());
+        scenario.steps[0]
+            .start
+            .as_mut()
+            .ok_or_else(|| TestkitError::Configuration("missing start".to_owned()))?
+            .post_read_action = Some(PostReadAction::KeepOpen);
+        assert!(scenario.validate().is_ok());
+        scenario.steps[0]
+            .start
+            .as_mut()
+            .ok_or_else(|| TestkitError::Configuration("missing start".to_owned()))?
+            .method = Some("HEAD".to_owned());
+        assert!(scenario.validate().is_err());
+        Ok(())
+    }
+
+    #[test]
     fn duplicate_playbacks_are_rejected() {
         let scenario = Scenario {
             schema_version: 1,
@@ -587,6 +772,8 @@ mod tests {
                 execution_mode: ExecutionMode::IsolatedFixture,
                 playback_endpoint: PlaybackEndpoint::default(),
                 fixture_stream: FixtureStreamOptions::default(),
+                input_type: FixtureInputType::default(),
+                stalker: FixtureStalker::default(),
             },
             origin: None,
             actors: vec![Actor {
@@ -639,6 +826,7 @@ mod tests {
             "vod-range-reopen-strict-cap.yml",
             "vod-reopen-backpressured-body.yml",
             "live-ts-same-channel-retry-latest-wins.yml",
+            "live-ts-channel-switch-single-user-two-provider-slots.yml",
             "reentry-suppresses-evicted-retry.yml",
             "soft-slot-precedes-eviction.yml",
             "soft-slot-exhausts-without-upstream-leak.yml",
@@ -691,6 +879,70 @@ steps:
         assert_eq!(expanded[0].start.as_ref().map(|start| start.playback_id.as_str()), Some("repeat:0:playback"));
         assert_eq!(expanded[2].command_id, "repeat:1:begin");
         assert_eq!(expanded[3].stop.as_ref().map(|stop| stop.playback_id.as_str()), Some("repeat:1:playback"));
+    }
+
+    #[test]
+    fn http_error_expectation_matches_only_the_declared_status() {
+        use crate::protocol::PlaybackOutcome;
+
+        let expected = ExpectedPlayback::HttpError(502);
+        assert!(expected.matches_outcome(&PlaybackOutcome::HttpError { status: 502 }));
+        assert!(!expected.matches_outcome(&PlaybackOutcome::HttpError { status: 400 }));
+        assert!(!expected.matches_outcome(&PlaybackOutcome::Streaming { frames: 1, bytes: 1 }));
+        // A status the SUT itself reports as a rejection is a different outcome class.
+        assert!(!expected.matches_outcome(&PlaybackOutcome::AdmissionRejected {
+            reason: crate::protocol::RejectionReason::HttpStatus(502)
+        }));
+        assert!(expected.is_rejected(), "an error step must not await frames");
+    }
+
+    #[test]
+    fn stalker_fixture_validation_rejects_unknown_presets_and_markers() -> Result<(), TestkitError> {
+        let mut scenario = Scenario {
+            schema_version: 1,
+            name: "stalker".to_owned(),
+            tuliprox: TuliproxConfig {
+                base_url: "http://example.invalid".to_owned(),
+                api_base_url: None,
+                admin_username: None,
+                admin_password_env: None,
+                playlist_url: None,
+                bootstrap: Some(BootstrapConfig {
+                    command: "true".to_owned(),
+                    arguments: Vec::new(),
+                    readiness_url: "http://example.invalid/healthcheck".to_owned(),
+                    readiness_timeout_millis: 1000,
+                }),
+                execution_mode: ExecutionMode::IsolatedFixture,
+                playback_endpoint: PlaybackEndpoint::M3u,
+                fixture_stream: FixtureStreamOptions::default(),
+                input_type: FixtureInputType::Stalker,
+                stalker: FixtureStalker::default(),
+            },
+            origin: None,
+            actors: Vec::new(),
+            channels: HashMap::from([(
+                "live-17".to_owned(),
+                Channel { origin_marker: 17, protocol: "xtream_ts".to_owned() },
+            )]),
+            agents: AgentsConfig::default(),
+            policy_contract: None,
+            steps: Vec::new(),
+        };
+        assert!(scenario.validate().is_ok());
+
+        scenario.tuliprox.stalker.mag_preset = "mag999".to_owned();
+        assert!(scenario.validate().is_err(), "an unknown MAG preset must be rejected");
+
+        scenario.tuliprox.stalker.mag_preset = "generic_safe".to_owned();
+        scenario.tuliprox.stalker.refuse_create_link_markers = vec![42];
+        assert!(scenario.validate().is_err(), "a marker no channel uses must be rejected");
+
+        scenario.tuliprox.input_type = FixtureInputType::M3u;
+        scenario.tuliprox.stalker.refuse_create_link_markers.clear();
+        scenario.tuliprox.stalker.refuse_create_link_once = true;
+        assert!(scenario.validate().is_err(), "portal refusals require a stalker input");
+        Ok(())
     }
 
     #[test]

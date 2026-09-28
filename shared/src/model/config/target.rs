@@ -6,8 +6,8 @@ use crate::{
     error::TuliproxError,
     foundation::{get_filter, Filter},
     model::{
-        ClusterFlags, ConfigFavouritesDto, ConfigRenameDto, ConfigSortDto, HdHomeRunDeviceOverview, PatternTemplate,
-        Prepare, PrepareAll, ProcessingOrder, StrmExportStyle, TargetType, TraktConfigDto,
+        ClusterFlags, ConfigFavouritesDto, ConfigRenameDto, ConfigSortDto, CurationConfigDto, HdHomeRunDeviceOverview,
+        PatternTemplate, Prepare, PrepareAll, ProcessingOrder, StrmExportStyle, TargetType, TraktConfigDto,
     },
     utils::is_blank_optional_string,
 };
@@ -417,6 +417,8 @@ pub struct ConfigTargetDto {
     #[serde(default)]
     pub output: Vec<TargetOutputDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curation: Option<CurationConfigDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rename: Option<Vec<ConfigRenameDto>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mapping: Option<Vec<String>>,
@@ -440,6 +442,7 @@ impl Default for ConfigTargetDto {
             sort: None,
             filter: ConfigTargetFilterDto::default(),
             output: Vec::new(),
+            curation: None,
             rename: None,
             mapping: None,
             favourites: None,
@@ -465,6 +468,10 @@ impl ConfigTargetDto {
         self.name = self.name.trim().to_string();
         if self.name.is_empty() {
             return Err(TuliproxError::ConfigTarget("target name required".to_string()));
+        }
+
+        if let Some(curation) = &mut self.curation {
+            curation.prepare(&self.output)?;
         }
 
         let mut m3u_cnt = 0;
@@ -659,6 +666,76 @@ mod tests {
     }
 
     fn xtream_output() -> TargetOutputDto { TargetOutputDto::Xtream(XtreamTargetOutputDto::default()) }
+
+    #[test]
+    fn shipped_tmdb_example_is_safe_by_default_and_prepares_when_explicitly_enabled() {
+        let sources: crate::model::SourcesConfigDto =
+            serde_saphyr::from_str(include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../config/source.yml"))).unwrap();
+        let mut target = sources
+            .sources
+            .into_iter()
+            .flat_map(|source| source.targets)
+            .find(|target| target.name == "tmdb-discovery-example")
+            .expect("shipped TMDB example");
+        assert!(!target.enabled);
+        assert!(!target.curation.as_ref().unwrap().enabled);
+        assert!(target.curation.as_ref().unwrap().tmdb.as_ref().unwrap().api.access_token.is_empty());
+        target.prepare(1, None, None).unwrap();
+        target.enabled = true;
+        target.curation.as_mut().unwrap().enabled = true;
+        target.prepare(1, None, None).unwrap();
+        let yaml = serde_saphyr::to_string(&target).unwrap();
+        let restored: ConfigTargetDto = serde_saphyr::from_str(&yaml).unwrap();
+        assert_eq!(restored.curation, target.curation);
+    }
+
+    #[test]
+    fn target_curation_prepares_and_round_trips_tmdb_only_and_mixed_sources() {
+        for with_trakt in [false, true] {
+            let mut value = serde_json::json!({"name": "discovery", "output": [{"type": "xtream"}, {"type": "m3u"}],
+                "curation": {"catalog_selection": "curated", "tmdb": {"trending": [{"kind": "movie", "time_window": "week", "limit": 37, "category_name": "TMDB"}]}}});
+            if with_trakt {
+                value["curation"]["trakt"] =
+                    serde_json::json!({"charts": [{"kind": "movies", "chart": "popular", "category_name": "Trakt"}]});
+            }
+            let mut target: ConfigTargetDto = serde_json::from_value(value).unwrap();
+            target.prepare(1, None, None).unwrap();
+            let restored: ConfigTargetDto = serde_saphyr::from_str(&serde_saphyr::to_string(&target).unwrap()).unwrap();
+            assert_eq!(restored.curation, target.curation);
+            assert!(matches!(&restored.output[0], TargetOutputDto::Xtream(output) if output.trakt.is_none()));
+        }
+    }
+
+    #[test]
+    fn target_curation_rejects_dual_declarations_before_preparing_legacy_values() {
+        let mut target: ConfigTargetDto = serde_json::from_value(serde_json::json!({"name": "discovery",
+            "curation": {"enabled": false}, "output": [{"type": "xtream", "trakt": {"catalog_selection": "curated"}}]}))
+        .unwrap();
+        assert!(target.prepare(1, None, None).unwrap_err().to_string().contains("output[].trakt"));
+    }
+
+    #[test]
+    fn target_curation_m3u_only_requires_selection_only_entries() {
+        let mut target: ConfigTargetDto = serde_json::from_value(serde_json::json!({"name": "discovery", "output": [{"type": "m3u"}],
+            "curation": {"catalog_selection": "curated", "tmdb": {"trending": [{"kind": "tv", "time_window": "day", "limit": 500, "category_name": "Shows"}]}}})).unwrap();
+        assert!(target.prepare(1, None, None).is_err());
+        target.curation.as_mut().unwrap().tmdb.as_mut().unwrap().trending[0].create_xtream_category = false;
+        target.prepare(1, None, None).unwrap();
+    }
+
+    #[test]
+    fn target_curation_absence_and_null_keep_the_legacy_surface() {
+        for value in [
+            serde_json::json!({"name": "discovery", "output": [{"type": "xtream", "trakt": {}}]}),
+            serde_json::json!({"name": "discovery", "curation": null, "output": [{"type": "xtream", "trakt": {}}]}),
+        ] {
+            let mut target: ConfigTargetDto = serde_json::from_value(value).unwrap();
+            target.prepare(1, None, None).unwrap();
+            let serialized = serde_json::to_value(target).unwrap();
+            assert!(serialized.get("curation").is_none());
+            assert!(serialized["output"][0].get("trakt").is_some());
+        }
+    }
 
     #[test]
     fn target_filter_string_roundtrips_as_string() {

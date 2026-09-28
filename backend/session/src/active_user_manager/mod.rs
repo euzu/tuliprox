@@ -1,5 +1,5 @@
 use crate::{
-    active_provider_manager::ConnectionKind,
+    active_provider_manager::{ConnectionKind, ProviderReleaseSnapshot},
     connection_manager::CleanupEvent,
     stream::{uses_direct_body_idle_timeout, DIRECT_BODY_IDLE_TIMEOUT_SECS},
     ActiveProviderManager, EventManager,
@@ -137,6 +137,8 @@ pub struct UserSession {
     pub provider: Arc<str>,
     pub stream_url: Arc<str>,
     pub provider_session_headers: HashMap<String, String>,
+    /// Shared with the response body so media confirmation survives a released VOD lease.
+    pub media_started: Arc<AtomicBool>,
     /// Stable suffix appended to upstream User-Agent headers for this playback session.
     pub user_agent_stream_index: Option<u64>,
     pub addr: SocketAddr,
@@ -690,6 +692,9 @@ pub struct ActiveUserManager {
     cleanup_tx: tokio::sync::OnceCell<mpsc::Sender<CleanupEvent>>,
     provider_manager: tokio::sync::OnceCell<Arc<ActiveProviderManager>>,
     transition_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    // An evicted stream can keep its provider slot after its user count is released.
+    // Retain the handoff across bounded admission attempts until the slot is gone.
+    pending_provider_releases: Mutex<HashMap<String, ProviderReleaseSnapshot>>,
     pub dropped_cleanup_events: AtomicU64,
     reentry_suppressed_total: AtomicU64,
     divergence_cache: Mutex<LruCache<String, DivergenceEntry>>,
@@ -791,6 +796,7 @@ impl ActiveUserManager {
             cleanup_tx: tokio::sync::OnceCell::new(),
             provider_manager: tokio::sync::OnceCell::new(),
             transition_gates: Mutex::new(HashMap::new()),
+            pending_provider_releases: Mutex::new(HashMap::new()),
             dropped_cleanup_events: AtomicU64::new(0),
             reentry_suppressed_total: AtomicU64::new(0),
             divergence_cache: Mutex::new(LruCache::new(DIVERGENCE_CACHE_CAPACITY)),
@@ -843,6 +849,27 @@ impl ActiveUserManager {
             Arc::clone(transition_gates.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))))
         };
         gate.lock_owned().await
+    }
+
+    pub(crate) async fn pending_provider_release(&self, username: &str) -> Option<ProviderReleaseSnapshot> {
+        self.pending_provider_releases.lock().await.get(username).cloned()
+    }
+
+    pub(crate) async fn set_pending_provider_release(&self, username: &str, snapshot: ProviderReleaseSnapshot) {
+        self.pending_provider_releases.lock().await.insert(username.to_owned(), snapshot);
+    }
+
+    pub(crate) async fn clear_pending_provider_release(
+        &self,
+        username: &str,
+        snapshot: &ProviderReleaseSnapshot,
+    ) -> bool {
+        let mut pending = self.pending_provider_releases.lock().await;
+        if pending.get(username) != Some(snapshot) {
+            return false;
+        }
+        pending.remove(username);
+        true
     }
 
     fn should_reuse_stream_for_session(existing_stream: &StreamInfo, incoming_channel: &StreamChannel) -> bool {
@@ -1561,17 +1588,9 @@ impl ActiveUserManager {
         };
         let mut addr_counts = HashMap::new();
         for stream in &connection_data.streams {
-            // Preserved streams do not occupy a counted slot — exclude from addr counts.
-            // They are still valid eviction candidates (see filter below), but they don't
-            // consume connection capacity, so they don't contribute to the "singleton addr" logic.
-            let contributes_to_count = if stream.preserved {
-                false
-            } else if let Some(token) = stream.session_token.as_deref() {
-                connection_data.sessions.iter().any(|s| s.token == token && s.lifecycle.is_counted())
-            } else {
-                true // orphan streams without a session are counted
-            };
-            if contributes_to_count {
+            // The stream kind is the charged slot. Session lifecycle may lag behind
+            // the stream registration, so it cannot determine eviction eligibility.
+            if !stream.preserved && connection_data.stream_kinds.contains_key(&stream.uid) {
                 addr_counts
                     .entry(stream.addr)
                     .and_modify(|count: &mut u8| *count = count.saturating_add(1))
@@ -1581,14 +1600,7 @@ impl ActiveUserManager {
         let candidates: Vec<_> = connection_data
             .streams
             .iter()
-            .filter(|stream| {
-                if let Some(token) = stream.session_token.as_deref() {
-                    connection_data.sessions.iter().any(|s| s.token == token && s.lifecycle.is_counted())
-                        || stream.preserved
-                } else {
-                    true
-                }
-            })
+            .filter(|stream| stream.preserved || connection_data.stream_kinds.contains_key(&stream.uid))
             .filter(|stream| {
                 let addr_count = addr_counts.get(&stream.addr).copied().unwrap_or(0);
                 if stream.preserved {
@@ -1951,6 +1963,7 @@ impl ActiveUserManager {
             provider: params.provider.intern(),
             stream_url: params.stream_url.intern(),
             provider_session_headers: HashMap::new(),
+            media_started: Arc::new(AtomicBool::new(false)),
             user_agent_stream_index: None,
             addr: *params.addr,
             socket_bound: params.socket_bound,
@@ -2231,69 +2244,75 @@ impl ActiveUserManager {
     ) {
         let (connection_changed, user_removed, promotions, divergence_snapshot) = {
             let mut user_connections = self.connections.write().await;
-            let Some(connection_data) = user_connections.by_key.get_mut(username) else {
-                return;
-            };
+            let (connection_changed, user_removed, promotions, divergence_snapshot) = {
+                let Some(connection_data) = user_connections.by_key.get_mut(username) else {
+                    return;
+                };
 
-            if Self::session_has_stream(connection_data, session_token) {
-                return;
-            }
-
-            let Some(session_index) =
-                connection_data.sessions.iter().position(|session| session.token == session_token)
-            else {
-                return;
-            };
-
-            if expected_transition_version
-                .is_some_and(|expected| connection_data.sessions[session_index].transition_version != expected)
-            {
-                return;
-            }
-
-            let mut connection_changed = false;
-            if connection_data.sessions[session_index].lifecycle.is_counted() {
-                let kind = connection_data.sessions[session_index].connection_kind.unwrap_or(ConnectionKind::Normal);
-                connection_data.decrement_kind(kind);
-                connection_data.sessions[session_index].lifecycle = PlaybackLifecycle::Expired;
-                connection_changed = true;
-            }
-            connection_data.sessions[session_index].transition_version =
-                connection_data.sessions[session_index].transition_version.saturating_add(1);
-
-            if remove_session_if_unbound {
-                connection_data.sessions.swap_remove(session_index);
-            }
-
-            if connection_data.connections < connection_data.max_connections {
-                connection_data.granted_grace = false;
-                connection_data.grace_ts = 0;
-            }
-
-            let mut promotions = Vec::new();
-            while let Some(action) = connection_data.try_promote_soft_stream() {
-                let promoted_stream = connection_data.streams.iter().find(|stream| stream.uid == action.uid).cloned();
-                if let Some(stream) = promoted_stream.as_ref() {
-                    Self::promote_session_for_stream(connection_data, stream);
+                if Self::session_has_stream(connection_data, session_token) {
+                    return;
                 }
-                promotions.push(action);
-            }
-            while connection_data.try_promote_soft_session_reservation() {}
 
-            let user_removed = connection_data.connections == 0
-                && connection_data.streams.is_empty()
-                && connection_data.sessions.is_empty();
-            let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, username);
+                let Some(session_index) =
+                    connection_data.sessions.iter().position(|session| session.token == session_token)
+                else {
+                    return;
+                };
+
+                if expected_transition_version
+                    .is_some_and(|expected| connection_data.sessions[session_index].transition_version != expected)
+                {
+                    return;
+                }
+
+                let mut connection_changed = false;
+                if connection_data.sessions[session_index].lifecycle.is_counted() {
+                    let kind =
+                        connection_data.sessions[session_index].connection_kind.unwrap_or(ConnectionKind::Normal);
+                    connection_data.decrement_kind(kind);
+                    connection_data.sessions[session_index].lifecycle = PlaybackLifecycle::Expired;
+                    connection_changed = true;
+                }
+                connection_data.sessions[session_index].transition_version =
+                    connection_data.sessions[session_index].transition_version.saturating_add(1);
+
+                if remove_session_if_unbound {
+                    connection_data.sessions.swap_remove(session_index);
+                }
+
+                if connection_data.connections < connection_data.max_connections {
+                    connection_data.granted_grace = false;
+                    connection_data.grace_ts = 0;
+                }
+
+                let mut promotions = Vec::new();
+                while let Some(action) = connection_data.try_promote_soft_stream() {
+                    let promoted_stream =
+                        connection_data.streams.iter().find(|stream| stream.uid == action.uid).cloned();
+                    if let Some(stream) = promoted_stream.as_ref() {
+                        Self::promote_session_for_stream(connection_data, stream);
+                    }
+                    promotions.push(action);
+                }
+                while connection_data.try_promote_soft_session_reservation() {}
+
+                let user_removed = connection_data.connections == 0
+                    && connection_data.streams.is_empty()
+                    && connection_data.sessions.is_empty();
+                let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, username);
+
+                (connection_changed, user_removed, promotions, divergence_snapshot)
+            };
+
+            if user_removed {
+                user_connections.by_key.remove(username);
+            }
 
             (connection_changed, user_removed, promotions, divergence_snapshot)
         };
 
         self.log_divergence_snapshot(divergence_snapshot).await;
 
-        if user_removed {
-            let mut user_connections = self.connections.write().await;
-            user_connections.by_key.remove(username);
-        }
         if connection_changed || user_removed {
             self.log_active_user().await;
         }
@@ -2305,40 +2324,44 @@ impl ActiveUserManager {
     pub async fn release_session_streams_and_counted_reservation(&self, username: &str, session_token: &str) -> bool {
         let (connection_changed, user_removed, promotions, divergence_snapshot) = {
             let mut user_connections = self.connections.write().await;
-            let Some(connection_data) = user_connections.by_key.get_mut(username) else {
-                return false;
+            let (connection_changed, user_removed, promotions, divergence_snapshot) = {
+                let Some(connection_data) = user_connections.by_key.get_mut(username) else {
+                    return false;
+                };
+
+                let counted_kind = connection_data
+                    .sessions
+                    .iter()
+                    .find(|session| session.token == session_token && session.lifecycle.is_counted())
+                    .and_then(|session| session.connection_kind);
+                let (_removed_streams, mut connection_changed) =
+                    connection_data.remove_streams_for_session_and_release_counted(session_token, counted_kind);
+                Self::clear_session_counted_without_stream(connection_data, session_token);
+
+                if connection_data.connections < connection_data.max_connections {
+                    connection_data.granted_grace = false;
+                    connection_data.grace_ts = 0;
+                }
+
+                let promotions = Self::collect_promotions_after_capacity_release(connection_data);
+                let user_removed = connection_data.connections == 0
+                    && connection_data.streams.is_empty()
+                    && connection_data.sessions.is_empty();
+                let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, username);
+                connection_changed |= !promotions.is_empty();
+
+                (connection_changed, user_removed, promotions, divergence_snapshot)
             };
 
-            let counted_kind = connection_data
-                .sessions
-                .iter()
-                .find(|session| session.token == session_token && session.lifecycle.is_counted())
-                .and_then(|session| session.connection_kind);
-            let (_removed_streams, mut connection_changed) =
-                connection_data.remove_streams_for_session_and_release_counted(session_token, counted_kind);
-            Self::clear_session_counted_without_stream(connection_data, session_token);
-
-            if connection_data.connections < connection_data.max_connections {
-                connection_data.granted_grace = false;
-                connection_data.grace_ts = 0;
+            if user_removed {
+                user_connections.by_key.remove(username);
             }
-
-            let promotions = Self::collect_promotions_after_capacity_release(connection_data);
-            let user_removed = connection_data.connections == 0
-                && connection_data.streams.is_empty()
-                && connection_data.sessions.is_empty();
-            let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, username);
-            connection_changed |= !promotions.is_empty();
 
             (connection_changed, user_removed, promotions, divergence_snapshot)
         };
 
         self.log_divergence_snapshot(divergence_snapshot).await;
 
-        if user_removed {
-            let mut user_connections = self.connections.write().await;
-            user_connections.by_key.remove(username);
-        }
         if connection_changed || user_removed {
             self.log_active_user().await;
         }
@@ -3072,6 +3095,17 @@ impl ActiveUserManager {
 
     pub async fn get_and_update_user_session(&self, username: &str, token: &str) -> Option<UserSession> {
         self.update_user_session(username, token).await
+    }
+
+    pub async fn media_started_flag(&self, username: &str, token: &str) -> Option<Arc<AtomicBool>> {
+        let users = self.connections.read().await;
+        users
+            .by_key
+            .get(username)?
+            .sessions
+            .iter()
+            .find(|session| session.token == token)
+            .map(|session| Arc::clone(&session.media_started))
     }
 
     /// Session for target-scoped `virtual_id` and request token (used to recover leaked relative DVR segment paths).

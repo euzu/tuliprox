@@ -142,6 +142,7 @@ async fn handle_connection<M, S>(
 
         let connection_manager_clone = Arc::clone(&connection_manager);
         let mut addr_close_rx = connection_manager_clone.get_close_connection_channel();
+        let mut close_rx = connection_manager_clone.register_close_socket(addr);
 
         trace!("Connection opened: {addr}");
         connection_manager.add_connection(&addr).await;
@@ -159,18 +160,31 @@ async fn handle_connection<M, S>(
                     connection_manager_clone.release_connection(&addr).await;
                     debug!("Connection gracefully closed: {remote_addr}");
                     conn.as_mut().graceful_shutdown();
+                    drop(conn);
+                    break;
+                }
+                Ok(reason) = &mut close_rx => {
+                    debug!("Forced client close {addr} reason={reason:?}");
+                    conn.as_mut().graceful_shutdown();
+                    drop(conn);
+                    if matches!(reason, DisconnectReason::ClientKicked) {
+                        connection_manager_clone.release_provider_deferred(&addr).await;
+                    } else {
+                        connection_manager_clone.release_connection_with_reason(&addr, reason).await;
+                    }
+                    break;
                 }
                 Ok(signal) = addr_close_rx.recv() => {
                     match signal {
                         CloseConnectionSignal::WithReason(msg, reason) if msg == addr => {
                             debug!("Forced client close {msg} reason={reason:?}");
+                            conn.as_mut().graceful_shutdown();
+                            drop(conn);
                             if matches!(reason, DisconnectReason::ClientKicked) {
-                                connection_manager_clone.release_user_sessions_only(&addr).await;
                                 connection_manager_clone.release_provider_deferred(&addr).await;
                             } else {
                                 connection_manager_clone.release_connection_with_reason(&addr, reason).await;
                             }
-                            conn.as_mut().graceful_shutdown();
                             break;
                         }
                         CloseConnectionSignal::WithReason(..) => {
@@ -180,6 +194,7 @@ async fn handle_connection<M, S>(
                 }
             }
         }
+        connection_manager_clone.unregister_close_socket(&addr);
     });
 }
 
@@ -192,7 +207,7 @@ mod tests {
             StreamDetails, StreamError,
         },
         auth::Fingerprint,
-        model::{Config, GracePeriodOptions, ProxyUserCredentials},
+        model::{Config, ConfigInput, GracePeriodOptions, ProxyUserCredentials, SourcesConfig},
     };
     use axum::{
         body::Body,
@@ -204,12 +219,17 @@ mod tests {
     };
     use bytes::Bytes;
     use futures::Stream;
+    use log::debug;
     use shared::{
-        model::{PlaylistItemType, StreamChannel, UserConnectionPermission, XtreamCluster},
+        model::{
+            InputFetchMethod, InputType, PlaylistItemType, StreamChannel, UserConnectionPermission, XtreamCluster,
+        },
         utils::Internable,
     };
     use socket2::SockRef;
     use std::{
+        collections::HashMap,
+        net::SocketAddr,
         pin::Pin,
         sync::{
             atomic::{AtomicBool, Ordering},
@@ -220,6 +240,27 @@ mod tests {
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_util::sync::CancellationToken;
+
+    fn configure_test_provider(app_state: &Arc<AppState>) {
+        let input = Arc::new(ConfigInput {
+            id: 1,
+            name: "provider_1".intern(),
+            input_type: InputType::Xtream,
+            headers: HashMap::default(),
+            url: "http://provider-1.example".to_string(),
+            username: Some("user1".to_string()),
+            password: Some("pass1".to_string()),
+            enabled: true,
+            priority: 0,
+            max_connections: 5,
+            method: InputFetchMethod::default(),
+            aliases: None,
+            ..ConfigInput::default()
+        });
+        let sources = SourcesConfig { inputs: vec![input], ..SourcesConfig::default() };
+        app_state.app_config.sources.store(Arc::new(sources));
+        app_state.active_provider.update_config(&app_state.app_config);
+    }
 
     #[derive(Clone)]
     struct DisconnectTestState {
@@ -268,7 +309,21 @@ mod tests {
             upstream_user_agent: None,
         };
         let upstream = PendingDropProbeStream { dropped: Arc::clone(&state.upstream_dropped) };
-        let stream_details = StreamDetails::from_stream(Box::pin(upstream), GracePeriodOptions::default());
+        let handle = state.app_state.active_provider.acquire_connection_with_grace_for_session(
+            &"provider_1".intern(),
+            &addr,
+            false,
+            0,
+            ConnectionKind::Normal,
+            Some("socket-series-user"),
+        );
+        let mut stream_details = StreamDetails::from_stream(Box::pin(upstream), GracePeriodOptions::default());
+        if let Some(handle) = handle {
+            stream_details.provider_handle = Some(tuliprox_session::ManagedProviderHandle::new(
+                Arc::clone(&state.app_state.active_provider),
+                handle,
+            ));
+        }
         let stream = create_active_client_stream(ActiveClientStreamParams {
             stream_details,
             app_state: &state.app_state,
@@ -296,6 +351,7 @@ mod tests {
 
     async fn assert_socket_disconnect_cleans_direct_series(disconnect: ClientDisconnect) {
         let app_state = create_test_app_state(Config::default());
+        configure_test_provider(&app_state);
         let upstream_dropped = Arc::new(AtomicBool::new(false));
         let router =
             Router::new().route("/series", get(pending_direct_series_response)).with_state(DisconnectTestState {
@@ -324,6 +380,7 @@ mod tests {
         assert!(read > 0, "streaming response should begin before client disconnects");
         assert_eq!(app_state.active_users.active_users_and_connections().await, (1, 1));
         assert_eq!(app_state.active_users.active_streams().await.len(), 1);
+        assert_eq!(app_state.active_provider.get_provider_connections_count(), 1);
 
         match disconnect {
             ClientDisconnect::Fin => {
@@ -350,7 +407,7 @@ mod tests {
         })
         .await
         .expect("socket disconnect should release registry state and drop the upstream");
-        assert_eq!(app_state.active_provider.active_connections().unwrap_or_default().values().sum::<usize>(), 0);
+        assert_eq!(app_state.active_provider.get_provider_connections_count(), 0);
 
         server_cancel.cancel();
         tokio::time::timeout(Duration::from_secs(1), server)
@@ -367,5 +424,101 @@ mod tests {
     #[tokio::test]
     async fn client_reset_cleans_direct_series_response() {
         assert_socket_disconnect_cleans_direct_series(ClientDisconnect::Reset).await;
+    }
+
+    #[tokio::test]
+    async fn client_kicked_releases_user_immediately_and_provider_on_transport_close() {
+        let app_state = create_test_app_state(Config::default());
+        configure_test_provider(&app_state);
+        let upstream_dropped = Arc::new(AtomicBool::new(false));
+        let router =
+            Router::new().route("/series", get(pending_direct_series_response)).with_state(DisconnectTestState {
+                app_state: Arc::clone(&app_state),
+                upstream_dropped: Arc::clone(&upstream_dropped),
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("test listener");
+        let server_addr = listener.local_addr().expect("listener address");
+        let server_cancel = CancellationToken::new();
+        let server_cancel_task = server_cancel.clone();
+        let connection_manager = Arc::clone(&app_state.connection_manager);
+        let server = tokio::spawn(async move {
+            serve(listener, router, Some(server_cancel_task), &connection_manager).await;
+        });
+
+        let mut client = tokio::net::TcpStream::connect(server_addr).await.expect("test client connection");
+        let client_addr = client.local_addr().expect("client local addr");
+        client
+            .write_all(b"GET /series HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n")
+            .await
+            .expect("test request");
+        let mut response_head = [0_u8; 1024];
+        let read = tokio::time::timeout(Duration::from_secs(1), client.read(&mut response_head))
+            .await
+            .expect("response head timeout")
+            .expect("response head read");
+        assert!(read > 0, "streaming response should begin before client disconnects");
+        assert_eq!(app_state.active_users.active_users_and_connections().await, (1, 1));
+        assert_eq!(app_state.active_users.active_streams().await.len(), 1);
+        assert_eq!(app_state.active_provider.get_provider_connections_count(), 1);
+
+        // Verify that kicking an unrelated address returns false and does not affect the active connection
+        let unrelated_addr = SocketAddr::from(([127, 0, 0, 1], 54321));
+        let kicked_unrelated =
+            app_state.connection_manager.kick_connection(&unrelated_addr, shared::model::VirtualId::new(1), 0).await;
+        assert!(!kicked_unrelated, "kick on unrelated address must return false even when active connections exist");
+        assert_eq!(
+            app_state.active_provider.get_provider_connections_count(),
+            1,
+            "active client must remain connected"
+        );
+
+        // Kick the active client connection
+        let kicked =
+            app_state.connection_manager.kick_connection(&client_addr, shared::model::VirtualId::new(1), 0).await;
+        assert!(kicked, "kick_connection should return true when transport receiver is active");
+
+        // User/session capacity is freed synchronously upon kick
+        assert_eq!(
+            app_state.active_users.active_users_and_connections().await,
+            (0, 0),
+            "user connections must be freed immediately upon kick"
+        );
+        assert!(
+            app_state.active_users.active_streams().await.is_empty(),
+            "active stream registry must be cleared immediately upon kick"
+        );
+
+        // The client DOES NOT disconnect or close the socket itself.
+        // It stays connected and attempts to read more data.
+        // Because the server drops the connection upon kick, the client receives EOF (0 bytes) or an error.
+        let mut body_chunk = [0_u8; 1024];
+        let read_result = tokio::time::timeout(Duration::from_secs(1), client.read(&mut body_chunk))
+            .await
+            .expect("read timeout after kick");
+        match read_result {
+            Ok(bytes_read) => assert_eq!(bytes_read, 0, "kicked client must receive EOF from closed connection"),
+            Err(e) => {
+                debug!("Client read error after kick (expected): {e}");
+            }
+        }
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if app_state.active_provider.get_provider_connections_count() == 0
+                    && upstream_dropped.load(Ordering::Acquire)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("provider connection and upstream must be released after kick even if client stayed connected");
+
+        server_cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .expect("server shutdown timeout")
+            .expect("server task");
     }
 }

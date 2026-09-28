@@ -4,7 +4,7 @@ use quick_xml::events::{BytesStart, BytesText, Event};
 use serde::{Deserialize, Serialize};
 use shared::{
     concat_string,
-    model::{has_resource_scheme, ingest_resource_value, EpgCategory, EpgChannel, EpgNamePrefix, EpgProgramme},
+    model::{EpgCategory, EpgChannel, EpgNamePrefix, EpgProgramme},
     utils::{deunicode_string, Internable, CONSTANTS},
 };
 use std::{
@@ -358,7 +358,6 @@ impl TVGuide {
                             if add_channel {
                                 with_folded_epg_id(&tag_epg_id, |folded| source_processed.insert(folded.intern()));
                                 id_cache.insert_processed_epg_id(&tag_epg_id);
-                                let icon_source = ingest_epg_icon(epg_source, Self::channel_icon(&tag));
                                 accumulator.upsert_channel(
                                     epg_source.priority,
                                     source_order,
@@ -366,7 +365,7 @@ impl TVGuide {
                                     EpgChannel {
                                         id: Arc::clone(&tag_epg_id),
                                         title: Self::channel_display_name(&tag),
-                                        icon: icon_source,
+                                        icon: Self::channel_icon(&tag),
                                         programmes: vec![],
                                     },
                                 );
@@ -376,14 +375,13 @@ impl TVGuide {
                         EPG_TAG_PROGRAMME => {
                             if let Some(epg_id) = tag.get_attribute_value(&epg_attrib_channel) {
                                 if with_folded_epg_id(epg_id, |folded| source_processed.contains(folded)) {
-                                    if let Some(mut programme) = Self::extract_programme(
+                                    if let Some(programme) = Self::extract_programme(
                                         &tag,
                                         epg_id,
                                         &start_attrib,
                                         &stop_attrib,
                                         &catchup_id_attrib,
                                     ) {
-                                        programme.icon = ingest_epg_icon(epg_source, programme.icon);
                                         accumulator.push_programme(epg_source.priority, source_order, programme);
                                     }
                                 }
@@ -447,9 +445,8 @@ impl TVGuide {
         )
         .await
         {
-            Ok(mut channel) => {
+            Ok(channel) => {
                 id_cache.insert_processed_epg_id(channel_id);
-                channel.icon = ingest_epg_icon(epg_source, channel.icon);
                 accumulator.add_channel_with_programmes(
                     epg_source.priority,
                     source_order,
@@ -1134,22 +1131,6 @@ fn apply_dummy_policies(channels: &mut [ChannelMergeAcc], dummy_policies: &HashM
     }
 }
 
-/// Origin of an icon belonging to `source`.
-///
-/// An icon without a value has no origin, and a source without an origin keeps `None`, which the
-/// request path treats as public-only.
-fn ingest_epg_icon(source: &PersistedEpgSource, mut icon: Option<Arc<str>>) -> Option<Arc<str>> {
-    let value = icon.as_mut()?;
-    if let Some(input_name) = &source.input_name {
-        if ingest_resource_value(value, input_name).is_err() {
-            return None;
-        }
-    } else if has_resource_scheme(value) {
-        return None;
-    }
-    icon
-}
-
 fn backfill_programme_metadata(existing: &mut EpgProgramme, incoming: EpgProgramme) {
     if existing.title.is_none() {
         existing.title = incoming.title;
@@ -1327,7 +1308,7 @@ mod tests {
     }
 
     fn xmltv_source(file_path: PathBuf, priority: i16, logo_override: bool) -> PersistedEpgSource {
-        PersistedEpgSource { file_path, priority, logo_override, kind: PersistedEpgSourceKind::Xmltv, input_name: None }
+        PersistedEpgSource { file_path, priority, logo_override, kind: PersistedEpgSourceKind::Xmltv }
     }
 
     fn dummy_policy_source(priority: i16, source_order: usize, title: &str) -> EpgDummyPolicySource {
@@ -1934,7 +1915,6 @@ mod tests {
                             ..IcsEpgSourceConfig::default()
                         }),
                     },
-                    input_name: None,
                 },
             ]);
             let mut id_cache = EpgIdCache::new(None);
