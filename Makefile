@@ -229,7 +229,7 @@ serve: ## Run tuliprox server with settings folder: make serve <settings_folder>
 		exit 1; \
 	fi
 	@echo "==> Starting tuliprox server with TULIPROX_HOME=$(SETTINGS_FOLDER)"
-	TULIPROX_HOME="$(SETTINGS_FOLDER)" $(CARGO) run --release --manifest-path $(PROJECT_DIR)/Cargo.toml --package tuliprox --bin tuliprox -- -s
+	TULIPROX_HOME="$(SETTINGS_FOLDER)" $(CARGO) run --manifest-path $(PROJECT_DIR)/Cargo.toml --package tuliprox --bin tuliprox -- -s
 
 .PHONY: architecture-check
 architecture-check: ## Verify workspace dependency direction

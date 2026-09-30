@@ -204,6 +204,14 @@ impl ProxyUserCredentials {
     /// Fill unset capability values from the referenced plan and compile the
     /// combined content filter. Idempotent; call after any load/conversion.
     pub fn resolve_plan(&mut self, plans: &HashMap<String, Arc<UserPlan>>) {
+        self.resolve_plan_with_templates(plans, None);
+    }
+
+    pub fn resolve_plan_with_templates(
+        &mut self,
+        plans: &HashMap<String, Arc<UserPlan>>,
+        templates: Option<&[shared::model::PatternTemplate]>,
+    ) {
         let plan = self.plan.as_ref().and_then(|name| plans.get(name));
         self.t_has_unresolved_plan = self.plan.is_some() && plan.is_none();
         if self.t_has_unresolved_plan {
@@ -227,7 +235,7 @@ impl ProxyUserCredentials {
 
         let plan_filter = plan.and_then(|p| p.t_filter.as_ref().map(Arc::clone));
         self.t_has_invalid_filter = false;
-        let user_filter = self.filter.as_ref().and_then(|raw| match get_filter(raw, None) {
+        let user_filter = self.filter.as_ref().and_then(|raw| match get_filter(raw, templates) {
             Ok(filter) => Some(Arc::new(filter)),
             Err(err) => {
                 error!(
@@ -382,6 +390,34 @@ impl TargetUser {
 mod tests {
     use super::*;
     use shared::model::UserPlanDto;
+
+    #[test]
+    fn user_filter_recompiles_with_changed_templates_and_preserves_raw_dto() {
+        use shared::model::{PatternTemplate, PlaylistItem, PlaylistItemHeader, TemplateValue};
+        let raw = r#"Group = "!groups!""#;
+        let dto = ProxyUserCredentialsDto { filter: Some(raw.to_owned()), ..Default::default() };
+        let mut user = ProxyUserCredentials::from(&dto);
+        let mut template = PatternTemplate {
+            name: "groups".to_owned(),
+            value: TemplateValue::Single("Sports".to_owned()),
+            placeholder: String::new(),
+        };
+        template.prepare();
+        let sports = PlaylistItem { header: PlaylistItemHeader { group: "Sports".into(), ..Default::default() } };
+        let news = PlaylistItem { header: PlaylistItemHeader { group: "News".into(), ..Default::default() } };
+        user.resolve_plan_with_templates(&HashMap::new(), Some(std::slice::from_ref(&template)));
+        assert!(!user.t_has_invalid_filter);
+        assert!(user.allows_content(&sports));
+        assert!(!user.allows_content(&news));
+        template.value = TemplateValue::Single("News".to_owned());
+        user.resolve_plan_with_templates(&HashMap::new(), Some(std::slice::from_ref(&template)));
+        assert!(!user.allows_content(&sports));
+        assert!(user.allows_content(&news));
+        let saved = ProxyUserCredentialsDto::from(&user);
+        assert_eq!(saved.filter.as_deref(), Some(raw));
+        user.resolve_plan_with_templates(&HashMap::new(), None);
+        assert!(user.t_has_invalid_filter);
+    }
 
     #[test]
     fn test_resolve_plan_inherits_proxy() {

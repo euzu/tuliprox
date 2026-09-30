@@ -2,7 +2,8 @@ use crate::{
     api::{api_utils::serve_file, http_layers::create_cors_layer},
     auth::generate_password_from_input,
     config_loader::{
-        read_api_proxy_file, read_config_file_with_options, read_sources_file, sanitize_sources_for_persist,
+        read_api_proxy_file_with_templates, read_config_file_with_options, read_sources_file,
+        sanitize_sources_for_persist,
     },
     model::validate_library_paths_from_dto,
     utils::{file_exists, get_default_web_root_path_for_home, read_templates_file, resolve_template_persist_file_path},
@@ -227,7 +228,12 @@ async fn build_initial_draft(paths: &ConfigPaths) -> AppConfigDto {
     }
 
     if file_exists(&paths.api_proxy_file_path) {
-        match read_api_proxy_file(paths.api_proxy_file_path.as_str(), true) {
+        let template_path =
+            resolve_template_persist_file_path(draft.config.template_path.as_deref(), &paths.config_path);
+        let result = prepare_setup_validation_templates(&draft, &template_path).and_then(|templates| {
+            read_api_proxy_file_with_templates(paths.api_proxy_file_path.as_str(), true, templates.as_deref())
+        });
+        match result {
             Ok(Some(api_proxy)) => draft.api_proxy = Some(api_proxy),
             Ok(None) => {}
             Err(err) => warn!("Setup mode: failed to load existing api-proxy.yml: {err}"),
@@ -679,7 +685,7 @@ async fn setup_complete_inner(
     if api_proxy.server.is_empty() {
         api_proxy.server.push(create_default_api_proxy_server());
     }
-    if let Err(err) = api_proxy.prepare() {
+    if let Err(err) = api_proxy.prepare_with_templates(prepared_templates.as_deref()) {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": err.to_string() }))).into_response();
     }
 

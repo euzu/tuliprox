@@ -7,8 +7,8 @@ use crate::{
     },
     auth::{verify_token, AuthBearer},
     config_loader::{
-        persist_messaging_templates, plans_file_path, prepare_sources_batch, prepare_users, read_api_proxy_file,
-        read_plans_file, save_plans,
+        persist_messaging_templates, plans_file_path, prepare_sources_batch, prepare_users,
+        read_api_proxy_file_with_templates, read_plans_file, save_plans,
     },
     iptv::xtream::{get_xtream_stream_url_base, xtream_login},
     model::{validate_library_paths_from_dto, ApiProxyConfig, InputSource, UserPlan},
@@ -528,7 +528,11 @@ async fn get_config_api_proxy_config_public(
             return internal_server_error!();
         }
     };
-    match read_api_proxy_file(api_proxy_file_path.as_str(), true) {
+    match read_api_proxy_file_with_templates(
+        api_proxy_file_path.as_str(),
+        true,
+        app_state.app_config.api_proxy.load().as_ref().and_then(|config| config.templates.as_deref()),
+    ) {
         Ok(Some(mut api_proxy_dto)) => {
             filter_api_proxy_by_permissions(&mut api_proxy_dto, PermissionSet::new());
             let response = axum::response::Json(api_proxy_dto).into_response();
@@ -590,7 +594,7 @@ async fn save_config_api_proxy_config(
     // and users referencing missing servers, which per-row validate() cannot see
     let stored_plans = updated_api_proxy.plans.clone();
     let mut updated_api_proxy_dto = ApiProxyConfigDto::from(&updated_api_proxy);
-    if let Err(err) = updated_api_proxy_dto.prepare() {
+    if let Err(err) = updated_api_proxy_dto.prepare_with_templates(updated_api_proxy.templates.as_deref()) {
         return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()}))).into_response();
     }
 
@@ -600,7 +604,8 @@ async fn save_config_api_proxy_config(
     }
     // Persist succeeded — now update in‑memory state with the prepared config.
     // Plans live in plans.yml, so re-inject them (the DTO round-trip drops them).
-    let mut stored_api_proxy = ApiProxyConfig::from(&updated_api_proxy_dto);
+    let mut stored_api_proxy =
+        ApiProxyConfig::from_dto_with_templates(&updated_api_proxy_dto, updated_api_proxy.templates.clone());
     stored_api_proxy.set_plans(stored_plans);
     app_state.app_config.api_proxy.store(Some(Arc::new(stored_api_proxy)));
 
@@ -720,7 +725,11 @@ async fn get_config_api_proxy_config(
             return internal_server_error!();
         }
     };
-    match read_api_proxy_file(api_proxy_file_path.as_str(), true) {
+    match read_api_proxy_file_with_templates(
+        api_proxy_file_path.as_str(),
+        true,
+        app_state.app_config.api_proxy.load().as_ref().and_then(|config| config.templates.as_deref()),
+    ) {
         Ok(Some(mut api_proxy_dto)) => {
             filter_api_proxy_by_permissions(&mut api_proxy_dto, permissions);
             let response = axum::response::Json(api_proxy_dto).into_response();

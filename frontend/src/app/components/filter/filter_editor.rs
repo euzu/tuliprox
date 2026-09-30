@@ -9,10 +9,11 @@ use shared::{
     foundation::{get_filter, Filter},
     model::PatternTemplate,
 };
+use std::cell::RefCell;
 use web_sys::InputEvent;
 use yew::{
-    classes, component, html, use_context, use_effect_with, use_mut_ref, use_state, Callback, Html, Properties,
-    TargetCast,
+    classes, component, html, use_context, use_effect_with, use_memo, use_mut_ref, use_state, Callback, Html,
+    Properties, TargetCast,
 };
 use yew_hooks::use_debounce;
 
@@ -25,6 +26,10 @@ pub struct FilterEditorProps {
     #[prop_or_default]
     pub on_valid_change: Callback<bool>,
     pub on_templates_change: Callback<Option<Vec<PatternTemplate>>>,
+    #[prop_or_default]
+    pub validate_on_server: bool,
+    #[prop_or_default]
+    pub disabled: bool,
 }
 
 const FILTER_INPUT_DEBOUNCE_MS: u32 = 300;
@@ -42,6 +47,16 @@ pub(crate) fn parse_filter_preview(
     }
 }
 
+fn emit_filter_input(
+    value: String,
+    pending_value: &RefCell<Option<String>>,
+    on_filter_change: &Callback<Option<String>>,
+) {
+    let next = if value.trim().is_empty() { None } else { Some(value) };
+    pending_value.replace(next.clone());
+    on_filter_change.emit(next);
+}
+
 #[component]
 pub fn FilterEditor(props: &FilterEditorProps) -> Html {
     let config_ctx = use_context::<ConfigContext>().expect("Config context not found");
@@ -54,7 +69,7 @@ pub fn FilterEditor(props: &FilterEditorProps) -> Html {
     let filter_state = use_state(|| props.filter.clone());
     // Raw textarea value, updated immediately on every keystroke so typing stays responsive.
     let input_value = use_state(|| props.filter.clone().unwrap_or_default());
-    // Latest pending value awaiting the debounced parse/emit.
+    // Latest value awaiting the debounced preview.
     let pending_value = use_mut_ref(|| props.filter.clone());
 
     {
@@ -71,17 +86,23 @@ pub fn FilterEditor(props: &FilterEditorProps) -> Html {
         let input_value = input_value.clone();
         let pending_value = pending_value.clone();
         use_effect_with(props.filter.clone(), move |flt| {
+            if *pending_value.borrow() == *flt {
+                return;
+            }
             filter.set(flt.clone());
             input_value.set(flt.clone().unwrap_or_default());
             *pending_value.borrow_mut() = flt.clone();
         });
     }
 
-    let (parsed_filter, valid_filter) = parse_filter_preview((*filter_state).as_deref(), (*templates_state).as_deref());
+    let preview = use_memo(((*filter_state).clone(), (*templates_state).clone()), |(filter, templates)| {
+        parse_filter_preview(filter.as_deref(), templates.as_deref())
+    });
+    let (parsed_filter, valid_filter) = &*preview;
 
     {
         let on_valid_change = props.on_valid_change.clone();
-        use_effect_with(valid_filter, move |valid| {
+        use_effect_with(*valid_filter, move |valid| {
             on_valid_change.emit(*valid);
             || ()
         });
@@ -89,13 +110,11 @@ pub fn FilterEditor(props: &FilterEditorProps) -> Html {
 
     let debounce = {
         let filter = filter_state.clone();
-        let on_filter_change = props.on_filter_change.clone();
         let pending_value = pending_value.clone();
         use_debounce(
             move || {
                 let next = pending_value.borrow().clone();
-                filter.set(next.clone());
-                on_filter_change.emit(next);
+                filter.set(next);
             },
             FILTER_INPUT_DEBOUNCE_MS,
         )
@@ -105,18 +124,19 @@ pub fn FilterEditor(props: &FilterEditorProps) -> Html {
         let input_value = input_value.clone();
         let pending_value = pending_value.clone();
         let debounce = debounce.clone();
+        let on_filter_change = props.on_filter_change.clone();
         Callback::from(move |event: InputEvent| {
             if let Some(input) = event.target_dyn_into::<web_sys::HtmlTextAreaElement>() {
                 let value = input.value();
                 input_value.set(value.clone());
-                *pending_value.borrow_mut() = if value.is_empty() { None } else { Some(value) };
+                emit_filter_input(value, &pending_value, &on_filter_change);
                 debounce.run();
             }
         })
     };
 
     html! {
-        <div class={classes!("tp__filter-editor", if valid_filter {"tp__filter-editor-valid"} else {"tp__filter-editor-invalid"})}>
+        <div class={classes!("tp__filter-editor", if *valid_filter {Some("tp__filter-editor-valid")} else if props.validate_on_server {None} else {Some("tp__filter-editor-invalid")})}>
           <CollapsePanel class="tp__filter-editor__templates-container" expanded={false} title={translate.t("LABEL.TEMPLATES")}>
             <div class="tp__filter-editor__templates">
                 <div class="tp__filter-editor__templates-content">
@@ -141,10 +161,14 @@ pub fn FilterEditor(props: &FilterEditorProps) -> Html {
               </div>
             </CollapsePanel>
             <div class="tp__filter-editor__editor">
-                <textarea class="tp__filter-editor__editor-input" value={(*input_value).clone()} oninput={handle_filter_input}/>
+                <textarea class="tp__filter-editor__editor-input" value={(*input_value).clone()} oninput={handle_filter_input} disabled={props.disabled}/>
             </div>
             <div class="tp__filter-editor__preview">
-                <FilterView inline={false} pretty={true} filter={parsed_filter} />
+                if props.validate_on_server && parsed_filter.is_none() {
+                    <pre class="tp__filter__code">{(*input_value).clone()}</pre>
+                } else {
+                    <FilterView inline={false} pretty={true} filter={parsed_filter.clone()} />
+                }
             </div>
         </div>
     }
@@ -152,7 +176,31 @@ pub fn FilterEditor(props: &FilterEditorProps) -> Html {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_filter_preview;
+    use super::{emit_filter_input, parse_filter_preview};
+    use std::{cell::RefCell, rc::Rc};
+    use yew::Callback;
+
+    #[test]
+    fn filter_input_emits_latest_value_before_preview_debounce() {
+        let previous = Some(r#"Group = "Sports""#.to_owned());
+        let pending = RefCell::new(previous.clone());
+        let submitted = Rc::new(RefCell::new(previous));
+        let captured = submitted.clone();
+        let on_change = Callback::from(move |filter| {
+            captured.replace(filter);
+        });
+        let latest = r#"Group = "News""#.to_owned();
+        emit_filter_input(latest.clone(), &pending, &on_change);
+        assert_eq!(submitted.borrow().as_ref(), Some(&latest));
+        assert_eq!(*submitted.borrow(), *pending.borrow());
+        emit_filter_input("(".to_owned(), &pending, &on_change);
+        assert!(!parse_filter_preview(submitted.borrow().as_deref(), None).1);
+        emit_filter_input(String::new(), &pending, &on_change);
+        assert!(submitted.borrow().is_none());
+        assert!(pending.borrow().is_none());
+        emit_filter_input("  ".to_owned(), &pending, &on_change);
+        assert!(submitted.borrow().is_none());
+    }
 
     #[test]
     fn parse_filter_preview_accepts_empty_filter() {

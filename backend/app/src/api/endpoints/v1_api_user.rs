@@ -18,6 +18,25 @@ use shared::{
 };
 use std::{path::Path, sync::Arc};
 
+async fn validate_user_filter(
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    axum::extract::Json(filter): axum::extract::Json<Option<String>>,
+) -> axum::response::Response {
+    let api_proxy = app_state.app_config.api_proxy.load();
+    let templates = api_proxy.as_ref().and_then(|config| config.templates.as_deref());
+    let valid = filter
+        .as_deref()
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+        .is_none_or(|raw| shared::foundation::get_filter(raw, templates).is_ok());
+    if valid {
+        axum::http::StatusCode::NO_CONTENT.into_response()
+    } else {
+        // Parser errors can contain expanded template values that the caller cannot read.
+        (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Invalid user filter"}))).into_response()
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 async fn save_config_api_proxy_user(
     method: axum::http::Method,
@@ -31,7 +50,9 @@ async fn save_config_api_proxy_user(
     };
     let _lock = app_state.app_config.file_locks.write_lock(Path::new(&api_proxy_file_path)).await;
 
-    if let Err(err) = credential.prepare() {
+    let runtime_api_proxy = app_state.app_config.api_proxy.load_full();
+    let templates = runtime_api_proxy.as_ref().and_then(|config| config.templates.as_deref());
+    if let Err(err) = credential.prepare_with_templates(templates) {
         return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()}))).into_response();
     }
     if let Err(err) = credential.validate() {
@@ -72,7 +93,7 @@ async fn save_config_api_proxy_user(
     }
     let new_user = {
         let mut user = ProxyUserCredentials::from(&credential);
-        user.resolve_plan(&api_proxy.plan_map());
+        user.resolve_plan_with_templates(&api_proxy.plan_map(), api_proxy.templates.as_deref());
         Arc::new(user)
     };
 
@@ -278,6 +299,7 @@ async fn terminate_user_session(
 
 pub fn v1_api_user_register(router: Router<Arc<AppState>>) -> axum::Router<Arc<AppState>> {
     router
+        .route("/user/filter/validate", axum::routing::post(validate_user_filter))
         .route("/user/{target}", axum::routing::post(save_config_api_proxy_user))
         .route("/user/{target}", axum::routing::put(save_config_api_proxy_user))
         .route("/user/{target}/{username}", axum::routing::delete(delete_config_api_proxy_user))
@@ -289,10 +311,122 @@ pub fn v1_api_user_register_with_permissions(
     app_state: &Arc<AppState>,
 ) -> axum::Router<Arc<AppState>> {
     let user_write_routes = Router::new()
+        .route("/filter/validate", axum::routing::post(validate_user_filter))
         .route("/{target}", axum::routing::post(save_config_api_proxy_user).put(save_config_api_proxy_user))
         .route("/{target}/{username}", axum::routing::delete(delete_config_api_proxy_user))
         .route("/{username}/session/{session_token}", axum::routing::delete(terminate_user_session))
         .layer(permission_layer!(app_state, Permission::UserWrite));
 
     router.nest("/user", user_write_routes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::v1_api_user_register_with_permissions;
+    use crate::{
+        api::model::create_test_app_state,
+        auth::create_jwt_web_user,
+        model::{ApiProxyConfig, Config},
+    };
+    use axum::{
+        body::{to_bytes, Body},
+        http::{Request, StatusCode},
+        Router,
+    };
+    use shared::model::{PatternTemplate, Permission, TemplateValue, UserId, WebAuthConfigDto, WebUiConfigDto};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn user_filter_validation_requires_user_write_and_keeps_templates_private(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let web_ui = WebUiConfigDto {
+            auth: Some(WebAuthConfigDto {
+                enabled: true,
+                issuer: "filter-test".to_owned(),
+                secret: "filter-test-secret".to_owned(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let config = Config { web_ui: Some((&web_ui).into()), ..Default::default() };
+        let Some(web_auth) = config.web_ui.as_ref().and_then(|web_ui| web_ui.auth.as_ref()) else {
+            return Err("missing web auth".into());
+        };
+        let writer =
+            create_jwt_web_user(web_auth, "writer", Permission::UserWrite.into(), 0, UserId::from("web:writer"))?;
+        let reader =
+            create_jwt_web_user(web_auth, "reader", Permission::UserRead.into(), 0, UserId::from("web:reader"))?;
+        let app_state = create_test_app_state(config);
+        let mut groups = PatternTemplate {
+            name: "groups".to_owned(),
+            value: TemplateValue::Single("Sports".to_owned()),
+            placeholder: String::new(),
+        };
+        groups.prepare();
+        let mut secret = PatternTemplate {
+            name: "invalid_regex".to_owned(),
+            value: TemplateValue::Single("private-template-value[".to_owned()),
+            placeholder: String::new(),
+        };
+        secret.prepare();
+        app_state.app_config.api_proxy.store(Some(Arc::new(ApiProxyConfig {
+            templates: Some(Arc::from([groups, secret])),
+            ..Default::default()
+        })));
+        let router = v1_api_user_register_with_permissions(Router::new(), &app_state).with_state(app_state);
+        for (filter, status) in [
+            (Some(r#"Group = "!groups!""#), StatusCode::NO_CONTENT),
+            (None, StatusCode::NO_CONTENT),
+            (Some("  "), StatusCode::NO_CONTENT),
+            (Some("("), StatusCode::BAD_REQUEST),
+            (Some(r#"Group = "!missing!""#), StatusCode::BAD_REQUEST),
+            (Some(r#"Group ~ "!invalid_regex!""#), StatusCode::BAD_REQUEST),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/user/filter/validate")
+                        .header("Authorization", format!("Bearer {writer}"))
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(serde_json::to_string(&filter)?))?,
+                )
+                .await?;
+            assert_eq!(response.status(), status);
+            let body = to_bytes(response.into_body(), 1024).await?;
+            if status == StatusCode::NO_CONTENT {
+                assert!(body.is_empty());
+            } else {
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&body)?,
+                    serde_json::json!({"error": "Invalid user filter"})
+                );
+            }
+        }
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/user/filter/validate")
+                    .header("Authorization", format!("Bearer {reader}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from("null"))?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/user/filter/validate")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from("null"))?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
 }

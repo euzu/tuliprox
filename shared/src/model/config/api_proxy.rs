@@ -179,12 +179,12 @@ impl ApiProxyConfigDto {
         }
     }
 
-    fn prepare_target_user(&mut self, errors: &mut Vec<String>) {
+    fn prepare_target_user(&mut self, errors: &mut Vec<String>, templates: Option<&[crate::model::PatternTemplate]>) {
         let mut usernames = HashSet::new();
         let mut tokens = HashSet::new();
         for target_user in &mut self.user {
             for user in &mut target_user.credentials {
-                if let Err(err) = user.prepare() {
+                if let Err(err) = user.prepare_with_templates(templates) {
                     errors.push(err.to_string());
                 }
                 if usernames.contains(&user.username) {
@@ -218,14 +218,19 @@ impl ApiProxyConfigDto {
         }
     }
 
-    pub fn prepare(&mut self) -> Result<(), TuliproxError> {
+    pub fn prepare(&mut self) -> Result<(), TuliproxError> { self.prepare_with_templates(None) }
+
+    pub fn prepare_with_templates(
+        &mut self,
+        templates: Option<&[crate::model::PatternTemplate]>,
+    ) -> Result<(), TuliproxError> {
         let mut errors = Vec::new();
         if self.server.is_empty() {
             errors.push("No server info defined".to_string());
         } else {
             self.prepare_server_config(&mut errors);
         }
-        self.prepare_target_user(&mut errors);
+        self.prepare_target_user(&mut errors, templates);
         // A success or redirect code here would make auth failures look like valid responses
         if !(400..=599).contains(&self.auth_error_status) {
             errors.push(format!(
