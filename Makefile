@@ -234,7 +234,7 @@ serve: ## Run tuliprox server with settings folder: make serve <settings_folder>
 .PHONY: serve-fe
 serve-fe: ## Run frontend dev server with Trunk: make serve-fe
 	@echo "==> Starting frontend dev server (trunk serve)"
-	@cd $(PROJECT_DIR)/frontend && $(TRUNK) serve
+	@cd $(PROJECT_DIR)/frontend && $(TRUNK) serve --address 127.0.0.1
 
 .PHONY: architecture-check
 architecture-check: ## Verify workspace dependency direction
