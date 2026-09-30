@@ -858,6 +858,20 @@ async fn set_active_download_state(
     .unwrap_or(false))
 }
 
+async fn continue_after_pause(download_queue: &RecordingQueue, uuid: &str) -> bool {
+    let mut running = download_queue.worker_running.write().await;
+    let resumed = download_queue
+        .active
+        .read()
+        .await
+        .as_ref()
+        .is_some_and(|task| task.uuid == uuid && !task.paused && !task.finished);
+    if !resumed {
+        *running = false;
+    }
+    resumed
+}
+
 async fn commit_acquired_download(
     download_queue: &RecordingQueue,
     uuid: &str,
@@ -1659,22 +1673,14 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
                             }
                             DownloadExecutionResult::Paused => {
                                 capacity.release(provider_handle).await;
-                                if let Err(err) = broadcast_required_worker_mutation(
-                                    &event_manager,
-                                    set_active_download_state(
-                                        &dq,
-                                        &worker_uuid,
-                                        RecordingTaskState::Paused,
-                                        None,
-                                        true,
-                                    )
-                                    .await,
-                                    "paused state",
-                                ) {
-                                    error!("Download worker commit failed: {err}");
-                                    break 'worker;
+                                // The pause command has already persisted the state. A resume
+                                // can arrive while this worker is closing the old stream. Hold
+                                // the worker flag until the state is checked so the resume
+                                // handler either restarts this worker or starts a new one.
+                                if continue_after_pause(&dq, &worker_uuid).await {
+                                    continue 'worker;
                                 }
-                                break;
+                                return;
                             }
                             DownloadExecutionResult::Cancelled => {
                                 capacity.release(provider_handle).await;
@@ -2022,9 +2028,9 @@ fn start_recording_scheduler<E: EventSink + Clone + 'static>(
 #[cfg(test)]
 mod tests {
     use super::{
-        download_file, ensure_recording_worker_running, finalize_http_transfer, http_transfer_path,
-        recording_deadline_instant, refresh_recording_progress, start_recording_scheduler, wait_for_provider_slot,
-        DownloadExecutionResult, DISK_GONE_BEFORE_START, LIVE_CAPACITY_WINDOW_CLOSED,
+        continue_after_pause, download_file, ensure_recording_worker_running, finalize_http_transfer,
+        http_transfer_path, recording_deadline_instant, refresh_recording_progress, start_recording_scheduler,
+        wait_for_provider_slot, DownloadExecutionResult, DISK_GONE_BEFORE_START, LIVE_CAPACITY_WINDOW_CLOSED,
     };
     use crate::recording::{
         recording_capacity::{stub::StubCapacity, RecordingCapacityPort},
@@ -2155,6 +2161,27 @@ mod tests {
             let request = server.join().expect("fixture server").to_ascii_lowercase();
             assert!(request.contains("range: bytes=4-\r\n"), "missing resume Range: {request}");
             assert!(request.contains("accept-encoding: identity\r\n"), "missing identity encoding: {request}");
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_during_pause_shutdown_keeps_a_worker_for_vod_and_series() {
+        for kind in [RecordingKind::Vod, RecordingKind::Series] {
+            let queue = RecordingQueue::new();
+            *queue.active.write().await = Some(scheduled_task(kind, 0, 900));
+            *queue.worker_running.write().await = true;
+
+            assert!(queue.pause_active("task").await.expect("pause"));
+            assert!(queue.resume_active("task").await.expect("resume before old worker exits"));
+            assert!(continue_after_pause(&queue, "task").await);
+            assert!(*queue.worker_running.read().await);
+            assert_eq!(queue.active.read().await.as_ref().map(|task| task.state), Some(RecordingTaskState::Running));
+
+            assert!(queue.pause_active("task").await.expect("second pause"));
+            assert!(!continue_after_pause(&queue, "task").await);
+            assert!(!*queue.worker_running.read().await);
+            assert!(queue.resume_active("task").await.expect("resume after old worker exits"));
+            assert!(!queue.active.read().await.as_ref().is_some_and(|task| task.paused));
         }
     }
 
