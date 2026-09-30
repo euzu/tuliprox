@@ -8,7 +8,8 @@ use crate::{
     model::{DialogAction, DialogActions, DialogResult},
 };
 use shared::{foundation::get_filter, model::PatternTemplate};
-use yew::prelude::*;
+use web_sys::window;
+use yew::{create_portal, prelude::*};
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct FilterInputProps {
@@ -183,32 +184,42 @@ pub fn FilterInput(props: &FilterInputProps) -> Html {
             </div>
             </div>
             if *dialog_open {
-                <ContentDialog
-                    content={html! {
-                        <FilterEditor
-                            filter={(*editor_filter_state).clone()}
-                            validate_on_server={props.validate_on_server}
-                            disabled={*validating}
-                            on_filter_change={{
-                                let editor_filter_state = editor_filter_state.clone();
-                                let latest_filter = latest_filter.clone();
-                                Callback::from(move |flt: Option<String>| {
-                                    latest_filter.replace(flt.clone());
-                                    editor_filter_state.set(flt);
-                                })
+                {{
+                    let dialog = html! {
+                        <ContentDialog
+                            content={html! {
+                                <FilterEditor
+                                    filter={(*editor_filter_state).clone()}
+                                    validate_on_server={props.validate_on_server}
+                                    disabled={*validating}
+                                    on_filter_change={{
+                                        let editor_filter_state = editor_filter_state.clone();
+                                        let latest_filter = latest_filter.clone();
+                                        Callback::from(move |flt: Option<String>| {
+                                            latest_filter.replace(flt.clone());
+                                            editor_filter_state.set(flt);
+                                        })
+                                    }}
+                                    on_valid_change={{
+                                        let editor_valid_state = editor_valid_state.clone();
+                                        Callback::from(move |valid: bool| editor_valid_state.set(valid))
+                                    }}
+                                    on_templates_change={handle_templates_edit}
+                                />
                             }}
-                            on_valid_change={{
-                                let editor_valid_state = editor_valid_state.clone();
-                                Callback::from(move |valid: bool| editor_valid_state.set(valid))
-                            }}
-                            on_templates_change={handle_templates_edit}
+                            actions={dialog_actions}
+                            close_on_backdrop_click={false}
+                            close_on_confirm={false}
+                            on_confirm={handle_dialog_result}
                         />
-                    }}
-                    actions={dialog_actions}
-                    close_on_backdrop_click={false}
-                    close_on_confirm={false}
-                    on_confirm={handle_dialog_result}
-                />
+                    };
+                    // Keep the overlay outside scrolling forms so WebKit cannot clip it.
+                    if let Some(body) = window().and_then(|win| win.document()).and_then(|document| document.body()) {
+                        create_portal(dialog, body.into())
+                    } else {
+                        dialog
+                    }
+                }}
             }
         </>
     }
