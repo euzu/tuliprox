@@ -18,7 +18,7 @@ pub const LABEL_REVERSE_PROXY_CONFIG: &str = "LABEL.REVERSE_PROXY_CONFIG";
 pub const LABEL_HDHOMERUN_CONFIG: &str = "LABEL.HDHOMERUN_CONFIG";
 pub const LABEL_PROXY_CONFIG: &str = "LABEL.PROXY_CONFIG";
 pub const LABEL_IP_CHECK_CONFIG: &str = "LABEL.IP_CHECK_CONFIG";
-pub const LABEL_VIDEO_CONFIG: &str = "LABEL.VIDEO_CONFIG";
+pub const LABEL_RECORDING_CONFIG: &str = "LABEL.RECORDING_CONFIG";
 pub const LABEL_PANEL_CONFIG: &str = "LABEL.PANEL_CONFIG";
 pub const LABEL_LIBRARY_CONFIG: &str = "LABEL.LIBRARY_CONFIG";
 pub const LABEL_METADATA_UPDATE_CONFIG: &str = "LABEL.METADATA_UPDATE_CONFIG";
@@ -33,7 +33,7 @@ const REVERSE_PROXY_PAGE: &str = "reverse_proxy";
 const HDHOMERUN_PAGE: &str = "hdhomerun";
 const PROXY_PAGE: &str = "proxy";
 const IPCHECK_PAGE: &str = "ipcheck";
-const VIDEO_PAGE: &str = "video";
+const RECORDING_PAGE: &str = "recording";
 const METADATA_UPDATE_PAGE: &str = "metadata_update";
 const PANEL_PAGE: &str = "panel";
 const LIBRARY_PAGE: &str = "library";
@@ -44,7 +44,7 @@ pub enum ConfigPage {
     Api,
     Log,
     Schedules,
-    Video,
+    Recording,
     MetadataUpdate,
     Messaging,
     WebUi,
@@ -65,7 +65,7 @@ impl FromStr for ConfigPage {
             API_PAGE => Ok(ConfigPage::Api),
             LOG_PAGE => Ok(ConfigPage::Log),
             SCHEDULES_PAGE => Ok(ConfigPage::Schedules),
-            VIDEO_PAGE => Ok(ConfigPage::Video),
+            RECORDING_PAGE | "video" => Ok(ConfigPage::Recording),
             METADATA_UPDATE_PAGE => Ok(ConfigPage::MetadataUpdate),
             MESSAGING_PAGE => Ok(ConfigPage::Messaging),
             WEBUI_PAGE => Ok(ConfigPage::WebUi),
@@ -87,7 +87,7 @@ impl fmt::Display for ConfigPage {
             ConfigPage::Api => API_PAGE,
             ConfigPage::Log => LOG_PAGE,
             ConfigPage::Schedules => SCHEDULES_PAGE,
-            ConfigPage::Video => VIDEO_PAGE,
+            ConfigPage::Recording => RECORDING_PAGE,
             ConfigPage::MetadataUpdate => METADATA_UPDATE_PAGE,
             ConfigPage::Messaging => MESSAGING_PAGE,
             ConfigPage::WebUi => WEBUI_PAGE,
@@ -114,7 +114,7 @@ pub enum ConfigForm {
     ApiProxy(bool, ApiProxyConfigDto),
     Log(bool, LogConfigDto),
     Schedules(bool, SchedulesConfigDto),
-    Video(bool, VideoConfigDto),
+    Recording(bool, VideoConfigDto),
     MetadataUpdate(bool, MetadataUpdateConfigDto),
     Messaging(bool, MessagingConfigDto),
     WebUi(bool, WebUiConfigDto),
@@ -135,7 +135,7 @@ impl ConfigForm {
                 | ConfigForm::ApiProxy(true, _)
                 | ConfigForm::Log(true, _)
                 | ConfigForm::Schedules(true, _)
-                | ConfigForm::Video(true, _)
+                | ConfigForm::Recording(true, _)
                 | ConfigForm::MetadataUpdate(true, _)
                 | ConfigForm::Messaging(true, _)
                 | ConfigForm::WebUi(true, _)
@@ -156,7 +156,7 @@ pub struct ConfigFormSlots {
     pub api_proxy: Option<ConfigForm>,
     pub log: Option<ConfigForm>,
     pub schedules: Option<ConfigForm>,
-    pub video: Option<ConfigForm>,
+    pub recording: Option<ConfigForm>,
     pub metadata_update: Option<ConfigForm>,
     pub messaging: Option<ConfigForm>,
     pub web_ui: Option<ConfigForm>,
@@ -178,7 +178,7 @@ impl ConfigFormSlots {
             ConfigForm::ApiProxy(_, _) => Self::set_form_slot(&mut self.api_proxy, form),
             ConfigForm::Log(_, _) => Self::set_form_slot(&mut self.log, form),
             ConfigForm::Schedules(_, _) => Self::set_form_slot(&mut self.schedules, form),
-            ConfigForm::Video(_, _) => Self::set_form_slot(&mut self.video, form),
+            ConfigForm::Recording(_, _) => Self::set_form_slot(&mut self.recording, form),
             ConfigForm::MetadataUpdate(_, _) => Self::set_form_slot(&mut self.metadata_update, form),
             ConfigForm::Messaging(_, _) => Self::set_form_slot(&mut self.messaging, form),
             ConfigForm::WebUi(_, _) => Self::set_form_slot(&mut self.web_ui, form),
@@ -198,7 +198,7 @@ impl ConfigFormSlots {
             &self.api_proxy,
             &self.log,
             &self.schedules,
-            &self.video,
+            &self.recording,
             &self.metadata_update,
             &self.messaging,
             &self.web_ui,

@@ -6,9 +6,9 @@
 //! backoff and the attempt/deadline caps that bound the loop live here too.
 
 use super::{
-    current_time_millis, hls_manifest_acceptance_directive_for_reevaluation, HlsManifestAcceptanceDirective,
-    HlsTerminalFailedClosedReason, HLS_AVAILABILITY_REEVALUATION_DEADLINE_MS,
-    HLS_AVAILABILITY_REEVALUATION_MAX_ATTEMPTS, HLS_AVAILABILITY_REEVALUATION_MAX_BACKOFF_MS,
+    hls_manifest_acceptance_directive_for_reevaluation, HlsManifestAcceptanceDirective, HlsTerminalFailedClosedReason,
+    HLS_AVAILABILITY_REEVALUATION_DEADLINE_MS, HLS_AVAILABILITY_REEVALUATION_MAX_ATTEMPTS,
+    HLS_AVAILABILITY_REEVALUATION_MAX_BACKOFF_MS,
 };
 use crate::{
     availability_reevaluation::{
@@ -142,12 +142,13 @@ enum HlsAvailabilityOwnerWaitOutcome {
 async fn wait_for_availability_owner_signal(
     ownership: &HlsAvailabilityReevaluationOwnership,
     wake_at_ms: u64,
+    now_ms: u64,
 ) -> HlsAvailabilityOwnerWaitOutcome {
     tokio::select! {
         () = ownership.cancelled() => HlsAvailabilityOwnerWaitOutcome::Cancelled,
         () = ownership.wake_requested() => HlsAvailabilityOwnerWaitOutcome::Woken,
         () = tokio::time::sleep(Duration::from_millis(
-            wake_at_ms.saturating_sub(current_time_millis())
+            wake_at_ms.saturating_sub(now_ms)
         )) => HlsAvailabilityOwnerWaitOutcome::DeadlineReached,
     }
 }
@@ -213,7 +214,7 @@ async fn handle_evaluated_availability_directive(
         return handoff_availability_reevaluation_worker(ctx, session, owner_key, ownership, refresh_request).await;
     }
     refresh_request.acceptance_directive = directive;
-    refresh_request.now_ms = current_time_millis();
+    refresh_request.now_ms = ctx.hls_proxy.now_ms();
     let trigger_decision = availability_refresh_trigger_decision(
         maybe_trigger_origin_refresh_with_outcome(refresh_request.clone()).await,
         terminal_evaluation_pending,
@@ -449,7 +450,7 @@ async fn run_hls_availability_reevaluation_attempt(
         ownership.discard_superseded(owner_key);
         return HlsAvailabilityCycleDecision::Stop;
     };
-    let attempt_now_ms = current_time_millis();
+    let attempt_now_ms = ctx.hls_proxy.now_ms();
     if attempt_now_ms > cycle.deadline_ms {
         warn!("HLS availability reevaluation cycle stopped: reason=deadline_elapsed");
         return HlsAvailabilityCycleDecision::FinishCycle;
@@ -480,12 +481,12 @@ async fn run_hls_availability_reevaluation_attempt(
         warn!("HLS availability reevaluation cycle stopped: reason=attempts_exhausted");
         return HlsAvailabilityCycleDecision::FinishCycle;
     }
-    let Some(retry_at_ms) = schedule.wake_at_ms(current_time_millis(), cycle.attempts_completed, cycle.deadline_ms)
-    else {
+    let retry_from_ms = ctx.hls_proxy.now_ms();
+    let Some(retry_at_ms) = schedule.wake_at_ms(retry_from_ms, cycle.attempts_completed, cycle.deadline_ms) else {
         warn!("HLS availability reevaluation cycle stopped: reason=deadline_elapsed");
         return HlsAvailabilityCycleDecision::FinishCycle;
     };
-    match wait_for_availability_owner_signal(ownership, retry_at_ms).await {
+    match wait_for_availability_owner_signal(ownership, retry_at_ms, retry_from_ms).await {
         HlsAvailabilityOwnerWaitOutcome::Cancelled => {
             ownership.discard_superseded(owner_key);
             HlsAvailabilityCycleDecision::Stop
@@ -506,7 +507,7 @@ async fn run_hls_availability_reevaluation(
     mut refresh_request: OriginRefreshRequest,
 ) {
     'cycles: loop {
-        let mut cycle = HlsAvailabilityReevaluationCycle::new(current_time_millis());
+        let mut cycle = HlsAvailabilityReevaluationCycle::new(ctx.hls_proxy.now_ms());
         loop {
             match run_hls_availability_reevaluation_attempt(
                 &ctx,
@@ -524,8 +525,8 @@ async fn run_hls_availability_reevaluation(
                 HlsAvailabilityCycleDecision::Stop => return,
             }
         }
-        if let Some(resolution) = cycle.retained_owner_resolution(current_time_millis()) {
-            match wait_for_owner_resolution(&ownership, resolution).await {
+        if let Some(resolution) = cycle.retained_owner_resolution(ctx.hls_proxy.now_ms()) {
+            match wait_for_owner_resolution(&ownership, resolution, ctx.hls_proxy.now_ms()).await {
                 HlsPostRefreshOwnerWaitOutcome::Cancelled => {
                     ownership.discard_superseded(&owner_key);
                     return;

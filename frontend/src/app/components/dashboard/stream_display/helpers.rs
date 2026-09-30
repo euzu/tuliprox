@@ -74,6 +74,10 @@ pub fn is_background_transfer_stream(stream: &StreamInfo) -> bool {
     stream.client_ip == BACKGROUND_TRANSFER_CLIENT_IP && stream.provider.as_ref() == BACKGROUND_TRANSFER_PROVIDER
 }
 
+pub fn is_recording_stream(stream: &StreamInfo) -> bool {
+    stream.user_agent == shared::model::RECORDING_STREAM_USER_AGENT
+}
+
 pub fn filter_visible_streams(
     streams: Option<Vec<std::rc::Rc<StreamInfo>>>,
     adaptive_last_seen: &HashMap<u32, u64>,
@@ -84,6 +88,9 @@ pub fn filter_visible_streams(
         streams
             .into_iter()
             .filter(|stream| {
+                if is_background_transfer_stream(stream) {
+                    return false;
+                }
                 if !is_adaptive_session_stream(stream) {
                     return true;
                 }
@@ -283,6 +290,22 @@ mod tests {
         let mut stream = (*test_stream(uid, PlaylistItemType::LiveHls, preserved, has_session)).clone();
         stream.channel.shared = true;
         Rc::new(stream)
+    }
+
+    #[test]
+    fn stream_list_keeps_real_recording_and_hides_download_placeholder() {
+        let mut real = (*test_stream(1, PlaylistItemType::Live, false, false)).clone();
+        real.user_agent = shared::model::RECORDING_STREAM_USER_AGENT.to_string();
+        let mut placeholder = (*test_stream(2, PlaylistItemType::Live, false, false)).clone();
+        placeholder.client_ip = crate::model::BACKGROUND_TRANSFER_CLIENT_IP.to_string();
+        placeholder.provider = crate::model::BACKGROUND_TRANSFER_PROVIDER.intern();
+
+        let visible =
+            super::filter_visible_streams(Some(vec![Rc::new(real), Rc::new(placeholder)]), &HashMap::new(), 0, 60)
+                .expect("stream list");
+
+        assert_eq!(visible.len(), 1);
+        assert!(super::is_recording_stream(&visible[0]));
     }
 
     #[test]

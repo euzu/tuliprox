@@ -836,6 +836,14 @@ macro_rules! generate_form_reducer {
             )*
             #[allow(dead_code)]
             SetAll($data_type),
+            /// Replace the data without claiming it came from a reload.
+            ///
+            /// `SetAll` means "this is the saved state" and clears
+            /// `modified`. A parent absorbing an edit a child component
+            /// already reported needs the opposite, or the edit is
+            /// forgotten the moment it crosses the boundary.
+            #[allow(dead_code)]
+            SetAllEdited($data_type),
         }
 
         impl yew::prelude::Reducible for $state_name {
@@ -854,6 +862,10 @@ macro_rules! generate_form_reducer {
                     )*
                     $action_name::SetAll(v) => {
                         modified = false;
+                        v
+                    },
+                    $action_name::SetAllEdited(v) => {
+                        modified = true;
                         v
                     },
                 };

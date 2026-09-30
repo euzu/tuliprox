@@ -16,10 +16,10 @@
 use crate::{
     api::model::{
         recording_catalog_access::{self, CatalogAccessError},
-        AppState, DownloadQueue,
+        AppState, RecordingQueue,
     },
     auth::{validate_token_claims, verify_token, AuthBearer, AuthError},
-    utils::{no_follow_path_in_root, resolve_recording_dir, RecordingPathError, RecordingVisibility as PathVisibility},
+    utils::no_follow_path_in_root,
 };
 use axum::{
     body::Body,
@@ -203,22 +203,15 @@ fn access_error_to_response(err: &CatalogAccessError) -> Response {
 /// Find the recording, authorize the open, and resolve the on-disk
 /// path. Every step is a security boundary; no step logs the path.
 async fn resolve_for_open(app_state: &AppState, claims: &Claims, uuid: &str) -> Result<ResolvedMedia, Box<Response>> {
-    let queue: &DownloadQueue = &app_state.downloads;
+    let queue: &RecordingQueue = &app_state.recordings;
     let recording = recording_catalog_access::lookup_recording(queue, uuid)
         .await
         .ok_or_else(|| Box::new(access_error_to_response(&CatalogAccessError::NotFound)))?;
-    let meta = recording
-        .recording
-        .as_ref()
-        .ok_or_else(|| Box::new(access_error_to_response(&CatalogAccessError::NotFound)))?;
+    let meta = &recording.recording;
     let relative = meta
         .relative_path
         .as_deref()
         .ok_or_else(|| Box::new(access_error_to_response(&CatalogAccessError::InvalidPath)))?;
-    let owner_dir = match &meta.owner {
-        shared::model::recording::RecordingOwner::User(user_id) => user_id.0.clone(),
-        shared::model::recording::RecordingOwner::LegacyAdmin => "legacy".to_string(),
-    };
     let subject_id = claims
         .subject_id
         .as_ref()
@@ -234,37 +227,22 @@ async fn resolve_for_open(app_state: &AppState, claims: &Claims, uuid: &str) -> 
     .await
     .map_err(|e| Box::new(access_error_to_response(&e)))?;
     let config = app_state.app_config.config.load();
-    let recording_root = config
-        .video
-        .as_ref()
-        .and_then(|v| v.download.as_ref())
-        .and_then(|d| d.recording.as_ref())
-        .map(|r| r.directory.clone())
-        .ok_or_else(|| {
-            Box::new(
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    axum::Json(serde_json::json!({"error": "recording_not_configured"})),
-                )
-                    .into_response(),
-            )
-        })?;
+    let recording_root = config.recording().map(|recording| recording.directory.clone()).ok_or_else(|| {
+        Box::new(
+            (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(serde_json::json!({"error": "recording_not_configured"})))
+                .into_response(),
+        )
+    })?;
     let recording_root = PathBuf::from(recording_root);
-    let abs_path = resolve_recording_dir(
-        &recording_root,
-        match meta.visibility {
-            shared::model::recording::RecordingVisibility::Private => PathVisibility::Private,
-            shared::model::recording::RecordingVisibility::Shared => PathVisibility::Shared,
-        },
-        &owner_dir,
-        Path::new(relative),
-    )
-    .map_err(|_e: RecordingPathError| Box::new(access_error_to_response(&CatalogAccessError::InvalidPath)))?;
+    // The stored path is relative to the recording root and carries no owner
+    // or visibility component: one physical file is shared by everyone who
+    // requested it, so its location cannot depend on who asked first.
+    let abs_path = tuliprox_dvr::recording_path::resolve_under_root(&recording_root, Path::new(relative))
+        .map_err(|_| Box::new(access_error_to_response(&CatalogAccessError::InvalidPath)))?;
     // Re-validate the on-disk file is a regular file (no symlink,
     // no directory) at every intermediate component between the
     // configured root and the leaf — otherwise a swapped-in symlink
-    // under `<root>/users/alice` would route reads outside the
-    // recording root.
+    // under the recording root would route reads outside it.
     let file_meta = no_follow_path_in_root(&recording_root, &abs_path)
         .await
         .ok_or_else(|| Box::new(access_error_to_response(&CatalogAccessError::NotFound)))?;
@@ -446,7 +424,7 @@ mod tests {
         assert_eq!(claims.roles, RoleSet::ADMIN);
         assert_eq!(claims.permissions, PERM_ALL);
         assert_eq!(claims.permission_schema_version, CURRENT_PERMISSION_SCHEMA_VERSION);
-        assert!(claims.permissions.contains(Permission::RecordingWrite));
+        assert!(claims.permissions.contains(Permission::RecordingManage));
 
         for authorization in [None, Some("Basic authorized"), Some("Bearer wrong")] {
             let response = extract_auth_claims(&state, authorization).await.expect_err("rejected");

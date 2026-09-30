@@ -24,32 +24,16 @@
 //! queue-mutation boundary can call them once the wiring lands; the
 //! `dead_code` allowance below is the test surface.
 
-use crate::download::DownloadState;
-use shared::model::recording::{RecordingMetadata, RecordingVisibility};
+use crate::recording::recording_transition;
+use shared::model::{
+    recording::{RecordingMetadata, RecordingVisibility},
+    RecordingTaskState,
+};
 
 /// The set of states a recording can be in for an edit to be
-/// accepted.
+/// accepted. Kept as labels for the wire; the rule itself lives in
+/// [`recording_transition::can_edit`].
 pub const EDITABLE_STATES: &[&str] = &["Scheduled", "Queued", "WaitingForCapacity", "RetryWaiting"];
-
-impl DownloadState {
-    /// Stable wire label consumed by `state_is_editable` and any caller
-    /// that needs to surface the state name in logs, errors, or tests.
-    /// Kept here so the source of truth for both the label and the
-    /// editable set lives next to `EDITABLE_STATES`.
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Queued => "Queued",
-            Self::Scheduled => "Scheduled",
-            Self::WaitingForCapacity => "WaitingForCapacity",
-            Self::RetryWaiting => "RetryWaiting",
-            Self::Downloading => "Downloading",
-            Self::Paused => "Paused",
-            Self::Completed => "Completed",
-            Self::Failed => "Failed",
-            Self::Cancelled => "Cancelled",
-        }
-    }
-}
 
 /// Edit-time error taxonomy. Stable wire codes live in
 /// `RecordingService::ServiceError`; this enum is the *pure*
@@ -94,12 +78,11 @@ pub struct PaddingBounds {
     pub max_post_roll_secs: u64,
 }
 
-/// The current state label. The form strings are
-/// `Scheduled` / `Queued` / `WaitingForCapacity` / `RetryWaiting` /
-/// `Downloading` / `Completed` / `Failed` / `Cancelled` /
-/// `Deleting(<previous>)`. The current state for the existing
-/// `DownloadState` variants is reduced to a string here.
-pub fn state_is_editable(state_label: &str) -> bool { EDITABLE_STATES.contains(&state_label) }
+/// `true` when a recording in `state` can still have its plan changed.
+///
+/// Delegates to the transition graph so the edit cutoff cannot drift from the
+/// action the UI offers.
+pub fn state_is_editable(state: RecordingTaskState) -> bool { recording_transition::can_edit(state) }
 
 /// Pure: validate the merged interval (patch overlaid on current) and
 /// the patch's padding bounds. Validation runs against the merged
@@ -226,24 +209,48 @@ mod tests {
 
     #[test]
     fn state_is_editable_accepts_only_upcoming_states() {
-        for s in EDITABLE_STATES {
-            assert!(state_is_editable(s));
+        for state in [
+            RecordingTaskState::Scheduled,
+            RecordingTaskState::Queued,
+            RecordingTaskState::WaitingForCapacity,
+            RecordingTaskState::RetryWaiting,
+        ] {
+            assert!(state_is_editable(state), "{}", state.label());
         }
-        assert!(!state_is_editable("Downloading"));
-        assert!(!state_is_editable("Completed"));
-        assert!(!state_is_editable("Failed"));
-        assert!(!state_is_editable("Cancelled"));
-        assert!(!state_is_editable("Deleting(Completed)"));
+        for state in [
+            RecordingTaskState::Running,
+            RecordingTaskState::Paused,
+            RecordingTaskState::Completed,
+            RecordingTaskState::Failed,
+            RecordingTaskState::Cancelled,
+        ] {
+            assert!(!state_is_editable(state), "{}", state.label());
+        }
+    }
+
+    #[test]
+    fn the_editable_labels_match_the_states_the_graph_accepts() {
+        // `EDITABLE_STATES` is the wire vocabulary; the graph is the rule.
+        // They are separate on purpose, so pin them to each other.
+        for label in EDITABLE_STATES {
+            let state = [
+                RecordingTaskState::Scheduled,
+                RecordingTaskState::Queued,
+                RecordingTaskState::WaitingForCapacity,
+                RecordingTaskState::RetryWaiting,
+            ]
+            .into_iter()
+            .find(|state| state.label() == *label)
+            .unwrap_or_else(|| panic!("{label} names no editable state"));
+            assert!(state_is_editable(state));
+        }
     }
 
     fn current_meta() -> RecordingMetadata {
         // Baseline current metadata: program 100..500, no padding.
         // Tests overlay a patch on top of this and assert the merged
         // interval is validated.
-        let mut m = RecordingMetadata::for_legacy_admin(100, 400);
-        m.pre_roll_secs = 0;
-        m.post_roll_secs = 0;
-        m
+        make_meta(100, 500, 0, 0)
     }
 
     #[test]
@@ -362,9 +369,9 @@ mod tests {
     /// Tiny helper so the test signatures stay short.
     fn make_meta(start: i64, end: i64, pre: u64, post: u64) -> RecordingMetadata {
         RecordingMetadata {
-            owner: shared::model::recording::RecordingOwner::LegacyAdmin,
+            owner: shared::model::recording::RecordingOwner::User(shared::model::UserId::from("web:alice")),
             visibility: shared::model::recording::RecordingVisibility::Private,
-            source: None,
+            source: shared::model::recording::RecordingSource::new("t1", "v1", "in1"),
             program_start: Some(start),
             program_end: Some(end),
             scheduled_start: Some(start),
@@ -378,6 +385,8 @@ mod tests {
             provenance: shared::model::recording::RecordingProvenance::default(),
             relative_path: None,
             partial_relative_path: None,
+            resume_etag: None,
+            resume_last_modified: None,
             reserved_bytes: 0,
             measured_bytes: 0,
             completed_at: None,

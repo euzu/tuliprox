@@ -12,7 +12,13 @@ pub const TOKEN_NO_AUTH: &str = "authorized";
 /// issued before a bump fail closed at the validator with a stable
 /// "token refresh required" response so clients re-authenticate
 /// before the new permission bits can leak through.
-pub const CURRENT_PERMISSION_SCHEMA_VERSION: u16 = 1;
+///
+/// Bumped to `3` for the `download.read/write -> recording.read/write`
+/// migration, and to `4` when `recording.write` was split into
+/// `recording.create`, `recording.manage` and `recording.delete`. Both
+/// changes renumbered the bits above them, so tokens issued before a bump
+/// must fail closed rather than have their old bits reinterpreted.
+pub const CURRENT_PERMISSION_SCHEMA_VERSION: u16 = 4;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Claims {
@@ -188,5 +194,19 @@ mod tests {
         };
         let json = serde_json::to_string(&claims).expect("serialize");
         assert!(!json.contains("subject_id"), "no subject_id key in: {json}");
+    }
+
+    #[test]
+    fn current_permission_schema_version_rejects_stale_tokens() {
+        // Removing `download.*` and then splitting `recording.write`
+        // renumbered the recording bits twice. Any token minted before those
+        // changes carries a lower schema version and must fail closed instead
+        // of having its old bits reinterpreted.
+        const {
+            assert!(
+                CURRENT_PERMISSION_SCHEMA_VERSION >= 4,
+                "schema must be bumped when permission bits are renumbered"
+            );
+        };
     }
 }

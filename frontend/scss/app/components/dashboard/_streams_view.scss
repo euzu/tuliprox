@@ -185,6 +185,38 @@
     overflow-wrap: anywhere;
   }
 
+  &__title-line {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--gap-small);
+    min-width: 0;
+  }
+
+  &__recording-badge {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: var(--gap-mini);
+    padding: var(--padding-micro) var(--padding-mini);
+    border: 1px solid var(--attention-color);
+    border-radius: var(--tag-border-radius);
+    color: var(--attention-color);
+    background: var(--error-background-color);
+    font-size: var(--font-size-xs);
+    font-weight: 700;
+    line-height: 1.2;
+    white-space: nowrap;
+
+    &::before {
+      content: "";
+      width: 0.5em;
+      height: 0.5em;
+      border-radius: 50%;
+      background: currentColor;
+    }
+  }
+
   &__subtitle {
     display: flex;
     flex-flow: row wrap;

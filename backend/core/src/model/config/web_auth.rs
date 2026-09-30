@@ -502,6 +502,23 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_groups_drops_removed_download_permissions() {
+        // `download.read`/`download.write` no longer exist. A groups file
+        // that still lists them must lose those entries rather than have
+        // them reinterpreted as the recording permissions.
+        let mut file = NamedTempFile::new().expect("create temp file");
+        writeln!(file, "viewer:download.read,download.write,config.read").expect("write");
+        let groups = WebAuthConfig::parse_groups(file.path());
+        let permissions = groups[0].permissions;
+
+        assert!(permissions.contains(Permission::ConfigRead));
+        assert!(!permissions.contains(Permission::RecordingRead));
+        assert!(!permissions.contains(Permission::RecordingCreate));
+        assert!(!permissions.contains(Permission::RecordingManage));
+        assert!(!permissions.contains(Permission::RecordingDelete));
+    }
+
+    #[test]
     fn test_parse_groups_missing_file() {
         let groups = WebAuthConfig::parse_groups(std::path::Path::new("/nonexistent/groups.txt"));
         assert!(groups.is_empty());

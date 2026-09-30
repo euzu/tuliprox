@@ -9,7 +9,7 @@ use crate::{
 };
 use shared::model::{
     RecordingConfigDto, RecordingContainerFormat, RecordingDiskConfigDto, RecordingNotificationConfigDto,
-    RecordingQuotaConfigDto, RecordingRetentionConfigDto, VideoConfigDto,
+    RecordingQuotaConfigDto, RecordingRetentionConfigDto,
 };
 use std::{collections::HashMap, rc::Rc};
 use yew::prelude::*;
@@ -19,6 +19,7 @@ generate_form_reducer!(
     action_name: RecordingConfigFormAction,
     fields {
         Enabled => enabled: bool,
+        Priority => priority: i8,
         ContainerFormat => container_format: RecordingContainerFormat,
         Directory => directory: Option<String>,
         Timezone => timezone: Option<String>,
@@ -84,13 +85,6 @@ pub struct RecordingSectionChanges {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuotaEntryParseError {
     pub user: String,
-}
-
-pub fn recording_config_for_video(video: Option<&VideoConfigDto>) -> RecordingConfigDto {
-    match video.and_then(|video| video.download.as_ref()) {
-        None => RecordingConfigDto { enabled: false, ..RecordingConfigDto::default() },
-        Some(download) => download.recording.clone().unwrap_or_default(),
-    }
 }
 
 pub fn assemble_recording_config(
@@ -166,7 +160,7 @@ pub const RECORDING_CARDS: [RecordingCardDescriptor; 5] = [
 
 pub const RECORDING_FIELDS: [RecordingFieldDescriptor; 25] = [
     RecordingFieldDescriptor { id: "enabled", label: "LABEL.RECORDING_ENABLED", card: 0 },
-    RecordingFieldDescriptor { id: "recording_priority", label: "LABEL.PRIORITY", card: 0 },
+    RecordingFieldDescriptor { id: "priority", label: "LABEL.PRIORITY", card: 0 },
     RecordingFieldDescriptor { id: "container_format", label: "LABEL.CONTAINER", card: 0 },
     RecordingFieldDescriptor { id: "directory", label: "LABEL.DIRECTORY", card: 0 },
     RecordingFieldDescriptor { id: "timezone", label: "LABEL.TIMEZONE", card: 0 },
@@ -208,11 +202,9 @@ pub fn recording_container_from_id(id: &str) -> Option<RecordingContainerFormat>
 #[derive(Properties, Clone, PartialEq)]
 pub struct RecordingConfigCardsProps {
     pub recording: RecordingConfigDto,
-    pub recording_priority: i8,
     pub reload_generation: u64,
     pub edit_mode: bool,
     pub on_change: Callback<(bool, RecordingConfigDto)>,
-    pub on_recording_priority_change: Callback<i8>,
     pub on_error: Callback<String>,
 }
 
@@ -307,7 +299,7 @@ pub fn RecordingConfigCards(props: &RecordingConfigCardsProps) -> Html {
     let render_view_field = |field: &RecordingFieldDescriptor| {
         let label = translate.t(field.label);
         let value = match field.id {
-            "recording_priority" => props.recording_priority.to_string(),
+            "priority" => direct_state.form.priority.to_string(),
             "container_format" => recording_container_id(direct_state.form.container_format).to_string(),
             "directory" => direct_state.form.directory.clone().unwrap_or_default(),
             "timezone" => direct_state.form.timezone.clone().unwrap_or_default(),
@@ -382,9 +374,9 @@ pub fn RecordingConfigCards(props: &RecordingConfigCardsProps) -> Html {
                 let state = direct_state.clone();
                 html! { <div class="tp__form-field tp__form-field__bool"><ToggleSwitch value={state.form.enabled} readonly={false} on_change={Callback::from(move |value| state.dispatch(RecordingConfigFormAction::Enabled(value)))} /><FieldLabel label={label} field_id={field.id} /></div> }
             }
-            "recording_priority" => {
-                let callback = props.on_recording_priority_change.clone();
-                html! { <crate::app::components::number_input::NumberInput name={field.id} label={Some(label)} value={Some(i64::from(props.recording_priority))} min_i64={Some(i64::from(i8::MIN))} max_i64={Some(i64::from(i8::MAX))} on_change={Callback::from(move |value: Option<i64>| { if let Some(value) = value.and_then(|value| i8::try_from(value).ok()) { callback.emit(value); } })} /> }
+            "priority" => {
+                let state = direct_state.clone();
+                html! { <crate::app::components::number_input::NumberInput name={field.id} label={Some(label)} value={Some(i64::from(state.form.priority))} min_i64={Some(i64::from(i8::MIN))} max_i64={Some(i64::from(i8::MAX))} on_change={Callback::from(move |value: Option<i64>| { if let Some(value) = value.and_then(|value| i8::try_from(value).ok()) { state.dispatch(RecordingConfigFormAction::Priority(value)); } })} /> }
             }
             "container_format" => {
                 let state = direct_state.clone();
@@ -696,9 +688,28 @@ mod tests {
     use super::*;
     use shared::model::{
         RecordingConfigDto, RecordingContainerFormat, RecordingDiskConfigDto, RecordingNotificationConfigDto,
-        RecordingQuotaConfigDto, RecordingRetentionConfigDto, VideoConfigDto, VideoDownloadConfigDto,
+        RecordingQuotaConfigDto, RecordingRetentionConfigDto,
     };
     use std::collections::HashMap;
+    use yew::Reducible;
+
+    #[test]
+    fn absorbing_a_child_edit_keeps_the_form_modified() {
+        // The recording form is split across two components, and the outer
+        // one takes the inner one's whole DTO when it changes. Doing that
+        // with `SetAll` marks the form clean, so a user's edit inside the
+        // cards never reaches the save button.
+        let state = std::rc::Rc::new(RecordingConfigFormState { form: RecordingConfigDto::default(), modified: false });
+        let edited = RecordingConfigDto { priority: 9, ..RecordingConfigDto::default() };
+
+        let after_reload = state.clone().reduce(RecordingConfigFormAction::SetAll(edited.clone()));
+        assert!(!after_reload.modified(), "a reload is not an edit");
+
+        let after_edit = state.reduce(RecordingConfigFormAction::SetAllEdited(edited));
+
+        assert!(after_edit.modified(), "an edit that crossed a component boundary is still an edit");
+        assert_eq!(after_edit.form.priority, 9);
+    }
 
     pub(super) fn populated_recording() -> RecordingConfigDto {
         RecordingConfigDto {
@@ -734,36 +745,8 @@ mod tests {
                 backoff_max_secs: 59,
             }),
             fallback_bytes_per_minute: 61,
+            ..RecordingConfigDto::default()
         }
-    }
-
-    #[test]
-    fn recording_config_for_missing_video_is_disabled_default() {
-        assert_eq!(
-            recording_config_for_video(None),
-            RecordingConfigDto { enabled: false, ..RecordingConfigDto::default() }
-        );
-    }
-
-    #[test]
-    fn recording_config_for_download_without_recording_is_default() {
-        let video = VideoConfigDto { download: Some(VideoDownloadConfigDto::default()), ..VideoConfigDto::default() };
-
-        assert_eq!(recording_config_for_video(Some(&video)), RecordingConfigDto::default());
-    }
-
-    #[test]
-    fn recording_config_for_populated_recording_is_exact() {
-        let recording = populated_recording();
-        let video = VideoConfigDto {
-            download: Some(VideoDownloadConfigDto {
-                recording: Some(recording.clone()),
-                ..VideoDownloadConfigDto::default()
-            }),
-            ..VideoConfigDto::default()
-        };
-
-        assert_eq!(recording_config_for_video(Some(&video)), recording);
     }
 
     #[test]
@@ -887,7 +870,7 @@ mod tests {
         let actual = RECORDING_FIELDS.iter().map(|field| field.id).collect::<std::collections::HashSet<_>>();
         let expected = std::collections::HashSet::from([
             "enabled",
-            "recording_priority",
+            "priority",
             "container_format",
             "directory",
             "timezone",
@@ -979,7 +962,7 @@ mod browser_tests {
     use super::*;
     use crate::{
         app::{
-            components::config::{ConfigForm, ConfigViewContext, VideoConfigView},
+            components::config::{ConfigForm, ConfigViewContext, RecordingConfigView},
             ConfigContext,
         },
         i18n::I18nProvider,
@@ -987,7 +970,6 @@ mod browser_tests {
         provider::{DialogProvider, IconContextProvider, ServiceContextProvider},
     };
     use gloo_timers::future::TimeoutFuture;
-    use shared::model::VideoDownloadConfigDto;
     use std::{cell::RefCell, collections::HashSet, rc::Rc};
     use wasm_bindgen::JsCast;
     use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
@@ -1006,8 +988,8 @@ mod browser_tests {
     }
 
     #[derive(Properties, Clone, PartialEq)]
-    struct VideoHarnessProps {
-        video: VideoConfigDto,
+    struct RecordingHarnessProps {
+        recording: RecordingConfigDto,
         emissions: Rc<RefCell<Vec<ConfigForm>>>,
     }
 
@@ -1020,11 +1002,9 @@ mod browser_tests {
                     <DialogProvider>
                         <RecordingConfigCards
                             recording={props.recording.clone()}
-                            recording_priority={props.priority}
                             reload_generation={props.generation}
                             edit_mode={props.edit_mode}
                             on_change={Callback::from(move |value| emissions.borrow_mut().push(value))}
-                            on_recording_priority_change={Callback::noop()}
                             on_error={Callback::noop()}
                         />
                     </DialogProvider>
@@ -1034,11 +1014,18 @@ mod browser_tests {
     }
 
     #[component]
-    fn VideoHarness(props: &VideoHarnessProps) -> Html {
+    fn RecordingHarness(props: &RecordingHarnessProps) -> Html {
         let edit_mode = use_state(|| true);
         let emissions = Rc::clone(&props.emissions);
         let config = shared::model::AppConfigDto {
-            config: shared::model::ConfigDto { video: Some(props.video.clone()), ..Default::default() },
+            config: shared::model::ConfigDto {
+                video: Some(shared::model::VideoConfigDto {
+                    extensions: Vec::new(),
+                    web_search: None,
+                    recording: Some(props.recording.clone()),
+                }),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let config_ctx = ConfigContext { config: Some(Rc::new(config)), api_proxy: None };
@@ -1055,7 +1042,7 @@ mod browser_tests {
                         <ServiceContextProvider config={WebConfig::default()}>
                             <ContextProvider<ConfigContext> context={config_ctx}>
                                 <ContextProvider<ConfigViewContext> context={view_ctx}>
-                                    <VideoConfigView />
+                                    <RecordingConfigView />
                                 </ContextProvider<ConfigViewContext>>
                             </ContextProvider<ConfigContext>>
                         </ServiceContextProvider>
@@ -1234,30 +1221,31 @@ mod browser_tests {
     #[wasm_bindgen_test(async)]
     async fn recording_and_priority_controls_reach_outer_video_form_together() -> Result<(), wasm_bindgen::JsValue> {
         let emissions = Rc::new(RefCell::new(Vec::<ConfigForm>::new()));
-        let video = VideoConfigDto { download: Some(VideoDownloadConfigDto::default()), ..Default::default() };
+        let recording = RecordingConfigDto::default();
         let document = gloo_utils::document();
         let body = document.body().ok_or_else(|| wasm_bindgen::JsValue::from_str("test document has no body"))?;
         let root = document.create_element("div")?;
         body.append_child(&root)?;
-        let handle = Renderer::<VideoHarness>::with_root_and_props(
+        let handle = Renderer::<RecordingHarness>::with_root_and_props(
             root.clone(),
-            VideoHarnessProps { video, emissions: Rc::clone(&emissions) },
+            RecordingHarnessProps { recording, emissions: Rc::clone(&emissions) },
         )
         .render();
         settle().await;
         emissions.borrow_mut().clear();
 
         set_input(&input(&root, "timezone")?, "UTC")?;
-        set_input(&input(&root, "recording_priority")?, "9")?;
+        set_input(&input(&root, "priority")?, "9")?;
         settle().await;
         let last = emissions.borrow().last().cloned();
 
         assert!(last.is_some_and(|form| match form {
-            ConfigForm::Video(modified, video) => video.download.is_some_and(|download| {
+            ConfigForm::Recording(modified, video) => {
                 modified
-                    && download.recording_priority == 9
-                    && download.recording.is_some_and(|recording| recording.timezone.as_deref() == Some("UTC"))
-            }),
+                    && video.recording.as_ref().is_some_and(|recording| {
+                        recording.priority == 9 && recording.timezone.as_deref() == Some("UTC")
+                    })
+            }
             _ => false,
         }));
         handle.destroy();

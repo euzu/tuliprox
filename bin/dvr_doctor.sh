@@ -24,6 +24,8 @@ Usage: dvr_doctor.sh [--url URL] [--token TOKEN] [--storage-dir DIR]
                  section is skipped; the on-disk sections still work.
   --storage-dir  Server storage directory, for the on-disk sections.
                  Default: $TULIPROX_HOME/data, else ./data
+  --backup-dir   Directory holding recovery generations (config `backup_dir`).
+                 Default: $TULIPROX_HOME/backup, else ./backup
 
 Environment: TULIPROX_URL, TULIPROX_TOKEN, TULIPROX_HOME.
 USAGE
@@ -32,18 +34,21 @@ USAGE
 URL="${TULIPROX_URL:-http://localhost:8901}"
 TOKEN="${TULIPROX_TOKEN:-}"
 STORAGE_DIR="${TULIPROX_HOME:+${TULIPROX_HOME}/data}"
+BACKUP_DIR="${TULIPROX_HOME:+${TULIPROX_HOME}/backup}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --url) URL="${2:?--url needs a value}"; shift 2 ;;
     --token) TOKEN="${2:?--token needs a value}"; shift 2 ;;
     --storage-dir) STORAGE_DIR="${2:?--storage-dir needs a value}"; shift 2 ;;
+    --backup-dir) BACKUP_DIR="${2:?--backup-dir needs a value}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument: $1 (try --help)" ;;
   esac
 done
 
 STORAGE_DIR="${STORAGE_DIR:-${WORKING_DIR}/data}"
+BACKUP_DIR="${BACKUP_DIR:-${WORKING_DIR}/backup}"
 
 command -v curl >/dev/null 2>&1 || die "curl is required"
 # jq is optional: without it the JSON is emitted raw rather than pretty.
@@ -73,6 +78,7 @@ printf 'Tuliprox DVR diagnostics\n'
 printf 'generated: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 printf 'url:         %s\n' "${URL}"
 printf 'storage dir: %s\n' "${STORAGE_DIR}"
+printf 'backup dir:  %s\n' "${BACKUP_DIR}"
 printf 'token:       %s\n' "$([[ -n "${TOKEN}" ]] && echo provided || echo '(none — health section skipped)')"
 
 section "Supervisor health"
@@ -87,13 +93,31 @@ else
   fi
 fi
 
+section "Recovery health (reported by the server)"
+# The authoritative view: the server reads it from the repository through a
+# read-only accessor. The on-disk section below is what an operator can check
+# with the server down, and cannot see revisions or lag.
+if [[ -z "${TOKEN}" ]]; then
+  echo "skipped: needs an administrator token (--token)"
+elif command -v jq >/dev/null 2>&1; then
+  fetch /api/v1/recording/health \
+    | jq '.recovery // "not repository backed"' \
+    || echo "unavailable"
+  echo
+  echo "state repair_required  → mutations are blocked until a clean reopen."
+  echo "recovery_lag > 0       → the journal is ahead; the next open rebuilds."
+  echo "storage_placement same_filesystem → history dies with the volume."
+else
+  echo "skipped: needs jq to extract the recovery block"
+fi
+
 section "Effective recording configuration"
 if [[ -z "${TOKEN}" ]]; then
   echo "skipped: needs a token (--token)"
 elif command -v jq >/dev/null 2>&1; then
   # The DVR block only; the rest of the config may contain credentials.
   fetch /api/v1/config \
-    | jq '.config.video.download.recording // "no recording block configured (defaults apply)"' \
+    | jq '.config.video.recording // "no recording block configured (defaults apply)"' \
     || echo "unavailable"
 else
   echo "skipped: needs jq to extract the recording block without dumping"
@@ -101,16 +125,17 @@ else
 fi
 
 section "Recording quota"
-if [[ -z "${TOKEN}" ]]; then
-  echo "skipped: needs a token (--token)"
-else
-  fetch /api/v1/recording/quota | pretty || echo "unavailable"
-fi
+# Quota has no REST route: it is part of the per-session recording snapshot
+# delivered over the WebSocket, so there is no list or status endpoint to
+# poll. The health section below carries the server-wide numbers.
+echo "not a REST endpoint: quota reaches a client on the recording WebSocket"
+echo "snapshot. Use the health section above for server-wide figures."
 
 section "On-disk state"
-queue_file="${STORAGE_DIR}/downloads_state.json"
+recordings_db="${STORAGE_DIR}/recordings.db"
 rules_file="${STORAGE_DIR}/recording_rules.json"
 outbox_file="${STORAGE_DIR}/recording_notification_outbox.json"
+recovery_dir="${BACKUP_DIR}/recordings_recovery"
 
 # mtime_as_iso8601_utc <file>
 #   Prints the file's modification time as `YYYY-MM-DDTHH:MM:SSZ`, or
@@ -132,7 +157,7 @@ mtime_as_iso8601_utc() {
   fi
 }
 
-for f in "${queue_file}" "${rules_file}" "${outbox_file}"; do
+for f in "${recordings_db}" "${rules_file}" "${outbox_file}"; do
   if [[ -f "${f}" ]]; then
     printf '%s  (%s bytes, modified %s)\n' \
       "${f}" \
@@ -143,29 +168,51 @@ for f in "${queue_file}" "${rules_file}" "${outbox_file}"; do
   fi
 done
 
-if [[ -f "${queue_file}" ]] && command -v jq >/dev/null 2>&1; then
-  section "Queue summary (no titles, no paths)"
-  # Aggregate only. Titles, filenames, and owner ids are deliberately not
-  # printed: a diagnostics dump gets pasted into tickets.
-  jq '{
-        revision: .revision,
-        queued: (.queue | length),
-        scheduled: (.scheduled | length),
-        active: (if .active then 1 else 0 end),
-        finished: (.finished | length),
-        recordings_by_state:
-          ([.queue[], .scheduled[], .finished[]]
-           + (if .active then [.active] else [] end)
-           | map(select(.recording != null))
-           | group_by(.state)
-           | map({ (.[0].state | tostring): length })
-           | add // {}),
-        stuck_deleting:
-          ([.queue[], .scheduled[], .finished[]]
-           + (if .active then [.active] else [] end)
-           | map(select(.recording != null and .recording.deleting_previous_state != null))
-           | length)
-      }' "${queue_file}" || echo "could not parse ${queue_file}"
+section "Recording recovery"
+# The queue lives in a B+Tree, so there is no JSON to summarise here. What an
+# operator can check without the server is whether the recovery history that
+# would rebuild that B+Tree exists, is current, and is on its own filesystem.
+if [[ ! -d "${recovery_dir}" ]]; then
+  echo "${recovery_dir}  (absent)"
+  echo "No recovery history. If ${recordings_db} exists, the server will refuse"
+  echo "to start: the database is ahead of every surviving history."
+else
+  printf 'directory: %s\n' "${recovery_dir}"
+  if [[ -f "${recovery_dir}/CURRENT" ]]; then
+    printf 'CURRENT:   %s\n' "$(tr -d '\n' <"${recovery_dir}/CURRENT")"
+  else
+    echo "CURRENT:   (absent — the pointer is repaired from the newest valid generation on open)"
+  fi
+  generations=$(find "${recovery_dir}" -maxdepth 1 -type d -name 'gen-*' 2>/dev/null | sort)
+  if [[ -z "${generations}" ]]; then
+    echo "generations: none"
+  else
+    echo "generations:"
+    while IFS= read -r gen; do
+      [[ -n "${gen}" ]] || continue
+      journal="${gen}/journal.bin"
+      journal_bytes=0
+      [[ -f "${journal}" ]] && journal_bytes=$(wc -c <"${journal}" | tr -d ' ')
+      printf '  %s  (journal %s bytes, modified %s)\n' \
+        "$(basename "${gen}")" "${journal_bytes}" "$(mtime_as_iso8601_utc "${gen}")"
+    done <<<"${generations}"
+    # Two is the retained pair: current plus one verified predecessor.
+    printf 'retained:  %s (expected 1 or 2)\n' "$(printf '%s\n' "${generations}" | grep -c .)"
+  fi
+
+  # Recovery on the same filesystem as the database survives a corrupt file
+  # but not the loss of the volume, which is the failure it exists for.
+  db_dir="$(dirname "${recordings_db}")"
+  if [[ -d "${db_dir}" ]]; then
+    db_fs="$(df -P "${db_dir}" 2>/dev/null | awk 'NR==2 {print $1}')"
+    rec_fs="$(df -P "${recovery_dir}" 2>/dev/null | awk 'NR==2 {print $1}')"
+    if [[ -n "${db_fs}" && "${db_fs}" == "${rec_fs}" ]]; then
+      echo
+      echo "warning: the recovery history shares a filesystem with the database."
+      echo "It survives a corrupt database file, but not the loss of the volume."
+      echo "Point backup_dir at a different mount."
+    fi
+  fi
 fi
 
 if [[ -f "${rules_file}" ]] && command -v jq >/dev/null 2>&1; then
@@ -199,8 +246,12 @@ cat <<'HINTS'
   supervisor is stalled or the DVR is disabled.
 - reconciliation_last_run null → the supervisors never started; check the log
   for "Recording is disabled" or a startup error.
-- stuck_deleting > 0 after a restart → reconciliation did not clear a task;
-  grep the log for recording_reconciliation_unsafe_path.
+- recordings.db present but the recovery directory absent → the server will
+  refuse to start; the database is ahead of every surviving history.
+- more than two generations retained → a checkpoint failed to prune; check the
+  log for a recovery error.
+- recovery lag reported by /api/v1/recording/health → the journal is ahead of
+  the database and the next open will rebuild it.
 - notification outbox pending > 0 and not draining → grep the log for
   recording_notification_dead_lettered.
 - no retention, no watermarks and no quota → recording disk use is unbounded;

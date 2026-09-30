@@ -24,6 +24,14 @@ return_self_not_must_use = "allow"
 missing_errors_doc      = "allow"
 large_futures           = "allow"
 
+# Its suggested rewrite of `assert!(x.is_empty())` is
+# `assert_eq!(x, [] as [some::crate_root::Path; 0])`, which names a type that
+# is usually not in scope at the assertion — which is why `clippy --fix`
+# declines to apply it. The panic message improves; every one of the 39 call
+# sites gets materially harder to read. Reverse this if the suggestion is
+# ever made to use an in-scope type.
+assert_is_empty         = "allow"
+
 [workspace.dependencies]
 shared = { version = "3", path = "shared" }
 tuliprox-hls = { version = "3", path = "backend/hls" }

@@ -1,3 +1,4 @@
+pub mod recording_capacity;
 pub mod recording_catalog_access;
 pub mod recording_conflict;
 pub mod recording_ctx;
@@ -12,6 +13,8 @@ pub mod recording_notification;
 pub mod recording_notification_adapter;
 pub mod recording_observability;
 pub mod recording_occurrence;
+pub mod recording_path;
+pub mod recording_queue;
 pub mod recording_quota;
 pub mod recording_reconciliation;
 pub mod recording_retention;
@@ -19,8 +22,12 @@ pub mod recording_rule_scheduler;
 pub mod recording_rule_service;
 pub mod recording_security;
 pub mod recording_service;
+pub mod recording_sidecar;
 pub mod recording_source_resolution;
 pub mod recording_supervisor;
+pub mod recording_transfer;
+pub mod recording_transition;
+pub mod recording_url;
 pub mod recording_worker;
 pub mod recording_worker_runner;
 pub mod recording_ws;
@@ -28,10 +35,11 @@ pub mod recording_ws;
 pub use self::{
     recording_catalog_access::*, recording_conflict::*, recording_ctx::*, recording_currently_airing::*,
     recording_deletion::*, recording_disk::*, recording_edit::*, recording_notification::*,
-    recording_notification_adapter::*, recording_observability::*, recording_occurrence::*, recording_quota::*,
-    recording_reconciliation::*, recording_retention::*, recording_rule_scheduler::*, recording_rule_service::*,
-    recording_security::*, recording_service::*, recording_source_resolution::*, recording_supervisor::*,
-    recording_worker::*, recording_worker_runner::*, recording_ws::*,
+    recording_notification_adapter::*, recording_observability::*, recording_occurrence::*, recording_path::*,
+    recording_queue::*, recording_quota::*, recording_reconciliation::*, recording_retention::*,
+    recording_rule_scheduler::*, recording_rule_service::*, recording_security::*, recording_service::*,
+    recording_source_resolution::*, recording_supervisor::*, recording_transfer::*, recording_transition::*,
+    recording_url::*, recording_worker::*, recording_worker_runner::*, recording_ws::*,
 };
 
 #[cfg(test)]
@@ -43,7 +51,7 @@ pub(crate) fn make_test_meta(
     shared::model::RecordingMetadata {
         owner,
         visibility,
-        source: None,
+        source: shared::model::recording::RecordingSource::new("t1", "v1", "in1"),
         program_start: Some(1_700_000_000),
         program_end: Some(1_700_003_600),
         scheduled_start: Some(1_700_000_000),
@@ -57,6 +65,8 @@ pub(crate) fn make_test_meta(
         provenance: shared::model::recording::RecordingProvenance::default(),
         relative_path: relative_path.map(Into::into),
         partial_relative_path: None,
+        resume_etag: None,
+        resume_last_modified: None,
         reserved_bytes: 0,
         measured_bytes: 0,
         completed_at: None,

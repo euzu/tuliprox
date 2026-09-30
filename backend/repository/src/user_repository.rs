@@ -1,4 +1,4 @@
-use crate::{storage_const, xtream_get_playlist_categories, BPlusTree};
+use crate::{api_user_recovery::ApiUserRepository, storage_const, xtream_get_playlist_categories, BPlusTree};
 use chrono::Local;
 use log::error;
 use shared::model::{
@@ -20,7 +20,7 @@ use tuliprox_core::{
 // V7 (current): added plan and filter. V1-V6 are migrated to V7 at startup
 // by `bplustree::run_all_startup_migrations`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct StoredProxyUserCredentials {
+pub(crate) struct StoredProxyUserCredentials {
     pub target: String,
     pub username: String,
     pub password: String,
@@ -121,6 +121,30 @@ pub fn get_api_user_db_path(cfg: &AppConfig) -> PathBuf {
     PathBuf::from(&paths.config_path).join(storage_const::API_USER_DB_FILE)
 }
 
+/// Where User API recovery generations live.
+///
+/// Beside the database, in the config directory, and deliberately not under
+/// `backup_dir`. Startup migration runs before the config is read, so it
+/// cannot know `backup_dir`; pointing the two at different roots would leave
+/// a migration's export somewhere the runtime never looks. Keeping history
+/// next to the data it describes also means a restored config volume yields a
+/// consistent pair rather than a split one.
+///
+/// `backup_dir` keeps its own role: `backup_api_user_db_file` still copies
+/// there, which is an independent safety net rather than a competing one.
+fn api_user_recovery_root(cfg: &AppConfig) -> PathBuf { PathBuf::from(&cfg.paths.load().config_path) }
+
+/// Open the User API database with its recovery history.
+///
+/// Every caller goes through here rather than `BPlusTree::load`, so a
+/// database that cannot be read is rebuilt from history instead of being
+/// silently replaced by an empty one.
+fn open_api_user_repository(cfg: &AppConfig) -> Result<ApiUserRepository, Error> {
+    let db_path = get_api_user_db_path(cfg);
+    let recovery_root = api_user_recovery_root(cfg);
+    ApiUserRepository::open(&db_path, &recovery_root).map(|(repository, _report)| repository)
+}
+
 fn add_target_user_to_user_tree(
     target_users: &[TargetUser],
     user_tree: &mut BPlusTree<String, StoredProxyUserCredentials>,
@@ -136,16 +160,22 @@ fn add_target_user_to_user_tree(
 pub async fn merge_api_user(cfg: &AppConfig, target_users: &[TargetUser]) -> Result<u64, Error> {
     let path = get_api_user_db_path(cfg);
     let write_lock = cfg.file_locks.write_lock(&path).await;
-    let mut user_tree: BPlusTree<String, StoredProxyUserCredentials> = task::spawn_blocking({
-        let path = path.clone();
-        move || BPlusTree::load(&path).unwrap_or_else(|_| BPlusTree::new())
-    })
-    .await
-    .map_err(|err| Error::other(format!("Failed to load user db: {err}")))?;
-    add_target_user_to_user_tree(target_users, &mut user_tree);
-    let result = task::spawn_blocking({
-        let path = path.clone();
-        move || user_tree.store(&path)
+    let cfg_for_open = cfg.clone();
+    let target_users = target_users.to_vec();
+    let result = task::spawn_blocking(move || -> Result<u64, Error> {
+        let mut repository = open_api_user_repository(&cfg_for_open)?;
+        // Merge onto what is stored rather than replacing it: this path adds
+        // configured users to an existing set.
+        let mut user_tree: BPlusTree<String, StoredProxyUserCredentials> = BPlusTree::new();
+        for (username, stored) in repository.load()? {
+            user_tree.insert(username, stored);
+        }
+        add_target_user_to_user_tree(&target_users, &mut user_tree);
+        let users: Vec<(String, StoredProxyUserCredentials)> =
+            user_tree.into_iter().map(|(name, user)| (name.clone(), user.clone())).collect();
+        let count = users.len() as u64;
+        repository.commit(users)?;
+        Ok(count)
     })
     .await
     .map_err(|err| Error::other(format!("Failed to store user db: {err}")))?;
@@ -153,6 +183,16 @@ pub async fn merge_api_user(cfg: &AppConfig, target_users: &[TargetUser]) -> Res
     result
 }
 
+/// Copies the user database to `backup_dir`, timestamped.
+///
+/// This is deliberately kept now that the database has a recovery history.
+/// The two cover different failures: recovery rebuilds a corrupt or truncated
+/// database, but it lives beside that database in the config directory, so
+/// losing the config volume loses both. This copy is the only thing that
+/// survives that, and it is the reason the recovery root is not moved to
+/// `backup_dir` - startup migration runs before the config is read and cannot
+/// know that path, so the history has to stay next to the data.
+///
 /// # Panics
 ///
 /// Will panic if `backup_dir` is not given
@@ -173,14 +213,20 @@ pub async fn backup_api_user_db_file(cfg: &AppConfig, path: &Path) {
 }
 
 pub async fn store_api_user(cfg: &AppConfig, target_users: &[TargetUser]) -> Result<u64, Error> {
-    let mut user_tree = BPlusTree::<String, StoredProxyUserCredentials>::new();
-    add_target_user_to_user_tree(target_users, &mut user_tree);
     let path = get_api_user_db_path(cfg);
     backup_api_user_db_file(cfg, &path).await;
     let write_lock = cfg.file_locks.write_lock(&path).await;
-    let result = task::spawn_blocking({
-        let path = path.clone();
-        move || user_tree.store(&path)
+    let cfg_for_open = cfg.clone();
+    let target_users = target_users.to_vec();
+    let result = task::spawn_blocking(move || -> Result<u64, Error> {
+        let mut user_tree = BPlusTree::<String, StoredProxyUserCredentials>::new();
+        add_target_user_to_user_tree(&target_users, &mut user_tree);
+        let users: Vec<(String, StoredProxyUserCredentials)> =
+            user_tree.into_iter().map(|(name, user)| (name.clone(), user.clone())).collect();
+        let count = users.len() as u64;
+        let mut repository = open_api_user_repository(&cfg_for_open)?;
+        repository.commit(users)?;
+        Ok(count)
     })
     .await
     .map_err(|err| Error::other(format!("Failed to store user db: {err}")))?;
@@ -209,9 +255,21 @@ fn collect_target_users(user_tree: &BPlusTree<String, StoredProxyUserCredentials
 pub async fn load_api_user(cfg: &AppConfig) -> Result<Vec<TargetUser>, Error> {
     let path = get_api_user_db_path(cfg);
     let lock = cfg.file_locks.read_lock(&path).await;
-    let result = BPlusTree::<String, StoredProxyUserCredentials>::load(&path);
+    let cfg_for_open = cfg.clone();
+    let result = task::spawn_blocking(move || -> Result<Vec<(String, StoredProxyUserCredentials)>, Error> {
+        let mut repository = open_api_user_repository(&cfg_for_open)?;
+        repository.load()
+    })
+    .await;
     drop(lock);
-    result.map(|tree| collect_target_users(&tree)).map_err(|err| Error::other(format!("Failed to load user db: {err}")))
+    let stored = result
+        .map_err(|err| Error::other(format!("Failed to load user db: {err}")))?
+        .map_err(|err| Error::other(format!("Failed to load user db: {err}")))?;
+    let mut user_tree: BPlusTree<String, StoredProxyUserCredentials> = BPlusTree::new();
+    for (username, user) in stored {
+        user_tree.insert(username, user);
+    }
+    Ok(collect_target_users(&user_tree))
 }
 
 pub fn get_user_storage_path(cfg: &Config, username: &str) -> Option<PathBuf> {
@@ -622,10 +680,10 @@ mod tests {
             media_tools: Arc::new(MediaToolCapabilities::new()),
         };
         let target_user = vec![user];
-        let _ = store_api_user(&cfg, &target_user).await;
+        store_api_user(&cfg, &target_user).await.expect("the users must be stored");
 
         let user_list = load_api_user(&cfg).await;
-        assert!(user_list.is_ok());
+        assert!(user_list.is_ok(), "loading must succeed: {:?}", user_list.as_ref().err());
         assert_eq!(user_list.as_ref().unwrap().len(), 1);
         let loaded = user_list.as_ref().unwrap().first().unwrap();
         assert_eq!(loaded.credentials.len(), 4);
@@ -644,6 +702,46 @@ mod tests {
         assert_eq!(networks.len(), 2);
         assert!(networks.iter().any(|n| n == "10.0.0.0/8"));
         assert!(networks.iter().any(|n| n == "192.168.1.0/24"));
+    }
+
+    /// Startup migration runs before the config is read, so it can only ever
+    /// use the config directory. If the runtime looked anywhere else, a
+    /// migration's export would land where nothing reads it.
+    #[test]
+    fn the_recovery_history_lives_beside_the_database() {
+        let dir = tempdir().expect("tempdir should succeed");
+        let cfg = AppConfig {
+            config: Arc::new(ArcSwapAny::default()),
+            sources: Arc::new(ArcSwapAny::default()),
+            hdhomerun: Arc::new(ArcSwapAny::default()),
+            api_proxy: Arc::new(ArcSwapAny::default()),
+            paths: Arc::new(ArcSwap::from(Arc::new(ConfigPaths {
+                home_path: String::new(),
+                config_path: dir.path().to_string_lossy().to_string(),
+                storage_path: dir.path().to_string_lossy().to_string(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
+                mapping_file_path: None,
+                mapping_files_used: None,
+                template_file_path: None,
+                template_files_used: None,
+                api_proxy_file_path: String::new(),
+                custom_stream_response_path: None,
+            }))),
+            file_locks: Arc::new(FileLockManager::default()),
+            custom_stream_response: Arc::new(ArcSwapAny::default()),
+            access_token_secret: Default::default(),
+            encrypt_secret: Default::default(),
+            media_tools: Arc::new(MediaToolCapabilities::new()),
+        };
+
+        let db_path = get_api_user_db_path(&cfg);
+        let recovery_root = api_user_recovery_root(&cfg);
+        assert_eq!(
+            Some(recovery_root.as_path()),
+            db_path.parent(),
+            "recovery history must sit beside the database it describes"
+        );
     }
 
     #[tokio::test]

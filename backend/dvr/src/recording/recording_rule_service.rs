@@ -30,7 +30,7 @@ impl DeleteFuture {
 /// the codes to localized messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuleServiceError {
-    /// The authenticated principal lacks the recording.write
+    /// The authenticated principal lacks the recording.manage
     /// permission.
     Forbidden,
     /// A non-administrator tried to create, delete, or manage a shared rule.
@@ -106,17 +106,17 @@ pub fn validate_rule(rule: &RecordingRule) -> Result<(), RuleServiceError> {
 /// The principal / owner / admin decision for any rule mutation:
 /// - read: any user with `recording.read`.
 /// - create / edit / delete private rule: any user with
-///   `recording.write`. Owner must be the principal unless
+///   `recording.manage`. Owner must be the principal unless
 ///   the principal is an administrator.
 /// - create / edit / delete shared rule: administrator with
-///   `recording.write`.
+///   `recording.manage`.
 pub fn authorize_rule_action(
-    has_recording_write: bool,
+    has_recording_manage: bool,
     is_admin_role: bool,
     principal_id: &UserId,
     rule: &RecordingRule,
 ) -> Result<(), RuleServiceError> {
-    if !has_recording_write {
+    if !has_recording_manage {
         return Err(RuleServiceError::Forbidden);
     }
     match rule.visibility {
@@ -280,7 +280,7 @@ mod tests {
     }
 
     #[test]
-    fn authorize_requires_recording_write() {
+    fn authorize_requires_recording_manage() {
         let r = private_rule(user());
         assert_eq!(authorize_rule_action(false, false, &user(), &r), Err(RuleServiceError::Forbidden));
     }

@@ -1,8 +1,7 @@
 use crate::model::BusyStatus;
 use shared::model::{
-    ActiveUserConnectionChange, ConfigType, DownloadsDelta, DownloadsResponse, LibraryScanProgressEvent,
-    PlaylistUpdateProgressEvent, PlaylistUpdateRunStateEvent, StatusCheck, StreamMeterEntry, SystemInfo,
-    TransferTaskDto,
+    ActiveUserConnectionChange, ConfigType, LibraryScanProgressEvent, PlaylistUpdateProgressEvent,
+    PlaylistUpdateRunStateEvent, RecordingTaskDto, StatusCheck, StreamMeterEntry, SystemInfo,
 };
 use std::{rc::Rc, sync::Arc};
 
@@ -23,15 +22,11 @@ pub enum EventMessage {
     SystemInfoUpdate(SystemInfo),
     LibraryScanProgress(LibraryScanProgressEvent),
     StreamMeterBatch(Vec<StreamMeterEntry>),
-    DownloadsUpdate(Rc<DownloadsResponse>),
-    DownloadsDeltaUpdate(Rc<DownloadsDelta>),
     RecordingSnapshot {
         revision: u64,
-        tasks: Rc<Vec<TransferTaskDto>>,
-    },
-    RecordingDelta {
-        revision: u64,
-        tasks: Rc<Vec<TransferTaskDto>>,
+        available: bool,
+        quota: shared::model::RecordingQuotaSummaryDto,
+        tasks: Rc<Vec<RecordingTaskDto>>,
     },
     RecordingRulesChanged,
     /// The socket refused to serve recordings for an actionable reason.

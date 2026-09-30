@@ -5,7 +5,10 @@
 //! first with a stable task-id tie-break.
 
 use super::recording_quota::QuotaRecordingTaskView;
-use shared::model::{recording::RecordingOwner, UserId};
+use shared::model::{
+    recording::{RecordingMetadata, RecordingVisibility},
+    UserId,
+};
 use std::collections::HashMap;
 
 /// Retention configuration derived from `RecordingRetentionConfig`.
@@ -113,10 +116,15 @@ pub fn normalize_channel_name(name: &str) -> String {
 }
 
 impl RetentionOwner {
-    pub fn from_recording_owner(owner: &RecordingOwner) -> Self {
-        match owner {
-            RecordingOwner::User(uid) => Self::Private(uid.clone()),
-            RecordingOwner::LegacyAdmin => Self::Shared,
+    /// Which retention budget a recording is charged to.
+    ///
+    /// Visibility decides it, exactly as it does for quota. Reading the owner
+    /// instead put every shared recording in its creator's personal budget, so
+    /// `Shared` was a variant nothing could produce.
+    pub fn from_metadata(meta: &RecordingMetadata) -> Self {
+        match meta.visibility {
+            RecordingVisibility::Shared => Self::Shared,
+            RecordingVisibility::Private => Self::Private(meta.owner_id().clone()),
         }
     }
 }
@@ -147,15 +155,15 @@ pub enum RetentionReason {
 /// `None` for non-Completed tasks and for tasks that cannot be
 /// grouped (no channel info and no `completed_at`).
 fn group_for<V: QuotaRecordingTaskView>(task: &V) -> Option<(RetentionGroupKey, i64)> {
-    let meta = task.recording()?;
+    let meta = task.recording();
     // Only `Completed` is eligible. Pending, active, failed,
     // Cancelled, deleting and non-recording tasks are excluded.
-    if !matches!(task.state(), crate::download::DownloadState::Completed) {
+    if !matches!(task.state(), crate::recording::recording_queue::RecordingTaskState::Completed) {
         return None;
     }
     let completed_at = meta.completed_at?;
     let channel = ChannelKey::from_metadata(meta.channel_id.as_deref(), meta.channel_name.as_deref());
-    let owner = RetentionOwner::from_recording_owner(&meta.owner);
+    let owner = RetentionOwner::from_metadata(meta);
     Some((RetentionGroupKey { owner, channel }, completed_at))
 }
 
@@ -244,7 +252,7 @@ pub fn compute_candidates<V: QuotaRecordingTaskView>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::download::DownloadState;
+    use crate::recording::recording_queue::RecordingTaskState;
     use shared::model::recording::{RecordingMetadata, RecordingOwner, RecordingSource, RecordingVisibility};
 
     fn make_meta(
@@ -256,7 +264,7 @@ mod tests {
         RecordingMetadata {
             owner,
             visibility: RecordingVisibility::Private,
-            source: Some(RecordingSource::new("t1", "v1", "in1")),
+            source: (RecordingSource::new("t1", "v1", "in1")),
             program_start: None,
             program_end: None,
             scheduled_start: None,
@@ -270,6 +278,8 @@ mod tests {
             provenance: shared::model::recording::RecordingProvenance::default(),
             relative_path: None,
             partial_relative_path: None,
+            resume_etag: None,
+            resume_last_modified: None,
             reserved_bytes: 0,
             measured_bytes: 0,
             completed_at: Some(completed_at),
@@ -280,12 +290,12 @@ mod tests {
 
     struct T {
         uuid: String,
-        state: DownloadState,
-        recording: Option<RecordingMetadata>,
+        state: RecordingTaskState,
+        recording: RecordingMetadata,
     }
     impl super::QuotaRecordingTaskView for T {
-        fn state(&self) -> &DownloadState { &self.state }
-        fn recording(&self) -> Option<&RecordingMetadata> { self.recording.as_ref() }
+        fn state(&self) -> &RecordingTaskState { &self.state }
+        fn recording(&self) -> &RecordingMetadata { &self.recording }
         fn uuid(&self) -> &str { &self.uuid }
     }
 
@@ -298,34 +308,33 @@ mod tests {
     ) -> T {
         T {
             uuid: uuid.to_string(),
-            state: DownloadState::Completed,
-            recording: Some(make_meta(owner, channel_id, channel_name, completed_at)),
+            state: RecordingTaskState::Completed,
+            recording: make_meta(owner, channel_id, channel_name, completed_at),
         }
+    }
+
+    /// A completed recording with shared visibility: it is charged to the
+    /// shared retention group instead of the owner's.
+    fn shared_completed(uuid: &str, channel_id: Option<&str>, channel_name: Option<&str>, completed_at: i64) -> T {
+        let mut t =
+            completed(uuid, RecordingOwner::User(UserId::from("web:alice")), channel_id, channel_name, completed_at);
+        t.recording.visibility = RecordingVisibility::Shared;
+        t
     }
 
     fn pending(uuid: &str) -> T {
         T {
             uuid: uuid.to_string(),
-            state: DownloadState::Scheduled,
-            recording: Some(make_meta(
-                RecordingOwner::User(UserId::from("web:alice")),
-                Some("c1"),
-                Some("Alpha"),
-                1_000_000,
-            )),
+            state: RecordingTaskState::Scheduled,
+            recording: make_meta(RecordingOwner::User(UserId::from("web:alice")), Some("c1"), Some("Alpha"), 1_000_000),
         }
     }
 
     fn failed(uuid: &str) -> T {
         T {
             uuid: uuid.to_string(),
-            state: DownloadState::Failed,
-            recording: Some(make_meta(
-                RecordingOwner::User(UserId::from("web:alice")),
-                Some("c1"),
-                Some("Alpha"),
-                1_000_000,
-            )),
+            state: RecordingTaskState::Failed,
+            recording: make_meta(RecordingOwner::User(UserId::from("web:alice")), Some("c1"), Some("Alpha"), 1_000_000),
         }
     }
 
@@ -338,20 +347,10 @@ mod tests {
     }
 
     #[test]
-    fn excludes_generic_downloads() {
-        // A `Completed` task with no recording metadata is a
-        // generic download. Retention must skip it.
-        let config = RetentionConfig { keep_last_per_channel: Some(0), delete_after_days: Some(365) };
-        let t = T { uuid: "d1".to_string(), state: DownloadState::Completed, recording: None };
-        let out = compute_candidates(&[t], &config, 1_000_000_000);
-        assert!(out.is_empty());
-    }
-
-    #[test]
     fn excludes_tasks_without_completed_at() {
         let config = RetentionConfig { keep_last_per_channel: Some(0), delete_after_days: Some(365) };
         let mut t = completed("a", RecordingOwner::User(UserId::from("web:alice")), Some("c1"), Some("Alpha"), 1);
-        t.recording.as_mut().unwrap().completed_at = None;
+        t.recording.completed_at = None;
         let out = compute_candidates(&[t], &config, 1_000_000_000);
         assert!(out.is_empty());
     }
@@ -536,13 +535,50 @@ mod tests {
     }
 
     #[test]
+    fn two_users_sharing_one_file_each_keep_their_own_entry() {
+        // A shared file is reachable from one entry per user, and each entry
+        // belongs to its owner's library. `keep_last_per_channel` is a
+        // per-library budget, so one user's entry must never consume the
+        // other's allowance.
+        let config = RetentionConfig { keep_last_per_channel: Some(1), delete_after_days: None };
+        let tasks = vec![
+            completed("alice-entry", RecordingOwner::User(UserId::from("web:alice")), Some("c1"), Some("Alpha"), 1_000),
+            completed("bob-entry", RecordingOwner::User(UserId::from("web:bob")), Some("c1"), Some("Alpha"), 1_000),
+        ];
+        let candidates = compute_candidates(&tasks, &config, 2_000);
+        assert_eq!(candidates.len(), 0, "each library holds one recording and is allowed one");
+    }
+
+    #[test]
+    fn private_retention_never_reaches_the_shared_library() {
+        // Step 1: a user's own budget must not evict the shared copy, and the
+        // shared budget must not evict anyone's private one. They are separate
+        // pools that happen to name the same channel.
+        let config = RetentionConfig { keep_last_per_channel: Some(1), delete_after_days: None };
+        let tasks = vec![
+            completed("alice-old", RecordingOwner::User(UserId::from("web:alice")), Some("c1"), Some("Alpha"), 1_000),
+            completed("alice-new", RecordingOwner::User(UserId::from("web:alice")), Some("c1"), Some("Alpha"), 2_000),
+            shared_completed("shared-old", Some("c1"), Some("Alpha"), 1_000),
+            shared_completed("shared-new", Some("c1"), Some("Alpha"), 2_000),
+        ];
+
+        let candidates = compute_candidates(&tasks, &config, 3_000);
+        let evicted: Vec<&str> = candidates.iter().map(|candidate| candidate.uuid.as_str()).collect();
+
+        // One over budget in each pool, and each pool gives up its own oldest.
+        assert!(evicted.contains(&"alice-old"), "alice keeps her newest and gives up her oldest");
+        assert!(evicted.contains(&"shared-old"), "the shared library does the same, separately");
+        assert_eq!(evicted.len(), 2, "neither pool spends the other's budget");
+    }
+
+    #[test]
     fn shared_owner_groups_only_by_channel() {
         // Two shared recordings on the same channel — count
         // retention keeps the newest 1, so 1 candidate.
         let config = RetentionConfig { keep_last_per_channel: Some(1), delete_after_days: None };
         let tasks = vec![
-            completed("s1", RecordingOwner::LegacyAdmin, Some("c1"), Some("Alpha"), 1),
-            completed("s2", RecordingOwner::LegacyAdmin, Some("c1"), Some("Alpha"), 2),
+            shared_completed("s1", Some("c1"), Some("Alpha"), 1),
+            shared_completed("s2", Some("c1"), Some("Alpha"), 2),
         ];
         let out = compute_candidates(&tasks, &config, 0);
         let uuids: Vec<&str> = out.iter().map(|c| c.uuid.as_str()).collect();

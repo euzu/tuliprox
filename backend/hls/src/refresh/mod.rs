@@ -450,7 +450,10 @@ async fn refresh_and_commit(mut request: OriginRefreshRequest, fetch_started_at_
     };
     if result.is_ok() {
         if let Some(lease_id) = request.access_lease_id.as_ref() {
-            request.hls_proxy.startup_observability().record_origin_manifest_commit(lease_id, current_time_millis());
+            request
+                .hls_proxy
+                .startup_observability()
+                .record_origin_manifest_commit(lease_id, request.hls_proxy.now_ms());
         }
     }
     let early_prepared_terminal_target_duration_ms =
@@ -458,7 +461,7 @@ async fn refresh_and_commit(mut request: OriginRefreshRequest, fetch_started_at_
     if let Some(target_duration_ms) = early_prepared_terminal_target_duration_ms {
         start_refresh_terminal_bundle_preparation(&request, target_duration_ms);
     }
-    let fetch_finished_at_ms = current_time_millis();
+    let fetch_finished_at_ms = request.hls_proxy.now_ms();
     let origin_work_state = finish_refresh_origin_work(&request, fetch_finished_at_ms).await;
     if let Some((origin_io, guard)) = provider_lease {
         let binding = guard.binding().clone();
@@ -821,7 +824,7 @@ async fn release_preacquired_origin_provider_handle(request: &OriginRefreshReque
 async fn touch_refresh_origin_account_binding(request: &OriginRefreshRequest, reservation_refreshed: bool) {
     let mut session = request.session.write().await;
     if let Some(binding) = session.origin_account_binding.as_mut() {
-        let now_ms = current_time_millis();
+        let now_ms = request.hls_proxy.now_ms();
         binding.last_origin_io_at_ms = Some(now_ms);
         if reservation_refreshed {
             binding.last_reservation_refresh_at_ms = Some(now_ms);
@@ -1052,7 +1055,7 @@ async fn commit_initial_fetched_manifest(
         score_hls_manifest_candidate_for_selection_log(fetch_context, &fetched, acceptance_mode).await;
     let commit_result = {
         let mut session = request.session.write().await;
-        commit_fetched_manifest(&mut session, &fetched, request, current_time_millis())
+        commit_fetched_manifest(&mut session, &fetched, request, request.hls_proxy.now_ms())
     };
     cancel_superseded_terminal_work_after_media_progress(request, &commit_result).await;
     if commit_result.is_err() {
@@ -1151,7 +1154,7 @@ async fn commit_verified_critical_handoff(
     retry_critical_handoff_state_access(staged.generation.acceptance_generation, || {
         request.hls_proxy.with_critical_handoff_state(&request.session, |leases, session| {
             // Both locks are held: revalidation and commit now share one fresh lease-time view.
-            let commit_now_ms = current_time_millis();
+            let commit_now_ms = request.hls_proxy.now_ms();
             let Some(preparation) = staged.critical_handoff.as_ref() else {
                 return Err(switch_staging_error(HlsManifestRejectLogReason::StagedSwitchInvalidated));
             };
@@ -1240,7 +1243,7 @@ async fn commit_manifest_recovery_candidate(
         commit_verified_critical_handoff(request, &fetched, acceptance_mode, staged).await
     } else {
         let mut session = request.session.write().await;
-        let commit_now_ms = current_time_millis();
+        let commit_now_ms = request.hls_proxy.now_ms();
         commit_fetched_manifest_with_acceptance_mode(
             &mut session,
             &fetched,

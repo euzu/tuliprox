@@ -1,5 +1,5 @@
 use super::{
-    helpers::{build_technical_chips, is_background_transfer_stream, render_cluster},
+    helpers::{build_technical_chips, is_recording_stream, render_cluster},
     meter::{MeterDisplayKind, StreamMeterBadge},
 };
 use crate::{
@@ -124,7 +124,7 @@ fn format_user_comment(user_comment: Option<String>) -> Option<String> {
 pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
     let translate = use_translation();
     let stream = props.stream.clone();
-    let is_background_transfer = is_background_transfer_stream(&stream);
+    let is_recording = is_recording_stream(&stream);
     let chips = build_technical_chips(stream.channel.item_type, stream.channel.technical.as_ref());
     let client_ip = strip_port(&stream.client_ip).to_string();
 
@@ -318,7 +318,7 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
 
     html! {
         <article class="tp__stream-display__item">
-            if !is_background_transfer {
+            if !is_recording {
                 <button class="tp__stream-display__menu" onclick={handle_popup_click}>
                     <AppIcon name="Handle" />
                 </button>
@@ -328,15 +328,22 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
                 <div class="tp__stream-display__identity">
                     <div class="tp__stream-display__title-row">
                         <div class="tp__stream-display__title-block">
-                            <div class="tp__stream-display__title">{stream.channel.title.to_string()}</div>
+                            <div class="tp__stream-display__title-line">
+                                <div class="tp__stream-display__title">{stream.channel.title.to_string()}</div>
+                                if is_recording {
+                                    <span class="tp__stream-display__recording-badge">{translate.t("LABEL.RECORDING")}</span>
+                                }
+                            </div>
                             <div class="tp__stream-display__subtitle">
                                 <span class="tp__stream-display__channel_type">{render_cluster(&stream.channel)}</span>
                                 {" • "}
                                 <span class="tp__stream-display__provider">{stream.provider.clone()}</span>
-                                {" • "}
-                                <span class="tp__stream-display__username"> {stream.username.clone()}</span>
-                                if !hide_properties.contains(StreamInfoFields::HideUserComment) {
-                                    <span class="tp__stream-display__user-comment"> {format_user_comment(props.user_comment.clone())}</span>
+                                if !is_recording {
+                                    {" • "}
+                                    <span class="tp__stream-display__username">{stream.username.clone()}</span>
+                                    if !hide_properties.contains(StreamInfoFields::HideUserComment) {
+                                        <span class="tp__stream-display__user-comment"> {format_user_comment(props.user_comment.clone())}</span>
+                                    }
                                 }
                             </div>
                             if !hide_properties.contains(StreamInfoFields::HideEpg) {

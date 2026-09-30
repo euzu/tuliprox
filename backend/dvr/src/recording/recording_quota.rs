@@ -16,10 +16,10 @@
 //! The recording service calls it under the queue mutation boundary
 //! before persisting a new task.
 
-use crate::download::{DownloadState, FileDownload, PersistedFileDownload};
+use crate::recording::recording_queue::{PersistedRecordingTask, RecordingTask, RecordingTaskState};
 use serde::{Deserialize, Serialize};
 use shared::model::{recording::RecordingMetadata, UserId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Pool a task belongs to. Private is keyed by the immutable
 /// `UserId`; shared is the single shared pool.
@@ -145,65 +145,76 @@ pub struct SharedAvailabilityDto {
 
 /// Read-only view of a recording task for quota computation.
 /// Lets the pure helpers be unit-tested without a real
-/// `FileDownload` (which has many unrelated fields and a required
+/// `RecordingTask` (which has many unrelated fields and a required
 /// `reqwest::Url`).
 pub trait QuotaRecordingTaskView {
-    fn state(&self) -> &DownloadState;
-    fn recording(&self) -> Option<&RecordingMetadata>;
+    fn state(&self) -> &RecordingTaskState;
+    fn recording(&self) -> &RecordingMetadata;
     /// Stable task identifier. Returns `""` for views that do
     /// not expose one; callers (e.g. retention) require a
     /// non-empty uuid to be useful.
     fn uuid(&self) -> &str;
+    /// Which file this entry points at. Several entries share one.
+    ///
+    /// Defaults to a key of its own, so a view that does not know about sharing
+    /// is counted separately rather than silently merged with another file.
+    fn media_key(&self) -> String { format!("uuid:{}", self.uuid()) }
 }
 
-impl QuotaRecordingTaskView for FileDownload {
-    fn state(&self) -> &DownloadState { &self.state }
-    fn recording(&self) -> Option<&RecordingMetadata> { self.recording.as_ref() }
+impl QuotaRecordingTaskView for RecordingTask {
+    fn state(&self) -> &RecordingTaskState { &self.state }
+    fn recording(&self) -> &RecordingMetadata { &self.recording }
     fn uuid(&self) -> &str { &self.uuid }
+    fn media_key(&self) -> String {
+        crate::recording::recording_service::recording_identity_key(&self.recording, self.url.as_str())
+    }
 }
 
-impl QuotaRecordingTaskView for PersistedFileDownload {
-    fn state(&self) -> &DownloadState { &self.state }
-    fn recording(&self) -> Option<&RecordingMetadata> { self.recording.as_ref() }
+impl QuotaRecordingTaskView for PersistedRecordingTask {
+    fn state(&self) -> &RecordingTaskState { &self.state }
+    fn recording(&self) -> &RecordingMetadata { &self.recording }
     fn uuid(&self) -> &str { &self.uuid }
+    fn media_key(&self) -> String {
+        if self.media_identity.is_empty() {
+            // An unresolved identity is nobody else's file.
+            return format!("uuid:{}", self.uuid);
+        }
+        self.media_identity.clone()
+    }
 }
 
 /// `charge_for_task` is the public surface that walks a real
-/// `FileDownload`. The shape-based test below covers the same
-/// state→charge logic; the `charge_for_task` wrapper is a
-/// trivial match on `recording.is_none()` and `charge_for_state`
-/// so it is not exercised separately here.
-pub fn charge_for_task<V: QuotaRecordingTaskView>(task: &V) -> u64 {
-    match task.recording() {
-        None => 0,
-        Some(meta) => charge_for_state(task.state(), meta),
-    }
-}
+/// `RecordingTask`. The shape-based test below covers the same
+/// state→charge logic.
+pub fn charge_for_task<V: QuotaRecordingTaskView>(task: &V) -> u64 { charge_for_state(task.state(), task.recording()) }
 
 /// Pure state-driven charge. Kept separate from `charge_for_task`
-/// so it can be unit-tested without a full `FileDownload`.
+/// so it can be unit-tested without a full `RecordingTask`.
 ///
-pub fn charge_for_state(state: &DownloadState, meta: &RecordingMetadata) -> u64 {
+pub fn charge_for_state(state: &RecordingTaskState, meta: &RecordingMetadata) -> u64 {
     match state {
-        DownloadState::Scheduled
-        | DownloadState::Queued
-        | DownloadState::WaitingForCapacity
-        | DownloadState::RetryWaiting
-        | DownloadState::Paused => meta.reserved_bytes,
-        DownloadState::Downloading => meta.reserved_bytes.max(meta.measured_bytes),
-        DownloadState::Completed | DownloadState::Failed | DownloadState::Cancelled => meta.measured_bytes,
+        RecordingTaskState::Scheduled
+        | RecordingTaskState::Queued
+        | RecordingTaskState::WaitingForCapacity
+        | RecordingTaskState::RetryWaiting
+        | RecordingTaskState::Paused => meta.reserved_bytes,
+        // Cancelling still owns the file: the worker has not released it, so
+        // the bytes on disk are still this entry's.
+        RecordingTaskState::Running | RecordingTaskState::Cancelling => meta.reserved_bytes.max(meta.measured_bytes),
+        RecordingTaskState::Completed | RecordingTaskState::Failed | RecordingTaskState::Cancelled => {
+            meta.measured_bytes
+        }
     }
 }
 
-/// Pool the given task belongs to. Returns `None` for non-recording
-/// tasks (so generic downloads are not charged).
-pub fn quota_pool_for_task<V: QuotaRecordingTaskView>(task: &V) -> Option<QuotaPool> {
-    let meta = task.recording()?;
-    Some(match (&meta.visibility, &meta.owner) {
-        (shared::model::recording::RecordingVisibility::Shared, _)
-        | (_, shared::model::recording::RecordingOwner::LegacyAdmin) => QuotaPool::Shared,
-        (_, shared::model::recording::RecordingOwner::User(uid)) => QuotaPool::Private(uid.clone()),
-    })
+/// Pool the given task belongs to. Shared recordings are charged to the
+/// shared pool, private ones to their owner.
+pub fn quota_pool_for_task<V: QuotaRecordingTaskView>(task: &V) -> QuotaPool {
+    let meta = task.recording();
+    match meta.visibility {
+        shared::model::recording::RecordingVisibility::Shared => QuotaPool::Shared,
+        shared::model::recording::RecordingVisibility::Private => QuotaPool::Private(meta.owner_id().clone()),
+    }
 }
 
 /// Build a `QuotaLedger` from a set of tasks. `tasks` should be the
@@ -212,9 +223,7 @@ pub fn quota_pool_for_task<V: QuotaRecordingTaskView>(task: &V) -> Option<QuotaP
 pub fn compute_totals<V: QuotaRecordingTaskView>(tasks: &[V]) -> QuotaTotals {
     let mut totals = QuotaTotals::default();
     for task in tasks {
-        let Some(pool) = quota_pool_for_task(task) else {
-            continue;
-        };
+        let pool = quota_pool_for_task(task);
         let charge = charge_for_task(task);
         match pool {
             QuotaPool::Private(uid) => *totals.private.entry(uid).or_insert(0) += charge,
@@ -238,10 +247,29 @@ where
 {
     let mut total = 0u64;
     for task in tasks {
-        let Some(task_pool) = quota_pool_for_task(task) else {
-            continue;
-        };
+        let task_pool = quota_pool_for_task(task);
         if &task_pool == pool {
+            total = total.saturating_add(charge_for_task(task));
+        }
+    }
+    total
+}
+
+/// Bytes on disk, counting each file once however many entries hold it.
+///
+/// The quota pools are logical: every attached entry is charged the whole size,
+/// because that is what that user is keeping. Disk is not -- one file occupies
+/// its bytes once, so summing the pools would refuse admission against space
+/// that was never taken.
+pub fn physical_bytes<'a, V, I>(tasks: I) -> u64
+where
+    V: QuotaRecordingTaskView + 'a,
+    I: IntoIterator<Item = &'a V>,
+{
+    let mut counted: HashSet<String> = HashSet::new();
+    let mut total = 0u64;
+    for task in tasks {
+        if counted.insert(task.media_key()) {
             total = total.saturating_add(charge_for_task(task));
         }
     }
@@ -279,22 +307,19 @@ pub fn split_measured_reserved_for_user_from_tasks<V: QuotaRecordingTaskView>(
     let mut measured = 0u64;
     let mut reserved = 0u64;
     for task in tasks {
-        let Some(meta) = task.recording() else {
-            continue;
-        };
-        let is_user = meta.visibility == shared::model::recording::RecordingVisibility::Private
-            && matches!(
-                &meta.owner,
-                shared::model::recording::RecordingOwner::User(uid) if uid == subject_id
-            );
+        let meta = task.recording();
+        let is_user =
+            meta.visibility == shared::model::recording::RecordingVisibility::Private && meta.owner_id() == subject_id;
         if !is_user {
             continue;
         }
         let charge = charge_for_task(task);
-        // The reservation is the part of the charge that comes
-        // from `reserved_bytes`; the measured part is everything
-        // over that, capped at the total charge.
-        let r = meta.reserved_bytes;
+        // The reservation is the part of the charge that comes from
+        // `reserved_bytes`; the measured part is everything over that, capped
+        // at the total charge. A terminal recording reserves nothing whatever
+        // the stored field says -- its charge is what it actually wrote, and
+        // reporting the old reservation would show space nobody is holding.
+        let r = if task.state().is_terminal() { 0 } else { meta.reserved_bytes.min(charge) };
         let m = charge.saturating_sub(r);
         reserved = reserved.saturating_add(r);
         measured = measured.saturating_add(m);
@@ -311,7 +336,7 @@ mod tests {
         RecordingMetadata {
             owner,
             visibility: RecordingVisibility::Private,
-            source: Some(RecordingSource::new("t1", "v1", "in1")),
+            source: (RecordingSource::new("t1", "v1", "in1")),
             program_start: None,
             program_end: None,
             scheduled_start: None,
@@ -325,6 +350,8 @@ mod tests {
             provenance: shared::model::recording::RecordingProvenance::default(),
             relative_path: None,
             partial_relative_path: None,
+            resume_etag: None,
+            resume_last_modified: None,
             reserved_bytes: reserved,
             measured_bytes: measured,
             completed_at: None,
@@ -333,19 +360,19 @@ mod tests {
         }
     }
 
-    // Lightweight stand-in for `FileDownload` so tests of the
+    // Lightweight stand-in for `RecordingTask` so tests of the
     // pure `charge_for_state` and pool-resolution helpers don't
     // need the full HTTP/URL machinery. The real
     // `charge_for_task` reads only `state` and `recording`; the
     // `TaskShape` mirrors that.
     struct TaskShape {
-        state: DownloadState,
-        recording: Option<RecordingMetadata>,
+        state: RecordingTaskState,
+        recording: RecordingMetadata,
     }
 
     impl QuotaRecordingTaskView for TaskShape {
-        fn state(&self) -> &DownloadState { &self.state }
-        fn recording(&self) -> Option<&RecordingMetadata> { self.recording.as_ref() }
+        fn state(&self) -> &RecordingTaskState { &self.state }
+        fn recording(&self) -> &RecordingMetadata { &self.recording }
         fn uuid(&self) -> &'static str {
             // The shape fixture has no uuid field; tests that
             // depend on the uuid path (retention) use a richer
@@ -354,32 +381,34 @@ mod tests {
         }
     }
 
-    fn task(owner: RecordingOwner, state: DownloadState, reserved: u64, measured: u64) -> TaskShape {
-        TaskShape { state, recording: Some(make_meta(owner, reserved, measured)) }
+    fn task(owner: RecordingOwner, state: RecordingTaskState, reserved: u64, measured: u64) -> TaskShape {
+        TaskShape { state, recording: make_meta(owner, reserved, measured) }
     }
 
     // Mirror the `charge_for_task` body against `TaskShape` so the
-    // tests can exercise the function without a real FileDownload.
+    // tests can exercise the function without a real RecordingTask.
     fn charge_task_shape(t: &TaskShape) -> u64 { charge_for_task(t) }
 
-    fn pool_for_shape(t: &TaskShape) -> Option<QuotaPool> { quota_pool_for_task(t) }
+    fn pool_for_shape(t: &TaskShape) -> QuotaPool { quota_pool_for_task(t) }
 
     #[test]
     fn charge_scheduled_is_reservation() {
-        let t = task(RecordingOwner::User(UserId::from("web:alice")), DownloadState::Scheduled, 1000, 0);
+        let t = task(RecordingOwner::User(UserId::from("web:alice")), RecordingTaskState::Scheduled, 1000, 0);
         assert_eq!(charge_task_shape(&t), 1000);
     }
 
     #[test]
     fn charge_queued_is_reservation() {
-        let t = task(RecordingOwner::User(UserId::from("web:alice")), DownloadState::Queued, 2000, 0);
+        let t = task(RecordingOwner::User(UserId::from("web:alice")), RecordingTaskState::Queued, 2000, 0);
         assert_eq!(charge_task_shape(&t), 2000);
     }
 
     #[test]
     fn charge_waiting_is_reservation() {
-        for state in &[DownloadState::WaitingForCapacity, DownloadState::RetryWaiting, DownloadState::Paused] {
-            let t = task(RecordingOwner::User(UserId::from("web:alice")), state.clone(), 500, 0);
+        for state in
+            &[RecordingTaskState::WaitingForCapacity, RecordingTaskState::RetryWaiting, RecordingTaskState::Paused]
+        {
+            let t = task(RecordingOwner::User(UserId::from("web:alice")), *state, 500, 0);
             assert_eq!(charge_task_shape(&t), 500, "state {state:?}");
         }
     }
@@ -387,52 +416,41 @@ mod tests {
     #[test]
     fn charge_downloading_is_max_of_reservation_and_measured() {
         // measured > reserved → measured
-        let t = task(RecordingOwner::User(UserId::from("web:alice")), DownloadState::Downloading, 1000, 1500);
+        let t = task(RecordingOwner::User(UserId::from("web:alice")), RecordingTaskState::Running, 1000, 1500);
         assert_eq!(charge_task_shape(&t), 1500);
         // reserved > measured → reserved
-        let t = task(RecordingOwner::User(UserId::from("web:alice")), DownloadState::Downloading, 2000, 100);
+        let t = task(RecordingOwner::User(UserId::from("web:alice")), RecordingTaskState::Running, 2000, 100);
         assert_eq!(charge_task_shape(&t), 2000);
     }
 
     #[test]
     fn charge_completed_is_measured() {
-        let t = task(RecordingOwner::User(UserId::from("web:alice")), DownloadState::Completed, 0, 3000);
+        let t = task(RecordingOwner::User(UserId::from("web:alice")), RecordingTaskState::Completed, 0, 3000);
         assert_eq!(charge_task_shape(&t), 3000);
     }
 
     #[test]
     fn charge_failed_cancelled_is_partial_measured() {
         // No partial file → 0
-        let t = task(RecordingOwner::User(UserId::from("web:alice")), DownloadState::Failed, 5000, 0);
+        let t = task(RecordingOwner::User(UserId::from("web:alice")), RecordingTaskState::Failed, 5000, 0);
         assert_eq!(charge_task_shape(&t), 0);
         // Partial file present → measured
-        let t = task(RecordingOwner::User(UserId::from("web:alice")), DownloadState::Cancelled, 5000, 200);
+        let t = task(RecordingOwner::User(UserId::from("web:alice")), RecordingTaskState::Cancelled, 5000, 200);
         assert_eq!(charge_task_shape(&t), 200);
     }
 
     #[test]
-    fn charge_is_zero_for_non_recording_task() {
-        let t = TaskShape { state: DownloadState::Completed, recording: None };
-        assert_eq!(charge_task_shape(&t), 0);
-    }
-
-    #[test]
     fn private_pool_for_user_owner() {
-        let t = task(RecordingOwner::User(UserId::from("web:alice")), DownloadState::Scheduled, 100, 0);
-        assert_eq!(pool_for_shape(&t), Some(QuotaPool::Private(UserId::from("web:alice"))));
+        let t = task(RecordingOwner::User(UserId::from("web:alice")), RecordingTaskState::Scheduled, 100, 0);
+        assert_eq!(pool_for_shape(&t), QuotaPool::Private(UserId::from("web:alice")));
     }
 
     #[test]
-    fn shared_pool_for_legacy_admin() {
-        let t = task(RecordingOwner::LegacyAdmin, DownloadState::Scheduled, 100, 0);
-        assert_eq!(pool_for_shape(&t), Some(QuotaPool::Shared));
+    fn shared_pool_for_shared_visibility() {
+        let mut t = task(RecordingOwner::User(UserId::from("web:alice")), RecordingTaskState::Scheduled, 100, 0);
+        t.recording.visibility = shared::model::recording::RecordingVisibility::Shared;
+        assert_eq!(pool_for_shape(&t), QuotaPool::Shared);
     }
-
-    // `charge_for_task` is the public surface that walks a real
-    // `FileDownload`. The shape-based test below covers the same
-    // state→charge logic; the `charge_for_task` wrapper is a
-    // trivial match on `recording.is_none()` and `charge_for_state`
-    // so it is not exercised separately here.
 
     #[test]
     fn admission_ok_under_limit() {
@@ -504,8 +522,8 @@ mod tests {
         let limits =
             QuotaLimits { default_private_bytes: Some(10_000), shared_bytes: Some(50_000), ..Default::default() };
         let tasks = vec![
-            task(RecordingOwner::User(UserId::from("web:alice")), DownloadState::Completed, 0, 6000),
-            task(RecordingOwner::User(UserId::from("web:bob")), DownloadState::Scheduled, 9999, 0),
+            task(RecordingOwner::User(UserId::from("web:alice")), RecordingTaskState::Completed, 0, 6000),
+            task(RecordingOwner::User(UserId::from("web:bob")), RecordingTaskState::Scheduled, 9999, 0),
         ];
         let dto = regular_user_dto(&UserId::from("web:alice"), &totals, &limits, &tasks);
         // Own totals present
@@ -519,5 +537,55 @@ mod tests {
         let json = serde_json::to_value(&dto).unwrap();
         let s = serde_json::to_string(&json).unwrap();
         assert!(!s.contains("9999"), "DTO must not leak other users' totals: {s}");
+    }
+    /// A view whose media key is stated explicitly, so sharing can be tested.
+    struct SharedView {
+        uuid: String,
+        media: String,
+        state: RecordingTaskState,
+        recording: RecordingMetadata,
+    }
+
+    impl QuotaRecordingTaskView for SharedView {
+        fn state(&self) -> &RecordingTaskState { &self.state }
+        fn recording(&self) -> &RecordingMetadata { &self.recording }
+        fn uuid(&self) -> &str { &self.uuid }
+        fn media_key(&self) -> String { self.media.clone() }
+    }
+
+    fn holder(uuid: &str, media: &str, measured: u64) -> SharedView {
+        let mut recording = make_meta(RecordingOwner::User(UserId::from("web:alice")), 0, measured);
+        recording.measured_bytes = measured;
+        SharedView { uuid: uuid.to_string(), media: media.to_string(), state: RecordingTaskState::Completed, recording }
+    }
+
+    #[test]
+    fn disk_counts_a_shared_file_once_however_many_hold_it() {
+        // Both users are charged the whole film in their own quota, because
+        // that is what each is keeping. The disk holds it once, and admitting
+        // against the sum would refuse space that was never taken.
+        let holders = vec![holder("alice", "film-42", 1_000), holder("bob", "film-42", 1_000)];
+        assert_eq!(physical_bytes(&holders), 1_000, "one file, one lot of bytes");
+        assert_eq!(compute_totals(&holders).private.values().sum::<u64>(), 2_000, "but two logical charges");
+    }
+
+    #[test]
+    fn disk_counts_different_files_separately() {
+        let holders = vec![holder("alice", "film-42", 1_000), holder("bob", "film-99", 1_000)];
+        assert_eq!(physical_bytes(&holders), 2_000);
+    }
+
+    #[test]
+    fn a_terminal_recording_reports_no_reservation() {
+        // A failed transfer used to keep whatever it had reserved, so the user
+        // was shown space held by a recording that no longer exists.
+        let subject = UserId::from("web:alice");
+        let mut failed = task(RecordingOwner::User(subject.clone()), RecordingTaskState::Failed, 5_000, 0);
+        failed.recording.reserved_bytes = 5_000;
+
+        let (measured, reserved) = split_measured_reserved_for_user_from_tasks(&subject, &[failed]);
+
+        assert_eq!(reserved, 0, "a failed recording is holding nothing");
+        assert_eq!(measured, 0, "and it wrote nothing");
     }
 }

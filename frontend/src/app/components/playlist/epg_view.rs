@@ -236,14 +236,13 @@ pub fn EpgView() -> Html {
     let is_program_panning = use_state(|| false);
     let is_timeline_panning = use_state(|| false);
     let selected_epg_source = use_state(|| None::<PlaylistEpgRequest>);
-    let can_write_recordings = services.auth.has_permission(Permission::RecordingWrite);
+    let can_write_recordings = services.auth.has_permission(Permission::RecordingCreate);
     let is_admin_role = services.auth.is_admin();
     let recording_padding = {
         let rec = config_ctx
             .config
             .as_ref()
             .and_then(|cfg| cfg.config.video.as_ref())
-            .and_then(|video| video.download.as_ref())
             .and_then(|video| video.recording.as_ref());
         Rc::new(PaddingBounds {
             default_pre_roll_secs: rec.and_then(|c| c.default_pre_roll_secs).unwrap_or(0),
@@ -928,7 +927,7 @@ pub fn EpgView() -> Html {
                 let body = html! {
                     <RecordingForm
                         prefill={prefill}
-                        has_recording_write={can_write_recordings}
+                        has_recording_manage={can_write_recordings}
                         is_admin_role={is_admin_role}
                         on_submit={on_submit}
                         on_cancel={Callback::from(|()| {})}
@@ -958,7 +957,7 @@ pub fn EpgView() -> Html {
                     return;
                 };
                 match RecordingService::new().create_task(request).await {
-                    Ok(_) => services.toastr.success(translate.t("MESSAGES.RECORDING.QUEUED")),
+                    Ok(()) => services.toastr.success(translate.t("MESSAGES.RECORDING.QUEUED")),
                     Err(err) => services.toastr.error(err.to_string()),
                 }
             });

@@ -86,7 +86,7 @@ macro_rules! app_state_views {
 app_state_views! {
     /// The handles the DVR needs: the recording queue and what feeds it.
     recording_ctx => crate::api::model::recording::recording_ctx::RecordingCtx<std::sync::Arc<tuliprox_session::EventManager>> {
-        app_config, downloads, events <- event_manager, http_client,
+        app_config, recordings, events <- event_manager, http_client, recording_capacity,
     }
 
     /// The handles the HLS proxy needs: itself, plus provider allocation and

@@ -736,8 +736,7 @@ mod snapshot_and_ring_tests {
     #[test]
     fn only_state_describing_kinds_are_latched() {
         for kind in EventKind::ALL {
-            let expected =
-                matches!(kind, EventKind::SystemInfoUpdate | EventKind::DownloadsUpdate | EventKind::ActiveProvider);
+            let expected = matches!(kind, EventKind::SystemInfoUpdate | EventKind::ActiveProvider);
             assert_eq!(kind.is_latched(), expected, "{kind:?}");
         }
     }

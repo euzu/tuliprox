@@ -428,7 +428,7 @@ mod tests {
         }
         // File must be persisted.
         let bytes = tokio::fs::read(&path).await.expect("read");
-        assert!(!bytes.is_empty());
+        assert_ne!(bytes, [] as [u8; 0]);
     }
 
     #[tokio::test]
@@ -537,7 +537,7 @@ mod tests {
         assert_eq!(reg.snapshot().await.web_users, web);
         // Restore must persist.
         let bytes = tokio::fs::read(&path).await.expect("read");
-        assert!(!bytes.is_empty());
+        assert_ne!(bytes, [] as [u8; 0]);
     }
 
     #[tokio::test]

@@ -6,9 +6,9 @@
 //!
 //! - The principal's recording permission bits
 //! - The principal's role (administrator vs. web/API user)
-//! - The recording's `RecordingOwner` (real owner vs. `LegacyAdmin`)
+//! - The recording's `RecordingOwner`
 //! - The recording's `RecordingVisibility` (private vs. shared)
-//! - The task's `DownloadState` (for state-aware actions like
+//! - The task's `RecordingTaskState` (for state-aware actions like
 //!   `system-retention-delete`)
 //! - A path/visibility/owner triple that the caller resolves before
 //!   calling the policy
@@ -69,10 +69,6 @@ pub enum DenyReason {
     /// Shared mutation (edit/cancel/delete) requires the administrator
     /// role in addition to the recording permission.
     NotAdministrator,
-    /// `LegacyAdmin` recordings are only accessible to administrators
-    /// with the required permission. Non-admin callers — even the
-    /// real owner — cannot act on a `LegacyAdmin` recording.
-    LegacyAdminReserved,
     /// Retention delete is gated on a terminal state and a non-partial
     /// path. The recording's current state forbids it.
     IneligibleState,
@@ -88,7 +84,6 @@ impl std::fmt::Display for DenyReason {
             Self::MissingPermission(p) => write!(f, "missing permission: {}", permission_name(*p)),
             Self::NotOwner => f.write_str("not the real owner"),
             Self::NotAdministrator => f.write_str("administrator role required"),
-            Self::LegacyAdminReserved => f.write_str("legacy admin recording — administrator required"),
             Self::IneligibleState => f.write_str("recording is not in an eligible terminal state"),
             Self::InvalidPath => f.write_str("recording path/kind is invalid"),
         }
@@ -111,15 +106,15 @@ fn permission_name(p: Permission) -> &'static str {
         Permission::SystemWrite => "system.write",
         Permission::EpgRead => "epg.read",
         Permission::EpgWrite => "epg.write",
-        Permission::DownloadRead => "download.read",
-        Permission::DownloadWrite => "download.write",
         Permission::RecordingRead => "recording.read",
-        Permission::RecordingWrite => "recording.write",
+        Permission::RecordingCreate => "recording.create",
+        Permission::RecordingManage => "recording.manage",
+        Permission::RecordingDelete => "recording.delete",
     }
 }
 
 /// Resolved view of the recording. Constructed by the caller from the
-/// runtime `FileDownload` and the new `RecordingService` so the policy
+/// runtime `RecordingTask` and the new `RecordingService` so the policy
 /// stays pure and testable.
 #[derive(Debug, Clone)]
 pub struct RecordingSubject<'a> {
@@ -208,14 +203,14 @@ pub fn is_system_principal(claims: &Claims) -> bool {
 fn check_create(claims: &Claims, action: RecordingAction) -> RecordingDecision {
     match action {
         RecordingAction::CreatePrivate => {
-            if !has_recording_write(claims) {
-                return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingWrite));
+            if !has(claims, Permission::RecordingCreate) {
+                return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingCreate));
             }
             RecordingDecision::Allow
         }
         RecordingAction::CreateShared => {
-            if !has_recording_write(claims) {
-                return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingWrite));
+            if !has(claims, Permission::RecordingCreate) {
+                return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingCreate));
             }
             if !claims.is_admin() {
                 return RecordingDecision::Deny(DenyReason::NotAdministrator);
@@ -226,19 +221,13 @@ fn check_create(claims: &Claims, action: RecordingAction) -> RecordingDecision {
     }
 }
 
-fn owner_of(meta: &RecordingMetadata) -> Option<UserId> {
-    use shared::model::RecordingOwner;
-    match &meta.owner {
-        RecordingOwner::User(uid) => Some(uid.clone()),
-        RecordingOwner::LegacyAdmin => None,
-    }
-}
+fn owner_of(meta: &RecordingMetadata) -> &UserId { meta.owner_id() }
 
 fn is_visibility(meta: &RecordingMetadata, want: RecordingVisibility) -> bool { meta.visibility == want }
 
 fn has_recording_read(claims: &Claims) -> bool { claims.permissions.contains(Permission::RecordingRead) }
 
-fn has_recording_write(claims: &Claims) -> bool { claims.permissions.contains(Permission::RecordingWrite) }
+fn has(claims: &Claims, permission: Permission) -> bool { claims.permissions.contains(permission) }
 
 /// The principal decision. Pure function — does not touch the
 /// filesystem, the network, or the queue.
@@ -263,7 +252,7 @@ pub fn authorize(
     // recording on behalf of any user, including when the owner
     // cannot be resolved (e.g., a corrupted registry entry). The
     // bypass is narrow: state must be eligible, path must be valid,
-    // and the caller must carry `recording.write`.
+    // and the caller must carry `recording.delete`.
     if matches!(action, RecordingAction::SystemRetentionDelete) {
         if !recording.state.is_eligible_for_retention() {
             return RecordingDecision::Deny(DenyReason::IneligibleState);
@@ -271,8 +260,8 @@ pub fn authorize(
         if !recording.path_valid {
             return RecordingDecision::Deny(DenyReason::InvalidPath);
         }
-        if !has_recording_write(claims) {
-            return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingWrite));
+        if !has(claims, Permission::RecordingDelete) {
+            return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingDelete));
         }
         if !claims.is_admin() {
             // The system-retention path bypasses user ownership only
@@ -295,8 +284,8 @@ pub fn authorize(
             return check_create(claims, action);
         }
         RecordingAction::ManageRule => {
-            if !has_recording_write(claims) {
-                return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingWrite));
+            if !has(claims, Permission::RecordingManage) {
+                return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingManage));
             }
             if !claims.is_admin() {
                 return RecordingDecision::Deny(DenyReason::NotAdministrator);
@@ -313,28 +302,18 @@ pub fn authorize(
         return RecordingDecision::Deny(DenyReason::InvalidPath);
     }
 
-    let is_legacy = matches!(meta.owner, shared::model::RecordingOwner::LegacyAdmin);
-
-    // LegacyAdmin recordings are only accessible to administrators.
-    if is_legacy && !claims.is_admin() {
-        return RecordingDecision::Deny(DenyReason::LegacyAdminReserved);
-    }
-    if is_legacy && action_requires_owner(action) {
-        // Even an admin cannot impersonate a LegacyAdmin owner.
-        return RecordingDecision::Deny(DenyReason::LegacyAdminReserved);
-    }
-
     match action {
         RecordingAction::Read | RecordingAction::Playback | RecordingAction::Download => {
-            check_read_action(claims, subject_id, meta, is_legacy)
+            check_read_action(claims, subject_id, meta)
         }
         RecordingAction::CreatePrivate | RecordingAction::CreateShared => check_create(claims, action),
-        RecordingAction::Edit | RecordingAction::Cancel | RecordingAction::Delete => {
-            check_mutate_action(claims, subject_id, meta)
+        RecordingAction::Edit | RecordingAction::Cancel => {
+            check_mutate_action(claims, subject_id, meta, Permission::RecordingManage)
         }
+        RecordingAction::Delete => check_mutate_action(claims, subject_id, meta, Permission::RecordingDelete),
         RecordingAction::ManageRule => {
-            if !has_recording_write(claims) {
-                return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingWrite));
+            if !has(claims, Permission::RecordingManage) {
+                return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingManage));
             }
             if !claims.is_admin() {
                 return RecordingDecision::Deny(DenyReason::NotAdministrator);
@@ -345,24 +324,12 @@ pub fn authorize(
     }
 }
 
-fn check_read_action(
-    claims: &Claims,
-    subject_id: &UserId,
-    meta: &RecordingMetadata,
-    is_legacy: bool,
-) -> RecordingDecision {
+fn check_read_action(claims: &Claims, subject_id: &UserId, meta: &RecordingMetadata) -> RecordingDecision {
     if !has_recording_read(claims) {
         return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingRead));
     }
     if is_visibility(meta, RecordingVisibility::Private) {
-        if is_legacy {
-            // LegacyAdmin is never owner-readable by a non-admin (already
-            // rejected at the policy boundary). This branch is
-            // unreachable when is_legacy=true; the redundant check
-            // documents the invariant.
-            return RecordingDecision::Deny(DenyReason::LegacyAdminReserved);
-        }
-        if owner_of(meta).as_ref() == Some(subject_id) {
+        if owner_of(meta) == subject_id {
             return RecordingDecision::Allow;
         }
         return RecordingDecision::Deny(DenyReason::NotOwner);
@@ -371,29 +338,26 @@ fn check_read_action(
     RecordingDecision::Allow
 }
 
-fn check_mutate_action(claims: &Claims, subject_id: &UserId, meta: &RecordingMetadata) -> RecordingDecision {
-    if !has_recording_write(claims) {
-        return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingWrite));
+fn check_mutate_action(
+    claims: &Claims,
+    subject_id: &UserId,
+    meta: &RecordingMetadata,
+    required: Permission,
+) -> RecordingDecision {
+    if !has(claims, required) {
+        return RecordingDecision::Deny(DenyReason::MissingPermission(required));
     }
     if is_visibility(meta, RecordingVisibility::Private) {
-        if owner_of(meta).as_ref() == Some(subject_id) {
+        if owner_of(meta) == subject_id {
             return RecordingDecision::Allow;
         }
         return RecordingDecision::Deny(DenyReason::NotOwner);
     }
-    // Shared visibility: only admins can mutate ("shared mutation
-    // only to administrators with recording.write").
+    // Shared visibility: only administrators may mutate.
     if !claims.is_admin() {
         return RecordingDecision::Deny(DenyReason::NotAdministrator);
     }
     RecordingDecision::Allow
-}
-
-fn action_requires_owner(action: RecordingAction) -> bool {
-    matches!(
-        action,
-        RecordingAction::Edit | RecordingAction::Cancel | RecordingAction::Delete | RecordingAction::ManageRule
-    )
 }
 
 /// Separate policy for orphan catalog entries. The catalog is a
@@ -452,7 +416,7 @@ mod tests {
         RecordingMetadata {
             owner,
             visibility,
-            source: None,
+            source: shared::model::recording::RecordingSource::new("t1", "v1", "in1"),
             program_start: None,
             program_end: None,
             scheduled_start: None,
@@ -473,6 +437,8 @@ mod tests {
             provenance: shared::model::recording::RecordingProvenance::default(),
             relative_path: Some("pilot.ts".to_string()),
             partial_relative_path: None,
+            resume_etag: None,
+            resume_last_modified: None,
             reserved_bytes: 0,
             measured_bytes: 0,
             completed_at: None,
@@ -485,14 +451,18 @@ mod tests {
         make_meta(RecordingOwner::User(UserId::from(uid)), visibility)
     }
 
-    fn legacy_meta() -> RecordingMetadata { make_meta(RecordingOwner::LegacyAdmin, RecordingVisibility::Private) }
-
     fn subject(uid: &str) -> UserId { UserId::from(uid) }
 
     fn read_perms() -> shared::model::permission::PermissionSet { Permission::RecordingRead.into() }
-    fn write_perms() -> shared::model::permission::PermissionSet { Permission::RecordingWrite.into() }
+    /// Every recording mutation permission, for tests that only care that the
+    /// caller is allowed to mutate at all.
+    fn write_perms() -> shared::model::permission::PermissionSet {
+        Permission::RecordingCreate | Permission::RecordingManage | Permission::RecordingDelete
+    }
     fn read_write_perms() -> shared::model::permission::PermissionSet {
-        Permission::RecordingRead | Permission::RecordingWrite
+        let mut perms = write_perms();
+        perms.set(Permission::RecordingRead);
+        perms
     }
     fn config_read_perms() -> shared::model::permission::PermissionSet { Permission::ConfigRead.into() }
 
@@ -555,9 +525,9 @@ mod tests {
     }
 
     #[test]
-    fn read_legacy_admin_recording_requires_administrator() {
+    fn read_private_recording_of_another_owner_is_denied() {
         let claims = make_claims("alice", Some(subject("web:alice")), RoleSet::new(), read_perms());
-        let meta = legacy_meta();
+        let meta = owner_meta("web:bob", RecordingVisibility::Private);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Completed, true);
         let d = authorize(
             &claims,
@@ -565,13 +535,13 @@ mod tests {
             RecordingAction::Read,
             &sub,
         );
-        assert!(matches!(d, RecordingDecision::Deny(DenyReason::LegacyAdminReserved)));
+        assert!(matches!(d, RecordingDecision::Deny(DenyReason::NotOwner)));
     }
 
     // --- create ---
 
     #[test]
-    fn create_private_with_recording_write_is_allowed() {
+    fn create_private_with_recording_create_is_allowed() {
         let claims = make_claims("alice", Some(subject("web:alice")), RoleSet::new(), write_perms());
         let sub = RecordingSubject::new(None, TerminalState::Active, true);
         let d = authorize(
@@ -597,7 +567,7 @@ mod tests {
     }
 
     #[test]
-    fn create_shared_with_admin_role_and_recording_write_is_allowed() {
+    fn create_shared_with_admin_role_and_recording_create_is_allowed() {
         let claims = make_claims("admin", Some(UserId::builtin_admin()), RoleSet::ADMIN, read_write_perms());
         let sub = RecordingSubject::new(None, TerminalState::Active, true);
         let d = authorize(
@@ -612,7 +582,7 @@ mod tests {
     // --- edit / cancel / delete ---
 
     #[test]
-    fn edit_private_owner_with_recording_write_is_allowed() {
+    fn edit_private_owner_with_recording_manage_is_allowed() {
         let claims = make_claims("alice", Some(subject("web:alice")), RoleSet::new(), write_perms());
         let meta = owner_meta("web:alice", RecordingVisibility::Private);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Scheduled, true);
@@ -670,7 +640,7 @@ mod tests {
     // --- manage rule ---
 
     #[test]
-    fn manage_rule_requires_administrator_and_recording_write() {
+    fn manage_rule_requires_administrator_and_recording_manage() {
         let claims = make_claims("alice", Some(subject("web:alice")), RoleSet::new(), write_perms());
         let sub = RecordingSubject::new(None, TerminalState::Active, true);
         let d = authorize(
@@ -734,7 +704,7 @@ mod tests {
     }
 
     #[test]
-    fn system_retention_delete_requires_recording_write() {
+    fn system_retention_delete_requires_recording_delete() {
         let claims = make_claims("admin", Some(UserId::builtin_admin()), RoleSet::ADMIN, read_perms());
         let meta = owner_meta("web:alice", RecordingVisibility::Private);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Completed, true);
@@ -744,7 +714,7 @@ mod tests {
             RecordingAction::SystemRetentionDelete,
             &sub,
         );
-        assert!(matches!(d, RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingWrite))));
+        assert!(matches!(d, RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingDelete))));
     }
 
     #[test]
@@ -828,7 +798,9 @@ mod tests {
         // `Claims` the supervisor mints, and the agreement has to be
         // verifiable without touching the supervisor module.
         let mut perms = shared::model::permission::PermissionSet::new();
-        perms.set(Permission::RecordingWrite);
+        perms.set(Permission::RecordingCreate);
+        perms.set(Permission::RecordingManage);
+        perms.set(Permission::RecordingDelete);
         perms.set(Permission::RecordingRead);
         let claims = make_claims(SYSTEM_PRINCIPAL_USERNAME, Some(UserId::builtin_admin()), RoleSet::ADMIN, perms);
         assert!(is_system_principal(&claims));
@@ -840,7 +812,9 @@ mod tests {
         // match. Without this distinction a forged `username` field
         // would silently elevate the caller to a bypass path.
         let mut perms = shared::model::permission::PermissionSet::new();
-        perms.set(Permission::RecordingWrite);
+        perms.set(Permission::RecordingCreate);
+        perms.set(Permission::RecordingManage);
+        perms.set(Permission::RecordingDelete);
         perms.set(Permission::RecordingRead);
         let claims = make_claims("alice", Some(UserId::builtin_admin()), RoleSet::ADMIN, perms);
         assert!(!is_system_principal(&claims));
@@ -854,7 +828,9 @@ mod tests {
         // point: future policy additions must not silently break the
         // background workers.
         let mut perms = shared::model::permission::PermissionSet::new();
-        perms.set(Permission::RecordingWrite);
+        perms.set(Permission::RecordingCreate);
+        perms.set(Permission::RecordingManage);
+        perms.set(Permission::RecordingDelete);
         perms.set(Permission::RecordingRead);
         let claims = make_claims(SYSTEM_PRINCIPAL_USERNAME, Some(UserId::builtin_admin()), RoleSet::ADMIN, perms);
         let meta = make_meta(RecordingOwner::User(UserId::from("web:alice")), RecordingVisibility::Private);

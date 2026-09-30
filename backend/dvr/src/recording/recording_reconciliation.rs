@@ -1,8 +1,7 @@
 //! Cross-store rule reconciliation.
 //!
 //! The scheduler persists two stores that can drift:
-//! - The queue (`downloads_state.json`) holds the materialized
-//!   recording tasks.
+//! - The recording repository holds the materialized recording tasks.
 //! - The rule repository (`recording_rules.json`) holds the rules
 //!   and the bounded tombstones.
 //!
@@ -40,7 +39,7 @@ use shared::model::recording_rule::{RecordingRule, RecordingTombstone, Tombstone
 pub const MIN_TOMBSTONE_HORIZON_SECS: i64 = 14 * 86_400;
 
 /// A task from the queue, summarized for reconciliation. The real
-/// `FileDownload` has more fields; reconciliation only needs the
+/// `RecordingTask` has more fields; reconciliation only needs the
 /// identity, provenance, state, and activity flags.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReconcilableTask {
