@@ -72,7 +72,7 @@ async fn tmdb_profile_tls_does_not_change_generic_clients_global_insecure_policy
 }
 
 #[tokio::test]
-async fn tmdb_profile_tls_failure_blocks_publication_and_retains_artifacts_even_with_complete_trakt() {
+async fn tmdb_profile_tls_failure_continues_publication_without_bypassing_verification() {
     for policy in ["full", "curated"] {
         let server = DiscoveryServer::start().await;
         let mut run = Publication::new(&server, &target(policy, true, true));
@@ -88,16 +88,15 @@ async fn tmdb_profile_tls_failure_blocks_publication_and_retains_artifacts_even_
                 run.tmdb_client = trusted.clone();
                 run.publish().await.unwrap();
             }
-            let files = file_snapshot(run.directory.path());
             let cache = run.cache_signature().await;
             assert_eq!(!cache.is_empty(), previously_published);
             let before = server.requests.lock().unwrap().len();
             run.tmdb_client = rejected.clone();
             let mut changed = catalog();
-            changed[0].channels[0].header.title = "Must not publish".intern();
-            assert!(run.publish_catalog(changed).await.is_err());
-            assert_eq!(file_snapshot(run.directory.path()), files, "all files, IDs and watches retained");
-            assert_eq!(run.cache_signature().await, cache, "no partial cache publication");
+            changed[0].channels[0].header.title = "Updated Live".intern();
+            assert!(run.publish_catalog(changed.clone()).await.is_ok());
+            run.assert_regular_publication(&changed).await;
+            assert_ne!(run.cache_signature().await, cache);
             let requests = server.requests.lock().unwrap();
             assert_eq!(requests.len(), before + 1, "only the required Trakt sibling reached HTTP; no fallback");
             assert!(requests[before].starts_with(&format!("GET {TRAKT} ")));

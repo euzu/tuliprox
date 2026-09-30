@@ -1,6 +1,6 @@
 use super::*;
 
-fn changed_catalog() -> Vec<PlaylistGroup> {
+pub(super) fn changed_catalog() -> Vec<PlaylistGroup> {
     let mut playlist = catalog();
     for group in &mut playlist {
         for item in &mut group.channels {
@@ -63,7 +63,7 @@ fn fail_late(server: &DiscoveryServer, failure: &str) {
 }
 
 #[tokio::test]
-async fn curation_late_failure_keeps_all_files_epg_cache_mapping_and_watches_in_both_policies() {
+async fn curation_late_failure_continues_playlists_epg_cache_and_watches_in_both_policies() {
     for policy in ["full", "curated"] {
         for failure in [
             "status",
@@ -79,52 +79,30 @@ async fn curation_late_failure_keeps_all_files_epg_cache_mapping_and_watches_in_
         ] {
             let server = DiscoveryServer::start().await;
             let mut dto = target(policy, true, true);
-            // A selection-only selector is just as required as its successful projecting siblings.
-            dto.curation.as_mut().unwrap().tmdb.as_mut().unwrap().trending[0].create_xtream_category = false;
+            if let Some(source) = dto.curation.as_mut().and_then(|config| config.tmdb.as_mut()) {
+                source.trending[0].create_xtream_category = false;
+            }
             let run = Publication::new(&server, &dto);
             let successful_replies = server.replies.lock().unwrap().clone();
-            let initial = file_snapshot(run.directory.path());
             fail_late(&server, failure);
-            assert!(run.publish_catalog(changed_catalog()).await.is_err(), "{policy}/{failure}: first refresh");
-            assert_eq!(file_snapshot(run.directory.path()), initial);
-            assert!(run.context.playlist_state.as_ref().unwrap().data.read().await.is_empty());
-            assert!(run.cache_signature().await.is_empty());
-            let count = server.requests.lock().unwrap().len();
-            assert_eq!(
-                count,
-                if failure == "requests" { 34 } else { 4 },
-                "Trakt and TV are evaluated too, but not published"
-            );
+            assert!(run.publish_catalog(changed_catalog()).await.is_ok(), "{policy}/{failure}");
+            run.assert_regular_publication(&changed_catalog()).await;
+            assert_eq!(server.requests.lock().unwrap().len(), if failure == "requests" { 34 } else { 4 });
             *server.replies.lock().unwrap() = successful_replies;
-            run.publish().await.unwrap();
-            let files = file_snapshot(run.directory.path());
-            assert!(
-                files.keys().any(|path| path.to_string_lossy().contains("epg")),
-                "EPG must be in the retention inventory: {:?}",
-                files.keys().collect::<Vec<_>>()
-            );
-            let cache = run.cache_signature().await;
-            assert!(cache.iter().any(|entry| entry.starts_with("mapping:")));
-            let watch_path = run.directory.path().join("publication.groups.bin");
-            let watch_before: std::collections::BTreeSet<Arc<str>> =
-                tuliprox_core::utils::binary_deserialize(&std::fs::read(&watch_path).unwrap()).unwrap();
-            assert!(!watch_before.is_empty());
+            assert!(run.publish().await.is_ok());
             fail_late(&server, failure);
-            assert!(
-                run.publish_catalog(changed_catalog()).await.is_err(),
-                "{policy}/{failure}: refresh with prior state"
-            );
-            assert_eq!(file_snapshot(run.directory.path()), files, "inventory and bytes, not just file sizes");
-            assert_eq!(run.cache_signature().await, cache, "all cached rows and mapping records, including timestamps");
-            let watch_after: std::collections::BTreeSet<Arc<str>> =
-                tuliprox_core::utils::binary_deserialize(&std::fs::read(&watch_path).unwrap()).unwrap();
-            assert_eq!(watch_before, watch_after);
+            assert!(run.publish_catalog(changed_catalog()).await.is_ok());
+            run.assert_regular_publication(&changed_catalog()).await;
+            assert!(std::fs::read(run.directory.path().join("publication.groups.bin")).is_ok_and(|bytes| {
+                tuliprox_core::utils::binary_deserialize::<std::collections::BTreeSet<Arc<str>>>(&bytes)
+                    .is_ok_and(|groups| groups.iter().any(|group| group.as_ref() == "Movies"))
+            }));
         }
     }
 }
 
 #[tokio::test]
-async fn curation_shared_batch_exhaustion_marks_pending_selectors_required_without_129th_get() {
+async fn curation_shared_batch_exhaustion_continues_publication_without_129th_get() {
     for policy in ["full", "curated"] {
         let server = DiscoveryServer::start().await;
         let dto = target(policy, false, true);
@@ -136,21 +114,16 @@ async fn curation_shared_batch_exhaustion_marks_pending_selectors_required_witho
         selector.create_xtream_category = false;
         source.trending = vec![selector; 129];
         let failing = run.target.clone();
-        let initial = file_snapshot(run.directory.path());
-        assert!(run.publish().await.is_err());
+        assert!(run.publish().await.is_ok());
         assert_eq!(server.requests.lock().unwrap().len(), 128);
-        assert_eq!(file_snapshot(run.directory.path()), initial);
-        assert!(run.cache_signature().await.is_empty());
+        run.assert_regular_publication(&catalog()).await;
         run.target = ordinary;
-        run.publish().await.unwrap();
-        let before = file_snapshot(run.directory.path());
-        let cache = run.cache_signature().await;
+        assert!(run.publish().await.is_ok());
         let requests = server.requests.lock().unwrap().len();
         run.target = failing;
-        assert!(run.publish_catalog(changed_catalog()).await.is_err());
+        assert!(run.publish_catalog(changed_catalog()).await.is_ok());
         assert_eq!(server.requests.lock().unwrap().len() - requests, 128);
-        assert_eq!(file_snapshot(run.directory.path()), before);
-        assert_eq!(run.cache_signature().await, cache);
+        run.assert_regular_publication(&changed_catalog()).await;
     }
 }
 
@@ -235,7 +208,7 @@ async fn curation_full_empty_or_no_match_removes_projections_not_ordinary_catalo
 }
 
 #[tokio::test]
-async fn curation_profile_requires_the_fixture_ca_and_has_no_unconfigured_fallback() {
+async fn curation_profile_requires_the_fixture_ca_and_continues_regular_publication() {
     let server = DiscoveryServer::start().await;
     let mut run = Publication::new(&server, &target("full", false, true));
     run.tmdb_client = tuliprox_core::utils::network::request::create_tmdb_client(&run.context.config)
@@ -244,9 +217,9 @@ async fn curation_profile_requires_the_fixture_ca_and_has_no_unconfigured_fallba
         .resolve("api.themoviedb.org", server.address)
         .build()
         .unwrap();
-    assert!(run.publish().await.is_err(), "untrusted CA fails rather than disabling TLS verification");
+    assert!(run.publish().await.is_ok());
+    run.assert_regular_publication(&catalog()).await;
     assert!(server.requests.lock().unwrap().is_empty());
-    assert!(file_snapshot(run.directory.path()).is_empty());
 }
 
 #[tokio::test]
@@ -266,17 +239,17 @@ async fn curation_production_wiring_does_not_fall_back_to_the_generic_client() {
         library_empty: tuliprox_repository::LibraryEmptyPublication::None,
     };
     let (result, _) = finalize_prepared_target(Arc::clone(&run.context), prepared).await;
-    assert!(result.is_err());
+    assert!(result.is_ok());
     assert!(
         server.requests.lock().unwrap().is_empty(),
         "generic client has the fixture CA and could succeed, but is not used"
     );
-    assert!(run.cache_signature().await.is_empty());
-    assert!(file_snapshot(run.directory.path()).is_empty());
+    assert!(!run.cache_signature().await.is_empty());
+    assert!(!file_snapshot(run.directory.path()).is_empty());
 }
 
 #[tokio::test]
-async fn curation_does_not_authorize_empty_inputs_and_authorized_empty_still_waits_for_all_selectors() {
+async fn curation_failure_respects_empty_input_authorization() {
     for authorized in [false, true] {
         let server = DiscoveryServer::start().await;
         let run = Publication::new(&server, &target("curated", false, true));
@@ -292,7 +265,7 @@ async fn curation_does_not_authorize_empty_inputs_and_authorized_empty_still_wai
         let (result, _) =
             target::finalize_prepared_target_with_tmdb(Arc::clone(&run.context), prepared, Some(&run.tmdb_client))
                 .await;
-        assert_eq!(result.is_err(), authorized);
+        assert_eq!(result.is_err(), authorized, "ordinary M3U persistence still rejects an empty playlist");
         assert_eq!(server.requests.lock().unwrap().len(), if authorized { 3 } else { 0 });
         assert!(file_snapshot(run.directory.path()).is_empty());
         assert!(run.cache_signature().await.is_empty());
