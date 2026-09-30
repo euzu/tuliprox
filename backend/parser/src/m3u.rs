@@ -523,8 +523,12 @@ enum ParseScope {
     Update,
 }
 
-fn apply_flussonic_hls_catchup(header: &mut PlaylistItemHeader, mode: FlussonicHlsCatchup) {
-    if mode != FlussonicHlsCatchup::BoundedArchive || !header.item_type.is_live() {
+fn apply_flussonic_hls_catchup(
+    header: &mut PlaylistItemHeader,
+    options: Option<&tuliprox_core::model::ConfigInputOptions>,
+) {
+    let Some(options) = options else { return };
+    if options.flussonic_hls_catchup != FlussonicHlsCatchup::BoundedArchive || !header.item_type.is_live() {
         return;
     }
     let Some(StreamProperties::Live(live)) = header.additional_properties.as_mut() else { return };
@@ -547,6 +551,7 @@ fn apply_flussonic_hls_catchup(header: &mut PlaylistItemHeader, mode: FlussonicH
     let suffix_start = header.url.find(['?', '#']).unwrap_or(header.url.len());
     let Some(prefix) = header.url[..suffix_start].strip_suffix("mono.m3u8") else { return };
     catchup.source = Some(format!("{prefix}archive-{{utc}}-{{duration}}.m3u8{}", &header.url[suffix_start..]).intern());
+    catchup.flussonic_archive_max_duration_secs = Some(options.flussonic_hls_catchup_max_duration_secs);
 }
 
 pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInput, lines: DynReader, visit: F) {
@@ -647,10 +652,7 @@ async fn consume_m3u_scoped<F: FnMut(PlaylistItem)>(
                     header.group = get_title_group(&header.title);
                 }
             }
-            apply_flussonic_hls_catchup(
-                header,
-                input.options.as_ref().map_or(FlussonicHlsCatchup::Native, |options| options.flussonic_hls_catchup),
-            );
+            apply_flussonic_hls_catchup(header, input.options.as_ref());
             visit(item);
         }
     }
@@ -874,6 +876,9 @@ mod test {
             };
             let catchup = live.catchup.as_ref().ok_or("catchup")?;
             assert_eq!(catchup.mode.as_deref(), Some("fs"));
+            assert_eq!(catchup.flussonic_archive_max_duration_secs, Some(14400));
+            let stored: shared::model::CatchupProperties = serde_json::from_str(&serde_json::to_string(catchup)?)?;
+            assert_eq!(stored, *catchup);
             assert_eq!(
                 catchup.source.as_deref(),
                 Some("https://HOST:8443/prefix/CHANNEL/archive-{utc}-{duration}.m3u8?token=a%2Fb+%3D&auth=secret")
@@ -893,8 +898,35 @@ mod test {
             let longer =
                 resolve_m3u_catchup_url(live_url, catchup, Some("v0=1717200000&v1=7200"))?.ok_or("resolution")?;
             assert_ne!(longer.discriminator, resolved.discriminator);
+            let capped = resolve_m3u_catchup_url(live_url, &stored, Some("utc=1717200000&lutc=1718064000"))?
+                .ok_or("capped resolution")?;
+            assert_eq!(
+                capped.url,
+                "https://HOST:8443/prefix/CHANNEL/archive-1717200000-14400.m3u8?token=a%2Fb+%3D&auth=secret"
+            );
+            assert_eq!(capped.discriminator, "archive|1717200000|14400");
             assert!(resolve_m3u_catchup_url(live_url, catchup, Some("v0=1717200000&v1=0")).is_err());
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bounded_flussonic_import_uses_configured_window() -> Result<(), Box<dyn std::error::Error>> {
+        let dto: shared::model::ConfigInputOptionsDto = serde_json::from_str(
+            r#"{"flussonic_hls_catchup":"bounded_archive","flussonic_hls_catchup_max_duration_secs":1800}"#,
+        )?;
+        let input = ConfigInput { options: Some(tuliprox_core::model::ConfigInputOptions::from(&dto)), ..test_input() };
+        let groups = parse_m3u(
+            &Config::default(),
+            &input,
+            make_reader("#EXTM3U\n#EXTINF:-1 catchup=\"fs\",Channel\nhttps://host/channel/mono.m3u8\n"),
+        )
+        .await;
+        let header = &groups.first().ok_or("group")?.channels.first().ok_or("channel")?.header;
+        let Some(StreamProperties::Live(live)) = &header.additional_properties else {
+            return Err("live properties".into());
+        };
+        assert_eq!(live.catchup.as_ref().ok_or("catchup")?.flussonic_archive_max_duration_secs, Some(1800));
         Ok(())
     }
 
@@ -932,6 +964,7 @@ mod test {
                 return Err("live properties".into());
             };
             assert_eq!(live.catchup.as_ref().and_then(|c| c.source.as_deref()), source, "{attributes} {url}");
+            assert_eq!(live.catchup.as_ref().and_then(|c| c.flussonic_archive_max_duration_secs), None);
         }
         let mut vod = process_header(
             &"input".intern(),
@@ -941,7 +974,7 @@ mod test {
         );
         assert!(!vod.item_type.is_live());
         let original = vod.clone();
-        super::apply_flussonic_hls_catchup(&mut vod, FlussonicHlsCatchup::BoundedArchive);
+        super::apply_flussonic_hls_catchup(&mut vod, input.options.as_ref());
         assert_eq!(vod.url, original.url);
         assert_eq!(vod.additional_properties, original.additional_properties);
         let text = "#EXTM3U\n#EXTINF:-1 catchup=\"fs\",Channel\nhttps://host/channel/mono.m3u8?token=secret\n";

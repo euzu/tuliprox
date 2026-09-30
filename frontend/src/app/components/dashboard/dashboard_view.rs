@@ -1,8 +1,8 @@
 use crate::{
     app::{
         components::{
-            Card, DiscordActionCard, DocumentationActionCard, GithubActionCard, IpinfoActionCard, UserActionCard,
-            VersionActionCard,
+            Card, CreditsActionCard, DiscordActionCard, DocumentationActionCard, GithubActionCard, IpinfoActionCard,
+            UserActionCard, VersionActionCard,
         },
         context::StatusContext,
     },
@@ -31,6 +31,7 @@ pub fn DashboardView() -> Html {
               <Card><DiscordActionCard /></Card>
               <Card><GithubActionCard /></Card>
               <Card><IpinfoActionCard /></Card>
+              <Card><CreditsActionCard /></Card>
             </div>
         </div>
       </div>

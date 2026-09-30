@@ -35,6 +35,9 @@ pub struct CatchupProperties {
     pub catchup_type: Option<Arc<str>>,
     #[serde(default)]
     pub extra_attributes: Vec<CatchupAttribute>,
+    /// Origin window for an automatically generated bounded Flussonic source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flussonic_archive_max_duration_secs: Option<u32>,
 }
 
 impl CatchupProperties {
@@ -46,6 +49,7 @@ impl CatchupProperties {
             && self.correction.is_none()
             && self.catchup_type.is_none()
             && self.extra_attributes.is_empty()
+            && self.flussonic_archive_max_duration_secs.is_none()
     }
 
     /// Prefer `catchup-type` when both fields are present because providers may leave
@@ -1310,6 +1314,63 @@ mod tests {
     fn normalize_episode_title_keeps_existing_episode_code() {
         let normalized = normalize_episode_title(&"S01E02".into(), &"Example Show".into(), 1, 2);
         assert_eq!(normalized.as_ref(), "S01E02");
+    }
+
+    #[test]
+    fn catchup_messagepack_round_trip_preserves_archive_window() -> Result<(), Box<dyn std::error::Error>> {
+        for window in [None, Some(14400)] {
+            let catchup = CatchupProperties {
+                mode: Some("fs".into()),
+                days: Some("10".into()),
+                source: Some("https://host/channel/archive-{utc}-{duration}.m3u8?token=a%2Fb".into()),
+                time: None,
+                correction: Some("0".into()),
+                catchup_type: Some("flussonic".into()),
+                extra_attributes: vec![super::CatchupAttribute { name: "catchup-extra".into(), value: "keep".into() }],
+                flussonic_archive_max_duration_secs: window,
+            };
+            let encoded = rmp_serde::to_vec(&catchup)?;
+            let restored: CatchupProperties = rmp_serde::from_slice(&encoded)?;
+            assert_eq!(restored, catchup);
+
+            let properties = StreamProperties::Live(Box::new(LiveStreamProperties {
+                catchup: Some(catchup),
+                ..LiveStreamProperties::default()
+            }));
+            let encoded = rmp_serde::to_vec(&properties)?;
+            let restored: StreamProperties = rmp_serde::from_slice(&encoded)?;
+            assert_eq!(restored, properties);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn catchup_messagepack_reads_legacy_records_without_changing_encoding() -> Result<(), Box<dyn std::error::Error>> {
+        // The seven-field positional layout is independent of the current struct definition.
+        let legacy_fields = (
+            Some("fs"),
+            Some("10"),
+            Some("https://host/channel/archive-{utc}-{duration}.m3u8?token=a%2Fb"),
+            None::<&str>,
+            Some("0"),
+            Some("flussonic"),
+            vec![("catchup-extra", "keep")],
+        );
+        let encoded = rmp_serde::to_vec(&legacy_fields)?;
+        let restored: CatchupProperties = rmp_serde::from_slice(&encoded)?;
+        assert_eq!(restored.flussonic_archive_max_duration_secs, None);
+        assert_eq!(restored.mode.as_deref(), Some("fs"));
+        assert_eq!(restored.days.as_deref(), Some("10"));
+        assert_eq!(restored.source.as_deref(), legacy_fields.2);
+        assert_eq!(restored.time, None);
+        assert_eq!(restored.correction.as_deref(), Some("0"));
+        assert_eq!(restored.catchup_type.as_deref(), Some("flussonic"));
+        assert_eq!(
+            restored.extra_attributes,
+            vec![super::CatchupAttribute { name: "catchup-extra".into(), value: "keep".into() }]
+        );
+        assert_eq!(rmp_serde::to_vec(&restored)?, encoded);
+        Ok(())
     }
 
     #[test]
