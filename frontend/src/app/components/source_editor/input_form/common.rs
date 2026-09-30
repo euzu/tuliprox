@@ -10,7 +10,10 @@ use super::{
     LABEL_XTREAM_LIVE_STREAM_USE_PREFIX, LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION,
 };
 use crate::{
-    app::components::{Card, FilterInput, KeyValueEditor, RadioButtonGroup, RangeSlider, TitledCard, ToolAction},
+    app::components::{
+        selection_parse_first, Card, DropDownOption, DropDownSelection, FilterInput, KeyValueEditor, RadioButtonGroup,
+        RangeSlider, Select, TitledCard, ToolAction,
+    },
     config_field, config_field_bool, config_field_child, config_field_custom, config_field_optional,
     config_field_optional_hide, edit_field_bool, edit_field_exp_date, edit_field_number_i16,
     edit_field_number_option_u32, edit_field_number_u16, edit_field_number_u32, edit_field_text,
@@ -19,10 +22,11 @@ use crate::{
     utils::content_cluster_presentation,
 };
 use shared::{
-    model::{ConfigInputUpdateQualityDto, InputFetchMethod, XtreamCluster},
+    model::{ConfigInputUpdateQualityDto, FlussonicHlsCatchup, InputFetchMethod, XtreamCluster},
     utils::BATCH_SCHEME_PREFIX,
 };
 use std::{collections::HashMap, rc::Rc};
+use strum::IntoEnumIterator;
 use yew::{component, html, use_memo, Callback, Html, Properties, UseReducerHandle, UseStateHandle};
 
 #[derive(Properties, Clone)]
@@ -254,6 +258,46 @@ fn update_quality_options(
     )
 }
 
+fn flussonic_hls_catchup_options(selected: FlussonicHlsCatchup) -> Rc<Vec<DropDownOption>> {
+    Rc::new(
+        FlussonicHlsCatchup::iter()
+            .map(|value| {
+                let id = value.to_string();
+                DropDownOption::new(&id, html! { &id }, value == selected)
+            })
+            .collect(),
+    )
+}
+
+fn m3u_options(
+    state: &UseReducerHandle<ConfigInputOptionsDtoFormState>,
+    translate: &YewI18n,
+    allow_write: bool,
+    update_quality: Html,
+) -> Html {
+    let label = translate.t("LABEL.FLUSSONIC_HLS_CATCHUP");
+    let catchup = if allow_write {
+        let options = flussonic_hls_catchup_options(state.form.flussonic_hls_catchup);
+        let state = state.clone();
+        config_field_child!(label, "CONFIG_INPUT_OPTIONS.FLUSSONIC_HLS_CATCHUP", {
+            html! { <Select name="flussonic_hls_catchup" multi_select={false} required={true} {options}
+            on_select={Callback::from(move |(_, selection): (String, DropDownSelection)| {
+                if let Some(value) = selection_parse_first::<FlussonicHlsCatchup>(&selection) {
+                    state.dispatch(ConfigInputOptionsFormAction::FlussonicHlsCatchup(value));
+                }
+            })} /> }
+        })
+    } else {
+        config_field_custom!(label, state.form.flussonic_hls_catchup.to_string())
+    };
+    html! {
+        <>
+            <TitledCard title={translate.t(LABEL_LIVE_STREAMS)}>{catchup}</TitledCard>
+            {update_quality}
+        </>
+    }
+}
+
 #[derive(Properties, Clone)]
 pub(super) struct InputOptionsFormProps {
     pub state: UseReducerHandle<ConfigInputOptionsDtoFormState>,
@@ -280,7 +324,7 @@ pub(super) fn InputOptionsForm(props: &InputOptionsFormProps) -> Html {
     };
     let type_options = match (props.allow_write, props.kind) {
         (_, OptionsKind::Basic) => Html::default(),
-        (_, OptionsKind::M3u) => update_quality,
+        (_, OptionsKind::M3u) => m3u_options(&state, &translate, props.allow_write, update_quality),
         (false, OptionsKind::Stalker) => html! {
             <>
             <TitledCard title={translate.t("LABEL.SKIP")}>
@@ -438,6 +482,38 @@ fn xtream_options_editable(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flussonic_catchup_select_exposes_only_supported_values_and_selects_loaded_mode(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for selected in [FlussonicHlsCatchup::Native, FlussonicHlsCatchup::BoundedArchive] {
+            let options = flussonic_hls_catchup_options(selected);
+            let ids: Vec<_> = options.iter().map(|option| option.id.as_str()).collect();
+            assert_eq!(ids, ["native", "bounded_archive"]);
+            let active: Vec<_> = options.iter().filter(|option| option.selected).collect();
+            assert_eq!(active.len(), 1);
+            assert_eq!(active[0].id.parse::<FlussonicHlsCatchup>()?, selected);
+            for option in options.iter() {
+                let mode = option.id.parse::<FlussonicHlsCatchup>()?;
+                assert_eq!(serde_json::to_value(mode)?, serde_json::json!(option.id));
+            }
+        }
+        assert!("other".parse::<FlussonicHlsCatchup>().is_err());
+        for source in [
+            include_str!("../../../../../public/assets/i18n/en.json"),
+            include_str!("../../../../../public/assets/i18n/ru.json"),
+            include_str!("../../../../../public/assets/i18n/ar.json"),
+        ] {
+            let translations: serde_json::Value = serde_json::from_str(source)?;
+            for key in ["/LABEL/FLUSSONIC_HLS_CATCHUP", "/EXPLANATION/CONFIG_INPUT_OPTIONS/FLUSSONIC_HLS_CATCHUP"] {
+                assert!(translations
+                    .pointer(key)
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|text| !text.is_empty()));
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn update_quality_slider_uses_content_taxonomy_without_renaming_config_fields() {

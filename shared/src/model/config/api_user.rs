@@ -58,7 +58,12 @@ pub struct ProxyUserCredentialsDto {
 }
 
 impl ProxyUserCredentialsDto {
-    pub fn prepare(&mut self) -> Result<(), TuliproxError> {
+    pub fn prepare(&mut self) -> Result<(), TuliproxError> { self.prepare_with_templates(None) }
+
+    pub fn prepare_with_templates(
+        &mut self,
+        templates: Option<&[crate::model::PatternTemplate]>,
+    ) -> Result<(), TuliproxError> {
         self.trim();
         if let Some(na) = &mut self.network_access {
             na.prepare()?;
@@ -67,8 +72,7 @@ impl ProxyUserCredentialsDto {
             }
         }
         if let Some(filter) = &self.filter {
-            // Templates are not available in api-proxy; fail fast on syntax errors.
-            crate::foundation::get_filter(filter, None)
+            crate::foundation::get_filter(filter, templates)
                 .map_err(|err| TuliproxError::ProxyUser(format!("Invalid filter for user {}: {err}", self.username)))?;
         }
         Ok(())
@@ -163,6 +167,22 @@ impl Default for ProxyUserCredentialsDto {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepare_with_templates_preserves_filter_references() {
+        let mut template = crate::model::PatternTemplate {
+            name: "groups".to_owned(),
+            value: crate::model::TemplateValue::Single("Sports".to_owned()),
+            placeholder: String::new(),
+        };
+        template.prepare();
+        let raw = r#"Group = "!groups!""#;
+        let mut user = ProxyUserCredentialsDto { filter: Some(raw.to_owned()), ..Default::default() };
+        assert!(user.prepare_with_templates(Some(&[template])).is_ok());
+        assert_eq!(user.filter.as_deref(), Some(raw));
+        assert!(user.prepare().is_err());
+        assert!(serde_json::to_string(&user).is_ok_and(|json| json.contains("!groups!")));
+    }
 
     #[test]
     fn proxy_user_credentials_output_clusters_none_preserved() {

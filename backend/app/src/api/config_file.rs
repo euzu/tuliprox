@@ -1,12 +1,9 @@
 use crate::{
     api::model::{update_app_state_config, update_app_state_sources, AppState, EventMessage},
-    config_loader::{
-        prepare_sources_batch, read_sources_file, read_sources_file_from_path_with_templates, read_templates,
-        resolve_template_and_mapping_paths,
-    },
+    config_loader::{prepare_sources_batch, read_sources_file_from_path_with_templates},
     model::{CompiledMappings, Config, ProcessTargets, SourcesConfig},
     utils,
-    utils::{read_mappings_file_unprepared, read_mappings_file_with_templates},
+    utils::read_mappings_file_with_templates,
 };
 use log::{debug, error, info, warn};
 use shared::{
@@ -40,12 +37,13 @@ struct PreparedSourcesReload {
     sources: SourcesConfig,
     mapping: Option<PreparedMappingsReload>,
     sources_file: String,
+    templates: Option<Vec<PatternTemplate>>,
 }
 
 /// What dependent reload (if any) was prepared alongside a config change.
 enum PreparedFollowUp {
     Unchanged,
-    Mapping(Option<PreparedMappingsReload>),
+    Mapping(Option<PreparedMappingsReload>, Option<Vec<PatternTemplate>>),
     Sources(PreparedSourcesReload),
 }
 
@@ -110,24 +108,7 @@ impl ConfigFile {
         paths: &ConfigPaths,
         config: &Config,
     ) -> Result<Option<Vec<PatternTemplate>>, TuliproxError> {
-        let sources_inline_templates =
-            read_sources_file(paths.sources_file_path.as_str(), false, false, None, None).await?.templates;
-
-        // Use robust fallbacks for mapping and template paths
-        let (effective_template_path, effective_mapping_path) =
-            resolve_template_and_mapping_paths(paths, config.template_path.as_deref(), config.mapping_path.as_deref());
-
-        let mapping_inline_templates = read_mappings_file_unprepared(effective_mapping_path.as_ref(), false)?
-            .map(|(_, mapping)| mapping)
-            .and_then(|mapping| mapping.mappings.templates);
-
-        let template_bundle = read_templates(
-            Some(effective_template_path.as_ref()),
-            true,
-            sources_inline_templates.as_deref(),
-            mapping_inline_templates.as_deref(),
-        )?;
-        Ok(template_bundle.prepared)
+        crate::config_loader::load_prepared_global_templates(paths, config).await
     }
 
     // -----------------------------------------------------------------
@@ -171,6 +152,18 @@ impl ConfigFile {
         }
     }
 
+    fn apply_user_filter_templates(
+        app_state: &Arc<AppState>,
+        templates: Option<Vec<PatternTemplate>>,
+    ) -> Result<(), TuliproxError> {
+        if let Some(current) = app_state.app_config.api_proxy.load_full() {
+            let mut config = (*current).clone();
+            config.set_templates(templates.map(Arc::from));
+            app_state.app_config.set_api_proxy(config)?;
+        }
+        Ok(())
+    }
+
     fn load_mapping_with_templates(
         app_state: &Arc<AppState>,
         prepared_templates: Option<&[PatternTemplate]>,
@@ -183,7 +176,8 @@ impl ConfigFile {
 
     async fn load_mapping(app_state: &Arc<AppState>) -> Result<(), TuliproxError> {
         let prepared_templates = Self::load_prepared_global_templates(app_state).await?;
-        Self::load_mapping_with_templates(app_state, prepared_templates.as_deref())
+        Self::load_mapping_with_templates(app_state, prepared_templates.as_deref())?;
+        Self::apply_user_filter_templates(app_state, prepared_templates)
     }
 
     // -----------------------------------------------------------------
@@ -209,7 +203,7 @@ impl ConfigFile {
         let sources: SourcesConfig = SourcesConfig::try_from(sources_dto)?;
         let prepared_mapping =
             Self::prepare_mapping_reload(paths.mapping_file_path.as_deref(), prepared_templates.as_deref())?;
-        Ok(PreparedSourcesReload { sources, mapping: prepared_mapping, sources_file })
+        Ok(PreparedSourcesReload { sources, mapping: prepared_mapping, sources_file, templates: prepared_templates })
     }
 
     /// Apply a fully-prepared sources reload to app state (infallible under normal conditions).
@@ -222,6 +216,7 @@ impl ConfigFile {
 
         update_app_state_sources(app_state, prepared.sources, Some(validated_forced)).await?;
         Self::apply_mapping_reload(app_state, prepared.mapping);
+        Self::apply_user_filter_templates(app_state, prepared.templates)?;
         info!("Loaded sources file {}", prepared.sources_file);
         Ok(())
     }
@@ -313,7 +308,7 @@ impl ConfigFile {
                 effective_paths.mapping_file_path.as_deref(),
                 prepared_templates.as_deref(),
             )?;
-            PreparedFollowUp::Mapping(prepared)
+            PreparedFollowUp::Mapping(prepared, prepared_templates)
         } else {
             PreparedFollowUp::Unchanged
         };
@@ -336,9 +331,9 @@ impl ConfigFile {
 
         let follow_up_result: Result<(), TuliproxError> = match follow_up {
             PreparedFollowUp::Unchanged => Ok(()),
-            PreparedFollowUp::Mapping(prepared) => {
+            PreparedFollowUp::Mapping(prepared, templates) => {
                 Self::apply_mapping_reload(app_state, prepared);
-                Ok(())
+                Self::apply_user_filter_templates(app_state, templates)
             }
             PreparedFollowUp::Sources(prepared) => Self::apply_sources_reload(app_state, prepared).await,
         };

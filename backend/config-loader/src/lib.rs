@@ -87,9 +87,12 @@ pub async fn read_api_proxy_config(
 ) -> Result<Option<ApiProxyConfig>, TuliproxError> {
     let paths = config.paths.load();
     let api_proxy_file_path = paths.api_proxy_file_path.as_str();
-    if let Some(api_proxy_dto) = read_api_proxy_file(api_proxy_file_path, resolve_env)? {
+    let templates = read_user_filter_templates(config).await?;
+    if let Some(api_proxy_dto) =
+        read_api_proxy_file_with_templates(api_proxy_file_path, resolve_env, templates.as_deref())?
+    {
         let mut errors = vec![];
-        let mut api_proxy: ApiProxyConfig = ApiProxyConfig::from(&api_proxy_dto);
+        let mut api_proxy = ApiProxyConfig::from_dto_with_templates(&api_proxy_dto, templates.map(Arc::from));
         apply_authoritative_plans(config, &mut api_proxy, resolve_env).await;
         migrate_api_user(&mut api_proxy, config, &mut errors).await;
         if !errors.is_empty() {
@@ -385,7 +388,8 @@ pub async fn read_app_config_dto(
         mapping.mappings.templates = None;
     }
 
-    let api_proxy = match read_api_proxy_file(api_proxy_file, resolve_env) {
+    let api_proxy = match read_api_proxy_file_with_templates(api_proxy_file, resolve_env, prepared_templates.as_deref())
+    {
         Ok(api_proxy) => api_proxy,
         Err(err) => {
             // Surface the fault instead of silently returning a config without api_proxy
@@ -614,9 +618,47 @@ pub async fn read_initial_app_config(
     Ok(app_config)
 }
 
+pub async fn read_user_filter_templates(config: &AppConfig) -> Result<Option<Vec<PatternTemplate>>, TuliproxError> {
+    let paths = config.paths.load();
+    let cfg = config.config.load();
+    load_prepared_global_templates(&paths, &cfg).await
+}
+
+pub async fn load_prepared_global_templates(
+    paths: &ConfigPaths,
+    config: &Config,
+) -> Result<Option<Vec<PatternTemplate>>, TuliproxError> {
+    let sources_inline_templates =
+        parse_sources_file_from_path(Path::new(&paths.sources_file_path), true).await?.templates;
+
+    // Use robust fallbacks for mapping and template paths
+    let (effective_template_path, effective_mapping_path) =
+        resolve_template_and_mapping_paths(paths, config.template_path.as_deref(), config.mapping_path.as_deref());
+
+    let mapping_inline_templates = read_mappings_file_unprepared(effective_mapping_path.as_ref(), true)?
+        .map(|(_, mapping)| mapping)
+        .and_then(|mapping| mapping.mappings.templates);
+
+    let template_bundle = read_templates(
+        Some(effective_template_path.as_ref()),
+        true,
+        sources_inline_templates.as_deref(),
+        mapping_inline_templates.as_deref(),
+    )?;
+    Ok(template_bundle.prepared)
+}
+
 pub fn read_api_proxy_file(
     api_proxy_file: &str,
     resolve_env: bool,
+) -> Result<Option<ApiProxyConfigDto>, TuliproxError> {
+    read_api_proxy_file_with_templates(api_proxy_file, resolve_env, None)
+}
+
+pub fn read_api_proxy_file_with_templates(
+    api_proxy_file: &str,
+    resolve_env: bool,
+    templates: Option<&[PatternTemplate]>,
 ) -> Result<Option<ApiProxyConfigDto>, TuliproxError> {
     open_file(&std::path::PathBuf::from(api_proxy_file)).map_or(Ok(None), |file| {
         let maybe_api_proxy: Result<ApiProxyConfigDto, _> =
@@ -625,7 +667,7 @@ pub fn read_api_proxy_file(
             Ok(mut api_proxy_dto) => {
                 if resolve_env {
                     // A recoverable error keeps the last good config alive during hot reload
-                    if let Err(err) = api_proxy_dto.prepare() {
+                    if let Err(err) = api_proxy_dto.prepare_with_templates(templates) {
                         return Err(TuliproxError::Config(format!("can't read api-proxy-config file: {err}")));
                     }
                 }
@@ -636,27 +678,8 @@ pub fn read_api_proxy_file(
     })
 }
 
-pub async fn read_api_proxy(config: &AppConfig, resolve_env: bool) -> Option<ApiProxyConfig> {
-    let paths = config.paths.load();
-    match read_api_proxy_file(paths.api_proxy_file_path.as_str(), resolve_env) {
-        Ok(Some(api_proxy_dto)) => {
-            let mut errors = vec![];
-            let mut api_proxy: ApiProxyConfig = ApiProxyConfig::from(&api_proxy_dto);
-            apply_authoritative_plans(config, &mut api_proxy, resolve_env).await;
-            migrate_api_user(&mut api_proxy, config, &mut errors).await;
-            if !errors.is_empty() {
-                for error in errors {
-                    error!("{error}");
-                }
-            }
-            Some(api_proxy)
-        }
-        Ok(None) => None,
-        Err(err) => {
-            error!("Failed to read Api-Proxy file {err}");
-            None
-        }
-    }
+pub async fn read_api_proxy(config: &AppConfig, resolve_env: bool) -> Result<Option<ApiProxyConfig>, TuliproxError> {
+    read_api_proxy_config(config, resolve_env).await
 }
 
 async fn write_config_file<T>(
@@ -1303,6 +1326,128 @@ mod tests {
     };
     use tempfile::tempdir;
     use tuliprox_core::utils::resolve_env_var;
+
+    #[tokio::test]
+    async fn api_proxy_template_failure_propagates_and_preserves_active_config(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+
+        let dir = tempdir()?;
+        let sources_path = dir.path().join("source.yml");
+        let template_path = dir.path().join("template.yml");
+        let proxy_path = dir.path().join("api-proxy.yml");
+        fs::write(&sources_path, "inputs: []\nsources: []\n").await?;
+        fs::write(&template_path, "templates: [").await?;
+        fs::write(&proxy_path, serde_saphyr::to_string(&ApiProxyConfigDto::default())?).await?;
+        let paths = ConfigPaths {
+            home_path: String::new(),
+            config_path: dir.path().to_string_lossy().into_owned(),
+            storage_path: String::new(),
+            config_file_path: String::new(),
+            sources_file_path: sources_path.to_string_lossy().into_owned(),
+            mapping_file_path: None,
+            mapping_files_used: None,
+            template_file_path: Some(template_path.to_string_lossy().into_owned()),
+            template_files_used: None,
+            api_proxy_file_path: proxy_path.to_string_lossy().into_owned(),
+            custom_stream_response_path: None,
+        };
+        assert!(read_api_proxy_file_with_templates(&paths.api_proxy_file_path, false, None)?.is_some());
+        let active = Arc::new(ApiProxyConfig::default());
+        let config = AppConfig {
+            config: Arc::new(ArcSwap::from_pointee(Config::default())),
+            sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
+            hdhomerun: Arc::new(ArcSwapAny::default()),
+            api_proxy: Arc::new(ArcSwapAny::from(Some(Arc::clone(&active)))),
+            paths: Arc::new(ArcSwap::from_pointee(paths)),
+            file_locks: Arc::new(FileLockManager::default()),
+            custom_stream_response: Arc::new(ArcSwapAny::default()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            media_tools: Arc::new(MediaToolCapabilities::new()),
+        };
+        for resolve_env in [false, true] {
+            assert!(read_api_proxy(&config, resolve_env).await.is_err());
+            assert!(read_api_proxy_config(&config, resolve_env).await.is_err());
+            let Some(retained) = config.api_proxy.load_full() else {
+                return Err("active API-proxy configuration was cleared".into());
+            };
+            assert!(Arc::ptr_eq(&active, &retained));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn user_filter_templates_resolve_env_in_all_sources() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempdir()?;
+        let sources_path = dir.path().join("source.yml");
+        let mapping_path = dir.path().join("mapping.yml");
+        let template_path = dir.path().join("template.yml");
+        tokio::fs::write(
+            &sources_path,
+            r#"
+inputs: []
+sources: []
+templates:
+  - name: source_group
+    value: '${env:PATH}'
+"#,
+        )
+        .await?;
+        tokio::fs::write(
+            &mapping_path,
+            r#"
+mappings:
+  templates:
+    - name: mapping_group
+      value: '${env:PATH}'
+  mapping: []
+"#,
+        )
+        .await?;
+        tokio::fs::write(
+            &template_path,
+            r#"
+templates:
+  - name: file_group
+    value: '${env:PATH}'
+  - name: combined
+    value: '!source_group!'
+"#,
+        )
+        .await?;
+        let paths = shared::model::ConfigPaths {
+            home_path: String::new(),
+            config_path: dir.path().to_string_lossy().into_owned(),
+            storage_path: String::new(),
+            config_file_path: String::new(),
+            sources_file_path: sources_path.to_string_lossy().into_owned(),
+            mapping_file_path: Some(mapping_path.to_string_lossy().into_owned()),
+            mapping_files_used: None,
+            template_file_path: Some(template_path.to_string_lossy().into_owned()),
+            template_files_used: None,
+            api_proxy_file_path: String::new(),
+            custom_stream_response_path: None,
+        };
+        let Some(templates) =
+            super::load_prepared_global_templates(&paths, &tuliprox_core::model::Config::default()).await?
+        else {
+            return Err("missing templates".into());
+        };
+        let expected = std::env::var("PATH")?;
+        for name in ["source_group", "mapping_group", "file_group", "combined"] {
+            let Some(template) = templates.iter().find(|template| template.name == name) else {
+                return Err(format!("missing template {name}").into());
+            };
+            assert_eq!(template.value.to_string(), expected);
+            let raw = format!(r#"Group = "!{name}!""#);
+            let mut credential =
+                shared::model::ProxyUserCredentialsDto { filter: Some(raw.clone()), ..Default::default() };
+            credential.prepare_with_templates(Some(&templates))?;
+            assert_eq!(credential.filter.as_deref(), Some(raw.as_str()));
+        }
+        Ok(())
+    }
 
     #[tokio::test]
     async fn curation_item_limits_survive_source_load_sanitize_save_reload() {

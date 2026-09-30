@@ -2,8 +2,8 @@ use crate::{
     app::{
         components::{
             convert_bool_to_chip_style, make_translated_header_callback, menu_item::MenuItem, popup_menu::PopupMenu,
-            AppIcon, CellValue, Chip, HideContent, MaxConnections, PagedTable, ProxyTypeView, RevealContent,
-            TableDefinition, UserStatus, UserlistContext, UserlistPage, PAGE_SIZES, TP_PAGE_SIZE_KEY,
+            AppIcon, CellValue, Chip, FilterView, HideContent, MaxConnections, PagedTable, ProxyTypeView,
+            RevealContent, TableDefinition, UserStatus, UserlistContext, UserlistPage, PAGE_SIZES, TP_PAGE_SIZE_KEY,
         },
         context::{target_users_to_api_proxy_users, TargetUser},
         ConfigContext, TargetUserList,
@@ -17,13 +17,14 @@ use crate::{
 };
 use shared::{
     defaults::default_page_size,
+    foundation::get_filter,
     model::{permission::Permission, SortOrder},
     utils::{unix_ts_to_str, Substring},
 };
 use std::{cmp::Ordering, collections::HashSet, rc::Rc, str::FromStr};
 use yew::{platform::spawn_local, prelude::*};
 
-const HEADERS: [&str; 19] = [
+const HEADERS: [&str; 20] = [
     "LABEL.EMPTY",
     "LABEL.ENABLED",
     "LABEL.STATUS",
@@ -43,6 +44,7 @@ const HEADERS: [&str; 19] = [
     "LABEL.CREATED_AT",
     "LABEL.EXP_DATE",
     "LABEL.COMMENT",
+    "LABEL.FILTER",
 ];
 
 fn get_cell_value(user: &TargetUser, col: usize) -> CellValue<'_> {
@@ -146,7 +148,18 @@ pub fn UserTable(props: &UserTableProps) -> Html {
 
     let render_header_cell = make_translated_header_callback(translate.clone(), &HEADERS);
 
+    let templates = use_memo(config_ctx.clone(), |ctx| {
+        ctx.config.as_ref().and_then(|config| {
+            config
+                .templates
+                .as_ref()
+                .map(|definition| definition.templates.clone())
+                .or_else(|| config.sources.templates.clone())
+        })
+    });
+
     let render_data_cell = {
+        let templates = templates.clone();
         let translator = translate.clone();
         let popup_onclick = handle_popup_onclick.clone();
         let target_names = target_names.clone();
@@ -188,6 +201,13 @@ pub fn UserTable(props: &UserTableProps) -> Html {
                     18 => dto.credentials.comment.as_ref()
                         .map_or_else(|| html! {},
                                      |comment| html! { <RevealContent preview={Some(html! {comment.substring(0, 50)})}>{comment}</RevealContent> }),
+                    19 => dto.credentials.filter.as_ref().map_or_else(|| html! {}, |filter| {
+                        let content = match get_filter(filter, templates.as_deref()) {
+                            Ok(parsed) => html! { <FilterView pretty={true} filter={Some(parsed)} /> },
+                            Err(_) => html! { <pre class="tp__filter__code">{filter}</pre> },
+                        };
+                        html! { <RevealContent>{content}</RevealContent> }
+                    }),
                     _ => html! {""},
                 }
             },
@@ -235,26 +255,29 @@ pub fn UserTable(props: &UserTableProps) -> Html {
         // Dereference the UseStateHandle to pass the actual value as dependency.
         // Yew 0.22 compares UseStateHandle by identity, not value, so use_memo
         // would never detect value changes if we passed the handle directly.
-        use_memo(((*user_list).clone(), current_page, page_size_value), move |(targets, current_page, page_size)| {
-            let items = if targets.as_ref().is_none_or(|l| l.is_empty()) {
-                None
-            } else {
-                targets.as_ref().map(|list| {
-                    let start = ((current_page - 1) as usize) * (*page_size as usize);
-                    let page_items =
-                        list.iter().skip(start).take(*page_size as usize).cloned().collect::<Vec<Rc<TargetUser>>>();
-                    Rc::new(page_items)
-                })
-            };
-            TableDefinition::<TargetUser> {
-                items,
-                num_cols,
-                is_sortable,
-                on_sort,
-                render_header_cell: render_header_cell_cb,
-                render_data_cell: render_data_cell_cb,
-            }
-        })
+        use_memo(
+            ((*user_list).clone(), current_page, page_size_value, (*templates).clone()),
+            move |(targets, current_page, page_size, _templates)| {
+                let items = if targets.as_ref().is_none_or(|l| l.is_empty()) {
+                    None
+                } else {
+                    targets.as_ref().map(|list| {
+                        let start = ((current_page - 1) as usize) * (*page_size as usize);
+                        let page_items =
+                            list.iter().skip(start).take(*page_size as usize).cloned().collect::<Vec<Rc<TargetUser>>>();
+                        Rc::new(page_items)
+                    })
+                };
+                TableDefinition::<TargetUser> {
+                    items,
+                    num_cols,
+                    is_sortable,
+                    on_sort,
+                    render_header_cell: render_header_cell_cb,
+                    render_data_cell: render_data_cell_cb,
+                }
+            },
+        )
     };
 
     let handle_page_change = {

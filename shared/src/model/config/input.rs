@@ -265,6 +265,31 @@ impl InputFetchMethod {
     pub fn is_default(value: &InputFetchMethod) -> bool { matches!(value, Self::GET) }
 }
 
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    PartialEq,
+    Eq,
+    strum_macros::Display,
+    strum_macros::EnumString,
+    strum_macros::EnumIter,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum FlussonicHlsCatchup {
+    #[default]
+    Native,
+    BoundedArchive,
+}
+
+impl FlussonicHlsCatchup {
+    pub fn is_native(value: &Self) -> bool { matches!(value, Self::Native) }
+}
+
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -283,6 +308,8 @@ pub struct ConfigInputOptionsDto {
     pub xtream_live_stream_without_extension: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub disable_hls_streaming: bool,
+    #[serde(default, skip_serializing_if = "FlussonicHlsCatchup::is_native")]
+    pub flussonic_hls_catchup: FlussonicHlsCatchup,
     #[serde(default, skip_serializing_if = "is_false")]
     pub user_agent_stream_index: bool,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -332,6 +359,7 @@ impl Default for ConfigInputOptionsDto {
             xtream_live_stream_use_prefix: default_xtream_live_stream_use_prefix(),
             xtream_live_stream_without_extension: false,
             disable_hls_streaming: false,
+            flussonic_hls_catchup: FlussonicHlsCatchup::Native,
             user_agent_stream_index: false,
             resolve_tmdb: false,
             resolve_background: default_resolve_background(),
@@ -361,6 +389,7 @@ impl ConfigInputOptionsDto {
             && self.xtream_live_stream_use_prefix
             && !self.xtream_live_stream_without_extension
             && !self.disable_hls_streaming
+            && FlussonicHlsCatchup::is_native(&self.flussonic_hls_catchup)
             && !self.user_agent_stream_index
             && !self.resolve_tmdb
             && self.resolve_background
@@ -385,6 +414,7 @@ impl ConfigInputOptionsDto {
         self.xtream_live_stream_use_prefix = default_as_true();
         self.xtream_live_stream_without_extension = false;
         self.disable_hls_streaming = false;
+        self.flussonic_hls_catchup = FlussonicHlsCatchup::Native;
         self.user_agent_stream_index = false;
         self.resolve_tmdb = false;
         self.resolve_background = default_as_true();
@@ -2097,6 +2127,24 @@ mod tests {
 
         assert_eq!(options.update_quality, ConfigInputUpdateQualityDto::default());
         assert!(options.is_empty());
+    }
+
+    #[test]
+    fn flussonic_hls_catchup_round_trips_and_cleans() -> Result<(), serde_json::Error> {
+        let defaults: ConfigInputOptionsDto = serde_json::from_str("{}")?;
+        assert_eq!(defaults.flussonic_hls_catchup, super::FlussonicHlsCatchup::Native);
+        assert!(serde_json::to_value(defaults)?.get("flussonic_hls_catchup").is_none());
+        let mut options: ConfigInputOptionsDto =
+            serde_json::from_str(r#"{"flussonic_hls_catchup":"bounded_archive"}"#)?;
+        assert_eq!(options.flussonic_hls_catchup, super::FlussonicHlsCatchup::BoundedArchive);
+        assert!(!options.is_empty());
+        assert_eq!(serde_json::to_value(&options)?, serde_json::json!({"flussonic_hls_catchup": "bounded_archive"}));
+        assert_eq!(serde_json::from_str::<ConfigInputOptionsDto>(&serde_json::to_string(&options)?)?, options);
+        assert!(serde_json::from_str::<ConfigInputOptionsDto>(r#"{"flussonic_hls_catchup":"unknown"}"#).is_err());
+        options.clean();
+        assert_eq!(options.flussonic_hls_catchup, super::FlussonicHlsCatchup::Native);
+        assert!(options.is_empty());
+        Ok(())
     }
 
     #[test]

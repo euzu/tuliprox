@@ -20,6 +20,11 @@ impl UserService {
         Self { user_path: concat_path_leading_slash(&base_href, "api/v1/user"), event_service }
     }
 
+    pub async fn validate_filter(&self, filter: Option<String>) -> Result<(), Error> {
+        let path = concat_path(&self.user_path, "filter/validate");
+        request_post::<Option<String>, ()>(&path, filter, None, None).await.map(|_| ())
+    }
+
     pub async fn create_user(&self, target: String, user: ProxyUserCredentialsDto) -> Result<(), Error> {
         let path = concat_path(&self.user_path, &target);
         match request_post::<ProxyUserCredentialsDto, ()>(&path, user, None, None).await {

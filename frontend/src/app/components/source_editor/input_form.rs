@@ -34,7 +34,7 @@ use shared::{
     error::TuliproxError,
     model::{
         ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigInputStagedDto, ConfigInputUpdateQualityDto,
-        ConfigProviderDto, EpgSmartMatchConfigDto, EpgSourceDto, InputFetchMethod, InputType,
+        ConfigProviderDto, EpgSmartMatchConfigDto, EpgSourceDto, FlussonicHlsCatchup, InputFetchMethod, InputType,
         MediaServerInputConfigDto, MediaServerLibrarySelector, OnConnectErrorPolicy, ProviderUrlSelectionPolicy,
         StagedInputType, StalkerDeviceProfileDto, StalkerInputConfigDto,
     },
@@ -366,6 +366,7 @@ generate_form_reducer!(
       XtreamLiveStreamUsePrefix => xtream_live_stream_use_prefix: bool,
       XtreamLiveStreamWithoutExtension => xtream_live_stream_without_extension: bool,
       DisableHlsStreaming => disable_hls_streaming: bool,
+      FlussonicHlsCatchup => flussonic_hls_catchup: FlussonicHlsCatchup,
       UserAgentStreamIndex => user_agent_stream_index: bool,
       ResolveTmdb => resolve_tmdb: bool,
       ResolveBackground => resolve_background: bool,
@@ -1523,6 +1524,28 @@ mod tests {
         assert!(state.modified());
         let applied = state.form.clone();
         assert_eq!(applied.update_quality, updated);
+    }
+
+    #[test]
+    fn flussonic_catchup_reducer_loads_changes_and_serializes_select_values() -> Result<(), serde_json::Error> {
+        let loaded = ConfigInputOptionsDto {
+            flussonic_hls_catchup: FlussonicHlsCatchup::BoundedArchive,
+            user_agent_stream_index: true,
+            ..ConfigInputOptionsDto::default()
+        };
+        let state = Rc::new(ConfigInputOptionsDtoFormState { form: ConfigInputOptionsDto::default(), modified: false })
+            .reduce(ConfigInputOptionsFormAction::SetAll(loaded.clone()));
+        assert_eq!(state.form, loaded);
+        assert!(!state.modified());
+        for value in [FlussonicHlsCatchup::Native, FlussonicHlsCatchup::BoundedArchive] {
+            let changed = state.clone().reduce(ConfigInputOptionsFormAction::FlussonicHlsCatchup(value));
+            assert!(changed.modified());
+            assert!(changed.form.user_agent_stream_index);
+            let saved = serde_json::to_string(changed.data())?;
+            let reloaded: ConfigInputOptionsDto = serde_json::from_str(&saved)?;
+            assert_eq!(reloaded.flussonic_hls_catchup, value);
+        }
+        Ok(())
     }
 
     #[test]

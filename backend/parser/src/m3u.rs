@@ -3,8 +3,8 @@ use regex::Regex;
 use shared::{
     defaults::default_supported_video_extensions,
     model::{
-        CatchupAttribute, CatchupProperties, LiveStreamProperties, PlaylistGroup, PlaylistItem, PlaylistItemHeader,
-        PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties,
+        CatchupAttribute, CatchupProperties, FlussonicHlsCatchup, LiveStreamProperties, PlaylistGroup, PlaylistItem,
+        PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties,
         SeriesStreamDetailSeasonProperties, SeriesStreamProperties, StreamProperties, XtreamCluster,
     },
     utils::{
@@ -523,6 +523,32 @@ enum ParseScope {
     Update,
 }
 
+fn apply_flussonic_hls_catchup(header: &mut PlaylistItemHeader, mode: FlussonicHlsCatchup) {
+    if mode != FlussonicHlsCatchup::BoundedArchive || !header.item_type.is_live() {
+        return;
+    }
+    let Some(StreamProperties::Live(live)) = header.additional_properties.as_mut() else { return };
+    let Some(catchup) = live.catchup.as_mut() else { return };
+    if catchup.source.is_some()
+        || !catchup.mode.as_deref().is_some_and(|mode| mode.eq_ignore_ascii_case("fs"))
+        || catchup.native_flussonic_player_mode() != Some("flussonic")
+    {
+        return;
+    }
+    let Ok(url) = url::Url::parse(&header.url) else { return };
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return;
+    }
+    let Some(channel_path) = url.path().strip_suffix("/mono.m3u8") else { return };
+    if channel_path.rsplit('/').next().is_none_or(str::is_empty) {
+        return;
+    }
+    // Replace only the filename so signed queries and the original live URL remain byte-for-byte intact.
+    let suffix_start = header.url.find(['?', '#']).unwrap_or(header.url.len());
+    let Some(prefix) = header.url[..suffix_start].strip_suffix("mono.m3u8") else { return };
+    catchup.source = Some(format!("{prefix}archive-{{utc}}-{{duration}}.m3u8{}", &header.url[suffix_start..]).intern());
+}
+
 pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInput, lines: DynReader, visit: F) {
     let _ = consume_m3u_scoped(cfg, input, lines, visit, ParseScope::Direct).await;
 }
@@ -621,6 +647,10 @@ async fn consume_m3u_scoped<F: FnMut(PlaylistItem)>(
                     header.group = get_title_group(&header.title);
                 }
             }
+            apply_flussonic_hls_catchup(
+                header,
+                input.options.as_ref().map_or(FlussonicHlsCatchup::Native, |options| options.flussonic_hls_catchup),
+            );
             visit(item);
         }
     }
@@ -820,6 +850,111 @@ mod test {
             password: Some("pass".to_string()),
             ..ConfigInput::default()
         }
+    }
+
+    #[tokio::test]
+    async fn bounded_flussonic_import_reuses_explicit_source_export_and_resolution(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::m3u_format::{build_m3u_catchup_rewrite, resolve_m3u_catchup_url};
+        use shared::model::{ConfigInputOptionsDto, FlussonicHlsCatchup};
+        use tuliprox_core::model::ConfigInputOptions;
+
+        let dto: ConfigInputOptionsDto = serde_json::from_str(r#"{"flussonic_hls_catchup":"bounded_archive"}"#)?;
+        let input = ConfigInput { options: Some(ConfigInputOptions::from(&dto)), ..test_input() };
+        assert_eq!(input.options.as_ref().map(|o| o.flussonic_hls_catchup), Some(FlussonicHlsCatchup::BoundedArchive));
+        let live_url = "https://HOST:8443/prefix/CHANNEL/mono.m3u8?token=a%2Fb+%3D&auth=secret";
+        let text = format!("#EXTM3U\n#EXTINF:-1 catchup=\"fs\",Channel\n{live_url}\n");
+        let direct = parse_m3u(&Config::default(), &input, make_reader(&text)).await;
+        let update = super::parse_m3u_for_update(&Config::default(), &input, make_reader(&text)).await?;
+        for groups in [direct, update] {
+            let header = &groups.first().ok_or("group")?.channels.first().ok_or("channel")?.header;
+            assert_eq!(header.url.as_ref(), live_url);
+            let Some(StreamProperties::Live(live)) = header.additional_properties.as_ref() else {
+                return Err("live properties".into());
+            };
+            let catchup = live.catchup.as_ref().ok_or("catchup")?;
+            assert_eq!(catchup.mode.as_deref(), Some("fs"));
+            assert_eq!(
+                catchup.source.as_deref(),
+                Some("https://HOST:8443/prefix/CHANNEL/archive-{utc}-{duration}.m3u8?token=a%2Fb+%3D&auth=secret")
+            );
+            let rewrite = build_m3u_catchup_rewrite(&[7; 16], "http://proxy", "alice", 7, 42, live_url, catchup)?
+                .ok_or("rewrite")?;
+            assert_eq!(rewrite.mode.as_ref(), "default");
+            assert!(rewrite.source.contains("v0={utc}&v1={duration}"));
+            assert!(!rewrite.source.contains("secret"));
+            let resolved =
+                resolve_m3u_catchup_url(live_url, catchup, Some("v0=1717200000&v1=3600"))?.ok_or("resolution")?;
+            assert_eq!(
+                resolved.url,
+                "https://HOST:8443/prefix/CHANNEL/archive-1717200000-3600.m3u8?token=a%2Fb+%3D&auth=secret"
+            );
+            assert_eq!(resolved.discriminator, "archive|1717200000|3600");
+            let longer =
+                resolve_m3u_catchup_url(live_url, catchup, Some("v0=1717200000&v1=7200"))?.ok_or("resolution")?;
+            assert_ne!(longer.discriminator, resolved.discriminator);
+            assert!(resolve_m3u_catchup_url(live_url, catchup, Some("v0=1717200000&v1=0")).is_err());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bounded_flussonic_import_preserves_non_matching_entries() -> Result<(), Box<dyn std::error::Error>> {
+        use shared::model::{ConfigInputOptionsDto, FlussonicHlsCatchup};
+        use tuliprox_core::model::ConfigInputOptions;
+
+        let bounded = ConfigInputOptionsDto {
+            flussonic_hls_catchup: FlussonicHlsCatchup::BoundedArchive,
+            ..ConfigInputOptionsDto::default()
+        };
+        let input = ConfigInput { options: Some(ConfigInputOptions::from(&bounded)), ..test_input() };
+        for (attributes, url, source) in [
+            (
+                "catchup=\"fs\" catchup-source=\"https://other/archive-{utc}-{duration}.m3u8\"",
+                "https://host/channel/mono.m3u8",
+                Some("https://other/archive-{utc}-{duration}.m3u8"),
+            ),
+            ("catchup=\"fs\" catchup-type=\"flussonic-ts\"", "https://host/channel/mono.m3u8", None),
+            ("catchup=\"fs\" catchup-type=\"shift\"", "https://host/channel/mono.m3u8", None),
+            ("catchup=\"append\"", "https://host/channel/mono.m3u8", None),
+            ("catchup=\"fs\"", "https://host/channel/index.m3u8", None),
+            ("catchup=\"fs\"", "https://host/channel/mpegts", None),
+            ("catchup=\"fs\"", "https://host/channel/index.ts", None),
+            ("catchup=\"fs\"", "https://host/mono.m3u8", None),
+            ("catchup=\"fs\"", "https://host//mono.m3u8", None),
+            ("catchup=\"fs\"", "not-a-url/mono.m3u8", None),
+        ] {
+            let text = format!("#EXTM3U\n#EXTINF:-1 {attributes},Channel\n{url}\n");
+            let groups = parse_m3u(&Config::default(), &input, make_reader(&text)).await;
+            let header = &groups.first().ok_or("group")?.channels.first().ok_or("channel")?.header;
+            assert_eq!(header.url.as_ref(), url);
+            let Some(StreamProperties::Live(live)) = header.additional_properties.as_ref() else {
+                return Err("live properties".into());
+            };
+            assert_eq!(live.catchup.as_ref().and_then(|c| c.source.as_deref()), source, "{attributes} {url}");
+        }
+        let mut vod = process_header(
+            &"input".intern(),
+            &["m3u8".to_owned()],
+            "#EXTINF:-1 catchup=\"fs\",Movie",
+            "https://host/channel/mono.m3u8".to_owned(),
+        );
+        assert!(!vod.item_type.is_live());
+        let original = vod.clone();
+        super::apply_flussonic_hls_catchup(&mut vod, FlussonicHlsCatchup::BoundedArchive);
+        assert_eq!(vod.url, original.url);
+        assert_eq!(vod.additional_properties, original.additional_properties);
+        let text = "#EXTM3U\n#EXTINF:-1 catchup=\"fs\",Channel\nhttps://host/channel/mono.m3u8?token=secret\n";
+        for options in [None, Some(ConfigInputOptions::from(&ConfigInputOptionsDto::default()))] {
+            let native = ConfigInput { options, ..test_input() };
+            let groups = parse_m3u(&Config::default(), &native, make_reader(text)).await;
+            let header = &groups.first().ok_or("group")?.channels.first().ok_or("channel")?.header;
+            let Some(StreamProperties::Live(live)) = header.additional_properties.as_ref() else {
+                return Err("live properties".into());
+            };
+            assert!(live.catchup.as_ref().is_some_and(|c| c.source.is_none()));
+        }
+        Ok(())
     }
 
     #[tokio::test]
