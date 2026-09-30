@@ -678,34 +678,8 @@ pub fn read_api_proxy_file_with_templates(
     })
 }
 
-pub async fn read_api_proxy(config: &AppConfig, resolve_env: bool) -> Option<ApiProxyConfig> {
-    let paths = config.paths.load();
-    let templates = match read_user_filter_templates(config).await {
-        Ok(templates) => templates,
-        Err(err) => {
-            error!("Failed to load user filter templates: {err}");
-            return None;
-        }
-    };
-    match read_api_proxy_file_with_templates(paths.api_proxy_file_path.as_str(), resolve_env, templates.as_deref()) {
-        Ok(Some(api_proxy_dto)) => {
-            let mut errors = vec![];
-            let mut api_proxy = ApiProxyConfig::from_dto_with_templates(&api_proxy_dto, templates.map(Arc::from));
-            apply_authoritative_plans(config, &mut api_proxy, resolve_env).await;
-            migrate_api_user(&mut api_proxy, config, &mut errors).await;
-            if !errors.is_empty() {
-                for error in errors {
-                    error!("{error}");
-                }
-            }
-            Some(api_proxy)
-        }
-        Ok(None) => None,
-        Err(err) => {
-            error!("Failed to read Api-Proxy file {err}");
-            None
-        }
-    }
+pub async fn read_api_proxy(config: &AppConfig, resolve_env: bool) -> Result<Option<ApiProxyConfig>, TuliproxError> {
+    read_api_proxy_config(config, resolve_env).await
 }
 
 async fn write_config_file<T>(
@@ -1352,6 +1326,56 @@ mod tests {
     };
     use tempfile::tempdir;
     use tuliprox_core::utils::resolve_env_var;
+
+    #[tokio::test]
+    async fn api_proxy_template_failure_propagates_and_preserves_active_config(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+
+        let dir = tempdir()?;
+        let sources_path = dir.path().join("source.yml");
+        let template_path = dir.path().join("template.yml");
+        let proxy_path = dir.path().join("api-proxy.yml");
+        fs::write(&sources_path, "inputs: []\nsources: []\n").await?;
+        fs::write(&template_path, "templates: [").await?;
+        fs::write(&proxy_path, serde_saphyr::to_string(&ApiProxyConfigDto::default())?).await?;
+        let paths = ConfigPaths {
+            home_path: String::new(),
+            config_path: dir.path().to_string_lossy().into_owned(),
+            storage_path: String::new(),
+            config_file_path: String::new(),
+            sources_file_path: sources_path.to_string_lossy().into_owned(),
+            mapping_file_path: None,
+            mapping_files_used: None,
+            template_file_path: Some(template_path.to_string_lossy().into_owned()),
+            template_files_used: None,
+            api_proxy_file_path: proxy_path.to_string_lossy().into_owned(),
+            custom_stream_response_path: None,
+        };
+        assert!(read_api_proxy_file_with_templates(&paths.api_proxy_file_path, false, None)?.is_some());
+        let active = Arc::new(ApiProxyConfig::default());
+        let config = AppConfig {
+            config: Arc::new(ArcSwap::from_pointee(Config::default())),
+            sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
+            hdhomerun: Arc::new(ArcSwapAny::default()),
+            api_proxy: Arc::new(ArcSwapAny::from(Some(Arc::clone(&active)))),
+            paths: Arc::new(ArcSwap::from_pointee(paths)),
+            file_locks: Arc::new(FileLockManager::default()),
+            custom_stream_response: Arc::new(ArcSwapAny::default()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            media_tools: Arc::new(MediaToolCapabilities::new()),
+        };
+        for resolve_env in [false, true] {
+            assert!(read_api_proxy(&config, resolve_env).await.is_err());
+            assert!(read_api_proxy_config(&config, resolve_env).await.is_err());
+            let Some(retained) = config.api_proxy.load_full() else {
+                return Err("active API-proxy configuration was cleared".into());
+            };
+            assert!(Arc::ptr_eq(&active, &retained));
+        }
+        Ok(())
+    }
 
     #[tokio::test]
     async fn user_filter_templates_resolve_env_in_all_sources() -> Result<(), Box<dyn std::error::Error>> {
