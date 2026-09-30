@@ -672,7 +672,9 @@ fn append_m3u_catchup_attributes(
     }
     append_catchup_attribute(line, "catchup-time", catchup.time.as_ref());
     append_catchup_attribute(line, "catchup-correction", catchup.correction.as_ref());
-    append_catchup_attribute(line, "catchup-type", catchup.catchup_type.as_ref());
+    if !catchup.is_flussonic() || rewritten_mode.is_none_or(|mode| mode.is_empty()) {
+        append_catchup_attribute(line, "catchup-type", catchup.catchup_type.as_ref());
+    }
     append_extra_catchup_attributes(line, &catchup.extra_attributes);
 }
 
@@ -2460,6 +2462,35 @@ mod tests {
         assert!(output.contains(r#"catchup="default""#));
         assert!(output.contains(r#"catchup-source="http://proxy.example/m3u-catchup/token?v0={utc}""#));
         assert!(!output.contains(r#"catchup-source="?offset=-${offset}""#));
+    }
+
+    #[test]
+    fn m3u_to_m3u_flussonic_source_override_uses_rewritten_mode() {
+        let mut item = M3uPlaylistItem::from(&PlaylistItem { header: PlaylistItemHeader::default() });
+        item.url = "https://provider.example/channel/mono.m3u8?token=secret".intern();
+        item.t_stream_url = "http://proxy.example/m3u-stream/alice/pass/42/index.m3u8".intern();
+        item.t_catchup_mode = Some("default".intern());
+        item.t_catchup_source = Some("http://proxy.example/m3u-catchup/token?v0={utc}&v1={duration}".intern());
+        item.additional_properties = Some(StreamProperties::Live(Box::new(LiveStreamProperties {
+            catchup: Some(CatchupProperties {
+                mode: Some("fs".intern()),
+                catchup_type: Some("flussonic".intern()),
+                source: Some("https://provider.example/channel/archive-{utc}-{duration}.m3u8?token=secret".intern()),
+                ..CatchupProperties::default()
+            }),
+            ..LiveStreamProperties::default()
+        })));
+        let output = item.to_m3u(None, false);
+        assert!(output.contains(r#"catchup="default""#));
+        assert!(output.contains("v0={utc}&v1={duration}"));
+        assert!(!output.contains("catchup-type="));
+        assert!(!output.contains("token=secret"));
+        assert!(output.ends_with("/42/index.m3u8"));
+        item.t_catchup_mode = None;
+        item.t_catchup_source = None;
+        let native = item.to_m3u(None, false);
+        assert!(native.contains(r#"catchup-type="flussonic""#));
+        assert!(!native.contains("catchup-source="));
     }
 
     #[test]
