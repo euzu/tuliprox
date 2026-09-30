@@ -491,7 +491,7 @@ pub(crate) async fn finalize_prepared_target<E: EventSink + Clone + 'static, M: 
     ctx: Arc<PlaylistProcessingContext<E, M>>,
     prepared: PreparedTarget,
 ) -> (Result<(), Vec<TuliproxError>>, Vec<TuliproxError>) {
-    // No generic-client fallback: unavailable transport participates in the same admission gate.
+    // Keep TMDB transport settings independent of the generic client.
     let tmdb_client = build_target_tmdb_client(
         &prepared.target,
         || tuliprox_core::utils::network::request::create_tmdb_client(&ctx.config),
@@ -528,13 +528,7 @@ pub(super) async fn finalize_prepared_target_with_tmdb<E: EventSink + Clone + 's
     }
 
     let eligible_catalog = prepare_eligible_catalog(target, new_playlist, &mut step);
-    let views = match prepare_target_playlist_views(&ctx.client, tmdb_client, target, eligible_catalog).await {
-        Ok(views) => views,
-        Err(error) => {
-            step.stop("Curation failed; skipping persist to preserve finalized artifacts");
-            return (Err(vec![error]), errors);
-        }
-    };
+    let views = prepare_target_playlist_views(&ctx.client, tmdb_client, target, eligible_catalog).await;
     if views.base.is_empty()
         && views.xtream.is_none()
         && views.publication_plan == PlaylistPublicationPlan::Ordinary
@@ -932,13 +926,13 @@ pub(crate) async fn prepare_target_playlist_views(
     tmdb_client: Option<&reqwest::Client>,
     target: &ConfigTarget,
     playlist: Vec<PlaylistGroup>,
-) -> Result<TargetPlaylistViews, TuliproxError> {
+) -> TargetPlaylistViews {
     let Some(config) = target.effective_curation() else {
-        return Ok(TargetPlaylistViews {
+        return TargetPlaylistViews {
             base: playlist,
             xtream: None,
             publication_plan: PlaylistPublicationPlan::Ordinary,
-        });
+        };
     };
 
     let outcome = evaluate_curation(client, tmdb_client, &playlist, &target.name, &config).await;
@@ -950,14 +944,16 @@ pub(super) fn curation_playlist_views(
     playlist: Vec<PlaylistGroup>,
     config: &CurationConfig,
     outcome: CurationRunOutcome,
-) -> Result<TargetPlaylistViews, TuliproxError> {
+) -> TargetPlaylistViews {
     match outcome {
-        CurationRunOutcome::NotConfigured => Ok(TargetPlaylistViews {
-            base: playlist,
-            xtream: None,
-            publication_plan: PlaylistPublicationPlan::Ordinary,
-        }),
-        CurationRunOutcome::Failed(failure) => Err(curation_failure_error(&target.name, &failure)),
+        CurationRunOutcome::NotConfigured => {
+            TargetPlaylistViews { base: playlist, xtream: None, publication_plan: PlaylistPublicationPlan::Ordinary }
+        }
+        CurationRunOutcome::Failed(failure) => {
+            warn_curation_failure(&target.name, &failure);
+            // Discovery is optional; unavailable selections must not suppress the source catalog or EPG.
+            TargetPlaylistViews { base: playlist, xtream: None, publication_plan: PlaylistPublicationPlan::Ordinary }
+        }
         CurationRunOutcome::Complete(evaluation) => {
             let views = build_curated_playlist_views(
                 playlist,
@@ -972,11 +968,11 @@ pub(super) fn curation_playlist_views(
                 evaluation.memberships.len(),
                 views.xtream.as_deref().map_or(0, <[PlaylistGroup]>::len)
             );
-            Ok(views)
+            views
         }
     }
 }
-fn curation_failure_error(target_name: &str, failure: &CurationFailure) -> TuliproxError {
+fn warn_curation_failure(target_name: &str, failure: &CurationFailure) {
     let mut complete = 0usize;
     let mut incomplete = 0usize;
     let mut unavailable = 0usize;
@@ -987,9 +983,9 @@ fn curation_failure_error(target_name: &str, failure: &CurationFailure) -> Tulip
             SelectorOutcome::Unavailable { .. } => unavailable += 1,
         }
     }
-    TuliproxError::RepositoryPlaylist(format!(
-        "Target '{target_name}' curation refresh failed (complete selectors: {complete}, incomplete: {incomplete}, unavailable: {unavailable}); existing finalized artifacts were retained"
-    ))
+    warn!(
+        "Target '{target_name}' curation refresh failed (complete selectors: {complete}, incomplete: {incomplete}, unavailable: {unavailable}); continuing with the regular catalog"
+    );
 }
 
 fn item_subject_uuid(item: &PlaylistItem) -> UUIDType {
