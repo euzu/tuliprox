@@ -7078,6 +7078,252 @@ async fn hls_cache_archive_entry_uses_distinct_identity_and_preserves_origin() -
     Ok(())
 }
 
+struct BoundedFlussonicFixture {
+    _temp: tempfile::TempDir,
+    origin: TestSegmentOrigin,
+    app_state: Arc<AppState>,
+    requests: Arc<std::sync::Mutex<Vec<String>>>,
+    catchup_template: String,
+    live_uri: String,
+}
+
+async fn bounded_flussonic_request(
+    app_state: Arc<AppState>,
+    url: &str,
+) -> Result<Response<Body>, Box<dyn std::error::Error>> {
+    let parsed = url::Url::parse(url)?;
+    let mut uri = parsed.path().to_owned();
+    if let Some(query) = parsed.query() {
+        uri.push('?');
+        uri.push_str(query);
+    }
+    let router = crate::api::endpoints::m3u_api::m3u_api_register().merge(hls_api_register()).with_state(app_state);
+    let mut request = Request::builder().uri(uri).body(Body::empty())?;
+    request.extensions_mut().insert(ConnectInfo(test_addr()));
+    Ok(router.oneshot(request).await?)
+}
+
+async fn bounded_flussonic_origin(
+    missing: bool,
+    requests: &Arc<std::sync::Mutex<Vec<String>>>,
+) -> Result<TestSegmentOrigin, Box<dyn std::error::Error>> {
+    let recorded = Arc::clone(requests);
+    let base = Arc::new(std::sync::OnceLock::<String>::new());
+    let origin_base = Arc::clone(&base);
+    let segment = Arc::<[u8]>::from(
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test/fixtures/hls/channel_unavailable.ts"))
+            .as_slice(),
+    );
+    let origin = spawn_test_binary_origin(Arc::new(move |path| {
+        if let Ok(mut paths) = recorded.lock() {
+            paths.push(path.to_owned());
+        }
+        let resource = path.split('?').next().unwrap_or(path);
+        if resource == "/input.m3u" {
+            let Some(host) = origin_base.get() else {
+                return TestBinaryOriginResponse::new(StatusCode::INTERNAL_SERVER_ERROR, Arc::from(&b"origin"[..]));
+            };
+            let text = format!(
+                "#EXTM3U\n#EXTINF:-1 catchup=\"fs\" catchup-days=\"7\",Channel\n{host}/channel/mono.m3u8?token=a%2Fb\n"
+            );
+            return TestBinaryOriginResponse::new(StatusCode::OK, Arc::from(text.into_bytes()));
+        }
+        if resource.ends_with(".ts")
+            && (resource.starts_with("/channel/archive-") || resource.starts_with("/channel/live/"))
+        {
+            return TestBinaryOriginResponse::new(StatusCode::OK, Arc::clone(&segment));
+        }
+        let media_directory = if resource == "/channel/mono.m3u8" {
+            Some("live")
+        } else {
+            resource
+                .strip_prefix("/channel/")
+                .and_then(|file| file.strip_suffix(".m3u8"))
+                .filter(|file| file.starts_with("archive-"))
+        };
+        if let Some(directory) = media_directory {
+            if missing && directory != "live" {
+                return TestBinaryOriginResponse::new(StatusCode::NOT_FOUND, Arc::from(&b"unavailable"[..]));
+            }
+            let mut manifest = String::from_utf8_lossy(&regression_origin_manifest(123, 6)).into_owned();
+            for sequence in 123..129 {
+                manifest =
+                    manifest.replace(&format!("{sequence}.ts"), &format!("{directory}/{sequence}.ts?token=a%2Fb"));
+            }
+            if directory != "live" {
+                manifest.push_str("#EXT-X-ENDLIST\n");
+            }
+            return TestBinaryOriginResponse::new(StatusCode::OK, Arc::from(manifest.into_bytes()));
+        }
+        TestBinaryOriginResponse::new(StatusCode::NOT_FOUND, Arc::from(&b"unexpected origin path"[..]))
+    }))
+    .await;
+    base.set(origin.base_url.clone()).map_err(|_| "origin already configured")?;
+    Ok(origin)
+}
+
+async fn bounded_flussonic_hls_fixture(missing: bool) -> Result<BoundedFlussonicFixture, Box<dyn std::error::Error>> {
+    use shared::model::{ConfigInputOptionsDto, FlussonicHlsCatchup, ProxyType};
+    use tuliprox_core::model::ConfigInputOptions;
+    use tuliprox_repository::{ensure_target_storage_path, m3u_write_playlist};
+
+    let temp = tempfile::tempdir()?;
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let origin = bounded_flussonic_origin(missing, &requests).await?;
+    let options: ConfigInputOptionsDto = serde_json::from_str(r#"{"flussonic_hls_catchup":"bounded_archive"}"#)?;
+    assert_eq!(options.flussonic_hls_catchup, FlussonicHlsCatchup::BoundedArchive);
+    let input = ConfigInput {
+        id: 1,
+        name: Arc::from("bounded-flussonic"),
+        input_type: InputType::M3u,
+        url: format!("{}/input.m3u", origin.base_url),
+        enabled: true,
+        options: Some(ConfigInputOptions::from(&options)),
+        ..ConfigInput::default()
+    };
+    let mut target = test_m3u_hls_share_target();
+    target.name = "default".to_owned();
+    let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+    enable_hls_cache(&app_state);
+    let mut config = (*app_state.app_config.config.load_full()).clone();
+    config.storage_dir = temp.path().to_string_lossy().into_owned();
+    config.custom_stream_response_enabled = false;
+    app_state.app_config.config.store(Arc::new(config));
+    configure_default_test_server(&app_state);
+    store_test_sources_with_target(&app_state, input.clone(), target.clone());
+    let mut user = ProxyUserCredentials::default();
+    user.username = "hls-user".to_owned();
+    user.password = "hls-pass".to_owned();
+    user.proxy = ProxyType::Reverse(None);
+    let mut proxy = app_state.app_config.api_proxy.load_full().ok_or("api proxy")?.as_ref().clone();
+    proxy.user = vec![TargetUser { target: target.name.clone(), credentials: vec![Arc::new(user)] }];
+    app_state.app_config.api_proxy.store(Some(Arc::new(proxy)));
+    let (mut groups, errors) = crate::iptv::m3u::download_m3u_playlist(
+        &app_state.app_config,
+        &reqwest::Client::new(),
+        &app_state.app_config.config.load_full(),
+        &input,
+    )
+    .await;
+    assert_eq!(errors.len(), 0, "import errors: {errors:?}");
+    let item = groups.first_mut().and_then(|group| group.channels.first_mut()).ok_or("imported item")?;
+    item.header.virtual_id = VirtualId::new(12345);
+    assert_eq!(item.header.url.as_ref(), format!("{}/channel/mono.m3u8?token=a%2Fb", origin.base_url));
+    let target_path = ensure_target_storage_path(&app_state.app_config.config.load(), &target.name).await?;
+    m3u_write_playlist(
+        &app_state.app_config,
+        &target,
+        target.get_m3u_output().ok_or("M3U output")?,
+        &target_path,
+        &groups,
+        false,
+    )
+    .await?;
+    let response = bounded_flussonic_request(
+        Arc::clone(&app_state),
+        "http://proxy/get.php?username=hls-user&password=hls-pass&type=m3u_plus",
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let export = String::from_utf8(response_body(response).await.to_vec())?;
+    let catchup_template = export
+        .split("catchup-source=\"")
+        .nth(1)
+        .and_then(|tail| tail.split('"').next())
+        .ok_or("exported catchup source")?
+        .to_owned();
+    assert!(export.contains("catchup=\"default\""));
+    assert!(!export.contains("a%2Fb"));
+    let live_uri =
+        export.lines().find(|line| !line.starts_with('#') && !line.is_empty()).ok_or("exported live URL")?.to_owned();
+    Ok(BoundedFlussonicFixture { _temp: temp, origin, app_state, requests, catchup_template, live_uri })
+}
+
+async fn bounded_flussonic_hls_entry(
+    fixture: &BoundedFlussonicFixture,
+    start: i64,
+    duration: i64,
+) -> Result<Response<Body>, Box<dyn std::error::Error>> {
+    let url =
+        fixture.catchup_template.replace("{utc}", &start.to_string()).replace("{duration}", &duration.to_string());
+    bounded_flussonic_request(Arc::clone(&fixture.app_state), &url).await
+}
+
+#[tokio::test]
+async fn bounded_flussonic_hls_preserves_master_child_segments_and_duration_identity(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = bounded_flussonic_hls_fixture(false).await?;
+    let mut identities = std::collections::HashSet::new();
+    for (start, duration) in [(1_784_898_000, 3600), (1_784_898_000, 7200), (1_784_898_600, 3600)] {
+        let entry = bounded_flussonic_hls_entry(&fixture, start, duration).await?;
+        assert_eq!(entry.status(), StatusCode::OK);
+        let (_, uri) = single_variant_master_playlist(entry).await;
+        let proxy_id = ProxySessionId(proxy_session_id_from_variant_uri(&uri).to_owned());
+        assert!(identities.insert(proxy_id.clone()));
+        let lease_id = HlsAccessLeaseId(access_lease_id_from_variant_uri(&uri).to_owned());
+        let lease = fixture
+            .app_state
+            .hls_proxy
+            .access_lease_response_snapshot(&lease_id, &proxy_id, super::current_time_millis())
+            .await
+            .ok_or("lease")?;
+        let archive = format!("archive-{start}-{duration}");
+        let expected_origin = format!("{}/channel/{archive}.m3u8?token=a%2Fb", fixture.origin.base_url);
+        assert_eq!(lease.archive_origin_url.as_deref(), Some(expected_origin.as_str()));
+        assert!(lease.user_session_token.contains(&format!("|archive|{start}|{duration}|hls-cache|")));
+        let media = get_response(Arc::clone(&fixture.app_state), &uri, None).await;
+        assert_eq!(media.status(), StatusCode::OK);
+        let body = String::from_utf8(response_body(media).await.to_vec())?;
+        let segment_uri =
+            body.lines().find(|line| line.starts_with("/hls/") && path_has_extension(line, "ts")).ok_or("segment")?;
+        let segment = get_response(Arc::clone(&fixture.app_state), segment_uri, None).await;
+        assert_eq!(segment.status(), StatusCode::OK);
+        assert_ne!(response_body(segment).await, bytes::Bytes::new());
+        let reload = get_response(Arc::clone(&fixture.app_state), &uri, None).await;
+        assert_eq!(reload.status(), StatusCode::OK);
+        let reload_body = String::from_utf8(response_body(reload).await.to_vec())?;
+        assert_eq!(manifest_media_sequence(&body), manifest_media_sequence(&reload_body));
+        let paths = fixture.requests.lock().map_err(|_| "request log")?;
+        assert!(paths.iter().any(|p| p == &format!("/channel/{archive}.m3u8?token=a%2Fb")));
+        assert!(paths.iter().any(|p| p.starts_with(&format!("/channel/{archive}/")) && p.ends_with(".ts?token=a%2Fb")));
+        assert!(!paths.iter().any(|p| p.contains("timeshift_abs") || p.contains("mono.m3u8")));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn bounded_flussonic_hls_404_is_unavailable_without_live_or_timeshift_fallback(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = bounded_flussonic_hls_fixture(true).await?;
+    let entry = bounded_flussonic_hls_entry(&fixture, 1_784_898_000, 3600).await?;
+    assert_eq!(entry.status(), StatusCode::OK);
+    let (_, uri) = single_variant_master_playlist(entry).await;
+    let response = get_response(Arc::clone(&fixture.app_state), &uri, None).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(!response.headers().contains_key(header::LOCATION));
+    {
+        let paths = fixture.requests.lock().map_err(|_| "request log")?;
+        assert!(paths.iter().any(|p| p == "/channel/archive-1784898000-3600.m3u8?token=a%2Fb"));
+        assert!(!paths.iter().any(|p| p.contains("timeshift_abs") || p.contains("mono.m3u8")));
+    }
+    let live = bounded_flussonic_request(Arc::clone(&fixture.app_state), &fixture.live_uri).await?;
+    assert_eq!(live.status(), StatusCode::OK);
+    let (_, live_manifest) = single_variant_master_playlist(live).await;
+    let media = get_response(Arc::clone(&fixture.app_state), &live_manifest, None).await;
+    assert_eq!(media.status(), StatusCode::OK);
+    let body = String::from_utf8(response_body(media).await.to_vec())?;
+    let segment_uri =
+        body.lines().find(|line| line.starts_with("/hls/") && path_has_extension(line, "ts")).ok_or("live segment")?;
+    let segment = get_response(Arc::clone(&fixture.app_state), segment_uri, None).await;
+    assert_eq!(segment.status(), StatusCode::OK);
+    assert_ne!(response_body(segment).await, bytes::Bytes::new());
+    let paths = fixture.requests.lock().map_err(|_| "request log")?;
+    assert!(paths.iter().any(|p| p == "/channel/mono.m3u8?token=a%2Fb"));
+    assert!(paths.iter().any(|p| p.starts_with("/channel/live/") && p.ends_with(".ts?token=a%2Fb")));
+    assert!(!paths.iter().any(|p| p.contains("timeshift_abs")));
+    Ok(())
+}
+
 #[tokio::test]
 async fn shared_hls_request_flow_keeps_media_playlist_lease_bound_across_reloads() {
     let fixture = shared_request_flow_fixture().await;

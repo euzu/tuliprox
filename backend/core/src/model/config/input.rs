@@ -10,9 +10,9 @@ use shared::{
     foundation::Filter,
     model::{
         ClusterFlags, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigInputStagedDto,
-        InputFetchMethod, InputType, MediaServerCatalogConfigDto, MediaServerImagePolicy, MediaServerInputConfigDto,
-        MediaServerLibrarySelector, MediaServerPlaybackConfigDto, StagedInputType, StalkerAuthMode,
-        StalkerDeviceProfileDto, StalkerEndpointPreference, StalkerInputConfigDto, StalkerMagPreset,
+        FlussonicHlsCatchup, InputFetchMethod, InputType, MediaServerCatalogConfigDto, MediaServerImagePolicy,
+        MediaServerInputConfigDto, MediaServerLibrarySelector, MediaServerPlaybackConfigDto, StagedInputType,
+        StalkerAuthMode, StalkerDeviceProfileDto, StalkerEndpointPreference, StalkerInputConfigDto, StalkerMagPreset,
     },
     utils::{
         get_credentials_from_url, get_credentials_from_url_str, is_non_blank_optional_string,
@@ -59,6 +59,7 @@ create_bitset!(
 pub struct ConfigInputOptions {
     pub flags: ConfigInputFlagsSet,
     pub update_quality: ConfigInputUpdateQuality,
+    pub flussonic_hls_catchup: FlussonicHlsCatchup,
     pub resolve_delay: u16,
     pub probe_delay: u16,
     pub probe_live_interval_hours: u32,
@@ -105,6 +106,7 @@ impl From<&ConfigInputOptionsDto> for ConfigInputOptions {
         Self {
             flags,
             update_quality: ConfigInputUpdateQuality::from(&dto.update_quality),
+            flussonic_hls_catchup: dto.flussonic_hls_catchup,
             resolve_delay: dto.resolve_delay,
             probe_delay: dto.probe_delay,
             probe_live_interval_hours: dto.probe_live_interval_hours,

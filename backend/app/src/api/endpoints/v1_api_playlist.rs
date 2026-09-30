@@ -105,6 +105,7 @@ fn create_config_input_for_m3u(url: &str) -> ConfigInput {
             probe_live_interval_hours: 120,
             resolve_filter: None,
             probe_filter: None,
+            flussonic_hls_catchup: shared::model::FlussonicHlsCatchup::Native,
         }),
         ..Default::default()
     }
@@ -127,6 +128,7 @@ fn create_config_input_for_xtream(username: &str, password: &str, host: &str) ->
             probe_live_interval_hours: 120,
             resolve_filter: None,
             probe_filter: None,
+            flussonic_hls_catchup: shared::model::FlussonicHlsCatchup::Native,
         }),
         ..Default::default()
     }
@@ -3428,6 +3430,7 @@ mod tests {
                 probe_live_interval_hours: 120,
                 resolve_filter: None,
                 probe_filter: None,
+                flussonic_hls_catchup: shared::model::FlussonicHlsCatchup::Native,
             }),
             stalker: Some(crate::model::StalkerInputConfig {
                 device: None,
@@ -3575,6 +3578,7 @@ mod tests {
                 probe_live_interval_hours: 120,
                 resolve_filter: None,
                 probe_filter: None,
+                flussonic_hls_catchup: shared::model::FlussonicHlsCatchup::Native,
             }),
             stalker: Some(crate::model::StalkerInputConfig {
                 device: None,
