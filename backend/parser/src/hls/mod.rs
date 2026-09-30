@@ -103,6 +103,24 @@ fn preserve_archive_start_query(base: &Url, mut target: Url) -> Url {
     target
 }
 
+fn is_bounded_flussonic_hls_url(url: &Url) -> bool {
+    url.path_segments().and_then(Iterator::last).is_some_and(|file| {
+        matches!(crate::m3u_format::parse_flussonic_archive_file(file),
+            Some(crate::m3u_format::FlussonicArchiveKind::Archive { duration, extension: ".m3u8", .. })
+                if duration.parse::<u64>().is_ok_and(|duration| duration > 0))
+    })
+}
+
+fn preserve_bounded_archive_query(base: &Url, mut target: Url) -> Url {
+    // Child URIs can supply their own credentials; inherit only missing query keys.
+    for (key, value) in base.query_pairs() {
+        if !target.query_pairs().any(|(target_key, _)| target_key.eq_ignore_ascii_case(&key)) {
+            target.query_pairs_mut().append_pair(&key, &value);
+        }
+    }
+    target
+}
+
 fn preserve_token_query(base: &Url, mut target: Url) -> Url {
     let target_has_token = target.query_pairs().any(|(key, _)| key.eq_ignore_ascii_case("token"));
     if target_has_token {
@@ -123,9 +141,19 @@ fn has_same_origin(left: &Url, right: &Url) -> bool {
 }
 
 /// Rewrites an HLS URI relative to a base playlist URL.
-/// Absolute URIs are returned unchanged.
+/// Bounded Flussonic archives inherit source queries for resources on the same origin.
+/// Other absolute URIs are returned unchanged.
 pub fn rewrite_hls_url<'a>(base: &'a str, reference: &'a str) -> Cow<'a, str> {
-    if Url::parse(reference).is_ok() {
+    rewrite_hls_url_with_archive_context(base, reference, false)
+}
+
+fn rewrite_hls_url_with_archive_context<'a>(base: &'a str, reference: &'a str, bounded_archive: bool) -> Cow<'a, str> {
+    if let Ok(target) = Url::parse(reference) {
+        if let Ok(base_url) = Url::parse(base) {
+            if (bounded_archive || is_bounded_flussonic_hls_url(&base_url)) && has_same_origin(&base_url, &target) {
+                return Cow::Owned(preserve_bounded_archive_query(&base_url, target).into());
+            }
+        }
         return Cow::Borrowed(reference);
     }
 
@@ -138,7 +166,11 @@ pub fn rewrite_hls_url<'a>(base: &'a str, reference: &'a str) -> Cow<'a, str> {
         |mut target| {
             let is_same_origin = has_same_origin(&target, &base_url);
             if is_same_origin {
-                target = preserve_token_query(&base_url, target);
+                target = if bounded_archive || is_bounded_flussonic_hls_url(&base_url) {
+                    preserve_bounded_archive_query(&base_url, target)
+                } else {
+                    preserve_token_query(&base_url, target)
+                };
             }
             let is_same_origin_child_playlist = is_same_origin
                 && extract_extension_from_url(target.as_str())
@@ -152,13 +184,40 @@ pub fn rewrite_hls_url<'a>(base: &'a str, reference: &'a str) -> Cow<'a, str> {
     )
 }
 
+fn bounded_archive_session_virtual_id(token: &str, username: &str) -> Option<u32> {
+    let payload = token.strip_prefix("m3u-catchup|").or_else(|| token.strip_prefix("catchup|"))?;
+    let (fingerprint, subject) = payload.split_once('|')?;
+    // Match the authenticated username before parsing fields; usernames may contain separators.
+    let archive = subject.strip_prefix(username)?.strip_prefix('|')?;
+    let mut fields = archive.split('|');
+    let virtual_id = fields.next()?.parse::<u32>().ok()?;
+    if fingerprint.is_empty() || username.is_empty() || fields.next()? != "archive" {
+        return None;
+    }
+    fields.next()?.parse::<u64>().ok()?;
+    if fields.next()?.parse::<u64>().ok()? == 0 {
+        return None;
+    }
+    match (fields.next(), fields.next()) {
+        (None | Some(".m3u8" | ".ts"), None) => Some(virtual_id),
+        _ => None,
+    }
+}
+
+fn rewrite_hls_resource_url<'a>(props: &'a RewriteHlsProps, reference: &'a str, username: &str) -> Cow<'a, str> {
+    // The range identity survives child playlists whose filenames no longer identify the archive.
+    let bounded_archive = props.user_token.and_then(|token| bounded_archive_session_virtual_id(token, username))
+        == Some(props.virtual_id);
+    rewrite_hls_url_with_archive_context(&props.hls_url, reference, bounded_archive)
+}
+
 fn rewrite_uri_attrib<'a>(line: &'a str, props: &RewriteHlsProps, user: &ProxyUserCredentials) -> Cow<'a, str> {
     let Some(caps) = CONSTANTS.re_hls_uri.captures(line) else {
         return Cow::Borrowed(line);
     };
 
     let uri = &caps[1];
-    let rewritten = rewrite_hls_url(&props.hls_url, uri);
+    let rewritten = rewrite_hls_resource_url(props, uri, &user.username);
 
     let token = if let Some(user_token) = &props.user_token {
         create_hls_session_token_and_url(props.secret, user_token, &rewritten)
@@ -191,7 +250,7 @@ pub fn rewrite_hls(user: &ProxyUserCredentials, props: &RewriteHlsProps) -> Stri
         }
 
         // target url
-        let target_url = rewrite_hls_url(&props.hls_url, line);
+        let target_url = rewrite_hls_resource_url(props, line, username);
         let token = if let Some(user_token) = &props.user_token {
             create_hls_session_token_and_url(props.secret, user_token, &target_url)
         } else {
@@ -209,7 +268,10 @@ pub fn rewrite_hls(user: &ProxyUserCredentials, props: &RewriteHlsProps) -> Stri
 
 #[cfg(test)]
 mod test {
-    use super::{get_hls_session_token_and_url_from_token, rewrite_hls, rewrite_hls_url, RewriteHlsProps};
+    use super::{
+        get_hls_session_token_and_url_from_token, rewrite_hls, rewrite_hls_resource_url, rewrite_hls_url,
+        RewriteHlsProps,
+    };
     use rand::RngCore;
     use shared::{defaults::HLS_PREFIX, utils::u32_to_base64};
     use tuliprox_core::model::ProxyUserCredentials;
@@ -252,6 +314,114 @@ mod test {
         ] {
             assert_eq!(rewrite_hls_url(base, reference), expected);
         }
+    }
+
+    #[test]
+    fn bounded_archive_token_survives_master_variant_and_segment_rewrites() {
+        let master = "https://provider.example/channel/archive-1717200000-3600.m3u8?token=a%2Fb&auth=secret";
+        let variant = rewrite_hls_url(master, "tracks-v1a1/archive-1717200000-3600.m3u8");
+        assert_eq!(
+            variant,
+            "https://provider.example/channel/tracks-v1a1/archive-1717200000-3600.m3u8?token=a%2Fb&auth=secret"
+        );
+        let segment = rewrite_hls_url(&variant, "dvr/segment.ts");
+        assert_eq!(segment, "https://provider.example/channel/tracks-v1a1/dvr/segment.ts?token=a%2Fb&auth=secret");
+        assert_eq!(rewrite_hls_url(&variant, "//elsewhere.example/segment.ts"), "https://elsewhere.example/segment.ts");
+    }
+
+    #[test]
+    fn bounded_archive_session_preserves_queries_for_generic_variant_names() {
+        let props = RewriteHlsProps {
+            secret: &[7; 16],
+            base_url: "http://proxy",
+            content: "",
+            hls_url: "https://provider.example/channel/variant.m3u8?token=secret&auth=value".to_string(),
+            target_id: 1,
+            virtual_id: 42,
+            input_id: 1,
+            user_token: Some("m3u-catchup|fp|alice|42|archive|1717200000|3600"),
+        };
+        assert_eq!(
+            rewrite_hls_resource_url(&props, "segment.ts", "alice"),
+            "https://provider.example/channel/segment.ts?token=secret&auth=value"
+        );
+        assert_eq!(
+            rewrite_hls_resource_url(&props, "https://other.example/segment.ts", "alice"),
+            "https://other.example/segment.ts"
+        );
+        let live = RewriteHlsProps { user_token: None, ..props };
+        assert_eq!(
+            rewrite_hls_resource_url(&live, "segment.ts", "alice"),
+            "https://provider.example/channel/segment.ts?token=secret"
+        );
+    }
+
+    #[test]
+    fn archive_text_in_username_does_not_enable_bounded_archive_queries() {
+        let mut props = RewriteHlsProps {
+            secret: &[7; 16],
+            base_url: "http://proxy",
+            content: "",
+            hls_url: "https://provider.example/channel/variant.m3u8?token=secret&auth=value".to_string(),
+            target_id: 1,
+            virtual_id: 42,
+            input_id: 1,
+            user_token: None,
+        };
+        for (token, username) in [
+            ("m3u-catchup|fp|alice|42|archive|42|3600", "alice|42|archive"),
+            ("fp|alice|archive|name|42", "alice|archive|name"),
+            ("m3u-catchup|fp|alice|archive|name|42|live", "alice|archive|name"),
+            ("m3u-catchup|fp|alice|archive|name|42|opaque", "alice|archive|name"),
+            ("m3u-catchup|fp|alice|42|archive|invalid|3600", "alice"),
+            ("m3u-catchup|fp|alice|42|archive|1717200000|0", "alice"),
+            ("m3u-catchup|fp|alice|43|archive|1717200000|3600", "alice"),
+            ("m3u-catchup|fp|alice|42|archive|1717200000|3600|unexpected", "alice"),
+        ] {
+            props.user_token = Some(token);
+            assert_eq!(
+                rewrite_hls_resource_url(&props, "segment.ts", username),
+                "https://provider.example/channel/segment.ts?token=secret",
+                "{token}"
+            );
+        }
+        for (token, username) in [
+            ("m3u-catchup|fp|alice|archive|name|42|archive|1717200000|3600", "alice|archive|name"),
+            ("m3u-catchup|fp|alice|42|archive|1717200000|3600|.m3u8", "alice"),
+            ("catchup|fp|alice|42|archive|1717200000|3600", "alice"),
+        ] {
+            props.user_token = Some(token);
+            assert_eq!(
+                rewrite_hls_resource_url(&props, "segment.ts", username),
+                "https://provider.example/channel/segment.ts?token=secret&auth=value",
+                "{token}"
+            );
+        }
+    }
+
+    #[test]
+    fn bounded_archive_inherits_query_only_on_same_origin_and_keeps_child_credentials() {
+        let base = "https://provider.example/channel/archive-1717200000-3600.m3u8?token=parent&auth=secret";
+        assert_eq!(
+            rewrite_hls_url(base, "https://provider.example/channel/segment.ts?token=child"),
+            "https://provider.example/channel/segment.ts?token=child&auth=secret"
+        );
+        assert_eq!(rewrite_hls_url(base, "https://other.example/segment.ts"), "https://other.example/segment.ts");
+        assert_eq!(
+            rewrite_hls_url(base, "https://provider.example:444/segment.ts"),
+            "https://provider.example:444/segment.ts"
+        );
+        assert_eq!(
+            rewrite_hls_url(base, "key.bin?AUTH=child"),
+            "https://provider.example/channel/key.bin?AUTH=child&token=parent"
+        );
+        assert_eq!(
+            rewrite_hls_url(
+                "https://provider.example/channel/archive-1717200000-3600.ts?token=parent&auth=secret",
+                "seg.ts"
+            ),
+            "https://provider.example/channel/seg.ts?token=parent"
+        );
     }
 
     #[test]
