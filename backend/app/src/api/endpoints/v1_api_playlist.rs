@@ -106,6 +106,7 @@ fn create_config_input_for_m3u(url: &str) -> ConfigInput {
             resolve_filter: None,
             probe_filter: None,
             flussonic_hls_catchup: shared::model::FlussonicHlsCatchup::Native,
+            flussonic_hls_catchup_max_duration_secs: shared::model::default_flussonic_hls_catchup_max_duration_secs(),
         }),
         ..Default::default()
     }
@@ -129,6 +130,7 @@ fn create_config_input_for_xtream(username: &str, password: &str, host: &str) ->
             resolve_filter: None,
             probe_filter: None,
             flussonic_hls_catchup: shared::model::FlussonicHlsCatchup::Native,
+            flussonic_hls_catchup_max_duration_secs: shared::model::default_flussonic_hls_catchup_max_duration_secs(),
         }),
         ..Default::default()
     }
@@ -3431,6 +3433,8 @@ mod tests {
                 resolve_filter: None,
                 probe_filter: None,
                 flussonic_hls_catchup: shared::model::FlussonicHlsCatchup::Native,
+                flussonic_hls_catchup_max_duration_secs: shared::model::default_flussonic_hls_catchup_max_duration_secs(
+                ),
             }),
             stalker: Some(crate::model::StalkerInputConfig {
                 device: None,
@@ -3579,6 +3583,8 @@ mod tests {
                 resolve_filter: None,
                 probe_filter: None,
                 flussonic_hls_catchup: shared::model::FlussonicHlsCatchup::Native,
+                flussonic_hls_catchup_max_duration_secs: shared::model::default_flussonic_hls_catchup_max_duration_secs(
+                ),
             }),
             stalker: Some(crate::model::StalkerInputConfig {
                 device: None,

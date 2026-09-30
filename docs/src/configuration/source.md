@@ -247,6 +247,7 @@ specific provider.
 | `xtream_live_stream_use_prefix`            | Bool     | `true`  | Injects the `/live/` prefix into URLs.                                                                                                                                                                                                 |
 | `disable_hls_streaming`                    | Bool     | `false` | Rewrites live `.m3u8` requests to `.ts` and bypasses Tuliprox HLS handling.                                                                                                                                                            |
 | `flussonic_hls_catchup`                    | String   | `native`| M3U Flussonic HLS catch-up mode: `native` or `bounded_archive`. See below.                                                                                                                                                             |
+| `flussonic_hls_catchup_max_duration_secs`  | Int      | `14400` | Maximum origin window in seconds for generated `bounded_archive` sources (1–604800). Longer player ranges are capped; explicit sources and native streams are unaffected.                                                              |
 | `user_agent_stream_index`                  | Bool     | `false` | Appends a process-local stream index to upstream `User-Agent` requests (e.g. `VLC/3.0 42`), keeping it stable for the session.                                                                                                         |
 | `resolve_tmdb`                             | Bool     | `false` | Enables TMDB queries for this specific input based on parsed titles to fill missing posters and release years.                                                                                                                         |
 | `probe_stream`                             | Bool     | `false` | Uses FFprobe to read A/V details (HDR, 4K). Respects `max_connections`.                                                                                                                                                                |
@@ -263,7 +264,10 @@ For M3U inputs, `flussonic_hls_catchup: bounded_archive` generates a `catchup-so
 `catchup="fs"`, no existing source, and a `/CHANNEL/mono.m3u8` URL. The generated URL uses
 `/CHANNEL/archive-{utc}-{duration}.m3u8` and preserves the scheme, host, and query string, including tokens.
 The live URL, explicit sources, other URL forms, and native TS entries remain unchanged. Archive requests use
-the existing explicit-source range validation and HLS sessions. Missing archives are unavailable without a
+a validated start and positive duration, capped to `flussonic_hls_catchup_max_duration_secs` (four hours by default).
+Shorter requests retain their duration. The seven-day safety limit and HLS session identity use the capped range,
+so selecting an older programme with `lutc` set to the current timestamp does not request the entire archive.
+Changes to this option take effect after a playlist refresh. Missing archives are unavailable without a
 fallback to live playback or moving timeshift playlists. Omit the option or set `native` to retain native behavior.
 
 > **Note:** For `resolve_vod` and `resolve_series`, data is cached per input and only new or changed entries are

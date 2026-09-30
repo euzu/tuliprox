@@ -550,7 +550,7 @@ pub fn resolve_xtream_m3u_catchup_url(
         .checked_add(duration_i64)
         .ok_or_else(|| TuliproxError::RepositoryM3u("Xtream catchup end timestamp overflow".to_string()))?;
 
-    let collectors: Vec<(usize, String)> = segments
+    let mut collectors: Vec<(usize, String)> = segments
         .iter()
         .filter_map(|segment| match segment {
             TemplateSegment::Placeholder(value) => Some(value.as_str()),
@@ -563,8 +563,19 @@ pub fn resolve_xtream_m3u_catchup_url(
         })
         .collect();
 
+    let bounded_discriminator =
+        if has_flussonic_hls_source_override(catchup) && catchup.flussonic_archive_max_duration_secs.is_some() {
+            validate_flussonic_archive_collectors(
+                &collect_placeholders(&segments),
+                &mut collectors,
+                None,
+                catchup.flussonic_archive_max_duration_secs,
+            )?
+        } else {
+            None
+        };
     let url = render_template(&segments, &collectors)?;
-    let discriminator = short_hash(&url);
+    let discriminator = bounded_discriminator.unwrap_or_else(|| short_hash(&url));
     Ok(ResolvedM3uCatchup { url, discriminator })
 }
 
@@ -572,6 +583,7 @@ fn validate_flussonic_archive_collectors(
     placeholders: &[&str],
     collectors: &mut [(usize, String)],
     raw_query: Option<&str>,
+    max_duration_secs: Option<u32>,
 ) -> Result<Option<String>, TuliproxError> {
     let Some(start_idx) = placeholders.iter().position(|p| placeholder_name(p) == "utc") else {
         return Ok(None);
@@ -596,12 +608,22 @@ fn validate_flussonic_archive_collectors(
             duration = end.checked_sub(start).ok_or_else(invalid_window)?;
         }
     }
+    // Validate the requested range before capping so malformed and reversed ranges cannot become valid.
+    if duration <= 0 {
+        return Err(invalid_window());
+    }
+    start.checked_add(duration).and_then(|end| DateTime::from_timestamp(end, 0)).ok_or_else(invalid_window)?;
+    if let Some(window) = max_duration_secs {
+        if !(1..=MAX_FLUSSONIC_ARCHIVE_DURATION_SECS).contains(&i64::from(window)) {
+            return Err(invalid_window());
+        }
+        duration = duration.min(i64::from(window));
+    }
     if !(1..=MAX_FLUSSONIC_ARCHIVE_DURATION_SECS).contains(&duration) {
         return Err(TuliproxError::RepositoryM3u(
             "Flussonic archive duration must be between 1 second and 7 days".to_string(),
         ));
     }
-    start.checked_add(duration).ok_or_else(invalid_window)?;
     // All repeated placeholders use the same validated range, including indexed player requests.
     for ((_, value), placeholder) in collectors.iter_mut().zip(placeholders) {
         match placeholder_name(placeholder) {
@@ -633,7 +655,12 @@ pub fn resolve_m3u_catchup_url(
     }
 
     let bounded_discriminator = if has_flussonic_hls_source_override(catchup) {
-        validate_flussonic_archive_collectors(&placeholders, &mut collectors, raw_query)?
+        validate_flussonic_archive_collectors(
+            &placeholders,
+            &mut collectors,
+            raw_query,
+            catchup.flussonic_archive_max_duration_secs,
+        )?
     } else {
         None
     };
@@ -758,6 +785,64 @@ mod tests {
             "v0=1717200000&v1=604801",
             "v0=-1&v1=3600",
             "v0=999999999999999999&v1=3600",
+        ] {
+            assert!(
+                resolve_m3u_catchup_url("https://provider.example/channel/mono.m3u8", &catchup, Some(query)).is_err(),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn generated_flussonic_window_caps_long_ranges_and_session_identity() -> Result<(), TuliproxError> {
+        let live_url = "https://provider.example/channel/mono.m3u8";
+        let mut catchup = bounded_flussonic_properties();
+        catchup.flussonic_archive_max_duration_secs = Some(14400);
+        let start = chrono::Utc::now().timestamp() - 10 * 24 * 60 * 60;
+        let end = start + 10 * 24 * 60 * 60;
+        let expected = resolve_m3u_catchup_url(live_url, &catchup, Some(&format!("v0={start}&v1=14400")))?;
+        for query in [
+            format!("utc={start}&lutc={end}"),
+            format!("utc={start}&lutc={}&duration=99999999", start + 265000),
+            format!("v0={start}&v1=864000"),
+        ] {
+            let resolved = resolve_m3u_catchup_url(live_url, &catchup, Some(&query))?;
+            assert_eq!(resolved, expected);
+        }
+        let resolved = expected.ok_or_else(|| TuliproxError::RepositoryM3u("Missing resolution".to_string()))?;
+        assert_eq!(resolved.discriminator, format!("archive|{start}|14400"));
+        assert_eq!(
+            resolved.url,
+            format!("https://provider.example/channel/archive-{start}-14400.m3u8?token=a%2Fb&auth=secret")
+        );
+        let bridge = resolve_xtream_m3u_catchup_url(live_url, &catchup, &start.to_string(), "14400")?;
+        assert_eq!(bridge, resolved);
+        catchup.flussonic_archive_max_duration_secs = Some(1200);
+        for duration in [600, 1200, 1800] {
+            let resolved =
+                resolve_m3u_catchup_url(live_url, &catchup, Some(&format!("utc={start}&lutc={}", start + duration)))?
+                    .ok_or_else(|| TuliproxError::RepositoryM3u("Missing resolution".to_string()))?;
+            assert_eq!(resolved.discriminator, format!("archive|{start}|{}", duration.min(1200)));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn generated_flussonic_window_rejects_invalid_ranges_before_capping() {
+        let mut catchup = bounded_flussonic_properties();
+        catchup.flussonic_archive_max_duration_secs = Some(14400);
+        for query in [
+            "utc=1717200000&lutc=invalid",
+            "utc=invalid&lutc=1717200000",
+            "utc=1717200000&lutc=1717200000",
+            "utc=1717203600&lutc=1717200000",
+            "utc=1717200000&lutc=9223372036854775807",
+            "v0=1717200000&v1=9223372036854775807",
+            "v0=1717200000&v1=-1",
+            "v0=-1&v1=864000",
+            "utc=1717200000",
+            "lutc=1717200000",
+            "v0=1717200000&v1=864000&utc=1717200000&lutc=invalid",
         ] {
             assert!(
                 resolve_m3u_catchup_url("https://provider.example/channel/mono.m3u8", &catchup, Some(query)).is_err(),

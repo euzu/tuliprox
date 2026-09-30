@@ -290,6 +290,12 @@ impl FlussonicHlsCatchup {
     pub fn is_native(value: &Self) -> bool { matches!(value, Self::Native) }
 }
 
+pub const fn default_flussonic_hls_catchup_max_duration_secs() -> u32 { 4 * 60 * 60 }
+
+fn is_default_flussonic_hls_catchup_max_duration_secs(value: &u32) -> bool {
+    *value == default_flussonic_hls_catchup_max_duration_secs()
+}
+
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -310,6 +316,11 @@ pub struct ConfigInputOptionsDto {
     pub disable_hls_streaming: bool,
     #[serde(default, skip_serializing_if = "FlussonicHlsCatchup::is_native")]
     pub flussonic_hls_catchup: FlussonicHlsCatchup,
+    #[serde(
+        default = "default_flussonic_hls_catchup_max_duration_secs",
+        skip_serializing_if = "is_default_flussonic_hls_catchup_max_duration_secs"
+    )]
+    pub flussonic_hls_catchup_max_duration_secs: u32,
     #[serde(default, skip_serializing_if = "is_false")]
     pub user_agent_stream_index: bool,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -360,6 +371,7 @@ impl Default for ConfigInputOptionsDto {
             xtream_live_stream_without_extension: false,
             disable_hls_streaming: false,
             flussonic_hls_catchup: FlussonicHlsCatchup::Native,
+            flussonic_hls_catchup_max_duration_secs: default_flussonic_hls_catchup_max_duration_secs(),
             user_agent_stream_index: false,
             resolve_tmdb: false,
             resolve_background: default_resolve_background(),
@@ -390,6 +402,7 @@ impl ConfigInputOptionsDto {
             && !self.xtream_live_stream_without_extension
             && !self.disable_hls_streaming
             && FlussonicHlsCatchup::is_native(&self.flussonic_hls_catchup)
+            && is_default_flussonic_hls_catchup_max_duration_secs(&self.flussonic_hls_catchup_max_duration_secs)
             && !self.user_agent_stream_index
             && !self.resolve_tmdb
             && self.resolve_background
@@ -415,6 +428,7 @@ impl ConfigInputOptionsDto {
         self.xtream_live_stream_without_extension = false;
         self.disable_hls_streaming = false;
         self.flussonic_hls_catchup = FlussonicHlsCatchup::Native;
+        self.flussonic_hls_catchup_max_duration_secs = default_flussonic_hls_catchup_max_duration_secs();
         self.user_agent_stream_index = false;
         self.resolve_tmdb = false;
         self.resolve_background = default_as_true();
@@ -439,6 +453,11 @@ impl Prepare for ConfigInputOptionsDto {
 
     fn prepare(&mut self, templates: Self::Ctx<'_>) -> Result<(), TuliproxError> {
         self.update_quality.prepare(())?;
+        if !(1..=7 * 24 * 60 * 60).contains(&self.flussonic_hls_catchup_max_duration_secs) {
+            return Err(TuliproxError::ConfigInput(
+                "flussonic_hls_catchup_max_duration_secs must be between 1 and 604800 seconds".to_string(),
+            ));
+        }
         if let Some(raw_filter) = &self.resolve_filter {
             self.t_resolve_filter = Some(get_filter(raw_filter, templates)?);
         }
@@ -2127,6 +2146,26 @@ mod tests {
 
         assert_eq!(options.update_quality, ConfigInputUpdateQualityDto::default());
         assert!(options.is_empty());
+    }
+
+    #[test]
+    fn flussonic_archive_window_config_validates_and_cleans() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::model::Prepare;
+        let mut options: ConfigInputOptionsDto = serde_json::from_str(
+            r#"{"flussonic_hls_catchup":"bounded_archive","flussonic_hls_catchup_max_duration_secs":1800}"#,
+        )?;
+        options.prepare(None)?;
+        assert_eq!(options.flussonic_hls_catchup_max_duration_secs, 1800);
+        assert_eq!(serde_json::from_str::<ConfigInputOptionsDto>(&serde_json::to_string(&options)?)?, options);
+        for value in [0, 604801, u32::MAX] {
+            options.flussonic_hls_catchup_max_duration_secs = value;
+            assert!(options.prepare(None).is_err());
+        }
+        options.clean();
+        assert_eq!(options.flussonic_hls_catchup_max_duration_secs, 14400);
+        assert!(options.is_empty());
+        assert!(serde_json::to_value(options)?.get("flussonic_hls_catchup_max_duration_secs").is_none());
+        Ok(())
     }
 
     #[test]

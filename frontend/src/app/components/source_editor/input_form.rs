@@ -367,6 +367,7 @@ generate_form_reducer!(
       XtreamLiveStreamWithoutExtension => xtream_live_stream_without_extension: bool,
       DisableHlsStreaming => disable_hls_streaming: bool,
       FlussonicHlsCatchup => flussonic_hls_catchup: FlussonicHlsCatchup,
+      FlussonicHlsCatchupMaxDurationSecs => flussonic_hls_catchup_max_duration_secs: u32,
       UserAgentStreamIndex => user_agent_stream_index: bool,
       ResolveTmdb => resolve_tmdb: bool,
       ResolveBackground => resolve_background: bool,
@@ -1537,6 +1538,8 @@ mod tests {
             .reduce(ConfigInputOptionsFormAction::SetAll(loaded.clone()));
         assert_eq!(state.form, loaded);
         assert!(!state.modified());
+        let state = state.reduce(ConfigInputOptionsFormAction::FlussonicHlsCatchupMaxDurationSecs(1800));
+        assert!(state.modified());
         for value in [FlussonicHlsCatchup::Native, FlussonicHlsCatchup::BoundedArchive] {
             let changed = state.clone().reduce(ConfigInputOptionsFormAction::FlussonicHlsCatchup(value));
             assert!(changed.modified());
@@ -1544,6 +1547,7 @@ mod tests {
             let saved = serde_json::to_string(changed.data())?;
             let reloaded: ConfigInputOptionsDto = serde_json::from_str(&saved)?;
             assert_eq!(reloaded.flussonic_hls_catchup, value);
+            assert_eq!(reloaded.flussonic_hls_catchup_max_duration_secs, 1800);
         }
         Ok(())
     }

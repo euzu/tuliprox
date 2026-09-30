@@ -290,9 +290,20 @@ fn m3u_options(
     } else {
         config_field_custom!(label, state.form.flussonic_hls_catchup.to_string())
     };
+    let window_label = translate.t("LABEL.FLUSSONIC_HLS_CATCHUP_MAX_DURATION_SECS");
+    let window = if allow_write {
+        edit_field_number_u32!(
+            state,
+            window_label,
+            flussonic_hls_catchup_max_duration_secs,
+            ConfigInputOptionsFormAction::FlussonicHlsCatchupMaxDurationSecs
+        )
+    } else {
+        config_field_custom!(window_label, state.form.flussonic_hls_catchup_max_duration_secs.to_string())
+    };
     html! {
         <>
-            <TitledCard title={translate.t(LABEL_LIVE_STREAMS)}>{catchup}</TitledCard>
+            <TitledCard title={translate.t(LABEL_LIVE_STREAMS)}>{catchup}{window}</TitledCard>
             {update_quality}
         </>
     }
@@ -505,7 +516,12 @@ mod tests {
             include_str!("../../../../../public/assets/i18n/ar.json"),
         ] {
             let translations: serde_json::Value = serde_json::from_str(source)?;
-            for key in ["/LABEL/FLUSSONIC_HLS_CATCHUP", "/EXPLANATION/CONFIG_INPUT_OPTIONS/FLUSSONIC_HLS_CATCHUP"] {
+            for key in [
+                "/LABEL/FLUSSONIC_HLS_CATCHUP",
+                "/EXPLANATION/CONFIG_INPUT_OPTIONS/FLUSSONIC_HLS_CATCHUP",
+                "/LABEL/FLUSSONIC_HLS_CATCHUP_MAX_DURATION_SECS",
+                "/EXPLANATION/CONFIG_INPUT_OPTIONS/FLUSSONIC_HLS_CATCHUP_MAX_DURATION_SECS",
+            ] {
                 assert!(translations
                     .pointer(key)
                     .and_then(serde_json::Value::as_str)
