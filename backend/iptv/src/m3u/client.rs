@@ -51,7 +51,14 @@ async fn download_reader(
     explicit_source: Option<InputSource>,
 ) -> Result<request::DynReader, TuliproxError> {
     let storage_dir = &cfg.storage_dir;
-    let input_source: InputSource = explicit_source.unwrap_or_else(|| input.into());
+    let input_source: InputSource = match explicit_source {
+        Some(source) => source,
+        None => input
+            .playlist_account()
+            .ok_or_else(|| TuliproxError::ConfigInput(format!("No available provider account for {}", input.name)))?
+            .as_ref()
+            .into(),
+    };
     let persist_file_path = prepare_file_path(input.persist.as_deref(), storage_dir, "");
     request::get_input_text_content_as_stream(app_config, client, &input_source, storage_dir, persist_file_path).await
 }

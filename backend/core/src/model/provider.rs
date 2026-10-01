@@ -10,7 +10,11 @@ use crate::{
     utils::debug_if_enabled,
 };
 use log::debug;
-use shared::{model::InputType, utils::sanitize_sensitive_info, write_if_some};
+use shared::{
+    model::{InputType, ProviderAccountIdentity, ProxyUserStatus},
+    utils::sanitize_sensitive_info,
+    write_if_some,
+};
 use std::{
     fmt,
     net::SocketAddr,
@@ -190,10 +194,39 @@ pub enum ProviderConfigAllocation {
     GracePeriod,
 }
 
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct ProviderConfigConnection {
     pub current_connections: usize,
     pub grace_started_at: Option<Instant>,
+    pub health_status: Option<ProviderAccountObservation>,
+    pub pending_health: Option<ProviderAccountObservation>,
+    /// Set after an authorization failure; the expiry worker checks the account within its own throttle.
+    pub probe_requested: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderAccountObservation {
+    pub name: Arc<str>,
+    pub identity: ProviderAccountIdentity,
+    pub status: Option<ProxyUserStatus>,
+    pub exp_date: Option<i64>,
+}
+
+impl ProviderAccountObservation {
+    /// Excludes the account from allocation at runtime.
+    pub fn is_blocked(&self) -> bool {
+        self.status.is_some_and(|status| !status.is_usable()) || is_input_expired(self.exp_date)
+    }
+
+    /// Confirmed exclusion that is written to the source files.
+    pub fn is_persistent_block(&self) -> bool {
+        self.status.is_some_and(ProxyUserStatus::is_terminal) || is_input_expired(self.exp_date)
+    }
+
+    /// Same account and same reported state, ignoring the account name.
+    pub fn same_state(&self, other: &Self) -> bool {
+        self.identity == other.identity && self.status == other.status && self.exp_date == other.exp_date
+    }
 }
 
 /// This struct represents an individual provider configuration with fields like:
@@ -213,6 +246,8 @@ pub struct ProviderConfig {
     max_connections: usize,
     priority: i16,
     exp_date: Option<i64>,
+    account_identity: ProviderAccountIdentity,
+    account_disabled: bool,
     connection: Arc<RwLock<ProviderConfigConnection>>,
     on_connection_change: ProviderConnectionChangeCallback,
 }
@@ -271,6 +306,19 @@ macro_rules! modify_connections {
 }
 
 impl ProviderConfig {
+    pub fn account_identity(&self) -> ProviderAccountIdentity { self.account_identity }
+
+    pub fn is_account_blocked(&self) -> bool { self.is_account_blocked_with_connection(&self.read_connection()) }
+
+    fn is_account_blocked_with_connection(&self, connection: &ProviderConfigConnection) -> bool {
+        self.account_disabled
+            || is_input_expired(self.exp_date)
+            || connection
+                .health_status
+                .as_ref()
+                .is_some_and(|health| health.identity == self.account_identity && health.is_blocked())
+    }
+
     fn read_connection(&self) -> RwLockReadGuard<'_, ProviderConfigConnection> {
         match self.connection.read() {
             Ok(guard) => guard,
@@ -323,6 +371,8 @@ impl ProviderConfig {
             max_connections: effective_max_connections,
             priority: cfg.priority,
             exp_date: cfg.exp_date,
+            account_disabled: cfg.account_disabled,
+            account_identity: cfg.account_identity(),
             connection,
             on_connection_change,
         }
@@ -354,6 +404,8 @@ impl ProviderConfig {
             max_connections: effective_max_connections,
             priority: alias.priority,
             exp_date: alias.exp_date,
+            account_disabled: !alias.enabled,
+            account_identity: alias.account_identity(),
             connection,
             on_connection_change,
         }
@@ -416,11 +468,11 @@ impl ProviderConfig {
     // }
 
     fn try_allocate(&self, grace: bool, grace_period_timeout_secs: u64) -> ProviderConfigAllocation {
-        if is_input_expired(self.exp_date) {
+        let mut guard = self.write_connection();
+        if self.is_account_blocked_with_connection(&guard) {
             return ProviderConfigAllocation::Exhausted;
         }
 
-        let mut guard = self.write_connection();
         if self.max_connections == 0 {
             modify_connections!(self, guard, +1);
             return ProviderConfigAllocation::Available;
@@ -454,14 +506,14 @@ impl ProviderConfig {
     // is intended to use with redirects, to cycle through provider
     // do not increment and connection counter!
     fn get_next(&self, grace: bool, grace_period_timeout_secs: u64) -> bool {
-        if is_input_expired(self.exp_date) {
-            return false;
-        }
-
         if self.max_connections == 0 {
-            return true;
+            // The unlimited redirect path never touches the counter, so a read lock suffices.
+            return !self.is_account_blocked();
         }
         let mut guard = self.write_connection();
+        if self.is_account_blocked_with_connection(&guard) {
+            return false;
+        }
         let connections = guard.current_connections;
         if connections < self.max_connections {
             guard.grace_started_at = None;
@@ -571,6 +623,7 @@ mod tests {
             epg: None,
             persist: None,
             enabled: true,
+            account_disabled: false,
             sequential_group: None,
             options: None,
             media_server: None,
@@ -675,5 +728,19 @@ mod tests {
         assert!(provider.get_next(true, 10));
         assert!(provider.read_connection().grace_started_at.is_none());
         assert!(matches!(provider.try_allocate(true, 10), ProviderConfigAllocation::GracePeriod));
+    }
+    #[test]
+    fn unlimited_account_is_unavailable_when_banned() {
+        let provider = build_test_config(0);
+        let identity = provider.account_identity;
+        provider.write_connection().health_status = Some(crate::model::ProviderAccountObservation {
+            name: Arc::clone(&provider.name),
+            identity,
+            status: Some(shared::model::ProxyUserStatus::Banned),
+            exp_date: None,
+        });
+        assert!(matches!(provider.try_allocate(true, 10), ProviderConfigAllocation::Exhausted));
+        assert!(!provider.get_next(true, 10));
+        assert_eq!(provider.get_current_connections(), 0);
     }
 }

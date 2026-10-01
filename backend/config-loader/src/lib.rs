@@ -111,26 +111,30 @@ async fn parse_sources_file_from_path(
     sources_file: &Path,
     resolve_env: bool,
 ) -> Result<SourcesConfigDto, TuliproxError> {
-    let sources_file = sources_file.to_path_buf();
-    tokio::task::spawn_blocking(move || match open_file(&sources_file) {
-        Ok(file) => {
-            let maybe_sources: Result<SourcesConfigDto, _> =
-                serde_saphyr::from_reader(config_file_reader(file, resolve_env));
-            match maybe_sources {
-                Ok(sources) => Ok(sources),
-                Err(err) => Err(TuliproxError::ConfigSource(format!(
-                    "Can't read the sources-config file: {}: {err}",
-                    sources_file.display()
-                ))),
-            }
+    parse_sources_file_with_revision(sources_file, resolve_env).await.map(|(sources, _)| sources)
+}
+
+/// Parses the sources file and returns the revision of exactly the bytes that were parsed.
+async fn parse_sources_file_with_revision(
+    sources_file: &Path,
+    resolve_env: bool,
+) -> Result<(SourcesConfigDto, blake3::Hash), TuliproxError> {
+    let read_error = |err: &dyn std::fmt::Display| {
+        TuliproxError::ConfigSource(format!("Can't read the sources-config file: {}: {err}", sources_file.display()))
+    };
+    let content = fs::read(sources_file).await.map_err(|err| read_error(&err))?;
+    let revision = blake3::hash(&content);
+    let parsed = tokio::task::spawn_blocking(move || {
+        let reader = utils::file_reader(std::io::Cursor::new(content));
+        if resolve_env {
+            serde_saphyr::from_reader::<_, SourcesConfigDto>(utils::EnvResolvingReader::new(reader))
+        } else {
+            serde_saphyr::from_reader::<_, SourcesConfigDto>(reader)
         }
-        Err(err) => Err(TuliproxError::ConfigSource(format!(
-            "Can't read the sources-config file: {}: {err}",
-            sources_file.display()
-        ))),
     })
     .await
-    .map_err(|join_err| TuliproxError::ConfigSource(format!("Failed to read sources-config file: {join_err}")))?
+    .map_err(|join_err| TuliproxError::ConfigSource(format!("Failed to read sources-config file: {join_err}")))?;
+    parsed.map(|sources| (sources, revision)).map_err(|err| read_error(&err))
 }
 
 pub fn resolve_template_and_mapping_paths(
@@ -156,7 +160,20 @@ pub async fn read_sources_file_from_path_with_templates(
     hdhr_config: Option<&HdHomeRunDeviceOverview>,
     prepared_templates: Option<&[shared::model::PatternTemplate]>,
 ) -> Result<SourcesConfigDto, TuliproxError> {
-    let mut sources = parse_sources_file_from_path(sources_file, resolve_env).await?;
+    read_sources_file_with_revision(sources_file, resolve_env, include_computed, hdhr_config, prepared_templates)
+        .await
+        .map(|(sources, _)| sources)
+}
+
+/// Like [`read_sources_file_from_path_with_templates`], plus the revision of the parsed bytes.
+pub async fn read_sources_file_with_revision(
+    sources_file: &Path,
+    resolve_env: bool,
+    include_computed: bool,
+    hdhr_config: Option<&HdHomeRunDeviceOverview>,
+    prepared_templates: Option<&[shared::model::PatternTemplate]>,
+) -> Result<(SourcesConfigDto, blake3::Hash), TuliproxError> {
+    let (mut sources, revision) = parse_sources_file_with_revision(sources_file, resolve_env).await?;
     if resolve_env {
         if let Err(err) = sources.prepare(include_computed, hdhr_config, prepared_templates) {
             return Err(TuliproxError::Config(format!(
@@ -165,7 +182,7 @@ pub async fn read_sources_file_from_path_with_templates(
             )));
         }
     }
-    Ok(sources)
+    Ok((sources, revision))
 }
 
 pub async fn read_sources_file_from_path_with_options(
@@ -428,6 +445,20 @@ fn apply_prepared_mappings(
     }
 }
 
+pub async fn capture_batch_revisions(sources: &SourcesConfigDto) -> Vec<(PathBuf, blake3::Hash)> {
+    let mut revisions = Vec::new();
+    for input in &sources.inputs {
+        if input.input_type.is_batch() {
+            if let Ok(path) = tuliprox_repository::get_csv_file_path(&input.url) {
+                if let Ok(content) = fs::read(&path).await {
+                    revisions.push((path, blake3::hash(&content)));
+                }
+            }
+        }
+    }
+    revisions
+}
+
 pub async fn prepare_sources_batch(
     sources: &mut SourcesConfigDto,
     include_computed: bool,
@@ -533,7 +564,10 @@ pub async fn read_initial_app_config(
     paths.template_file_path =
         Some(utils::resolve_template_file_path(config_path, configured_template_path.as_deref()));
 
-    let mut sources_dto = parse_sources_file_from_path(&PathBuf::from(sources_file), resolve_env).await?;
+    let (mut sources_dto, source_revision) =
+        parse_sources_file_with_revision(&PathBuf::from(sources_file), resolve_env).await?;
+    let mut loaded_revisions = capture_batch_revisions(&sources_dto).await;
+    loaded_revisions.push((PathBuf::from(sources_file), source_revision));
 
     let (mapping_paths, mut mappings_dto) = if let Some(mappings_file) = &paths.mapping_file_path {
         match read_mappings_file_unprepared(mappings_file.as_str(), resolve_env) {
@@ -584,6 +618,9 @@ pub async fn read_initial_app_config(
         media_tools: Arc::new(MediaToolCapabilities::new()),
     };
     app_config.prepare(include_computed)?;
+    for (path, revision) in loaded_revisions {
+        app_config.file_locks.record_loaded_revision(&path, revision).await;
+    }
     //print_info(&app_config);
 
     if let Some(mappings_file) = paths.mapping_file_path.clone() {
@@ -716,7 +753,6 @@ pub async fn write_config_text_file(
     expected_revision: Option<blake3::Hash>,
 ) -> Result<bool, TuliproxError> {
     let path = PathBuf::from(file_path);
-    let filename = path.file_name().map_or(default_name.to_string(), |f| f.to_string_lossy().to_string());
 
     let revision_content = if let Some(expected) = expected_revision {
         let current = fs::read(&path).await.map_err(|err| {
@@ -752,12 +788,9 @@ pub async fn write_config_text_file(
         fs::create_dir_all(backup_dir)
             .await
             .map_err(|err| TuliproxError::Config(format!("Could not create backup directory {backup_dir}: {err}")))?;
-        let backup_path =
-            PathBuf::from(backup_dir).join(format!("{filename}_{}", Local::now().format("%Y%m%d_%H%M%S%9f")));
-
-        fs::copy(&path, &backup_path)
+        tuliprox_core::utils::backup_config_file(&path, Path::new(backup_dir))
             .await
-            .map_err(|err| TuliproxError::Config(format!("Could not backup file {}: {err}", backup_path.display())))?;
+            .map_err(|err| TuliproxError::Config(format!("Could not back up {}: {err}", path.display())))?;
         info!("Saving file to {}", path.to_str().unwrap_or("?"));
     }
 
@@ -777,27 +810,38 @@ pub async fn write_config_text_file(
         Local::now().timestamp_nanos_opt().unwrap_or_default()
     ));
 
-    if let Err(err) = fs::write(&tmp_path, content).await {
-        let _ = fs::remove_file(&tmp_path).await;
+    let result = replace_with_temp_file(&path, &tmp_path, content).await;
+    if destination_exists {
+        if let Err(err) = tuliprox_core::utils::prune_config_backups(&path, Path::new(backup_dir)).await {
+            warn!("Could not prune configuration backups: {err}");
+        }
+    }
+    result
+}
+
+/// Writes `content` to `tmp_path` and atomically moves it over `path`.
+async fn replace_with_temp_file(path: &Path, tmp_path: &Path, content: &str) -> Result<bool, TuliproxError> {
+    if let Err(err) = fs::write(tmp_path, content).await {
+        let _ = fs::remove_file(tmp_path).await;
         return Err(TuliproxError::Config(format!(
             "Could not write temp file {}: {err}",
             tmp_path.to_str().unwrap_or("?")
         )));
     }
 
-    match fs::rename(&tmp_path, &path).await {
+    match fs::rename(tmp_path, path).await {
         Ok(()) => Ok(true),
         Err(err) => {
             // Windows doesn't allow overwriting an existing file via rename.
             #[cfg(windows)]
             {
-                if replace_file_windows(&tmp_path, &path).is_ok() {
+                if replace_file_windows(tmp_path, path).is_ok() {
                     return Ok(true);
                 }
             }
 
             // Best-effort cleanup; if the temp file can't be removed, ignore it.
-            let _ = fs::remove_file(&tmp_path).await;
+            let _ = fs::remove_file(tmp_path).await;
             Err(TuliproxError::Config(format!(
                 "Could not replace file {} with {}: {err}",
                 path.to_str().unwrap_or("?"),
@@ -1624,7 +1668,7 @@ sources:
         assert_eq!(tokio::fs::read_to_string(&path).await?, "new content");
         let mut backups: Vec<_> = std::fs::read_dir(&backup_dir)?
             .filter_map(std::result::Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy().starts_with("source.yml_"))
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("source.yml-"))
             .map(|entry| entry.path())
             .collect();
         backups.sort();
