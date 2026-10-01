@@ -2150,17 +2150,18 @@ pub(super) async fn terminate_failed_hls_manifest_session(
     let _transition_guard = app_state.active_users.acquire_playback_transition(username, session_token).await;
     app_state.active_users.terminate_session(username, session_token).await;
     let mut cleared = false;
-    if let Some(provider_name) = provider_name {
-        app_state.active_provider.clear_identified_provider_reservation(session_token, provider_name, binding_tag);
-        if binding_tag.is_some() {
-            cleared = true;
-        }
-    }
     if let Some(request_id) = request_id {
         app_state.active_provider.finish_identified_playback_request(
             session_token,
             request_id,
             PlaybackRequestOutcome::ProviderFailed,
+        );
+        cleared = true;
+    } else if let (Some(provider_name), Some(binding_tag)) = (provider_name, binding_tag) {
+        app_state.active_provider.clear_identified_provider_reservation(
+            session_token,
+            provider_name,
+            Some(binding_tag),
         );
         cleared = true;
     }
