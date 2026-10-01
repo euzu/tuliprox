@@ -306,6 +306,8 @@ If connection handling looks "strange" for your users, check these first:
 - Are `admission_strategies` configured?
 - Is `grace_period_millis` set sensibly?
 - Are `hls_session_ttl_secs` and `catchup_session_ttl_secs` appropriate for the player in use?
+- Does `provider_affinity_ttl_secs` cover the longest request pause of the player, so a returning playback stays on its
+  provider account?
 - Is `share_live_streams.mpeg_ts` enabled and are multiple users watching the same channel?
 - Is the actual provider already at capacity?
 

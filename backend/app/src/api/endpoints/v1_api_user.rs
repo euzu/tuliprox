@@ -288,12 +288,16 @@ async fn delete_config_api_proxy_user(
 /// - Removes the session and all associated streams
 /// - Releases the counted lease if held
 /// - Sets lifecycle to `Expired`
-async fn terminate_user_session(
+pub(in crate::api) async fn terminate_user_session(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     axum::extract::Path((username, session_token)): axum::extract::Path<(String, String)>,
 ) -> impl axum::response::IntoResponse {
-    app_state.active_users.terminate_session(&username, &session_token).await;
-    app_state.active_provider.clear_provider_reservation(&session_token);
+    let _transition_guard = app_state.active_users.acquire_playback_transition(&username, &session_token).await;
+    // Only a session that actually existed may end provider state, and only the binding
+    // its token acquired: a stale token must not end a newer playback of the same owner.
+    if app_state.active_users.terminate_session(&username, &session_token).await {
+        app_state.active_provider.terminate_identified_playback_owner(&session_token);
+    }
     (axum::http::StatusCode::NO_CONTENT).into_response()
 }
 

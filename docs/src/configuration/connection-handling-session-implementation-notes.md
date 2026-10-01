@@ -168,6 +168,16 @@ TTL mapping (the reconnect window):
 Lease end is outcome-driven: provider failure, preemption, kick and timeout release capacity immediately; a clean finish
 of a reconnect-capable playback keeps the idle window.
 
+Provider affinity is separate from the lease and reserves no capacity:
+
+- confirmed media of a reconnect-capable playback records the provider for the reconnect window plus
+  `provider_affinity_ttl_secs`
+- a re-entry without a live lease pin tries that provider first, without grace; when it has no free slot the normal
+  lineup selection runs
+- a failure on the preferred provider, preemption, kick, timeout or an administrative terminate ends the preference;
+  a delayed failure or terminate of an older binding is ignored through its binding tag, request IDs and session
+  tokens
+
 Important:
 
 - VOD/movie/series still have strict provider affinity on follow-up requests

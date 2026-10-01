@@ -295,6 +295,13 @@ impl Config {
         self.reverse_proxy.as_ref().and_then(|r| r.disabled_header.clone())
     }
 
+    pub fn get_provider_affinity_ttl_secs(&self) -> u64 {
+        self.reverse_proxy
+            .as_ref()
+            .and_then(|r| r.stream.as_ref())
+            .map_or_else(shared::defaults::default_provider_affinity_ttl_secs, |s| s.provider_affinity_ttl_secs)
+    }
+
     pub fn get_grace_options(&self) -> GracePeriodOptions {
         self.reverse_proxy.as_ref().and_then(|r| r.stream.as_ref()).map_or_else(GracePeriodOptions::default, |s| {
             GracePeriodOptions {

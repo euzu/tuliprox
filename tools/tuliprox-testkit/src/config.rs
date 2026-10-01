@@ -52,6 +52,12 @@ pub struct PolicyContract {
     /// replacement. Used by the reentry-suppression scenario.
     #[serde(default)]
     pub recent_eviction_reentry_ttl_ms: Option<u64>,
+    /// Overrides `reverse_proxy.stream.hls_session_ttl_secs`, the HLS reconnect window.
+    #[serde(default)]
+    pub hls_session_ttl_secs: Option<u64>,
+    /// Overrides `reverse_proxy.stream.provider_affinity_ttl_secs`.
+    #[serde(default)]
+    pub provider_affinity_ttl_secs: Option<u64>,
     #[serde(default)]
     pub grace: Option<GraceContract>,
     #[serde(default)]
@@ -269,6 +275,10 @@ pub struct Channel {
 #[serde(deny_unknown_fields)]
 pub struct Step {
     pub command_id: String,
+    /// Idles the scenario for this many milliseconds, for example to let a
+    /// reconnect window lapse between two requests of one playback.
+    #[serde(default)]
+    pub pause_millis: Option<u64>,
     #[serde(default)]
     pub expect: ExpectedPlayback,
     pub start: Option<Start>,
@@ -500,6 +510,9 @@ impl Scenario {
             if !command_ids.insert(step.command_id.as_str()) || step.command_id.is_empty() {
                 return Err(TestkitError::Configuration("command IDs must be unique and non-empty".to_owned()));
             }
+            if step.pause_millis.is_some() {
+                continue;
+            }
             if step.start.is_some() == step.stop.is_some() {
                 return Err(TestkitError::Configuration(
                     "each step must contain exactly one of start or stop".to_owned(),
@@ -682,9 +695,26 @@ fn validate_provider_pool_contract(contract: &PolicyContract) -> Result<(), Test
 
 fn expand_steps(steps: &[Step], prefix: &str, expanded: &mut Vec<Step>) -> Result<(), TestkitError> {
     const MAX_REPEAT_COUNT: usize = 1_000;
+    const MAX_PAUSE_MILLIS: u64 = 300_000;
     for step in steps {
         if step.command_id.is_empty() {
             return Err(TestkitError::Configuration("command IDs must be unique and non-empty".to_owned()));
+        }
+        if let Some(pause_millis) = step.pause_millis {
+            if step.start.is_some() || step.stop.is_some() || step.repeat.is_some() {
+                return Err(TestkitError::Configuration(
+                    "pause_millis cannot be combined with start, stop or repeat".to_owned(),
+                ));
+            }
+            if pause_millis == 0 || pause_millis > MAX_PAUSE_MILLIS {
+                return Err(TestkitError::Configuration(format!(
+                    "pause_millis must be between 1 and {MAX_PAUSE_MILLIS}"
+                )));
+            }
+            let mut child = step.clone();
+            child.command_id = format!("{prefix}{}", step.command_id);
+            expanded.push(child);
+            continue;
         }
         if let Some(repeat) = &step.repeat {
             if step.start.is_some() || step.stop.is_some() {
@@ -792,6 +822,7 @@ steps:
             steps: (0..2)
                 .map(|number| Step {
                     command_id: number.to_string(),
+                    pause_millis: None,
                     expect: ExpectedPlayback::Streaming,
                     start: Some(Start {
                         actor: "a".to_owned(),
@@ -835,6 +866,36 @@ steps:
             "soft-slot-exhausts-without-upstream-leak.yml",
         ] {
             assert!(Scenario::from_path(&root.join(filename)).is_ok(), "{filename}");
+        }
+    }
+
+    #[test]
+    fn pause_step_expands_alone_and_rejects_combinations() {
+        let scenario: Scenario = serde_saphyr::from_str(
+            r"
+schema_version: 1
+name: pause-validation
+tuliprox: { base_url: http://example.invalid, execution_mode: existing_instance }
+actors: [{ id: a, agent: local }]
+steps:
+  - command_id: wait
+    pause_millis: 1500
+",
+        )
+        .unwrap();
+        assert!(scenario.validate().is_ok());
+        assert_eq!(scenario.expanded_steps().unwrap()[0].pause_millis, Some(1_500));
+
+        for invalid_step in [
+            "{ command_id: wait, pause_millis: 0 }",
+            "{ command_id: wait, pause_millis: 300001 }",
+            "{ command_id: wait, pause_millis: 10, stop: { playback_id: missing } }",
+        ] {
+            let yaml = format!(
+                "schema_version: 1\nname: pause-invalid\ntuliprox: {{ base_url: http://example.invalid, execution_mode: existing_instance }}\nactors: [{{ id: a, agent: local }}]\nsteps: [{invalid_step}]\n"
+            );
+            let scenario: Scenario = serde_saphyr::from_str(&yaml).unwrap();
+            assert!(scenario.validate().is_err(), "{invalid_step}");
         }
     }
 

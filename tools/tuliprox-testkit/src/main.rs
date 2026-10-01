@@ -2674,6 +2674,11 @@ async fn execute_scenario_steps<'a>(
     }
     let execution_result = async {
         for step in steps {
+            if let Some(pause_millis) = step.pause_millis {
+                tokio::time::sleep(Duration::from_millis(pause_millis)).await;
+                events.push((step.command_id.as_str(), "paused"));
+                continue;
+            }
             if let Some(stop) = &step.stop {
                 if let Some(oracles) = admission_oracles.as_mut() {
                     if let Some(username) = playback_users.remove(&stop.playback_id) {

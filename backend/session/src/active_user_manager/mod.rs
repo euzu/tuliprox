@@ -2821,17 +2821,18 @@ impl ActiveUserManager {
     ///
     /// Unlike `release_unbound_session_reservation`, this terminates regardless of
     /// whether streams are currently active, and always removes associated streams.
-    pub async fn terminate_session(&self, username: &str, session_token: &str) {
+    /// Returns `true` only when the session existed and was removed by this call.
+    pub async fn terminate_session(&self, username: &str, session_token: &str) -> bool {
         let (connection_changed, removed_count, promotions) = {
             let mut user_connections = self.connections.write().await;
             let Some(connection_data) = user_connections.by_key.get_mut(username) else {
-                return;
+                return false;
             };
 
             let Some(session_index) =
                 connection_data.sessions.iter().position(|session| session.token == session_token)
             else {
-                return;
+                return false;
             };
 
             let counted_kind = connection_data.sessions[session_index]
@@ -2868,6 +2869,7 @@ impl ActiveUserManager {
             self.emit_promotion_update(username, action).await;
         }
         debug!("Terminated session {session_token} for user {username}, released {removed_count} streams");
+        true
     }
 
     /// Terminates all sessions associated with a given socket address for a user.
