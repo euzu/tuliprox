@@ -21,24 +21,24 @@
 
 use crate::{
     api::{
-        config_file::ConfigFile,
+        internal_csv::{
+            csv_patch_batch_append, csv_patch_batch_remove_expired, csv_patch_batch_sort_by_exp_date,
+            csv_patch_batch_update_credentials, csv_patch_batch_update_exp_date,
+        },
         model::{
             create_panel_api_provisioning_stream_with_stop, create_provider_connections_exhausted_stream, AppState,
             StreamDetails,
         },
         source_yml_patch::{
-            derive_unique_alias_name, derive_unique_alias_name_set, execute_source_yml_patches,
-            resolve_provisioned_account_base_url, SourcesYmlPatch,
+            derive_unique_alias_name, derive_unique_alias_name_set, resolve_provisioned_account_base_url,
+            SourcesYmlPatch,
         },
     },
     model::{
         is_input_expired, is_input_expired_at, ConfigInput, ConfigInputAlias, GracePeriodOptions, InputSource,
         PanelApiConfig, PanelApiQueryParam, ProxyUserCredentials,
     },
-    repository::{
-        csv_patch_batch_append, csv_patch_batch_remove_expired, csv_patch_batch_sort_by_exp_date,
-        csv_patch_batch_update_credentials, csv_patch_batch_update_exp_date, get_csv_file_path, AliasExpDateSortOrder,
-    },
+    repository::{get_csv_file_path, AliasExpDateSortOrder},
     utils::{debug_if_enabled, format_http_status, request},
 };
 use axum::http::{header, HeaderMap, Method, StatusCode};
@@ -1180,6 +1180,10 @@ fn root_counts_towards_pool_at(accounts: &[AccountCredentials], input_name: &Arc
         .is_some_and(|acct| acct.exp_date.is_some() && !is_input_expired_at(acct.exp_date, now))
 }
 
+fn refresh_internal_sources(app_state: &Arc<AppState>) {
+    app_state.active_provider.update_config(&app_state.app_config);
+}
+
 fn should_reload_sources_after_internal_write(app_state: &AppState) -> bool {
     !app_state.app_config.config.load().config_hot_reload
 }
@@ -1338,8 +1342,10 @@ async fn try_renew_expired_account(
                     if is_batch {
                         match require_batch_alias_path(input) {
                             Ok(csv_path) => {
-                                let _csv_lock = app_state.app_config.file_locks.write_lock(&csv_path).await;
+                                let csv_lock = app_state.app_config.file_locks.write_lock(&csv_path).await;
                                 if let Err(err) = csv_patch_batch_update_exp_date(
+                                    app_state,
+                                    &csv_lock,
                                     input.input_type,
                                     &csv_path,
                                     &acct.name,
@@ -1352,6 +1358,8 @@ async fn try_renew_expired_account(
                                     debug_if_enabled!("panel_api failed to persist renew exp_date to csv: {}", err);
                                 }
                                 if let Err(err) = csv_patch_batch_sort_by_exp_date(
+                                    app_state,
+                                    &csv_lock,
                                     input.input_type,
                                     &csv_path,
                                     AliasExpDateSortOrder::NewestFirst,
@@ -1375,8 +1383,12 @@ async fn try_renew_expired_account(
                                 order: AliasExpDateSortOrder::NewestFirst,
                             },
                         ];
-                        if let Err(err) =
-                            execute_source_yml_patches(&app_state.app_config, sources_path, &patches).await
+                        if let Err(err) = crate::api::source_yml_patch::execute_account_source_patches(
+                            app_state,
+                            sources_path,
+                            &patches,
+                        )
+                        .await
                         {
                             debug_if_enabled!("panel_api failed to persist renew exp_date to source.yml: {}", err);
                         }
@@ -1384,9 +1396,7 @@ async fn try_renew_expired_account(
                 }
 
                 if should_reload_sources_after_internal_write(app_state.as_ref()) {
-                    if let Err(err) = ConfigFile::load_sources(app_state).await {
-                        debug_if_enabled!("panel_api reload sources failed: {}", err);
-                    }
+                    refresh_internal_sources(app_state);
                 }
                 return Some(PanelApiProvisionOutcome::Renewed);
             }
@@ -1522,9 +1532,11 @@ async fn try_refresh_root_account_on_exhausted(
         let Ok(csv_path) = require_batch_alias_path(input) else {
             return None;
         };
-        let _csv_lock = app_state.app_config.file_locks.write_lock(&csv_path).await;
+        let csv_lock = app_state.app_config.file_locks.write_lock(&csv_path).await;
         let result = if credentials_changed {
             csv_patch_batch_update_credentials(
+                app_state,
+                &csv_lock,
                 input.input_type,
                 &csv_path,
                 &input.name,
@@ -1537,6 +1549,8 @@ async fn try_refresh_root_account_on_exhausted(
             .await
         } else if let Some(exp_date) = exp_date {
             csv_patch_batch_update_exp_date(
+                app_state,
+                &csv_lock,
                 input.input_type,
                 &csv_path,
                 &input.name,
@@ -1552,8 +1566,14 @@ async fn try_refresh_root_account_on_exhausted(
             debug_if_enabled!("panel_api failed to persist root provisioning to csv: {}", err);
             return None;
         }
-        if let Err(err) =
-            csv_patch_batch_sort_by_exp_date(input.input_type, &csv_path, AliasExpDateSortOrder::NewestFirst).await
+        if let Err(err) = csv_patch_batch_sort_by_exp_date(
+            app_state,
+            &csv_lock,
+            input.input_type,
+            &csv_path,
+            AliasExpDateSortOrder::NewestFirst,
+        )
+        .await
         {
             debug_if_enabled!("panel_api failed to sort csv accounts after root provisioning: {}", err);
             return None;
@@ -1565,17 +1585,16 @@ async fn try_refresh_root_account_on_exhausted(
             password: active_password,
             exp_date,
         };
-        if let Err(err) = execute_source_yml_patches(&app_state.app_config, sources_path, &[patch]).await {
+        if let Err(err) =
+            crate::api::source_yml_patch::execute_account_source_patches(app_state, sources_path, &[patch]).await
+        {
             debug_if_enabled!("panel_api failed to persist root provisioning to source.yml: {}", err);
             return None;
         }
     }
 
     if should_reload_sources_after_internal_write(app_state.as_ref()) {
-        if let Err(err) = ConfigFile::load_sources(app_state).await {
-            debug_if_enabled!("panel_api reload sources failed: {}", err);
-            return None;
-        }
+        refresh_internal_sources(app_state);
     }
 
     Some(outcome)
@@ -1646,8 +1665,10 @@ async fn try_create_new_account(
                         } else {
                             InputType::M3uBatch
                         };
-                        let _csv_lock = app_state.app_config.file_locks.write_lock(&csv_path).await;
+                        let csv_lock = app_state.app_config.file_locks.write_lock(&csv_path).await;
                         if let Err(err) = csv_patch_batch_append(
+                            app_state,
+                            &csv_lock,
                             &csv_path,
                             batch_type,
                             &alias_name,
@@ -1661,9 +1682,14 @@ async fn try_create_new_account(
                             warn!("panel_api failed to append new account to csv: {err}");
                             return None;
                         }
-                        if let Err(err) =
-                            csv_patch_batch_sort_by_exp_date(batch_type, &csv_path, AliasExpDateSortOrder::NewestFirst)
-                                .await
+                        if let Err(err) = csv_patch_batch_sort_by_exp_date(
+                            app_state,
+                            &csv_lock,
+                            batch_type,
+                            &csv_path,
+                            AliasExpDateSortOrder::NewestFirst,
+                        )
+                        .await
                         {
                             warn!("panel_api failed to sort csv accounts after append: {err}");
                             return None;
@@ -1693,17 +1719,17 @@ async fn try_create_new_account(
                         order: AliasExpDateSortOrder::NewestFirst,
                     },
                 ];
-                if let Err(err) = execute_source_yml_patches(&app_state.app_config, sources_path, &patches).await {
+                if let Err(err) =
+                    crate::api::source_yml_patch::execute_account_source_patches(app_state, sources_path, &patches)
+                        .await
+                {
                     warn!("panel_api failed to persist new alias to source.yml: {err}");
                     return None;
                 }
             }
 
             if should_reload_sources_after_internal_write(app_state.as_ref()) {
-                if let Err(err) = ConfigFile::load_sources(app_state).await {
-                    error!("panel_api reload sources failed: {err}");
-                    return None;
-                }
+                refresh_internal_sources(app_state);
             }
             Some(PanelApiProvisionOutcome::Created)
         }
@@ -1891,8 +1917,10 @@ async fn ensure_alias_pool_min(
                                 acct_mut.exp_date = Some(new_exp);
                             }
                             if let Some(csv_path) = csv_path {
-                                let _csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
+                                let csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
                                 if let Err(err) = csv_patch_batch_update_exp_date(
+                                    app_state,
+                                    &csv_lock,
                                     input.input_type,
                                     csv_path,
                                     &acct.name,
@@ -1976,8 +2004,10 @@ async fn ensure_alias_pool_min(
                     } else {
                         input.input_type
                     };
-                    let _csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
+                    let csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
                     if let Err(err) = csv_patch_batch_append(
+                        app_state,
+                        &csv_lock,
                         csv_path,
                         batch_type,
                         &alias_name,
@@ -2187,8 +2217,10 @@ async fn sync_panel_api_for_input_on_boot(
         }
 
         if let Some(csv_path) = csv_path.as_ref() {
-            let _csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
+            let csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
             if let Err(err) = csv_patch_batch_update_exp_date(
+                app_state,
+                &csv_lock,
                 input.input_type,
                 csv_path,
                 &acct.name,
@@ -2318,9 +2350,11 @@ async fn sync_panel_api_for_input_on_boot(
                                                 } else {
                                                     input.input_type
                                                 };
-                                                let _csv_lock =
+                                                let csv_lock =
                                                     app_state.app_config.file_locks.write_lock(csv_path).await;
                                                 if let Err(err) = csv_patch_batch_append(
+                                                    app_state,
+                                                    &csv_lock,
                                                     csv_path,
                                                     batch_type,
                                                     &alias_name,
@@ -2366,8 +2400,10 @@ async fn sync_panel_api_for_input_on_boot(
                                         }
 
                                         if let Some(csv_path) = csv_path.as_ref() {
-                                            let _csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
+                                            let csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
                                             if let Err(err) = csv_patch_batch_update_credentials(
+                                                app_state,
+                                                &csv_lock,
                                                 input.input_type,
                                                 csv_path,
                                                 &input.name,
@@ -2440,8 +2476,10 @@ async fn sync_panel_api_for_input_on_boot(
                                     } else {
                                         input.input_type
                                     };
-                                    let _csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
+                                    let csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
                                     if let Err(err) = csv_patch_batch_append(
+                                        app_state,
+                                        &csv_lock,
                                         csv_path,
                                         batch_type,
                                         &alias_name,
@@ -2487,8 +2525,10 @@ async fn sync_panel_api_for_input_on_boot(
                             }
 
                             if let Some(csv_path) = csv_path.as_ref() {
-                                let _csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
+                                let csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
                                 if let Err(err) = csv_patch_batch_update_credentials(
+                                    app_state,
+                                    &csv_lock,
                                     input.input_type,
                                     csv_path,
                                     &input.name,
@@ -2578,9 +2618,11 @@ async fn sync_panel_api_for_input_on_boot(
                     );
                 } else if let Some(new_exp) = refreshed_exp {
                     if let Some(csv_path) = csv_path.as_ref() {
-                        let _csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
+                        let csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
                         let result = if creds_changed {
                             csv_patch_batch_update_credentials(
+                                app_state,
+                                &csv_lock,
                                 input.input_type,
                                 csv_path,
                                 &input.name,
@@ -2593,6 +2635,8 @@ async fn sync_panel_api_for_input_on_boot(
                             .await
                         } else {
                             csv_patch_batch_update_exp_date(
+                                app_state,
+                                &csv_lock,
                                 input.input_type,
                                 csv_path,
                                 &input.name,
@@ -2825,8 +2869,10 @@ async fn sync_panel_api_for_input_on_boot(
                                     } else {
                                         input.input_type
                                     };
-                                    let _csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
+                                    let csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
                                     if let Err(err) = csv_patch_batch_append(
+                                        app_state,
+                                        &csv_lock,
                                         csv_path,
                                         batch_type,
                                         &alias_name,
@@ -2927,8 +2973,10 @@ async fn sync_panel_api_for_input_on_boot(
                         } else {
                             input.input_type
                         };
-                        let _csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
+                        let csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
                         if let Err(err) = csv_patch_batch_append(
+                            app_state,
+                            &csv_lock,
                             csv_path,
                             batch_type,
                             &alias_name,
@@ -3010,9 +3058,11 @@ async fn sync_panel_api_for_input_on_boot(
 
         if let Some(new_exp) = refreshed_exp {
             if let Some(csv_path) = csv_path.as_ref() {
-                let _csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
+                let csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
                 let result = if creds_changed {
                     csv_patch_batch_update_credentials(
+                        app_state,
+                        &csv_lock,
                         input.input_type,
                         csv_path,
                         &account_name,
@@ -3025,6 +3075,8 @@ async fn sync_panel_api_for_input_on_boot(
                     .await
                 } else {
                     csv_patch_batch_update_exp_date(
+                        app_state,
+                        &csv_lock,
                         input.input_type,
                         csv_path,
                         &account_name,
@@ -3135,8 +3187,8 @@ async fn sync_panel_api_for_input_on_boot(
 
     if alias_pool_remove_expired(panel_cfg) {
         if let Some(csv_path) = csv_path.as_ref() {
-            let _csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
-            match csv_patch_batch_remove_expired(input.input_type, csv_path).await {
+            let csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
+            match csv_patch_batch_remove_expired(app_state, &csv_lock, input.input_type, csv_path).await {
                 Ok(true) => any_change = true,
                 Ok(false) => {}
                 Err(err) => debug_if_enabled!("panel_api boot sync failed to remove expired csv accounts: {}", err),
@@ -3175,8 +3227,15 @@ async fn sync_panel_api_for_input_on_boot(
 
     if panel_cfg.alias_pool.is_some() {
         if let Some(csv_path) = csv_path.as_ref() {
-            let _csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
-            match csv_patch_batch_sort_by_exp_date(input.input_type, csv_path, AliasExpDateSortOrder::NewestFirst).await
+            let csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
+            match csv_patch_batch_sort_by_exp_date(
+                app_state,
+                &csv_lock,
+                input.input_type,
+                csv_path,
+                AliasExpDateSortOrder::NewestFirst,
+            )
+            .await
             {
                 Ok(true) => any_change = true,
                 Ok(false) => {}
@@ -3195,7 +3254,13 @@ async fn sync_panel_api_for_input_on_boot(
     }
 
     if pending_sources_yml {
-        match execute_source_yml_patches(&app_state.app_config, sources_path, &sources_yml_patches).await {
+        match crate::api::source_yml_patch::execute_account_source_patches(
+            app_state,
+            sources_path,
+            &sources_yml_patches,
+        )
+        .await
+        {
             Ok(true) => any_change = true,
             Ok(false) => {}
             Err(err) => debug_if_enabled!("panel_api boot sync failed to persist source.yml patches: {}", err),
@@ -3218,11 +3283,8 @@ pub(crate) async fn sync_panel_api_exp_dates(app_state: &Arc<AppState>) {
     }
 
     if any_change {
-        // Even with `config_hot_reload=true`, the file watcher reload is asynchronous.
-        // Reload immediately so subsequent routines use updated credentials (e.g. after root renewal).
-        if let Err(err) = ConfigFile::load_sources(app_state).await {
-            debug_if_enabled!("panel_api boot/update reload sources failed: {}", err);
-        }
+        // Account writes already synchronize prepared sources; refresh allocation without restarting services.
+        refresh_internal_sources(app_state);
     }
 }
 
@@ -3271,9 +3333,7 @@ pub(crate) async fn sync_panel_api_alias_pool_for_target(app_state: &Arc<AppStat
     }
 
     if any_change && should_reload_sources_after_internal_write(app_state.as_ref()) {
-        if let Err(err) = ConfigFile::load_sources(app_state).await {
-            debug_if_enabled!("panel_api user sync reload sources failed: {}", err);
-        }
+        refresh_internal_sources(app_state);
     }
 }
 

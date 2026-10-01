@@ -541,6 +541,9 @@ pub struct ConfigInputDto {
     pub persist: Option<String>,
     #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
+    /// Excludes the root account while keeping enabled aliases available.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub account_disabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequential_group: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -588,6 +591,7 @@ impl Default for ConfigInputDto {
             password: None,
             persist: None,
             enabled: default_as_true(),
+            account_disabled: false,
             sequential_group: None,
             options: None,
             media_server: None,
@@ -1179,9 +1183,13 @@ impl ConfigInputDto {
         exp_date: i64,
         disable: bool,
     ) -> Result<bool, TuliproxError> {
-        let (expiration, enabled) = if self.name.as_ref() == account_name {
-            (&mut self.exp_date, &mut self.enabled)
-        } else if let Some(alias) = self
+        if self.name.as_ref() == account_name {
+            let changed = self.exp_date != Some(exp_date) || disable && !self.account_disabled;
+            self.exp_date = Some(exp_date);
+            self.account_disabled |= disable;
+            return Ok(changed);
+        }
+        let (expiration, enabled) = if let Some(alias) = self
             .aliases
             .as_mut()
             .and_then(|aliases| aliases.iter_mut().find(|alias| alias.name.as_ref() == account_name))

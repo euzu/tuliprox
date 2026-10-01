@@ -24,6 +24,8 @@ pub struct PatchInput {
     #[serde(default)]
     pub enabled: Option<serde_saphyr::Spanned<bool>>,
     #[serde(default)]
+    pub account_disabled: Option<serde_saphyr::Spanned<bool>>,
+    #[serde(default)]
     pub url: Option<serde_saphyr::Spanned<String>>,
     #[serde(default)]
     pub username: Option<serde_saphyr::Spanned<String>>,

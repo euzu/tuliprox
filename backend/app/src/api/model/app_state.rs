@@ -542,6 +542,7 @@ pub(crate) fn create_test_app_state(config: Config) -> Arc<AppState> {
     });
     let event_manager = Arc::new(EventManager::new());
     let active_provider = Arc::new(ActiveProviderManager::new(&app_config, &event_manager));
+    active_provider.bind_event_manager(&event_manager);
     let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
     active_provider.set_shared_stream_manager(&shared_stream_manager);
 

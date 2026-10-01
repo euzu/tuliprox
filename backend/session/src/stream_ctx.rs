@@ -13,6 +13,7 @@ use tuliprox_core::model::AppConfig;
 /// What opening and reading a provider stream needs.
 #[derive(Clone)]
 pub struct ProviderStreamCtx {
+    pub active_provider: Arc<crate::ActiveProviderManager>,
     /// Resolved configuration; re-read on each use because it is hot-swapped.
     pub app_config: Arc<AppConfig>,
     /// Connection admission and teardown for the provider side.

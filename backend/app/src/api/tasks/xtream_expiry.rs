@@ -1,16 +1,7 @@
-use crate::{
-    api::{
-        config_file::ConfigFile,
-        model::AppState,
-        source_yml_patch::{execute_source_yml_patches, SourcesYmlPatch},
-    },
-    iptv::xtream::get_xtream_stream_url_base,
-    repository::{csv_patch_batch_update_exp_dates, get_csv_file_path, BatchExpDateUpdate},
-    utils::request,
-};
+use crate::{api::model::AppState, iptv::xtream::get_xtream_stream_url_base, utils::request};
 use chrono::Utc;
 use log::{debug, warn};
-use shared::{error::TuliproxError, model::InputType};
+use shared::error::TuliproxError;
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -28,7 +19,6 @@ const PERSIST_INTERVAL: Duration = Duration::from_mins(15);
 struct Account {
     input_name: Arc<str>,
     name: Arc<str>,
-    batch_url: Option<String>,
     url: String,
     source_url: String,
     headers: HashMap<String, String>,
@@ -36,6 +26,12 @@ struct Account {
     password: String,
     exp_date: Option<i64>,
     panel: Arc<str>,
+}
+
+impl Account {
+    fn identity(&self) -> shared::model::ProviderAccountIdentity {
+        shared::model::ProviderAccountIdentity::new(&self.source_url, Some(&self.username), Some(&self.password))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +76,7 @@ pub fn exec_xtream_expiry_sync(app_state: &Arc<AppState>, cancel: &CancellationT
                 now,
             )
             .await;
+            super::provider_account_state::persist_provider_account_observations(&app_state).await;
             state_dirty |= persist_pending_updates(&app_state, &accounts, &mut state, &mut next_persist, now).await;
             if state_dirty {
                 match save_state(&app_state, &state).await {
@@ -89,7 +86,8 @@ pub fn exec_xtream_expiry_sync(app_state: &Arc<AppState>, cancel: &CancellationT
             }
             tokio::select! {
                 () = cancel.cancelled() => return,
-                () = tokio::time::sleep(Duration::from_mins(1)) => {}
+                () = tokio::time::sleep(Duration::from_mins(1)) => {},
+                () = app_state.active_provider.account_health_changed() => {}
             }
         }
     });
@@ -108,13 +106,18 @@ async fn fetch_due_accounts(
     panel_next.retain(|panel, _| active_panels.contains(panel));
     for account in accounts {
         let key = account_key(account);
-        if !is_expiry_refresh_due(
-            account.exp_date,
-            state.last_refresh.get(&key).copied(),
-            state.last_attempt.get(&key).copied(),
-            now,
-        ) {
-            continue;
+        let last_refresh = state.last_refresh.get(&key).copied();
+        let last_attempt = state.last_attempt.get(&key).copied();
+        let probe_requested = app_state.active_provider.is_account_probe_requested(&account.name);
+        if !is_expiry_refresh_due(account.exp_date, last_refresh, last_attempt, now) {
+            if !probe_requested {
+                continue;
+            }
+            if !is_probe_due(last_refresh, last_attempt, now) {
+                // The account was queried within the refresh interval; asking again risks a ban.
+                app_state.active_provider.clear_account_probe(&account.name);
+                continue;
+            }
         }
         let url = account_url(account);
         let panel = panel_key(account);
@@ -138,6 +141,7 @@ async fn fetch_due_accounts(
         }
         *state_dirty = false;
         panel_next.insert(panel.clone(), tokio::time::Instant::now() + PANEL_INTERVAL);
+        app_state.active_provider.clear_account_probe(&account.name);
         let (urgent, result_changed) = match fetch_expiry_date(app_state, account, &url).await {
             Ok(exp_date) => {
                 let pending_was_empty = state.pending_expiry.is_empty();
@@ -197,22 +201,16 @@ async fn persist_pending_updates(
             state.pending_expiry.get(&key).map(|exp_date| (account, *exp_date))
         })
         .collect::<Vec<_>>();
-    match persist_updates(app_state, &updates).await {
-        Ok(updated_accounts) => {
-            for key in updated_accounts {
-                state.pending_expiry.remove(&key);
-                let refreshed_at = state.last_attempt.get(&key).copied().unwrap_or(now);
-                state.last_refresh.insert(key, refreshed_at);
-            }
-            *next_persist = tokio::time::Instant::now() + PERSIST_INTERVAL;
-            true
-        }
-        Err(err) => {
-            warn!("Failed to persist Xtream expiry dates: {err}");
-            *next_persist = tokio::time::Instant::now() + Duration::from_mins(1);
-            false
-        }
+    let (updated_accounts, error) = persist_updates(app_state, &updates).await;
+    let dirty = !updated_accounts.is_empty();
+    for key in updated_accounts {
+        state.pending_expiry.remove(&key);
+        let refreshed_at = state.last_attempt.get(&key).copied().unwrap_or(now);
+        state.last_refresh.insert(key, refreshed_at);
     }
+    *next_persist =
+        tokio::time::Instant::now() + if error.is_some() { Duration::from_mins(1) } else { PERSIST_INTERVAL };
+    dirty || error.is_none()
 }
 
 fn is_expiry_refresh_due(
@@ -221,9 +219,13 @@ fn is_expiry_refresh_due(
     last_attempt: Option<i64>,
     now: i64,
 ) -> bool {
-    let last_request = last_refresh.max(last_attempt);
-    exp_date.is_none_or(|expiry| expiry <= now + EXPIRY_WINDOW_SECS)
-        && last_request.is_none_or(|last| now.saturating_sub(last) >= REFRESH_INTERVAL_SECS)
+    exp_date.is_none_or(|expiry| expiry <= now + EXPIRY_WINDOW_SECS) && is_probe_due(last_refresh, last_attempt, now)
+}
+
+/// An authorization failure may query an account outside the expiry window, but never more
+/// often than the regular refresh interval.
+fn is_probe_due(last_refresh: Option<i64>, last_attempt: Option<i64>, now: i64) -> bool {
+    last_refresh.max(last_attempt).is_none_or(|last| now.saturating_sub(last) >= REFRESH_INTERVAL_SECS)
 }
 
 fn is_panel_request_due(last_attempt: Option<i64>, now: i64) -> bool {
@@ -260,13 +262,11 @@ fn collect_accounts(app_state: &AppState) -> Vec<Account> {
         .iter()
         .filter(|input| input.enabled && input.input_type.is_xtream())
         .flat_map(|input| {
-            let batch_url = input.t_batch_url.clone();
             let panel = Arc::<str>::from(panel_identity(&input.url, &input.name));
             let root = input.username.as_ref().zip(input.password.as_ref()).and_then(|(username, password)| {
                 input.resolve_url(&input.url).ok().map(|url| Account {
                     input_name: Arc::clone(&input.name),
                     name: Arc::clone(&input.name),
-                    batch_url: batch_url.clone(),
                     url: url.into_owned(),
                     source_url: input.url.clone(),
                     headers: input.headers.clone(),
@@ -282,7 +282,6 @@ fn collect_accounts(app_state: &AppState) -> Vec<Account> {
                         input.resolve_url(&alias.url).ok().map(|url| Account {
                             input_name: Arc::clone(&input.name),
                             name: Arc::clone(&alias.name),
-                            batch_url: batch_url.clone(),
                             url: url.into_owned(),
                             source_url: alias.url.clone(),
                             headers: input.headers.clone(),
@@ -363,7 +362,18 @@ async fn fetch_expiry_date(app_state: &AppState, account: &Account, url: &str) -
         debug!("Xtream expiry response was invalid JSON: {err}");
         FetchError::Account
     })?;
-    parse_expiry_date(&value)
+    let status =
+        value.pointer("/user_info/status").and_then(serde_json::Value::as_str).and_then(|status| status.parse().ok());
+    let exp_date = parse_expiry_date(&value).ok();
+    if status.is_some() || exp_date.is_some() {
+        let _ = app_state.active_provider.observe_account(crate::model::ProviderAccountObservation {
+            name: Arc::clone(&account.name),
+            identity: account.identity(),
+            status,
+            exp_date,
+        });
+    }
+    exp_date.ok_or(FetchError::Account)
 }
 
 fn parse_expiry_date(value: &serde_json::Value) -> Result<i64, FetchError> {
@@ -378,96 +388,50 @@ fn account_is_current(account: &Account, current_keys: &HashSet<String>) -> bool
     current_keys.contains(&account_key(account))
 }
 
-async fn persist_updates(app_state: &Arc<AppState>, updates: &[(&Account, i64)]) -> Result<Vec<String>, TuliproxError> {
+/// Persists every update it can in one grouped pass; returns the persisted keys and the first error.
+async fn persist_updates(
+    app_state: &Arc<AppState>,
+    updates: &[(&Account, i64)],
+) -> (Vec<String>, Option<TuliproxError>) {
     let current_keys = collect_accounts(app_state).iter().map(account_key).collect::<HashSet<_>>();
-    let updates =
-        updates.iter().copied().filter(|(account, _)| account_is_current(account, &current_keys)).collect::<Vec<_>>();
-    if updates.is_empty() {
-        return Ok(Vec::new());
-    }
     let now = Utc::now().timestamp();
-    let requires_reload =
-        updates.iter().any(|(account, exp_date)| account.exp_date != Some(*exp_date) || is_expired_at(*exp_date, now));
-    let mut source_updates = Vec::new();
-    let mut batch_updates = HashMap::<String, Vec<BatchExpDateUpdate>>::new();
-    let mut updated_accounts = Vec::new();
-    for (account, exp_date) in updates {
-        let disable = is_expired_at(exp_date, now);
-        if account.exp_date == Some(exp_date) && !disable {
-            updated_accounts.push(account_key(account));
+    let mut persisted = Vec::new();
+    let mut queued_keys = Vec::new();
+    let mut observations = Vec::new();
+    for &(account, exp_date) in updates {
+        if !account_is_current(account, &current_keys) {
             continue;
         }
-        if let Some(batch_url) = &account.batch_url {
-            batch_updates.entry(batch_url.clone()).or_default().push(BatchExpDateUpdate {
-                account_key: account_key(account),
-                account_name: Arc::clone(&account.name),
-                exp_date,
-                disable,
-            });
-        } else {
-            source_updates.push((
-                account_key(account),
-                Arc::clone(&account.input_name),
-                Arc::clone(&account.name),
-                exp_date,
-            ));
+        if account.exp_date == Some(exp_date) && !is_expired_at(exp_date, now) {
+            persisted.push(account_key(account));
+            continue;
+        }
+        // `None` means already persisted or unknown; the next pass sees the stored date.
+        if let Some(observation) = app_state.active_provider.observe_account(crate::model::ProviderAccountObservation {
+            name: Arc::clone(&account.name),
+            identity: account.identity(),
+            status: None,
+            exp_date: Some(exp_date),
+        }) {
+            queued_keys.push(account_key(account));
+            observations.push(observation);
         }
     }
-    let sources_path = app_state.app_config.paths.load().sources_file_path.clone();
-    let sources_path = std::path::Path::new(&sources_path);
-    if !source_updates.is_empty() {
-        let patches: Vec<SourcesYmlPatch> = source_updates
-            .iter()
-            .map(|(_, input_name, account_name, exp_date)| SourcesYmlPatch::SetFetchedExpiry {
-                input_name: Arc::clone(input_name),
-                account_name: Arc::clone(account_name),
-                exp_date: *exp_date,
-                disable: is_expired_at(*exp_date, now),
-            })
-            .collect();
-        match execute_source_yml_patches(&app_state.app_config, sources_path, &patches).await {
-            Ok(_) => {
-                updated_accounts.extend(source_updates.iter().map(|(key, _, _, _)| key.clone()));
-            }
-            Err(err) => {
-                // Failed patching leaves pending updates available for retry.
-                warn!("source.yml expiry patch failed, will retry: {err}");
-            }
-        }
+    if observations.is_empty() {
+        return (persisted, None);
     }
-    let mut persistence_error = None;
-    for (batch_url, updates) in batch_updates {
-        let csv_path = match get_csv_file_path(&batch_url) {
-            Ok(path) => path,
-            Err(err) => {
-                persistence_error = Some(TuliproxError::ConfigInput(format!("{err}")));
-                break;
-            }
-        };
-        let _csv_lock = app_state.app_config.file_locks.write_lock(&csv_path).await;
-        let backup_dir = app_state.app_config.config.load().get_backup_dir().to_string();
-        match csv_patch_batch_update_exp_dates(InputType::XtreamBatch, &csv_path, &updates, &backup_dir).await {
-            Ok((batch_changed, matched_keys)) => {
-                if batch_changed {
-                    app_state.app_config.file_locks.mark_internal_write_revision(&csv_path).await.map_err(|err| {
-                        TuliproxError::Io(format!("Failed to track internal alias CSV update: {err}"))
-                    })?;
-                }
-                updated_accounts.extend(matched_keys);
-            }
-            Err(err) => {
-                persistence_error = Some(err);
-                break;
-            }
-        }
+    let report = super::provider_account_state::persist_observations(app_state, &observations).await;
+    for (name, err) in &report.failed {
+        warn!("Failed to persist Xtream expiry for {name}: {err}");
     }
-    if requires_reload && !updated_accounts.is_empty() {
-        ConfigFile::load_sources(app_state).await?;
-    }
-    if let Some(err) = persistence_error {
-        return Err(err);
-    }
-    Ok(updated_accounts)
+    persisted.extend(
+        queued_keys
+            .into_iter()
+            .zip(&observations)
+            .filter(|(_, observation)| report.persisted.contains(&observation.name))
+            .map(|(key, _)| key),
+    );
+    (persisted, report.first_error)
 }
 
 fn state_path(app_state: &AppState) -> std::path::PathBuf {
@@ -538,7 +502,6 @@ mod tests {
         Account {
             input_name: Arc::from("input"),
             name: Arc::from("alias"),
-            batch_url: None,
             url: "http://panel.example".to_string(),
             source_url: "http://panel.example".to_string(),
             headers: HashMap::new(),
@@ -549,6 +512,36 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn restored_pending_csv_expiry_updates_runtime_without_reload() -> Result<(), Box<dyn std::error::Error>> {
+        let (_dir, app, path) = super::super::provider_account_state::tests::fixture(true).await?;
+        let account = Account {
+            input_name: Arc::from("root"),
+            name: Arc::from("root"),
+            url: "http://provider".to_string(),
+            source_url: "http://provider".to_string(),
+            username: "user".to_string(),
+            password: "pass".to_string(),
+            ..account("pass")
+        };
+        let key = super::account_key(&account);
+        let mut state =
+            super::ExpiryState { pending_expiry: HashMap::from([(key.clone(), 30)]), ..super::ExpiryState::default() };
+        let mut due = tokio::time::Instant::now();
+        assert!(super::persist_pending_updates(&app, &[account], &mut state, &mut due, 100).await);
+        assert!(!state.pending_expiry.contains_key(&key));
+        let sources = app.app_config.sources.load();
+        assert_eq!(sources.inputs[0].exp_date, Some(30));
+        assert!(sources.inputs[0].account_disabled);
+        assert!(app.active_provider.get_next_provider(&Arc::from("root")).is_none());
+        assert!(app.app_config.file_locks.is_internal_write_revision(&path).await);
+        let (_, aliases) =
+            crate::repository::csv_read_inputs(shared::model::InputType::XtreamBatch, path.to_string_lossy().as_ref())
+                .await?;
+        assert!(!aliases[0].enabled);
+        Ok(())
+    }
+
     #[test]
     fn missing_or_soon_expiring_accounts_are_due_once_per_day() {
         let now = 1_000_000;
@@ -557,6 +550,19 @@ mod tests {
         assert!(super::is_expiry_refresh_due(Some(now + 2 * 24 * 60 * 60), Some(now - 24 * 60 * 60), None, now));
         assert!(!super::is_expiry_refresh_due(Some(now + 4 * 24 * 60 * 60), None, None, now));
         assert!(!super::is_expiry_refresh_due(None, None, Some(now - 1), now));
+    }
+
+    #[test]
+    fn authorization_probe_respects_refresh_interval() {
+        let now = 1_000_000;
+        let day = 24 * 60 * 60;
+        // Outside the expiry window an authorization failure may still query the account ...
+        assert!(!super::is_expiry_refresh_due(Some(now + 30 * day), Some(now - day), None, now));
+        assert!(super::is_probe_due(Some(now - day), None, now));
+        assert!(super::is_probe_due(None, None, now));
+        // ... but never sooner than the regular refresh interval after any earlier request.
+        assert!(!super::is_probe_due(Some(now - day + 1), None, now));
+        assert!(!super::is_probe_due(Some(now - 2 * day), Some(now - 60), now));
     }
 
     #[test]
@@ -691,12 +697,13 @@ mod tests {
     }
 
     #[test]
-    fn expired_source_account_is_disabled() -> Result<(), Box<dyn std::error::Error>> {
+    fn expired_root_is_excluded_without_disabling_input() -> Result<(), Box<dyn std::error::Error>> {
         let mut input = ConfigInputDto { name: Arc::from("input"), enabled: true, ..Default::default() };
 
         assert!(input.update_account_expiration_date("input", 30, true)?);
         assert_eq!(input.exp_date, Some(30));
-        assert!(!input.enabled);
+        assert!(input.enabled);
+        assert!(input.account_disabled);
         Ok(())
     }
 

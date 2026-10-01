@@ -1025,6 +1025,19 @@
 
 ## 🐛 Fixes
 
+- **Banned, disabled or expired provider accounts are excluded from allocation and remembered.** A login or expiry
+  response that reports `Banned`, `Disabled` or `Expired` excludes the account immediately and stores the exclusion in
+  `source.yml` (`account_disabled: true` for a root account) or the alias CSV (`enabled` = `0`). `Pending` and other
+  non-terminal states only exclude the account at runtime until the provider reports it as usable again. A stream
+  rejected with HTTP 401/403 sends no request of its own; it only asks the Xtream expiry worker to check the account,
+  which still queries each account at most once per 24 hours and each panel at most every 5 minutes. A stored
+  exclusion is cleared by a panel renewal or credential update of that account (this also re-enables an alias that was
+  disabled by hand), or by resetting the flag in the file. An expired root
+  account no longer disables the whole input; playlist updates use the first usable alias instead. Configuration
+  backups are now named `<file>-<path hash>-<timestamp>-<random>`, and the latest ten are kept per source file. Backups
+  written in the previous format (`<file>_<timestamp>…`) are not pruned automatically; delete them manually if they are
+  no longer needed.
+
 - **Stalker playback resolution now says why it failed, retries a rejected session, and can fall back to the stored
   command.** A playback request that could not be resolved reported a single message naming the requested item's portal
   id, while the actual cause — no published catalog for the configured portal identity, an item missing from the active

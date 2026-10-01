@@ -132,6 +132,16 @@ pub trait EventSink: Send + Sync {
     /// closed channel are all normal and none of them are the emitter's
     /// problem.
     fn emit(&self, event: EventMessage);
+    /// Forward a confirmed account response to the runtime provider manager.
+    /// Sinks without a provider runtime deliberately ignore the observation.
+    fn observe_provider_account(
+        &self,
+        _name: Arc<str>,
+        _identity: super::ProviderAccountIdentity,
+        _status: Option<super::ProxyUserStatus>,
+        _exp_date: Option<i64>,
+    ) {
+    }
 }
 
 /// The sink that drops everything.
@@ -148,10 +158,28 @@ impl EventSink for NoopSink {
 
 impl<T: EventSink + ?Sized> EventSink for Arc<T> {
     fn emit(&self, event: EventMessage) { (**self).emit(event); }
+    fn observe_provider_account(
+        &self,
+        name: Arc<str>,
+        identity: super::ProviderAccountIdentity,
+        status: Option<super::ProxyUserStatus>,
+        exp_date: Option<i64>,
+    ) {
+        (**self).observe_provider_account(name, identity, status, exp_date);
+    }
 }
 
 impl<T: EventSink> EventSink for &T {
     fn emit(&self, event: EventMessage) { (**self).emit(event); }
+    fn observe_provider_account(
+        &self,
+        name: Arc<str>,
+        identity: super::ProviderAccountIdentity,
+        status: Option<super::ProxyUserStatus>,
+        exp_date: Option<i64>,
+    ) {
+        (**self).observe_provider_account(name, identity, status, exp_date);
+    }
 }
 
 /// Which event this is, without its payload.

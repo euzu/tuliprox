@@ -1,11 +1,10 @@
-use chrono::Local;
 use futures::TryFutureExt;
 use log::{error, warn};
 use shared::{
     error::{string_to_io_error, to_io_error, TuliproxError},
     model::{
-        ConfigInputAliasDto, InputType, StalkerAuthMode, StalkerDeviceProfileDto, StalkerEndpointPreference,
-        StalkerInputConfigDto, StalkerMagPreset,
+        ConfigInputAliasDto, InputType, ProviderAccountIdentity, StalkerAuthMode, StalkerDeviceProfileDto,
+        StalkerEndpointPreference, StalkerInputConfigDto, StalkerMagPreset,
     },
     utils::{
         get_credentials_from_url, get_credentials_from_url_str, parse_timestamp, sanitize_sensitive_info, Internable,
@@ -27,6 +26,7 @@ use tuliprox_core::{
     utils::{file_reader, request::get_local_file_content, EnvResolvingReader},
 };
 use url::Url;
+#[cfg(windows)]
 use uuid::Uuid;
 
 const CSV_SEPARATOR: char = ';';
@@ -55,10 +55,13 @@ pub enum AliasExpDateSortOrder {
     OldestFirst,
 }
 
-pub struct BatchExpDateUpdate {
-    pub account_key: String,
+pub struct BatchAccountStateUpdate {
+    pub identity: ProviderAccountIdentity,
     pub account_name: Arc<str>,
-    pub exp_date: i64,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub url: Option<String>,
+    pub exp_date: Option<i64>,
     pub disable: bool,
 }
 
@@ -328,49 +331,22 @@ pub async fn csv_read_inputs(
 // `repository::mod` so existing call sites are unchanged.
 pub use tuliprox_core::utils::get_csv_file_path;
 
-pub async fn csv_backup_file(csv_path: &Path, backup_dir: &str) -> Result<(), TuliproxError> {
-    let filename = csv_path.file_name().and_then(|name| name.to_str()).ok_or_else(|| {
-        TuliproxError::ConfigInput(format!("Could not derive a filename for alias CSV {}", csv_path.display()))
-    })?;
-    let backup_dir = PathBuf::from(backup_dir);
-    tokio::fs::create_dir_all(&backup_dir)
+pub async fn csv_backup_file(csv_path: &Path, backup_dir: &str) -> Result<PathBuf, TuliproxError> {
+    let backup = tuliprox_core::utils::backup_config_file(csv_path, Path::new(backup_dir))
         .await
-        .map_err(|err| TuliproxError::ConfigInput(format!("Could not create alias CSV backup directory: {err}")))?;
-    let backup_path =
-        backup_dir.join(format!("{filename}_{}_{}", Local::now().format("%Y%m%d_%H%M%S%9f"), Uuid::new_v4()));
-    let mut source = tokio::fs::File::open(csv_path)
-        .await
-        .map_err(|err| TuliproxError::ConfigInput(format!("Could not open alias CSV for backup: {err}")))?;
-    let source_permissions = source
-        .metadata()
-        .await
-        .map_err(|err| TuliproxError::ConfigInput(format!("Could not read alias CSV metadata: {err}")))?
-        .permissions();
-    let mut backup =
-        tokio::fs::OpenOptions::new().write(true).create_new(true).open(&backup_path).await.map_err(|err| {
-            TuliproxError::ConfigInput(format!("Could not create alias CSV backup {}: {err}", backup_path.display()))
-        })?;
-    if let Err(err) = tokio::io::copy(&mut source, &mut backup).await {
-        drop(backup);
-        let _ = tokio::fs::remove_file(&backup_path).await;
-        return Err(TuliproxError::ConfigInput(format!(
-            "Could not backup alias CSV to {}: {err}",
-            backup_path.display()
-        )));
-    }
-    drop(backup);
-    if let Err(err) = tokio::fs::set_permissions(&backup_path, source_permissions).await {
-        let _ = tokio::fs::remove_file(&backup_path).await;
-        return Err(TuliproxError::ConfigInput(format!("Could not preserve alias CSV backup permissions: {err}")));
-    }
-    if let Err(err) = copy_csv_acl(csv_path, &backup_path).await {
-        let _ = tokio::fs::remove_file(&backup_path).await;
+        .map_err(|err| TuliproxError::ConfigInput(format!("Could not back up alias CSV: {err}")))?;
+    if let Err(err) = copy_csv_acl(csv_path, &backup).await {
+        let _ = tokio::fs::remove_file(backup).await;
         return Err(TuliproxError::ConfigInput(format!("Could not preserve alias CSV backup ACL: {err}")));
     }
-    Ok(())
+    Ok(backup)
 }
 
 async fn csv_write_input_to_path(file_path: &Path, aliases: &[ConfigInputAliasDto]) -> Result<(), Error> {
+    csv_write_content_to_path(file_path, csv_render_aliases(aliases)).await
+}
+
+fn csv_render_aliases(aliases: &[ConfigInputAliasDto]) -> String {
     let write_stalker_fields = aliases.iter().any(|alias| alias.stalker.is_some());
     let mut content = String::new();
     content.push(HEADER_PREFIX);
@@ -436,8 +412,29 @@ async fn csv_write_input_to_path(file_path: &Path, aliases: &[ConfigInputAliasDt
         }
         content.push('\n');
     }
+    content
+}
 
-    csv_write_content_to_path(file_path, content).await
+/// Backs up and replaces the CSV only when `content` differs from the file, then prunes old backups.
+/// A failed backup aborts before the original is overwritten.
+async fn csv_replace_with_backup(csv_path: &Path, content: String, backup_dir: &str) -> Result<bool, TuliproxError> {
+    let current = tokio::fs::read(csv_path)
+        .await
+        .map_err(|err| TuliproxError::ConfigInput(format!("Could not read alias CSV {}: {err}", csv_path.display())))?;
+    if current == content.as_bytes() {
+        return Ok(false);
+    }
+    csv_write_with_backup(csv_path, content, backup_dir).await?;
+    Ok(true)
+}
+
+async fn csv_write_with_backup(csv_path: &Path, content: String, backup_dir: &str) -> Result<(), TuliproxError> {
+    csv_backup_file(csv_path, backup_dir).await?;
+    let written = csv_write_content_to_path(csv_path, content).await;
+    if let Err(err) = tuliprox_core::utils::prune_config_backups(csv_path, Path::new(backup_dir)).await {
+        warn!("Could not prune alias CSV backups: {err}");
+    }
+    written.map_err(|err| TuliproxError::ConfigInput(err.to_string()))
 }
 
 async fn csv_write_content_to_path(file_path: &Path, content: String) -> Result<(), Error> {
@@ -641,6 +638,7 @@ pub async fn csv_write_inputs(file_uri: &str, aliases: &[ConfigInputAliasDto]) -
     csv_write_input_to_path(&file_path, aliases).await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn csv_patch_batch_append(
     csv_path: &Path,
     input_type: InputType,
@@ -649,6 +647,7 @@ pub async fn csv_patch_batch_append(
     username: &str,
     password: &str,
     exp_date: Option<i64>,
+    backup_dir: &str,
 ) -> Result<(), TuliproxError> {
     // TODO check if alias name exists in any config ?
 
@@ -679,7 +678,7 @@ pub async fn csv_patch_batch_append(
     };
     aliases.push(alias);
 
-    csv_write_input_to_path(&file_path, &aliases).map_err(|err| TuliproxError::ConfigInput(format!("{err}"))).await?;
+    csv_replace_with_backup(&file_path, csv_render_aliases(&aliases), backup_dir).await?;
     Ok(())
 }
 
@@ -690,45 +689,68 @@ pub async fn csv_patch_batch_update_exp_date(
     username: &str,
     password: &str,
     exp_date: i64,
+    backup_dir: &str,
 ) -> Result<(), TuliproxError> {
     let mut matched = false;
     let (file_path, mut aliases) = csv_read_inputs_from_path(input_type, csv_path)
         .map_err(|err| TuliproxError::ConfigInput(format!("{err}")))
         .await?;
+    let name_matches = aliases.iter().any(|alias| &alias.name == account_name);
     for alias in &mut aliases {
+        let url_credentials_match =
+            || matches!(get_credentials_from_url_str(&alias.url), (Some(u), Some(p)) if u == username && p == password);
         if &alias.name == account_name
-            || (alias.username == Some(username.to_string()) && alias.password == Some(password.to_string()))
+            || (!name_matches
+                && ((alias.username.as_deref() == Some(username) && alias.password.as_deref() == Some(password))
+                    || url_credentials_match()))
         {
+            // A panel renewal is an explicit decision for this account and lifts a stored exclusion.
+            alias.enabled = true;
             alias.exp_date = Some(exp_date);
             alias.max_connections = 1;
             matched = true;
-        } else if let (Some(u), Some(p)) = get_credentials_from_url_str(&alias.url) {
-            if u == username && p == password {
-                alias.exp_date = Some(exp_date);
-                alias.max_connections = 1;
-                matched = true;
-            }
         }
     }
 
     if matched {
-        csv_write_input_to_path(&file_path, &aliases)
-            .map_err(|err| TuliproxError::ConfigInput(format!("{err}")))
-            .await?;
+        csv_replace_with_backup(&file_path, csv_render_aliases(&aliases), backup_dir).await?;
     } else {
         warn!("panel_api: could not find batch csv row for account {account_name}");
     }
     Ok(())
 }
 
-pub async fn csv_patch_batch_update_exp_dates(
+pub struct CsvAccountPatchResult {
+    pub changed: bool,
+    pub matched: Vec<ProviderAccountIdentity>,
+}
+
+fn match_csv_account_credentials<'a>(
+    columns: &[String],
+    values: &[String],
+    updates: &'a [BatchAccountStateUpdate],
+) -> Option<&'a BatchAccountStateUpdate> {
+    let username = columns.iter().position(|column| column == FIELD_USERNAME).and_then(|index| values.get(index))?;
+    let password = columns.iter().position(|column| column == FIELD_PASSWORD).and_then(|index| values.get(index))?;
+    let url = columns.iter().position(|column| column == FIELD_URL).and_then(|index| values.get(index));
+    let username = tuliprox_core::utils::resolve_env_var(username);
+    let password = tuliprox_core::utils::resolve_env_var(password);
+    let url = url.map(|url| tuliprox_core::utils::resolve_env_var(url));
+    updates.iter().find(|update| {
+        update.username.as_deref() == Some(username.as_str())
+            && update.password.as_deref() == Some(password.as_str())
+            && update.url.as_ref().is_none_or(|expected| url.as_ref().is_some_and(|url| url.trim() == expected))
+    })
+}
+
+pub async fn csv_patch_batch_update_account_states(
     _input_type: InputType,
     csv_path: &Path,
-    updates: &[BatchExpDateUpdate],
+    updates: &[BatchAccountStateUpdate],
     backup_dir: &str,
-) -> Result<(bool, Vec<String>), TuliproxError> {
+) -> Result<CsvAccountPatchResult, TuliproxError> {
     if updates.is_empty() {
-        return Ok((false, Vec::new()));
+        return Ok(CsvAccountPatchResult { changed: false, matched: Vec::new() });
     }
 
     let content = get_local_file_content(csv_path).await.map_err(|err| TuliproxError::ConfigInput(format!("{err}")))?;
@@ -737,7 +759,7 @@ pub async fn csv_patch_batch_update_exp_dates(
     let mut columns = DEFAULT_COLUMNS.iter().map(|column| (*column).to_string()).collect::<Vec<_>>();
     let mut header_defined = false;
     let mut header_extended = false;
-    let mut matched_account_keys = Vec::new();
+    let mut matched = Vec::new();
     let mut changed = false;
     let mut patched = String::with_capacity(content.len());
     for raw_line in content.split_inclusive('\n') {
@@ -779,16 +801,23 @@ pub async fn csv_patch_batch_update_exp_dates(
         if header_extended && values.len() < columns.len() {
             values.resize(columns.len(), String::new());
         }
-        let update =
-            name_index.and_then(|index| values.get(index)).and_then(|name| updates_by_name.get(name.as_str())).copied();
+        let update = name_index
+            .and_then(|index| values.get(index))
+            .and_then(|name| updates_by_name.get(name.as_str()))
+            .copied()
+            .filter(|update| {
+                (update.username.is_none() && update.password.is_none())
+                    || match_csv_account_credentials(&columns, &values, std::slice::from_ref(*update)).is_some()
+            })
+            .or_else(|| match_csv_account_credentials(&columns, &values, updates));
         if let Some(update) = update {
             if values.len() < columns.len() {
                 values.resize(columns.len(), String::new());
             }
-            matched_account_keys.push(update.account_key.clone());
-            if let Some(index) = exp_index {
-                let expiration = shared::utils::unix_ts_to_str_with_format(update.exp_date, "%Y-%m-%d %H:%M:%S")
-                    .unwrap_or_else(|| update.exp_date.to_string());
+            matched.push(update.identity);
+            if let (Some(index), Some(exp_date)) = (exp_index, update.exp_date) {
+                let expiration = shared::utils::unix_ts_to_str_with_format(exp_date, "%Y-%m-%d %H:%M:%S")
+                    .unwrap_or_else(|| exp_date.to_string());
                 if values[index] != expiration {
                     values[index] = expiration;
                     changed = true;
@@ -809,12 +838,9 @@ pub async fn csv_patch_batch_update_exp_dates(
         }
     }
     if changed {
-        csv_backup_file(csv_path, backup_dir).await?;
-        csv_write_content_to_path(csv_path, patched)
-            .map_err(|err| TuliproxError::ConfigInput(format!("{err}")))
-            .await?;
+        csv_write_with_backup(csv_path, patched, backup_dir).await?;
     }
-    Ok((changed, matched_account_keys))
+    Ok(CsvAccountPatchResult { changed, matched })
 }
 
 fn push_csv_row(content: &mut String, values: &[String]) {
@@ -846,6 +872,7 @@ pub async fn csv_patch_batch_update_credentials(
     new_username: &str,
     new_password: &str,
     exp_date: Option<i64>,
+    backup_dir: &str,
 ) -> Result<(), TuliproxError> {
     let mut matched = false;
     let (file_path, mut aliases) = csv_read_inputs_from_path(input_type, csv_path)
@@ -875,6 +902,7 @@ pub async fn csv_patch_batch_update_credentials(
 
         alias.username = Some(new_username.to_string());
         alias.password = Some(new_password.to_string());
+        alias.enabled = true;
         alias.max_connections = 1;
         if let Some(exp_date) = exp_date {
             alias.exp_date = Some(exp_date);
@@ -918,34 +946,34 @@ pub async fn csv_patch_batch_update_credentials(
     }
 
     if matched {
-        csv_write_input_to_path(&file_path, &aliases)
-            .map_err(|err| TuliproxError::ConfigInput(format!("{err}")))
-            .await?;
+        csv_replace_with_backup(&file_path, csv_render_aliases(&aliases), backup_dir).await?;
     } else {
         warn!("panel_api: could not find batch csv row to update credentials for account {account_name}");
     }
     Ok(())
 }
 
-pub async fn csv_patch_batch_remove_expired(input_type: InputType, csv_path: &Path) -> Result<bool, TuliproxError> {
+pub async fn csv_patch_batch_remove_expired(
+    input_type: InputType,
+    csv_path: &Path,
+    backup_dir: &str,
+) -> Result<bool, TuliproxError> {
     let (file_path, mut aliases) = csv_read_inputs_from_path(input_type, csv_path)
         .map_err(|err| TuliproxError::ConfigInput(format!("{err}")))
         .await?;
     let before_len = aliases.len();
     aliases.retain(|alias| !is_input_expired(alias.exp_date));
-    let changed = before_len != aliases.len();
-    if changed {
-        csv_write_input_to_path(&file_path, &aliases)
-            .map_err(|err| TuliproxError::ConfigInput(format!("{err}")))
-            .await?;
+    if before_len == aliases.len() {
+        return Ok(false);
     }
-    Ok(changed)
+    csv_replace_with_backup(&file_path, csv_render_aliases(&aliases), backup_dir).await
 }
 
 pub async fn csv_patch_batch_sort_by_exp_date(
     input_type: InputType,
     csv_path: &Path,
     order: AliasExpDateSortOrder,
+    backup_dir: &str,
 ) -> Result<bool, TuliproxError> {
     let (file_path, mut aliases) = csv_read_inputs_from_path(input_type, csv_path)
         .map_err(|err| TuliproxError::ConfigInput(format!("{err}")))
@@ -958,8 +986,7 @@ pub async fn csv_patch_batch_sort_by_exp_date(
         return Ok(false);
     }
     aliases.sort_by(compare);
-    csv_write_input_to_path(&file_path, &aliases).map_err(|err| TuliproxError::ConfigInput(format!("{err}"))).await?;
-    Ok(true)
+    csv_replace_with_backup(&file_path, csv_render_aliases(&aliases), backup_dir).await
 }
 
 #[cfg(test)]
@@ -967,14 +994,17 @@ mod tests {
     #[cfg(target_os = "linux")]
     use super::read_acl_value;
     use super::{
-        csv_backup_file, csv_patch_batch_sort_by_exp_date, csv_patch_batch_update_exp_dates, csv_read_inputs_from_path,
-        csv_temp_path, csv_write_input_to_path, AliasExpDateSortOrder, BatchExpDateUpdate,
+        csv_backup_file, csv_patch_batch_sort_by_exp_date, csv_patch_batch_update_account_states,
+        csv_read_inputs_from_path, csv_temp_path, csv_write_input_to_path, AliasExpDateSortOrder,
+        BatchAccountStateUpdate, CsvAccountPatchResult,
     };
     use crate::csv_read_inputs_from_reader;
-    use shared::model::{InputType, StalkerAuthMode, StalkerEndpointPreference, StalkerMagPreset};
+    use shared::model::{
+        InputType, ProviderAccountIdentity, StalkerAuthMode, StalkerEndpointPreference, StalkerMagPreset,
+    };
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-    use std::{io::Cursor, path::PathBuf};
+    use std::{io::Cursor, path::PathBuf, sync::Arc};
     use tuliprox_core::utils::file_reader;
 
     const M3U_BATCH: &str = r"
@@ -1133,12 +1163,21 @@ missing;missing-user;missing-pass;http://missing.example;1;\n",
         )
         .expect("write csv fixture");
 
-        let changed =
-            csv_patch_batch_sort_by_exp_date(InputType::XtreamBatch, &path, AliasExpDateSortOrder::NewestFirst)
-                .await
-                .expect("sort succeeds");
-
-        assert!(changed);
+        let backup_dir = tempfile::tempdir().expect("backup dir");
+        let backup_dir_str = backup_dir.path().to_string_lossy();
+        let sort = || {
+            csv_patch_batch_sort_by_exp_date(
+                InputType::XtreamBatch,
+                &path,
+                AliasExpDateSortOrder::NewestFirst,
+                backup_dir_str.as_ref(),
+            )
+        };
+        assert!(sort().await.expect("sort succeeds"));
+        assert_eq!(std::fs::read_dir(backup_dir.path()).expect("backups").count(), 1);
+        // A sorted file is neither rewritten nor backed up again.
+        assert!(!sort().await.expect("noop sort succeeds"));
+        assert_eq!(std::fs::read_dir(backup_dir.path()).expect("backups").count(), 1);
         let (_, aliases) = csv_read_inputs_from_path(InputType::XtreamBatch, &path).await.expect("read sorted csv");
         assert_eq!(aliases.len(), 3);
         assert_eq!(aliases[0].name.as_ref(), "new");
@@ -1153,14 +1192,17 @@ missing;missing-user;missing-pass;http://missing.example;1;\n",
         let csv_path = dir.path().join("aliases.csv");
         let backup_dir = dir.path().join("backups");
         tokio::fs::write(&csv_path, XTREAM_BATCH).await?;
-        let update = BatchExpDateUpdate {
-            account_key: "provider/input_1".to_string(),
+        let update = BatchAccountStateUpdate {
+            identity: ProviderAccountIdentity::new("provider/input_1", None, None),
             account_name: "input_1".into(),
-            exp_date: 2_000_000_000,
+            username: None,
+            password: None,
+            url: None,
+            exp_date: Some(2_000_000_000),
             disable: true,
         };
 
-        let (changed, updated) = csv_patch_batch_update_exp_dates(
+        let CsvAccountPatchResult { changed, matched: updated } = csv_patch_batch_update_account_states(
             InputType::XtreamBatch,
             &csv_path,
             &[update],
@@ -1169,9 +1211,99 @@ missing;missing-user;missing-pass;http://missing.example;1;\n",
         .await?;
 
         assert!(changed);
-        assert_eq!(updated, vec!["provider/input_1"]);
+        assert_eq!(updated, vec![ProviderAccountIdentity::new("provider/input_1", None, None)]);
         let (_, aliases) = csv_read_inputs_from_path(InputType::XtreamBatch, &csv_path).await?;
         assert!(!aliases[0].enabled);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn banned_promoted_root_matches_credentials_without_overwriting_expiry(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("aliases.csv");
+        let original = "#name;username;password;url;enabled;exp_date;custom\n#keep this comment\nrow-name;user;pass;http://provider;1;2000000000;keep\n";
+        tokio::fs::write(&path, original).await?;
+        let updates = [super::BatchAccountStateUpdate {
+            identity: ProviderAccountIdentity::new("key", None, None),
+            url: Some("http://provider".to_string()),
+            account_name: "input-name".into(),
+            username: Some("user".to_string()),
+            password: Some("pass".to_string()),
+            exp_date: None,
+            disable: true,
+        }];
+        let result = super::csv_patch_batch_update_account_states(
+            InputType::XtreamBatch,
+            &path,
+            &updates,
+            dir.path().join("backups").to_string_lossy().as_ref(),
+        )
+        .await?;
+        let content = tokio::fs::read(&path).await?;
+        assert!(result.changed);
+        assert_eq!(result.matched, vec![ProviderAccountIdentity::new("key", None, None)]);
+        assert_eq!(String::from_utf8(content)?, original.replace(";1;2000000000;", ";0;2000000000;"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn csv_renewal_prefers_name_and_falls_back_to_credentials() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("aliases.csv");
+        let original = "#name;username;password;url;enabled;max_connections;exp_date\n\
+target;user;pass;http://provider;0;2;\n\
+direct;user;pass;http://other;0;2;\n\
+url;other;other;http://third/get.php?username=user&password=pass;0;2;\n";
+        for requested_name in ["target", "missing"] {
+            tokio::fs::write(&path, original).await?;
+            super::csv_patch_batch_update_exp_date(
+                InputType::XtreamBatch,
+                &path,
+                &Arc::from(requested_name),
+                "user",
+                "pass",
+                2_000_000_000,
+                dir.path().join("backups").to_string_lossy().as_ref(),
+            )
+            .await?;
+            let (_, aliases) = csv_read_inputs_from_path(InputType::XtreamBatch, &path).await?;
+            assert_eq!(aliases.len(), 3);
+            for alias in aliases {
+                let renewed = requested_name == "missing" || alias.name.as_ref() == "target";
+                assert_eq!(alias.enabled, renewed);
+                assert_eq!(alias.exp_date, renewed.then_some(2_000_000_000));
+                assert_eq!(alias.max_connections, if renewed { 1 } else { 2 });
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn named_account_with_renewed_credentials_ignores_old_ban() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("aliases.csv");
+        let original = "#name;username;password;url;enabled;exp_date\naccount;user;renewed;http://provider;1;\n";
+        tokio::fs::write(&path, original).await?;
+        let update = super::BatchAccountStateUpdate {
+            identity: ProviderAccountIdentity::new("old", None, None),
+            account_name: Arc::from("account"),
+            username: Some("user".to_string()),
+            password: Some("pass".to_string()),
+            url: Some("http://provider".to_string()),
+            exp_date: None,
+            disable: true,
+        };
+        let receipt = super::csv_patch_batch_update_account_states(
+            InputType::XtreamBatch,
+            &path,
+            &[update],
+            dir.path().join("backups").to_string_lossy().as_ref(),
+        )
+        .await?;
+        assert!(!receipt.changed);
+        assert!(receipt.matched.is_empty());
+        assert_eq!(tokio::fs::read_to_string(&path).await?, original);
         Ok(())
     }
 
@@ -1184,14 +1316,17 @@ missing;missing-user;missing-pass;http://missing.example;1;\n",
 #name;username;password;url;enabled;max_connections;priority;exp_date;custom\n\
 input_1;${env:PATH};${env:XTREAM_PASSWORD};http://provider.tv;1;1;0;2028-11-23 13:12:34;keep-me;trailing-a;trailing-b\n";
         tokio::fs::write(&csv_path, raw).await?;
-        let update = BatchExpDateUpdate {
-            account_key: "provider/input_1".to_string(),
+        let update = BatchAccountStateUpdate {
+            identity: ProviderAccountIdentity::new("provider/input_1", None, None),
             account_name: "input_1".into(),
-            exp_date: 2_000_000_000,
+            username: None,
+            password: None,
+            url: None,
+            exp_date: Some(2_000_000_000),
             disable: true,
         };
 
-        csv_patch_batch_update_exp_dates(
+        csv_patch_batch_update_account_states(
             InputType::XtreamBatch,
             &csv_path,
             &[update],
@@ -1214,14 +1349,17 @@ input_1;${env:PATH};${env:XTREAM_PASSWORD};http://provider.tv;1;1;0;2028-11-23 1
         let raw = "#name;username;password;url;max_connections;priority;custom\n\
 input_1;user;password;http://provider.tv;1;0;keep-me;old-enabled;old-expiry;trailing\n";
         tokio::fs::write(&csv_path, raw).await?;
-        let update = BatchExpDateUpdate {
-            account_key: "provider/input_1".to_string(),
+        let update = BatchAccountStateUpdate {
+            identity: ProviderAccountIdentity::new("provider/input_1", None, None),
             account_name: "input_1".into(),
-            exp_date: 2_000_000_000,
+            username: None,
+            password: None,
+            url: None,
+            exp_date: Some(2_000_000_000),
             disable: true,
         };
 
-        csv_patch_batch_update_exp_dates(
+        csv_patch_batch_update_account_states(
             InputType::XtreamBatch,
             &csv_path,
             &[update],
@@ -1240,14 +1378,17 @@ input_1;user;password;http://provider.tv;1;0;keep-me;old-enabled;old-expiry;trai
         let csv_path = dir.path().join("aliases.csv");
         let backup_dir = dir.path().join("backups");
         tokio::fs::write(&csv_path, XTREAM_BATCH).await?;
-        let update = BatchExpDateUpdate {
-            account_key: "provider/missing".to_string(),
+        let update = BatchAccountStateUpdate {
+            identity: ProviderAccountIdentity::new("provider/missing", None, None),
             account_name: "missing".into(),
-            exp_date: 2_000_000_000,
+            username: None,
+            password: None,
+            url: None,
+            exp_date: Some(2_000_000_000),
             disable: true,
         };
 
-        let (changed, updated) = csv_patch_batch_update_exp_dates(
+        let CsvAccountPatchResult { changed, matched: updated } = csv_patch_batch_update_account_states(
             InputType::XtreamBatch,
             &csv_path,
             &[update],

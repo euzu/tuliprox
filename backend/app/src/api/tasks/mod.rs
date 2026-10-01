@@ -28,3 +28,5 @@ pub(in crate::api) use library_scan::*;
 pub(in crate::api) use notification_bridge::*;
 pub(in crate::api) use scheduler::*;
 pub(in crate::api) use xtream_expiry::*;
+
+mod provider_account_state;

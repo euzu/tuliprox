@@ -103,7 +103,7 @@ app_state_views! {
     /// The handles the provider side of a stream needs: the redirect-aware
     /// HTTP clients.
     provider_stream_ctx => tuliprox_session::stream_ctx::ProviderStreamCtx {
-        app_config, connection_manager, http_client_no_redirect, public_http_client_no_redirect,
+        app_config, active_provider, connection_manager, http_client_no_redirect, public_http_client_no_redirect,
     }
 
     /// The handles the background metadata worker reads.

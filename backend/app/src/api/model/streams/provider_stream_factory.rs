@@ -107,6 +107,7 @@ pub struct ProviderStreamFactoryOptions {
     cancel_token: Option<CancellationToken>,
     completion_token: Option<CancellationToken>,
     close_reason: Option<Arc<AtomicU8>>,
+    account: Option<Arc<crate::model::ProviderConfig>>,
 }
 
 pub(crate) struct ProviderStreamFactoryParams<'a> {
@@ -224,6 +225,7 @@ impl ProviderStreamFactoryOptions {
             cancel_token: None,
             completion_token: None,
             close_reason: None,
+            account: None,
         }
     }
 
@@ -997,6 +999,66 @@ async fn provider_stream_request(
     }
 }
 
+fn failed_stream_account(
+    input: &crate::model::ConfigInput,
+    options: &ProviderStreamFactoryOptions,
+) -> Option<crate::model::ConfigInput> {
+    let url = &options.url;
+    let credentials = shared::utils::get_credentials_from_url(url);
+    let segments: Vec<_> = url.path_segments().into_iter().flatten().collect();
+    let matches = |username: Option<&str>, password: Option<&str>| {
+        username.zip(password).is_some_and(|(username, password)| {
+            credentials.0.as_deref() == Some(username) && credentials.1.as_deref() == Some(password)
+                || segments.windows(2).any(|pair| pair[0] == username && pair[1] == password)
+        })
+    };
+    let matches_origin = |base: &str| {
+        input
+            .resolve_url(base)
+            .ok()
+            .and_then(|base| Url::parse(&base).ok())
+            .is_some_and(|base| base.origin() == url.origin())
+    };
+    let account = if let Some(allocated) = &options.account {
+        if input.name == allocated.name {
+            input.clone()
+        } else {
+            let alias = input.aliases.iter().flatten().find(|alias| alias.name == allocated.name)?;
+            input.as_input(alias)
+        }
+    } else if matches(input.username.as_deref(), input.password.as_deref()) && matches_origin(&input.url) {
+        input.clone()
+    } else {
+        let alias = input.aliases.iter().flatten().find(|alias| {
+            matches(alias.username.as_deref(), alias.password.as_deref()) && matches_origin(&alias.url)
+        })?;
+        input.as_input(alias)
+    };
+    if options.account.as_ref().is_some_and(|allocated| account.account_identity() != allocated.account_identity()) {
+        return None;
+    }
+    Some(account)
+}
+
+/// Flags the failed account for the Xtream expiry worker. No request is sent here: the worker
+/// checks the account only when its per-account, per-panel and cooldown throttles allow it,
+/// because frequent account queries can get the account banned.
+fn request_provider_account_probe(ctx: &ProviderStreamCtx, options: &ProviderStreamFactoryOptions) {
+    let Some(channel) = options.stream_channel.as_ref() else {
+        return;
+    };
+    let sources = ctx.app_config.sources.load_full();
+    let Some(input) = sources.get_input_by_name(&channel.input_name) else {
+        return;
+    };
+    if !input.input_type.is_xtream() {
+        return;
+    }
+    if let Some(account) = failed_stream_account(input, options) {
+        ctx.active_provider.request_account_probe(&account.name);
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 async fn get_provider_stream(
     ctx: &ProviderStreamCtx,
@@ -1044,6 +1106,9 @@ async fn get_provider_stream(
                 }
             }
             Err(failure) => {
+                if matches!(failure.status(), StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+                    request_provider_account_probe(ctx, stream_options);
+                }
                 if failure.should_serve_channel_unavailable() {
                     return Err(failure);
                 }
@@ -1239,6 +1304,7 @@ pub struct ProviderStreamOpenLifecycle {
     cancel_token: Option<CancellationToken>,
     completion_token: Option<CancellationToken>,
     close_reason: Option<Arc<AtomicU8>>,
+    account: Option<Arc<crate::model::ProviderConfig>>,
 }
 
 impl ProviderStreamOpenLifecycle {
@@ -1250,6 +1316,7 @@ impl ProviderStreamOpenLifecycle {
             cancel_token: handle.cancel_token.clone(),
             completion_token: handle.completion_token.clone(),
             close_reason: Some(Arc::clone(&handle.close_reason)),
+            account: handle.allocation.get_provider_config(),
         })
     }
 
@@ -1266,6 +1333,7 @@ pub async fn open_provider_stream_with_lifecycle(
 ) -> Option<ProviderStreamFactoryResponse> {
     if let Some(ref lc) = lifecycle {
         lc.mark_opening();
+        stream_options.account.clone_from(&lc.account);
         stream_options.set_provider_handle_tokens(
             lc.cancel_token.clone(),
             lc.completion_token.clone(),
@@ -1339,6 +1407,44 @@ mod tests {
             encrypt_secret: [0; 16],
             media_tools: Arc::new(MediaToolCapabilities::new()),
         })
+    }
+
+    #[test]
+    fn auth_failure_selects_origin_and_allocated_account() -> Result<(), Box<dyn std::error::Error>> {
+        let dto = shared::model::ConfigInputDto {
+            name: Arc::from("root"),
+            url: "http://main.example".to_string(),
+            username: Some("user".to_string()),
+            password: Some("pass".to_string()),
+            aliases: Some(vec![shared::model::ConfigInputAliasDto {
+                name: Arc::from("alias"),
+                url: "http://alias.example".to_string(),
+                username: Some("user".to_string()),
+                password: Some("pass".to_string()),
+                ..shared::model::ConfigInputAliasDto::default()
+            }]),
+            ..shared::model::ConfigInputDto::default()
+        };
+        let mut input = crate::model::ConfigInput::from(&dto);
+        let mut options = redirect_test_options(&Url::parse("http://alias.example/live/user/pass/1.ts")?);
+        assert_eq!(failed_stream_account(&input, &options).map(|account| account.name), Some(Arc::from("alias")));
+        options.url = Url::parse("http://main.example/live/user/pass/1.ts")?;
+        assert_eq!(failed_stream_account(&input, &options).map(|account| account.name), Some(Arc::from("root")));
+        options.url = Url::parse("http://cdn.example/token")?;
+        assert!(failed_stream_account(&input, &options).is_none());
+        let alias = input.aliases.as_ref().and_then(|aliases| aliases.first()).ok_or("missing alias")?;
+        options.account = Some(Arc::new(crate::model::ProviderConfig::new_alias(
+            &input,
+            alias,
+            Arc::new(std::sync::RwLock::new(crate::model::ProviderConfigConnection::default())),
+            Arc::new(|_, _| {}),
+        )));
+        assert_eq!(failed_stream_account(&input, &options).map(|account| account.name), Some(Arc::from("alias")));
+        if let Some(alias) = input.aliases.as_mut().and_then(|aliases| aliases.first_mut()) {
+            alias.password = Some("renewed".to_string());
+        }
+        assert!(failed_stream_account(&input, &options).is_none());
+        Ok(())
     }
 
     async fn read_http_request(socket: &mut TcpStream) -> String {

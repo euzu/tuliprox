@@ -1,6 +1,6 @@
 use crate::{
     api::model::{update_app_state_config, update_app_state_sources, AppState, EventMessage},
-    config_loader::{prepare_sources_batch, read_sources_file_from_path_with_templates},
+    config_loader::{prepare_sources_batch, read_sources_file_with_revision},
     model::{CompiledMappings, Config, ProcessTargets, SourcesConfig},
     utils,
     utils::read_mappings_file_with_templates,
@@ -38,13 +38,14 @@ struct PreparedSourcesReload {
     mapping: Option<PreparedMappingsReload>,
     sources_file: String,
     templates: Option<Vec<PatternTemplate>>,
+    loaded_revisions: Vec<(PathBuf, blake3::Hash)>,
 }
 
 /// What dependent reload (if any) was prepared alongside a config change.
 enum PreparedFollowUp {
     Unchanged,
     Mapping(Option<PreparedMappingsReload>, Option<Vec<PatternTemplate>>),
-    Sources(PreparedSourcesReload),
+    Sources(Box<PreparedSourcesReload>),
 }
 
 /// Refreshes CLI-forced target IDs against an incoming `SourcesConfig`.
@@ -191,7 +192,7 @@ impl ConfigFile {
     ) -> Result<PreparedSourcesReload, TuliproxError> {
         let sources_file = paths.sources_file_path.clone();
         let prepared_templates = Self::load_prepared_global_templates_with_config(paths, config).await?;
-        let mut sources_dto = read_sources_file_from_path_with_templates(
+        let (mut sources_dto, source_revision) = read_sources_file_with_revision(
             &PathBuf::from(sources_file.as_str()),
             true,
             true,
@@ -199,11 +200,19 @@ impl ConfigFile {
             prepared_templates.as_deref(),
         )
         .await?;
+        let mut loaded_revisions = crate::config_loader::capture_batch_revisions(&sources_dto).await;
+        loaded_revisions.push((PathBuf::from(&sources_file), source_revision));
         prepare_sources_batch(&mut sources_dto, true).await?;
         let sources: SourcesConfig = SourcesConfig::try_from(sources_dto)?;
         let prepared_mapping =
             Self::prepare_mapping_reload(paths.mapping_file_path.as_deref(), prepared_templates.as_deref())?;
-        Ok(PreparedSourcesReload { sources, mapping: prepared_mapping, sources_file, templates: prepared_templates })
+        Ok(PreparedSourcesReload {
+            sources,
+            mapping: prepared_mapping,
+            sources_file,
+            templates: prepared_templates,
+            loaded_revisions,
+        })
     }
 
     /// Apply a fully-prepared sources reload to app state (infallible under normal conditions).
@@ -217,6 +226,9 @@ impl ConfigFile {
         update_app_state_sources(app_state, prepared.sources, Some(validated_forced)).await?;
         Self::apply_mapping_reload(app_state, prepared.mapping);
         Self::apply_user_filter_templates(app_state, prepared.templates)?;
+        for (path, revision) in prepared.loaded_revisions {
+            app_state.app_config.file_locks.record_loaded_revision(&path, revision).await;
+        }
         info!("Loaded sources file {}", prepared.sources_file);
         Ok(())
     }
@@ -299,7 +311,7 @@ impl ConfigFile {
         let follow_up: PreparedFollowUp = if template_changed {
             // Template path changed -> sources depend on new templates, reload everything.
             let prepared = Self::prepare_sources_reload_with_config(&config, &effective_paths).await?;
-            PreparedFollowUp::Sources(prepared)
+            PreparedFollowUp::Sources(Box::new(prepared))
         } else if mapping_changed {
             // Only mapping path changed; templates are the same -> load templates once.
             let prepared_templates =
@@ -335,7 +347,7 @@ impl ConfigFile {
                 Self::apply_mapping_reload(app_state, prepared);
                 Self::apply_user_filter_templates(app_state, templates)
             }
-            PreparedFollowUp::Sources(prepared) => Self::apply_sources_reload(app_state, prepared).await,
+            PreparedFollowUp::Sources(prepared) => Self::apply_sources_reload(app_state, *prepared).await,
         };
 
         if let Err(err) = follow_up_result {

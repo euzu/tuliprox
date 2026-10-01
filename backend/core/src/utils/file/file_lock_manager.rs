@@ -74,21 +74,32 @@ impl FileLockManager {
         }
     }
 
-    pub async fn mark_internal_write_revision(&self, path: &Path) -> io::Result<()> {
-        let content = tokio::fs::read(path).await?;
-        self.internal_write_revisions.lock().await.insert(normalize_path(path), blake3::hash(&content));
-        Ok(())
+    /// Records a loaded snapshot only while the file still contains those bytes.
+    pub async fn record_loaded_revision(&self, path: &Path, revision: blake3::Hash) {
+        if tokio::fs::read(path).await.is_ok_and(|content| blake3::hash(&content) == revision) {
+            self.internal_write_revisions.lock().await.insert(normalize_path(path), revision);
+        } else {
+            self.internal_write_revisions.lock().await.remove(&normalize_path(path));
+        }
+    }
+
+    pub async fn mark_internal_write_content(&self, path: &Path, content: &[u8]) {
+        self.internal_write_revisions.lock().await.insert(normalize_path(path), blake3::hash(content));
     }
 
     pub async fn is_internal_write_revision(&self, path: &Path) -> bool {
-        let normalized = normalize_path(path);
         let Ok(content) = tokio::fs::read(path).await else {
-            self.internal_write_revisions.lock().await.remove(&normalized);
+            self.internal_write_revisions.lock().await.remove(&normalize_path(path));
             return false;
         };
-        let revision = blake3::hash(&content);
+        self.is_internal_revision_hash(path, &blake3::hash(&content)).await
+    }
+
+    /// Checks bytes the caller already read, avoiding a second read that could see a later edit.
+    pub async fn is_internal_revision_hash(&self, path: &Path, revision: &blake3::Hash) -> bool {
+        let normalized = normalize_path(path);
         let mut revisions = self.internal_write_revisions.lock().await;
-        if revisions.get(&normalized) == Some(&revision) {
+        if revisions.get(&normalized) == Some(revision) {
             true
         } else {
             revisions.remove(&normalized);
@@ -231,6 +242,20 @@ mod tests {
     use super::{revision_is_missing, FileLockManager};
     use std::io;
 
+    #[tokio::test]
+    async fn changed_file_is_not_recorded_as_loaded_snapshot() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("source.yml");
+        let locks = FileLockManager::new();
+        tokio::fs::write(&path, "loaded").await?;
+        locks.record_loaded_revision(&path, blake3::hash(b"loaded")).await;
+        assert!(locks.is_internal_write_revision(&path).await);
+        tokio::fs::write(&path, "external").await?;
+        locks.record_loaded_revision(&path, blake3::hash(b"loaded")).await;
+        assert!(!locks.is_internal_write_revision(&path).await);
+        Ok(())
+    }
+
     #[test]
     fn revision_probe_errors_are_not_treated_as_missing() {
         assert!(!revision_is_missing(&Err(io::Error::other("probe failed"))));
@@ -244,7 +269,7 @@ mod tests {
         let locks = FileLockManager::new();
         tokio::fs::write(&path, b"first").await?;
 
-        locks.mark_internal_write_revision(&path).await?;
+        locks.mark_internal_write_content(&path, &tokio::fs::read(&path).await?).await;
         assert!(locks.is_internal_write_revision(&path).await);
 
         tokio::fs::write(&path, b"second").await?;

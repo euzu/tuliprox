@@ -11,8 +11,9 @@ use shared::{
     model::{
         ClusterFlags, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigInputStagedDto,
         FlussonicHlsCatchup, InputFetchMethod, InputType, MediaServerCatalogConfigDto, MediaServerImagePolicy,
-        MediaServerInputConfigDto, MediaServerLibrarySelector, MediaServerPlaybackConfigDto, StagedInputType,
-        StalkerAuthMode, StalkerDeviceProfileDto, StalkerEndpointPreference, StalkerInputConfigDto, StalkerMagPreset,
+        MediaServerInputConfigDto, MediaServerLibrarySelector, MediaServerPlaybackConfigDto, ProviderAccountIdentity,
+        StagedInputType, StalkerAuthMode, StalkerDeviceProfileDto, StalkerEndpointPreference, StalkerInputConfigDto,
+        StalkerMagPreset,
     },
     utils::{
         get_credentials_from_url, get_credentials_from_url_str, is_non_blank_optional_string,
@@ -462,6 +463,12 @@ pub struct ConfigInputAlias {
 }
 
 macros::from_impl!(ConfigInputAlias);
+impl ConfigInputAlias {
+    pub fn account_identity(&self) -> ProviderAccountIdentity {
+        ProviderAccountIdentity::new(&self.url, self.username.as_deref(), self.password.as_deref())
+    }
+}
+
 impl From<&ConfigInputAliasDto> for ConfigInputAlias {
     fn from(dto: &ConfigInputAliasDto) -> Self {
         Self {
@@ -494,6 +501,7 @@ pub struct ConfigInput {
     pub password: Option<String>,
     pub persist: Option<String>,
     pub enabled: bool,
+    pub account_disabled: bool,
     pub sequential_group: Option<u32>,
     pub options: Option<ConfigInputOptions>,
     pub media_server: Option<MediaServerInputConfig>,
@@ -564,7 +572,10 @@ impl ConfigInput {
     fn apply_expiration(&mut self) {
         if is_input_expired(self.exp_date) {
             warn!("Account {} expired for provider: {}", self.username.as_ref().map_or("?", |s| s.as_str()), self.name);
-            self.enabled = false;
+            // Expiry stays derived from `exp_date`, so a fetched renewal unblocks without reload.
+            if !self.aliases.iter().flatten().any(|alias| alias.enabled && !is_input_expired(alias.exp_date)) {
+                self.enabled = false;
+            }
         }
     }
 
@@ -877,6 +888,7 @@ impl ConfigInput {
             password: alias.password.clone(),
             persist: self.persist.clone(),
             enabled: self.enabled,
+            account_disabled: !alias.enabled,
             sequential_group: self.sequential_group,
             options: self.options.clone(),
             media_server: self.media_server.clone(),
@@ -899,6 +911,23 @@ impl ConfigInput {
                 StalkerInputConfig { username, password, ..cfg }
             }),
         }
+    }
+
+    pub fn account_identity(&self) -> ProviderAccountIdentity {
+        ProviderAccountIdentity::new(&self.url, self.username.as_deref(), self.password.as_deref())
+    }
+
+    /// Account used for playlist downloads: the root, or the first usable alias
+    /// when the root is excluded or expired.
+    pub fn playlist_account(&self) -> Option<Cow<'_, ConfigInput>> {
+        if !self.account_disabled && !is_input_expired(self.exp_date) {
+            return Some(Cow::Borrowed(self));
+        }
+        self.aliases
+            .iter()
+            .flatten()
+            .find(|alias| alias.enabled && !is_input_expired(alias.exp_date))
+            .map(|alias| Cow::Owned(self.as_input(alias)))
     }
 
     pub fn has_enabled_aliases(&self) -> bool {
@@ -972,6 +1001,7 @@ impl From<&ConfigInputDto> for ConfigInput {
             password: dto.password.clone(),
             persist: dto.persist.clone(),
             enabled: dto.enabled,
+            account_disabled: dto.account_disabled,
             sequential_group: dto.sequential_group,
             options: Some(options),
             media_server: dto.media_server.as_ref().map(MediaServerInputConfig::from),
@@ -1523,6 +1553,94 @@ mod tests {
 
         let err = input.prepare(&[]).unwrap_err();
         assert!(err.to_string().contains("Malformed provider URL"));
+    }
+
+    #[test]
+    fn playlist_account_falls_back_to_first_usable_alias() {
+        let alias = |id, name: &str, enabled| ConfigInputAlias {
+            id,
+            name: name.into(),
+            url: format!("http://{name}.example.com/playlist.m3u"),
+            username: None,
+            password: None,
+            priority: 0,
+            max_connections: 0,
+            exp_date: None,
+            enabled,
+            stalker: None,
+        };
+        let mut input = ConfigInput {
+            name: "root".into(),
+            input_type: InputType::M3u,
+            url: "http://example.com/playlist.m3u".to_string(),
+            enabled: true,
+            aliases: Some(vec![alias(1, "disabled", false), alias(2, "usable", true)]),
+            ..Default::default()
+        };
+        assert!(matches!(input.playlist_account(), Some(Cow::Borrowed(_))));
+        input.exp_date = Some(1);
+        assert_eq!(input.playlist_account().map(|account| account.name.to_string()).as_deref(), Some("usable"));
+        input.exp_date = None;
+        input.account_disabled = true;
+        input.aliases = Some(vec![alias(1, "disabled", false)]);
+        assert!(input.playlist_account().is_none());
+    }
+
+    #[test]
+    fn expired_root_with_aliases_is_not_persistently_disabled() -> Result<(), TuliproxError> {
+        let mut input = ConfigInput {
+            name: "root".into(),
+            input_type: InputType::M3u,
+            url: "http://example.com/playlist.m3u".to_string(),
+            enabled: true,
+            exp_date: Some(1),
+            aliases: Some(vec![ConfigInputAlias {
+                id: 1,
+                name: "alias".into(),
+                url: "http://alias.example.com/playlist.m3u".to_string(),
+                username: None,
+                password: None,
+                priority: 0,
+                max_connections: 0,
+                exp_date: None,
+                enabled: true,
+                stalker: None,
+            }]),
+            ..Default::default()
+        };
+
+        input.prepare(&[])?;
+        assert!(input.enabled);
+        assert!(!input.account_disabled);
+        Ok(())
+    }
+
+    #[test]
+    fn expired_root_requires_a_usable_alias() {
+        for (enabled, exp_date, usable) in
+            [(true, Some(1), false), (false, None, false), (true, None, true), (true, Some(i64::MAX), true)]
+        {
+            let mut input = ConfigInput {
+                enabled: true,
+                exp_date: Some(1),
+                aliases: Some(vec![ConfigInputAlias {
+                    id: 1,
+                    name: Arc::from("alias"),
+                    url: "http://alias.example".to_string(),
+                    username: None,
+                    password: None,
+                    priority: 0,
+                    max_connections: 0,
+                    exp_date,
+                    enabled,
+                    stalker: None,
+                }]),
+                ..ConfigInput::default()
+            };
+            input.apply_expiration();
+            assert_eq!(input.enabled, usable);
+            assert!(!input.account_disabled);
+        }
     }
 
     #[test]
