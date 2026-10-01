@@ -319,8 +319,8 @@ mod tests {
 
         let mut contract_with_pool = contract();
         contract_with_pool.provider_pool = vec![
-            ProviderPoolAccount { name: "alpha".to_owned(), max_connections: 2 },
-            ProviderPoolAccount { name: "beta".to_owned(), max_connections: 3 },
+            ProviderPoolAccount { name: "alpha".to_owned(), max_connections: 2, priority: None },
+            ProviderPoolAccount { name: "beta".to_owned(), max_connections: 3, priority: None },
         ];
 
         let mut config_matching = fixture();

@@ -160,7 +160,7 @@ fn append_catchup_session_hint_keeps_m3u_catchup_token_without_shared_hls_cache(
 }
 
 #[test]
-fn live_hls_entry_tokens_separate_parallel_playbacks_with_the_same_fingerprint() {
+fn live_hls_entry_tokens_are_unique_but_share_a_stable_provider_owner() {
     let fingerprint = test_fingerprint();
     let first = super::hls_entry_user_session_token(&fingerprint, "alice", 42, None, None);
     let second = super::hls_entry_user_session_token(&fingerprint, "alice", 42, None, None);
@@ -168,6 +168,21 @@ fn live_hls_entry_tokens_separate_parallel_playbacks_with_the_same_fingerprint()
     assert_ne!(first, second);
     assert!(first.contains("|hls|"));
     assert!(second.contains("|hls|"));
+    let first_lease = tuliprox_session::PlaybackLeaseRef::new(&first, tuliprox_core::model::PlaybackKind::LiveHls);
+    let second_lease = tuliprox_session::PlaybackLeaseRef::new(&second, tuliprox_core::model::PlaybackKind::LiveHls);
+    assert_ne!(first_lease.owner, second_lease.owner);
+    assert_eq!(first_lease.provider_owner(), second_lease.provider_owner());
+    assert_ne!(first_lease.request_id, second_lease.request_id);
+    let other_channel = super::hls_entry_user_session_token(&fingerprint, "alice", 43, None, None);
+    let other_user = super::hls_entry_user_session_token(&fingerprint, "bob", 42, None, None);
+    assert_ne!(
+        first_lease.provider_owner(),
+        tuliprox_session::PlaybackLeaseRef::new(&other_channel, first_lease.kind).provider_owner()
+    );
+    assert_ne!(
+        first_lease.provider_owner(),
+        tuliprox_session::PlaybackLeaseRef::new(&other_user, first_lease.kind).provider_owner()
+    );
 }
 
 #[test]
@@ -12496,4 +12511,175 @@ async fn legacy_hls_route_remains_registered() {
     let status = get_status(test_app_state(), "/hls/user/pass/1/2/3/not-a-token").await;
 
     assert_ne!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn terminate_failed_hls_manifest_session_releases_identified_provider_reservation() {
+    let input = single_hls_provider_input("failed-hls-input");
+    let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+    let username = "testuser";
+    let session_token = "testuser|stream-1|hls|0123456789abcdef";
+    let provider_name = Arc::clone(&input.name);
+    let addr = test_addr_with_port(55301);
+
+    let handle = app_state
+        .active_provider
+        .acquire_connection_with_lease_for_session(
+            &provider_name,
+            &addr,
+            false,
+            0,
+            ConnectionKind::Normal,
+            Some(tuliprox_session::PlaybackLeaseRef::new(session_token, crate::model::PlaybackKind::LiveHls)),
+        )
+        .expect("handle should be acquired");
+
+    let binding_tag = handle.binding_tag;
+    let request_id = handle.playback_request_id;
+    assert!(binding_tag.is_some(), "handle should carry a binding tag");
+
+    app_state.connection_manager.release_provider_handle(Some(handle));
+
+    assert!(
+        app_state.active_provider.binding_tag_for_owner(session_token).is_some(),
+        "lease should still be active after releasing connection handle"
+    );
+
+    app_state.active_provider.clear_provider_reservation(session_token);
+    assert!(
+        app_state.active_provider.binding_tag_for_owner(session_token).is_some(),
+        "clear_provider_reservation must return early for public HLS token"
+    );
+
+    super::segment::terminate_failed_hls_manifest_session(
+        &app_state,
+        username,
+        session_token,
+        Some(&provider_name),
+        binding_tag,
+        request_id,
+    )
+    .await;
+
+    assert!(
+        app_state.active_provider.binding_tag_for_owner(session_token).is_none(),
+        "lease should be cleared after terminate_failed_hls_manifest_session with binding identity"
+    );
+}
+
+#[tokio::test]
+async fn terminate_failed_hls_manifest_session_preserves_shared_lease_when_request_id_available() {
+    let mut input = single_hls_provider_input("shared-hls-input");
+    input.max_connections = 2;
+    let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+    let username = "testuser";
+    let session_token = "testuser|stream-1|hls|0123456789abcdef";
+    let provider_name = Arc::clone(&input.name);
+    let addr = test_addr_with_port(55302);
+
+    let handle1 = app_state
+        .active_provider
+        .acquire_connection_with_lease_for_session(
+            &provider_name,
+            &addr,
+            false,
+            0,
+            ConnectionKind::Normal,
+            Some(tuliprox_session::PlaybackLeaseRef::new(session_token, crate::model::PlaybackKind::LiveHls)),
+        )
+        .expect("handle1 should be acquired");
+
+    let handle2 = app_state
+        .active_provider
+        .acquire_connection_with_lease_for_session(
+            &provider_name,
+            &addr,
+            false,
+            0,
+            ConnectionKind::Normal,
+            Some(tuliprox_session::PlaybackLeaseRef::new(session_token, crate::model::PlaybackKind::LiveHls)),
+        )
+        .expect("handle2 should be acquired");
+
+    let binding_tag = handle1.binding_tag;
+    let request_id1 = handle1.playback_request_id;
+    let request_id2 = handle2.playback_request_id;
+    assert!(request_id1.is_some() && request_id2.is_some() && request_id1 != request_id2);
+
+    app_state.connection_manager.release_provider_handle(Some(handle1));
+
+    super::segment::terminate_failed_hls_manifest_session(
+        &app_state,
+        username,
+        session_token,
+        Some(&provider_name),
+        binding_tag,
+        request_id1,
+    )
+    .await;
+
+    assert!(
+        app_state.active_provider.binding_tag_for_owner(session_token).is_some(),
+        "shared lease must remain active for surviving request"
+    );
+
+    app_state.connection_manager.release_provider_handle(Some(handle2));
+    super::segment::terminate_failed_hls_manifest_session(
+        &app_state,
+        username,
+        session_token,
+        Some(&provider_name),
+        binding_tag,
+        request_id2,
+    )
+    .await;
+
+    assert!(
+        app_state.active_provider.binding_tag_for_owner(session_token).is_none(),
+        "lease should be cleared once all requests are terminated"
+    );
+}
+
+#[tokio::test]
+async fn terminate_failed_hls_manifest_session_clears_identified_reservation_without_request_id() {
+    let input = single_hls_provider_input("no-request-id-hls-input");
+    let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+    let username = "testuser";
+    let session_token = "testuser|stream-1|hls|0123456789abcdef";
+    let provider_name = Arc::clone(&input.name);
+    let addr = test_addr_with_port(55303);
+
+    let handle = app_state
+        .active_provider
+        .acquire_connection_with_lease_for_session(
+            &provider_name,
+            &addr,
+            false,
+            0,
+            ConnectionKind::Normal,
+            Some(tuliprox_session::PlaybackLeaseRef::new(session_token, crate::model::PlaybackKind::LiveHls)),
+        )
+        .expect("handle should be acquired");
+
+    let binding_tag = handle.binding_tag;
+    assert!(binding_tag.is_some());
+
+    app_state.connection_manager.release_provider_handle(Some(handle));
+
+    assert!(app_state.active_provider.binding_tag_for_owner(session_token).is_some(), "lease should still be active");
+
+    super::segment::terminate_failed_hls_manifest_session(
+        &app_state,
+        username,
+        session_token,
+        Some(&provider_name),
+        binding_tag,
+        None,
+    )
+    .await;
+
+    assert!(
+        app_state.active_provider.binding_tag_for_owner(session_token).is_none(),
+        "lease should be cleared via binding tag when no request ID is available"
+    );
 }

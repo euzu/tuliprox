@@ -7,7 +7,7 @@ use axum::{
     Json, Router,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
 use serde::Serialize;
@@ -116,6 +116,9 @@ enum Command {
         bitrate: u32,
         #[arg(long, value_delimiter = ',', default_value = "17")]
         markers: Vec<u32>,
+        /// Publish these catalog markers as HLS instead of MPEG-TS.
+        #[arg(long, value_delimiter = ',')]
+        hls_markers: Vec<u32>,
         #[arg(long)]
         account_limit: Option<usize>,
         #[arg(long, default_value = "observe_only")]
@@ -164,6 +167,7 @@ struct OriginState {
     run_id: RunId,
     bitrate: u32,
     markers: Arc<Vec<u32>>,
+    hls_markers: Arc<HashSet<u32>>,
     stream_counter: Arc<Mutex<u64>>,
     observations: Arc<Mutex<Vec<OriginObservation>>>,
     faults: Arc<Mutex<FaultSchedule>>,
@@ -300,6 +304,7 @@ async fn run(cli: Cli) -> Result<RunExit, TestkitError> {
             run_id,
             bitrate,
             mut markers,
+            hls_markers,
             account_limit,
             limit_mode,
             stalker_refuse_create_link_once,
@@ -325,6 +330,7 @@ async fn run(cli: Cli) -> Result<RunExit, TestkitError> {
                     run_id: RunId::new(run_id),
                     bitrate,
                     markers: Arc::new(markers),
+                    hls_markers: Arc::new(hls_markers.into_iter().collect()),
                     stream_counter: Arc::new(Mutex::new(0)),
                     observations: Arc::new(Mutex::new(Vec::new())),
                     faults: Arc::new(Mutex::new(FaultSchedule::default())),
@@ -716,7 +722,12 @@ fn catalog_m3u(state: &OriginState, host: &str, account: Option<&str>) -> String
     let mut catalog = String::from("#EXTM3U\n");
     for marker in state.markers.iter() {
         let _ = writeln!(catalog, "#EXTINF:-1 tvg-id=\"test-{marker}\",Test channel {marker}");
-        let _ = writeln!(catalog, "http://{host}/live/{marker}.ts?run={}{}", state.run_id.0, account_query);
+        let path = if state.hls_markers.contains(marker) {
+            format!("hls/{marker}/index.m3u8")
+        } else {
+            format!("live/{marker}.ts")
+        };
+        let _ = writeln!(catalog, "http://{host}/{path}?run={}{}", state.run_id.0, account_query);
     }
     let _ = writeln!(catalog, "#EXTINF:-1 tvg-id=\"test-vod-movie.mkv\" tvg-type=\"movie\",Test Movie");
     let _ = writeln!(catalog, "http://{host}/vod/movie.mkv?run={}{}", state.run_id.0, account_query);
@@ -1048,10 +1059,50 @@ async fn clear_fault(Path((run_id, fault_id)): Path<(String, String)>, State(sta
     }
 }
 
+async fn hls_guarded_response(
+    payload: Bytes,
+    content_type: &'static str,
+    conn_id: u64,
+    req_id: u64,
+    tracker: &OriginTracker,
+) -> Response {
+    let length = payload.len() as u64;
+    let _evict_rx = tracker.on_body_started(conn_id, req_id, Some(length)).await;
+    let bytes_emitted = Arc::new(AtomicU64::new(0));
+    let closed = Arc::new(AtomicBool::new(false));
+    let evicted = Arc::new(AtomicBool::new(false));
+    let guard = Arc::new(BodyDropGuard {
+        conn_id,
+        req_id,
+        tracker: tracker.clone(),
+        bytes_emitted: bytes_emitted.clone(),
+        start_time: Instant::now(),
+        closed: closed.clone(),
+        evicted: evicted.clone(),
+    });
+    let bytes_tracker = bytes_emitted;
+    let stream =
+        futures::stream::once(futures::future::ready(Ok::<_, std::convert::Infallible>(payload))).map(move |item| {
+            let _keep_guard = &guard;
+            if let Ok(chunk) = &item {
+                bytes_tracker.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+            }
+            item
+        });
+    let mut response = Response::new(Body::from_stream(stream));
+    response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    if let Ok(value) = HeaderValue::from_str(&length.to_string()) {
+        response.headers_mut().insert(header::CONTENT_LENGTH, value);
+    }
+    response
+}
+
 async fn hls(
     Path(resource): Path<String>,
     Query(query): Query<HashMap<String, String>>,
     State(state): State<OriginState>,
+    meta: Option<Extension<OriginConnectionMeta>>,
+    headers: HeaderMap,
 ) -> Response {
     if query.get("run") != Some(&state.run_id.0) {
         return StatusCode::NOT_FOUND.into_response();
@@ -1065,16 +1116,40 @@ async fn hls(
     if !state.markers.contains(&marker) {
         return StatusCode::NOT_FOUND.into_response();
     }
+    let conn_id = meta.as_ref().map_or(0, |m| m.conn_id);
+    let account = origin_account(&query);
+    let user_agent = headers.get(header::USER_AGENT).and_then(|value| value.to_str().ok());
+    let req_id = match state
+        .tracker
+        .on_request_started(conn_id, "GET", &format!("/hls/{marker}/{resource}"), None, user_agent, account)
+        .await
+    {
+        Ok(id) => id,
+        Err((_id, status)) => {
+            return StatusCode::from_u16(status).unwrap_or(StatusCode::TOO_MANY_REQUESTS).into_response();
+        }
+    };
     if resource == "index.m3u8" {
         let mut sequences = state.hls_sequences.lock().await;
         let sequence = sequences.entry(marker).or_insert(0);
         *sequence += 1;
         let first = sequence.saturating_sub(1);
+        let account_query = origin_account(&query).map_or_else(String::new, |account| {
+            let encoded = url::form_urlencoded::byte_serialize(account.as_bytes()).collect::<String>();
+            format!("&token={encoded}")
+        });
         let playlist = format!(
-            "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:{first}\n#EXTINF:1.0,\n{first}.ts?run={}\n#EXTINF:1.0,\n{}.ts?run={}\n",
+            "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:{first}\n#EXTINF:1.0,\n{first}.ts?run={}{account_query}\n#EXTINF:1.0,\n{}.ts?run={}{account_query}\n",
             state.run_id.0, *sequence, state.run_id.0
         );
-        return ([(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")], playlist).into_response();
+        return hls_guarded_response(
+            Bytes::from(playlist),
+            "application/vnd.apple.mpegurl",
+            conn_id,
+            req_id,
+            &state.tracker,
+        )
+        .await;
     }
     let segment = resource.strip_suffix(".ts").and_then(|part| part.parse::<u64>().ok());
     let Some(sequence) = segment else {
@@ -1086,7 +1161,7 @@ async fn hls(
     if frame.encode(&mut encoded).is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
-    ([(header::CONTENT_TYPE, "video/mp2t")], encoded.freeze()).into_response()
+    hls_guarded_response(encoded.freeze(), "video/mp2t", conn_id, req_id, &state.tracker).await
 }
 
 async fn vod(
@@ -2399,7 +2474,9 @@ async fn check_origin_assertions<'a>(
                         if let Some(expected_account) = check_account {
                             let latest_account = evts.iter().rev().find_map(|event| match &event.kind {
                                 OriginEventKind::RequestStarted { path, account, .. }
-                                    if path.starts_with("/live/") || path.starts_with("/vod/") =>
+                                    if path.starts_with("/live/")
+                                        || path.starts_with("/vod/")
+                                        || path.starts_with("/hls/") =>
                                 {
                                     Some(account.as_deref())
                                 }
@@ -3434,6 +3511,7 @@ mod tests {
             run_id: RunId::new(run_id),
             bitrate: 64_000,
             markers: Arc::new(vec![17]),
+            hls_markers: Arc::new(HashSet::new()),
             stream_counter: Arc::new(Mutex::new(4)),
             observations: Arc::new(Mutex::new(Vec::new())),
             faults: Arc::new(Mutex::new(FaultSchedule::default())),
@@ -3507,6 +3585,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hls_catalog_and_segments_preserve_alias_account_tokens() -> Result<(), TestkitError> {
+        let mut state = test_origin_state("hls-run");
+        state.markers = Arc::new(vec![17, 19]);
+        state.hls_markers = Arc::new(HashSet::from([17]));
+        let document = catalog_m3u(&state, "127.0.0.1", Some("account-b"));
+        assert!(document.contains("/hls/17/index.m3u8?run=hls-run&token=account-b"));
+        assert!(document.contains("/live/19.ts?run=hls-run&token=account-b"));
+        let response = hls(
+            Path("17/index.m3u8".to_owned()),
+            Query(HashMap::from([
+                ("run".to_owned(), "hls-run".to_owned()),
+                ("token".to_owned(), "account-b".to_owned()),
+            ])),
+            State(state),
+            None,
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .map_err(|error| TestkitError::Protocol(error.to_string()))?;
+        let playlist = String::from_utf8(body.to_vec()).map_err(|error| TestkitError::Protocol(error.to_string()))?;
+        let segments = playlist.lines().filter(|line| !line.starts_with('#')).collect::<Vec<_>>();
+        assert_eq!(segments.len(), 2);
+        assert!(segments.iter().all(|url| url.ends_with("&token=account-b")));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn hls_records_body_lifecycle_events() -> Result<(), TestkitError> {
+        let mut state = test_origin_state("hls-events-run");
+        state.markers = Arc::new(vec![17]);
+        state.hls_markers = Arc::new(HashSet::from([17]));
+        let response = hls(
+            Path("17/index.m3u8".to_owned()),
+            Query(HashMap::from([("run".to_owned(), "hls-events-run".to_owned())])),
+            State(state.clone()),
+            None,
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let _body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .map_err(|error| TestkitError::Protocol(error.to_string()))?;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let events = state.tracker.events().await;
+        assert!(events.iter().any(|e| matches!(e.kind, OriginEventKind::RequestStarted { .. })));
+        assert!(events.iter().any(|e| matches!(e.kind, OriginEventKind::BodyStarted { .. })));
+        assert!(events.iter().any(|e| matches!(e.kind, OriginEventKind::BodyClosed { .. })));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn hls_rejects_a_marker_absent_from_the_origin_catalog() {
         let state = test_origin_state("hls-run");
         assert_eq!(
@@ -3514,6 +3647,8 @@ mod tests {
                 Path("19/index.m3u8".to_owned()),
                 Query(HashMap::from([("run".to_owned(), "hls-run".to_owned())])),
                 State(state),
+                None,
+                HeaderMap::new(),
             )
             .await
             .status(),

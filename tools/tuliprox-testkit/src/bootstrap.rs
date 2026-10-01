@@ -181,6 +181,9 @@ fn render_provider_pool(run_id: &str, origin_address: SocketAddr, policy: Option
             "  - name: testkit-origin\n    type: m3u\n    url: http://{origin_address}/catalog/input.m3u?run={run_id}&account={}\n    max_connections: {}\n",
             root.name, root.max_connections
         );
+        if let Some(priority) = root.priority {
+            let _ = writeln!(rendered, "    priority: {priority}");
+        }
         if !aliases.is_empty() {
             rendered.push_str("    aliases:\n");
             for alias in aliases {
@@ -191,6 +194,9 @@ fn render_provider_pool(run_id: &str, origin_address: SocketAddr, policy: Option
                     alias.name,
                     alias.max_connections
                 );
+                if let Some(priority) = alias.priority {
+                    let _ = writeln!(rendered, "        priority: {priority}");
+                }
             }
         }
         rendered
@@ -334,6 +340,16 @@ impl IsolatedFixture {
             .arg(run_id)
             .arg("--markers")
             .arg(markers);
+        let mut hls_markers = channels
+            .values()
+            .filter(|channel| channel.protocol == "hls")
+            .map(|channel| channel.origin_marker)
+            .collect::<Vec<_>>();
+        hls_markers.sort_unstable();
+        hls_markers.dedup();
+        if !hls_markers.is_empty() {
+            origin_cmd.arg("--hls-markers").arg(hls_markers.iter().map(u32::to_string).collect::<Vec<_>>().join(","));
+        }
         if let Some(origin_cfg) = origin_config {
             if let Some(limit) = origin_cfg.account_limit {
                 origin_cmd.arg("--account-limit").arg(limit.to_string());

@@ -75,12 +75,30 @@ enum PriorityOwner {
     Shared(SharedConnectionId),
 }
 
+/// Resolves a public live HLS session token to its stable provider playback owner.
+///
+/// The random suffix distinguishes public sessions, while the preceding client,
+/// user and channel fingerprint identifies one provider playback across retries.
+/// Catchup and shared-cache owners retain their own identity semantics.
+fn playback_lease_owner(owner: &str) -> &str {
+    if owner.starts_with("m3u-catchup|") || owner.starts_with("catchup|") || owner.starts_with("hls-cache:") {
+        return owner;
+    }
+    let Some((base, suffix)) = owner.rsplit_once("|hls|") else {
+        return owner;
+    };
+    if suffix.len() == 16 && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        base
+    } else {
+        owner
+    }
+}
+
 /// Playback identity of one provider acquisition.
 ///
-/// `owner` is a stable playback identity (usually the user session token), never a
-/// socket address and never a per-attempt random suffix in a shared family. Retries
-/// of one playback resolve to the same owner and therefore to one capacity slot,
-/// while two players behind a reverse proxy keep independent owners.
+/// `owner` carries the public session identity so transport cleanup can distinguish
+/// retries. Provider leases use [`Self::provider_owner`] to resolve it to a stable
+/// client/user/channel owner and therefore one capacity slot.
 #[derive(Debug, Clone, Copy)]
 pub struct PlaybackLeaseRef<'a> {
     pub owner: &'a str,
@@ -92,6 +110,9 @@ impl<'a> PlaybackLeaseRef<'a> {
     pub fn new(owner: &'a str, kind: PlaybackKind) -> Self {
         Self { owner, kind, request_id: PlaybackRequestId::next() }
     }
+
+    /// Stable provider lease identity, independent of the public HLS token suffix.
+    pub fn provider_owner(&self) -> &'a str { playback_lease_owner(self.owner) }
 
     /// Compatibility view of a bare session owner: one request, live TS semantics.
     pub fn for_session_owner(owner: &'a str) -> Self { Self::new(owner, PlaybackKind::LiveTs) }
@@ -124,7 +145,7 @@ impl Drop for ProviderAllocationGuard {
 
 impl AcquireProviderParams<'_> {
     #[inline]
-    fn session_owner(&self) -> Option<&str> { self.lease.map(|lease| lease.owner) }
+    fn session_owner(&self) -> Option<&str> { self.lease.map(|lease| lease.provider_owner()) }
 }
 
 #[derive(Debug, Clone)]
@@ -159,6 +180,9 @@ struct ActiveConnectionInfo {
     priority: i8,
     kind: ConnectionKind,
     session_owner: Option<Arc<str>>,
+    // Public session identity scopes targeted socket cleanup independently of the
+    // stable provider lease owner shared by entry retries.
+    request_owner: Option<Arc<str>>,
     playback_request_id: Option<PlaybackRequestId>,
 }
 
@@ -703,6 +727,7 @@ impl ActiveProviderManager {
     /// A provisional lease only pins its provider while its allocation is active.
     /// Once an unstarted request releases its slot, the next attempt may use another alias.
     pub fn should_reuse_playback_provider(&self, session_owner: &str, provider_name: &Arc<str>) -> bool {
+        let session_owner = playback_lease_owner(session_owner);
         let _transition = self.lock_capacity_transition();
         let mut leases = self.write_leases();
         Self::prune_expired_leases(&mut leases);
@@ -877,6 +902,7 @@ impl ActiveProviderManager {
         kind: PlaybackKind,
         ttl_secs: u64,
     ) {
+        let session_owner = playback_lease_owner(session_owner);
         let _transition = self.lock_capacity_transition();
         if self.is_shutting_down.load(Ordering::Acquire) {
             return;
@@ -907,6 +933,7 @@ impl ActiveProviderManager {
         kind: PlaybackKind,
         ttl_secs: u64,
     ) {
+        let session_owner = playback_lease_owner(session_owner);
         let _transition = self.lock_capacity_transition();
         if self.is_shutting_down.load(Ordering::Acquire) {
             return;
@@ -919,6 +946,7 @@ impl ActiveProviderManager {
 
     /// Renews the lease of a playback. A zero TTL clears it.
     pub fn refresh_playback_lease(&self, provider_name: &Arc<str>, lease_ref: &PlaybackLeaseRef<'_>, ttl_secs: u64) {
+        let lease_ref = PlaybackLeaseRef { owner: lease_ref.provider_owner(), ..*lease_ref };
         let _transition = self.lock_capacity_transition();
         if self.is_shutting_down.load(Ordering::Acquire) {
             return;
@@ -961,7 +989,13 @@ impl ActiveProviderManager {
         }
     }
 
+    /// Clears an explicit owner. Public HLS tokens intentionally have no owner-wide
+    /// delete right: a delayed session cleanup must not erase a retry's shared lease.
+    /// HLS request cleanup uses request IDs or binding tags instead.
     pub fn clear_provider_reservation(&self, session_owner: &str) {
+        if playback_lease_owner(session_owner) != session_owner {
+            return;
+        }
         let _transition = self.lock_capacity_transition();
         let mut leases = self.write_leases();
         leases.release_owner(session_owner);
@@ -973,6 +1007,7 @@ impl ActiveProviderManager {
         provider_name: &Arc<str>,
         binding_tag: Option<ProviderBindingTag>,
     ) {
+        let session_owner = playback_lease_owner(session_owner);
         // A delayed clear without the exact binding tag has no delete right: it must
         // not fall back to an owner-wide release and erase a successor lease.
         let Some(binding_tag) = binding_tag else {
@@ -1001,6 +1036,7 @@ impl ActiveProviderManager {
     /// free slot remains; otherwise the media bytes are recorded without a reservation
     /// so a late cache confirmation cannot over-commit a provider at its limit.
     fn confirm_owner(&self, owner: &str, request_id: Option<PlaybackRequestId>) -> Option<PlaybackLeaseId> {
+        let owner = playback_lease_owner(owner);
         let _transition = self.lock_capacity_transition();
         let (provider_name, wants_reservation) = {
             let mut leases = self.write_leases();
@@ -1057,6 +1093,7 @@ impl ActiveProviderManager {
         outcome: PlaybackRequestOutcome,
         idle_ttl_secs: Option<u64>,
     ) {
+        let owner = playback_lease_owner(owner);
         let _transition = self.lock_capacity_transition();
         // A delayed completion must not end a newer request of this playback.
         // Only active connections from a DIFFERENT request ID (or shared streams) prevent lease finish.
@@ -1104,6 +1141,7 @@ impl ActiveProviderManager {
     /// back to [`Self::clear_identified_provider_reservation`] so a stale detach
     /// cannot delete a successor lease on the same account.
     pub fn binding_tag_for_owner(&self, owner: &str) -> Option<ProviderBindingTag> {
+        let owner = playback_lease_owner(owner);
         let mut leases = self.write_leases();
         Self::prune_expired_leases(&mut leases);
         leases.lease_of_owner(owner).map(|lease| ProviderBindingTag::new(lease.id, lease.binding_generation))
@@ -1367,7 +1405,7 @@ impl ActiveProviderManager {
         params: &AcquireProviderParams<'_>,
     ) -> ProviderHandle {
         let AcquireProviderParams { addr, priority, kind, lease } = *params;
-        let session_owner = lease.map(|lease| lease.owner);
+        let session_owner = lease.map(|lease| lease.provider_owner());
         let provider_name = allocation.get_provider_name().unwrap_or_default();
         let allocation_id = self.next_allocation_id.fetch_add(1, Ordering::Relaxed);
         let cancel_token = CancellationToken::new();
@@ -1383,12 +1421,12 @@ impl ActiveProviderManager {
         let binding_tag = if let Some(lease) = lease {
             let mut leases = self.write_leases();
             Self::prune_expired_leases(&mut leases);
-            let id = leases.begin_owner(lease.owner, &provider_name, lease.kind, lease.request_id);
+            let id = leases.begin_owner(lease.provider_owner(), &provider_name, lease.kind, lease.request_id);
             let generation = leases.lease(id).map_or(1, |lease| lease.binding_generation);
             debug_if_enabled!(
                 "Playback lease began: provider={} owner={} kind={} request_id={} lease_id={} generation={} state=starting",
                 sanitize_sensitive_info(&provider_name),
-                sanitize_sensitive_info(lease.owner),
+                sanitize_sensitive_info(lease.provider_owner()),
                 lease.kind,
                 lease.request_id,
                 id,
@@ -1418,6 +1456,12 @@ impl ActiveProviderManager {
                 priority,
                 kind,
                 session_owner: session_owner_arc.clone(),
+                request_owner: lease.map(|lease| {
+                    session_owner_arc
+                        .as_ref()
+                        .filter(|owner| owner.as_ref() == lease.owner)
+                        .map_or_else(|| Arc::from(lease.owner), Arc::clone)
+                }),
                 playback_request_id: lease.map(|lease| lease.request_id),
             },
         );
@@ -2058,6 +2102,7 @@ impl ActiveProviderManager {
         provider_name: &Arc<str>,
         session_owner: Option<&str>,
     ) -> bool {
+        let session_owner = session_owner.map(playback_lease_owner);
         self.reserved_capacity_blocks_next(provider_name, session_owner)
     }
 
@@ -2347,7 +2392,7 @@ impl ActiveProviderManager {
                 if let Some(alloc_ids) = connections.single_by_addr.get(addr) {
                     for id in alloc_ids {
                         if let Some(info) = connections.single.get(id) {
-                            if info.session_owner.as_deref() == Some(owner) {
+                            if info.request_owner.as_deref() == Some(owner) {
                                 handles.push(ProviderHandle {
                                     playback_request_id: info.playback_request_id,
                                     binding_tag: None,
@@ -2384,7 +2429,7 @@ impl ActiveProviderManager {
                 if let Some(alloc_ids) = connections.single_by_addr.get(addr).cloned() {
                     for id in alloc_ids {
                         if let Some(info) = connections.single.get_mut(&id) {
-                            if info.session_owner.as_deref() == Some(owner)
+                            if info.request_owner.as_deref() == Some(owner)
                                 && info.lifecycle != ConnectionLifecycle::Closed
                             {
                                 info.lifecycle = ConnectionLifecycle::Closing;
@@ -2484,7 +2529,7 @@ impl ActiveProviderManager {
         let mut index_updates = Vec::new();
         for allocation_id in alloc_ids {
             if let Some(info) = connections.single.get_mut(&allocation_id) {
-                if info.session_owner.as_deref() != owner {
+                if info.request_owner.as_deref() != owner {
                     continue;
                 }
                 if let Some(provider_name) = info.allocation.get_provider_name() {
@@ -4687,6 +4732,187 @@ mod tests {
             manager.release_handle(handle);
         }
         assert_eq!(manager.get_provider_connections_count(), 0);
+    }
+
+    #[test]
+    fn live_hls_lease_owner_preserves_other_playback_identities() {
+        let owner = "client|alice|42";
+        assert_eq!(super::playback_lease_owner("client|alice|42|hls|0123456789abcdef"), owner);
+        for token in [
+            owner,
+            "client|alice|42|hls|short",
+            "client|alice|42|hls|0123456789abcde!",
+            "m3u-catchup|client|alice|42|hls|0123456789abcdef",
+            "catchup|client|alice|42|hls|0123456789abcdef",
+            "hls-cache:client|hls|0123456789abcdef",
+        ] {
+            assert_eq!(super::playback_lease_owner(token), token);
+        }
+        assert_ne!(
+            super::playback_lease_owner("client|alice|42|hls|0123456789abcdef"),
+            super::playback_lease_owner("other-client|alice|42|hls|0123456789abcdef")
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn live_hls_retries_with_unique_tokens_keep_one_provider_lease() -> Result<(), String> {
+        let app_cfg = create_test_app_config_with_pool(2, 4);
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+        let input = "provider_1".intern();
+        let alias = "provider_2".intern();
+        let mut original_tag = None;
+        let mut previous_request: Option<(
+            String,
+            tuliprox_core::model::PlaybackRequestId,
+            Option<tuliprox_core::model::ProviderBindingTag>,
+        )> = None;
+        for attempt in 0..104_u16 {
+            let token = format!("client|alice|42|hls|{attempt:016x}");
+            let handle = manager
+                .acquire_connection_with_lease_for_session(
+                    &input,
+                    &SocketAddr::from(([172, 18, 0, 9], 55_000 + attempt)),
+                    false,
+                    default_user_priority(),
+                    ConnectionKind::Normal,
+                    Some(PlaybackLeaseRef::new(&token, PlaybackKind::LiveHls)),
+                )
+                .ok_or("retry must reuse the reserved provider")?;
+            let request_id = handle.playback_request_id.ok_or("identified HLS request")?;
+            let provider = handle.allocation.get_provider_name().ok_or("provider")?;
+            assert_eq!(provider, input);
+            let tag = handle.binding_tag.ok_or("binding tag")?;
+            let first_tag = original_tag.get_or_insert(tag);
+            assert_eq!(tag.lease_id, first_tag.lease_id);
+            manager.refresh_adaptive_playback_lease(&provider, &token, PlaybackKind::LiveHls, 60);
+            manager.confirm_identified_playback_activity(&token, request_id);
+            assert!(manager.should_reuse_playback_provider(&token, &provider));
+            manager.release_handle(&handle);
+            manager.finish_identified_playback_request(&token, request_id, PlaybackRequestOutcome::Completed);
+            manager.clear_provider_reservation(&token);
+            if let Some((old_token, old_request, old_tag)) = previous_request.take() {
+                manager.clear_identified_provider_reservation(&old_token, &provider, old_tag);
+                manager.finish_identified_playback_request(
+                    &old_token,
+                    old_request,
+                    PlaybackRequestOutcome::ProviderFailed,
+                );
+                assert!(manager.confirm_identified_playback_activity(&old_token, old_request).is_none());
+            }
+            previous_request = Some((token, request_id, handle.binding_tag));
+            assert_eq!(manager.provider_lease_usage(&input).idle, 1);
+            assert_eq!(manager.provider_lease_usage(&alias).total(), 0);
+        }
+        let foreign = manager
+            .acquire_connection_with_lease_for_session(
+                &input,
+                &SocketAddr::from(([172, 18, 0, 10], 56_000)),
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+                Some(PlaybackLeaseRef::new("other-client|alice|42|hls|0123456789abcdef", PlaybackKind::LiveHls)),
+            )
+            .ok_or("another playback must retain free provider capacity")?;
+        manager.release_handle(&foreign);
+        tokio::time::advance(Duration::from_secs(61)).await;
+        assert_eq!(manager.provider_lease_usage(&input).total(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn live_hls_socket_cleanup_only_cancels_its_public_session() -> Result<(), String> {
+        let app_cfg = create_test_app_config_with_pool(2, 4);
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+        let input = "provider_1".intern();
+        let addr = SocketAddr::from(([172, 18, 0, 9], 55_000));
+        let old = "client|alice|42|hls|0123456789abcdef";
+        let new = "client|alice|42|hls|fedcba9876543210";
+        let first = manager
+            .acquire_exact_connection_with_lease_for_session(
+                &input,
+                &addr,
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+                Some(PlaybackLeaseRef::new(old, PlaybackKind::LiveHls)),
+            )
+            .ok_or("old allocation")?;
+        let next = manager
+            .acquire_exact_connection_with_lease_for_session(
+                &input,
+                &addr,
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+                Some(PlaybackLeaseRef::new(new, PlaybackKind::LiveHls)),
+            )
+            .ok_or("new allocation")?;
+        assert_eq!(first.binding_tag, next.binding_tag);
+        assert_eq!(manager.provider_lease_usage(&input).total(), 1);
+        manager.release_playback_connections(old, &[addr]);
+        manager.release_playback_connections_await(old, &[addr]).await;
+        assert_eq!(manager.get_provider_connections_count(), 1);
+        assert!(!next.cancel_token.as_ref().is_some_and(tokio_util::sync::CancellationToken::is_cancelled));
+        manager.release_handle(&next);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn live_hls_old_token_cleanup_cannot_mutate_rebound_retry() -> Result<(), String> {
+        let app_cfg = create_test_app_config_with_pool(2, 4);
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+        let input = "provider_1".intern();
+        let alias = "provider_2".intern();
+        let old = "client|alice|42|hls|0123456789abcdef";
+        let new = "client|alice|42|hls|fedcba9876543210";
+        let addr = SocketAddr::from(([172, 18, 0, 9], 55_000));
+        let first = manager
+            .acquire_exact_connection_with_lease_for_session(
+                &input,
+                &addr,
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+                Some(PlaybackLeaseRef::new(old, PlaybackKind::LiveHls)),
+            )
+            .ok_or("initial allocation")?;
+        let old_request = first.playback_request_id.ok_or("old request")?;
+        manager.refresh_adaptive_playback_lease(&input, old, PlaybackKind::LiveHls, 60);
+        manager.confirm_identified_playback_activity(old, old_request);
+        manager.release_handle(&first);
+        let next = manager
+            .acquire_exact_connection_with_lease_for_session(
+                &alias,
+                &addr,
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+                Some(PlaybackLeaseRef::new(new, PlaybackKind::LiveHls)),
+            )
+            .ok_or("rebound allocation")?;
+        let new_request = next.playback_request_id.ok_or("new request")?;
+        assert_ne!(first.binding_tag, next.binding_tag);
+        manager.refresh_adaptive_playback_lease(&alias, new, PlaybackKind::LiveHls, 60);
+        manager.confirm_identified_playback_activity(new, new_request);
+        manager.release_handle(&next);
+        manager.finish_identified_playback_request(new, new_request, PlaybackRequestOutcome::Completed);
+        let before = manager.binding_tag_for_owner(new);
+        manager.clear_provider_reservation(old);
+        manager.clear_identified_provider_reservation(old, &input, first.binding_tag);
+        manager.finish_identified_playback_request(old, old_request, PlaybackRequestOutcome::ProviderFailed);
+        manager.refresh_playback_lease(
+            &input,
+            &PlaybackLeaseRef { owner: old, kind: PlaybackKind::LiveHls, request_id: old_request },
+            0,
+        );
+        assert!(manager.confirm_identified_playback_activity(old, old_request).is_none());
+        assert_eq!(manager.binding_tag_for_owner(new), before);
+        assert_eq!(manager.provider_lease_usage(&input).total(), 0);
+        assert_eq!(manager.provider_lease_usage(&alias).idle, 1);
+        Ok(())
     }
 
     /// Confirmed reconnect-capable lease, physical handle release first, then the real

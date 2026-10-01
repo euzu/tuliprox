@@ -1180,6 +1180,64 @@ pub(crate) async fn select_provider_stream_url(
     }
 }
 
+/// Stored Xtream VOD entries belong to their named input even when their URL uses a CDN host.
+fn resolve_xtream_vod_provider_url(
+    stream_url: &str,
+    input: &ConfigInput,
+    provider_cfg: &ProviderConfig,
+    channel: &StreamChannel,
+) -> Option<String> {
+    if input.input_type != InputType::Xtream
+        || provider_cfg.input_type != InputType::Xtream
+        || channel.item_type != PlaylistItemType::Video
+        || channel.input_name != input.name
+        || channel.url.as_ref() != stream_url
+        || channel.provider_id == 0
+    {
+        return None;
+    }
+    let url = Url::parse(stream_url).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    let is_main = provider_cfg.name == input.name;
+    if !is_main
+        && !input.aliases.as_ref().is_some_and(|aliases| aliases.iter().any(|alias| alias.name == provider_cfg.name))
+    {
+        return None;
+    }
+    let selected = provider_cfg.get_user_info()?;
+    let origin = input.get_user_info()?;
+    if is_main
+        && selected.base_url == origin.base_url
+        && selected.username == origin.username
+        && selected.password == origin.password
+    {
+        return Some(stream_url.to_string());
+    }
+
+    // A direct source may carry account-bound tokens. A different account obtains its own redirect.
+    let extension = channel
+        .technical
+        .as_ref()
+        .map(|technical| technical.container.as_str())
+        .filter(|container| !container.is_empty())
+        .map(|container| match container {
+            "mpegts" => "ts",
+            "hls" => "m3u8",
+            "dash" => "mpd",
+            other => other,
+        })
+        .or_else(|| extract_extension_from_url(&channel.url).and_then(|extension| extension.strip_prefix('.')));
+    let base_url = selected.base_url.trim_end_matches('/');
+    let mut url = format!("{base_url}/movie/{}/{}/{}", selected.username, selected.password, channel.provider_id);
+    if let Some(extension) = extension {
+        url.push('.');
+        url.push_str(extension);
+    }
+    Some(url)
+}
+
 fn create_unmapped_provider_stream(app_config: &AppConfig) -> ProviderStreamState {
     ProviderStreamState::Custom {
         response: create_channel_unavailable_stream(app_config, &[], StatusCode::OK),
@@ -1303,6 +1361,7 @@ async fn resolve_streaming_strategy(
     fingerprint: &Fingerprint,
     input: &ConfigInput,
     options: StreamingAcquireOptions<'_>,
+    stream_channel: Option<&StreamChannel>,
 ) -> StreamingStrategy {
     let mut provider_connection_handle = acquire_stream_provider_handle(app_state, input, fingerprint, &options).await;
 
@@ -1327,7 +1386,7 @@ async fn resolve_streaming_strategy(
                     && options.force_provider.is_none_or(|forced| forced.as_ref() == provider_cfg.name.as_ref());
                 // Keep the URL only when it already targets the selected provider account. Hot reload can leave old
                 // alias URLs in persisted playlists until the next processing run.
-                if let Some((selected_provider_name, url)) = select_provider_stream_url(
+                let selected_stream = select_provider_stream_url(
                     stream_url,
                     input,
                     provider_cfg,
@@ -1335,7 +1394,11 @@ async fn resolve_streaming_strategy(
                     &app_state.app_config,
                 )
                 .await
-                {
+                .or_else(|| {
+                    let url = resolve_xtream_vod_provider_url(stream_url, input, provider_cfg, stream_channel?)?;
+                    Some((Arc::clone(&provider_cfg.name), url))
+                });
+                if let Some((selected_provider_name, url)) = selected_stream {
                     debug_if_enabled!(
                         "provider session: input={} provider_cfg={} user={} allocation={} stream_url={}",
                         sanitize_sensitive_info(&input.name),
@@ -1543,6 +1606,7 @@ async fn create_stream_response_details(
             playback_kind: PlaybackKind::classify(item_type, extract_extension_from_url(stream_url)),
             accept_requested_stream_url,
         },
+        Some(stream_channel),
     )
     .await;
     let user_agent_stream_index = resolve_stream_user_agent_index(

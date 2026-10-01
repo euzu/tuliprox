@@ -1,5 +1,6 @@
 #![allow(clippy::wildcard_imports)]
 use super::*;
+use tuliprox_core::model::{PlaybackRequestId, PlaybackRequestOutcome, ProviderBindingTag};
 
 pub(super) fn log_hls_initial_strip_publication(
     proxy_session_id: &ProxySessionId,
@@ -2142,10 +2143,31 @@ pub(super) async fn terminate_failed_hls_manifest_session(
     app_state: &Arc<AppState>,
     username: &str,
     session_token: &str,
+    provider_name: Option<&Arc<str>>,
+    binding_tag: Option<ProviderBindingTag>,
+    request_id: Option<PlaybackRequestId>,
 ) {
     let _transition_guard = app_state.active_users.acquire_playback_transition(username, session_token).await;
     app_state.active_users.terminate_session(username, session_token).await;
-    app_state.active_provider.clear_provider_reservation(session_token);
+    let mut cleared = false;
+    if let Some(request_id) = request_id {
+        app_state.active_provider.finish_identified_playback_request(
+            session_token,
+            request_id,
+            PlaybackRequestOutcome::ProviderFailed,
+        );
+        cleared = true;
+    } else if let (Some(provider_name), Some(binding_tag)) = (provider_name, binding_tag) {
+        app_state.active_provider.clear_identified_provider_reservation(
+            session_token,
+            provider_name,
+            Some(binding_tag),
+        );
+        cleared = true;
+    }
+    if !cleared {
+        app_state.active_provider.clear_provider_reservation(session_token);
+    }
 }
 
 pub(super) fn normalize_xtream_live_hls_url(hls_url: &str, input: &ConfigInput) -> String {
@@ -2357,7 +2379,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
     }
 
     let fallback_connection_kind = connection_kind.unwrap_or(crate::api::model::ConnectionKind::Normal);
-    let (request_url, session_token, provider_handle, _selected_provider_config) = if let Some(session) = user_session {
+    let (request_url, session_token, provider_handle, selected_provider_config) = if let Some(session) = user_session {
         let pinned_provider = if session.provider.is_empty() { &input.name } else { &session.provider };
         let pinned_kind = if archive_reference.is_some() { PlaybackKind::Catchup } else { PlaybackKind::LiveHls };
         let provider_handle = if let Some(handle) =
@@ -2493,6 +2515,10 @@ pub(in crate::api) async fn handle_hls_stream_request(
         )
     };
 
+    let provider_binding_tag = provider_handle.as_ref().and_then(|handle| handle.binding_tag);
+    let provider_request_id = provider_handle.as_ref().and_then(|handle| handle.playback_request_id);
+    let selected_provider_name = selected_provider_config.as_ref().map(|cfg| Arc::clone(&cfg.name));
+
     let user_agent_stream_index = crate::api::api_utils::resolve_stream_user_agent_index(
         app_state,
         input,
@@ -2549,7 +2575,15 @@ pub(in crate::api) async fn handle_hls_stream_request(
         Err(err) => {
             error!("Failed to download m3u8: {}", request::text_response_error_log_label(&err));
             if let Some(session_token) = session_token.as_deref() {
-                terminate_failed_hls_manifest_session(app_state, &user.username, session_token).await;
+                terminate_failed_hls_manifest_session(
+                    app_state,
+                    &user.username,
+                    session_token,
+                    selected_provider_name.as_ref(),
+                    provider_binding_tag,
+                    provider_request_id,
+                )
+                .await;
             }
 
             hls_custom_video_manifest_response(

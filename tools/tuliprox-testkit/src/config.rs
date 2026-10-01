@@ -67,6 +67,8 @@ pub struct PolicyContract {
 pub struct ProviderPoolAccount {
     pub name: String,
     pub max_connections: u16,
+    #[serde(default)]
+    pub priority: Option<i16>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -821,6 +823,7 @@ steps:
             "evict-user-oldest.yml",
             "evict-user-latest.yml",
             "provider-hard-limit.yml",
+            "m3u-hls-retries-stable-provider-lease.yml",
             "shared-stream-single-provider-slot.yml",
             "vod-range-reopen-preserves-three-live.yml",
             "vod-range-reopen-strict-cap.yml",
