@@ -573,7 +573,7 @@ impl ConfigInput {
         if is_input_expired(self.exp_date) {
             warn!("Account {} expired for provider: {}", self.username.as_ref().map_or("?", |s| s.as_str()), self.name);
             // Expiry stays derived from `exp_date`, so a fetched renewal unblocks without reload.
-            if !self.has_enabled_aliases() {
+            if !self.aliases.iter().flatten().any(|alias| alias.enabled && !is_input_expired(alias.exp_date)) {
                 self.enabled = false;
             }
         }
@@ -1613,6 +1613,34 @@ mod tests {
         assert!(input.enabled);
         assert!(!input.account_disabled);
         Ok(())
+    }
+
+    #[test]
+    fn expired_root_requires_a_usable_alias() {
+        for (enabled, exp_date, usable) in
+            [(true, Some(1), false), (false, None, false), (true, None, true), (true, Some(i64::MAX), true)]
+        {
+            let mut input = ConfigInput {
+                enabled: true,
+                exp_date: Some(1),
+                aliases: Some(vec![ConfigInputAlias {
+                    id: 1,
+                    name: Arc::from("alias"),
+                    url: "http://alias.example".to_string(),
+                    username: None,
+                    password: None,
+                    priority: 0,
+                    max_connections: 0,
+                    exp_date,
+                    enabled,
+                    stalker: None,
+                }]),
+                ..ConfigInput::default()
+            };
+            input.apply_expiration();
+            assert_eq!(input.enabled, usable);
+            assert!(!input.account_disabled);
+        }
     }
 
     #[test]

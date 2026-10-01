@@ -695,12 +695,14 @@ pub async fn csv_patch_batch_update_exp_date(
     let (file_path, mut aliases) = csv_read_inputs_from_path(input_type, csv_path)
         .map_err(|err| TuliproxError::ConfigInput(format!("{err}")))
         .await?;
+    let name_matches = aliases.iter().any(|alias| &alias.name == account_name);
     for alias in &mut aliases {
         let url_credentials_match =
             || matches!(get_credentials_from_url_str(&alias.url), (Some(u), Some(p)) if u == username && p == password);
         if &alias.name == account_name
-            || (alias.username.as_deref() == Some(username) && alias.password.as_deref() == Some(password))
-            || url_credentials_match()
+            || (!name_matches
+                && ((alias.username.as_deref() == Some(username) && alias.password.as_deref() == Some(password))
+                    || url_credentials_match()))
         {
             // A panel renewal is an explicit decision for this account and lifts a stored exclusion.
             alias.enabled = true;
@@ -1242,6 +1244,38 @@ missing;missing-user;missing-pass;http://missing.example;1;\n",
         assert!(result.changed);
         assert_eq!(result.matched, vec![ProviderAccountIdentity::new("key", None, None)]);
         assert_eq!(String::from_utf8(content)?, original.replace(";1;2000000000;", ";0;2000000000;"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn csv_renewal_prefers_name_and_falls_back_to_credentials() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("aliases.csv");
+        let original = "#name;username;password;url;enabled;max_connections;exp_date\n\
+target;user;pass;http://provider;0;2;\n\
+direct;user;pass;http://other;0;2;\n\
+url;other;other;http://third/get.php?username=user&password=pass;0;2;\n";
+        for requested_name in ["target", "missing"] {
+            tokio::fs::write(&path, original).await?;
+            super::csv_patch_batch_update_exp_date(
+                InputType::XtreamBatch,
+                &path,
+                &Arc::from(requested_name),
+                "user",
+                "pass",
+                2_000_000_000,
+                dir.path().join("backups").to_string_lossy().as_ref(),
+            )
+            .await?;
+            let (_, aliases) = csv_read_inputs_from_path(InputType::XtreamBatch, &path).await?;
+            assert_eq!(aliases.len(), 3);
+            for alias in aliases {
+                let renewed = requested_name == "missing" || alias.name.as_ref() == "target";
+                assert_eq!(alias.enabled, renewed);
+                assert_eq!(alias.exp_date, renewed.then_some(2_000_000_000));
+                assert_eq!(alias.max_connections, if renewed { 1 } else { 2 });
+            }
+        }
         Ok(())
     }
 
