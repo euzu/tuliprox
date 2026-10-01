@@ -855,6 +855,7 @@ steps:
             "evict-user-latest.yml",
             "provider-hard-limit.yml",
             "m3u-hls-retries-stable-provider-lease.yml",
+            "m3u-hls-provider-affinity-after-lease-expiry.yml",
             "shared-stream-single-provider-slot.yml",
             "vod-range-reopen-preserves-three-live.yml",
             "vod-range-reopen-strict-cap.yml",
