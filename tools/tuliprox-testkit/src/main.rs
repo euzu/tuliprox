@@ -116,6 +116,9 @@ enum Command {
         bitrate: u32,
         #[arg(long, value_delimiter = ',', default_value = "17")]
         markers: Vec<u32>,
+        /// Publish these catalog markers as HLS instead of MPEG-TS.
+        #[arg(long, value_delimiter = ',')]
+        hls_markers: Vec<u32>,
         #[arg(long)]
         account_limit: Option<usize>,
         #[arg(long, default_value = "observe_only")]
@@ -164,6 +167,7 @@ struct OriginState {
     run_id: RunId,
     bitrate: u32,
     markers: Arc<Vec<u32>>,
+    hls_markers: Arc<HashSet<u32>>,
     stream_counter: Arc<Mutex<u64>>,
     observations: Arc<Mutex<Vec<OriginObservation>>>,
     faults: Arc<Mutex<FaultSchedule>>,
@@ -300,6 +304,7 @@ async fn run(cli: Cli) -> Result<RunExit, TestkitError> {
             run_id,
             bitrate,
             mut markers,
+            hls_markers,
             account_limit,
             limit_mode,
             stalker_refuse_create_link_once,
@@ -325,6 +330,7 @@ async fn run(cli: Cli) -> Result<RunExit, TestkitError> {
                     run_id: RunId::new(run_id),
                     bitrate,
                     markers: Arc::new(markers),
+                    hls_markers: Arc::new(hls_markers.into_iter().collect()),
                     stream_counter: Arc::new(Mutex::new(0)),
                     observations: Arc::new(Mutex::new(Vec::new())),
                     faults: Arc::new(Mutex::new(FaultSchedule::default())),
@@ -716,7 +722,12 @@ fn catalog_m3u(state: &OriginState, host: &str, account: Option<&str>) -> String
     let mut catalog = String::from("#EXTM3U\n");
     for marker in state.markers.iter() {
         let _ = writeln!(catalog, "#EXTINF:-1 tvg-id=\"test-{marker}\",Test channel {marker}");
-        let _ = writeln!(catalog, "http://{host}/live/{marker}.ts?run={}{}", state.run_id.0, account_query);
+        let path = if state.hls_markers.contains(marker) {
+            format!("hls/{marker}/index.m3u8")
+        } else {
+            format!("live/{marker}.ts")
+        };
+        let _ = writeln!(catalog, "http://{host}/{path}?run={}{}", state.run_id.0, account_query);
     }
     let _ = writeln!(catalog, "#EXTINF:-1 tvg-id=\"test-vod-movie.mkv\" tvg-type=\"movie\",Test Movie");
     let _ = writeln!(catalog, "http://{host}/vod/movie.mkv?run={}{}", state.run_id.0, account_query);
@@ -1052,6 +1063,8 @@ async fn hls(
     Path(resource): Path<String>,
     Query(query): Query<HashMap<String, String>>,
     State(state): State<OriginState>,
+    meta: Option<Extension<OriginConnectionMeta>>,
+    headers: HeaderMap,
 ) -> Response {
     if query.get("run") != Some(&state.run_id.0) {
         return StatusCode::NOT_FOUND.into_response();
@@ -1065,13 +1078,28 @@ async fn hls(
     if !state.markers.contains(&marker) {
         return StatusCode::NOT_FOUND.into_response();
     }
+    if let Some(Extension(meta)) = meta {
+        let account = origin_account(&query);
+        let user_agent = headers.get(header::USER_AGENT).and_then(|value| value.to_str().ok());
+        if let Err((_, status)) = state
+            .tracker
+            .on_request_started(meta.conn_id, "GET", &format!("/hls/{marker}/{resource}"), None, user_agent, account)
+            .await
+        {
+            return StatusCode::from_u16(status).unwrap_or(StatusCode::TOO_MANY_REQUESTS).into_response();
+        }
+    }
     if resource == "index.m3u8" {
         let mut sequences = state.hls_sequences.lock().await;
         let sequence = sequences.entry(marker).or_insert(0);
         *sequence += 1;
         let first = sequence.saturating_sub(1);
+        let account_query = origin_account(&query).map_or_else(String::new, |account| {
+            let encoded = url::form_urlencoded::byte_serialize(account.as_bytes()).collect::<String>();
+            format!("&token={encoded}")
+        });
         let playlist = format!(
-            "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:{first}\n#EXTINF:1.0,\n{first}.ts?run={}\n#EXTINF:1.0,\n{}.ts?run={}\n",
+            "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:{first}\n#EXTINF:1.0,\n{first}.ts?run={}{account_query}\n#EXTINF:1.0,\n{}.ts?run={}{account_query}\n",
             state.run_id.0, *sequence, state.run_id.0
         );
         return ([(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")], playlist).into_response();
@@ -2399,7 +2427,9 @@ async fn check_origin_assertions<'a>(
                         if let Some(expected_account) = check_account {
                             let latest_account = evts.iter().rev().find_map(|event| match &event.kind {
                                 OriginEventKind::RequestStarted { path, account, .. }
-                                    if path.starts_with("/live/") || path.starts_with("/vod/") =>
+                                    if path.starts_with("/live/")
+                                        || path.starts_with("/vod/")
+                                        || path.starts_with("/hls/") =>
                                 {
                                     Some(account.as_deref())
                                 }
@@ -3434,6 +3464,7 @@ mod tests {
             run_id: RunId::new(run_id),
             bitrate: 64_000,
             markers: Arc::new(vec![17]),
+            hls_markers: Arc::new(HashSet::new()),
             stream_counter: Arc::new(Mutex::new(4)),
             observations: Arc::new(Mutex::new(Vec::new())),
             faults: Arc::new(Mutex::new(FaultSchedule::default())),
@@ -3507,6 +3538,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hls_catalog_and_segments_preserve_alias_account_tokens() -> Result<(), TestkitError> {
+        let mut state = test_origin_state("hls-run");
+        state.markers = Arc::new(vec![17, 19]);
+        state.hls_markers = Arc::new(HashSet::from([17]));
+        let document = catalog_m3u(&state, "127.0.0.1", Some("account-b"));
+        assert!(document.contains("/hls/17/index.m3u8?run=hls-run&token=account-b"));
+        assert!(document.contains("/live/19.ts?run=hls-run&token=account-b"));
+        let response = hls(
+            Path("17/index.m3u8".to_owned()),
+            Query(HashMap::from([
+                ("run".to_owned(), "hls-run".to_owned()),
+                ("token".to_owned(), "account-b".to_owned()),
+            ])),
+            State(state),
+            None,
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .map_err(|error| TestkitError::Protocol(error.to_string()))?;
+        let playlist = String::from_utf8(body.to_vec()).map_err(|error| TestkitError::Protocol(error.to_string()))?;
+        let segments = playlist.lines().filter(|line| !line.starts_with('#')).collect::<Vec<_>>();
+        assert_eq!(segments.len(), 2);
+        assert!(segments.iter().all(|url| url.ends_with("&token=account-b")));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn hls_rejects_a_marker_absent_from_the_origin_catalog() {
         let state = test_origin_state("hls-run");
         assert_eq!(
@@ -3514,6 +3575,8 @@ mod tests {
                 Path("19/index.m3u8".to_owned()),
                 Query(HashMap::from([("run".to_owned(), "hls-run".to_owned())])),
                 State(state),
+                None,
+                HeaderMap::new(),
             )
             .await
             .status(),

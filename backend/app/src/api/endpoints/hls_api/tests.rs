@@ -160,7 +160,7 @@ fn append_catchup_session_hint_keeps_m3u_catchup_token_without_shared_hls_cache(
 }
 
 #[test]
-fn live_hls_entry_tokens_separate_parallel_playbacks_with_the_same_fingerprint() {
+fn live_hls_entry_tokens_are_unique_but_share_a_stable_provider_owner() {
     let fingerprint = test_fingerprint();
     let first = super::hls_entry_user_session_token(&fingerprint, "alice", 42, None, None);
     let second = super::hls_entry_user_session_token(&fingerprint, "alice", 42, None, None);
@@ -168,6 +168,21 @@ fn live_hls_entry_tokens_separate_parallel_playbacks_with_the_same_fingerprint()
     assert_ne!(first, second);
     assert!(first.contains("|hls|"));
     assert!(second.contains("|hls|"));
+    let first_lease = tuliprox_session::PlaybackLeaseRef::new(&first, tuliprox_core::model::PlaybackKind::LiveHls);
+    let second_lease = tuliprox_session::PlaybackLeaseRef::new(&second, tuliprox_core::model::PlaybackKind::LiveHls);
+    assert_ne!(first_lease.owner, second_lease.owner);
+    assert_eq!(first_lease.provider_owner(), second_lease.provider_owner());
+    assert_ne!(first_lease.request_id, second_lease.request_id);
+    let other_channel = super::hls_entry_user_session_token(&fingerprint, "alice", 43, None, None);
+    let other_user = super::hls_entry_user_session_token(&fingerprint, "bob", 42, None, None);
+    assert_ne!(
+        first_lease.provider_owner(),
+        tuliprox_session::PlaybackLeaseRef::new(&other_channel, first_lease.kind).provider_owner()
+    );
+    assert_ne!(
+        first_lease.provider_owner(),
+        tuliprox_session::PlaybackLeaseRef::new(&other_user, first_lease.kind).provider_owner()
+    );
 }
 
 #[test]

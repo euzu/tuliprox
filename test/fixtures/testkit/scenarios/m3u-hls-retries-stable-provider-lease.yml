@@ -1,0 +1,90 @@
+schema_version: 1
+name: m3u-hls-retries-stable-provider-lease
+tuliprox:
+  base_url: http://fixture.invalid
+  execution_mode: isolated_fixture
+  fixture_stream: { share_live_hls: false, share_live_mpeg_ts: false }
+  bootstrap:
+    command: "${env:TULIPROX_TESTKIT_SUT_BINARY}"
+    arguments: ["-s", "-c", "{config_file}", "-i", "{source_file}", "-a", "{api_proxy_file}"]
+    readiness_url: "{base_url}/healthcheck"
+origin:
+  run_id: m3u-hls-retries-stable-provider-lease
+  account_limit: 6
+  limit_mode: reject_new
+actors:
+  - id: retrying-player
+    agent: local
+    username: viewer
+    user_agent: tuliprox-testkit/retrying-player
+    client_ip: { mode: forwarded, value: 10.32.0.10 }
+  - id: other-player
+    agent: local
+    username: other
+    user_agent: tuliprox-testkit/other-player
+    client_ip: { mode: forwarded, value: 10.32.0.11 }
+channels:
+  retry-channel: { origin_marker: 17, protocol: hls }
+  other-channel: { origin_marker: 19, protocol: hls }
+steps:
+  - command_id: retry-live-entry
+    repeat:
+      count: 12
+      steps:
+        - command_id: start
+          start:
+            actor: retrying-player
+            playback_id: retry
+            session_group: retry
+            channel: retry-channel
+          await: { valid_frames: 2 }
+          assert_origin: { latest_request_account: account-a, no_limit_rejections: true }
+        - command_id: stop
+          stop: { playback_id: retry }
+          assert_runtime: { active_users: 0, active_user_connections: 0 }
+  - command_id: other-client-retains-primary-capacity
+    start:
+      actor: other-player
+      playback_id: other
+      session_group: other
+      channel: other-channel
+    await: { valid_frames: 2 }
+    assert_origin: { latest_request_account: account-a, no_limit_rejections: true }
+  - command_id: stop-other-client
+    stop: { playback_id: other }
+    assert_runtime: { active_users: 0, active_user_connections: 0 }
+  - command_id: same-client-other-channel-falls-back-to-alias
+    repeat:
+      count: 8
+      steps:
+        - command_id: start-alias
+          start:
+            actor: retrying-player
+            playback_id: alias-retry
+            session_group: other-channel
+            channel: other-channel
+          await: { valid_frames: 2 }
+          assert_origin: { latest_request_account: account-b, no_limit_rejections: true }
+        - command_id: stop-alias
+          stop: { playback_id: alias-retry }
+          assert_runtime: { active_users: 0, active_user_connections: 0 }
+  - command_id: original-client-reuses-full-primary
+    start:
+      actor: retrying-player
+      playback_id: final-retry
+      session_group: retry
+      channel: retry-channel
+    await: { valid_frames: 2 }
+    assert_origin: { latest_request_account: account-a, no_limit_rejections: true }
+  - command_id: stop-final-retry
+    stop: { playback_id: final-retry }
+    assert_runtime: { active_users: 0, active_user_connections: 0 }
+policy_contract:
+  user_access_control: true
+  users:
+    viewer: { max_connections: 64 }
+    other: { max_connections: 4 }
+  admission_strategies: []
+  provider_pool:
+    - { name: account-a, priority: -1, max_connections: 2 }
+    - { name: account-b, max_connections: 4 }
