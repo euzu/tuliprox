@@ -1025,6 +1025,18 @@
 
 ## 🐛 Fixes
 
+- **A continuing playback keeps its provider after its reconnect window ends.** When an HLS player paused requests
+  longer than `hls_session_ttl_secs`, its lease expired and the next request ran priority selection again, so a playback
+  that had fallen back to an alias moved back to the primary account and then back to the alias. A playback now returns
+  to the provider that last delivered its media for `provider_affinity_ttl_secs` after the reconnect window. This
+  preference holds no connection slot and never causes a grace over-allocation while another provider has a free slot:
+  a full provider still falls back to the lineup. Provider errors on the preferred provider, preemption, kicks and
+  timeouts end it immediately; a failure on a fallback provider keeps it. It applies to reconnect-capable playback
+  (HLS, DASH, Catchup, VOD), not to one-shot live MPEG-TS responses. A delayed failure of an older binding cannot end the preference of its
+  successor. Terminating an HLS session or kicking its client now also releases the provider lease and preference of
+  the binding that session acquired, which the per-retry public HLS token previously left in place. Terminating an
+  unknown or outdated session token leaves a newer playback of the same client, user and channel untouched.
+
 - **Banned, disabled or expired provider accounts are excluded from allocation and remembered.** A login or expiry
   response that reports `Banned`, `Disabled` or `Expired` excludes the account immediately and stores the exclusion in
   `source.yml` (`account_disabled: true` for a root account) or the alias CSV (`enabled` = `0`). `Pending` and other
@@ -1451,6 +1463,11 @@
 
 ## ⚙️ New Settings
 
+- **config.yml (`reverse_proxy.stream`)**:
+  - `provider_affinity_ttl_secs` (default `120`): seconds a playback keeps preferring its last provider after the
+    reconnect window has ended. It reserves no capacity. `0` ends the preference together with the reconnect window;
+    values above `86400` are rejected. Editable in the Web UI under Reverse Proxy → Stream.
+
 - **Runtime diagnostics (environment variables)**:
   - `TULIPROX_WATCHDOG` (default unset = off) is a mode selector: `1` (`true`/`on`/`yes`/`enabled`) observes and logs
     stalls, `2` (`restart`) additionally exits the process after the stall persists so a supervisor restarts it.
@@ -1598,6 +1615,11 @@
   - The rules use OR semantics: any matching CIDR or country allows the request.
 
 ## 🛠 Maintenance
+
+- **Testkit scenarios can pause and tune reconnect windows.** A step with only `pause_millis` (1 to 300000) idles the
+  scenario, and `policy_contract` accepts `hls_session_ttl_secs` and `provider_affinity_ttl_secs`. The new scenario
+  `m3u-hls-provider-affinity-after-lease-expiry` uses both to prove that a returning HLS playback stays on its
+  fallback account after its reconnect window lapsed and falls back to priority selection once the affinity ended.
 
 - **The testkit can now drive a Stalker/Ministra input.** The fixture origin emulates a portal
   (`handshake`, `get_profile`, `get_genres`, `get_ordered_list`, `create_link`), a scenario selects it with

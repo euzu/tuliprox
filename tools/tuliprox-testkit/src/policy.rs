@@ -252,6 +252,8 @@ mod tests {
             users: HashMap::from([("alice".to_owned(), UserPolicy { max_connections: 2, soft_connections: 1 })]),
             admission_strategies: Some(vec![AdmissionStrategy::EvictUserSameIpLatest]),
             recent_eviction_reentry_ttl_ms: None,
+            hls_session_ttl_secs: None,
+            provider_affinity_ttl_secs: None,
             grace: None,
             provider_max_connections: None,
             provider_pool: Vec::new(),

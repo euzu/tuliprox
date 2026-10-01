@@ -1,0 +1,87 @@
+schema_version: 1
+name: m3u-hls-provider-affinity-after-lease-expiry
+tuliprox:
+  base_url: http://fixture.invalid
+  execution_mode: isolated_fixture
+  fixture_stream: { share_live_hls: false, share_live_mpeg_ts: false }
+  bootstrap:
+    command: "${env:TULIPROX_TESTKIT_SUT_BINARY}"
+    arguments: ["-s", "-c", "{config_file}", "-i", "{source_file}", "-a", "{api_proxy_file}"]
+    readiness_url: "{base_url}/healthcheck"
+origin:
+  run_id: m3u-hls-provider-affinity-after-lease-expiry
+  account_limit: 6
+  limit_mode: reject_new
+actors:
+  - id: viewer
+    agent: local
+    username: viewer
+    user_agent: tuliprox-testkit/viewer
+    client_ip: { mode: forwarded, value: 10.33.0.10 }
+  - id: holder-1
+    agent: local
+    username: holder1
+    user_agent: tuliprox-testkit/holder-1
+    client_ip: { mode: forwarded, value: 10.33.0.11 }
+  - id: holder-2
+    agent: local
+    username: holder2
+    user_agent: tuliprox-testkit/holder-2
+    client_ip: { mode: forwarded, value: 10.33.0.12 }
+channels:
+  viewer-channel: { origin_marker: 17, protocol: hls }
+  holder-channel-1: { origin_marker: 19, protocol: hls }
+  holder-channel-2: { origin_marker: 23, protocol: hls }
+steps:
+  # Two other playbacks fill the primary account, so the viewer falls back to the alias.
+  - command_id: holder-1-fills-primary
+    start: { actor: holder-1, playback_id: holder-1, session_group: holder-1, channel: holder-channel-1 }
+    await: { valid_frames: 2 }
+    assert_origin: { latest_request_account: account-a, no_limit_rejections: true }
+  - command_id: holder-2-fills-primary
+    start: { actor: holder-2, playback_id: holder-2, session_group: holder-2, channel: holder-channel-2 }
+    await: { valid_frames: 2 }
+    assert_origin: { latest_request_account: account-a, no_limit_rejections: true }
+  - command_id: viewer-falls-back-to-alias
+    start: { actor: viewer, playback_id: viewer-first, session_group: viewer, channel: viewer-channel }
+    await: { valid_frames: 2 }
+    assert_origin: { latest_request_account: account-b, no_limit_rejections: true }
+  - command_id: viewer-pauses
+    stop: { playback_id: viewer-first }
+  - command_id: stop-holder-1
+    stop: { playback_id: holder-1 }
+  - command_id: stop-holder-2
+    stop: { playback_id: holder-2 }
+    assert_runtime: { active_users: 0, active_user_connections: 0 }
+  # The 2 s reconnect window lapses while the 6 s provider affinity is still alive.
+  - command_id: request-gap-longer-than-reconnect-window
+    pause_millis: 4000
+  - command_id: viewer-returns-to-alias-although-primary-is-free
+    start: { actor: viewer, playback_id: viewer-return, session_group: viewer, channel: viewer-channel }
+    await: { valid_frames: 2 }
+    assert_origin: { latest_request_account: account-b, no_limit_rejections: true }
+  - command_id: viewer-ends-playback
+    stop: { playback_id: viewer-return }
+    assert_runtime: { active_users: 0, active_user_connections: 0 }
+  # Once reconnect window and affinity have both lapsed, priority selection applies again.
+  - command_id: playback-genuinely-ended
+    pause_millis: 10000
+  - command_id: new-playback-uses-free-primary
+    start: { actor: viewer, playback_id: viewer-new, session_group: viewer, channel: viewer-channel }
+    await: { valid_frames: 2 }
+    assert_origin: { latest_request_account: account-a, no_limit_rejections: true }
+  - command_id: stop-new-playback
+    stop: { playback_id: viewer-new }
+    assert_runtime: { active_users: 0, active_user_connections: 0 }
+policy_contract:
+  user_access_control: true
+  users:
+    viewer: { max_connections: 4 }
+    holder1: { max_connections: 1 }
+    holder2: { max_connections: 1 }
+  admission_strategies: []
+  hls_session_ttl_secs: 2
+  provider_affinity_ttl_secs: 6
+  provider_pool:
+    - { name: account-a, priority: -1, max_connections: 2 }
+    - { name: account-b, max_connections: 4 }

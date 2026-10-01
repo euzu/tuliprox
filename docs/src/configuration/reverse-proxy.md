@@ -134,6 +134,7 @@ reverse_proxy:
     grace_period_hold_stream: true
     hls_session_ttl_secs: 15
     catchup_session_ttl_secs: 45
+    provider_affinity_ttl_secs: 120
     shared_burst_buffer_mb: 12
     cleanup_queue_capacity: 4096
     recent_eviction_reentry_ttl_ms: 3000
@@ -156,6 +157,7 @@ reverse_proxy:
 | `grace_period_hold_stream` | Bool | `true` | Tuliprox artificially holds back video data to the client, waiting for grace check to finish, so it doesn't trigger provider prematurely. |
 | `hls_session_ttl_secs` | Int | `15` | Keeps virtual provider slot open between HLS segment (`.ts`) requests to prevent provider bans for "Account Hopping". |
 | `catchup_session_ttl_secs` | Int | `45` | Same session-holding principle applied to Archive/Catchup TV. See notes on section [Session TTLs for HLS & Catchup](#session-ttls-for-hls-m3u8--catchup) for details. |
+| `provider_affinity_ttl_secs` | Int | `120` | How long a reconnect-capable playback (HLS, DASH, Catchup, VOD) keeps returning to its last provider account after the reconnect window has ended. It holds no connection slot and never causes a grace over-allocation. `0` ends the preference together with the reconnect window; the maximum is `86400`. See [Session TTLs for HLS & Catchup](#session-ttls-for-hls-m3u8--catchup). |
 | `shared_burst_buffer_mb` | Int | `12` | Minimum burst buffer size (in MB) used for shared live streams to immediately synchronize new clients without Keyframe dropouts. See notes on section [Shared Live Streams](#shared-live-streams) for details. |
 | `cleanup_queue_capacity` | Int | `4096` | Maximum number of concurrent cleanup permits available to active response bodies and shared subscribers. Must be at least `1`. If all permits remain held, new stream admission waits for a bounded interval and then returns `503 Service Unavailable` instead of growing memory without limit. |
 | `recent_eviction_reentry_ttl_ms` | Int | `3000` | Time window after an eviction during which a retry of the evicted playback must not evict its replacement. The guard is scoped to the user, client address and channel, so unrelated clients are not blocked. Suppressed retries end quietly (no `user_connections_exhausted` video and no `ConnectionDenied` event), since they are not a real connection-limit refusal. Raise this for players with slow automatic retries; `0` disables the guard. The cumulative suppression count is exposed as `reentry_suppressed_total` in the server status (`GET /api/v1/status`). |
@@ -598,6 +600,14 @@ hopping. Tuliprox therefore keeps a logical, confirmed slot lease for the playba
   create a capacity reservation.
 * Archive/Catchup playback uses the same confirmed-lease principle with `catchup_session_ttl_secs: 45`.
 * Provider errors, preemption, kicks and timeouts release the lease immediately rather than keeping the reconnect window.
+* `provider_affinity_ttl_secs: 120`: When a player pauses its requests longer than the reconnect window (for example
+  while buffering), the lease expires but the playback still prefers the provider account that last delivered its
+  media for another 120 seconds. This preference holds no slot: other playbacks can still use that account, and if it
+  is full, the playback falls back to the normal provider order. A full preferred account never receives a grace
+  over-allocation while another account has a free slot. Provider errors on the preferred account, preemption, kicks
+  and timeouts end the preference immediately; a failure on a fallback account keeps it. The preference applies to
+  reconnect-capable playback (HLS, DASH, Catchup, VOD), not to one-shot live MPEG-TS responses. `0` ends it together
+  with the reconnect window; values above `86400` are rejected.
 
 ---
 

@@ -6,6 +6,10 @@
 /// This is the single source of truth for the default.
 pub const DEFAULT_RECENT_EVICTION_REENTRY_TTL_MS: u64 = 3000;
 
+/// Upper bound for `provider_affinity_ttl_secs` (one day). Larger windows serve no
+/// playback purpose and would overflow monotonic deadline arithmetic.
+pub const MAX_PROVIDER_AFFINITY_TTL_SECS: u64 = 86_400;
+
 default_eq_fns!(
     default_resolve_delay_secs, is_default_resolve_delay_secs, u16, 2;
     default_probe_delay_secs, is_default_probe_delay_secs, u16, 2;
@@ -15,6 +19,7 @@ default_eq_fns!(
     default_shared_subscriber_idle_timeout_secs, is_default_shared_subscriber_idle_timeout_secs, u64, 300;
     default_grace_period_timeout_secs, is_default_grace_period_timeout_secs, u64, 4;
     default_catchup_session_ttl_secs, is_default_catchup_session_ttl_secs, u64, 45;
+    default_provider_affinity_ttl_secs, is_default_provider_affinity_ttl_secs, u64, 120;
     default_connect_timeout_secs, is_default_connect_timeout_secs, u32, 6;
     default_resource_retry_attempts, is_default_resource_retry_attempts, u32, 3;
     default_resource_retry_backoff_ms, is_default_resource_retry_backoff_ms, u64, 250;

@@ -339,7 +339,7 @@ async fn release_connection_parts(
     if matches!(reason, DisconnectReason::ClientKicked) {
         for stream_info in &removed.removed_streams {
             if let Some(session_token) = stream_info.session_token.as_deref() {
-                deps.provider_manager.clear_provider_reservation(session_token);
+                deps.provider_manager.terminate_identified_playback_owner(session_token);
             }
         }
         // Explicitly terminate all sessions for the kicked addr. This expires them
@@ -1294,7 +1294,7 @@ impl ConnectionManager {
         // Provider release and capacity notification are deferred via `release_provider_deferred`.
         for stream_info in &removed.removed_streams {
             if let Some(session_token) = stream_info.session_token.as_deref() {
-                self.provider_manager.clear_provider_reservation(session_token);
+                self.provider_manager.terminate_identified_playback_owner(session_token);
             }
         }
         for username in &removed.disconnected_users {

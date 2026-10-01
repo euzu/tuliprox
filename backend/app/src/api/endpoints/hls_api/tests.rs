@@ -12568,6 +12568,118 @@ async fn terminate_failed_hls_manifest_session_releases_identified_provider_rese
 }
 
 #[tokio::test]
+async fn delayed_manifest_failure_of_older_binding_keeps_provider_affinity() {
+    let input = single_hls_provider_input("affinity-hls-input");
+    let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+    let provider_name = Arc::clone(&input.name);
+    let old_token = "testuser|stream-1|hls|0123456789abcdef";
+    let new_token = "testuser|stream-1|hls|fedcba9876543210";
+    let acquire = |token: &'static str, port: u16| {
+        app_state
+            .active_provider
+            .acquire_connection_with_lease_for_session(
+                &provider_name,
+                &test_addr_with_port(port),
+                false,
+                0,
+                ConnectionKind::Normal,
+                Some(tuliprox_session::PlaybackLeaseRef::new(token, crate::model::PlaybackKind::LiveHls)),
+            )
+            .expect("handle should be acquired")
+    };
+
+    // The older binding never produced media and ended.
+    let old = acquire(old_token, 55311);
+    let (old_tag, old_request) = (old.binding_tag, old.playback_request_id);
+    let old_request_id = old_request.expect("old request id");
+    app_state.connection_manager.release_provider_handle(Some(old));
+    app_state.active_provider.finish_identified_playback_request(
+        old_token,
+        old_request_id,
+        tuliprox_core::model::PlaybackRequestOutcome::FailedBeforeMedia,
+    );
+
+    // The successor binding confirms media and owns the provider preference.
+    let current = acquire(new_token, 55312);
+    let current_request = current.playback_request_id.expect("current request id");
+    app_state.active_provider.refresh_adaptive_playback_lease(
+        &provider_name,
+        new_token,
+        crate::model::PlaybackKind::LiveHls,
+        15,
+    );
+    app_state.active_provider.confirm_identified_playback_activity(new_token, current_request);
+    app_state.connection_manager.release_provider_handle(Some(current));
+    assert_eq!(app_state.active_provider.provider_affinity_for_owner(new_token), Some(Arc::clone(&provider_name)));
+
+    for (tag, request) in [(old_tag, old_request), (old_tag, None)] {
+        super::segment::terminate_failed_hls_manifest_session(
+            &app_state,
+            "testuser",
+            old_token,
+            Some(&provider_name),
+            tag,
+            request,
+        )
+        .await;
+    }
+
+    assert_eq!(
+        app_state.active_provider.provider_affinity_for_owner(new_token),
+        Some(Arc::clone(&provider_name)),
+        "a delayed failure of the older binding must not end the successor's provider preference"
+    );
+}
+
+#[tokio::test]
+async fn terminating_unknown_old_hls_session_keeps_newer_provider_lease() {
+    use axum::response::IntoResponse;
+    let input = single_hls_provider_input("terminate-hls-input");
+    let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+    let provider_name = Arc::clone(&input.name);
+    let old_token = "testuser|stream-1|hls|0123456789abcdef";
+    let new_token = "testuser|stream-1|hls|fedcba9876543210";
+    let current = app_state
+        .active_provider
+        .acquire_connection_with_lease_for_session(
+            &provider_name,
+            &test_addr_with_port(55321),
+            false,
+            0,
+            ConnectionKind::Normal,
+            Some(tuliprox_session::PlaybackLeaseRef::new(new_token, crate::model::PlaybackKind::LiveHls)),
+        )
+        .expect("handle should be acquired");
+    let request_id = current.playback_request_id.expect("request id");
+    app_state.active_provider.refresh_adaptive_playback_lease(
+        &provider_name,
+        new_token,
+        crate::model::PlaybackKind::LiveHls,
+        15,
+    );
+    app_state.active_provider.confirm_identified_playback_activity(new_token, request_id);
+    app_state.connection_manager.release_provider_handle(Some(current));
+    app_state.active_provider.finish_identified_playback_request(
+        new_token,
+        request_id,
+        tuliprox_core::model::PlaybackRequestOutcome::Completed,
+    );
+    let binding_tag = app_state.active_provider.binding_tag_for_owner(new_token);
+    assert!(binding_tag.is_some(), "the newer playback keeps an idle lease");
+
+    let response = crate::api::endpoints::v1_api_user::terminate_user_session(
+        axum::extract::State(Arc::clone(&app_state)),
+        axum::extract::Path(("testuser".to_string(), old_token.to_string())),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(app_state.active_provider.binding_tag_for_owner(new_token), binding_tag);
+    assert_eq!(app_state.active_provider.provider_affinity_for_owner(new_token), Some(provider_name));
+}
+
+#[tokio::test]
 async fn terminate_failed_hls_manifest_session_preserves_shared_lease_when_request_id_available() {
     let mut input = single_hls_provider_input("shared-hls-input");
     input.max_connections = 2;

@@ -115,6 +115,12 @@ fn render_config(
         if let Some(ttl_ms) = policy.recent_eviction_reentry_ttl_ms {
             let _ = writeln!(config, "    recent_eviction_reentry_ttl_ms: {ttl_ms}");
         }
+        if let Some(ttl_secs) = policy.hls_session_ttl_secs {
+            let _ = writeln!(config, "    hls_session_ttl_secs: {ttl_secs}");
+        }
+        if let Some(ttl_secs) = policy.provider_affinity_ttl_secs {
+            let _ = writeln!(config, "    provider_affinity_ttl_secs: {ttl_secs}");
+        }
     }
     let _ = writeln!(
         config,
@@ -560,6 +566,8 @@ mod tests {
             )]),
             admission_strategies: Some(vec![crate::oracle::AdmissionStrategy::EvictUserSameIpLatest]),
             recent_eviction_reentry_ttl_ms: None,
+            hls_session_ttl_secs: Some(2),
+            provider_affinity_ttl_secs: Some(6),
             grace: None,
             provider_max_connections: None,
             provider_pool: Vec::new(),
@@ -587,6 +595,8 @@ mod tests {
         let api_proxy = std::fs::read_to_string(&fixture.api_proxy_file)?;
 
         assert!(config.contains(fixture.root.to_string_lossy().as_ref()));
+        assert!(config.contains("    hls_session_ttl_secs: 2\n"), "{config}");
+        assert!(config.contains("    provider_affinity_ttl_secs: 6\n"), "{config}");
         assert!(source.contains("fixture-run"));
         assert!(api_proxy.contains("fixture-user"));
         let expected_paths = [

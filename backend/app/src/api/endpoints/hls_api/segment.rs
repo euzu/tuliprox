@@ -2158,6 +2158,9 @@ pub(super) async fn terminate_failed_hls_manifest_session(
         );
         cleared = true;
     } else if let (Some(provider_name), Some(binding_tag)) = (provider_name, binding_tag) {
+        // A failed manifest lets the next entry fall back to another provider, but only
+        // when the preference still belongs to this binding.
+        app_state.active_provider.forget_identified_provider_affinity(session_token, provider_name, binding_tag);
         app_state.active_provider.clear_identified_provider_reservation(
             session_token,
             provider_name,
