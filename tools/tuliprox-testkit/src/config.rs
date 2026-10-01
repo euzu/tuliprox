@@ -511,6 +511,16 @@ impl Scenario {
                 return Err(TestkitError::Configuration("command IDs must be unique and non-empty".to_owned()));
             }
             if step.pause_millis.is_some() {
+                if !step.expect.is_streaming()
+                    || step.await_frames.is_some()
+                    || step.await_condition.is_some()
+                    || step.assert_origin.is_some()
+                    || step.assert_runtime.is_some()
+                {
+                    return Err(TestkitError::Configuration(
+                        "pause_millis cannot be combined with playback expectations or checks".to_owned(),
+                    ));
+                }
                 continue;
             }
             if step.start.is_some() == step.stop.is_some() {
@@ -891,6 +901,13 @@ steps:
             "{ command_id: wait, pause_millis: 0 }",
             "{ command_id: wait, pause_millis: 300001 }",
             "{ command_id: wait, pause_millis: 10, stop: { playback_id: missing } }",
+            "{ command_id: wait, pause_millis: 10, expect: rejected }",
+            "{ command_id: wait, pause_millis: 10, expect: suppressed }",
+            "{ command_id: wait, pause_millis: 10, await_frames: 0 }",
+            "{ command_id: wait, pause_millis: 10, await: { valid_frames: 1 } }",
+            "{ command_id: wait, pause_millis: 10, await: {} }",
+            "{ command_id: wait, pause_millis: 10, assert_origin: {} }",
+            "{ command_id: wait, pause_millis: 10, assert_runtime: {} }",
         ] {
             let yaml = format!(
                 "schema_version: 1\nname: pause-invalid\ntuliprox: {{ base_url: http://example.invalid, execution_mode: existing_instance }}\nactors: [{{ id: a, agent: local }}]\nsteps: [{invalid_step}]\n"
