@@ -12512,3 +12512,57 @@ async fn legacy_hls_route_remains_registered() {
 
     assert_ne!(status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn terminate_failed_hls_manifest_session_releases_identified_provider_reservation() {
+    let input = single_hls_provider_input("failed-hls-input");
+    let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+    let username = "testuser";
+    let session_token = "testuser|stream-1|hls|0123456789abcdef";
+    let provider_name = Arc::clone(&input.name);
+    let addr = test_addr_with_port(55301);
+
+    let handle = app_state
+        .active_provider
+        .acquire_connection_with_lease_for_session(
+            &provider_name,
+            &addr,
+            false,
+            0,
+            ConnectionKind::Normal,
+            Some(tuliprox_session::PlaybackLeaseRef::new(session_token, crate::model::PlaybackKind::LiveHls)),
+        )
+        .expect("handle should be acquired");
+
+    let binding_tag = handle.binding_tag;
+    let request_id = handle.playback_request_id;
+    assert!(binding_tag.is_some(), "handle should carry a binding tag");
+
+    app_state.connection_manager.release_provider_handle(Some(handle));
+
+    assert!(
+        app_state.active_provider.binding_tag_for_owner(session_token).is_some(),
+        "lease should still be active after releasing connection handle"
+    );
+
+    app_state.active_provider.clear_provider_reservation(session_token);
+    assert!(
+        app_state.active_provider.binding_tag_for_owner(session_token).is_some(),
+        "clear_provider_reservation must return early for public HLS token"
+    );
+
+    super::segment::terminate_failed_hls_manifest_session(
+        &app_state,
+        username,
+        session_token,
+        Some(&provider_name),
+        binding_tag,
+        request_id,
+    )
+    .await;
+
+    assert!(
+        app_state.active_provider.binding_tag_for_owner(session_token).is_none(),
+        "lease should be cleared after terminate_failed_hls_manifest_session with binding identity"
+    );
+}

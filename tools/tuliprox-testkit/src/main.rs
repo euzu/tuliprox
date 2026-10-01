@@ -7,7 +7,7 @@ use axum::{
     Json, Router,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
 use serde::Serialize;
@@ -1059,6 +1059,44 @@ async fn clear_fault(Path((run_id, fault_id)): Path<(String, String)>, State(sta
     }
 }
 
+async fn hls_guarded_response(
+    payload: Bytes,
+    content_type: &'static str,
+    conn_id: u64,
+    req_id: u64,
+    tracker: &OriginTracker,
+) -> Response {
+    let length = payload.len() as u64;
+    let _evict_rx = tracker.on_body_started(conn_id, req_id, Some(length)).await;
+    let bytes_emitted = Arc::new(AtomicU64::new(0));
+    let closed = Arc::new(AtomicBool::new(false));
+    let evicted = Arc::new(AtomicBool::new(false));
+    let guard = Arc::new(BodyDropGuard {
+        conn_id,
+        req_id,
+        tracker: tracker.clone(),
+        bytes_emitted: bytes_emitted.clone(),
+        start_time: Instant::now(),
+        closed: closed.clone(),
+        evicted: evicted.clone(),
+    });
+    let bytes_tracker = bytes_emitted;
+    let stream =
+        futures::stream::once(futures::future::ready(Ok::<_, std::convert::Infallible>(payload))).map(move |item| {
+            let _keep_guard = &guard;
+            if let Ok(chunk) = &item {
+                bytes_tracker.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+            }
+            item
+        });
+    let mut response = Response::new(Body::from_stream(stream));
+    response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    if let Ok(value) = HeaderValue::from_str(&length.to_string()) {
+        response.headers_mut().insert(header::CONTENT_LENGTH, value);
+    }
+    response
+}
+
 async fn hls(
     Path(resource): Path<String>,
     Query(query): Query<HashMap<String, String>>,
@@ -1078,17 +1116,19 @@ async fn hls(
     if !state.markers.contains(&marker) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    if let Some(Extension(meta)) = meta {
-        let account = origin_account(&query);
-        let user_agent = headers.get(header::USER_AGENT).and_then(|value| value.to_str().ok());
-        if let Err((_, status)) = state
-            .tracker
-            .on_request_started(meta.conn_id, "GET", &format!("/hls/{marker}/{resource}"), None, user_agent, account)
-            .await
-        {
+    let conn_id = meta.as_ref().map_or(0, |m| m.conn_id);
+    let account = origin_account(&query);
+    let user_agent = headers.get(header::USER_AGENT).and_then(|value| value.to_str().ok());
+    let req_id = match state
+        .tracker
+        .on_request_started(conn_id, "GET", &format!("/hls/{marker}/{resource}"), None, user_agent, account)
+        .await
+    {
+        Ok(id) => id,
+        Err((_id, status)) => {
             return StatusCode::from_u16(status).unwrap_or(StatusCode::TOO_MANY_REQUESTS).into_response();
         }
-    }
+    };
     if resource == "index.m3u8" {
         let mut sequences = state.hls_sequences.lock().await;
         let sequence = sequences.entry(marker).or_insert(0);
@@ -1102,7 +1142,14 @@ async fn hls(
             "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:{first}\n#EXTINF:1.0,\n{first}.ts?run={}{account_query}\n#EXTINF:1.0,\n{}.ts?run={}{account_query}\n",
             state.run_id.0, *sequence, state.run_id.0
         );
-        return ([(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")], playlist).into_response();
+        return hls_guarded_response(
+            Bytes::from(playlist),
+            "application/vnd.apple.mpegurl",
+            conn_id,
+            req_id,
+            &state.tracker,
+        )
+        .await;
     }
     let segment = resource.strip_suffix(".ts").and_then(|part| part.parse::<u64>().ok());
     let Some(sequence) = segment else {
@@ -1114,7 +1161,7 @@ async fn hls(
     if frame.encode(&mut encoded).is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
-    ([(header::CONTENT_TYPE, "video/mp2t")], encoded.freeze()).into_response()
+    hls_guarded_response(encoded.freeze(), "video/mp2t", conn_id, req_id, &state.tracker).await
 }
 
 async fn vod(
@@ -3564,6 +3611,31 @@ mod tests {
         let segments = playlist.lines().filter(|line| !line.starts_with('#')).collect::<Vec<_>>();
         assert_eq!(segments.len(), 2);
         assert!(segments.iter().all(|url| url.ends_with("&token=account-b")));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn hls_records_body_lifecycle_events() -> Result<(), TestkitError> {
+        let mut state = test_origin_state("hls-events-run");
+        state.markers = Arc::new(vec![17]);
+        state.hls_markers = Arc::new(HashSet::from([17]));
+        let response = hls(
+            Path("17/index.m3u8".to_owned()),
+            Query(HashMap::from([("run".to_owned(), "hls-events-run".to_owned())])),
+            State(state.clone()),
+            None,
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let _body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .map_err(|error| TestkitError::Protocol(error.to_string()))?;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let events = state.tracker.events().await;
+        assert!(events.iter().any(|e| matches!(e.kind, OriginEventKind::RequestStarted { .. })));
+        assert!(events.iter().any(|e| matches!(e.kind, OriginEventKind::BodyStarted { .. })));
+        assert!(events.iter().any(|e| matches!(e.kind, OriginEventKind::BodyClosed { .. })));
         Ok(())
     }
 

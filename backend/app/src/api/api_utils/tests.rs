@@ -810,6 +810,147 @@ fn get_stream_alternative_url_does_not_passthrough_arbitrary_open_external_url_f
 }
 
 #[test]
+fn xtream_vod_provider_url_requires_stored_input_identity() -> Result<(), Box<dyn std::error::Error>> {
+    let config = create_test_dual_provider_app_config();
+    let input = config.sources.load().inputs.first().cloned().ok_or("missing input")?;
+    let provider = RuntimeProviderConfig::new(
+        &input,
+        Arc::new(std::sync::RwLock::new(ProviderConfigConnection::default())),
+        Arc::new(|_, _| {}),
+    );
+    let stream_url = "http://cdn.example/r2/movie.mp4";
+    let mut channel = create_test_live_channel(stream_url);
+    channel.item_type = PlaylistItemType::Video;
+    channel.cluster = XtreamCluster::Video;
+    channel.provider_id = 100;
+    assert_eq!(resolve_xtream_vod_provider_url(stream_url, &input, &provider, &channel), Some(stream_url.to_string()));
+    assert_eq!(
+        resolve_xtream_vod_provider_url("http://unrelated.example/movie.mp4", &input, &provider, &channel),
+        None
+    );
+    channel.input_name = "other-input".intern();
+    assert_eq!(resolve_xtream_vod_provider_url(stream_url, &input, &provider, &channel), None);
+    channel.input_name = Arc::clone(&input.name);
+    channel.item_type = PlaylistItemType::Live;
+    assert_eq!(resolve_xtream_vod_provider_url(stream_url, &input, &provider, &channel), None);
+    channel.item_type = PlaylistItemType::Video;
+    channel.provider_id = 0;
+    assert_eq!(resolve_xtream_vod_provider_url(stream_url, &input, &provider, &channel), None);
+    channel.provider_id = 100;
+    channel.url = "file:///internal/movie.mp4".intern();
+    assert_eq!(resolve_xtream_vod_provider_url(&channel.url, &input, &provider, &channel), None);
+    let unrelated = test_runtime_provider("http://unrelated.example", "other-user", "other-pass");
+    channel.url = stream_url.intern();
+    assert_eq!(resolve_xtream_vod_provider_url(stream_url, &input, &unrelated, &channel), None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn xtream_vod_m3u_reverse_proxies_external_sources_and_alias_redirects_without_leaking_urls(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for use_alias in [false, true] {
+        for source_path in ["/r2/movie.mp4", "/stream/account-bound-token"] {
+            let (cdn_addr, cdn_task) = spawn_legacy_hls_test_origin(
+                "HTTP/1.1 206 Partial Content\r\nContent-Type: video/mp4\r\nContent-Length: 4\r\nContent-Range: bytes 4-7/12\r\nAccept-Ranges: bytes\r\nReferer: http://private-provider.example/user/pass\r\nContent-Location: http://private-cdn.example/movie.mp4\r\nLocation: http://private-cdn.example/movie.mp4\r\nLink: <http://private-cdn.example/movie.mp4>\r\nConnection: close\r\n\r\n".to_string(),
+                b"DATA".to_vec(),
+            ).await;
+            let cdn_url = format!("http://{cdn_addr}/internal/media.mp4?token=private-cdn-token");
+            let (redirect_addr, redirect_task) = spawn_legacy_hls_test_origin(
+                format!("HTTP/1.1 302 Found\r\nLocation: {cdn_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+                Vec::new(),
+            )
+            .await;
+            let config = create_test_dual_provider_app_config();
+            let mut input = (**config.sources.load().inputs.first().ok_or("missing input")?).clone();
+            let alias = input.aliases.as_mut().and_then(|aliases| aliases.first_mut()).ok_or("missing alias")?;
+            alias.url = format!("http://{redirect_addr}");
+            let input = Arc::new(input);
+            config
+                .sources
+                .store(Arc::new(SourcesConfig { inputs: vec![Arc::clone(&input)], ..SourcesConfig::default() }));
+            let app_state = create_test_app_state_for_config(Arc::new(config));
+            let busy_addr = SocketAddr::from(([127, 0, 0, 1], 55401));
+            let busy = if use_alias {
+                app_state.active_provider.acquire_exact_connection_with_grace(
+                    &input.name,
+                    &busy_addr,
+                    false,
+                    0,
+                    crate::api::model::ConnectionKind::Normal,
+                )
+            } else {
+                None
+            };
+            assert!(!use_alias || busy.is_some());
+            let source_url = format!("http://{redirect_addr}{source_path}");
+            let item = shared::model::M3uPlaylistItem::from(&PlaylistItem {
+                header: PlaylistItemHeader {
+                    id: "900".intern(),
+                    input_stream_id: "100".intern(),
+                    virtual_id: VirtualId::new(100),
+                    input_name: Arc::clone(&input.name),
+                    url: source_url.intern(),
+                    item_type: PlaylistItemType::Video,
+                    xtream_cluster: XtreamCluster::Video,
+                    additional_properties: Some(shared::model::StreamProperties::Video(Box::new(
+                        shared::model::VideoStreamProperties {
+                            container_extension: "mp4".intern(),
+                            ..Default::default()
+                        },
+                    ))),
+                    ..Default::default()
+                },
+            });
+            let mut target = create_test_shared_target();
+            target.options = None;
+            target.output = vec![tuliprox_core::model::TargetOutput::M3u(tuliprox_core::model::M3uTargetOutput::from(
+                &shared::model::M3uTargetOutputDto::default(),
+            ))];
+            let mut user = load_test_user("vod-reverse-viewer");
+            user.proxy = ProxyType::Reverse(None);
+            let mut headers = HeaderMap::new();
+            headers.insert(header::RANGE, HeaderValue::from_static("bytes=4-7"));
+            let response = crate::api::endpoints::m3u_api::m3u_api_stream_loaded(
+                Arc::new(user),
+                Arc::new(target),
+                &create_test_fingerprint(SocketAddr::from(([127, 0, 0, 1], 55402))),
+                &headers,
+                &app_state,
+                item,
+                Arc::clone(&input),
+                Some("mp4"),
+                None,
+            )
+            .await
+            .into_response();
+            assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+            assert_eq!(response.headers().get(header::CONTENT_RANGE), Some(&HeaderValue::from_static("bytes 4-7/12")));
+            for name in ["location", "content-location", "referer", "link"] {
+                assert!(!response.headers().contains_key(name));
+            }
+            for value in response.headers().values() {
+                let value = value.to_str()?;
+                assert!(!value.contains(&redirect_addr.to_string()));
+                assert!(!value.contains(&cdn_addr.to_string()));
+                assert!(!value.contains("private-cdn-token"));
+                assert!(!value.contains("user2/pass2"));
+            }
+            let body = response.into_body().collect().await?.to_bytes();
+            assert_eq!(body.as_ref(), b"DATA");
+            let redirect_request = tokio::time::timeout(Duration::from_secs(5), redirect_task).await??;
+            let cdn_request = tokio::time::timeout(Duration::from_secs(5), cdn_task).await??;
+            let expected_path = if use_alias { "/movie/user2/pass2/100.mp4" } else { source_path };
+            assert!(redirect_request.starts_with(&format!("GET {expected_path} ")));
+            assert!(cdn_request.starts_with("GET /internal/media.mp4?token=private-cdn-token "));
+            assert!(redirect_request.to_ascii_lowercase().contains("range: bytes=4-7"));
+            assert!(cdn_request.to_ascii_lowercase().contains("range: bytes=4-7"));
+            app_state.active_provider.release_connection(&busy_addr);
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn media_server_proxy_response_header_filter_drops_hop_by_hop_headers() {
     for name in [
         "connection",
@@ -3849,6 +3990,7 @@ async fn resolve_streaming_strategy_honors_forced_provider_fallback_policy() {
             playback_kind: crate::model::PlaybackKind::Vod,
             accept_requested_stream_url: false,
         },
+        None,
     )
     .await;
     assert!(strict.provider_handle.is_none(), "strict provider affinity should not allocate a different provider");
@@ -3875,6 +4017,7 @@ async fn resolve_streaming_strategy_honors_forced_provider_fallback_policy() {
             playback_kind: crate::model::PlaybackKind::LiveTs,
             accept_requested_stream_url: false,
         },
+        None,
     )
     .await;
     let (ProviderStreamState::Available(Some(fallback_provider), _)
@@ -3924,6 +4067,7 @@ async fn resolve_streaming_strategy_rewrites_url_on_fallback_even_when_accept_re
             playback_kind: crate::model::PlaybackKind::Vod,
             accept_requested_stream_url: true,
         },
+        None,
     )
     .await;
 
@@ -4151,6 +4295,7 @@ async fn resolve_streaming_strategy_rewrites_stale_alias_url_to_selected_main_pr
             playback_kind: crate::model::PlaybackKind::LiveTs,
             accept_requested_stream_url: false,
         },
+        None,
     )
     .await;
 
@@ -4217,6 +4362,7 @@ async fn resolve_streaming_strategy_rewrites_opaque_m3u_token_after_alias_alloca
             playback_kind: crate::model::PlaybackKind::LiveTs,
             accept_requested_stream_url: false,
         },
+        None,
     )
     .await;
 
@@ -4253,6 +4399,7 @@ async fn resolve_streaming_strategy_rejects_unmapped_provider_url() {
             playback_kind: crate::model::PlaybackKind::LiveTs,
             accept_requested_stream_url: false,
         },
+        None,
     )
     .await;
 
@@ -4298,6 +4445,7 @@ async fn resolve_streaming_strategy_accepts_stalker_portal_url() {
             playback_kind: crate::model::PlaybackKind::LiveTs,
             accept_requested_stream_url: false,
         },
+        None,
     )
     .await;
 
@@ -4350,6 +4498,7 @@ async fn resolve_streaming_strategy_rejects_stalker_url_after_forced_provider_fa
             playback_kind: crate::model::PlaybackKind::LiveTs,
             accept_requested_stream_url: false,
         },
+        None,
     )
     .await;
 
@@ -4385,6 +4534,7 @@ async fn resolve_streaming_strategy_accepts_session_requested_stream_url() {
             playback_kind: crate::model::PlaybackKind::LiveTs,
             accept_requested_stream_url: true,
         },
+        None,
     )
     .await;
 
