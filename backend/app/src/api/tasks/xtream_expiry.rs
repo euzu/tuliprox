@@ -406,15 +406,17 @@ async fn persist_updates(
             persisted.push(account_key(account));
             continue;
         }
-        // `None` means already persisted or unknown; the next pass sees the stored date.
-        if let Some(observation) = app_state.active_provider.observe_account(crate::model::ProviderAccountObservation {
+        let observation = crate::model::ProviderAccountObservation {
             name: Arc::clone(&account.name),
             identity: account.identity(),
             status: None,
             exp_date: Some(exp_date),
-        }) {
+        };
+        if let Some(queued) = app_state.active_provider.observe_account(observation.clone()) {
             queued_keys.push(account_key(account));
-            observations.push(observation);
+            observations.push(queued);
+        } else if !app_state.active_provider.is_observation_pending(&observation) {
+            persisted.push(account_key(account));
         }
     }
     if observations.is_empty() {
@@ -528,7 +530,7 @@ mod tests {
         let mut state =
             super::ExpiryState { pending_expiry: HashMap::from([(key.clone(), 30)]), ..super::ExpiryState::default() };
         let mut due = tokio::time::Instant::now();
-        assert!(super::persist_pending_updates(&app, &[account], &mut state, &mut due, 100).await);
+        assert!(super::persist_pending_updates(&app, std::slice::from_ref(&account), &mut state, &mut due, 100).await);
         assert!(!state.pending_expiry.contains_key(&key));
         let sources = app.app_config.sources.load();
         assert_eq!(sources.inputs[0].exp_date, Some(30));
@@ -539,6 +541,13 @@ mod tests {
             crate::repository::csv_read_inputs(shared::model::InputType::XtreamBatch, path.to_string_lossy().as_ref())
                 .await?;
         assert!(!aliases[0].enabled);
+        // Recovered state may contain an expired date the health worker already stored.
+        let account = Account { exp_date: Some(30), ..account };
+        state.pending_expiry.insert(key.clone(), 30);
+        due = tokio::time::Instant::now();
+        assert!(super::persist_pending_updates(&app, &[account], &mut state, &mut due, 100).await);
+        assert!(!state.pending_expiry.contains_key(&key));
+        assert!(app.active_provider.pending_account_observations().is_empty());
         Ok(())
     }
 
