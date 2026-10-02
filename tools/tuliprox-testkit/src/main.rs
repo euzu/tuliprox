@@ -2493,9 +2493,7 @@ async fn check_origin_assertions<'a>(
                                     if (path.starts_with("/live/")
                                         || path.starts_with("/vod/")
                                         || path.starts_with("/hls/"))
-                                        && marker.is_none_or(|marker| {
-                                            origin_path_marker(path).is_none_or(|found| found == marker)
-                                        }) =>
+                                        && marker.is_none_or(|marker| origin_path_marker(path) == Some(marker)) =>
                                 {
                                     Some(account.as_deref())
                                 }
