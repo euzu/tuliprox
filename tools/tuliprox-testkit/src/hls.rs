@@ -19,7 +19,9 @@ pub async fn read_segments(
     headers: &BTreeMap<String, String>,
 ) -> Result<u64, TestkitError> {
     let client = reqwest::Client::builder().http1_only().build()?;
-    let base = Url::parse(manifest_url).map_err(|error| TestkitError::Configuration(error.to_string()))?;
+    // A master playlist is resolved once to its first variant; reloads then target the variant,
+    // as a player does.
+    let mut manifest_url = Url::parse(manifest_url).map_err(|error| TestkitError::Configuration(error.to_string()))?;
     let mut frames = 0;
     let mut validator = FrameValidator::new(expected_run_id, expected_marker);
     // Live manifests are reloaded until enough frames were observed. Segment
@@ -29,10 +31,20 @@ pub async fn read_segments(
     let deadline = tokio::time::Instant::now() + MANIFEST_RELOAD_DEADLINE;
     loop {
         let manifest = tokio::time::timeout_at(deadline, async {
-            request_with_headers(client.get(manifest_url), headers).send().await?.error_for_status()?.text().await
+            request_with_headers(client.get(manifest_url.clone()), headers)
+                .send()
+                .await?
+                .error_for_status()?
+                .text()
+                .await
         })
         .await
         .map_err(|_| TestkitError::Protocol("HLS manifest request exceeded overall deadline".to_owned()))??;
+        if let Some(variant) = first_variant_uri(&manifest) {
+            manifest_url =
+                manifest_url.join(variant).map_err(|error| TestkitError::Configuration(error.to_string()))?;
+            continue;
+        }
         let segments = manifest
             .lines()
             .map(str::trim)
@@ -43,7 +55,8 @@ pub async fn read_segments(
             if !consumed.insert(segment.clone()) {
                 continue;
             }
-            let segment_url = base.join(&segment).map_err(|error| TestkitError::Configuration(error.to_string()))?;
+            let segment_url =
+                manifest_url.join(&segment).map_err(|error| TestkitError::Configuration(error.to_string()))?;
             let response = tokio::time::timeout_at(deadline, async {
                 request_with_headers(client.get(segment_url), headers).send().await?.error_for_status()
             })
@@ -86,6 +99,13 @@ pub async fn read_segments(
     }
 }
 
+/// URI of the first `#EXT-X-STREAM-INF` variant, or `None` for a media playlist.
+fn first_variant_uri(manifest: &str) -> Option<&str> {
+    let mut lines = manifest.lines().map(str::trim);
+    lines.find(|line| line.starts_with("#EXT-X-STREAM-INF"))?;
+    lines.find(|line| !line.is_empty() && !line.starts_with('#'))
+}
+
 fn request_with_headers(
     mut request: reqwest::RequestBuilder,
     headers: &BTreeMap<String, String>,
@@ -120,6 +140,14 @@ mod tests {
             .filter(|line| !line.is_empty() && !line.starts_with('#'))
             .collect::<Vec<_>>();
         assert_eq!(entries, vec!["0.ts"]);
+    }
+
+    #[test]
+    fn master_playlist_resolves_to_first_variant() {
+        let master =
+            "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\n\nvariant/a.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=2\nb.m3u8\n";
+        assert_eq!(first_variant_uri(master), Some("variant/a.m3u8"));
+        assert_eq!(first_variant_uri("#EXTM3U\n#EXTINF:1,\n0.ts\n"), None);
     }
 
     #[tokio::test]
