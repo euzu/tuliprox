@@ -1,5 +1,6 @@
 #![allow(clippy::wildcard_imports)]
 use super::*;
+use crate::processing::parser::hls::{classify_hls_playlist, HlsManifestSource, HlsPlaylistKind, HlsResourceKind};
 use tuliprox_core::model::{PlaybackRequestId, PlaybackRequestOutcome, ProviderBindingTag};
 
 pub(super) fn log_hls_initial_strip_publication(
@@ -50,7 +51,7 @@ pub(super) fn stripped_tail_segments(materialized: &HlsMaterializedSharedManifes
 }
 
 pub(super) fn hls_access_lease_ttl_ms(app_state: &Arc<AppState>) -> u64 {
-    app_state.hls_proxy.session_idle_timeout_ms()
+    app_state.hls.proxy.session_idle_timeout_ms()
 }
 
 pub(super) fn duration_to_millis_saturating(duration: Duration) -> u64 {
@@ -85,7 +86,8 @@ pub(super) async fn touch_pending_manifest_follow_up_window(
     };
     let now_ms = current_time_millis();
     if !app_state
-        .hls_proxy
+        .hls
+        .proxy
         .mark_pending_manifest_follow_up_for_lease(access_lease_id, &proxy_session_id, now_ms, target_duration)
         .await
     {
@@ -111,11 +113,12 @@ pub(super) async fn prepare_hls_resource_access(
     now_ms: u64,
     request_kind: &'static str,
 ) -> Result<HlsResourceAccess, Box<axum::response::Response>> {
-    let Some(session) = app_state.hls_proxy.sessions().get_by_proxy_session_id(proxy_session_id).await else {
+    let Some(session) = app_state.hls.proxy.sessions().get_by_proxy_session_id(proxy_session_id).await else {
         return Err(Box::new(StatusCode::NOT_FOUND.into_response()));
     };
     app_state
-        .hls_proxy
+        .hls
+        .proxy
         .sync_session_access_lease_count_and_detach_if_needed(
             &app_state.active_users,
             &app_state.active_provider,
@@ -142,7 +145,7 @@ pub(super) async fn prepare_hls_resource_access(
     };
     reclaim_hls_account_overlap_if_needed(app_state, &session, now_ms).await;
     let Some(lease) =
-        app_state.hls_proxy.access_lease_response_snapshot(&access_context.lease_id, proxy_session_id, now_ms).await
+        app_state.hls.proxy.access_lease_response_snapshot(&access_context.lease_id, proxy_session_id, now_ms).await
     else {
         return Err(Box::new(StatusCode::NOT_FOUND.into_response()));
     };
@@ -167,7 +170,8 @@ pub(super) async fn current_hls_resource_lease(
     access_context: &HlsAccessContext,
 ) -> Option<HlsAccessLease> {
     app_state
-        .hls_proxy
+        .hls
+        .proxy
         .access_lease_response_snapshot(
             &access_context.lease_id,
             &access_context.proxy_session_id,
@@ -209,7 +213,7 @@ pub(super) async fn hls_cache_response_context(
     lease_identity: HlsMediaLeaseIdentity,
     now_ms: u64,
 ) -> HlsCacheResponseContext {
-    let qos_meter = app_state.hls_proxy.qos().meter_for_access_lease(&access_context.lease_id).await;
+    let qos_meter = app_state.hls.proxy.qos().meter_for_access_lease(&access_context.lease_id).await;
     let (log_identity, session_owner, playback_request_id) = {
         let session = session.read().await;
         let binding = session.origin_account_binding.as_ref().filter(|binding| binding.is_active());
@@ -222,13 +226,13 @@ pub(super) async fn hls_cache_response_context(
     HlsCacheResponseContext::new(
         access_context.lease_id.clone(),
         log_identity,
-        app_state.hls_proxy.cache_duration_seconds(),
-        Arc::clone(app_state.hls_proxy.metrics()),
-        Arc::clone(app_state.hls_proxy.segment_repair()),
+        app_state.hls.proxy.cache_duration_seconds(),
+        Arc::clone(app_state.hls.proxy.metrics()),
+        Arc::clone(app_state.hls.proxy.segment_repair()),
         qos_meter,
         Some(
             HlsMediaActivityMarker::new(
-                Arc::clone(&app_state.hls_proxy),
+                Arc::clone(&app_state.hls.proxy),
                 Arc::clone(session),
                 access_context.proxy_session_id.clone(),
                 access_context.lease_id.clone(),
@@ -270,7 +274,7 @@ pub(super) async fn register_hls_cache_stream_for_successful_media_response(
             safe_hls_access_lease_id(&access_context.lease_id)
         );
     }
-    response_context.set_qos_meter(app_state.hls_proxy.qos().meter_for_access_lease(&access_context.lease_id).await);
+    response_context.set_qos_meter(app_state.hls.proxy.qos().meter_for_access_lease(&access_context.lease_id).await);
 }
 
 pub(super) async fn hls_proxy_segment(
@@ -433,7 +437,7 @@ pub(super) async fn serve_hls_segment_for_current_lease(
         app_state,
         access_context,
         serve_hls_segment_cache_outcome(
-            Arc::clone(app_state.hls_proxy.segment_cache()),
+            Arc::clone(app_state.hls.proxy.segment_cache()),
             Arc::clone(session),
             segment_file,
             headers.get(header::RANGE).cloned(),
@@ -469,7 +473,7 @@ pub(super) async fn hls_proxy_terminal_segment(
     let now_ms = current_time_millis();
     let access_lease_id = HlsAccessLeaseId(params.hls_access_lease_id.clone());
     let immutable_replay_plan =
-        app_state.hls_proxy.access_lease_response_snapshot(&access_lease_id, &proxy_session_id, now_ms).await.and_then(
+        app_state.hls.proxy.access_lease_response_snapshot(&access_lease_id, &proxy_session_id, now_ms).await.and_then(
             |lease| match lease.playback_mode {
                 HlsLeasePlaybackMode::TerminalTail(plan) if plan.matches_route(&proxy_session_id, &access_lease_id) => {
                     Some(plan)
@@ -555,7 +559,7 @@ pub(super) async fn demand_fetch_hls_segment_if_needed(
         preacquired_provider_handle,
     )
     .await;
-    app_state.hls_proxy.segment_worker_pool().demand_fetch_and_wait(context, segment_file, now_ms).await
+    app_state.hls.proxy.segment_worker_pool().demand_fetch_and_wait(context, segment_file, now_ms).await
 }
 
 pub(super) async fn build_hls_segment_fetch_context(
@@ -589,13 +593,13 @@ pub(super) async fn build_hls_segment_fetch_context(
     }
     SegmentFetchContext {
         session: Arc::clone(session),
-        segment_cache: Arc::clone(app_state.hls_proxy.segment_cache()),
-        segment_repair: Arc::clone(app_state.hls_proxy.segment_repair()),
+        segment_cache: Arc::clone(app_state.hls.proxy.segment_cache()),
+        segment_repair: Arc::clone(app_state.hls.proxy.segment_repair()),
         repair_access_lease_id,
         headers,
         origin_provider_session_headers,
-        client: app_state.http_client.load().as_ref().clone(),
-        no_redirect_client: app_state.http_client_no_redirect.load().as_ref().clone(),
+        client: app_state.http_clients.default.load().as_ref().clone(),
+        no_redirect_client: app_state.http_clients.no_redirect.load().as_ref().clone(),
         use_manual_redirects: app_state.should_use_manual_redirects(),
         origin_io: Some(origin_io),
     }
@@ -668,7 +672,7 @@ pub(super) async fn hls_proxy_map(
         &app_state,
         &access_context,
         serve_hls_map_cache_outcome(
-            Arc::clone(app_state.hls_proxy.segment_cache()),
+            Arc::clone(app_state.hls.proxy.segment_cache()),
             Arc::clone(&session),
             map_file,
             headers.get(header::RANGE).cloned(),
@@ -806,7 +810,7 @@ pub(super) async fn serve_hls_terminal_key_resource(
 pub(super) async fn serve_hls_live_transient_resource(
     context: HlsResourceEndpointContext<'_>,
 ) -> axum::response::Response {
-    let cache_duration_ms = context.app_state.hls_proxy.cache_duration_seconds().saturating_mul(1_000);
+    let cache_duration_ms = context.app_state.hls.proxy.cache_duration_seconds().saturating_mul(1_000);
     let Ok(cache_resolution) = resolve_hls_transient_object_cache_action(
         context.session,
         &context.access_context.proxy_session_id,
@@ -911,7 +915,7 @@ pub(super) async fn fetch_or_passthrough_transient_resource(
         .await;
     }
 
-    let policy = endpoint.app_state.hls_proxy.segment_fetch_policy();
+    let policy = endpoint.app_state.hls.proxy.segment_fetch_policy();
     let fetch_result = fetch_transient_origin_response_with_provider_io(HlsTransientEndpointOriginFetchRequest {
         app_state: endpoint.app_state,
         session: endpoint.session,
@@ -941,7 +945,8 @@ pub(super) async fn serve_hls_transient_passthrough_result(
             if response.decoded.status.is_success() {
                 let activity_outcome = endpoint
                     .app_state
-                    .hls_proxy
+                    .hls
+                    .proxy
                     .mark_authorized_media_access_for_lease_if_identity_matches(
                         endpoint.session,
                         &endpoint.access_context.lease_id,
@@ -1077,8 +1082,8 @@ pub(super) async fn fetch_transient_origin_response_with_provider_io(
     request: HlsTransientEndpointOriginFetchRequest<'_>,
 ) -> HlsTransientOriginFetchResult {
     let clients = HlsOriginResourceClients {
-        client: request.app_state.http_client.load().as_ref().clone(),
-        no_redirect_client: request.app_state.http_client_no_redirect.load().as_ref().clone(),
+        client: request.app_state.http_clients.default.load().as_ref().clone(),
+        no_redirect_client: request.app_state.http_clients.no_redirect.load().as_ref().clone(),
         use_manual_redirects: request.app_state.should_use_manual_redirects(),
     };
     let log_identity = {
@@ -1220,7 +1225,7 @@ pub(super) async fn serve_transient_object_cache_response_and_mark(
         context.app_state,
         context.access_context,
         serve_hls_transient_object_cache_outcome(
-            Arc::clone(context.app_state.hls_proxy.segment_cache()),
+            Arc::clone(context.app_state.hls.proxy.segment_cache()),
             Arc::clone(context.session),
             context.resource_file,
             context.range_header,
@@ -1251,7 +1256,7 @@ pub(super) async fn serve_transient_object_cache_response_and_mark_or_unavailabl
 pub(super) async fn wait_for_transient_object_cache_fetch(
     context: TransientObjectWaitContext<'_>,
 ) -> axum::response::Response {
-    let wait_timeout = context.app_state.hls_proxy.segment_fetch_policy().origin_object_wait_timeout();
+    let wait_timeout = context.app_state.hls.proxy.segment_fetch_policy().origin_object_wait_timeout();
     let safe_resource_id = safe_transient_resource_id(&context.resource_file.resource_id);
     debug!(
         "HLS transient object wait started: resource_id={} lease={} state=inflight",
@@ -1328,7 +1333,8 @@ pub(super) async fn validate_hls_proxy_access_request(
     )
     .await?;
     let startup_admission_pending = app_state
-        .hls_proxy
+        .hls
+        .proxy
         .access_lease_response_snapshot(&context.lease_id, proxy_session_id, now_ms)
         .await
         .is_some_and(|lease| {
@@ -1338,7 +1344,7 @@ pub(super) async fn validate_hls_proxy_access_request(
     if startup_admission_pending {
         return Err(HlsAccessLeaseValidationError::AvailabilityPending);
     }
-    match app_state.hls_proxy.activate_access_lease(&context.lease_id, proxy_session_id, now_ms, timing).await {
+    match app_state.hls.proxy.activate_access_lease(&context.lease_id, proxy_session_id, now_ms, timing).await {
         HlsAccessLeaseActivation::Activated { .. } => {
             debug!(
                 "HLS access lease accepted: lease={} proxy_session={} user_session={} request={request_kind}",
@@ -1356,7 +1362,8 @@ pub(super) async fn validate_hls_proxy_access_request(
                 safe_user_session_token(&context.user_session_token)
             );
             let (runtime_tail, reason) = app_state
-                .hls_proxy
+                .hls
+                .proxy
                 .access_lease_response_snapshot(&context.lease_id, proxy_session_id, now_ms)
                 .await
                 .map_or((None, None), |lease| {
@@ -1434,7 +1441,8 @@ pub(super) async fn ensure_hls_cache_stream_registered(
     );
     let qos_config = HlsQosRuntimeConfig::from_app_config(&app_state.app_config);
     let qos_registration = app_state
-        .hls_proxy
+        .hls
+        .proxy
         .qos()
         .ensure_access_lease(
             &access.lease_id,
@@ -1652,7 +1660,7 @@ pub(super) async fn hls_runtime_custom_tail_response(
     if matches!(outcome, HlsRuntimeCustomTailOutcome::Committed | HlsRuntimeCustomTailOutcome::AlreadyCommitted) {
         let now_ms = current_time_millis();
         if let Some(lease) =
-            app_state.hls_proxy.access_lease_response_snapshot(access_lease_id, proxy_session_id, now_ms).await
+            app_state.hls.proxy.access_lease_response_snapshot(access_lease_id, proxy_session_id, now_ms).await
         {
             if let Some(response) = hls_terminal_playback_response(&lease, proxy_session_id, access_lease_id) {
                 return response;
@@ -1675,7 +1683,7 @@ pub(super) async fn hls_runtime_or_standalone_custom_tail_response(
 ) -> axum::response::Response {
     let now_ms = current_time_millis();
     let Some(lease) =
-        app_state.hls_proxy.access_lease_response_snapshot(access_lease_id, proxy_session_id, now_ms).await
+        app_state.hls.proxy.access_lease_response_snapshot(access_lease_id, proxy_session_id, now_ms).await
     else {
         return fallback_status.into_response();
     };
@@ -1729,7 +1737,8 @@ pub(super) async fn hls_unpublished_lease_channel_unavailable_response(
 ) -> axum::response::Response {
     let reason = HlsRuntimeCustomTailReason::ChannelUnavailable;
     let lease = app_state
-        .hls_proxy
+        .hls
+        .proxy
         .access_lease_response_snapshot(access_lease_id, proxy_session_id, current_time_millis())
         .await;
     if let Some(lease) = lease.filter(|lease| lease.permits_unpublished_standalone_tail(reason)) {
@@ -1754,7 +1763,7 @@ pub(super) async fn hls_manifest_access_denial_runtime_response(
     let Some(lease) = lease_snapshot else {
         return fallback_status.into_response();
     };
-    let Some(session) = app_state.hls_proxy.sessions().get_by_proxy_session_id(proxy_session_id).await else {
+    let Some(session) = app_state.hls.proxy.sessions().get_by_proxy_session_id(proxy_session_id).await else {
         return fallback_status.into_response();
     };
     hls_runtime_or_standalone_custom_tail_response(
@@ -1871,7 +1880,7 @@ pub(super) async fn hls_manifest_access_context_and_state(
     access_lease_snapshot: Option<&HlsAccessLease>,
     now_ms: u64,
 ) -> Result<(HlsAccessContext, HlsAccessLeaseState), Box<axum::response::Response>> {
-    app_state.hls_proxy.startup_observability().record_media_manifest_request(access_lease_id, now_ms);
+    app_state.hls.proxy.startup_observability().record_media_manifest_request(access_lease_id, now_ms);
     let access_context = match validate_hls_proxy_access_context(
         app_state,
         fingerprint,
@@ -1896,8 +1905,8 @@ pub(super) async fn hls_manifest_access_context_and_state(
         }
     };
     if access_lease_snapshot.is_none()
-        && app_state.hls_proxy.sessions().get_by_proxy_session_id(proxy_session_id).await.is_none()
-        && app_state.hls_proxy.expired_session_marker(proxy_session_id, now_ms).await.is_some()
+        && app_state.hls.proxy.sessions().get_by_proxy_session_id(proxy_session_id).await.is_none()
+        && app_state.hls.proxy.expired_session_marker(proxy_session_id, now_ms).await.is_some()
     {
         return Err(Box::new(StatusCode::NOT_FOUND.into_response()));
     }
@@ -1909,7 +1918,8 @@ pub(super) async fn hls_manifest_access_context_and_state(
     );
 
     let access_lease_state = match app_state
-        .hls_proxy
+        .hls
+        .proxy
         .touch_manifest_access_lease(
             &access_context.lease_id,
             proxy_session_id,
@@ -1976,16 +1986,16 @@ pub(super) async fn hls_transient_object_unavailable_response(
 pub(super) async fn fetch_and_cache_transient_origin_response(
     context: HlsTransientEndpointCacheFetchContext<'_>,
 ) -> axum::response::Response {
-    let policy = context.app_state.hls_proxy.segment_fetch_policy();
+    let policy = context.app_state.hls.proxy.segment_fetch_policy();
     let mut fetch_finalizer = HlsTransientObjectFetchFinalizer::new(
         Arc::clone(context.session),
-        Arc::clone(context.app_state.hls_proxy.segment_cache()),
+        Arc::clone(context.app_state.hls.proxy.segment_cache()),
         context.fetch_token.clone(),
         HLS_TEMPORARY_RESOURCE_RETRY_AFTER_MS,
     );
     let clients = HlsOriginResourceClients {
-        client: context.app_state.http_client.load().as_ref().clone(),
-        no_redirect_client: context.app_state.http_client_no_redirect.load().as_ref().clone(),
+        client: context.app_state.http_clients.default.load().as_ref().clone(),
+        no_redirect_client: context.app_state.http_clients.no_redirect.load().as_ref().clone(),
         use_manual_redirects: context.app_state.should_use_manual_redirects(),
     };
     let log_identity = {
@@ -2006,8 +2016,8 @@ pub(super) async fn fetch_and_cache_transient_origin_response(
     let cache_fetch_request = HlsTransientOriginCacheFetchRequest {
         fetch: fetch_request,
         commit: HlsTransientCacheCommitContext {
-            segment_cache: Arc::clone(context.app_state.hls_proxy.segment_cache()),
-            segment_repair: Arc::clone(context.app_state.hls_proxy.segment_repair()),
+            segment_cache: Arc::clone(context.app_state.hls.proxy.segment_cache()),
+            segment_repair: Arc::clone(context.app_state.hls.proxy.segment_repair()),
             session: Arc::clone(context.session),
             proxy_session_id: context.access_context.proxy_session_id.clone(),
             log_identity: log_identity.clone(),
@@ -2042,7 +2052,7 @@ pub(super) async fn fetch_and_cache_transient_origin_response(
                 )
                 .await;
                 let response = serve_hls_transient_object_cache_response(
-                    Arc::clone(context.app_state.hls_proxy.segment_cache()),
+                    Arc::clone(context.app_state.hls.proxy.segment_cache()),
                     Arc::clone(context.session),
                     context.resource_file.clone(),
                     context.range_header.clone(),
@@ -2241,7 +2251,7 @@ pub(super) async fn download_legacy_hls_manifest(
     input: &InputSource,
     headers: &HeaderMap,
 ) -> Result<(String, String, HeaderMap), std::io::Error> {
-    let deadline = Duration::from_millis(app_state.hls_proxy.origin_manifest_timeout_ms().max(1));
+    let deadline = Duration::from_millis(app_state.hls.proxy.origin_manifest_timeout_ms().max(1));
     let fetch_options = request::RequestFetchOptions::with_attempt_idle_timeout(deadline)
         .with_content_coding(OutboundContentCodingPolicy::Identity);
     let body_options = request::TextContentBodyOptions::hls_manifest(MAX_HLS_MANIFEST_BYTES, deadline);
@@ -2250,7 +2260,7 @@ pub(super) async fn download_legacy_hls_manifest(
     if app_state.should_use_manual_redirects() {
         request::download_text_content_with_manual_redirects_and_headers_and_options(
             &app_state.app_config,
-            &app_state.http_client_no_redirect.load(),
+            &app_state.http_clients.no_redirect.load(),
             input,
             Some(headers),
             false,
@@ -2261,7 +2271,7 @@ pub(super) async fn download_legacy_hls_manifest(
     } else {
         request::download_text_content_with_headers_and_options(
             &app_state.app_config,
-            &app_state.http_client.load(),
+            &app_state.http_clients.default.load(),
             input,
             Some(headers),
             false,
@@ -2312,6 +2322,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
     connection_permission: UserConnectionPermission,
     connection_kind: Option<crate::api::model::ConnectionKind>,
     original_hls_entry_path: &str,
+    stage: HlsRequestStage<'_>,
 ) -> impl IntoResponse + Send {
     let virtual_id = stream_context.virtual_id();
     if app_state.active_users.is_user_blocked_for_stream(&user.username, VirtualId::new(virtual_id)).await {
@@ -2319,15 +2330,23 @@ pub(in crate::api) async fn handle_hls_stream_request(
     }
 
     let stream_ref = stream_context.stream_ref().to_string();
-    let normalized_hls_url = normalize_xtream_live_hls_url(hls_url, input);
-    if normalized_hls_url != hls_url {
-        debug_if_enabled!(
-            "Normalized xtream hls url from {} to {}",
-            sanitize_sensitive_info(hls_url),
-            sanitize_sensitive_info(&normalized_hls_url)
-        );
-    }
-    let url = ensure_hls_manifest_extension(&normalized_hls_url);
+    // Variant URLs were normalized before sealing or come from an upstream master; use them as is.
+    let url = if stage.normalizes_url() {
+        let normalized_hls_url = normalize_xtream_live_hls_url(hls_url, input);
+        if normalized_hls_url != hls_url {
+            debug_if_enabled!(
+                "Normalized xtream hls url from {} to {}",
+                sanitize_sensitive_info(hls_url),
+                sanitize_sensitive_info(&normalized_hls_url)
+            );
+        }
+        ensure_hls_manifest_extension(&normalized_hls_url)
+    } else {
+        hls_url.to_string()
+    };
+    // The wrapper seals the normalized entry URL, not the provider-resolved one, so every
+    // refresh can resolve it to whichever account is selected then.
+    let entry_url = url.clone();
     // Recover archive context when callers (esp. Xtream timeshift) pass None but the
     // resolved provider URL / catchup session still carries Flussonic archive markers.
     let archive_reference = archive_reference.or_else(|| m3u_archive_epg_reference_ts(&url)).or_else(|| {
@@ -2423,19 +2442,50 @@ pub(in crate::api) async fn handle_hls_stream_request(
             Some(ProviderAllocation::Exhausted) => (url, None, provider_handle, None),
             Some(ProviderAllocation::Available(cfg) | ProviderAllocation::GracePeriod(cfg)) => {
                 let selected_provider_config = Arc::clone(cfg);
-                let Some((_provider_name, stream_url)) =
-                    select_provider_stream_url(&url, input, cfg, false, &app_state.app_config).await
+                // URL acceptance follows the provider that produced the sealed URL, not the session:
+                // entry URLs are re-resolved to the selected account on every fetch, child URLs
+                // (often CDN URLs) are fetched as sealed and only from their origin provider.
+                let accept_requested_stream_url = match stage {
+                    HlsRequestStage::Variant { source: HlsManifestSource::Child, origin_provider } => {
+                        if origin_provider != Some(selected_provider_config.name.as_ref()) {
+                            // A stale child URI from an earlier account: reject only this request,
+                            // the playback itself stays valid after the player refetches its master.
+                            app_state.connection_manager.release_provider_handle(provider_handle);
+                            debug_if_enabled!(
+                                "HLS child manifest from provider {} rejected for selected provider {}",
+                                sanitize_sensitive_info(origin_provider.unwrap_or("<unknown>")),
+                                sanitize_sensitive_info(&selected_provider_config.name)
+                            );
+                            return StatusCode::NOT_FOUND.into_response();
+                        }
+                        true
+                    }
+                    HlsRequestStage::Entry | HlsRequestStage::LegacyVariant | HlsRequestStage::Variant { .. } => false,
+                };
+                let Some((_provider_name, stream_url)) = select_provider_stream_url(
+                    &url,
+                    input,
+                    &selected_provider_config,
+                    accept_requested_stream_url,
+                    &app_state.app_config,
+                )
+                .await
                 else {
                     app_state.connection_manager.release_provider_handle(provider_handle);
                     return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
                 };
+                if session.provider.as_ref() == selected_provider_config.name.as_ref() {
+                    if let Some(session_headers) = session.provider_session_headers_for(&stream_url) {
+                        append_user_session_provider_headers(&mut headers, session_headers);
+                    }
+                }
                 let session_token = app_state
                     .active_users
                     .create_user_session(crate::api::model::CreateUserSessionParams {
                         user,
                         session_token: &session.token,
                         virtual_id,
-                        provider: &cfg.name,
+                        provider: &selected_provider_config.name,
                         stream_url: &stream_url,
                         addr: &fingerprint.addr,
                         connection_permission,
@@ -2443,12 +2493,16 @@ pub(in crate::api) async fn handle_hls_stream_request(
                         socket_bound: PlaylistItemType::LiveHls.uses_socket_bound_session(),
                     })
                     .await;
-                let hls_session_ttl_secs = get_hls_session_ttl_secs(app_state);
+                let session_ttl_secs = if pinned_kind == PlaybackKind::Catchup {
+                    get_catchup_session_ttl_secs(app_state)
+                } else {
+                    get_hls_session_ttl_secs(app_state)
+                };
                 app_state.active_provider.refresh_adaptive_playback_lease(
-                    &cfg.name,
+                    &selected_provider_config.name,
                     &session_token,
                     pinned_kind,
-                    hls_session_ttl_secs,
+                    session_ttl_secs,
                 );
                 (stream_url, Some(session_token), provider_handle, Some(selected_provider_config))
             }
@@ -2522,6 +2576,24 @@ pub(in crate::api) async fn handle_hls_stream_request(
     let provider_request_id = provider_handle.as_ref().and_then(|handle| handle.playback_request_id);
     let selected_provider_name = selected_provider_config.as_ref().map(|cfg| Arc::clone(&cfg.name));
 
+    // The entry request already downloaded this playlist; serve it once to the immediate variant
+    // request when it is still bound to the same provider binding.
+    if matches!(stage, HlsRequestStage::Variant { source: HlsManifestSource::Entry, .. }) {
+        if let (Some(session_token), Some(provider)) = (session_token.as_deref(), selected_provider_name.as_deref()) {
+            if let Some(entry) = app_state
+                .hls
+                .playlist_handoff
+                .take(session_token, hls_url)
+                .filter(|entry| entry.matches(provider, provider_binding_tag))
+            {
+                app_state.connection_manager.release_provider_handle(provider_handle);
+                release_prepared_hls_manifest_session(app_state, &user.username, session_token, &fingerprint.addr)
+                    .await;
+                return hls_response(entry.content).into_response();
+            }
+        }
+    }
+
     let user_agent_stream_index = crate::api::api_utils::resolve_stream_user_agent_index(
         app_state,
         input,
@@ -2546,9 +2618,26 @@ pub(in crate::api) async fn handle_hls_stream_request(
     app_state.connection_manager.release_provider_handle(provider_handle);
 
     let input_source = InputSource::from(input).with_url(request_url);
-    let download_result = download_legacy_hls_manifest(app_state, &input_source, &headers).await;
+    let download_result = match download_legacy_hls_manifest(app_state, &input_source, &headers).await {
+        Ok((content, response_url, response_headers)) => match classify_hls_playlist(&content) {
+            // A refresh keeps its session on a malformed body; the player retries the playlist.
+            HlsPlaylistKind::Invalid if stage != HlsRequestStage::Entry => {
+                warn!("Upstream HLS refresh returned no playlist for virtual_id={virtual_id}; keeping session");
+                if let Some(session_token) = session_token.as_deref() {
+                    release_prepared_hls_manifest_session(app_state, &user.username, session_token, &fingerprint.addr)
+                        .await;
+                }
+                return StatusCode::BAD_GATEWAY.into_response();
+            }
+            HlsPlaylistKind::Invalid => {
+                Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "upstream response is not an HLS playlist"))
+            }
+            playlist_kind => Ok((content, response_url, response_headers, playlist_kind)),
+        },
+        Err(err) => Err(err),
+    };
     match download_result {
-        Ok((content, response_url, response_headers)) => {
+        Ok((content, response_url, response_headers, playlist_kind)) => {
             let encrypt_secret = app_state.get_encrypt_secret();
             let base_url = server_info.get_base_url();
             let rewrite_hls_props = RewriteHlsProps {
@@ -2560,6 +2649,8 @@ pub(in crate::api) async fn handle_hls_stream_request(
                 virtual_id,
                 input_id: input.id,
                 user_token: session_token.as_deref(),
+                origin_provider: selected_provider_name.as_deref(),
+                playlist_kind: Some(playlist_kind),
             };
             let hls_content = rewrite_hls(user, &rewrite_hls_props);
             if let Some(session_token) = session_token.as_deref() {
@@ -2567,11 +2658,41 @@ pub(in crate::api) async fn handle_hls_stream_request(
                 if !session_headers.is_empty() {
                     app_state
                         .active_users
-                        .update_session_provider_headers(&user.username, session_token, &session_headers)
+                        .update_session_provider_headers_from(
+                            &user.username,
+                            session_token,
+                            &session_headers,
+                            &rewrite_hls_props.hls_url,
+                        )
                         .await;
                 }
                 release_prepared_hls_manifest_session(app_state, &user.username, session_token, &fingerprint.addr)
                     .await;
+            }
+            if let (HlsRequestStage::Entry, HlsPlaylistKind::Media, Some(session_token), Some(provider)) =
+                (stage, playlist_kind, session_token.as_deref(), selected_provider_name.as_ref())
+            {
+                if hls_media_playlist_wrap_enabled(app_state, target) {
+                    let master = wrap_media_playlist(
+                        HlsMediaPlaylistWrap {
+                            app_state,
+                            user,
+                            base_url: &base_url,
+                            target_id: target.id,
+                            input,
+                            virtual_id,
+                            session_token,
+                            sealed_url: &entry_url,
+                            provider,
+                            binding_tag: provider_binding_tag,
+                            known_bitrate_bps: stream_context.known_bitrate_bps(),
+                            stream_ref: Some(&stream_ref),
+                        },
+                        hls_content,
+                    )
+                    .await;
+                    return hls_response(master).into_response();
+                }
             }
             hls_response(hls_content).into_response()
         }
@@ -2738,7 +2859,11 @@ pub(super) fn hls_entry_user_session_token(
     session_token_hint: Option<&str>,
     archive_reference: Option<i64>,
 ) -> String {
-    if let Some(hint) = session_token_hint.filter(|token| is_m3u_catchup_session_token(token)) {
+    // Live hints only arrive from sealed tokens validated by `hls_session_hint_matches_requester`;
+    // entry routes pass the plain fingerprint key, which never carries the `|hls|` suffix.
+    if let Some(hint) =
+        session_token_hint.filter(|token| is_m3u_catchup_session_token(token) || is_live_hls_session_token(token))
+    {
         return hint.to_string();
     }
     if let Some(timestamp) = archive_reference {
@@ -2785,7 +2910,7 @@ pub(super) async fn hls_api_stream(
             return StatusCode::BAD_REQUEST.into_response();
         };
         let lookup_session_token = decoded_hls_token
-            .0
+            .session_token
             .clone()
             .unwrap_or_else(|| create_session_fingerprint(&fingerprint, &user.username, params.stream_id, false));
         let Some(input) = app_state.app_config.get_input_by_id(params.input_id) else {
@@ -2806,7 +2931,7 @@ pub(super) async fn hls_api_stream(
         };
         if !legacy_hls_route_allowed_with_cache(
             hls_cache_enabled_for_target(&app_state, &target),
-            decoded_hls_token.0.as_deref(),
+            decoded_hls_token.session_token.as_deref(),
             Some(session.token.as_str()),
         ) {
             return hls_custom_video_manifest_response_for_username(
@@ -2826,7 +2951,7 @@ pub(super) async fn hls_api_stream(
             input,
             params.stream_id,
             session,
-            decoded_hls_token.1,
+            decoded_hls_token.url,
             relative_path.to_string(),
             raw_query.as_deref(),
         )
@@ -2888,15 +3013,17 @@ pub(super) async fn hls_api_stream_resolved(
     let Some(decoded_hls_token) = get_hls_session_token_and_url_from_token(&encrypt_secret, &token) else {
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     };
+    // Manifest vs. media is decided once from the token kind; legacy tokens use the URL heuristic.
+    let is_manifest = decoded_hls_token.is_manifest();
     let lookup_session_token = decoded_hls_token
-        .0
+        .session_token
         .clone()
         .unwrap_or_else(|| create_session_fingerprint(&fingerprint, &user.username, virtual_id, false));
     let mut user_session =
         app_state.active_users.get_and_update_user_session(&user.username, &lookup_session_token).await;
     if !legacy_hls_route_allowed_with_cache(
         hls_cache_enabled_for_target(&app_state, &target),
-        decoded_hls_token.0.as_deref(),
+        decoded_hls_token.session_token.as_deref(),
         user_session.as_ref().map(|session| session.token.as_str()),
     ) {
         return hls_manifest_channel_unavailable_response_for_username(&app_state, &user.username).await;
@@ -2904,14 +3031,14 @@ pub(super) async fn hls_api_stream_resolved(
 
     if let Some(session) = &mut user_session {
         let decoded_archive_reference =
-            resolve_m3u_archive_reference(&decoded_hls_token.1, Some(lookup_session_token.as_str()));
+            resolve_m3u_archive_reference(&decoded_hls_token.url, Some(lookup_session_token.as_str()));
         if session.permission == UserConnectionPermission::Exhausted {
             let stream_channel = resolve_stream_channel(
                 &app_state,
                 &target,
                 &input,
                 virtual_id,
-                &decoded_hls_token.1,
+                &decoded_hls_token.url,
                 decoded_archive_reference,
                 Some(session.token.as_str()),
             )
@@ -2934,7 +3061,7 @@ pub(super) async fn hls_api_stream_resolved(
                 &target,
                 &input,
                 virtual_id,
-                &decoded_hls_token.1,
+                &decoded_hls_token.url,
                 decoded_archive_reference,
                 Some(session.token.as_str()),
             )
@@ -2951,11 +3078,24 @@ pub(super) async fn hls_api_stream_resolved(
             .await;
         }
 
-        let hls_url = match decoded_hls_token {
-            (Some(session_token), hls_url) if session.token.eq(&session_token) => hls_url,
-            (None, hls_url) => hls_url,
-            _ => return axum::http::StatusCode::BAD_REQUEST.into_response(),
+        let hls_url = match decoded_hls_token.session_token.as_deref() {
+            Some(session_token) if session.token.eq(session_token) => decoded_hls_token.url.as_str(),
+            None => decoded_hls_token.url.as_str(),
+            Some(_) => return axum::http::StatusCode::BAD_REQUEST.into_response(),
         };
+        // A media URI resolved by another provider account would be fetched with that account's
+        // credentials; the player refetches its playlist from the session's provider instead.
+        if decoded_hls_token.kind == Some(HlsResourceKind::Media)
+            && !session.provider.is_empty()
+            && decoded_hls_token.origin_provider.as_deref().is_some_and(|origin| origin != session.provider.as_ref())
+        {
+            debug_if_enabled!(
+                "HLS media URI from provider {} rejected for session provider {}",
+                sanitize_sensitive_info(decoded_hls_token.origin_provider.as_deref().unwrap_or_default()),
+                sanitize_sensitive_info(&session.provider)
+            );
+            return StatusCode::NOT_FOUND.into_response();
+        }
         let hls_url = hls_url.intern();
         // Recover utc/utcstart from the prior playlist URL before overwriting with a segment URL
         // that usually drops append/shift query params.
@@ -2974,7 +3114,9 @@ pub(super) async fn hls_api_stream_resolved(
                 Some(session.token.as_str()),
             )
             .await;
-            if is_seekable_media_request(stream_channel.cluster, &req_headers, extract_extension_from_url(&hls_url)) {
+            if !is_manifest
+                && is_seekable_media_request(stream_channel.cluster, &req_headers, extract_extension_from_url(&hls_url))
+            {
                 // partial request means we are in reverse proxy mode, seek happened
                 return force_provider_stream_response(
                     &fingerprint,
@@ -3006,9 +3148,9 @@ pub(super) async fn hls_api_stream_resolved(
                 &session.token,
                 true,
                 crate::api::api_utils::EvictionReentryGuard::Session(&session.token),
-                // HLS playlist requests (.m3u8) are explicit Prepare: they set up session metadata
+                // HLS playlist requests are explicit Prepare: they set up session metadata
                 // but do not consume an admission slot. Segment and other media requests use Activate.
-                is_hls_url(&hls_url),
+                is_manifest,
                 false,
             )
             .await;
@@ -3048,7 +3190,13 @@ pub(super) async fn hls_api_stream_resolved(
         }
         let fallback_connection_kind = connection_kind.unwrap_or(crate::api::model::ConnectionKind::Normal);
 
-        if is_hls_url(&session.stream_url) {
+        if is_manifest {
+            let manifest_stage = match decoded_hls_token.kind {
+                Some(HlsResourceKind::Manifest(source)) => {
+                    HlsRequestStage::Variant { source, origin_provider: decoded_hls_token.origin_provider.as_deref() }
+                }
+                Some(HlsResourceKind::Media) | None => HlsRequestStage::LegacyVariant,
+            };
             let source = match resolve_hls_virtual_source_for_target(&app_state, &target, virtual_id).await {
                 Ok(source) if source.input.id == input.id => source,
                 Ok(source) => {
@@ -3076,6 +3224,7 @@ pub(super) async fn hls_api_stream_resolved(
                 connection_permission,
                 connection_kind,
                 &original_hls_entry_path,
+                manifest_stage,
             )
             .await
             .into_response();
@@ -3137,6 +3286,16 @@ pub(super) async fn hls_api_stream_resolved(
         .await
         .into_response()
     } else {
-        axum::http::StatusCode::BAD_REQUEST.into_response()
+        recreate_hls_session_from_token(
+            &fingerprint,
+            &req_headers,
+            &app_state,
+            &user,
+            &target,
+            &input,
+            virtual_id,
+            &decoded_hls_token,
+        )
+        .await
     }
 }

@@ -121,6 +121,9 @@ fn render_config(
         if let Some(ttl_secs) = policy.provider_affinity_ttl_secs {
             let _ = writeln!(config, "    provider_affinity_ttl_secs: {ttl_secs}");
         }
+        if let Some(wrap) = policy.hls_wrap_media_playlist {
+            let _ = writeln!(config, "    hls_wrap_media_playlist: {wrap}");
+        }
     }
     let _ = writeln!(
         config,
@@ -568,6 +571,7 @@ mod tests {
             recent_eviction_reentry_ttl_ms: None,
             hls_session_ttl_secs: Some(2),
             provider_affinity_ttl_secs: Some(6),
+            hls_wrap_media_playlist: Some(false),
             grace: None,
             provider_max_connections: None,
             provider_pool: Vec::new(),
@@ -597,6 +601,7 @@ mod tests {
         assert!(config.contains(fixture.root.to_string_lossy().as_ref()));
         assert!(config.contains("    hls_session_ttl_secs: 2\n"), "{config}");
         assert!(config.contains("    provider_affinity_ttl_secs: 6\n"), "{config}");
+        assert!(config.contains("    hls_wrap_media_playlist: false\n"), "{config}");
         assert!(source.contains("fixture-run"));
         assert!(api_proxy.contains("fixture-user"));
         let expected_paths = [

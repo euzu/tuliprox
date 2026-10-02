@@ -19,7 +19,8 @@ use crate::{
             hls_api::{
                 build_virtual_hls_entry_path, handle_hls_stream_request, hls_admission_failure_manifest_response,
                 hls_custom_video_manifest_response, m3u_archive_epg_reference_ts,
-                m3u_catchup_epg_reference_from_session_token, HlsEntryStreamContext,
+                m3u_catchup_epg_reference_from_session_token, user_allows_entry_content, HlsEntryOutputScope,
+                HlsEntryStreamContext, HlsRequestStage,
             },
             xmltv_api::{get_empty_epg_response, get_epg_path_for_target_by_type, serve_short_epg},
         },
@@ -320,12 +321,12 @@ async fn xtream_player_api_stream(
         .map_or(stream_ext, |input| override_live_hls_extension(stream_req.context, input, stream_ext));
     let is_hls_manifest_request = stream_ext == Some(HLS_EXT);
 
-    let output_allowed = (if stream_req.context == ApiStreamContext::Timeshift {
-        user.allows_cluster(XtreamCluster::Live)
+    let output_scope = if stream_req.context == ApiStreamContext::Timeshift {
+        HlsEntryOutputScope::LiveCluster
     } else {
-        user.allows_item_type(pli.item_type)
-    }) && (user.t_filter.is_none()
-        || user.allows_content(&shared::model::PlaylistItem::from(&pli)));
+        HlsEntryOutputScope::ItemType(pli.item_type)
+    };
+    let output_allowed = user_allows_entry_content(&user, output_scope, &pli);
     if !output_allowed {
         if is_hls_manifest_request {
             return hls_custom_video_manifest_response(
@@ -683,6 +684,7 @@ async fn xtream_player_api_stream(
             connection_permission,
             connection_admission.kind(),
             &original_hls_entry_path,
+            HlsRequestStage::Entry,
         )
         .await
         .into_response();
@@ -1003,6 +1005,7 @@ pub(in crate::api) async fn xtream_player_api_stream_with_resolved_target(
                 UserConnectionPermission::Allowed,
                 Some(crate::api::model::ConnectionKind::Normal),
                 &original_hls_entry_path,
+                HlsRequestStage::Entry,
             )
             .await
             .into_response();
@@ -1359,7 +1362,7 @@ pub async fn xtream_get_stream_info_response(
 
                 // fetch info from the upstream provider
                 if let Ok(content) = xtream::get_xtream_stream_info(
-                    &app_state.http_client.load(),
+                    &app_state.http_clients.default.load(),
                     &app_state.app_config,
                     &app_state.playlists,
                     user,
@@ -1467,7 +1470,7 @@ async fn xtream_get_short_epg(
                         let input_source = InputSource::from(&*input).with_url(info_url);
                         return match request::download_text_content(
                             &app_state.app_config,
-                            &app_state.http_client.load(),
+                            &app_state.http_clients.default.load(),
                             &input_source,
                             None,
                             None,
@@ -1605,7 +1608,7 @@ async fn xtream_get_catchup_response(
     let content = try_result_bad_request!(
         xtream::get_xtream_stream_info_content(
             &app_state.app_config,
-            &app_state.http_client.load(),
+            &app_state.http_clients.default.load(),
             &input_source,
             false,
         )

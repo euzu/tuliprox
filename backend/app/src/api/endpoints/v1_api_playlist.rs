@@ -368,7 +368,7 @@ async fn load_xmltv_epg_source_channels(
         }
     }
 
-    parse_xmltv_for_web_ui_from_url(&app_state.app_config, &app_state.http_client.load(), resolved_url).await
+    parse_xmltv_for_web_ui_from_url(&app_state.app_config, &app_state.http_clients.default.load(), resolved_url).await
 }
 
 async fn load_ics_epg_source_channels(
@@ -411,7 +411,7 @@ async fn load_ics_epg_source_channels(
         }
     }
 
-    let client = app_state.http_client.load();
+    let client = app_state.http_clients.default.load();
     request::get_input_epg_content_as_file(
         &app_state.app_config,
         &client,
@@ -537,7 +537,11 @@ async fn playlist_update(
     match process_targets {
         Ok(valid_targets) => {
             let valid_targets = Arc::new(valid_targets);
-            match enqueue_manual_playlist_update(&app_state.manual_update_sender, valid_targets, input_action) {
+            match enqueue_manual_playlist_update(
+                &app_state.playlist_updates.manual_update_sender,
+                valid_targets,
+                input_action,
+            ) {
                 Ok(run_id) => {
                     (axum::http::StatusCode::ACCEPTED, axum::Json(OperationRunAccepted::playlist_update(run_id)))
                         .into_response()
@@ -722,7 +726,7 @@ async fn playlist_content(
     playlist_req: &PlaylistRequest,
     cluster: XtreamCluster,
 ) -> impl IntoResponse + Send {
-    let client = app_state.http_client.load();
+    let client = app_state.http_clients.default.load();
     match playlist_req {
         PlaylistRequest::Target(target_id) => get_playlist_for_target(
             app_state.app_config.get_target_by_id(*target_id).as_deref(),
@@ -828,7 +832,7 @@ async fn playlist_series_info(
                             let input_source = InputSource::from(input.as_ref()).with_url(resolved_url.to_string());
                             if let Ok(content) = xtream::get_xtream_stream_info_content(
                                 &app_state.app_config,
-                                &app_state.http_client.load(),
+                                &app_state.http_clients.default.load(),
                                 &input_source,
                                 false,
                             )
@@ -853,7 +857,7 @@ async fn playlist_series_info(
                     let input_source = InputSource::from(&input).with_url(info_url);
                     if let Ok(content) = xtream::get_xtream_stream_info_content(
                         &app_state.app_config,
-                        &app_state.http_client.load(),
+                        &app_state.http_clients.default.load(),
                         &input_source,
                         false,
                     )
@@ -1061,7 +1065,9 @@ async fn playlist_epg(
                 )
                     .into_response();
             }
-            match parse_xmltv_for_web_ui_from_url(&app_state.app_config, &app_state.http_client.load(), &url).await {
+            match parse_xmltv_for_web_ui_from_url(&app_state.app_config, &app_state.http_clients.default.load(), &url)
+                .await
+            {
                 Ok(epg) => {
                     let config = app_state.app_config.config.load();
                     let web_ui_path = config.web_ui.as_ref().and_then(|w| w.path.as_ref()).map_or("", String::as_str);
@@ -1130,7 +1136,7 @@ async fn stalker_resource_response(
         XtreamCluster::Video => StalkerStreamKind::Movie,
         XtreamCluster::Series => StalkerStreamKind::Episode,
     };
-    let client = app_state.http_client.load().as_ref().clone();
+    let client = app_state.http_clients.default.load().as_ref().clone();
     match re_resolve_stalker_url(&app_state.app_config, &client, &input, provider_id, kind, false).await {
         Ok(Some(resolved_url)) => {
             let Ok(url) = Url::parse(&resolved_url) else {
@@ -2638,41 +2644,23 @@ mod tests {
         let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
 
         Arc::new(AppState {
-            forced_targets: Arc::new(ArcSwap::from_pointee(crate::model::ProcessTargets {
-                enabled: false,
-                inputs: Vec::new(),
-                targets: Vec::new(),
-                target_names: Vec::new(),
-            })),
             app_config: app_cfg,
-            http_client: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-            http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-            public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-            resource_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-            resource_public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+            http_clients: Arc::default(),
             downloads: Arc::new(crate::api::model::DownloadQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,
-            hls_proxy: Arc::new(crate::api::model::HlsProxyManager::new()),
-            hls_provisioning: Arc::new(crate::api::model::HlsProvisioningState::new()),
-            stalker_resolve_coordinator: Arc::default(),
+            hls: crate::api::model::HlsState::new(Arc::new(crate::api::model::HlsProxyManager::new())),
+            stalker_resolve_coordinator: crate::api::model::StalkerResolveCoordinator::default(),
             active_users,
             active_provider,
             connection_manager,
             event_manager,
-            cancel_tokens: Arc::new(ArcSwap::from_pointee(tokens)),
+            cancel_tokens: ArcSwap::from_pointee(tokens),
             playlists: Arc::new(PlaylistStorageState::new()),
             geoip,
-            update_guard: crate::api::model::UpdateGuard::new(),
             metadata_manager,
-            identity_registry: Arc::new(tuliprox_repository::identity_registry::IdentityRegistry::empty(
-                std::path::PathBuf::new(),
-            )),
-            login_throttle: Arc::new(crate::auth::LoginThrottle::new()),
-            token_revocations: Arc::new(tuliprox_repository::token_revocations::TokenRevocations::empty(
-                std::path::PathBuf::new(),
-            )),
-            manual_update_sender,
+            auth: crate::api::model::AuthState::for_tests(),
+            playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests_with_sender(manual_update_sender),
         })
     }
 

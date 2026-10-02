@@ -298,6 +298,7 @@ pub(in crate::api) async fn terminate_user_session(
     if app_state.active_users.terminate_session(&username, &session_token).await {
         app_state.active_provider.terminate_identified_playback_owner(&session_token);
     }
+    app_state.active_users.mark_session_ended(&session_token).await;
     (axum::http::StatusCode::NO_CONTENT).into_response()
 }
 

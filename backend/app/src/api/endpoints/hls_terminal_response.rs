@@ -210,7 +210,7 @@ async fn current_hls_terminal_lease(
     access_lease_id: &HlsAccessLeaseId,
     now_ms: u64,
 ) -> Result<HlsAccessLease, Box<axum::response::Response>> {
-    app_state.hls_proxy.access_lease_response_snapshot(access_lease_id, proxy_session_id, now_ms).await.ok_or_else(
+    app_state.hls.proxy.access_lease_response_snapshot(access_lease_id, proxy_session_id, now_ms).await.ok_or_else(
         || Box::new(hls_terminal_failed_closed_response(HlsTerminalFailedClosedReason::LeaseStateUnavailable)),
     )
 }
@@ -219,7 +219,7 @@ async fn current_hls_terminal_session(
     app_state: &Arc<AppState>,
     proxy_session_id: &ProxySessionId,
 ) -> Result<HlsSessionHandle, Box<axum::response::Response>> {
-    app_state.hls_proxy.sessions().get_by_proxy_session_id(proxy_session_id).await.ok_or_else(|| {
+    app_state.hls.proxy.sessions().get_by_proxy_session_id(proxy_session_id).await.ok_or_else(|| {
         Box::new(hls_terminal_failed_closed_response(HlsTerminalFailedClosedReason::LeaseStateUnavailable))
     })
 }

@@ -317,7 +317,8 @@ async fn validate_hls_standalone_custom_access(
 ) -> Result<(), Box<Response>> {
     if let Some(shared_lease) = access.shared_lease.as_ref() {
         let lease = app_state
-            .hls_proxy
+            .hls
+            .proxy
             .access_lease_response_snapshot(access_lease_id, &shared_lease.proxy_session_id, now_ms)
             .await;
         if !lease.is_some_and(|lease| {
@@ -509,9 +510,9 @@ mod tests {
         api::model::{
             build_hls_standalone_custom_plan, hls_custom_video_manifest_response_for_access_lease,
             ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, CustomVideoStreamType,
-            DownloadQueue, EventManager, HlsAccessLease, HlsAccessLeaseId, HlsPlaybackFamilyKey, HlsProvisioningState,
-            HlsProxyManager, HlsRuntimeCustomTailReason, HlsStandaloneCustomAccess, MetadataUpdateManager,
-            PlaylistStorageState, ProxySessionId, SharedStreamManager, TransportStreamBuffer, UpdateGuard,
+            DownloadQueue, EventManager, HlsAccessLease, HlsAccessLeaseId, HlsPlaybackFamilyKey, HlsProxyManager,
+            HlsRuntimeCustomTailReason, HlsStandaloneCustomAccess, MetadataUpdateManager, PlaylistStorageState,
+            ProxySessionId, SharedStreamManager, TransportStreamBuffer,
         },
         model::{
             ApiProxyConfig, ApiProxyServerInfo, AppConfig, Config, ConfigInput, ConfigSource, ConfigTarget,
@@ -533,7 +534,6 @@ mod tests {
         model::{ConfigPaths, InputFetchMethod, InputType, ProcessingOrder},
     };
     use std::{collections::HashMap, sync::Arc};
-    use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
     use tower::ServiceExt;
 
@@ -712,44 +712,25 @@ mod tests {
             hls_cache: CancellationToken::new(),
         };
         let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
-        let (manual_update_sender, _) = mpsc::channel::<crate::api::model::ManualPlaylistUpdateRequest>(1);
 
         Arc::new(AppState {
-            forced_targets: Arc::new(ArcSwap::from_pointee(crate::model::ProcessTargets {
-                enabled: false,
-                inputs: Vec::new(),
-                targets: Vec::new(),
-                target_names: Vec::new(),
-            })),
             app_config: app_cfg,
-            http_client: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-            http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-            public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-            resource_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-            resource_public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+            http_clients: Arc::default(),
             downloads: Arc::new(DownloadQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,
-            hls_proxy: Arc::new(HlsProxyManager::new()),
-            hls_provisioning: Arc::new(HlsProvisioningState::new()),
-            stalker_resolve_coordinator: Arc::default(),
+            hls: crate::api::model::HlsState::new(Arc::new(HlsProxyManager::new())),
+            stalker_resolve_coordinator: crate::api::model::StalkerResolveCoordinator::default(),
             active_users,
             active_provider,
             connection_manager,
             event_manager,
-            cancel_tokens: Arc::new(ArcSwap::from_pointee(tokens)),
+            cancel_tokens: ArcSwap::from_pointee(tokens),
             playlists: Arc::new(PlaylistStorageState::new()),
             geoip,
-            update_guard: UpdateGuard::new(),
             metadata_manager,
-            identity_registry: Arc::new(tuliprox_repository::identity_registry::IdentityRegistry::empty(
-                std::path::PathBuf::new(),
-            )),
-            login_throttle: Arc::new(crate::auth::LoginThrottle::new()),
-            token_revocations: Arc::new(tuliprox_repository::token_revocations::TokenRevocations::empty(
-                std::path::PathBuf::new(),
-            )),
-            manual_update_sender,
+            auth: crate::api::model::AuthState::for_tests(),
+            playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests(),
         })
     }
 
@@ -1044,7 +1025,7 @@ mod tests {
             now_ms,
             60_000,
         );
-        app_state.hls_proxy.prepare_access_lease(lease.clone()).await;
+        app_state.hls.proxy.prepare_access_lease(lease.clone()).await;
         let user = app_state.app_config.get_user_credentials("viewer").expect("test user");
         let response = hls_custom_video_manifest_response_for_access_lease(
             &app_state,
@@ -1065,7 +1046,7 @@ mod tests {
             StatusCode::OK
         );
 
-        app_state.hls_proxy.access_leases().write().await.remove_access_lease(&lease_id);
+        app_state.hls.proxy.access_leases().write().await.remove_access_lease(&lease_id);
         let replacement = HlsAccessLease::pending(
             lease_id.clone(),
             HlsPlaybackFamilyKey::new("viewer", "client"),
@@ -1078,7 +1059,7 @@ mod tests {
             now_ms.saturating_add(1),
             60_000,
         );
-        app_state.hls_proxy.prepare_access_lease(replacement).await;
+        app_state.hls.proxy.prepare_access_lease(replacement).await;
 
         assert_eq!(
             standalone_segment_response(app_state, url, Method::GET, None).await.status(),

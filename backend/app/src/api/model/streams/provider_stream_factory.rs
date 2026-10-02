@@ -863,9 +863,9 @@ async fn provider_stream_request(
     }
     let response_result = if use_manual_redirects {
         let client_no_redirect = if stream_options.requires_public_destination() {
-            ctx.public_http_client_no_redirect.load()
+            ctx.http_clients.public_no_redirect.load()
         } else {
-            ctx.http_client_no_redirect.load()
+            ctx.http_clients.no_redirect.load()
         };
         send_with_manual_redirects(&client_no_redirect, stream_options, &ctx.app_config).await
     } else {

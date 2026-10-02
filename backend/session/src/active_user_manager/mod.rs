@@ -129,6 +129,12 @@ impl PlaybackLifecycle {
     pub fn is_counted(&self) -> bool { matches!(self, Self::Active | Self::GraceActive) }
 }
 
+/// `host:port` of a URL, used to scope provider session cookies.
+fn url_host_key(url: &str) -> Option<String> {
+    let url = url::Url::parse(url).ok()?;
+    Some(format!("{}://{}:{}", url.scheme(), url.host_str()?, url.port_or_known_default()?))
+}
+
 #[derive(Clone, Debug)]
 pub struct UserSession {
     pub token: String,
@@ -137,6 +143,8 @@ pub struct UserSession {
     pub provider: Arc<str>,
     pub stream_url: Arc<str>,
     pub provider_session_headers: HashMap<String, String>,
+    /// Origin (`scheme://host:port`) whose response set `provider_session_headers`; `None` when unknown.
+    pub provider_session_headers_host: Option<String>,
     /// Shared with the response body so media confirmation survives a released VOD lease.
     pub media_started: Arc<AtomicBool>,
     /// Stable suffix appended to upstream User-Agent headers for this playback session.
@@ -149,6 +157,20 @@ pub struct UserSession {
     pub permission: UserConnectionPermission,
     pub connection_kind: Option<ConnectionKind>,
     pub lifecycle: PlaybackLifecycle,
+}
+
+impl UserSession {
+    /// Provider session headers that may be sent to `target_url`: only to the origin (scheme,
+    /// host and port) that set them, or unconditionally when that origin is unknown.
+    pub fn provider_session_headers_for(&self, target_url: &str) -> Option<&HashMap<String, String>> {
+        if self.provider_session_headers.is_empty() {
+            return None;
+        }
+        match self.provider_session_headers_host.as_deref() {
+            Some(host) => (url_host_key(target_url).as_deref() == Some(host)).then_some(&self.provider_session_headers),
+            None => Some(&self.provider_session_headers),
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -521,6 +543,18 @@ fn uses_session_reentry_guard(stream: &StreamInfo) -> bool {
         )
 }
 
+/// How long an ended session token blocks its recreation from a sealed playlist token.
+const ENDED_SESSION_RECREATE_BLOCK: Duration = Duration::from_secs(600);
+
+impl UserConnections {
+    fn mark_sessions_ended<I: IntoIterator<Item = String>>(&mut self, tokens: I) {
+        let now = Instant::now();
+        self.ended_sessions.retain(|_, expires_at| *expires_at > now);
+        let expires_at = now + ENDED_SESSION_RECREATE_BLOCK;
+        self.ended_sessions.extend(tokens.into_iter().map(|token| (token, expires_at)));
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct RecentWinnerProtection {
     protected_addr: SocketAddr,
@@ -531,6 +565,9 @@ struct RecentWinnerProtection {
 struct UserConnections {
     kicked: HashMap<String, (u64, VirtualId)>,
     recently_evicted_sessions: HashMap<String, RecentWinnerProtection>,
+    /// Session tokens ended by eviction, kick or explicit terminate, with their expiry. A sealed
+    /// playlist token of such a session must not recreate it; an expired session may.
+    ended_sessions: HashMap<String, Instant>,
     recent_socket_reentry_guards: HashMap<String, RecentWinnerProtection>,
     by_key: HashMap<String, UserConnectionData>,
     key_by_addr: HashMap<SocketAddr, SocketRegistration>,
@@ -1963,6 +2000,7 @@ impl ActiveUserManager {
             provider: params.provider.intern(),
             stream_url: params.stream_url.intern(),
             provider_session_headers: HashMap::new(),
+            provider_session_headers_host: None,
             media_started: Arc::new(AtomicBool::new(false)),
             user_agent_stream_index: None,
             addr: *params.addr,
@@ -2413,8 +2451,9 @@ impl ActiveUserManager {
                 Self::bump_session_transition_version(session);
                 let mut reset_provider_session_headers = false;
                 if &*session.stream_url != stream_url {
+                    // Provider cookies are host scoped: alternating child playlists on one host keep them.
+                    reset_provider_session_headers |= url_host_key(&session.stream_url) != url_host_key(stream_url);
                     session.stream_url = stream_url.intern();
-                    reset_provider_session_headers = true;
                 }
                 if &*session.provider != provider {
                     session.provider = provider.intern();
@@ -2422,6 +2461,7 @@ impl ActiveUserManager {
                 }
                 if reset_provider_session_headers {
                     session.provider_session_headers.clear();
+                    session.provider_session_headers_host = None;
                 }
                 // Normalize stale lifecycle states on session refresh.
                 // Expired, PendingProvider, and Preserved sessions cannot stay in those states
@@ -2928,6 +2968,7 @@ impl ActiveUserManager {
             let promotions = Self::collect_promotions_after_capacity_release(connection_data);
 
             let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, username);
+            user_connections.mark_sessions_ended(tokens_to_remove);
             drop(user_connections);
             self.log_divergence_snapshot(divergence_snapshot).await;
 
@@ -3095,6 +3136,17 @@ impl ActiveUserManager {
         }
     }
 
+    /// Marks a session as ended on purpose (eviction, kick, explicit terminate), so it is not
+    /// recreated from a sealed playlist token.
+    pub async fn mark_session_ended(&self, token: &str) {
+        self.connections.write().await.mark_sessions_ended([token.to_string()]);
+    }
+
+    /// True while a session token is blocked from recreation after an eviction, kick or terminate.
+    pub async fn is_session_ended(&self, token: &str) -> bool {
+        self.connections.read().await.ended_sessions.get(token).is_some_and(|expires_at| *expires_at > Instant::now())
+    }
+
     pub async fn get_and_update_user_session(&self, username: &str, token: &str) -> Option<UserSession> {
         self.update_user_session(username, token).await
     }
@@ -3153,6 +3205,29 @@ impl ActiveUserManager {
             return false;
         };
         session.provider_session_headers.clone_from(provider_session_headers);
+        session.provider_session_headers_host = None;
+        session.ts = current_time_secs();
+        true
+    }
+
+    /// Stores provider session headers set by the response of `source_url`; they are only sent
+    /// back to that host (see [`UserSession::provider_session_headers_for`]).
+    pub async fn update_session_provider_headers_from(
+        &self,
+        username: &str,
+        token: &str,
+        provider_session_headers: &HashMap<String, String>,
+        source_url: &str,
+    ) -> bool {
+        let mut user_connections = self.connections.write().await;
+        let Some(connection_data) = user_connections.by_key.get_mut(username) else {
+            return false;
+        };
+        let Some(session) = connection_data.sessions.iter_mut().find(|session| session.token == token) else {
+            return false;
+        };
+        session.provider_session_headers.clone_from(provider_session_headers);
+        session.provider_session_headers_host = url_host_key(source_url);
         session.ts = current_time_secs();
         true
     }
@@ -3389,10 +3464,6 @@ impl ActiveUserManager {
         protected_addr: SocketAddr,
         ttl: Duration,
     ) {
-        if ttl.is_zero() {
-            return;
-        }
-
         let mut connections = self.connections.write().await;
         let now = Instant::now();
         connections.recently_evicted_sessions.retain(|_, protection| protection.expires_at > now);
@@ -3426,6 +3497,11 @@ impl ActiveUserManager {
             }
         }
 
+        // Evicted sessions stay ended even when the reentry guard itself is disabled.
+        connections.mark_sessions_ended(session_tokens.iter().cloned());
+        if ttl.is_zero() {
+            return;
+        }
         for session_token in session_tokens {
             connections.recently_evicted_sessions.insert(session_token, protection);
         }
@@ -3752,6 +3828,7 @@ impl ActiveUserManager {
                     user_connections
                         .recently_evicted_sessions
                         .retain(|_, protection| protection.expires_at > now_instant);
+                    user_connections.ended_sessions.retain(|_, expires_at| *expires_at > now_instant);
                     user_connections
                         .recent_socket_reentry_guards
                         .retain(|_, protection| protection.expires_at > now_instant);

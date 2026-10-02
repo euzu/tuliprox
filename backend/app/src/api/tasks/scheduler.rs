@@ -177,12 +177,16 @@ async fn run_playlist_update_inner(
     app_state: &Arc<AppState>,
     schedule_target_names: Option<&Vec<String>>,
 ) {
-    let Some(permit) = app_state.update_guard.acquire_playlist_lock().await else {
+    let Some(permit) = app_state.playlist_updates.update_guard.acquire_playlist_lock().await else {
         return;
     };
     // Re-resolve targets from the CURRENT sources and forced_targets each time,
     // so that input/target ID changes from hot-reloads are picked up.
-    let targets = get_process_targets(&app_state.app_config, &app_state.forced_targets.load(), schedule_target_names);
+    let targets = get_process_targets(
+        &app_state.app_config,
+        &app_state.playlist_updates.forced_targets.load(),
+        schedule_target_names,
+    );
     exec_processing(
         ProcessingRun::new(
             client.clone(),
@@ -198,7 +202,7 @@ async fn run_playlist_update_inner(
             }
         })
         .with_playlist_state(app_state.playlists.clone())
-        .with_update_guard(app_state.update_guard.clone())
+        .with_update_guard(app_state.playlist_updates.update_guard.clone())
         .with_disabled_headers(app_state.get_disabled_headers())
         .with_provider_manager(Arc::clone(&app_state.active_provider))
         .with_metadata_manager(Arc::clone(&app_state.metadata_manager))
@@ -247,7 +251,7 @@ fn run_library_scan(client: &reqwest::Client, app_state: &Arc<AppState>) {
     let config = app_state.app_config.config.load();
     if let Some(lib_config) = config.library.as_ref() {
         if lib_config.enabled {
-            if let Some(permit) = app_state.update_guard.try_library() {
+            if let Some(permit) = app_state.playlist_updates.update_guard.try_library() {
                 let event_manager = Arc::clone(&app_state.event_manager);
                 spawn_library_scan(
                     event_manager,
@@ -270,7 +274,8 @@ fn run_geoip_update(app_state: &Arc<AppState>, schedule: &str) {
     let app_state = Arc::clone(app_state);
     let schedule = schedule.to_string();
     tokio::spawn(async move {
-        if let Err(err) = update_geoip_db(&app_state.app_config, &app_state.http_client.load(), &app_state.geoip).await
+        if let Err(err) =
+            update_geoip_db(&app_state.app_config, &app_state.http_clients.default.load(), &app_state.geoip).await
         {
             // `Disabled` is not a failure - the task ran and found nothing to
             // do, which is what the config asked for.
@@ -341,7 +346,7 @@ pub fn exec_interner_prune(app_state: &Arc<AppState>) {
                 if interner_len() < min_pool_size {
                     continue;
                 }
-                if let Some(permit) = app_state.update_guard.try_playlist() {
+                if let Some(permit) = app_state.playlist_updates.update_guard.try_playlist() {
                     // Gate check: ensure updates aren't in progress; permit dropped to allow concurrent updates during GC
                     drop(permit);
                     interner_gc();

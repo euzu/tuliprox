@@ -976,7 +976,7 @@ pub(super) async fn log_hls_origin_binding_reacquire_failed(session: &HlsSession
 }
 
 pub(super) async fn detach_unprotected_hls_origin_account_bindings(app_state: &Arc<AppState>, now_ms: u64) {
-    let sessions = app_state.hls_proxy.sessions().list_sessions().await;
+    let sessions = app_state.hls.proxy.sessions().list_sessions().await;
     for session in sessions {
         let binding = {
             let mut session_guard = session.write().await;
@@ -1201,7 +1201,7 @@ async fn restore_hls_origin_policy_preempt_candidate_reservation<C: HlsOriginRes
         candidate.reservation_ttl_secs(),
     );
     let new_tag = app_state.active_provider.binding_tag_for_owner(session_owner);
-    let Some(session) = app_state.hls_proxy.sessions().get_by_proxy_session_id(candidate.proxy_session_id()).await
+    let Some(session) = app_state.hls.proxy.sessions().get_by_proxy_session_id(candidate.proxy_session_id()).await
     else {
         return;
     };
@@ -1223,7 +1223,7 @@ pub(super) async fn find_hls_origin_policy_preempt_candidate(
     request_policy: HlsEffectiveOriginAcquirePolicy,
     _now_ms: u64,
 ) -> Option<HlsOriginPolicyPreemptCandidate> {
-    let sessions = app_state.hls_proxy.sessions().list_sessions().await;
+    let sessions = app_state.hls.proxy.sessions().list_sessions().await;
     let mut best_candidate = None;
     for session in sessions {
         let session_guard = session.read().await;
@@ -1379,7 +1379,7 @@ pub(super) async fn find_hls_account_overlap_candidate(
     new_proxy_session_id: &ProxySessionId,
     now_ms: u64,
 ) -> Option<HlsAccountOverlapCandidate> {
-    let sessions = app_state.hls_proxy.sessions().list_sessions().await;
+    let sessions = app_state.hls.proxy.sessions().list_sessions().await;
     let tuliprox_target_user_connection_capacity = hls_tuliprox_target_user_connection_capacity(app_state, input).await;
     let origin_input_account_connection_capacity = hls_origin_input_account_connection_capacity(app_state, input);
     let mut speculative_accounts = Vec::new();
@@ -1478,7 +1478,8 @@ pub(super) async fn filter_hls_account_overlap_cooldowns(
     let mut eligible = Vec::new();
     for candidate in candidates {
         if app_state
-            .hls_proxy
+            .hls
+            .proxy
             .is_account_overlap_cooling_down(&candidate.input_name, &candidate.account_name, now_ms)
             .await
         {
@@ -1500,7 +1501,7 @@ pub(super) async fn reclaim_hls_account_overlap_if_needed(
     now_ms: u64,
 ) {
     let winner_proxy_session_id = winner_session.read().await.proxy_session_id.clone();
-    let sessions = app_state.hls_proxy.sessions().list_sessions().await;
+    let sessions = app_state.hls.proxy.sessions().list_sessions().await;
     for session in sessions {
         let (loser_proxy_session_id, loser_binding) = {
             let session_guard = session.read().await;
@@ -1554,7 +1555,8 @@ pub(super) async fn reclaim_hls_account_overlap_if_needed(
         }
         let hard_active_window_ms = winner_session.read().await.account_overlap_timing().hard_active_window_ms;
         app_state
-            .hls_proxy
+            .hls
+            .proxy
             .mark_account_overlap_reclaimed_cooldown(
                 Arc::clone(&loser_binding.input_name),
                 Arc::clone(&loser_binding.account_name),
@@ -1578,7 +1580,7 @@ pub(super) async fn reclaim_hls_account_overlap_if_needed(
 }
 
 pub(super) async fn promote_elapsed_hls_account_overlaps(app_state: &Arc<AppState>, now_ms: u64) {
-    let sessions = app_state.hls_proxy.sessions().list_sessions().await;
+    let sessions = app_state.hls.proxy.sessions().list_sessions().await;
     for session in sessions {
         let (input_name, account_name, promoted_session_id, displaced_session_id, hard_active_window_ms) = {
             let mut session_guard = session.write().await;
@@ -1607,7 +1609,8 @@ pub(super) async fn promote_elapsed_hls_account_overlaps(app_state: &Arc<AppStat
             )
         };
         app_state
-            .hls_proxy
+            .hls
+            .proxy
             .mark_account_overlap_promoted_cooldown(
                 Arc::clone(&input_name),
                 Arc::clone(&account_name),
@@ -1615,7 +1618,7 @@ pub(super) async fn promote_elapsed_hls_account_overlaps(app_state: &Arc<AppStat
                 hard_active_window_ms,
             )
             .await;
-        if let Some(displaced) = app_state.hls_proxy.sessions().get_by_proxy_session_id(&displaced_session_id).await {
+        if let Some(displaced) = app_state.hls.proxy.sessions().get_by_proxy_session_id(&displaced_session_id).await {
             let mut detached = false;
             let mut displaced = displaced.write().await;
             // The winner's speculative claim matured, so the displaced session must yield
@@ -1912,7 +1915,7 @@ pub(super) async fn create_hls_cache_entry_master_playlist_response(
     } else {
         lease.state = HlsAccessLeaseState::Denied;
     }
-    app_state.hls_proxy.prepare_access_lease(lease).await;
+    app_state.hls.proxy.prepare_access_lease(lease).await;
     debug!(
         "HLS access lease prepared: lease={} session={} proxy_session={} user_session={} action=created reason=new-playback",
         safe_hls_access_lease_id(&access_lease_id),
@@ -1922,7 +1925,7 @@ pub(super) async fn create_hls_cache_entry_master_playlist_response(
     );
     let response =
         hls_entry_master_playlist_response(&proxy_session_id, &access_lease_id, bandwidth.bandwidth(), server_path);
-    app_state.hls_proxy.startup_observability().record_entry_master_response(
+    app_state.hls.proxy.startup_observability().record_entry_master_response(
         access_lease_id.clone(),
         HlsLogIdentity::new(&session_key, &proxy_session_id),
         current_time_millis(),
@@ -2080,7 +2083,7 @@ pub(super) async fn prepare_hls_transient_origin_io_for_authorized_resource_work
                     &origin_io,
                     session,
                     binding,
-                    hls_object_body_deadline(app_state.hls_proxy.segment_fetch_policy().origin_segment_timeout_ms),
+                    hls_object_body_deadline(app_state.hls.proxy.segment_fetch_policy().origin_segment_timeout_ms),
                 )
                 .await
                 {
@@ -2157,7 +2160,7 @@ pub(super) async fn prepare_hls_transient_origin_io_for_authorized_resource_work
         &origin_io,
         session,
         &binding,
-        hls_object_body_deadline(app_state.hls_proxy.segment_fetch_policy().origin_segment_timeout_ms),
+        hls_object_body_deadline(app_state.hls.proxy.segment_fetch_policy().origin_segment_timeout_ms),
     )
     .await
     else {

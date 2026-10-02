@@ -131,6 +131,7 @@ pub async fn resolve_playback_request_admission(
     if request_class == PlaybackRequestClass::Terminate {
         if let Some(session) = user_session {
             adm.active_users.terminate_session(&user.username, session.token.as_str()).await;
+            adm.active_users.mark_session_ended(session.token.as_str()).await;
         }
         return (
             crate::ConnectionAdmission::exhausted(

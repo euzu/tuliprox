@@ -36,7 +36,7 @@ use tuliprox_testkit::{
     discovery::VirtualIdMap,
     faults::{FaultSchedule, OriginFault},
     frame::{Frame, FrameDecoder, FrameValidator},
-    hls::read_segments,
+    hls::{parse_manifest_url, read_playlist, read_segments},
     observation::TuliproxObserver,
     oracle::{AdmissionOracle, Decision as AdmissionDecision, Request as AdmissionRequest},
     origin_events::{BodyCloseReason, OriginEvent, OriginEventKind, OriginStats, StalkerPortalStats},
@@ -1490,6 +1490,12 @@ async fn run_hls_until_released(
     mut release: oneshot::Receiver<()>,
 ) -> Result<PlaybackOutcome, TestkitError> {
     let mut ready = Some(ready);
+    // Later rounds reload the resolved media playlist like a player; re-entering the entry URL
+    // would start a new playback session that a single-connection user is not admitted to.
+    let mut playlist_url = match parse_manifest_url(&url) {
+        Ok(playlist_url) => playlist_url,
+        Err(err) => return Ok(PlaybackOutcome::TransportError { message: err.to_string() }),
+    };
     loop {
         tokio::select! {
             _ = &mut release => {
@@ -1499,7 +1505,7 @@ async fn run_hls_until_released(
                     PlaybackOutcome::UnexpectedEof { frames: 0, bytes: 0 }
                 });
             }
-            result = read_segments(&url, &expected_run_id, expected_marker, required_frames, &headers) => {
+            result = read_playlist(&mut playlist_url, &expected_run_id, expected_marker, required_frames, &headers) => {
                 if let Err(err) = result {
                     return Ok(PlaybackOutcome::TransportError { message: err.to_string() });
                 }
@@ -2421,8 +2427,18 @@ async fn dispatch_run_lease(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Origin marker of a live or HLS request path (`/live/{marker}.ts`, `/hls/{marker}/...`).
+fn origin_path_marker(path: &str) -> Option<u32> {
+    let rest = path.strip_prefix("/live/").or_else(|| path.strip_prefix("/hls/"))?;
+    rest.split(['/', '.', '?']).next()?.parse().ok()
+}
+
+/// `marker` scopes `latest_request_account` to the started channel, so reloads of other
+/// playbacks that are still held do not count as the latest request.
+#[allow(clippy::too_many_arguments)]
 async fn check_origin_assertions<'a>(
     step_id: &'a str,
+    marker: Option<u32>,
     assert_origin: &tuliprox_testkit::config::AssertOrigin,
     obs: &OriginObserver,
     origin_run_id: &str,
@@ -2474,9 +2490,10 @@ async fn check_origin_assertions<'a>(
                         if let Some(expected_account) = check_account {
                             let latest_account = evts.iter().rev().find_map(|event| match &event.kind {
                                 OriginEventKind::RequestStarted { path, account, .. }
-                                    if path.starts_with("/live/")
+                                    if (path.starts_with("/live/")
                                         || path.starts_with("/vod/")
-                                        || path.starts_with("/hls/") =>
+                                        || path.starts_with("/hls/"))
+                                        && marker.is_none_or(|marker| origin_path_marker(path) == Some(marker)) =>
                                 {
                                     Some(account.as_deref())
                                 }
@@ -2724,6 +2741,7 @@ async fn execute_scenario_steps<'a>(
                             .map_or_else(|| RunId::new(&scenario.name), |origin| RunId::new(&origin.run_id));
                         check_origin_assertions(
                             stop.playback_id.as_str(),
+                            None,
                             assert_origin,
                             obs,
                             &origin_run_id.0,
@@ -2981,6 +2999,7 @@ async fn execute_scenario_steps<'a>(
                         .map_or_else(|| RunId::new(&scenario.name), |origin| RunId::new(&origin.run_id));
                     check_origin_assertions(
                         start.playback_id.as_str(),
+                        (!is_vod).then_some(marker),
                         assert_origin,
                         obs,
                         &origin_run_id.0,
@@ -3532,6 +3551,14 @@ mod tests {
     }
 
     #[test]
+    fn origin_path_marker_reads_live_and_hls_paths() {
+        assert_eq!(origin_path_marker("/live/17.ts"), Some(17));
+        assert_eq!(origin_path_marker("/hls/19/index.m3u8?run=r&token=***"), Some(19));
+        assert_eq!(origin_path_marker("/hls/23/1.ts"), Some(23));
+        assert_eq!(origin_path_marker("/vod/movie.mp4"), None);
+    }
+
+    #[test]
     fn extracts_marker_from_hls_manifest_url() {
         assert!(matches!(marker_from_url("http://origin/hls/17/index.m3u8"), Ok(17)));
     }
@@ -3801,6 +3828,7 @@ mod tests {
 
         check_origin_assertions(
             "step-1",
+            None,
             &assert_origin,
             &obs,
             "test-run",
@@ -3862,6 +3890,7 @@ mod tests {
 
         check_origin_assertions(
             "step-1",
+            None,
             &assert_origin,
             &obs,
             "test-run",

@@ -5,10 +5,8 @@
 //! note in `api::model::streams`.
 
 use crate::connection_manager::ConnectionManager;
-use arc_swap::ArcSwap;
-use reqwest::Client;
 use std::sync::Arc;
-use tuliprox_core::model::AppConfig;
+use tuliprox_core::model::{AppConfig, HttpClients};
 
 /// What opening and reading a provider stream needs.
 #[derive(Clone)]
@@ -18,8 +16,6 @@ pub struct ProviderStreamCtx {
     pub app_config: Arc<AppConfig>,
     /// Connection admission and teardown for the provider side.
     pub connection_manager: Arc<ConnectionManager>,
-    /// Client that does not follow redirects, for provider requests.
-    pub http_client_no_redirect: Arc<ArcSwap<Client>>,
-    /// The same, but without proxy configuration applied.
-    pub public_http_client_no_redirect: Arc<ArcSwap<Client>>,
+    /// Outbound clients; provider requests use the no-redirect variants.
+    pub http_clients: Arc<HttpClients>,
 }

@@ -210,6 +210,7 @@ async fn create_user_session_normalizes_expired_lifecycle() {
             provider: "provider-a".intern(),
             stream_url: "http://localhost/live.m3u8".intern(),
             provider_session_headers: HashMap::new(),
+            provider_session_headers_host: None,
             media_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_agent_stream_index: None,
             addr,
@@ -273,6 +274,7 @@ async fn create_user_session_does_not_normalize_pending_provider_lifecycle() {
             provider: "provider-a".intern(),
             stream_url: "http://localhost/live.m3u8".intern(),
             provider_session_headers: HashMap::new(),
+            provider_session_headers_host: None,
             media_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_agent_stream_index: None,
             addr,
@@ -5887,6 +5889,7 @@ async fn check_divergence_detects_connection_count_mismatch() {
             provider: "provider-a".intern(),
             stream_url: "http://localhost/stream.ts".intern(),
             provider_session_headers: HashMap::new(),
+            provider_session_headers_host: None,
             media_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_agent_stream_index: None,
             addr,
@@ -5932,6 +5935,7 @@ async fn check_divergence_detects_stream_without_counted_session() {
             provider: "provider-a".intern(),
             stream_url: "http://localhost/stream.ts".intern(),
             provider_session_headers: HashMap::new(),
+            provider_session_headers_host: None,
             media_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_agent_stream_index: None,
             addr,
@@ -6018,6 +6022,7 @@ async fn divergence_log_rate_limited_within_cooldown_window() {
             provider: "provider-a".intern(),
             stream_url: "http://localhost/stream.ts".intern(),
             provider_session_headers: HashMap::new(),
+            provider_session_headers_host: None,
             media_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_agent_stream_index: None,
             addr,
@@ -6195,4 +6200,84 @@ async fn arm_eviction_protection_protects_all_users_on_addr() {
 
     assert!(connections.recent_socket_reentry_guards.contains_key(&key_a), "user_a guard must be armed");
     assert!(connections.recent_socket_reentry_guards.contains_key(&key_b), "user_b guard must be armed");
+}
+
+fn provider_header_test_manager() -> ActiveUserManager {
+    let config = Config::default();
+    let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+    let event_manager = Arc::new(EventManager::new());
+    ActiveUserManager::new(&config, &geoip, &event_manager)
+}
+
+async fn create_provider_header_session(manager: &ActiveUserManager, user: &ProxyUserCredentials, url: &str) {
+    let addr: SocketAddr = "127.0.0.1:55420".parse().unwrap_or_else(|_| unreachable!());
+    manager
+        .create_user_session(CreateUserSessionParams {
+            user,
+            session_token: "tok-host",
+            virtual_id: 7010,
+            provider: "provider-a",
+            stream_url: url,
+            addr: &addr,
+            connection_permission: UserConnectionPermission::Allowed,
+            connection_kind: Some(ConnectionKind::Normal),
+            socket_bound: false,
+        })
+        .await;
+}
+
+/// Provider cookies survive child playlist changes on the same host and are only sent to that host.
+#[tokio::test]
+async fn provider_session_headers_are_scoped_to_the_host_that_set_them() {
+    let manager = provider_header_test_manager();
+    let mut user = ProxyUserCredentials::default();
+    user.username = "user-provider-header-host".to_string();
+    let headers = HashMap::from([(String::from("cookie"), String::from("sid=abc"))]);
+
+    create_provider_header_session(&manager, &user, "http://cdn.example/a/video.m3u8").await;
+    assert!(
+        manager
+            .update_session_provider_headers_from(
+                &user.username,
+                "tok-host",
+                &headers,
+                "http://cdn.example/a/video.m3u8"
+            )
+            .await
+    );
+    create_provider_header_session(&manager, &user, "http://cdn.example/a/audio.m3u8").await;
+
+    let session = manager.get_and_update_user_session(&user.username, "tok-host").await.expect("session exists");
+    assert_eq!(session.provider_session_headers_for("http://cdn.example/a/video.m3u8"), Some(&headers));
+    assert_eq!(session.provider_session_headers_for("http://entry.example/live/1.m3u8"), None);
+    assert_eq!(
+        session.provider_session_headers_for("https://cdn.example:80/a/video.m3u8"),
+        None,
+        "same host and port with another scheme is another origin"
+    );
+
+    create_provider_header_session(&manager, &user, "http://other.example/a/video.m3u8").await;
+    let session = manager.get_and_update_user_session(&user.username, "tok-host").await.expect("session exists");
+    assert!(session.provider_session_headers.is_empty());
+}
+
+/// Kicked and evicted sessions are marked ended, also with the reentry guard disabled.
+#[tokio::test]
+async fn kicked_and_evicted_sessions_are_marked_ended() {
+    let manager = provider_header_test_manager();
+    let mut user = ProxyUserCredentials::default();
+    user.username = "user-ended".to_string();
+    create_provider_header_session(&manager, &user, "http://cdn.example/a/video.m3u8").await;
+    let addr: SocketAddr = "127.0.0.1:55420".parse().unwrap_or_else(|_| unreachable!());
+
+    assert!(!manager.is_session_ended("tok-host").await);
+    assert!(manager.terminate_session(&user.username, "tok-host").await);
+    assert!(!manager.is_session_ended("tok-host").await, "a plain terminate (e.g. manifest failure) is not an end");
+
+    create_provider_header_session(&manager, &user, "http://cdn.example/a/video.m3u8").await;
+    manager.terminate_sessions_for_addr(&user.username, &addr).await;
+    assert!(manager.is_session_ended("tok-host").await);
+
+    manager.mark_session_ended("tok-explicit").await;
+    assert!(manager.is_session_ended("tok-explicit").await);
 }

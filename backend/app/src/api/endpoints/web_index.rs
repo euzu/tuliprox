@@ -40,7 +40,7 @@ fn api_user_can_access_web_ui(ui_enabled: bool) -> bool { ui_enabled }
 /// `format!("web:{username}")`, which made the subject a function of the
 /// display name: renaming a user reassigned everything the old subject owned.
 async fn web_subject_id(app_state: &Arc<AppState>, username: &str) -> Option<shared::model::UserId> {
-    match app_state.identity_registry.register(username).await {
+    match app_state.auth.identity_registry.register(username).await {
         Ok(id) => Some(id),
         Err(err) => {
             error!("Cannot resolve a stable subject id for web user '{username}': {err}");
@@ -51,7 +51,7 @@ async fn web_subject_id(app_state: &Arc<AppState>, username: &str) -> Option<sha
 
 /// The stable subject id for a proxy API user, allocating one on first sight.
 async fn api_subject_id(app_state: &Arc<AppState>, username: &str) -> Option<shared::model::UserId> {
-    match app_state.identity_registry.register_api_user(username).await {
+    match app_state.auth.identity_registry.register_api_user(username).await {
         Ok(id) => Some(id),
         Err(err) => {
             error!("Cannot resolve a stable subject id for API user '{username}': {err}");
@@ -171,7 +171,7 @@ async fn token(
     // Before the argon2 verify, not after: the point is to stop a password
     // list, and an attacker who can still force the hash on every attempt has
     // not been slowed down.
-    if let Some(retry_after) = app_state.login_throttle.retry_after(&username, &fingerprint.client_ip) {
+    if let Some(retry_after) = app_state.auth.login_throttle.retry_after(&username, &fingerprint.client_ip) {
         warn!(
             "Sign-in throttled for '{}' from {}; {}s remaining",
             sanitize_sensitive_info(&username),
@@ -194,7 +194,7 @@ async fn token(
         }
         match attempt {
             SignInAttempt::Issued(token) => {
-                app_state.login_throttle.record_success(&username, &fingerprint.client_ip);
+                app_state.auth.login_throttle.record_success(&username, &fingerprint.client_ip);
                 emit_auth_audit(&app_state, AuthAuditEvent::sign_in_succeeded(Arc::from(username.as_str()), client_ip));
                 req.zeroize();
                 return axum::Json(TokenResponse { token, username }).into_response();
@@ -207,7 +207,7 @@ async fn token(
         }
     }
 
-    app_state.login_throttle.record_failure(&username, &fingerprint.client_ip);
+    app_state.auth.login_throttle.record_failure(&username, &fingerprint.client_ip);
     emit_auth_audit(&app_state, AuthAuditEvent::sign_in_failed(Arc::from(username.as_str()), client_ip));
     warn!("Sign-in rejected for '{}' from {}", sanitize_sensitive_info(&username), fingerprint.client_ip);
     req.zeroize();
@@ -229,8 +229,8 @@ async fn revoke_user_tokens(
     // Both namespaces: an operator names a principal, not a namespace, and a
     // username can exist in either.
     let subjects: Vec<_> = [
-        app_state.identity_registry.lookup_by_username(&username).await,
-        app_state.identity_registry.lookup_api_by_username(&username).await,
+        app_state.auth.identity_registry.lookup_by_username(&username).await,
+        app_state.auth.identity_registry.lookup_api_by_username(&username).await,
     ]
     .into_iter()
     .flatten()
@@ -242,7 +242,7 @@ async fn revoke_user_tokens(
 
     let now = chrono::Utc::now().timestamp();
     for subject in &subjects {
-        if let Err(err) = app_state.token_revocations.revoke_subject(subject, now).await {
+        if let Err(err) = app_state.auth.token_revocations.revoke_subject(subject, now).await {
             error!("Cannot persist token revocation for '{username}': {err}");
             return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
@@ -260,7 +260,7 @@ async fn revoke_all_tokens(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> impl axum::response::IntoResponse + Send {
     let now = chrono::Utc::now().timestamp();
-    if let Err(err) = app_state.token_revocations.revoke_all(now).await {
+    if let Err(err) = app_state.auth.token_revocations.revoke_all(now).await {
         error!("Cannot persist a global token revocation: {err}");
         return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
@@ -285,7 +285,7 @@ async fn token_refresh(
                 let claims = token_data.claims;
                 // A revoked token must not be exchangeable for a fresh one -
                 // that would make revocation a formality.
-                if app_state.token_revocations.is_revoked(&claims).await {
+                if app_state.auth.token_revocations.is_revoked(&claims).await {
                     return axum::http::StatusCode::UNAUTHORIZED.into_response();
                 }
                 let username = claims.username.as_str();

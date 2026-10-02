@@ -254,6 +254,7 @@ mod tests {
             recent_eviction_reentry_ttl_ms: None,
             hls_session_ttl_secs: None,
             provider_affinity_ttl_secs: None,
+            hls_wrap_media_playlist: None,
             grace: None,
             provider_max_connections: None,
             provider_pool: Vec::new(),

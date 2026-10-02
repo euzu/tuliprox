@@ -11,11 +11,11 @@ use crate::{
     api::model::{
         recording_notification::LifecycleEvent, ActiveProviderManager, ActiveUserManager, AppState, CancelTokens,
         ConnectionManager, DownloadControl, DownloadKind, DownloadQueue, DownloadState, EventManager, EventMessage,
-        FileDownload, MetadataUpdateManager, PlaylistStorageState, SharedStreamManager, UpdateGuard,
+        FileDownload, MetadataUpdateManager, PlaylistStorageState, SharedStreamManager,
     },
     model::{
         ApiProxyConfig, ApiProxyServerInfo, AppConfig, Config, ConfigInput, MediaToolCapabilities, MessageContent,
-        ProcessTargets, SourcesConfig,
+        SourcesConfig,
     },
     repository::GeoIp,
     utils::FileLockManager,
@@ -31,7 +31,7 @@ use shared::{
     utils::Internable,
 };
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::RwLock;
 
 fn make_download(
     kind: DownloadKind,
@@ -564,44 +564,25 @@ fn create_test_app_state_with_downloads(downloads: Arc<DownloadQueue>) -> Arc<Ap
 
     let tokens = CancelTokens::default();
     let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
-    let (manual_update_sender, _) = mpsc::channel::<crate::api::model::ManualPlaylistUpdateRequest>(1);
 
     Arc::new(AppState {
-        forced_targets: Arc::new(ArcSwap::from_pointee(ProcessTargets {
-            enabled: false,
-            inputs: Vec::new(),
-            targets: Vec::new(),
-            target_names: Vec::new(),
-        })),
         app_config: app_cfg,
-        http_client: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-        http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-        public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-        resource_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-        resource_public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+        http_clients: Arc::default(),
         downloads,
         cache: Arc::new(ArcSwapOption::default()),
         shared_stream_manager,
-        hls_proxy: Arc::new(crate::api::model::HlsProxyManager::new()),
-        hls_provisioning: Arc::new(crate::api::model::HlsProvisioningState::new()),
-        stalker_resolve_coordinator: Arc::default(),
+        hls: crate::api::model::HlsState::new(Arc::new(crate::api::model::HlsProxyManager::new())),
+        stalker_resolve_coordinator: crate::api::model::StalkerResolveCoordinator::default(),
         active_users,
         active_provider,
         connection_manager,
         event_manager,
-        cancel_tokens: Arc::new(ArcSwap::from_pointee(tokens)),
+        cancel_tokens: ArcSwap::from_pointee(tokens),
         playlists: Arc::new(PlaylistStorageState::new()),
         geoip,
-        update_guard: UpdateGuard::new(),
         metadata_manager,
-        identity_registry: Arc::new(tuliprox_repository::identity_registry::IdentityRegistry::empty(
-            std::path::PathBuf::new(),
-        )),
-        login_throttle: Arc::new(crate::auth::LoginThrottle::new()),
-        token_revocations: Arc::new(tuliprox_repository::token_revocations::TokenRevocations::empty(
-            std::path::PathBuf::new(),
-        )),
-        manual_update_sender,
+        auth: crate::api::model::AuthState::for_tests(),
+        playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests(),
     })
 }
 
