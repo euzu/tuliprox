@@ -6250,6 +6250,11 @@ async fn provider_session_headers_are_scoped_to_the_host_that_set_them() {
     let session = manager.get_and_update_user_session(&user.username, "tok-host").await.expect("session exists");
     assert_eq!(session.provider_session_headers_for("http://cdn.example/a/video.m3u8"), Some(&headers));
     assert_eq!(session.provider_session_headers_for("http://entry.example/live/1.m3u8"), None);
+    assert_eq!(
+        session.provider_session_headers_for("https://cdn.example:80/a/video.m3u8"),
+        None,
+        "same host and port with another scheme is another origin"
+    );
 
     create_provider_header_session(&manager, &user, "http://other.example/a/video.m3u8").await;
     let session = manager.get_and_update_user_session(&user.username, "tok-host").await.expect("session exists");

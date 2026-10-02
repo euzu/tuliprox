@@ -114,7 +114,10 @@ fn handoff_ttl(content: &str) -> Duration {
         .find_map(|line| line.trim().strip_prefix("#EXT-X-TARGETDURATION:"))
         .and_then(|value| value.trim().parse::<f64>().ok())
         .filter(|secs| secs.is_finite() && *secs > 0.0)
-        .map_or(HLS_PLAYLIST_HANDOFF_MAX_TTL, |secs| Duration::from_secs_f64(secs).min(HLS_PLAYLIST_HANDOFF_MAX_TTL))
+        .map_or(HLS_PLAYLIST_HANDOFF_MAX_TTL, |secs| {
+            // Cap before converting: `Duration::from_secs_f64` panics on values beyond `Duration::MAX`.
+            Duration::from_secs_f64(secs.min(HLS_PLAYLIST_HANDOFF_MAX_TTL.as_secs_f64()))
+        })
 }
 
 #[cfg(test)]
@@ -158,6 +161,11 @@ mod tests {
         assert!(cache.take_at("s", "u", now + Duration::from_millis(3_100)).is_none());
         cache.insert_at("s", "u", long.to_string(), Arc::from("p"), None, now);
         assert!(cache.take_at("s", "u", now + Duration::from_millis(2_900)).is_some());
+    }
+
+    #[test]
+    fn oversized_target_duration_is_capped_without_panicking() {
+        assert_eq!(super::handoff_ttl("#EXTM3U\n#EXT-X-TARGETDURATION:1e300\n"), super::HLS_PLAYLIST_HANDOFF_MAX_TTL);
     }
 
     #[test]

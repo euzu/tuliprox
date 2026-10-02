@@ -132,7 +132,7 @@ impl PlaybackLifecycle {
 /// `host:port` of a URL, used to scope provider session cookies.
 fn url_host_key(url: &str) -> Option<String> {
     let url = url::Url::parse(url).ok()?;
-    Some(format!("{}:{}", url.host_str()?, url.port_or_known_default()?))
+    Some(format!("{}://{}:{}", url.scheme(), url.host_str()?, url.port_or_known_default()?))
 }
 
 #[derive(Clone, Debug)]
@@ -143,7 +143,7 @@ pub struct UserSession {
     pub provider: Arc<str>,
     pub stream_url: Arc<str>,
     pub provider_session_headers: HashMap<String, String>,
-    /// Host (`host:port`) whose response set `provider_session_headers`; `None` when unknown.
+    /// Origin (`scheme://host:port`) whose response set `provider_session_headers`; `None` when unknown.
     pub provider_session_headers_host: Option<String>,
     /// Shared with the response body so media confirmation survives a released VOD lease.
     pub media_started: Arc<AtomicBool>,
@@ -160,8 +160,8 @@ pub struct UserSession {
 }
 
 impl UserSession {
-    /// Provider session headers that may be sent to `target_url`: only to the host that set
-    /// them, or unconditionally when that host is unknown.
+    /// Provider session headers that may be sent to `target_url`: only to the origin (scheme,
+    /// host and port) that set them, or unconditionally when that origin is unknown.
     pub fn provider_session_headers_for(&self, target_url: &str) -> Option<&HashMap<String, String>> {
         if self.provider_session_headers.is_empty() {
             return None;
