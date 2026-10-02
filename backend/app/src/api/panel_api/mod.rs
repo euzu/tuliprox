@@ -575,7 +575,7 @@ fn panel_api_retry_after_from_headers(headers: &HeaderMap) -> Duration {
 }
 
 async fn panel_get_json(app_state: &AppState, url: Url) -> Result<Value, TuliproxError> {
-    let client = app_state.http_client.load();
+    let client = app_state.http_clients.default.load();
     let sanitized = sanitize_sensitive_info(url.as_str());
     for attempt in 0..PANEL_API_RETRY_ATTEMPTS {
         debug_if_enabled!("panel_api request attempt {} of {}: {}", attempt + 1, PANEL_API_RETRY_ATTEMPTS, sanitized);
@@ -641,7 +641,7 @@ fn build_user_api_account_info_input_source(
 }
 
 async fn user_api_get_json(app_state: &AppState, input_source: &InputSource) -> Result<Value, TuliproxError> {
-    let client = app_state.http_client.load();
+    let client = app_state.http_clients.default.load();
     let url = Url::parse(input_source.url.as_str()).map_err(|e| {
         TuliproxError::ConfigPanelApi(format!(
             "panel_api user_api invalid url {}: {e}",
@@ -3452,7 +3452,7 @@ async fn probe_panel_api_test_url(
     input_source: &InputSource,
     method: PanelApiProvisioningMethod,
 ) -> Result<StatusCode, io::Error> {
-    let client = app_state.http_client.load();
+    let client = app_state.http_clients.default.load();
     let request_method = provisioning_method_to_reqwest(method);
     let test_url = Url::parse(input_source.url.as_str()).map_err(|err| {
         string_to_io_error(format!(

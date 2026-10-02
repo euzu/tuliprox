@@ -13,7 +13,8 @@ use crate::{
         endpoints::{
             hls_api::{
                 build_virtual_hls_entry_path, handle_hls_stream_request, hls_admission_failure_manifest_response,
-                hls_custom_video_manifest_response, m3u_archive_epg_reference_ts, HlsEntryStreamContext,
+                hls_custom_video_manifest_response, m3u_archive_epg_reference_ts, user_allows_entry_content,
+                HlsEntryOutputScope, HlsEntryStreamContext, HlsRequestStage,
             },
             xtream_api::{ApiStreamContext, ApiStreamRequest},
         },
@@ -161,9 +162,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
 
     let is_hls_manifest_request = effective_playback_extension(pli.item_type, &pli.url, stream_ext) == Some(HLS_EXT);
 
-    if !user.allows_item_type(pli.item_type)
-        || !(user.t_filter.is_none() || user.allows_content(&shared::model::PlaylistItem::from(&pli)))
-    {
+    if !user_allows_entry_content(&user, HlsEntryOutputScope::ItemType(pli.item_type), &pli) {
         if is_hls_manifest_request {
             return hls_custom_video_manifest_response(
                 app_state,
@@ -489,6 +488,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
             connection_permission,
             Some(connection_kind),
             &original_hls_entry_path,
+            HlsRequestStage::Entry,
         )
         .await
         .into_response();

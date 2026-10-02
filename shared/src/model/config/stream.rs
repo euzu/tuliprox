@@ -112,6 +112,11 @@ pub struct StreamConfigDto {
         skip_serializing_if = "is_default_provider_affinity_ttl_secs"
     )]
     pub provider_affinity_ttl_secs: u64,
+    /// If true (default), proxied live HLS entry requests whose upstream returns a media
+    /// playlist answer with a single-variant master playlist pointing at a sealed token URL,
+    /// so playlist refreshes keep their playback owner across client IP changes.
+    #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
+    pub hls_wrap_media_playlist: bool,
     #[serde(default, skip)]
     pub throttle_kbps: u64,
     #[serde(default = "default_shared_burst_buffer_mb", skip_serializing_if = "is_default_shared_burst_buffer_mb")]
@@ -154,6 +159,7 @@ impl Default for StreamConfigDto {
             hls_session_ttl_secs: default_hls_session_ttl_secs(),
             catchup_session_ttl_secs: default_catchup_session_ttl_secs(),
             provider_affinity_ttl_secs: default_provider_affinity_ttl_secs(),
+            hls_wrap_media_playlist: true,
             admission_strategies: None,
         }
     }
@@ -176,6 +182,7 @@ impl StreamConfigDto {
             && self.hls_session_ttl_secs == default_hls_session_ttl_secs()
             && self.catchup_session_ttl_secs == default_catchup_session_ttl_secs()
             && self.provider_affinity_ttl_secs == default_provider_affinity_ttl_secs()
+            && self.hls_wrap_media_playlist
             && self.admission_strategies.is_none()
     }
 
@@ -315,6 +322,19 @@ mod tests {
         assert_eq!(dto.provider_affinity_ttl_secs, 0);
         assert!(!dto.is_empty());
         assert!(serde_json::to_string(&dto)?.contains("\"provider_affinity_ttl_secs\":0"));
+        Ok(())
+    }
+
+    #[test]
+    fn hls_wrap_media_playlist_defaults_to_true_and_disabling_is_not_empty() -> Result<(), serde_json::Error> {
+        let dto: StreamConfigDto = serde_json::from_str("{}")?;
+        assert!(dto.hls_wrap_media_playlist);
+        assert!(!serde_json::to_string(&dto)?.contains("hls_wrap_media_playlist"));
+
+        let dto: StreamConfigDto = serde_json::from_str(r#"{"hls_wrap_media_playlist":false}"#)?;
+        assert!(!dto.hls_wrap_media_playlist);
+        assert!(!dto.is_empty());
+        assert!(serde_json::to_string(&dto)?.contains("\"hls_wrap_media_playlist\":false"));
         Ok(())
     }
 

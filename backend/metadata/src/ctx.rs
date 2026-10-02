@@ -6,11 +6,9 @@
 //! removes the cycle - none of them reach back here - so they are held strongly.
 //! The late binding stays: they are still constructed after the worker.
 
-use arc_swap::ArcSwap;
-use reqwest::Client;
 use shared::model::EventSink;
 use std::sync::Arc;
-use tuliprox_core::model::{AppConfig, UpdateGuard};
+use tuliprox_core::model::{AppConfig, HttpClients, UpdateGuard};
 use tuliprox_repository::PlaylistStorageState;
 use tuliprox_session::{ActiveProviderManager, ConnectionManager, EventManager};
 
@@ -29,10 +27,8 @@ pub struct MetadataUpdateCtx<E: EventSink> {
     pub playlists: Arc<PlaylistStorageState>,
     /// Guards a playlist update against concurrent metadata writes.
     pub update_guard: UpdateGuard,
-    /// Shared HTTP client, swapped when the proxy configuration changes.
-    pub http_client: Arc<ArcSwap<Client>>,
-    /// Client that does not follow redirects, for provider requests.
-    pub http_client_no_redirect: Arc<ArcSwap<Client>>,
+    /// Outbound clients, swapped when the proxy configuration changes.
+    pub http_clients: Arc<HttpClients>,
 }
 
 /// The instantiation the long-lived worker stores.

@@ -89,6 +89,9 @@ In plain language:
 - catchup usually gets a somewhat longer one
 - after either window, a playback that comes back still prefers the provider account that last delivered its media for
   `provider_affinity_ttl_secs` (default `120`); this preference holds no connection slot
+- with `hls_wrap_media_playlist` (default `true`) and the shared HLS cache off, a proxied live HLS player refreshes a
+  sealed token URL instead of the entry URL, so its playback keeps the same session and provider account when its
+  client IP changes; a refresh after session expiry recreates the session from that token
 
 ## What the session TTL does not mean
 

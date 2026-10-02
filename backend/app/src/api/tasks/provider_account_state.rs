@@ -53,7 +53,7 @@ pub(super) async fn persist_provider_account_observations(app_state: &Arc<AppSta
         )
         .with_severity(shared::model::notification::Severity::Error)
         .with_dedup_key(format!("provider-account-persistence:{name}"));
-        let client = app_state.http_client.load();
+        let client = app_state.http_clients.default.load();
         tuliprox_messaging::send_event(&app_state.app_config, &client, event).await;
     }
 }

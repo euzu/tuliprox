@@ -751,7 +751,7 @@ impl Stream for ActiveClientStream {
                                 DeferredProviderOpenState::Pending(context) => {
                                     let app_state = Arc::clone(&context.app_state);
                                     let client = {
-                                        let http_client = app_state.http_client.load();
+                                        let http_client = app_state.http_clients.default.load();
                                         http_client.as_ref().clone()
                                     };
                                     let lifecycle = self
@@ -1601,12 +1601,11 @@ mod tests {
             BoxedProviderStream, CancelTokens, ConnectionManager, CreateUserSessionParams, CustomVideoStreamType,
             DownloadQueue, EventManager, GraceResolutionContext, MetadataUpdateManager, PlaylistStorageState,
             ProviderContentRepresentationMode, ProviderHandle, SharedStreamManager, StreamDetails, StreamError,
-            UpdateGuard,
         },
         auth::Fingerprint,
         model::{
-            AppConfig, Config, ConfigInput, GracePeriodOptions, MediaToolCapabilities, ProcessTargets,
-            ProxyUserCredentials, SourcesConfig, StreamConfig,
+            AppConfig, Config, ConfigInput, GracePeriodOptions, MediaToolCapabilities, ProxyUserCredentials,
+            SourcesConfig, StreamConfig,
         },
         repository::GeoIp,
         utils::FileLockManager,
@@ -1616,7 +1615,6 @@ mod tests {
     use bytes::Bytes;
     use futures::{pin_mut, StreamExt};
     use http_body_util::BodyExt;
-    use reqwest::Client;
     use shared::{
         model::{
             AdmissionStrategy, ConfigPaths, InputFetchMethod, InputType, PlaylistItemType, StreamChannel,
@@ -1635,7 +1633,7 @@ mod tests {
         task::{Context, Poll},
         time::Duration,
     };
-    use tokio::sync::{mpsc, oneshot, Notify};
+    use tokio::sync::{oneshot, Notify};
     use tokio_util::sync::CancellationToken;
 
     fn create_test_app_config() -> AppConfig {
@@ -1716,44 +1714,25 @@ mod tests {
 
         let tokens = CancelTokens::default();
         let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
-        let (manual_update_sender, _) = mpsc::channel::<crate::api::model::ManualPlaylistUpdateRequest>(1);
 
         Arc::new(AppState {
-            forced_targets: Arc::new(ArcSwap::from_pointee(ProcessTargets {
-                enabled: false,
-                inputs: Vec::new(),
-                targets: Vec::new(),
-                target_names: Vec::new(),
-            })),
             app_config: app_cfg,
-            http_client: Arc::new(ArcSwap::from_pointee(Client::new())),
-            http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
-            public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
-            resource_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-            resource_public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+            http_clients: Arc::default(),
             downloads: Arc::new(DownloadQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,
-            hls_proxy: Arc::new(crate::api::model::HlsProxyManager::new()),
-            hls_provisioning: Arc::new(crate::api::model::HlsProvisioningState::new()),
-            stalker_resolve_coordinator: Arc::default(),
+            hls: crate::api::model::HlsState::new(Arc::new(crate::api::model::HlsProxyManager::new())),
+            stalker_resolve_coordinator: crate::api::model::StalkerResolveCoordinator::default(),
             active_users,
             active_provider,
             connection_manager,
             event_manager,
-            cancel_tokens: Arc::new(ArcSwap::from_pointee(tokens)),
+            cancel_tokens: ArcSwap::from_pointee(tokens),
             playlists: Arc::new(PlaylistStorageState::new()),
             geoip,
-            update_guard: UpdateGuard::new(),
             metadata_manager,
-            identity_registry: Arc::new(tuliprox_repository::identity_registry::IdentityRegistry::empty(
-                std::path::PathBuf::new(),
-            )),
-            login_throttle: Arc::new(crate::auth::LoginThrottle::new()),
-            token_revocations: Arc::new(tuliprox_repository::token_revocations::TokenRevocations::empty(
-                std::path::PathBuf::new(),
-            )),
-            manual_update_sender,
+            auth: crate::api::model::AuthState::for_tests(),
+            playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests(),
         })
     }
 
@@ -1797,44 +1776,25 @@ mod tests {
 
         let tokens = CancelTokens::default();
         let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
-        let (manual_update_sender, _) = mpsc::channel::<crate::api::model::ManualPlaylistUpdateRequest>(1);
 
         Arc::new(AppState {
-            forced_targets: Arc::new(ArcSwap::from_pointee(ProcessTargets {
-                enabled: false,
-                inputs: Vec::new(),
-                targets: Vec::new(),
-                target_names: Vec::new(),
-            })),
             app_config: Arc::new(app_cfg),
-            http_client: Arc::new(ArcSwap::from_pointee(Client::new())),
-            http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
-            public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
-            resource_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-            resource_public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+            http_clients: Arc::default(),
             downloads: Arc::new(DownloadQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,
-            hls_proxy: Arc::new(crate::api::model::HlsProxyManager::new()),
-            hls_provisioning: Arc::new(crate::api::model::HlsProvisioningState::new()),
-            stalker_resolve_coordinator: Arc::default(),
+            hls: crate::api::model::HlsState::new(Arc::new(crate::api::model::HlsProxyManager::new())),
+            stalker_resolve_coordinator: crate::api::model::StalkerResolveCoordinator::default(),
             active_users,
             active_provider,
             connection_manager,
             event_manager,
-            cancel_tokens: Arc::new(ArcSwap::from_pointee(tokens)),
+            cancel_tokens: ArcSwap::from_pointee(tokens),
             playlists: Arc::new(PlaylistStorageState::new()),
             geoip,
-            update_guard: UpdateGuard::new(),
             metadata_manager,
-            identity_registry: Arc::new(tuliprox_repository::identity_registry::IdentityRegistry::empty(
-                std::path::PathBuf::new(),
-            )),
-            login_throttle: Arc::new(crate::auth::LoginThrottle::new()),
-            token_revocations: Arc::new(tuliprox_repository::token_revocations::TokenRevocations::empty(
-                std::path::PathBuf::new(),
-            )),
-            manual_update_sender,
+            auth: crate::api::model::AuthState::for_tests(),
+            playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests(),
         })
     }
 
@@ -2869,6 +2829,7 @@ mod tests {
             hls_session_ttl_secs: 10,
             catchup_session_ttl_secs: 10,
             provider_affinity_ttl_secs: 120,
+            hls_wrap_media_playlist: true,
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
@@ -3145,6 +3106,7 @@ mod tests {
             hls_session_ttl_secs: 10,
             catchup_session_ttl_secs: 10,
             provider_affinity_ttl_secs: 120,
+            hls_wrap_media_playlist: true,
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,

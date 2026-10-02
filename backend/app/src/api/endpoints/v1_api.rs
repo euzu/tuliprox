@@ -39,7 +39,7 @@ pub const API_V1_PATH: &str = "api/v1";
 async fn create_ipinfo_check(app_state: &Arc<AppState>) -> Option<(Option<String>, Option<String>)> {
     let config = app_state.app_config.config.load();
     if let Some(ipcheck) = config.ipcheck.as_ref() {
-        if let Ok(check) = get_ips(&app_state.http_client.load(), ipcheck).await {
+        if let Ok(check) = get_ips(&app_state.http_clients.default.load(), ipcheck).await {
             return Some(check);
         }
     }
@@ -141,7 +141,7 @@ async fn streams(
 async fn geoip_update(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> axum::response::Response {
-    match update_geoip_db(&app_state.app_config, &app_state.http_client.load(), &app_state.geoip).await {
+    match update_geoip_db(&app_state.app_config, &app_state.http_clients.default.load(), &app_state.geoip).await {
         Ok(()) => axum::http::StatusCode::OK.into_response(),
         Err(GeoIpUpdateError::Disabled | GeoIpUpdateError::DownloadFailed(_)) => {
             axum::http::StatusCode::BAD_REQUEST.into_response()

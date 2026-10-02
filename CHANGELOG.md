@@ -1025,6 +1025,28 @@
 
 ## 🐛 Fixes
 
+- **Proxied live HLS keeps its provider account when the client IP changes.** A player that refreshes its playlist
+  from alternating client IPs (dual-stack IPv4/IPv6, WLAN/mobile switching behind a reverse proxy) created a new
+  playback owner on every IP change. The new owner had no lease or provider affinity, went through normal lineup
+  selection and could land on another provider account, so the provider saw one playback on two accounts. With the
+  shared HLS cache off, an entry request whose provider returns a media playlist is now answered with a single-variant
+  master playlist. Its variant URI is a sealed token that carries the session token, so every refresh keeps the original
+  owner, lease and affinity. The playlist downloaded on the entry request is handed to the immediate variant request,
+  so channel start does not fetch the same playlist twice. A refresh after the session has expired recreates the
+  session from the token and runs the same access checks and admission as the entry route; a session that was
+  evicted, kicked or terminated is not recreated.
+- **HLS tokens carry an explicit resource kind.** Manifest and media references are classified from the playlist and
+  the tag that references them instead of the `.m3u8` extension, so catch-up manifests behind `.ts` or extensionless
+  URLs are admitted as playlist requests and rewritten as playlists, also with a `Range` header. Playlists that list
+  other playlists under `#EXTINF` count as master playlists. Child manifests are only fetched from the provider account
+  that resolved them (a stale one answers `404` without ending the playback), and a media URI resolved by another
+  account answers `404` instead of being fetched with that account's credentials; manifest refreshes forward the provider
+  session cookies stored for the playback, only to the host that set them, and catch-up refreshes renew the lease with
+  `catchup_session_ttl_secs`. Provider session cookies now survive URL changes on the same host.
+- **An upstream response that is not an HLS playlist is a failed manifest.** HTML or JSON bodies answered with `200`
+  were rewritten and served as a playlist. On an entry request they now end the session and return the
+  channel-unavailable manifest; on a playlist refresh they answer `502` and keep the session, so the player retries.
+
 - **A continuing playback keeps its provider after its reconnect window ends.** When an HLS player paused requests
   longer than `hls_session_ttl_secs`, its lease expired and the next request ran priority selection again, so a playback
   that had fallen back to an alias moved back to the primary account and then back to the alias. A playback now returns
@@ -1464,6 +1486,10 @@
 ## ⚙️ New Settings
 
 - **config.yml (`reverse_proxy.stream`)**:
+  - `hls_wrap_media_playlist` (default `true`): answers a proxied live HLS entry request whose provider returns a media
+    playlist with a single-variant master playlist, so playlist refreshes keep their provider account across client
+    IP changes. Applies only while the shared HLS cache is off for the target. Disable it for players that mishandle a
+    master playlist. Editable in the Web UI under Reverse Proxy → Stream.
   - `provider_affinity_ttl_secs` (default `120`): seconds a playback keeps preferring its last provider after the
     reconnect window has ended. It reserves no capacity. `0` ends the preference together with the reconnect window;
     values above `86400` are rejected. Editable in the Web UI under Reverse Proxy → Stream.

@@ -344,7 +344,7 @@ fn classify_response_status(status: reqwest::StatusCode) -> Result<(), FetchErro
 }
 
 async fn fetch_expiry_date(app_state: &AppState, account: &Account, url: &str) -> Result<i64, FetchError> {
-    let client = app_state.http_client.load();
+    let client = app_state.http_clients.default.load();
     let response = client
         .get(url)
         .headers(request::get_request_headers(Some(&account.headers), None, None, None))

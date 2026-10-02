@@ -220,7 +220,7 @@ impl ConfigFile {
         app_state: &Arc<AppState>,
         prepared: PreparedSourcesReload,
     ) -> Result<(), TuliproxError> {
-        let current_forced = app_state.forced_targets.load_full();
+        let current_forced = app_state.playlist_updates.forced_targets.load_full();
         let validated_forced = refresh_forced_targets(current_forced, &prepared.sources);
 
         update_app_state_sources(app_state, prepared.sources, Some(validated_forced)).await?;
@@ -327,7 +327,7 @@ impl ConfigFile {
 
         let previous_config: Config = (*app_state.app_config.config.load_full()).clone();
         let previous_sources: SourcesConfig = (*app_state.app_config.sources.load_full()).clone();
-        let previous_forced_targets = app_state.forced_targets.load_full();
+        let previous_forced_targets = app_state.playlist_updates.forced_targets.load_full();
 
         // Update live state only after every dependent value has been prepared.
         if let Err(err) = update_app_state_config(app_state, config).await {

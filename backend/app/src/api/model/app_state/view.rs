@@ -46,29 +46,29 @@ impl AppState {
 /// fields it clones. Field names are the same on both sides by construction -
 /// a view renaming a handle would be a view lying about what it reads.
 ///
-/// The one permitted exception is `ctx_field <- state_field`, for a context
+/// The one permitted exception is `ctx_field <- state_path`, for a context
 /// that is generic over a handle `AppState` holds concretely - `events <-
-/// event_manager`. The context names the handle by the role it plays,
-/// because it is written against a bound rather than against
-/// `EventManager`; the view still reads exactly the handle it names.
+/// event_manager` - or for a handle `AppState` keeps inside a container -
+/// `hls_proxy <- hls.proxy`. The context names the handle by the role it
+/// plays; the view still reads exactly the handle it names.
 macro_rules! view_field {
     ($state:ident, $field:ident) => {
         ::core::clone::Clone::clone(&$state.$field)
     };
-    ($state:ident, $field:ident, $source:ident) => {
-        ::core::clone::Clone::clone(&$state.$source)
+    ($state:ident, $field:ident, $($source:ident).+) => {
+        ::core::clone::Clone::clone(&$state.$($source).+)
     };
 }
 
 macro_rules! app_state_views {
     ($(
         $(#[$meta:meta])*
-        $accessor:ident => $ctx:ty { $($field:ident $(<- $source:ident)?),+ $(,)? }
+        $accessor:ident => $ctx:ty { $($field:ident $(<- $($source:ident).+)?),+ $(,)? }
     )+) => {
         $(
             impl AppStateView for $ctx {
                 fn from_app_state(state: &AppState) -> Self {
-                    Self { $($field: view_field!(state, $field $(, $source)?)),+ }
+                    Self { $($field: view_field!(state, $field $(, $($source).+)?)),+ }
                 }
             }
 
@@ -86,13 +86,13 @@ macro_rules! app_state_views {
 app_state_views! {
     /// The handles the DVR needs: the recording queue and what feeds it.
     recording_ctx => crate::api::model::recording::recording_ctx::RecordingCtx<std::sync::Arc<tuliprox_session::EventManager>> {
-        app_config, downloads, events <- event_manager, http_client,
+        app_config, downloads, events <- event_manager, http_clients,
     }
 
     /// The handles the HLS proxy needs: itself, plus provider allocation and
     /// session accounting.
     hls_ctx => crate::api::model::hls_cache::HlsCtx {
-        app_config, hls_proxy, active_provider, connection_manager, active_users,
+        app_config, hls_proxy <- hls.proxy, active_provider, connection_manager, active_users,
     }
 
     /// The handles admission reads: it decides over connections and users.
@@ -103,12 +103,12 @@ app_state_views! {
     /// The handles the provider side of a stream needs: the redirect-aware
     /// HTTP clients.
     provider_stream_ctx => tuliprox_session::stream_ctx::ProviderStreamCtx {
-        app_config, active_provider, connection_manager, http_client_no_redirect, public_http_client_no_redirect,
+        app_config, active_provider, connection_manager, http_clients,
     }
 
     /// The handles the background metadata worker reads.
     metadata_update_ctx => tuliprox_metadata::ctx::BoundMetadataUpdateCtx {
-        app_config, active_provider, connection_manager, events <- event_manager, playlists, update_guard,
-        http_client, http_client_no_redirect,
+        app_config, active_provider, connection_manager, events <- event_manager, playlists,
+        update_guard <- playlist_updates.update_guard, http_clients,
     }
 }

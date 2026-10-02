@@ -2991,9 +2991,9 @@ impl InputWorker {
             .unwrap_or(input_base);
 
         let client = if tuliprox_core::model::should_use_manual_redirects(&ctx.app_config) {
-            ctx.http_client_no_redirect.load()
+            ctx.http_clients.no_redirect.load()
         } else {
-            ctx.http_client.load()
+            ctx.http_clients.default.load()
         };
 
         // Execute task; probe tasks get a reserved provider handle, resolve tasks don't.

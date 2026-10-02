@@ -58,6 +58,9 @@ pub struct PolicyContract {
     /// Overrides `reverse_proxy.stream.provider_affinity_ttl_secs`.
     #[serde(default)]
     pub provider_affinity_ttl_secs: Option<u64>,
+    /// Overrides `reverse_proxy.stream.hls_wrap_media_playlist`.
+    #[serde(default)]
+    pub hls_wrap_media_playlist: Option<bool>,
     #[serde(default)]
     pub grace: Option<GraceContract>,
     #[serde(default)]

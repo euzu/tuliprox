@@ -4,7 +4,10 @@ pub use crate::repository::{
 };
 use crate::{
     api::{
-        endpoints::xtream_api::{get_xtream_player_api_stream_url, ApiStreamContext},
+        endpoints::{
+            hls_api::{hls_media_playlist_wrap_enabled, wrap_media_playlist, HlsMediaPlaylistWrap},
+            xtream_api::{get_xtream_player_api_stream_url, ApiStreamContext},
+        },
         model::{
             create_active_client_stream, create_channel_unavailable_stream, create_custom_video_stream_response,
             create_provider_connections_exhausted_stream, get_custom_stream_response_error_status,
@@ -29,7 +32,7 @@ use crate::{
         AppConfig, ConfigInput, ConfigInputFlags, ConfigTarget, InputUserInfo, PlaybackKind, ProxyUserCredentials,
     },
     processing::{
-        parser::hls::{rewrite_hls, RewriteHlsProps},
+        parser::hls::{classify_hls_playlist, rewrite_hls, HlsPlaylistKind, RewriteHlsProps},
         processor::re_resolve_stalker_url,
     },
     repository::load_input_m3u_stream_url,
@@ -1517,7 +1520,7 @@ async fn re_resolve_stalker_url_singleflight(
 ) -> Result<Option<Arc<str>>, TuliproxError> {
     let entry_lock = app_state.stalker_resolve_coordinator.guard_for(input.id, provider_id).await;
     let _flight = entry_lock.lock().await;
-    let client = app_state.http_client.load().as_ref().clone();
+    let client = app_state.http_clients.default.load().as_ref().clone();
     re_resolve_stalker_url(&app_state.app_config, &client, input, provider_id, kind, force_refresh).await
 }
 
@@ -1769,7 +1772,7 @@ async fn create_stream_response_details(
                                 .and_then(ProviderStreamOpenLifecycle::from_managed);
                             let provider_stream = match open_provider_stream_with_lifecycle(
                                 &app_state.provider_stream_ctx(),
-                                &app_state.http_client.load(),
+                                &app_state.http_clients.default.load(),
                                 provider_stream_factory_options,
                                 lifecycle,
                             )
@@ -1841,7 +1844,7 @@ async fn create_stream_response_details(
                                         .and_then(ProviderStreamOpenLifecycle::from_managed);
                                     let retried = open_provider_stream_with_lifecycle(
                                         &app_state.provider_stream_ctx(),
-                                        &app_state.http_client.load(),
+                                        &app_state.http_clients.default.load(),
                                         options,
                                         retry_lifecycle,
                                     )
@@ -2104,7 +2107,7 @@ async fn open_media_server_stream_for_input(
 ) -> Result<(BoxedProviderStream, ProviderStreamInfo), MediaServerError> {
     let stream_ref = parse_media_server_stream_ref(&input.name, stream_url)?;
     let range = req_headers.get(header::RANGE).and_then(|value| value.to_str().ok());
-    let http_client = MediaServerHttpClient::new(app_state.http_client.load().as_ref().clone());
+    let http_client = MediaServerHttpClient::new(app_state.http_clients.default.load().as_ref().clone());
 
     let response = match input.input_type {
         InputType::Plex => {
@@ -2589,7 +2592,7 @@ pub(crate) async fn stream_response(
 
     if item_type == PlaylistItemType::Catchup {
         if let Some(provider_stream) = stream_details.stream.take() {
-            let probe_deadline = Duration::from_millis(app_state.hls_proxy.origin_manifest_timeout_ms().max(1));
+            let probe_deadline = Duration::from_millis(app_state.hls.proxy.origin_manifest_timeout_ms().max(1));
             match probe_catchup_payload(provider_stream, probe_deadline).await {
                 Ok(CatchupPayload::Direct(provider_stream)) => stream_details.stream = Some(provider_stream),
                 Ok(CatchupPayload::HlsManifest(manifest)) => {
@@ -2995,6 +2998,7 @@ struct DetectedCatchupHlsResponseParams<'a> {
     fallback_stream_url: &'a str,
 }
 
+#[allow(clippy::too_many_lines)]
 async fn detected_catchup_hls_response(params: DetectedCatchupHlsResponseParams<'_>) -> axum::response::Response {
     let DetectedCatchupHlsResponseParams {
         app_state,
@@ -3023,6 +3027,11 @@ async fn detected_catchup_hls_response(params: DetectedCatchupHlsResponseParams<
         cleanup_failed_detected_catchup_hls(app_state, &mut stream_details, &user.username, session_token).await;
         return StatusCode::BAD_GATEWAY.into_response();
     };
+    let playlist_kind = classify_hls_playlist(content);
+    if playlist_kind == HlsPlaylistKind::Invalid {
+        cleanup_failed_detected_catchup_hls(app_state, &mut stream_details, &user.username, session_token).await;
+        return StatusCode::BAD_GATEWAY.into_response();
+    }
 
     let response_url = stream_details
         .stream_info
@@ -3042,6 +3051,8 @@ async fn detected_catchup_hls_response(params: DetectedCatchupHlsResponseParams<
             virtual_id: virtual_id.get(),
             input_id: input.id,
             user_token: Some(session_token),
+            origin_provider: Some(&provider),
+            playlist_kind: Some(playlist_kind),
         },
     );
 
@@ -3082,6 +3093,7 @@ async fn detected_catchup_hls_response(params: DetectedCatchupHlsResponseParams<
         PlaybackKind::Catchup,
         get_catchup_session_ttl_secs(app_state),
     );
+    let binding_tag = stream_details.provider_handle.as_ref().and_then(|handle| handle.handle()?.binding_tag);
     app_state.connection_manager.release_managed_provider_handle(stream_details.provider_handle.take());
     app_state
         .active_users
@@ -3089,6 +3101,29 @@ async fn detected_catchup_hls_response(params: DetectedCatchupHlsResponseParams<
         .await;
     app_state.active_users.clear_unbound_session_addr(&user.username, &created_session_token, &fingerprint.addr).await;
 
+    if playlist_kind == HlsPlaylistKind::Media && hls_media_playlist_wrap_enabled(app_state, target) {
+        let master = wrap_media_playlist(
+            HlsMediaPlaylistWrap {
+                app_state,
+                user,
+                base_url: &base_url,
+                target_id: target.id,
+                input,
+                virtual_id: virtual_id.get(),
+                session_token: &created_session_token,
+                // The canonical catch-up URL, not the provider-resolved one, so a refresh can
+                // resolve it to whichever account is selected then.
+                sealed_url: fallback_stream_url,
+                provider: &provider,
+                binding_tag,
+                known_bitrate_bps: None,
+                stream_ref: None,
+            },
+            rewritten,
+        )
+        .await;
+        return catchup_hls_manifest_response(master);
+    }
     catchup_hls_manifest_response(rewritten)
 }
 
@@ -3889,9 +3924,9 @@ async fn fetch_resource_with_retry(
             true,
             |resolved_url| {
                 let http_client = if use_proxy_aware_client {
-                    app_state.resource_public_http_client_no_redirect.load()
+                    app_state.http_clients.resource_public_no_redirect.load()
                 } else {
-                    app_state.resource_http_client_no_redirect.load()
+                    app_state.http_clients.resource_no_redirect.load()
                 };
                 request::get_client_request(
                     &http_client,
@@ -4156,7 +4191,7 @@ async fn open_media_server_image_resource(
             .provider("media-server")
             .detail("media-server image input was not found")
     })?;
-    let http_client = MediaServerHttpClient::new(app_state.http_client.load().as_ref().clone());
+    let http_client = MediaServerHttpClient::new(app_state.http_clients.default.load().as_ref().clone());
 
     let response = match input.input_type {
         InputType::Plex => {

@@ -47,7 +47,7 @@ pub fn spawn_notification_bridge(app_state: &Arc<AppState>, cancel_token: &Cance
             match message {
                 Ok(message) => {
                     if let Some(event) = to_notification(&message) {
-                        let client = app_state.http_client.load();
+                        let client = app_state.http_clients.default.load();
                         tuliprox_messaging::send_event(&app_state.app_config, &client, event).await;
                     }
                 }

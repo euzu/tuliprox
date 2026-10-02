@@ -756,7 +756,7 @@ async fn config_batch_content(
             let input_source = InputSource::from(&*config_input).with_url(batch_url.to_owned());
             return match download_text_content(
                 &app_state.app_config,
-                &app_state.http_client.load(),
+                &app_state.http_clients.default.load(),
                 &input_source,
                 None,
                 None,
@@ -807,7 +807,7 @@ async fn get_xtream_login_info(
             return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()}))).into_response();
         }
     };
-    let http_client = app_state.http_client.load();
+    let http_client = app_state.http_clients.default.load();
     match xtream_login(&app_state.app_config, &http_client, &app_state.event_manager, &input_source, &request.username)
         .await
     {
@@ -1024,7 +1024,7 @@ async fn test_messaging(
     };
 
     let event = tuliprox_messaging::test_event(event_id);
-    let client = app_state.http_client.load();
+    let client = app_state.http_clients.default.load();
     let results = tuliprox_messaging::render_and_send_test(
         &app_state.app_config,
         &client,

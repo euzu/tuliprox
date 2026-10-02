@@ -8,7 +8,7 @@ use crate::{
     auth::Fingerprint,
     model::{
         AppConfig, Config, ConfigInput, ConfigInputAlias, ConfigProvider, ConfigTarget, GracePeriodOptions,
-        MediaToolCapabilities, NetworkAccess, ProcessTargets, ProxyUserCredentials, SourcesConfig, StreamHistoryConfig,
+        MediaToolCapabilities, NetworkAccess, ProxyUserCredentials, SourcesConfig, StreamHistoryConfig,
     },
     repository::GeoIp,
     utils::FileLockManager,
@@ -37,7 +37,7 @@ use std::{borrow::Cow, collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
-    sync::{mpsc, RwLock},
+    sync::RwLock,
 };
 use tuliprox_core::utils::response_compression::should_compress_response;
 use tuliprox_session::{
@@ -1236,6 +1236,7 @@ async fn forced_legacy_hls_test_response(
         provider: Arc::clone(&input.name),
         stream_url: origin_url.as_str().intern(),
         provider_session_headers: HashMap::new(),
+        provider_session_headers_host: None,
         media_started: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         user_agent_stream_index: None,
         addr: client_addr,
@@ -1385,6 +1386,7 @@ async fn forced_reopen_stays_on_pinned_provider_account() {
         provider: Arc::clone(&input.name),
         stream_url: format!("http://{origin_a}/live/1.ts").intern(),
         provider_session_headers: HashMap::new(),
+        provider_session_headers_host: None,
         media_started: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         user_agent_stream_index: None,
         addr: client_addr,
@@ -1465,6 +1467,7 @@ async fn overlapping_vod_range_requests_return_correct_account_bytes() {
         provider: Arc::clone(&input.name),
         stream_url: format!("http://{origin_addr}/movie/1.ts").intern(),
         provider_session_headers: HashMap::new(),
+        provider_session_headers_host: None,
         media_started: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         user_agent_stream_index: None,
         addr: client_addr,
@@ -1584,6 +1587,7 @@ async fn parallel_series_range_requests_keep_both_claims_active() {
         provider: Arc::clone(&input.name),
         stream_url: format!("http://{origin_addr}/series/1.ts").intern(),
         provider_session_headers: HashMap::new(),
+        provider_session_headers_host: None,
         media_started: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         user_agent_stream_index: None,
         addr: client_addr,
@@ -1935,6 +1939,7 @@ fn load_test_session(input: &ConfigInput, origin_addr: SocketAddr, token: &str, 
         provider: Arc::clone(&input.name),
         stream_url: format!("http://{origin_addr}/live/42.ts").intern(),
         provider_session_headers: HashMap::new(),
+        provider_session_headers_host: None,
         media_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         user_agent_stream_index: None,
         addr,
@@ -2221,6 +2226,7 @@ async fn direct_ts_eof_before_first_byte_releases_slot_without_idle_lease() {
         provider: Arc::clone(&input.name),
         stream_url: format!("http://{origin_addr}/live/42.ts").intern(),
         provider_session_headers: HashMap::new(),
+        provider_session_headers_host: None,
         media_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         user_agent_stream_index: None,
         addr: client_addr,
@@ -2311,6 +2317,7 @@ async fn direct_ts_abort_while_waiting_for_first_byte_releases_exact_request() {
         provider: Arc::clone(&input.name),
         stream_url: format!("http://{origin_addr}/live/42.ts").intern(),
         provider_session_headers: HashMap::new(),
+        provider_session_headers_host: None,
         media_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         user_agent_stream_index: None,
         addr: client_addr,
@@ -2677,6 +2684,7 @@ async fn parallel_vod_abort_preserves_sibling_claim_and_provider_stickiness() {
         provider: Arc::clone(&input.name),
         stream_url: format!("http://{origin_addr}/movie/1.ts").intern(),
         provider_session_headers: HashMap::new(),
+        provider_session_headers_host: None,
         media_started: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         user_agent_stream_index: None,
         addr: client_addr,
@@ -2837,6 +2845,7 @@ async fn parallel_series_abort_then_seek_reuses_account_without_stale_claim() {
         provider: Arc::clone(&input.name),
         stream_url: format!("http://{origin_addr}/series/1.ts").intern(),
         provider_session_headers: HashMap::new(),
+        provider_session_headers_host: None,
         media_started: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         user_agent_stream_index: None,
         addr: client_addr,
@@ -3455,6 +3464,7 @@ async fn catchup_abort_seek_and_window_change_preserve_correct_affinity() {
         provider: Arc::clone(&input.name),
         stream_url: format!("http://{origin_a}/timeshift/1.ts?window={window}").intern(),
         provider_session_headers: HashMap::new(),
+        provider_session_headers_host: None,
         media_started: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         user_agent_stream_index: None,
         addr: client_addr,
@@ -4557,6 +4567,7 @@ fn test_should_allow_exhausted_shared_reconnect_only_for_matching_shared_session
         provider: Arc::<str>::from("provider"),
         stream_url: Arc::<str>::from("http://provider/live/449924.ts"),
         provider_session_headers: HashMap::new(),
+        provider_session_headers_host: None,
         media_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         user_agent_stream_index: None,
         addr: "127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!()),
@@ -4752,44 +4763,25 @@ fn create_test_app_state_for_config(app_cfg: Arc<AppConfig>) -> Arc<AppState> {
 
     let tokens = CancelTokens::default();
     let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
-    let (manual_update_sender, _) = mpsc::channel::<crate::api::model::ManualPlaylistUpdateRequest>(1);
 
     Arc::new(AppState {
-        forced_targets: Arc::new(ArcSwap::from_pointee(ProcessTargets {
-            enabled: false,
-            inputs: Vec::new(),
-            targets: Vec::new(),
-            target_names: Vec::new(),
-        })),
         app_config: app_cfg,
-        http_client: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-        http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-        public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-        resource_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-        resource_public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+        http_clients: Arc::default(),
         downloads: Arc::new(crate::api::model::DownloadQueue::new()),
         cache: Arc::new(ArcSwapOption::default()),
         shared_stream_manager,
-        hls_proxy: Arc::new(crate::api::model::HlsProxyManager::new()),
-        hls_provisioning: Arc::new(crate::api::model::HlsProvisioningState::new()),
-        stalker_resolve_coordinator: Arc::default(),
+        hls: crate::api::model::HlsState::new(Arc::new(crate::api::model::HlsProxyManager::new())),
+        stalker_resolve_coordinator: crate::api::model::StalkerResolveCoordinator::default(),
         active_users,
         active_provider,
         connection_manager,
         event_manager,
-        cancel_tokens: Arc::new(ArcSwap::from_pointee(tokens)),
+        cancel_tokens: ArcSwap::from_pointee(tokens),
         playlists: Arc::new(PlaylistStorageState::new()),
         geoip,
-        update_guard: crate::api::model::UpdateGuard::new(),
         metadata_manager,
-        identity_registry: Arc::new(tuliprox_repository::identity_registry::IdentityRegistry::empty(
-            std::path::PathBuf::new(),
-        )),
-        login_throttle: Arc::new(crate::auth::LoginThrottle::new()),
-        token_revocations: Arc::new(tuliprox_repository::token_revocations::TokenRevocations::empty(
-            std::path::PathBuf::new(),
-        )),
-        manual_update_sender,
+        auth: crate::api::model::AuthState::for_tests(),
+        playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests(),
     })
 }
 
@@ -4822,8 +4814,8 @@ async fn resource_cache_is_used_only_by_matching_public_fetch_policy() {
     // The destination is public, so the hop is fetched through the public resource client; both resource
     // clients are mocked so the assertion below is about the cache, not about which client performed the
     // request.
-    app_state.resource_public_http_client_no_redirect.store(Arc::clone(&mock_client));
-    app_state.resource_http_client_no_redirect.store(mock_client);
+    app_state.http_clients.resource_public_no_redirect.store(Arc::clone(&mock_client));
+    app_state.http_clients.resource_no_redirect.store(mock_client);
 
     let public_response =
         resource_response(&app_state, ResourceFetchPolicy::Public, resource_url, &HeaderMap::new(), None)
@@ -4911,7 +4903,7 @@ async fn an_unresolved_resource_name_is_fetched_through_the_configured_proxy() {
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("mock proxy client");
-    app_state.resource_public_http_client_no_redirect.store(Arc::new(client));
+    app_state.http_clients.resource_public_no_redirect.store(Arc::new(client));
 
     let response =
         resource_proxy_response(&app_state, "http://unresolved.invalid/logo.png", &HeaderMap::new(), None).await;
@@ -4964,7 +4956,7 @@ async fn no_redirect_resource_refuses_destinations_local_to_this_host() {
     }));
     let client = crate::api::model::create_resource_http_client_no_redirect(&app_state.app_config)
         .expect("resource HTTP client");
-    app_state.resource_http_client_no_redirect.store(Arc::new(client));
+    app_state.http_clients.resource_no_redirect.store(Arc::new(client));
 
     for local_only in ["http://127.0.0.1/icon.png", "http://169.254.169.254/latest/meta-data/", "http://[::1]/icon.png"]
     {
@@ -4993,7 +4985,7 @@ async fn resource_redirect_hides_private_destination_and_upstream_location() {
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("mock upstream client");
-    app_state.resource_http_client_no_redirect.store(Arc::new(client));
+    app_state.http_clients.resource_no_redirect.store(Arc::new(client));
 
     let private = resource_redirect_or_proxy(&app_state, "http://10.0.0.1/icon.png", &HeaderMap::new(), None).await;
     assert_eq!(private.status(), StatusCode::OK);
@@ -5050,7 +5042,7 @@ async fn proxied_m3u_logo_follows_private_redirect_without_forwarding_credential
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("mock resource client");
-    app_state.resource_http_client_no_redirect.store(Arc::new(client));
+    app_state.http_clients.resource_no_redirect.store(Arc::new(client));
     let input = ConfigInput {
         url: "http://10.0.0.1/playlist.m3u".to_string(),
         headers: HashMap::from([("Authorization".to_string(), "Bearer secret".to_string())]),
@@ -5092,7 +5084,7 @@ async fn public_resource_is_fetched_through_the_configured_proxy() {
         .proxy(reqwest::Proxy::all(format!("http://{proxy_addr}")).expect("test proxy"))
         .build()
         .expect("mock proxy client");
-    app_state.resource_public_http_client_no_redirect.store(Arc::new(client));
+    app_state.http_clients.resource_public_no_redirect.store(Arc::new(client));
 
     let response = resource_proxy_response(&app_state, "http://8.8.8.8/logo.png", &HeaderMap::new(), None).await;
 
@@ -5120,7 +5112,7 @@ async fn proxied_resource_follows_a_redirect_into_the_public_network_through_the
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("mock private client");
-    app_state.resource_http_client_no_redirect.store(Arc::new(private_client));
+    app_state.http_clients.resource_no_redirect.store(Arc::new(private_client));
 
     let response_head = "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 3\r\nConnection: close\r\n\r\n";
     let (public_proxy_addr, public_proxy_task) =
@@ -5130,7 +5122,7 @@ async fn proxied_resource_follows_a_redirect_into_the_public_network_through_the
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("mock public client");
-    app_state.resource_public_http_client_no_redirect.store(Arc::new(public_client));
+    app_state.http_clients.resource_public_no_redirect.store(Arc::new(public_client));
 
     let response = resource_proxy_response(&app_state, "http://10.0.0.1/logo.png", &HeaderMap::new(), None).await;
 
@@ -5180,7 +5172,7 @@ async fn public_resource_redirect_to_a_destination_local_to_this_host_is_refused
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("mock client");
-    app_state.resource_public_http_client_no_redirect.store(Arc::new(client));
+    app_state.http_clients.resource_public_no_redirect.store(Arc::new(client));
 
     let response = resource_proxy_response(&app_state, "http://8.8.8.8/logo.png", &HeaderMap::new(), None).await;
 
@@ -5206,7 +5198,7 @@ async fn no_redirect_resource_does_not_relay_upstream_error_details() {
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("mock upstream client");
-    app_state.resource_http_client_no_redirect.store(Arc::new(client));
+    app_state.http_clients.resource_no_redirect.store(Arc::new(client));
 
     let response = resource_response(
         &app_state,
@@ -5341,6 +5333,7 @@ fn create_test_session(
             _ => "http://provider-1.example/live/42.ts",
         }),
         provider_session_headers: HashMap::new(),
+        provider_session_headers_host: None,
         media_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         user_agent_stream_index: None,
         addr: "127.0.0.1:55555".parse().unwrap_or_else(|_| unreachable!()),
@@ -5514,6 +5507,7 @@ async fn activate_session_before_stream_open_skips_placeholder_for_follow_up_ses
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
         provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -5605,6 +5599,7 @@ async fn activate_session_before_stream_open_revalidates_precomputed_follow_up_r
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
         provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -5681,6 +5676,7 @@ async fn activate_session_before_stream_open_stale_follow_up_reclassified_on_cou
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
         provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -5760,6 +5756,7 @@ async fn activate_session_before_stream_open_pre_resolved_grace_period_materiali
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
         provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -5857,6 +5854,7 @@ async fn activate_session_before_stream_open_skips_placeholder_for_prepare() {
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
         provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -5914,6 +5912,7 @@ async fn resolve_playback_request_admission_prepare_only_returns_prepare_class()
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
         provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -5961,6 +5960,7 @@ async fn resolve_playback_request_admission_terminate_returns_terminate_class() 
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
         provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -6041,6 +6041,7 @@ async fn activate_session_before_stream_open_marks_pending_provider_for_grace_ho
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
         provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -6151,6 +6152,7 @@ async fn activate_session_before_stream_open_does_not_commit_user_lease_before_p
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
         provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -6278,6 +6280,7 @@ async fn effective_admission_strategies_use_legacy_grace_when_field_missing() {
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
         provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -6305,6 +6308,7 @@ async fn effective_admission_strategies_respect_explicit_empty_list() {
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
         provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -6331,6 +6335,7 @@ async fn grace_context_is_populated_when_grace_strategy_is_actually_granted() {
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
         provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -6438,6 +6443,7 @@ async fn evaluate_remaining_strategies_evicts_after_used_grace() {
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
         provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -6611,6 +6617,7 @@ async fn evaluate_remaining_strategies_skips_no_match_and_uses_later_eviction() 
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
         provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -6713,6 +6720,7 @@ async fn evaluate_remaining_strategies_empty_slice_denies() {
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
         provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -6768,6 +6776,7 @@ async fn evaluate_remaining_strategies_preserves_soft_kind_on_exhausted() {
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
         provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -6830,6 +6839,7 @@ async fn evaluate_remaining_strategies_does_not_retry_used_prefix() {
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
         provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -6934,6 +6944,7 @@ async fn evaluate_remaining_strategies_empty_slice_uses_original_kind_not_contex
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
         provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -6999,6 +7010,7 @@ async fn evaluate_remaining_strategies_later_grace_uses_original_kind_not_contex
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
         provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -7099,6 +7111,7 @@ async fn resolve_admission_with_strategies_falls_through_after_failed_grace_gran
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
         provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -7301,6 +7314,7 @@ async fn resolve_admission_with_strategies_prevents_recently_evicted_playback_pi
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
         provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -7484,6 +7498,7 @@ async fn resolve_admission_with_strategies_allows_other_channel_after_recent_evi
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
         provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -7614,6 +7629,7 @@ async fn resolve_admission_with_strategies_does_not_suppress_different_session_o
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
         provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -7744,6 +7760,7 @@ async fn resolve_admission_with_strategies_allows_recently_evicted_playback_when
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
         provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -8815,6 +8832,7 @@ async fn resolve_admission_with_strategies_evicts_preserved_hls_session_for_same
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
         provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -9110,6 +9128,7 @@ async fn xtream_hls_then_ts_uses_distinct_tokens_and_evicts_old_hls_session() {
                 hls_session_ttl_secs: 10,
                 catchup_session_ttl_secs: 10,
                 provider_affinity_ttl_secs: 120,
+                hls_wrap_media_playlist: true,
                 throttle_str: None,
                 throttle_kbps: 0,
                 shared_burst_buffer_mb: 1,
@@ -9318,6 +9337,7 @@ fn session_reacquire_cleanup_addrs_excludes_current_and_deduplicates() {
         provider: "provider-a".intern(),
         stream_url: "http://localhost/movie.mkv".intern(),
         provider_session_headers: HashMap::new(),
+        provider_session_headers_host: None,
         media_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         user_agent_stream_index: None,
         addr: seek,
@@ -9937,7 +9957,7 @@ async fn test_provider_open_cancelled_during_header_wait_releases_slot_without_l
     app_state.active_provider.mark_opening(handle.allocation_id);
 
     let ctx = app_state.provider_stream_ctx();
-    let client = app_state.http_client.load().as_ref().clone();
+    let client = app_state.http_clients.default.load().as_ref().clone();
 
     let open_task =
         tokio::spawn(async move { crate::api::model::create_provider_stream(&ctx, &client, options).await });
@@ -9989,6 +10009,7 @@ async fn test_eviction_strategy_falls_back_when_candidate_protected_by_reentry()
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
         provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -10191,6 +10212,7 @@ async fn test_mixed_suppressed_and_legitimate_eviction_reports_exhaustion() {
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
         provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -10362,6 +10384,7 @@ async fn test_reentry_suppression_does_not_emit_connection_denied() {
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
         provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -10486,6 +10509,7 @@ async fn test_real_exhaustion_emits_connection_denied() {
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
         provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
