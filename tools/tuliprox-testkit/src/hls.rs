@@ -18,10 +18,26 @@ pub async fn read_segments(
     minimum_frames: u64,
     headers: &BTreeMap<String, String>,
 ) -> Result<u64, TestkitError> {
+    let mut manifest_url = parse_manifest_url(manifest_url)?;
+    read_playlist(&mut manifest_url, expected_run_id, expected_marker, minimum_frames, headers).await
+}
+
+pub fn parse_manifest_url(manifest_url: &str) -> Result<Url, TestkitError> {
+    Url::parse(manifest_url).map_err(|error| TestkitError::Configuration(error.to_string()))
+}
+
+/// Reads segments until `minimum_frames` were decoded. `manifest_url` is advanced to the media
+/// playlist a player keeps reloading: the target of redirects and of a master playlist's first
+/// variant. Continuing a playback from it never re-enters the entry URL, which would start a new
+/// playback session.
+pub async fn read_playlist(
+    manifest_url: &mut Url,
+    expected_run_id: &RunId,
+    expected_marker: u32,
+    minimum_frames: u64,
+    headers: &BTreeMap<String, String>,
+) -> Result<u64, TestkitError> {
     let client = reqwest::Client::builder().http1_only().build()?;
-    // A master playlist is resolved once to its first variant; reloads then target the variant,
-    // as a player does.
-    let mut manifest_url = Url::parse(manifest_url).map_err(|error| TestkitError::Configuration(error.to_string()))?;
     let mut frames = 0;
     let mut validator = FrameValidator::new(expected_run_id, expected_marker);
     // Live manifests are reloaded until enough frames were observed. Segment
@@ -30,18 +46,17 @@ pub async fn read_segments(
     let mut consumed: HashSet<String> = HashSet::new();
     let deadline = tokio::time::Instant::now() + MANIFEST_RELOAD_DEADLINE;
     loop {
-        let manifest = tokio::time::timeout_at(deadline, async {
-            request_with_headers(client.get(manifest_url.clone()), headers)
-                .send()
-                .await?
-                .error_for_status()?
-                .text()
-                .await
+        let (final_url, manifest) = tokio::time::timeout_at(deadline, async {
+            let response =
+                request_with_headers(client.get(manifest_url.clone()), headers).send().await?.error_for_status()?;
+            let final_url = response.url().clone();
+            Ok::<_, reqwest::Error>((final_url, response.text().await?))
         })
         .await
         .map_err(|_| TestkitError::Protocol("HLS manifest request exceeded overall deadline".to_owned()))??;
+        *manifest_url = final_url;
         if let Some(variant) = first_variant_uri(&manifest) {
-            manifest_url =
+            *manifest_url =
                 manifest_url.join(variant).map_err(|error| TestkitError::Configuration(error.to_string()))?;
             continue;
         }
