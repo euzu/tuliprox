@@ -2438,6 +2438,12 @@ pub(in crate::api) async fn handle_hls_stream_request(
         };
 
         if provider_handle.is_none() {
+            // The capacity wait can outlive the session snapshot: an ended or rebound session must
+            // not trigger panel provisioning for the stale pinned account.
+            if app_state.active_users.session_identity(&user.username, &session.token).await != Some(session.identity())
+            {
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            }
             return hls_panel_provisioning_or_status_response(
                 app_state,
                 user,
