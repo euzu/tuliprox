@@ -1,6 +1,5 @@
 use crate::header_policy::{HeaderProtocol, HopByHopHeader};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue};
-use std::collections::HashMap;
 use tuliprox_core::{model::ReverseProxyDisabledHeaderConfig, utils::content_coding::force_accept_encoding_identity};
 
 /// Returns true when a header must never be forwarded by the live HLS cache proxy.
@@ -62,11 +61,12 @@ pub fn extract_hls_provider_session_header_map(headers: &HeaderMap) -> HeaderMap
 }
 
 /// Extracts provider session cookies for the legacy `ActiveUserManager` session store.
-pub fn extract_hls_provider_session_headers(headers: &HeaderMap) -> HashMap<String, String> {
-    extract_hls_provider_session_header_map(headers)
+pub fn extract_hls_provider_session_headers(headers: &HeaderMap) -> tuliprox_session::ProviderSessionHeaders {
+    let selected = extract_hls_provider_session_header_map(headers)
         .iter()
         .filter_map(|(name, value)| value.to_str().ok().map(|value| (name.as_str().to_string(), value.to_string())))
-        .collect()
+        .collect();
+    tuliprox_session::ProviderSessionHeaders::from_response(headers, selected)
 }
 
 /// Appends trusted provider session headers after client-header scrubbing.
@@ -191,7 +191,7 @@ mod tests {
         assert_eq!(header_map.get(header::COOKIE).expect("cookie"), "sid=abc; pref=1");
 
         let legacy_headers = extract_hls_provider_session_headers(&headers);
-        assert_eq!(legacy_headers.get("cookie").map(String::as_str), Some("sid=abc; pref=1"));
+        assert_eq!(legacy_headers.headers.get("cookie").map(String::as_str), Some("sid=abc; pref=1"));
     }
 
     #[test]

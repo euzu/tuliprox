@@ -370,6 +370,7 @@
       "FLUSSONIC_HLS_CATCHUP": "native keeps the provider’s native catch-up behavior (default). bounded_archive generates a fixed archive source for live M3U entries with catchup=\"fs\" and a /CHANNEL/mono.m3u8 URL when no catchup-source exists. The live URL and token remain unchanged.",
       "FLUSSONIC_HLS_CATCHUP_MAX_DURATION_SECS": "Maximum archive playback window requested from the provider in bounded_archive mode. Default: 14400 seconds (4 hours). Allowed range: 1–604800 seconds. Longer player requests are shortened to this window from the selected start time; shorter requests keep their duration. Applies only to automatically generated Flussonic HLS archive sources. Explicit catchup sources, native mode and TS streams are unaffected. Refresh the playlist after changing this value.",
       "USER_AGENT_STREAM_INDEX": "Appends a process-local numeric index to the configured User-Agent. The index stays stable for one playback session across manifests, segments, seeks, reconnects, and provider failover.",
+      "FLUSSONIC_HLS_AUDIO_TRACKS": "Labels fragmented-MP4 HLS objects below Flussonic tracks-a<N> paths as audio/mp4 when the provider sends no specific Content-Type. Enable only for Flussonic sources.",
       "XTREAM_SKIP_LIVE": "If true, the live section of the Xtream provider is skipped during update.",
       "XTREAM_SKIP_SERIES": "If true, the series section of the Xtream provider is skipped during update.",
       "XTREAM_SKIP_VOD": "If true, the VOD section of the Xtream provider is skipped during update."
@@ -1190,6 +1191,7 @@
     "FLUSSONIC_HLS_CATCHUP": "Flussonic HLS catch-up",
     "FLUSSONIC_HLS_CATCHUP_MAX_DURATION_SECS": "Max. Flussonic archive window (secs)",
     "USER_AGENT_STREAM_INDEX": "Append stream index to User-Agent",
+    "FLUSSONIC_HLS_AUDIO_TRACKS": "Label Flussonic audio tracks as audio/mp4",
     "LOG": "Log",
     "LOGS": "Logs",
     "LIVE_LOGS": "Live Logs",

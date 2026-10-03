@@ -394,7 +394,6 @@ fn prepare_target_playlist_for_persistence(
     normalize_target_playlist_epg_ids(playlist, target.options.as_ref());
 }
 
-#[allow(clippy::too_many_lines)]
 pub async fn persist_playlist(
     app_config: &Arc<AppConfig>,
     playlist: &mut [PlaylistGroup],
@@ -415,7 +414,6 @@ pub async fn persist_playlist(
     .await
 }
 
-#[allow(clippy::too_many_lines)]
 pub async fn persist_playlist_views(
     app_config: &Arc<AppConfig>,
     base_playlist: &mut [PlaylistGroup],
@@ -438,7 +436,6 @@ pub async fn persist_playlist_views(
     .await
 }
 
-#[allow(clippy::too_many_lines)]
 async fn persist_playlist_with_mode(
     app_config: &Arc<AppConfig>,
     playlist: &mut [PlaylistGroup],

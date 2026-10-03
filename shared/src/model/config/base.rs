@@ -22,7 +22,6 @@ use crate::{
     utils::is_blank_optional_string,
 };
 
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigDto {

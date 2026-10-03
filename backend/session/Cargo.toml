@@ -17,6 +17,7 @@ arc-swap.workspace = true
 axum = { version = "0.8.9", features = ["macros", "default", "ws"] }
 bytes.workspace = true
 chrono.workspace = true
+cookie.workspace = true
 dashmap.workspace = true
 futures.workspace = true
 jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }

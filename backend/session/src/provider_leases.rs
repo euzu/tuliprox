@@ -388,9 +388,14 @@ pub struct ProviderLeaseTable {
     // stale heap entries that grow with the number of segment requests.
     expirations: BTreeSet<(TokioInstant, PlaybackLeaseId)>,
     affinity: ProviderAffinities,
+    // Providers whose leases ended since the last drain; their capacity waiters get woken.
+    released_providers: Vec<Arc<str>>,
 }
 
 impl ProviderLeaseTable {
+    /// Providers whose leases ended since the last call.
+    pub fn take_released_providers(&mut self) -> Vec<Arc<str>> { std::mem::take(&mut self.released_providers) }
+
     #[inline]
     pub fn is_empty(&self) -> bool { self.leases.is_empty() }
 
@@ -435,6 +440,7 @@ impl ProviderLeaseTable {
         self.expirations.remove(&(lease.state.expires_at(), id));
         Self::deindex(&mut self.by_owner, &mut self.by_provider, &lease);
         self.affinity.orphan(&lease);
+        self.released_providers.push(Arc::clone(&lease.provider_name));
         Some(lease)
     }
 
@@ -939,6 +945,9 @@ impl ProviderLeaseTable {
             .filter(|lease| session_owner != Some(lease.owner.as_ref()) && !counted_owners.contains(&lease.owner))
             .count()
     }
+
+    /// Earliest instant at which any lease may expire and release reserved capacity.
+    pub fn next_expiry(&self) -> Option<TokioInstant> { self.expirations.first().map(|(deadline, _)| *deadline) }
 
     pub fn has_foreign_reserved_lease(&self, provider_name: &Arc<str>, session_owner: Option<&str>) -> bool {
         let Some(ids) = self.by_provider.get(provider_name) else {

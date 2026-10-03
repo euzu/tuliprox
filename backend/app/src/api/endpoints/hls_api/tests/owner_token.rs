@@ -21,6 +21,7 @@ struct RecordingOrigin {
     base_url: String,
     requests: Arc<Mutex<Vec<String>>>,
     task: tokio::task::JoinHandle<()>,
+    body_gate: Arc<tokio::sync::Notify>,
 }
 
 impl Drop for RecordingOrigin {
@@ -42,6 +43,8 @@ fn request_path(request: &str) -> &str {
 async fn spawn_recording_origin(handler: OriginHandler) -> RecordingOrigin {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let requests_for_task = Arc::clone(&requests);
+    let body_gate = Arc::new(tokio::sync::Notify::new());
+    let task_body_gate = Arc::clone(&body_gate);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("test origin binds");
     let addr = listener.local_addr().expect("local addr");
     let task = tokio::spawn(async move {
@@ -51,6 +54,7 @@ async fn spawn_recording_origin(handler: OriginHandler) -> RecordingOrigin {
             };
             let handler = Arc::clone(&handler);
             let requests = Arc::clone(&requests_for_task);
+            let body_gate = Arc::clone(&task_body_gate);
             tokio::spawn(async move {
                 let mut buf = vec![0_u8; 4096];
                 let Ok(read) = socket.read(&mut buf).await else {
@@ -61,6 +65,7 @@ async fn spawn_recording_origin(handler: OriginHandler) -> RecordingOrigin {
                 }
                 let request = String::from_utf8_lossy(&buf[..read]).to_string();
                 let (status, headers, body) = handler(request_path(&request));
+                let gated = request_path(&request).contains("slow.hls.fmp4");
                 requests.lock().expect("requests lock").push(request);
                 let reason = status.canonical_reason().unwrap_or("Status");
                 let extra_headers = headers.iter().fold(String::new(), |mut acc, (name, value)| {
@@ -73,11 +78,18 @@ async fn spawn_recording_origin(handler: OriginHandler) -> RecordingOrigin {
                     body.len()
                 );
                 let _ = socket.write_all(response.as_bytes()).await;
-                let _ = socket.write_all(&body).await;
+                if gated {
+                    let split = 4.min(body.len());
+                    let _ = socket.write_all(&body[..split]).await;
+                    body_gate.notified().await;
+                    let _ = socket.write_all(&body[split..]).await;
+                } else {
+                    let _ = socket.write_all(&body).await;
+                }
             });
         }
     });
-    RecordingOrigin { base_url: format!("http://{addr}"), requests, task }
+    RecordingOrigin { base_url: format!("http://{addr}"), requests, task, body_gate }
 }
 
 fn playlist_origin_handler(playlist: &'static str) -> OriginHandler {
@@ -839,4 +851,920 @@ async fn leaked_relative_path_resolves_the_same_for_kind_and_legacy_tokens() {
         fetched.push(path.replace(&format!("dvr-{index}"), "dvr"));
     }
     assert_eq!(fetched[0], fetched[1], "four-field and legacy tokens resolve the same origin path");
+}
+
+fn attribute_uri(line: &str) -> Option<&str> { line.split_once("URI=\"")?.1.split_once('"').map(|(uri, _)| uri) }
+
+#[tokio::test]
+async fn catchup_fmp4_master_renditions_maps_and_segments_keep_tokens_and_ranges(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let handler: OriginHandler = Arc::new(|path| {
+        let (mime, body) = if path.contains("tracks-") && path.contains(".m3u8") {
+            ("application/vnd.apple.mpegurl", b"#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-TARGETDURATION:4\n#EXT-X-MAP:URI=\"init-1.hls.fmp4\",BYTERANGE=\"4@2\"\n#EXTINF:4,\n#EXT-X-BYTERANGE:4@2\ndvr-1.fmp4\n".as_slice())
+        } else if path.contains(".m3u8") {
+            ("application/vnd.apple.mpegurl", b"#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aac\",NAME=\"audio\",URI=\"tracks-a1/timeshift_abs-1785136500.fmp4.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=12000000,AUDIO=\"aac\"\ntracks-v1/timeshift_abs-1785136500.fmp4.m3u8\n".as_slice())
+        } else {
+            ("video/MP2T", b"cdef".as_slice())
+        };
+        let mut headers = vec![("Content-Type".to_string(), mime.to_string())];
+        let status = if path.contains(".m3u8") {
+            StatusCode::OK
+        } else {
+            headers.push(("Content-Range".to_string(), "bytes 2-5/10".to_string()));
+            headers.push(("Accept-Ranges".to_string(), "bytes".to_string()));
+            StatusCode::PARTIAL_CONTENT
+        };
+        (status, headers, body.to_vec())
+    });
+    let mut fixture = owner_token_fixture_with(handler, |input| {
+        input.options = Some(crate::model::ConfigInputOptions::from(&shared::model::ConfigInputOptionsDto {
+            flussonic_hls_audio_tracks: true,
+            ..shared::model::ConfigInputOptionsDto::default()
+        }));
+    })
+    .await;
+    fixture.entry_url = format!("{}/live/user/pass/{VIRTUAL_ID}.m3u8?token=archive-token", fixture.origin.base_url);
+    set_session_ttls(&fixture.app_state, 1, 30);
+    let device = client("10.0.0.1", 50_301);
+    let response = fixture.entry_with_archive(&device, 1_785_136_500).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let master = body_text(response).await;
+    let audio_uri = master.lines().find_map(attribute_uri).ok_or("audio URI missing")?;
+    let video_uri =
+        master.lines().find(|line| !line.starts_with('#') && line.contains("/hls/")).ok_or("video URI missing")?;
+    let session_token = fixture.decode(token_of(video_uri)).session_token.ok_or("session token missing")?;
+    assert!(session_token.starts_with("m3u-catchup|"));
+
+    for (uri, track, mime) in [(video_uri, "tracks-v1", "video/mp4"), (audio_uri, "tracks-a1", "audio/mp4")] {
+        let variant_token = token_of(uri);
+        assert_eq!(fixture.decode(variant_token).kind, Some(HlsResourceKind::Manifest(HlsManifestSource::Child)));
+        let response = fixture.token_request(&device, variant_token, HeaderMap::new()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let playlist = body_text(response).await;
+        let map_uri = playlist.lines().find_map(attribute_uri).ok_or("map URI missing")?;
+        assert!(playlist.contains("BYTERANGE=\"4@2\""));
+        assert!(playlist.contains("#EXT-X-BYTERANGE:4@2"));
+        let segment_uri = playlist
+            .lines()
+            .find(|line| !line.starts_with('#') && line.contains("/hls/"))
+            .ok_or("segment URI missing")?;
+        for (resource_uri, file) in [(map_uri, "init-1.hls.fmp4"), (segment_uri, "dvr-1.fmp4")] {
+            let token = token_of(resource_uri);
+            let decoded = fixture.decode(token);
+            assert_eq!(decoded.kind, Some(HlsResourceKind::Media));
+            assert_eq!(decoded.session_token.as_deref(), Some(session_token.as_str()));
+            assert_eq!(decoded.origin_provider.as_deref(), Some(fixture.input.name.as_ref()));
+            assert_eq!(
+                decoded.url,
+                format!("{}/live/user/pass/{track}/{file}?token=archive-token", fixture.origin.base_url)
+            );
+            let mut headers = HeaderMap::new();
+            headers.insert(header::RANGE, HeaderValue::from_static("bytes=2-5"));
+            let response = fixture.token_request(&device, token, headers).await;
+            assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+            assert_eq!(response.headers()[header::CONTENT_TYPE], mime);
+            assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes 2-5/10");
+            assert_eq!(response.headers()[header::CONTENT_LENGTH], "4");
+            assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
+            assert_eq!(response_body(response).await.as_ref(), b"cdef");
+        }
+    }
+    let requests = fixture.origin.requests();
+    let media_requests: Vec<_> = requests.iter().filter(|request| !request_path(request).contains(".m3u8")).collect();
+    assert_eq!(media_requests.len(), 4);
+    assert!(media_requests.iter().all(|request| request.to_ascii_lowercase().contains("\r\nrange: bytes=2-5\r\n")));
+    assert!(lease_alive_after_hls_ttl(&fixture, &session_token).await);
+    Ok(())
+}
+
+#[tokio::test]
+async fn catchup_fmp4_init_errors_keep_upstream_status_without_ts_fallback() -> Result<(), Box<dyn std::error::Error>> {
+    for (status, manual_redirects) in [
+        (StatusCode::FORBIDDEN, false),
+        (StatusCode::FORBIDDEN, true),
+        (StatusCode::NOT_FOUND, false),
+        (StatusCode::RANGE_NOT_SATISFIABLE, false),
+        (StatusCode::SERVICE_UNAVAILABLE, true),
+    ] {
+        let handler: OriginHandler = Arc::new(move |path| {
+            if path.contains(".m3u8") {
+                (StatusCode::OK, Vec::new(), MEDIA_PLAYLIST.as_bytes().to_vec())
+            } else {
+                (
+                    status,
+                    vec![
+                        ("Content-Range".to_string(), "bytes */10".to_string()),
+                        ("Retry-After".to_string(), "0".to_string()),
+                    ],
+                    b"provider error".to_vec(),
+                )
+            }
+        });
+        let fixture = owner_token_fixture_with(handler, |input| {
+            if manual_redirects {
+                input.headers.insert("Authorization".to_string(), "Bearer fixture".to_string());
+            }
+        })
+        .await;
+        let device = client("10.0.0.1", 50_311);
+        let response = fixture.entry_with_archive(&device, 1_785_136_500).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let (_, uri) = single_variant_master_playlist(response).await;
+        let session_token = fixture.decode(token_of(&uri)).session_token.ok_or("session missing")?;
+        let token = fixture.seal(
+            Some(&session_token),
+            &format!("{}/channel4k/tracks-v1/init-1.hls.mp4?token=archive-token", fixture.origin.base_url),
+            HlsResourceKind::Media,
+            Some(fixture.input.name.as_ref()),
+        );
+        let response = fixture.token_request(&device, &token, HeaderMap::new()).await;
+        assert_eq!(response.status(), status);
+        assert!(!response.headers().contains_key(header::CONTENT_TYPE));
+        assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes */10");
+        assert_eq!(response.headers()[header::RETRY_AFTER], "0");
+        assert!(response_body(response).await.is_empty());
+        assert_eq!(
+            fixture.origin.requests().iter().filter(|request| request_path(request).contains("init-1")).count(),
+            if status.is_server_error() {
+                fixture.app_state.app_config.config.load().reverse_proxy.as_ref().map_or_else(
+                    || crate::model::ResourceRetryConfig::get_default_retry_values().0 as usize,
+                    |config| config.resource_retry.get_retry_values().0 as usize,
+                )
+            } else {
+                1
+            }
+        );
+        assert_eq!(fixture.app_state.active_users.user_connections("hls-user").await, 0);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn catchup_init_cannot_switch_account_when_manifest_account_is_full() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = owner_token_fixture_with(playlist_origin_handler(MEDIA_PLAYLIST), with_alias_account).await;
+    let device = client("10.0.0.1", 50_321);
+    let response = fixture.entry_with_archive(&device, 1_785_136_500).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let (_, uri) = single_variant_master_playlist(response).await;
+    let decoded = fixture.decode(token_of(&uri));
+    assert_eq!(decoded.origin_provider.as_deref(), Some("owner-token-alias"));
+    let session_token = decoded.session_token.ok_or("session missing")?;
+    fixture.app_state.active_provider.terminate_identified_playback_owner(&session_token);
+    let pinned_provider: Arc<str> = Arc::from("owner-token-alias");
+    let handle = fixture
+        .app_state
+        .active_provider
+        .acquire_exact_connection_with_lease_for_session_await(
+            &pinned_provider,
+            &test_addr_with_port(50_322),
+            false,
+            0,
+            ConnectionKind::Normal,
+            Some(crate::api::model::PlaybackLeaseRef::new("another-playback", crate::model::PlaybackKind::LiveHls)),
+        )
+        .await
+        .ok_or("alias slot missing")?;
+    let _guard = tuliprox_session::ManagedProviderHandle::new(Arc::clone(&fixture.app_state.active_provider), handle);
+    let token = fixture.seal(
+        Some(&session_token),
+        &format!("{}/channel4k/tracks-v1/init-1.hls.mp4?token=archive-token", fixture.origin.base_url),
+        HlsResourceKind::Media,
+        Some(&pinned_provider),
+    );
+    let requests_before = fixture.origin.requests().len();
+    let response = fixture.token_request(&device, &token, HeaderMap::new()).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(fixture.origin.requests().len(), requests_before, "no init fetch through a different account");
+    assert!(response_body(response).await.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn live_ts_range_segment_on_full_account_fails_without_fallback() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = owner_token_fixture_with(playlist_origin_handler(MEDIA_PLAYLIST), with_alias_account).await;
+    let device = client("10.0.0.1", 50_341);
+    let response = fixture.entry(&device).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let (_, uri) = single_variant_master_playlist(response).await;
+    let decoded = fixture.decode(token_of(&uri));
+    assert_eq!(decoded.origin_provider.as_deref(), Some("owner-token-alias"));
+    let session_token = decoded.session_token.ok_or("session missing")?;
+    fixture.app_state.active_provider.terminate_identified_playback_owner(&session_token);
+    let pinned_provider: Arc<str> = Arc::from("owner-token-alias");
+    let handle = fixture
+        .app_state
+        .active_provider
+        .acquire_exact_connection_with_lease_for_session_await(
+            &pinned_provider,
+            &test_addr_with_port(50_342),
+            false,
+            0,
+            ConnectionKind::Normal,
+            Some(crate::api::model::PlaybackLeaseRef::new("another-playback", crate::model::PlaybackKind::LiveHls)),
+        )
+        .await
+        .ok_or("alias slot missing")?;
+    let _guard = tuliprox_session::ManagedProviderHandle::new(Arc::clone(&fixture.app_state.active_provider), handle);
+    let token = fixture.seal(
+        Some(&session_token),
+        &format!("{}/channel4k/segment-1.ts", fixture.origin.base_url),
+        HlsResourceKind::Media,
+        Some(&pinned_provider),
+    );
+    let requests_before = fixture.origin.requests().len();
+    let mut headers = HeaderMap::new();
+    headers.insert(header::RANGE, HeaderValue::from_static("bytes=0-187"));
+    let response = fixture.token_request(&device, &token, headers).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(fixture.origin.requests().len(), requests_before, "no segment fetch through a different account");
+    assert!(response_body(response).await.is_empty(), "a ranged TS segment must not receive a TS fallback body");
+    Ok(())
+}
+
+#[tokio::test]
+async fn catchup_range_init_obeys_user_admission_before_upstream_fetch() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = owner_token_fixture(playlist_origin_handler(MEDIA_PLAYLIST)).await;
+    enable_user_limits(&fixture.app_state, Vec::new());
+    let device_a = client("10.0.0.1", 50_331);
+    let response = fixture.entry_with_archive(&device_a, 1_785_136_500).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let (_, uri) = single_variant_master_playlist(response).await;
+    let session_token = fixture.decode(token_of(&uri)).session_token.ok_or("session missing")?;
+    let (_, _, _open_segment) = start_playback(&fixture, &other_device(50_332)).await;
+    assert_eq!(fixture.app_state.active_users.user_connections("hls-user").await, 1);
+    let token = fixture.seal(
+        Some(&session_token),
+        &format!("{}/channel4k/tracks-v1/init-1.hls.mp4", fixture.origin.base_url),
+        HlsResourceKind::Media,
+        Some(fixture.input.name.as_ref()),
+    );
+    let requests_before = fixture.origin.requests().len();
+    let mut headers = HeaderMap::new();
+    headers.insert(header::RANGE, HeaderValue::from_static("bytes=0-99"));
+    let response = fixture.token_request(&device_a, &token, headers).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(fixture.origin.requests().len(), requests_before);
+    assert_eq!(fixture.app_state.active_users.user_connections("hls-user").await, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn catchup_entry_reservation_uses_catchup_ttl_before_first_child_request(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = owner_token_fixture(playlist_origin_handler(MEDIA_PLAYLIST)).await;
+    set_session_ttls(&fixture.app_state, 1, 30);
+    let response = fixture.entry_with_archive(&client("10.0.0.1", 50_341), 1_785_136_500).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let (_, uri) = single_variant_master_playlist(response).await;
+    let session_token = fixture.decode(token_of(&uri)).session_token.ok_or("session missing")?;
+    assert!(lease_alive_after_hls_ttl(&fixture, &session_token).await);
+    Ok(())
+}
+
+#[tokio::test]
+async fn hls_media_cookies_follow_origin_scope_and_keep_the_response_origin() -> Result<(), Box<dyn std::error::Error>>
+{
+    let handler: OriginHandler = Arc::new(|path| {
+        if path.contains(".m3u8") {
+            (StatusCode::OK, Vec::new(), MEDIA_PLAYLIST.as_bytes().to_vec())
+        } else {
+            (StatusCode::OK, vec![("Set-Cookie".to_string(), "sid=media-secret; Path=/".to_string())], b"init".to_vec())
+        }
+    });
+    let fixture = owner_token_fixture(handler).await;
+    let device = client("10.0.0.1", 50_701);
+    let (_, _, owner) = wrapped_entry(&fixture, &device).await;
+    let cookies = "sid=entry-secret";
+    for (index, origin, expected_cookie) in
+        [(1, "http://entry.example", false), (2, fixture.origin.base_url.as_str(), true)]
+    {
+        store_cookie_header(&fixture.app_state.active_users, &owner, cookies, origin).await;
+        let file = format!("init-{index}.hls.fmp4");
+        let url = format!("{}/tracks-v1/{file}", fixture.origin.base_url);
+        let token = fixture.seal(Some(&owner), &url, HlsResourceKind::Media, Some(fixture.input.name.as_ref()));
+        let response = fixture.token_request(&device, &token, HeaderMap::new()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_body(response).await.as_ref(), b"init");
+        let requests = fixture.origin.requests();
+        let init =
+            requests.iter().find(|request| request_path(request).contains(&file)).ok_or("init request missing")?;
+        assert_eq!(init.to_ascii_lowercase().contains("cookie: sid=entry-secret"), expected_cookie);
+        let session = fixture
+            .app_state
+            .active_users
+            .get_and_update_user_session("hls-user", &owner)
+            .await
+            .ok_or("session missing")?;
+        // The origin-scoped cookie store is the single source of provider session headers.
+        assert!(session.provider_session_headers.is_empty());
+        assert_eq!(
+            session.provider_session_headers_for(&url).and_then(|headers| headers.get("cookie").cloned()).as_deref(),
+            Some("sid=media-secret")
+        );
+        assert_eq!(
+            session
+                .provider_session_headers_for("http://entry.example/init.mp4")
+                .and_then(|headers| headers.get("cookie").cloned())
+                .as_deref(),
+            Some("sid=entry-secret")
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn hls_media_redirect_cookie_is_scoped_to_final_origin() -> Result<(), Box<dyn std::error::Error>> {
+    let cdn = spawn_recording_origin(Arc::new(|_| {
+        (StatusCode::OK, vec![("Set-Cookie".to_string(), "sid=cdn-secret; Path=/".to_string())], b"init".to_vec())
+    }))
+    .await;
+    let redirect_url = format!("{}/init.hls.fmp4", cdn.base_url);
+    let handler: OriginHandler = Arc::new(move |path| {
+        if path.contains(".m3u8") {
+            (StatusCode::OK, Vec::new(), MEDIA_PLAYLIST.as_bytes().to_vec())
+        } else {
+            (StatusCode::FOUND, vec![("Location".to_string(), redirect_url.clone())], Vec::new())
+        }
+    });
+    let fixture = owner_token_fixture(handler).await;
+    let device = client("10.0.0.1", 50_705);
+    let (_, _, owner) = wrapped_entry(&fixture, &device).await;
+    let cookies = "sid=entry-secret";
+    store_cookie_header(&fixture.app_state.active_users, &owner, cookies, &fixture.entry_url).await;
+    let url = format!("{}/init.hls.fmp4", fixture.origin.base_url);
+    let token = fixture.seal(Some(&owner), &url, HlsResourceKind::Media, Some(fixture.input.name.as_ref()));
+    let response = fixture.token_request(&device, &token, HeaderMap::new()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response_body(response).await.as_ref(), b"init");
+    assert!(cdn.requests().iter().all(|request| !request.to_ascii_lowercase().contains("cookie:")));
+    let session = fixture
+        .app_state
+        .active_users
+        .get_and_update_user_session("hls-user", &owner)
+        .await
+        .ok_or("session missing")?;
+    assert_eq!(
+        session.provider_session_headers_for(&url).and_then(|headers| headers.get("cookie").cloned()).as_deref(),
+        Some("sid=entry-secret")
+    );
+    assert_eq!(
+        session
+            .provider_session_headers_for(&format!("{}/next.mp4", cdn.base_url))
+            .and_then(|headers| headers.get("cookie").cloned())
+            .as_deref(),
+        Some("sid=cdn-secret")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn catchup_audio_request_preserves_running_video_body_and_provider_limits(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for max_connections in [1, 2] {
+        let handler: OriginHandler = Arc::new(|path| {
+            if path.contains(".m3u8") {
+                (StatusCode::OK, Vec::new(), MEDIA_PLAYLIST.as_bytes().to_vec())
+            } else {
+                (
+                    StatusCode::OK,
+                    vec![("Content-Type".to_string(), "video/mp4".to_string())],
+                    b"abcdefghijklmnop".to_vec(),
+                )
+            }
+        });
+        let fixture = owner_token_fixture_with(handler, |input| input.max_connections = max_connections).await;
+        let video_device = client("10.0.0.1", 50_711);
+        let audio_device = client("10.0.0.1", 50_712);
+        let master = body_text(fixture.entry_with_archive(&video_device, 1_785_136_500).await).await;
+        let uri =
+            master.lines().find(|line| !line.starts_with('#') && line.contains("/hls/")).ok_or("variant missing")?;
+        let owner = fixture.decode(token_of(uri)).session_token.ok_or("owner missing")?;
+        let video = fixture.seal(
+            Some(&owner),
+            &format!("{}/tracks-v1/slow.hls.fmp4", fixture.origin.base_url),
+            HlsResourceKind::Media,
+            Some(fixture.input.name.as_ref()),
+        );
+        let audio = fixture.seal(
+            Some(&owner),
+            &format!("{}/tracks-a1/fast.hls.fmp4", fixture.origin.base_url),
+            HlsResourceKind::Media,
+            Some(fixture.input.name.as_ref()),
+        );
+        let video_response = fixture.token_request(&video_device, &video, HeaderMap::new()).await;
+        assert_eq!(video_response.status(), StatusCode::OK);
+        let video_reader =
+            tokio::spawn(async move { axum::body::to_bytes(video_response.into_body(), usize::MAX).await });
+        let audio_request = fixture.token_request(&audio_device, &audio, HeaderMap::new());
+        tokio::pin!(audio_request);
+        let audio_response = if max_connections == 1 {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), &mut audio_request).await.is_err(),
+                "audio waits for the only provider slot"
+            );
+            assert_eq!(fixture.app_state.active_provider.get_provider_connections_count(), 1);
+            None
+        } else {
+            Some(tokio::time::timeout(Duration::from_secs(2), &mut audio_request).await?)
+        };
+        assert!(!video_reader.is_finished(), "audio must not abort the video initialization body");
+        assert!(fixture.app_state.active_provider.get_provider_connections_count() <= max_connections as usize);
+        assert_eq!(fixture.app_state.active_users.user_connections("hls-user").await, 1);
+        fixture.origin.body_gate.notify_one();
+        let response = match audio_response {
+            Some(response) => response,
+            None => tokio::time::timeout(Duration::from_secs(2), &mut audio_request).await?,
+        };
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_body(response).await.as_ref(), b"abcdefghijklmnop");
+        let video_body = tokio::time::timeout(Duration::from_secs(2), video_reader).await???;
+        assert_eq!(video_body.as_ref(), b"abcdefghijklmnop");
+        assert_eq!(
+            fixture.origin.requests().iter().filter(|request| request_path(request).contains(".fmp4")).count(),
+            2
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn hls_ts_and_fmp4_resources_retry_transient_http_errors() -> Result<(), Box<dyn std::error::Error>> {
+    for (extension, manual_redirects, retry_enabled) in [
+        ("ts", false, true),
+        ("hls.fmp4", false, true),
+        ("ts", true, true),
+        ("hls.fmp4", true, true),
+        ("ts", false, false),
+        ("hls.fmp4", false, false),
+        ("ts", true, false),
+        ("hls.fmp4", true, false),
+    ] {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let origin_attempts = Arc::clone(&attempts);
+        let handler: OriginHandler = Arc::new(move |path| {
+            if path.contains(".m3u8") {
+                (StatusCode::OK, Vec::new(), MEDIA_PLAYLIST.as_bytes().to_vec())
+            } else if origin_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                (StatusCode::SERVICE_UNAVAILABLE, vec![("Retry-After".to_string(), "0".to_string())], Vec::new())
+            } else {
+                (StatusCode::OK, Vec::new(), b"media".to_vec())
+            }
+        });
+        let fixture = owner_token_fixture_with(handler, |input| {
+            if manual_redirects {
+                input.headers.insert("Authorization".to_string(), "Bearer fixture".to_string());
+            }
+        })
+        .await;
+        let config = fixture.app_state.app_config.config.load_full();
+        fixture.app_state.app_config.config.store(Arc::new(Config {
+            reverse_proxy: Some(ReverseProxyConfig::from(&ReverseProxyConfigDto {
+                stream: Some(StreamConfigDto { retry: retry_enabled, ..Default::default() }),
+                ..Default::default()
+            })),
+            ..config.as_ref().clone()
+        }));
+        let device = client("10.0.0.1", 50_721);
+        let (_, _, owner) = wrapped_entry(&fixture, &device).await;
+        let token = fixture.seal(
+            Some(&owner),
+            &format!("{}/tracks-v1/media.{extension}", fixture.origin.base_url),
+            HlsResourceKind::Media,
+            Some(fixture.input.name.as_ref()),
+        );
+        let response = fixture.token_request(&device, &token, HeaderMap::new()).await;
+        if retry_enabled {
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response_body(response).await.as_ref(), b"media");
+            assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+        } else {
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert!(response_body(response).await.is_empty());
+            assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn hls_terminated_session_cancels_capacity_wait_without_reopening() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture =
+        owner_token_fixture_with(playlist_origin_handler(MEDIA_PLAYLIST), |input| input.max_connections = 1).await;
+    enable_user_limits(&fixture.app_state, Vec::new());
+    let device = client("10.0.0.1", 50_801);
+    let (_, owner, initial_segment) = start_playback(&fixture, &device).await;
+    assert_eq!(response_body(initial_segment).await.as_ref(), b"segment");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while fixture.app_state.active_provider.get_provider_connections_count() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    fixture.app_state.active_provider.terminate_identified_playback_owner(&owner);
+    let handle = fixture
+        .app_state
+        .active_provider
+        .acquire_exact_connection_with_lease_for_session_await(
+            &fixture.input.name,
+            &test_addr_with_port(50_802),
+            false,
+            0,
+            ConnectionKind::Normal,
+            Some(crate::api::model::PlaybackLeaseRef::new("capacity-blocker", crate::model::PlaybackKind::LiveHls)),
+        )
+        .await
+        .ok_or("blocker acquisition failed")?;
+    let blocker = tuliprox_session::ManagedProviderHandle::new(Arc::clone(&fixture.app_state.active_provider), handle);
+    let token = fixture.seal(
+        Some(&owner),
+        &format!("{}/tracks-v1/init.hls.fmp4", fixture.origin.base_url),
+        HlsResourceKind::Media,
+        Some(fixture.input.name.as_ref()),
+    );
+    let request = fixture.token_request(&device, &token, HeaderMap::new());
+    tokio::pin!(request);
+    assert!(tokio::time::timeout(Duration::from_millis(100), &mut request).await.is_err());
+    fixture.app_state.active_users.terminate_sessions_for_addr("hls-user", &device.addr).await;
+    assert!(fixture.app_state.active_users.is_session_ended(&owner).await);
+    assert!(fixture.app_state.active_users.get_and_update_user_session("hls-user", &owner).await.is_none());
+    assert_eq!(fixture.app_state.active_users.user_connections("hls-user").await, 0);
+    drop(blocker);
+    let response = tokio::time::timeout(Duration::from_secs(2), &mut request).await?;
+    let status = response.status();
+    let body = response_body(response).await;
+    assert_eq!(fixture.app_state.active_users.user_connections("hls-user").await, 0);
+    assert!(body.is_empty());
+    assert!(!fixture.origin.requests().iter().any(|request| request_path(request).contains("init.hls.fmp4")));
+    assert!(!status.is_success(), "a terminated session must not resume media after waiting");
+    Ok(())
+}
+
+#[tokio::test]
+async fn hls_cmaf_preemption_ends_body_without_ts_fallback() -> Result<(), Box<dyn std::error::Error>> {
+    let handler: OriginHandler = Arc::new(|path| {
+        if path.contains(".m3u8") {
+            (StatusCode::OK, Vec::new(), MEDIA_PLAYLIST.as_bytes().to_vec())
+        } else {
+            (StatusCode::OK, vec![("Content-Type".to_string(), "video/mp4".to_string())], b"abcdefghijklmnop".to_vec())
+        }
+    });
+    let fixture = owner_token_fixture_with(handler, |input| input.max_connections = 1).await;
+    let config = fixture.app_state.app_config.custom_stream_response.load_full().ok_or("custom config missing")?;
+    let mut custom = config.as_ref().clone();
+    custom.low_priority_preempted = Some(test_custom_video_buffer());
+    fixture.app_state.app_config.custom_stream_response.store(Some(Arc::new(custom)));
+    set_session_ttls(&fixture.app_state, 0, 0);
+    let device = client("10.0.0.1", 50_811);
+    let (_, _, owner) = wrapped_entry(&fixture, &device).await;
+    let token = fixture.seal(
+        Some(&owner),
+        &format!("{}/tracks-v1/slow.hls.fmp4", fixture.origin.base_url),
+        HlsResourceKind::Media,
+        Some(fixture.input.name.as_ref()),
+    );
+    let response = fixture.token_request(&device, &token, HeaderMap::new()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "video/mp4");
+    assert_eq!(response.headers()[header::CONTENT_LENGTH], "16");
+    let (first_byte_tx, first_byte_rx) = tokio::sync::oneshot::channel();
+    let reader = tokio::spawn(async move {
+        let mut first_byte_tx = Some(first_byte_tx);
+        let mut body = response.into_body();
+        let mut bytes = Vec::new();
+        while let Some(frame) = body.frame().await {
+            if let Ok(data) = frame?.into_data() {
+                bytes.extend_from_slice(&data);
+                if !bytes.is_empty() {
+                    if let Some(tx) = first_byte_tx.take() {
+                        let _ = tx.send(());
+                    }
+                }
+            }
+            if bytes.len() > 16 {
+                break;
+            }
+        }
+        Ok::<_, axum::Error>(bytes)
+    });
+    tokio::time::timeout(Duration::from_secs(2), first_byte_rx).await??;
+    let handle = fixture
+        .app_state
+        .active_provider
+        .acquire_exact_connection_with_lease_for_session_await(
+            &fixture.input.name,
+            &test_addr_with_port(50_812),
+            false,
+            -100,
+            ConnectionKind::Normal,
+            Some(crate::api::model::PlaybackLeaseRef::new("high-priority-owner", crate::model::PlaybackKind::LiveHls)),
+        )
+        .await
+        .ok_or("priority acquisition failed")?;
+    let _guard = tuliprox_session::ManagedProviderHandle::new(Arc::clone(&fixture.app_state.active_provider), handle);
+    let body = tokio::time::timeout(Duration::from_secs(3), reader).await???;
+    assert_eq!(body.as_slice(), b"abcd", "preempted MP4 ends after the already received prefix");
+    Ok(())
+}
+
+#[tokio::test]
+async fn hls_cdn_cookie_preserves_manifest_origin_cookie() -> Result<(), Box<dyn std::error::Error>> {
+    let cdn = spawn_recording_origin(Arc::new(|_| {
+        (StatusCode::OK, vec![("Set-Cookie".to_string(), "cdn_sid=media-secret; Path=/".to_string())], b"init".to_vec())
+    }))
+    .await;
+    let fixture = owner_token_fixture(playlist_origin_handler(MEDIA_PLAYLIST)).await;
+    let device = client("10.0.0.1", 50_821);
+    let (_, variant, owner) = wrapped_entry(&fixture, &device).await;
+    // Consume the entry handoff so the later refresh makes a real upstream request.
+    let initial = fixture.token_request(&device, &variant, HeaderMap::new()).await;
+    assert_eq!(initial.status(), StatusCode::OK);
+    response_body(initial).await;
+    let cookies = "manifest_sid=entry-secret";
+    store_cookie_header(&fixture.app_state.active_users, &owner, cookies, &fixture.entry_url).await;
+    let token = fixture.seal(
+        Some(&owner),
+        &format!("{}/init.hls.fmp4", cdn.base_url),
+        HlsResourceKind::Media,
+        Some(fixture.input.name.as_ref()),
+    );
+    let response = fixture.token_request(&device, &token, HeaderMap::new()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response_body(response).await.as_ref(), b"init");
+    let before = fixture.origin.manifest_requests();
+    let response = fixture.token_request(&device, &variant, HeaderMap::new()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(fixture.origin.manifest_requests(), before + 1, "refresh must reach the origin");
+    let requests = fixture.origin.requests();
+    let refresh = requests.last().ok_or("manifest refresh missing")?;
+    let retained = refresh.to_ascii_lowercase().contains("cookie: manifest_sid=entry-secret");
+    assert!(retained, "a CDN cookie must not overwrite the distinct manifest-origin cookie");
+    Ok(())
+}
+
+/// Blocks the only slot of `provider` so the next HLS resource request waits for capacity.
+async fn block_provider_slot(
+    fixture: &OwnerTokenFixture,
+    owner: &str,
+    provider: &Arc<str>,
+    port: u16,
+) -> Result<tuliprox_session::ManagedProviderHandle, Box<dyn std::error::Error>> {
+    fixture.app_state.active_provider.terminate_identified_playback_owner(owner);
+    let handle = fixture
+        .app_state
+        .active_provider
+        .acquire_exact_connection_with_lease_for_session_await(
+            provider,
+            &test_addr_with_port(port),
+            false,
+            0,
+            ConnectionKind::Normal,
+            Some(crate::api::model::PlaybackLeaseRef::new("slot-blocker", crate::model::PlaybackKind::LiveHls)),
+        )
+        .await
+        .ok_or("blocker acquisition failed")?;
+    Ok(tuliprox_session::ManagedProviderHandle::new(Arc::clone(&fixture.app_state.active_provider), handle))
+}
+
+#[tokio::test]
+async fn hls_resource_waiting_for_capacity_is_rejected_after_account_switch() -> Result<(), Box<dyn std::error::Error>>
+{
+    let fixture = owner_token_fixture_with(playlist_origin_handler(MEDIA_PLAYLIST), |input| {
+        with_alias_account(input);
+        input.max_connections = 1;
+    })
+    .await;
+    let device = client("10.0.0.1", 50_831);
+    let (_, _, owner) = wrapped_entry(&fixture, &device).await;
+    let session = fixture
+        .app_state
+        .active_users
+        .get_and_update_user_session("hls-user", &owner)
+        .await
+        .ok_or("session missing")?;
+    let old_provider = session.provider.clone();
+    let blocker = block_provider_slot(&fixture, &owner, &old_provider, 50_832).await?;
+    let token = fixture.seal(
+        Some(&owner),
+        &format!("{}/tracks-v1/old-account.hls.fmp4", fixture.origin.base_url),
+        HlsResourceKind::Media,
+        Some(old_provider.as_ref()),
+    );
+    let request = fixture.token_request(&device, &token, HeaderMap::new());
+    tokio::pin!(request);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut request).await.is_err(),
+        "request waits for capacity"
+    );
+    fixture
+        .app_state
+        .active_users
+        .update_session_provider_binding(
+            "hls-user",
+            &owner,
+            fixture.input.name.clone(),
+            fixture.entry_url.clone().into(),
+        )
+        .await;
+    drop(blocker);
+    let response = tokio::time::timeout(Duration::from_secs(2), &mut request).await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(response_body(response).await.is_empty());
+    assert!(
+        !fixture.origin.requests().iter().any(|request| request_path(request).contains("old-account")),
+        "a child URL of the previous account must not be fetched"
+    );
+    assert_eq!(fixture.app_state.active_provider.get_provider_connections_count(), 0, "no provider slot leaks");
+    Ok(())
+}
+
+#[tokio::test]
+async fn hls_resource_waiting_for_capacity_sends_cookies_rotated_during_the_wait(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let fixture =
+        owner_token_fixture_with(playlist_origin_handler(MEDIA_PLAYLIST), |input| input.max_connections = 1).await;
+    let device = client("10.0.0.1", 50_841);
+    let (_, _, owner) = wrapped_entry(&fixture, &device).await;
+    let blocker = block_provider_slot(&fixture, &owner, &fixture.input.name, 50_842).await?;
+    let url = format!("{}/tracks-v1/cookie-check.hls.fmp4", fixture.origin.base_url);
+    let active_users = &fixture.app_state.active_users;
+    let cookie = |value: &str| format!("sid={value}");
+    store_cookie_header(active_users, &owner, &cookie("old"), &url).await;
+    let token = fixture.seal(Some(&owner), &url, HlsResourceKind::Media, Some(fixture.input.name.as_ref()));
+    let request = fixture.token_request(&device, &token, HeaderMap::new());
+    tokio::pin!(request);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut request).await.is_err(),
+        "request waits for capacity"
+    );
+    store_cookie_header(active_users, &owner, &cookie("fresh"), &url).await;
+    drop(blocker);
+    let response = tokio::time::timeout(Duration::from_secs(2), &mut request).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    drop(response_body(response).await);
+    let requests = fixture.origin.requests();
+    let sent =
+        requests.iter().find(|request| request_path(request).contains("cookie-check")).ok_or("request missing")?;
+    assert!(sent.contains("sid=fresh") && !sent.contains("sid=old"), "request must use the rotated cookie: {sent}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn hls_resource_cancelled_by_session_end_during_capacity_wait_leaks_no_slot(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let fixture =
+        owner_token_fixture_with(playlist_origin_handler(MEDIA_PLAYLIST), |input| input.max_connections = 1).await;
+    let device = client("10.0.0.1", 50_851);
+    let (_, _, owner) = wrapped_entry(&fixture, &device).await;
+    let blocker = block_provider_slot(&fixture, &owner, &fixture.input.name, 50_852).await?;
+    let token = fixture.seal(
+        Some(&owner),
+        &format!("{}/tracks-v1/cancelled.hls.fmp4", fixture.origin.base_url),
+        HlsResourceKind::Media,
+        Some(fixture.input.name.as_ref()),
+    );
+    let request = fixture.token_request(&device, &token, HeaderMap::new());
+    tokio::pin!(request);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut request).await.is_err(),
+        "request waits for capacity"
+    );
+    assert!(fixture.app_state.active_users.terminate_session("hls-user", &owner).await);
+    let response = tokio::time::timeout(Duration::from_secs(2), &mut request).await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(fixture.app_state.active_provider.get_provider_connections_count(), 1, "only the blocker holds a slot");
+    drop(blocker);
+    assert_eq!(fixture.app_state.active_provider.get_provider_connections_count(), 0);
+    assert!(!fixture.origin.requests().iter().any(|request| request_path(request).contains("cancelled")));
+    Ok(())
+}
+
+#[tokio::test]
+async fn capacity_wait_returns_at_its_deadline_while_the_account_stays_full() -> Result<(), Box<dyn std::error::Error>>
+{
+    let fixture =
+        owner_token_fixture_with(playlist_origin_handler(MEDIA_PLAYLIST), |input| input.max_connections = 1).await;
+    let device = client("10.0.0.1", 50_861);
+    let (_, _, owner) = wrapped_entry(&fixture, &device).await;
+    let _blocker = block_provider_slot(&fixture, &owner, &fixture.input.name, 50_862).await?;
+    let wait = Duration::from_millis(300);
+    let started = tokio::time::Instant::now();
+    let acquired = crate::api::api_utils::acquire_exact_provider_handle(
+        &fixture.app_state,
+        &crate::api::api_utils::ExactProviderAcquire {
+            provider: &fixture.input.name,
+            addr: &device.addr,
+            allow_grace: false,
+            priority: 0,
+            kind: ConnectionKind::Normal,
+            lease: Some(crate::api::model::PlaybackLeaseRef::new(&owner, crate::model::PlaybackKind::LiveHls)),
+        },
+        Some(wait),
+    )
+    .await;
+    let elapsed = started.elapsed();
+    assert!(acquired.is_none());
+    assert!(elapsed >= wait, "the wait lasts until its deadline: {elapsed:?}");
+    assert!(elapsed < wait + Duration::from_millis(500), "the wait ends at its deadline: {elapsed:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn pinned_manifest_refresh_waits_for_a_freed_slot_instead_of_503() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture =
+        owner_token_fixture_with(playlist_origin_handler(MEDIA_PLAYLIST), |input| input.max_connections = 1).await;
+    let device = client("10.0.0.1", 50_871);
+    let (_, token, owner) = wrapped_entry(&fixture, &device).await;
+    // The first variant request is served from the entry hand-off; refreshes fetch upstream.
+    assert_eq!(fixture.token_request(&device, &token, HeaderMap::new()).await.status(), StatusCode::OK);
+    let manifests_before = fixture.origin.manifest_requests();
+    let blocker = block_provider_slot(&fixture, &owner, &fixture.input.name, 50_872).await?;
+    let refresh = fixture.token_request(&device, &token, HeaderMap::new());
+    tokio::pin!(refresh);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut refresh).await.is_err(),
+        "refresh waits for capacity"
+    );
+    drop(blocker);
+    let response = tokio::time::timeout(Duration::from_secs(2), &mut refresh).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(body_text(response).await.contains("#EXTM3U"));
+    assert_eq!(fixture.origin.manifest_requests(), manifests_before + 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn pinned_manifest_refresh_after_capacity_wait_sends_cookies_rotated_during_the_wait(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let fixture =
+        owner_token_fixture_with(playlist_origin_handler(MEDIA_PLAYLIST), |input| input.max_connections = 1).await;
+    let device = client("10.0.0.1", 50_881);
+    let (_, token, owner) = wrapped_entry(&fixture, &device).await;
+    assert_eq!(fixture.token_request(&device, &token, HeaderMap::new()).await.status(), StatusCode::OK);
+    let active_users = &fixture.app_state.active_users;
+    store_cookie_header(active_users, &owner, "sid=old", &fixture.entry_url).await;
+    let blocker = block_provider_slot(&fixture, &owner, &fixture.input.name, 50_882).await?;
+    let refresh = fixture.token_request(&device, &token, HeaderMap::new());
+    tokio::pin!(refresh);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut refresh).await.is_err(),
+        "refresh waits for capacity"
+    );
+    store_cookie_header(active_users, &owner, "sid=fresh", &fixture.entry_url).await;
+    drop(blocker);
+    let response = tokio::time::timeout(Duration::from_secs(2), &mut refresh).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    drop(body_text(response).await);
+    let requests = fixture.origin.requests();
+    let sent =
+        requests.iter().rev().find(|request| request_path(request).contains(".m3u8")).ok_or("refresh missing")?;
+    assert!(sent.contains("sid=fresh") && !sent.contains("sid=old"), "refresh must use the rotated cookie: {sent}");
+    Ok(())
+}
+
+/// Stores the pairs of a `Cookie` header as origin-wide provider cookies set by `source_url`.
+async fn store_cookie_header(
+    active_users: &tuliprox_session::ActiveUserManager,
+    owner: &str,
+    cookie_header: &str,
+    source_url: &str,
+) -> bool {
+    let response = tuliprox_session::ProviderSessionHeaders {
+        headers: HashMap::new(),
+        cookies: cookie_header
+            .split(';')
+            .map(str::trim)
+            .filter(|pair| !pair.is_empty())
+            .map(|pair| format!("{pair}; Path=/"))
+            .collect(),
+    };
+    active_users.update_session_provider_response_headers_from("hls-user", owner, &response, source_url).await
+}
+
+#[tokio::test]
+async fn hls_resource_unfollowed_redirect_answers_bad_gateway() -> Result<(), Box<dyn std::error::Error>> {
+    let handler: OriginHandler = Arc::new(|path| {
+        if path.contains(".m3u8") {
+            (StatusCode::OK, Vec::new(), MEDIA_PLAYLIST.as_bytes().to_vec())
+        } else {
+            // A redirect without Location cannot be followed and must not reach the client as 3xx.
+            (StatusCode::FOUND, Vec::new(), Vec::new())
+        }
+    });
+    // Provider credentials in headers force manual redirects, which hand unfollowed 3xx back.
+    let fixture = owner_token_fixture_with(handler, |input| {
+        input.headers.insert("Authorization".to_string(), "Bearer fixture".to_string());
+    })
+    .await;
+    let device = client("10.0.0.1", 50_891);
+    let (_, _, owner) = wrapped_entry(&fixture, &device).await;
+    let token = fixture.seal(
+        Some(&owner),
+        &format!("{}/tracks-v1/redirected.hls.fmp4", fixture.origin.base_url),
+        HlsResourceKind::Media,
+        Some(fixture.input.name.as_ref()),
+    );
+    let response = fixture.token_request(&device, &token, HeaderMap::new()).await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert!(response_body(response).await.is_empty());
+    Ok(())
 }

@@ -14,7 +14,7 @@ use crate::{
         debug_if_enabled,
         request::{
             get_request_headers, is_safe_cross_origin_redirect_header, preview_request_diagnostics_for_logging,
-            preview_request_target_for_logging, send_with_retry_and_provider_policy,
+            preview_request_target_for_logging, send_with_retry_and_provider_policy_with_options, RequestFetchOptions,
         },
     },
 };
@@ -47,9 +47,9 @@ use tuliprox_hls::api::{
 use tuliprox_session::{
     response_headers::{provider_response_headers, ProviderResponseHeaderError},
     stream_ctx::ProviderStreamCtx,
-    stream_options::StreamOptions,
+    stream_options::{StreamOptions, StreamResponseMode},
     streams::{ProviderBodyOwner, ProviderBodyOwnerConfig},
-    ActiveProviderManager, ManagedProviderHandle,
+    ActiveProviderManager, ManagedProviderHandle, ProviderSessionHeaders,
 };
 use url::Url;
 
@@ -72,7 +72,7 @@ struct ProviderStreamPreparationContext {
 }
 
 create_bitset!(
-    u8,
+    u16,
     ProviderStreamFactoryFlags,
     RetryEnabled,
     InitialRetryLoopEnabled,
@@ -80,7 +80,9 @@ create_bitset!(
     ShareStream,
     PipeStream,
     RangeRequested,
-    PublicDestinationRequired
+    PublicDestinationRequired,
+    HlsResource,
+    FlussonicAudioTracks
 );
 
 #[derive(Debug, Clone)]
@@ -153,7 +155,11 @@ impl ProviderStreamFactoryOptions {
             .get(axum::http::header::USER_AGENT)
             .and_then(|value| value.to_str().ok())
             .map(ToString::to_string);
-        let filter_header = get_header_filter_for_item_type(*item_type);
+        let filter_header = if stream_options.response_mode == StreamResponseMode::HlsResource {
+            None
+        } else {
+            get_header_filter_for_item_type(*item_type)
+        };
         let mut req_headers = get_headers_from_request(req_headers, &filter_header);
         let requested_range = req_headers.remove(RANGE.as_str()).and_then(|value| HeaderValue::from_bytes(&value).ok());
 
@@ -182,7 +188,7 @@ impl ProviderStreamFactoryOptions {
         let mut flags = ProviderStreamFactoryFlagsSet::new();
         if stream_options.stream_retry {
             flags.set(ProviderStreamFactoryFlags::RetryEnabled);
-            if !item_type.is_live_adaptive() {
+            if !item_type.is_live_adaptive() && stream_options.response_mode != StreamResponseMode::HlsResource {
                 flags.set(ProviderStreamFactoryFlags::InitialRetryLoopEnabled);
             }
         }
@@ -191,6 +197,9 @@ impl ProviderStreamFactoryOptions {
         }
         if stream_options.buffer_enabled {
             flags.set(ProviderStreamFactoryFlags::BufferEnabled);
+        }
+        if stream_options.response_mode == StreamResponseMode::HlsResource {
+            flags.set(ProviderStreamFactoryFlags::HlsResource);
         }
         if *share_stream {
             flags.set(ProviderStreamFactoryFlags::ShareStream);
@@ -254,6 +263,13 @@ impl ProviderStreamFactoryOptions {
 
     pub fn require_public_destination(&mut self) {
         self.flags.set(ProviderStreamFactoryFlags::PublicDestinationRequired);
+    }
+
+    /// Applies per-input stream options that the generic factory parameters do not carry.
+    pub fn apply_input_options(&mut self, input: &crate::model::ConfigInput) {
+        if input.has_flag(crate::model::ConfigInputFlags::FlussonicHlsAudioTracks) {
+            self.flags.set(ProviderStreamFactoryFlags::FlussonicAudioTracks);
+        }
     }
 
     pub fn get_provider(&self) -> Option<&Arc<ConfigProvider>> { self.provider.as_ref() }
@@ -423,8 +439,9 @@ fn should_reject_success_response_content_type(item_type: PlaylistItemType, head
     !item_type.is_live_adaptive() && provider_content_type_looks_like_html(headers)
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 enum ProviderStreamRequestFailure {
+    HlsStatus { status: StatusCode, headers: Vec<(String, String)> },
     Status { status: StatusCode, provider_error_class: &'static str, serve_channel_unavailable: bool },
 }
 
@@ -456,21 +473,23 @@ impl ProviderStreamPreparationError {
 }
 
 impl ProviderStreamRequestFailure {
-    fn status(self) -> StatusCode {
+    fn status(&self) -> StatusCode {
         match self {
-            Self::Status { status, .. } => status,
+            Self::Status { status, .. } | Self::HlsStatus { status, .. } => *status,
         }
     }
 
-    fn provider_error_class(self) -> &'static str {
+    fn provider_error_class(&self) -> &'static str {
         match self {
             Self::Status { provider_error_class, .. } => provider_error_class,
+            Self::HlsStatus { status, .. } => classify_provider_status_error(*status),
         }
     }
 
-    fn should_serve_channel_unavailable(self) -> bool {
+    fn should_serve_channel_unavailable(&self) -> bool {
         match self {
-            Self::Status { serve_channel_unavailable, .. } => serve_channel_unavailable,
+            Self::Status { serve_channel_unavailable, .. } => *serve_channel_unavailable,
+            Self::HlsStatus { .. } => false,
         }
     }
 }
@@ -651,12 +670,14 @@ async fn send_with_manual_redirects(
                 .await
                 .map_err(|err| io::Error::new(io::ErrorKind::PermissionDenied, err))?;
         }
-        let result = send_with_retry_and_provider_policy(
+        let result = send_with_retry_and_provider_policy_with_options(
             app_config,
             &current_url,
             provider.as_ref(),
             true,
             stream_options.should_retry_provider_request(),
+            RequestFetchOptions::default()
+                .with_http_error_responses(stream_options.flags.contains(ProviderStreamFactoryFlags::HlsResource)),
             |resolved_url| prepare_client(request_client, stream_options, Some(resolved_url), credential_state).0,
         )
         .await;
@@ -740,10 +761,50 @@ async fn prepare_provider_stream_response_with_idle_timeout(
     .await
 }
 
+/// Preserve specific upstream MIME types; repair missing or generic types for MP4 objects.
+/// Audio and video share most fMP4 extensions, so audio is only recognized by an `m4a`/`cmfa`
+/// extension or, when enabled for the input, by Flussonic's `tracks-a<N>` rendition paths.
+fn normalize_hls_resource_content_type(headers: &mut HeaderMap, url: &Url, flussonic_audio_tracks: bool) {
+    let extension = url.path().rsplit_once('.').map_or("", |(_, ext)| ext);
+    let mime = crate::utils::request::content_type_from_ext(extension);
+    if !matches!(mime, "video/mp4" | "audio/mp4") {
+        return;
+    }
+    let needs_type =
+        headers.get(reqwest::header::CONTENT_TYPE).and_then(|value| value.to_str().ok()).is_none_or(|value| {
+            let base = value.split(';').next().unwrap_or_default().trim();
+            base.is_empty()
+                || base.eq_ignore_ascii_case("application/octet-stream")
+                || base.eq_ignore_ascii_case("video/mp2t")
+        });
+    if needs_type {
+        // Flussonic names separate audio-only renditions tracks-a<index>.
+        let audio_track = flussonic_audio_tracks
+            && url.path_segments().is_some_and(|mut segments| {
+                segments.any(|segment| {
+                    segment
+                        .strip_prefix("tracks-a")
+                        .is_some_and(|index| !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit()))
+                })
+            });
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            HeaderValue::from_static(if audio_track { "audio/mp4" } else { mime }),
+        );
+    }
+}
+
 async fn prepare_provider_stream_response_for_request(
-    response: reqwest::Response,
+    mut response: reqwest::Response,
     stream_options: &ProviderStreamFactoryOptions,
 ) -> Result<ProviderStreamFactoryResponse, ProviderStreamPreparationError> {
+    if stream_options.flags.contains(ProviderStreamFactoryFlags::HlsResource) {
+        normalize_hls_resource_content_type(
+            response.headers_mut(),
+            stream_options.get_url(),
+            stream_options.flags.contains(ProviderStreamFactoryFlags::FlussonicAudioTracks),
+        );
+    }
     prepare_provider_stream_response_with_context(
         response,
         ProviderStreamPreparationContext {
@@ -873,12 +934,14 @@ async fn provider_stream_request(
         let url = stream_options.get_url();
         let provider = stream_options.get_provider().cloned();
 
-        send_with_retry_and_provider_policy(
+        send_with_retry_and_provider_policy_with_options(
             &ctx.app_config,
             url,
             provider.as_ref(),
             false,
             stream_options.should_retry_provider_request(),
+            RequestFetchOptions::default()
+                .with_http_error_responses(stream_options.flags.contains(ProviderStreamFactoryFlags::HlsResource)),
             |resolved_url| {
                 let (client, _partial_content) = prepare_client(
                     request_client,
@@ -936,6 +999,28 @@ async fn provider_stream_request(
                     debug!("{}", sanitize_sensitive_info(&message));
                 }
                 return Ok(Some(response));
+            }
+
+            if stream_options.flags.contains(ProviderStreamFactoryFlags::HlsResource) {
+                // Keep range and retry metadata while discarding the provider's error body.
+                let headers = response
+                    .headers()
+                    .iter()
+                    .filter(|(name, _)| {
+                        matches!(
+                            **name,
+                            reqwest::header::CONTENT_RANGE
+                                | reqwest::header::ACCEPT_RANGES
+                                | reqwest::header::RETRY_AFTER
+                        )
+                    })
+                    .filter_map(|(name, value)| value.to_str().ok().map(|value| (name.to_string(), value.to_string())))
+                    .collect();
+                // Only upstream errors pass through; an unfollowed redirect or other non-success
+                // status would reach the client without its Location or body.
+                let status =
+                    if status.is_client_error() || status.is_server_error() { status } else { StatusCode::BAD_GATEWAY };
+                return Err(ProviderStreamRequestFailure::HlsStatus { status, headers });
             }
 
             if status.is_client_error() {
@@ -1109,7 +1194,9 @@ async fn get_provider_stream(
                 if matches!(failure.status(), StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
                     request_provider_account_probe(ctx, stream_options);
                 }
-                if failure.should_serve_channel_unavailable() {
+                if stream_options.flags.contains(ProviderStreamFactoryFlags::HlsResource)
+                    || failure.should_serve_channel_unavailable()
+                {
                     return Err(failure);
                 }
                 let status = failure.status();
@@ -1186,12 +1273,23 @@ impl Drop for ProviderOpenGuard {
     }
 }
 
+/// Result of opening a provider stream.
+pub enum ProviderStreamOpen {
+    Stream(ProviderStreamFactoryResponse),
+    /// A finite HLS resource keeps the upstream error status and its range and retry headers
+    /// instead of receiving a fallback body.
+    UpstreamStatus {
+        status: StatusCode,
+        headers: Vec<(String, String)>,
+    },
+}
+
 #[allow(clippy::too_many_lines)]
 pub async fn create_provider_stream(
     ctx: &ProviderStreamCtx,
     client: &reqwest::Client,
     stream_options: ProviderStreamFactoryOptions,
-) -> Option<ProviderStreamFactoryResponse> {
+) -> Option<ProviderStreamOpen> {
     let mut open_guard = ProviderOpenGuard { token: stream_options.get_completion_token(), handed_off: false };
     match get_provider_stream(ctx, client, &stream_options).await {
         Ok(Some(ProviderStreamFactoryResponse { stream: init_stream, info, provider_session_headers, .. })) => {
@@ -1208,13 +1306,13 @@ pub async fn create_provider_stream(
                 if let Some(reason) = reason {
                     record_provider_open_failure(ctx, &stream_options, reason, None, None);
                 }
-                return Some(ProviderStreamFactoryResponse {
+                return Some(ProviderStreamOpen::Stream(ProviderStreamFactoryResponse {
                     stream: ClientStream::new(init_stream, continue_signal, None, stream_options.get_url_as_str())
                         .boxed(),
                     info,
                     provider_session_headers,
                     has_upstream_owner: false,
-                });
+                }));
             }
             let handle_cancel = stream_options.get_cancel_token();
             let completion_token = stream_options.get_completion_token();
@@ -1262,13 +1360,13 @@ pub async fn create_provider_stream(
             )
             .boxed();
 
-            Some(ProviderStreamFactoryResponse {
+            Some(ProviderStreamOpen::Stream(ProviderStreamFactoryResponse {
                 stream: ClientStream::new(stream, continue_signal.clone(), None, stream_options.get_url_as_str())
                     .boxed(),
                 info,
                 provider_session_headers,
                 has_upstream_owner: true,
-            })
+            }))
         }
         Ok(None) => None,
         Err(failure) => {
@@ -1280,17 +1378,24 @@ pub async fn create_provider_stream(
                 Some(status),
                 Some(failure.provider_error_class()),
             );
+            if stream_options.flags.contains(ProviderStreamFactoryFlags::HlsResource) {
+                let headers = match failure {
+                    ProviderStreamRequestFailure::HlsStatus { headers, .. } => headers,
+                    ProviderStreamRequestFailure::Status { .. } => Vec::new(),
+                };
+                return Some(ProviderStreamOpen::UpstreamStatus { status, headers });
+            }
             if let (Some(boxed_provider_stream), response_info) = create_channel_unavailable_stream(
                 &ctx.app_config,
                 &get_response_headers(stream_options.get_headers()),
                 StatusCode::OK,
             ) {
-                return Some(ProviderStreamFactoryResponse {
+                return Some(ProviderStreamOpen::Stream(ProviderStreamFactoryResponse {
                     stream: boxed_provider_stream,
                     info: response_info,
-                    provider_session_headers: HashMap::new(),
+                    provider_session_headers: ProviderSessionHeaders::default(),
                     has_upstream_owner: false,
-                });
+                }));
             }
             None
         }
@@ -1330,7 +1435,7 @@ pub async fn open_provider_stream_with_lifecycle(
     client: &reqwest::Client,
     mut stream_options: ProviderStreamFactoryOptions,
     lifecycle: Option<ProviderStreamOpenLifecycle>,
-) -> Option<ProviderStreamFactoryResponse> {
+) -> Option<ProviderStreamOpen> {
     if let Some(ref lc) = lifecycle {
         lc.mark_opening();
         stream_options.account.clone_from(&lc.account);
@@ -1340,15 +1445,13 @@ pub async fn open_provider_stream_with_lifecycle(
             lc.close_reason.clone(),
         );
     }
-    let response = create_provider_stream(ctx, client, stream_options).await?;
-    if response.has_upstream_owner {
-        if let Some(ref lc) = lifecycle {
-            if !lc.register_body_owner() {
-                return None;
-            }
+    let open = create_provider_stream(ctx, client, stream_options).await?;
+    if let (ProviderStreamOpen::Stream(response), Some(lc)) = (&open, lifecycle.as_ref()) {
+        if response.has_upstream_owner && !lc.register_body_owner() {
+            return None;
         }
     }
-    Some(response)
+    Some(open)
 }
 
 #[cfg(test)]
@@ -1407,6 +1510,53 @@ mod tests {
             encrypt_secret: [0; 16],
             media_tools: Arc::new(MediaToolCapabilities::new()),
         })
+    }
+
+    #[test]
+    fn hls_mp4_mime_detection_preserves_specific_types_and_repairs_container_defaults(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for (path, original, expected) in [
+            ("tracks-v1/init-1.hls.mp4", Some("video/MP2T"), "video/mp4"),
+            ("tracks-v1/init-1.hls.fmp4", Some("application/octet-stream"), "video/mp4"),
+            ("tracks-a1/init-1.hls.fmp4", None, "audio/mp4"),
+            ("tracks-a2/init-1.hls.mp4", Some("video/mp2t"), "audio/mp4"),
+            ("audio/init.mp4", Some("audio/mp4"), "audio/mp4"),
+            ("tracks-a1/init.mp4", Some("audio/mp4; codecs=mp4a.40.2"), "audio/mp4; codecs=mp4a.40.2"),
+            ("tracks-v1/segment.fmp4", None, "video/mp4"),
+            ("tracks-v1/segment.m4s", Some("video/mp2t; charset=binary"), "video/mp4"),
+            ("audio/segment.cmfa", None, "audio/mp4"),
+            ("audio/segment.m4a", None, "audio/mp4"),
+            ("video/segment.CMFV", None, "video/mp4"),
+            ("tracks-v1/init.mp4", Some("application/mp4"), "application/mp4"),
+            ("tracks-v1/init.mp4", Some("text/html"), "text/html"),
+            ("channel/dvr-1.ts", Some("video/MP2T"), "video/MP2T"),
+            ("key.bin", Some("application/octet-stream"), "application/octet-stream"),
+        ] {
+            for flussonic_audio_tracks in [true, false] {
+                let url = Url::parse(&format!("https://origin.example/{path}?token=signed&file=ignored.ts"))?;
+                let mut headers = HeaderMap::new();
+                if let Some(original) = original {
+                    headers.insert(reqwest::header::CONTENT_TYPE, HeaderValue::try_from(original)?);
+                }
+                let mut headers = headers.clone();
+                normalize_hls_resource_content_type(&mut headers, &url, flussonic_audio_tracks);
+                // Without the input option only the extension decides; tracks-a paths stay video.
+                let expected = if !flussonic_audio_tracks
+                    && path.starts_with("tracks-a")
+                    && original.is_none_or(|o| !o.starts_with("audio"))
+                {
+                    "video/mp4"
+                } else {
+                    expected
+                };
+                assert_eq!(
+                    headers[reqwest::header::CONTENT_TYPE],
+                    expected,
+                    "{path} flussonic_audio_tracks={flussonic_audio_tracks}"
+                );
+            }
+        }
+        Ok(())
     }
 
     #[test]
@@ -1564,6 +1714,7 @@ mod tests {
             buffer_size: 0,
             buffer_max_bytes: 0,
             pipe_provider_stream: false,
+            response_mode: StreamResponseMode::Stream,
         };
         ProviderStreamFactoryOptions::new(&ProviderStreamFactoryParams {
             addr: "127.0.0.1:8080".parse().unwrap(),
@@ -1760,6 +1911,7 @@ mod tests {
             buffer_size: 1024,
             buffer_max_bytes: 4096,
             pipe_provider_stream: false,
+            response_mode: StreamResponseMode::Stream,
         };
         let req_headers = HeaderMap::new();
         let options = ProviderStreamFactoryOptions::new(&ProviderStreamFactoryParams {
@@ -1793,6 +1945,7 @@ mod tests {
             buffer_size: 1024,
             buffer_max_bytes: 0,
             pipe_provider_stream: false,
+            response_mode: StreamResponseMode::Stream,
         };
         let disabled_headers = None;
 
@@ -1897,6 +2050,7 @@ mod tests {
             buffer_size: 1024,
             buffer_max_bytes: 0,
             pipe_provider_stream: false,
+            response_mode: StreamResponseMode::Stream,
         };
 
         let hls_options = ProviderStreamFactoryOptions::new(&ProviderStreamFactoryParams {
@@ -1952,6 +2106,7 @@ mod tests {
             buffer_size: 1024,
             buffer_max_bytes: 0,
             pipe_provider_stream: false,
+            response_mode: StreamResponseMode::Stream,
         };
 
         let shared_options = ProviderStreamFactoryOptions::new(&ProviderStreamFactoryParams {
@@ -1989,6 +2144,7 @@ mod tests {
             buffer_size: 1024,
             buffer_max_bytes: 0,
             pipe_provider_stream: false,
+            response_mode: StreamResponseMode::Stream,
         };
 
         let options = ProviderStreamFactoryOptions::new(&ProviderStreamFactoryParams {
@@ -2071,6 +2227,7 @@ mod tests {
             buffer_size: 1024,
             buffer_max_bytes: 0,
             pipe_provider_stream: false,
+            response_mode: StreamResponseMode::Stream,
         };
 
         let options = ProviderStreamFactoryOptions::new(&ProviderStreamFactoryParams {
@@ -2115,7 +2272,7 @@ mod tests {
 
         assert!(result.is_ok());
         if let Ok(response) = result {
-            assert_eq!(response.provider_session_headers.get("cookie").map(String::as_str), Some("sid=abc"));
+            assert_eq!(response.provider_session_headers.headers.get("cookie").map(String::as_str), Some("sid=abc"));
             assert!(response.info.as_ref().is_some_and(|(headers, _, _, _)| headers
                 .iter()
                 .all(|(name, _)| !name.eq_ignore_ascii_case("set-cookie"))));

@@ -1,6 +1,7 @@
 use super::*;
 use crate::EventManager;
 use arc_swap::ArcSwapOption;
+use futures::FutureExt;
 use shared::{
     model::{PlaylistItemType, ProxyType, StreamChannel, StreamInfo, XtreamCluster},
     utils::Internable,
@@ -221,6 +222,7 @@ async fn create_user_session_normalizes_expired_lifecycle() {
             permission: UserConnectionPermission::Allowed,
             connection_kind: Some(ConnectionKind::Normal),
             lifecycle: PlaybackLifecycle::Expired,
+            ..Default::default()
         });
     }
 
@@ -293,6 +295,7 @@ async fn create_user_session_does_not_normalize_pending_provider_lifecycle() {
                     wake_source: None,
                 },
             },
+            ..Default::default()
         });
     }
 
@@ -5900,6 +5903,7 @@ async fn check_divergence_detects_connection_count_mismatch() {
             permission: UserConnectionPermission::Allowed,
             connection_kind: None,
             lifecycle: PlaybackLifecycle::Active,
+            ..Default::default()
         });
     }
 
@@ -5954,6 +5958,7 @@ async fn check_divergence_detects_stream_without_counted_session() {
                     wake_source: None,
                 },
             },
+            ..Default::default()
         });
         data.increment_kind(ConnectionKind::Normal);
 
@@ -6033,6 +6038,7 @@ async fn divergence_log_rate_limited_within_cooldown_window() {
             permission: UserConnectionPermission::Allowed,
             connection_kind: None,
             lifecycle: PlaybackLifecycle::Prepared,
+            ..Default::default()
         });
     }
 
@@ -6235,20 +6241,11 @@ async fn provider_session_headers_are_scoped_to_the_host_that_set_them() {
     let headers = HashMap::from([(String::from("cookie"), String::from("sid=abc"))]);
 
     create_provider_header_session(&manager, &user, "http://cdn.example/a/video.m3u8").await;
-    assert!(
-        manager
-            .update_session_provider_headers_from(
-                &user.username,
-                "tok-host",
-                &headers,
-                "http://cdn.example/a/video.m3u8"
-            )
-            .await
-    );
+    assert!(store_cookie_header(&manager, &user.username, "sid=abc", "http://cdn.example/a/video.m3u8").await);
     create_provider_header_session(&manager, &user, "http://cdn.example/a/audio.m3u8").await;
 
     let session = manager.get_and_update_user_session(&user.username, "tok-host").await.expect("session exists");
-    assert_eq!(session.provider_session_headers_for("http://cdn.example/a/video.m3u8"), Some(&headers));
+    assert_eq!(session.provider_session_headers_for("http://cdn.example/a/video.m3u8").as_deref(), Some(&headers));
     assert_eq!(session.provider_session_headers_for("http://entry.example/live/1.m3u8"), None);
     assert_eq!(
         session.provider_session_headers_for("https://cdn.example:80/a/video.m3u8"),
@@ -6280,4 +6277,274 @@ async fn kicked_and_evicted_sessions_are_marked_ended() {
 
     manager.mark_session_ended("tok-explicit").await;
     assert!(manager.is_session_ended("tok-explicit").await);
+}
+
+async fn register_guarded_resource(
+    manager: &ActiveUserManager,
+    user: &ProxyUserCredentials,
+    token: &str,
+    uid: u32,
+    requirement: &PlaybackSessionRegistration,
+) -> Option<StreamInfo> {
+    let addr = SocketAddr::from(([127, 0, 0, 1], 55500 + u16::try_from(uid).ok()?));
+    let fingerprint = Fingerprint::new("guarded-player".to_string(), "127.0.0.1".to_string(), addr);
+    manager
+        .update_connection_with_session_registration(
+            ActiveUserConnectionParams {
+                uid,
+                meter_uid: 0,
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                connection_kind: ConnectionKind::Normal,
+                priority: user.priority,
+                soft_priority: user.soft_priority,
+                fingerprint: &fingerprint,
+                provider: "provider-a".intern(),
+                stream_channel: &test_adaptive_channel(7010),
+                user_agent: Cow::Borrowed("guarded-player"),
+                session_token: Some(token),
+            },
+            Some(requirement),
+        )
+        .await
+}
+
+#[tokio::test]
+async fn guarded_resource_registration_rejects_removed_and_replaced_sessions() -> Result<(), Box<dyn std::error::Error>>
+{
+    let manager = provider_header_test_manager();
+    let mut user = ProxyUserCredentials::default();
+    user.username = "registration-identity".to_string();
+    user.max_connections = 1;
+    create_provider_header_session(&manager, &user, "http://provider.example/index.m3u8").await;
+    let identity = session_identity(&manager, &user.username, "tok-host").await.ok_or("session missing")?;
+    let requirement = PlaybackSessionRegistration { identity, enforce_limits: true, grace_admitted: false };
+    assert!(manager.terminate_session(&user.username, "tok-host").await);
+    assert!(register_guarded_resource(&manager, &user, "tok-host", 1, &requirement).await.is_none());
+    assert_eq!(manager.user_connections(&user.username).await, 0);
+    assert!(manager.connections.read().await.key_by_addr.is_empty(), "rejection must not mutate socket registrations");
+    create_provider_header_session(&manager, &user, "http://provider.example/index.m3u8").await;
+    assert!(register_guarded_resource(&manager, &user, "tok-host", 2, &requirement).await.is_none());
+    let current = PlaybackSessionRegistration {
+        identity: session_identity(&manager, &user.username, "tok-host").await.ok_or("replacement missing")?,
+        ..requirement
+    };
+    assert!(register_guarded_resource(&manager, &user, "tok-host", 3, &current).await.is_some());
+    assert!(register_guarded_resource(&manager, &user, "tok-host", 4, &current).await.is_some());
+    assert_eq!(manager.user_connections(&user.username).await, 1, "parallel resources share one user admission");
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_end_wakes_waiters_without_polling() -> Result<(), Box<dyn std::error::Error>> {
+    let manager = Arc::new(provider_header_test_manager());
+    let mut user = ProxyUserCredentials::default();
+    user.username = "session-end-waiter".to_string();
+    create_provider_header_session(&manager, &user, "http://provider.example/index.m3u8").await;
+    let identity = session_identity(&manager, &user.username, "tok-host").await.ok_or("session missing")?;
+    let waiter = {
+        let manager = Arc::clone(&manager);
+        let username = user.username.clone();
+        tokio::spawn(async move { manager.wait_for_playback_session_end(&username, "tok-host", identity).await })
+    };
+    tokio::task::yield_now().await;
+    assert!(!waiter.is_finished(), "a current session must keep the waiter pending");
+    assert!(manager.terminate_session(&user.username, "tok-host").await);
+    tokio::time::timeout(Duration::from_secs(1), waiter).await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn account_switch_ends_resource_identity_and_rejects_stale_cookie_updates(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let manager = Arc::new(provider_header_test_manager());
+    let mut user = ProxyUserCredentials::default();
+    user.username = "session-binding".to_string();
+    let url = "http://provider.example/index.m3u8";
+    create_provider_header_session(&manager, &user, url).await;
+    let identity = session_identity(&manager, &user.username, "tok-host").await.ok_or("session missing")?;
+    let cookie = |value: &str| crate::ProviderSessionHeaders {
+        headers: HashMap::new(),
+        cookies: vec![format!("sid={value}; Path=/")],
+    };
+    assert!(
+        manager
+            .update_current_session_provider_response_headers_from(
+                &user.username,
+                "tok-host",
+                identity,
+                &cookie("old"),
+                url
+            )
+            .await
+    );
+    // Rotation while a resource waits is visible to the send-time lookup.
+    assert!(
+        manager.update_session_provider_response_headers_from(&user.username, "tok-host", &cookie("fresh"), url).await
+    );
+    assert_eq!(
+        manager.current_session_provider_headers(&user.username, "tok-host", identity, url).await,
+        SessionProviderHeaders::Headers(HashMap::from([("cookie".to_string(), "sid=fresh".to_string())]))
+    );
+    assert_eq!(
+        manager.current_session_provider_headers(&user.username, "tok-host", identity, "http://other.example/x").await,
+        SessionProviderHeaders::NoHeaders,
+        "a valid session without headers for the target is not a missing session"
+    );
+
+    let notify = {
+        let users = manager.connections.read().await;
+        let (_, session) = users.current_session(&user.username, "tok-host", identity).ok_or("session missing")?;
+        Arc::clone(&session.change_signal.notify)
+    };
+    let woken = notify.notified();
+    tokio::pin!(woken);
+    woken.as_mut().enable();
+    // Writes that keep the session and binding, of this or another user, wake nobody.
+    manager.update_session_addr(&user.username, "tok-host", &"127.0.0.1:55499".parse()?).await;
+    let mut other = ProxyUserCredentials::default();
+    other.username = "session-binding-other".to_string();
+    let other_addr: SocketAddr = "127.0.0.1:55498".parse()?;
+    manager
+        .create_user_session(CreateUserSessionParams {
+            user: &other,
+            session_token: "tok-other",
+            virtual_id: 7012,
+            provider: "provider-a",
+            stream_url: url,
+            addr: &other_addr,
+            connection_permission: UserConnectionPermission::Allowed,
+            connection_kind: Some(ConnectionKind::Normal),
+            socket_bound: false,
+        })
+        .await;
+    assert!(manager.terminate_session(&other.username, "tok-other").await);
+    assert!(woken.as_mut().now_or_never().is_none(), "unrelated writes must not wake the waiter");
+    let waiter = {
+        let manager = Arc::clone(&manager);
+        let username = user.username.clone();
+        tokio::spawn(async move { manager.wait_for_playback_session_end(&username, "tok-host", identity).await })
+    };
+    tokio::task::yield_now().await;
+    assert!(!waiter.is_finished());
+    manager.update_session_provider_binding(&user.username, "tok-host", "provider-b".intern(), url.intern()).await;
+    tokio::time::timeout(Duration::from_secs(1), waiter).await??;
+    assert!(woken.as_mut().now_or_never().is_some(), "the account switch wakes the waiter");
+    assert!(!manager.playback_session_is_current(&user.username, "tok-host", identity).await);
+    assert_eq!(
+        manager.current_session_provider_headers(&user.username, "tok-host", identity, url).await,
+        SessionProviderHeaders::NoSession
+    );
+    assert!(
+        !manager
+            .update_current_session_provider_response_headers_from(
+                &user.username,
+                "tok-host",
+                identity,
+                &cookie("stale"),
+                url
+            )
+            .await,
+        "responses from the previous account must not enter the new account's jar"
+    );
+    let switched = session_identity(&manager, &user.username, "tok-host").await.ok_or("session missing")?;
+    assert_eq!(switched.incarnation, identity.incarnation);
+    assert_ne!(switched.binding_generation, identity.binding_generation);
+    Ok(())
+}
+
+#[tokio::test]
+async fn guarded_resource_registration_rechecks_user_capacity_at_commit() -> Result<(), Box<dyn std::error::Error>> {
+    let manager = provider_header_test_manager();
+    let mut user = ProxyUserCredentials::default();
+    user.username = "registration-capacity".to_string();
+    user.max_connections = 1;
+    create_provider_header_session(&manager, &user, "http://provider.example/index.m3u8").await;
+    let first = PlaybackSessionRegistration {
+        identity: session_identity(&manager, &user.username, "tok-host").await.ok_or("session missing")?,
+        enforce_limits: true,
+        grace_admitted: false,
+    };
+    let addr = SocketAddr::from(([127, 0, 0, 1], 55421));
+    manager
+        .create_user_session(CreateUserSessionParams {
+            user: &user,
+            session_token: "second-session",
+            virtual_id: 7011,
+            provider: "provider-a",
+            stream_url: "http://provider.example/other.m3u8",
+            addr: &addr,
+            connection_permission: UserConnectionPermission::Allowed,
+            connection_kind: Some(ConnectionKind::Normal),
+            socket_bound: false,
+        })
+        .await;
+    let second = PlaybackSessionRegistration {
+        identity: session_identity(&manager, &user.username, "second-session").await.ok_or("second session missing")?,
+        enforce_limits: true,
+        grace_admitted: false,
+    };
+    assert!(register_guarded_resource(&manager, &user, "tok-host", 5, &first).await.is_some());
+    assert!(register_guarded_resource(&manager, &user, "second-session", 6, &second).await.is_none());
+    assert_eq!(manager.user_connections(&user.username).await, 1);
+    assert!(
+        manager.playback_session_is_current(&user.username, "second-session", second.identity).await,
+        "capacity rejection does not terminate an otherwise valid session"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_session_cookies_survive_origin_changes_and_clear_on_account_switch(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let manager = provider_header_test_manager();
+    let mut user = ProxyUserCredentials::default();
+    user.username = "cookie-account".to_string();
+    let entry = "https://entry.example/index.m3u8";
+    let cdn = "https://cdn.example/video/init.mp4";
+    create_provider_header_session(&manager, &user, entry).await;
+    for (url, cookie) in [(entry, "sid=entry"), (cdn, "sid=cdn")] {
+        assert!(store_cookie_header(&manager, &user.username, cookie, url).await);
+    }
+    create_provider_header_session(&manager, &user, cdn).await;
+    let session = manager.get_and_update_user_session(&user.username, "tok-host").await.ok_or("session missing")?;
+    assert_eq!(
+        session.provider_session_headers_for(entry).and_then(|headers| headers.get("cookie").cloned()).as_deref(),
+        Some("sid=entry")
+    );
+    assert_eq!(
+        session.provider_session_headers_for(cdn).and_then(|headers| headers.get("cookie").cloned()).as_deref(),
+        Some("sid=cdn")
+    );
+    manager.update_session_provider_binding(&user.username, "tok-host", "provider-b".intern(), entry.intern()).await;
+    let session = manager.get_and_update_user_session(&user.username, "tok-host").await.ok_or("session missing")?;
+    assert!(session.provider_session_cookies.is_empty());
+    assert!(session.provider_session_headers_for(entry).is_none());
+    assert!(session.provider_session_headers_for(cdn).is_none());
+    Ok(())
+}
+
+/// Stores the pairs of a `Cookie` header as origin-wide provider cookies set by `source_url`.
+async fn store_cookie_header(
+    manager: &ActiveUserManager,
+    username: &str,
+    cookie_header: &str,
+    source_url: &str,
+) -> bool {
+    let response = crate::ProviderSessionHeaders {
+        headers: HashMap::new(),
+        cookies: cookie_header
+            .split(';')
+            .map(str::trim)
+            .filter(|pair| !pair.is_empty())
+            .map(|pair| format!("{pair}; Path=/"))
+            .collect(),
+    };
+    manager.update_session_provider_response_headers_from(username, "tok-host", &response, source_url).await
+}
+
+async fn session_identity(manager: &ActiveUserManager, username: &str, token: &str) -> Option<SessionIdentity> {
+    let users = manager.connections.read().await;
+    users.by_key.get(username)?.sessions.iter().find(|session| session.token == token).map(UserSession::identity)
 }

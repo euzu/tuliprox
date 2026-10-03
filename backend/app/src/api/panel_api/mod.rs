@@ -3740,7 +3740,7 @@ pub fn create_panel_api_provisioning_stream_details(
             provider_name,
             request_url: None,
             session_headers: None,
-            provider_session_headers: HashMap::new(),
+            provider_session_headers: tuliprox_session::ProviderSessionHeaders::default(),
             user_agent_stream_index: None,
             grace_period: *grace_period_options,
             provider_grace_active: false,
@@ -3750,6 +3750,8 @@ pub fn create_panel_api_provisioning_stream_details(
             content_representation: crate::api::model::ProviderContentRepresentationMode::PreserveOrigin,
             grace_resolution_context: None,
             custom_reason: None,
+            response_mode: tuliprox_session::stream_options::StreamResponseMode::default(),
+            session_registration: None,
         };
     }
 
@@ -3771,7 +3773,7 @@ pub fn create_panel_api_provisioning_stream_details(
         provider_name,
         request_url: None,
         session_headers: None,
-        provider_session_headers: HashMap::new(),
+        provider_session_headers: tuliprox_session::ProviderSessionHeaders::default(),
         user_agent_stream_index: None,
         grace_period: *grace_period_options,
         provider_grace_active: false,
@@ -3781,6 +3783,8 @@ pub fn create_panel_api_provisioning_stream_details(
         content_representation: crate::api::model::ProviderContentRepresentationMode::PreserveOrigin,
         grace_resolution_context: None,
         custom_reason: None,
+        response_mode: tuliprox_session::stream_options::StreamResponseMode::default(),
+        session_registration: None,
     }
 }
 

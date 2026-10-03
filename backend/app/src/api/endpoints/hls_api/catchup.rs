@@ -303,7 +303,7 @@ pub(super) async fn hls_api_stream_leaked_relative(
         Ok(admission) => admission,
         Err(response) => return *response,
     };
-    force_provider_stream_response(
+    force_hls_resource_response(
         &fingerprint,
         &app_state,
         &session,

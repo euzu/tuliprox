@@ -58,7 +58,6 @@ pub struct ConfigSourceDto {
 }
 
 impl ConfigSourceDto {
-    #[allow(clippy::cast_possible_truncation)]
     pub fn prepare(&mut self, index: u16, _include_computed: bool) -> Result<u16, TuliproxError> {
         let current_index = index;
         if self.inputs.is_empty() {
