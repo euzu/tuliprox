@@ -845,7 +845,7 @@ fn extract_hls_provider_session_headers_converts_set_cookie_to_cookie_header() {
 
     let session_headers = extract_hls_provider_session_headers(&headers);
 
-    assert_eq!(session_headers.get("cookie").map(String::as_str), Some("sid=abc; pref=1"));
+    assert_eq!(session_headers.headers.get("cookie").map(String::as_str), Some("sid=abc; pref=1"));
 }
 
 fn test_app_config() -> Arc<AppConfig> {
@@ -11275,6 +11275,7 @@ fn stats_provider_test_user_session(provider: &str) -> UserSession {
         permission: UserConnectionPermission::Allowed,
         connection_kind: Some(ConnectionKind::Normal),
         lifecycle: PlaybackLifecycle::Active,
+        ..Default::default()
     }
 }
 

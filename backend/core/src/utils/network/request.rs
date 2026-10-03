@@ -404,6 +404,7 @@ pub struct RequestFetchOptions {
     pub attempt_idle_timeout: Option<Duration>,
     content_coding: OutboundContentCodingPolicy,
     resource_retry: ResourceRetryExecution,
+    return_http_errors: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -420,6 +421,12 @@ impl RequestFetchOptions {
 
     pub const fn with_content_coding(mut self, content_coding: OutboundContentCodingPolicy) -> Self {
         self.content_coding = content_coding;
+        self
+    }
+
+    /// Returns the final HTTP error response after the configured retry and failover policy.
+    pub const fn with_http_error_responses(mut self, enabled: bool) -> Self {
+        self.return_http_errors = enabled;
         self
     }
 
@@ -558,7 +565,8 @@ pub fn format_http_status(status: StatusCode) -> String {
 
 pub fn content_type_from_ext(ext: &str) -> &'static str {
     match ext.to_ascii_lowercase().as_str() {
-        "mp4" => "video/mp4",
+        "mp4" | "fmp4" | "m4s" | "m4v" | "cmfv" => "video/mp4",
+        "m4a" | "cmfa" => "audio/mp4",
         "mkv" => "video/x-matroska",
         "avi" => "video/x-msvideo",
         "mov" => "video/quicktime",
@@ -1123,7 +1131,7 @@ pub async fn send_with_retry_and_provider_policy(
 }
 
 #[allow(clippy::too_many_lines)]
-async fn send_with_retry_and_provider_policy_with_options(
+pub async fn send_with_retry_and_provider_policy_with_options(
     app_config: &Arc<AppConfig>,
     url: &Url, // Used primarily for logging/context
     provider: Option<&Arc<ConfigProvider>>,
@@ -1335,6 +1343,13 @@ async fn send_with_retry_and_provider_policy_with_options_result(
                                             last_provider_failure.as_deref().unwrap_or("request failed"),
                                         );
                                     }
+                                }
+
+                                if options.return_http_errors && (status.is_client_error() || status.is_server_error()) {
+                                    return Ok(ProviderFailoverResponse {
+                                        response,
+                                        provider_url_index: provider.map(|_| provider_url_index),
+                                    });
                                 }
 
                                 return Err(string_to_io_error(format!("Request failed ({}): {}",
@@ -1710,7 +1725,9 @@ pub async fn send_input_with_retry_and_provider_policy_with_manual_redirects_and
                                     }
                                 }
 
-                                if provider_failover_only {
+                                if provider_failover_only
+                                    || (options.return_http_errors && (status.is_client_error() || status.is_server_error()))
+                                {
                                     return Ok(ProviderFailoverResponse {
                                         response,
                                         provider_url_index: provider.map(|_| provider_url_index),
@@ -4484,6 +4501,111 @@ mod tests {
             hls_cache: None,
         });
         make_test_app_config(config)
+    }
+
+    #[test]
+    fn content_type_from_ext_maps_fragmented_mp4_extensions_case_insensitively() {
+        for (ext, expected) in [
+            ("mp4", "video/mp4"),
+            ("FMP4", "video/mp4"),
+            ("m4s", "video/mp4"),
+            ("m4v", "video/mp4"),
+            ("cmfv", "video/mp4"),
+            ("m4a", "audio/mp4"),
+            ("CMFA", "audio/mp4"),
+            ("ts", "video/mp2t"),
+            ("mkv", "video/x-matroska"),
+            ("bin", "application/octet-stream"),
+            ("", "application/octet-stream"),
+        ] {
+            assert_eq!(super::content_type_from_ext(ext), expected, "{ext}");
+        }
+    }
+
+    #[tokio::test]
+    async fn http_error_response_option_preserves_final_status_headers_and_configured_retries(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let app_config = test_retry_config(3);
+        let client = reqwest::Client::builder().no_proxy().build()?;
+        for failover_only in [false, true] {
+            for status in [reqwest::StatusCode::FORBIDDEN, reqwest::StatusCode::SERVICE_UNAVAILABLE] {
+                let response = format!(
+                    "HTTP/1.1 {}\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    super::format_http_status(status)
+                );
+                let (addr, accepted, server) = start_plain_http_server_with_response(response).await?;
+                let url = Url::parse(&format!("http://{addr}/init.hls.fmp4"))?;
+                let mut options = RequestFetchOptions::default().with_http_error_responses(true);
+                if failover_only {
+                    options = options.without_resource_retries();
+                }
+                let response = super::send_with_retry_and_provider_policy_with_options(
+                    &app_config,
+                    &url,
+                    None,
+                    false,
+                    true,
+                    options,
+                    |resolved| client.get(resolved.clone()),
+                )
+                .await?;
+                assert_eq!(response.status(), status);
+                assert_eq!(response.headers()[reqwest::header::RETRY_AFTER], "0");
+                assert_eq!(
+                    accepted.load(Ordering::SeqCst),
+                    if !failover_only && status.is_server_error() { 3 } else { 1 }
+                );
+                server.abort();
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn http_error_response_option_recovers_transient_statuses_in_both_request_paths(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let client = reqwest::Client::builder().no_proxy().build()?;
+        for manual_redirects in [false, true] {
+            for status in ["503 Service Unavailable", "429 Too Many Requests", "408 Request Timeout"] {
+                let (addr, requests, server) = start_recording_http_server(vec![
+                    response_with_body(status, ""),
+                    response_with_body("200 OK", "media"),
+                ])
+                .await?;
+                let url = Url::parse(&format!("http://{addr}/init.hls.fmp4"))?;
+                let app_config = test_retry_config(2);
+                let options = RequestFetchOptions::default().with_http_error_responses(true);
+                let response = if manual_redirects {
+                    send_input_with_retry_and_provider_policy_with_manual_redirects_and_options_result(
+                        &app_config,
+                        &client,
+                        &test_input_source(url.to_string(), None),
+                        None,
+                        &url,
+                        10,
+                        options,
+                    )
+                    .await?
+                    .response
+                } else {
+                    super::send_with_retry_and_provider_policy_with_options(
+                        &app_config,
+                        &url,
+                        None,
+                        false,
+                        true,
+                        options,
+                        |resolved| client.get(resolved.clone()),
+                    )
+                    .await?
+                };
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                assert_eq!(response.bytes().await?.as_ref(), b"media");
+                assert_eq!(requests.lock().await.len(), 2);
+                server.abort();
+            }
+        }
+        Ok(())
     }
 
     fn identity_fetch_options() -> RequestFetchOptions {

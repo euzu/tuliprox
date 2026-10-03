@@ -1,4 +1,6 @@
-use crate::{ManagedProviderHandle, SharedCleanupCapability};
+use crate::{
+    stream_options::StreamResponseMode, ManagedProviderHandle, PlaybackSessionRegistration, SharedCleanupCapability,
+};
 use axum::http::StatusCode;
 use bytes::Bytes;
 use futures::stream::BoxStream;
@@ -20,7 +22,7 @@ pub type ProviderStreamResponse = (Option<BoxedProviderStream>, ProviderStreamIn
 pub struct ProviderStreamFactoryResponse {
     pub stream: BoxedProviderStream,
     pub info: ProviderStreamInfo,
-    pub provider_session_headers: HashMap<String, String>,
+    pub provider_session_headers: crate::ProviderSessionHeaders,
     pub has_upstream_owner: bool,
 }
 
@@ -80,7 +82,7 @@ pub struct StreamDetails {
     pub provider_name: Option<Arc<str>>,
     pub request_url: Option<Arc<str>>,
     pub session_headers: Option<HashMap<String, String>>,
-    pub provider_session_headers: HashMap<String, String>,
+    pub provider_session_headers: crate::ProviderSessionHeaders,
     pub user_agent_stream_index: Option<u64>,
     pub grace_period: GracePeriodOptions,
     pub provider_grace_active: bool,
@@ -92,6 +94,8 @@ pub struct StreamDetails {
     /// `stream_grace_period` so remaining strategies can be evaluated if the grace fails.
     pub grace_resolution_context: Option<crate::GraceResolutionContext>,
     pub custom_reason: Option<ProviderStreamCustomReason>,
+    pub response_mode: StreamResponseMode,
+    pub session_registration: Option<PlaybackSessionRegistration>,
 }
 
 /// Manual Clone: stream and `provider_handle` cannot be duplicated so we set them to None on the clone.
@@ -115,6 +119,8 @@ impl Clone for StreamDetails {
             content_representation: self.content_representation,
             grace_resolution_context: self.grace_resolution_context.clone(),
             custom_reason: self.custom_reason,
+            response_mode: self.response_mode,
+            session_registration: self.session_registration,
         }
     }
 }
@@ -128,7 +134,7 @@ impl StreamDetails {
             provider_name: None,
             request_url: None,
             session_headers: None,
-            provider_session_headers: HashMap::new(),
+            provider_session_headers: crate::ProviderSessionHeaders::default(),
             user_agent_stream_index: None,
             grace_period: grace_period_options,
             provider_grace_active: false,
@@ -138,6 +144,8 @@ impl StreamDetails {
             content_representation: ProviderContentRepresentationMode::PreserveOrigin,
             grace_resolution_context: None,
             custom_reason: None,
+            response_mode: crate::stream_options::StreamResponseMode::default(),
+            session_registration: None,
         }
     }
     #[inline]

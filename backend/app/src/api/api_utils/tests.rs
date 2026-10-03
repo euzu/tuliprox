@@ -1247,6 +1247,7 @@ async fn forced_legacy_hls_test_response(
         permission: UserConnectionPermission::Allowed,
         connection_kind: Some(crate::api::model::ConnectionKind::Normal),
         lifecycle: crate::api::model::PlaybackLifecycle::Active,
+        ..Default::default()
     };
     let mut stream_channel = create_test_local_channel(&origin_url);
     stream_channel.provider_id = u32::from(input.id);
@@ -1397,6 +1398,7 @@ async fn forced_reopen_stays_on_pinned_provider_account() {
         permission: UserConnectionPermission::Allowed,
         connection_kind: Some(crate::api::model::ConnectionKind::Normal),
         lifecycle: crate::api::model::PlaybackLifecycle::Active,
+        ..Default::default()
     };
     let mut stream_channel = create_test_live_channel(&format!("http://{origin_a}/live/1.ts"));
     stream_channel.provider_id = 1;
@@ -1431,6 +1433,87 @@ async fn forced_reopen_stays_on_pinned_provider_account() {
 
     let request_b = tokio::time::timeout(std::time::Duration::from_millis(250), task_b).await;
     assert!(request_b.is_err(), "origin B must not receive a seek from an A-affine session");
+}
+
+#[tokio::test]
+async fn forced_reopen_sends_provider_cookies_only_to_the_origin_that_set_them() {
+    for (cookie_from_stream_origin, expect_cookie) in [(true, true), (false, false)] {
+        let head = "HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nContent-Length: 4\r\nConnection: close\r\n\r\n";
+        let (origin, task) = spawn_legacy_hls_test_origin(head.to_string(), b"live".to_vec()).await;
+        let input = Arc::new(ConfigInput {
+            id: 1,
+            name: "provider_1".intern(),
+            input_type: InputType::Xtream,
+            url: format!("http://{origin}"),
+            username: Some("user".to_string()),
+            password: Some("pass".to_string()),
+            enabled: true,
+            max_connections: 1,
+            ..ConfigInput::default()
+        });
+        let app_config = Arc::new(create_test_provider_app_config());
+        app_config
+            .sources
+            .store(Arc::new(SourcesConfig { inputs: vec![Arc::clone(&input)], ..SourcesConfig::default() }));
+        let app_state = create_test_app_state_for_config(app_config);
+
+        let stream_url = format!("http://{origin}/live/1.ts");
+        let cookie_source =
+            if cookie_from_stream_origin { stream_url.clone() } else { "http://cdn.example/live/1.ts".to_string() };
+        let mut cookies = tuliprox_session::ProviderSessionCookieStore::default();
+        cookies.update(
+            &Url::parse(&cookie_source).expect("cookie source url"),
+            &tuliprox_session::ProviderSessionHeaders {
+                headers: HashMap::new(),
+                cookies: vec!["sid=scoped; Path=/".to_string()],
+            },
+        );
+        let client_addr = SocketAddr::from(([127, 0, 0, 1], 55_410));
+        let mut user = ProxyUserCredentials::default();
+        user.username = "viewer".to_string();
+        let session = UserSession {
+            token: "cookie-scope-token".to_string(),
+            virtual_id: 41,
+            provider: Arc::clone(&input.name),
+            stream_url: stream_url.as_str().intern(),
+            provider_session_cookies: Arc::new(cookies),
+            media_started: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            addr: client_addr,
+            active_addrs: vec![client_addr],
+            connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+            lifecycle: crate::api::model::PlaybackLifecycle::Active,
+            ..Default::default()
+        };
+        let mut stream_channel = create_test_live_channel(&stream_url);
+        stream_channel.provider_id = 1;
+        stream_channel.input_name = Arc::clone(&input.name);
+
+        let response = force_provider_stream_response(
+            &create_test_fingerprint(client_addr),
+            &app_state,
+            &session,
+            stream_channel,
+            ForceStreamRequestContext {
+                req_headers: &HeaderMap::new(),
+                input: &input,
+                user: &user,
+                session_reservation_ttl_secs: 0,
+                content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+            },
+            None,
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        drop(response.into_body().collect().await.expect("stream body"));
+
+        let request = task.await.expect("origin task completes").to_ascii_lowercase();
+        assert_eq!(
+            request.contains("cookie: sid=scoped"),
+            expect_cookie,
+            "cookie_from_stream_origin={cookie_from_stream_origin}: {request}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1478,6 +1561,7 @@ async fn overlapping_vod_range_requests_return_correct_account_bytes() {
         permission: UserConnectionPermission::Allowed,
         connection_kind: Some(crate::api::model::ConnectionKind::Normal),
         lifecycle: crate::api::model::PlaybackLifecycle::Active,
+        ..Default::default()
     };
 
     let make_channel = || {
@@ -1598,6 +1682,7 @@ async fn parallel_series_range_requests_keep_both_claims_active() {
         permission: UserConnectionPermission::Allowed,
         connection_kind: Some(crate::api::model::ConnectionKind::Normal),
         lifecycle: crate::api::model::PlaybackLifecycle::Active,
+        ..Default::default()
     };
 
     let make_channel = || {
@@ -1950,6 +2035,7 @@ fn load_test_session(input: &ConfigInput, origin_addr: SocketAddr, token: &str, 
         permission: UserConnectionPermission::Allowed,
         connection_kind: Some(crate::api::model::ConnectionKind::Normal),
         lifecycle: crate::api::model::PlaybackLifecycle::Active,
+        ..Default::default()
     }
 }
 
@@ -2237,6 +2323,7 @@ async fn direct_ts_eof_before_first_byte_releases_slot_without_idle_lease() {
         permission: UserConnectionPermission::Allowed,
         connection_kind: Some(crate::api::model::ConnectionKind::Normal),
         lifecycle: crate::api::model::PlaybackLifecycle::Active,
+        ..Default::default()
     };
 
     let channel = load_test_channel(&input, origin_addr);
@@ -2328,6 +2415,7 @@ async fn direct_ts_abort_while_waiting_for_first_byte_releases_exact_request() {
         permission: UserConnectionPermission::Allowed,
         connection_kind: Some(crate::api::model::ConnectionKind::Normal),
         lifecycle: crate::api::model::PlaybackLifecycle::Active,
+        ..Default::default()
     };
 
     let channel = load_test_channel(&input, origin_addr);
@@ -2695,6 +2783,7 @@ async fn parallel_vod_abort_preserves_sibling_claim_and_provider_stickiness() {
         permission: UserConnectionPermission::Allowed,
         connection_kind: Some(crate::api::model::ConnectionKind::Normal),
         lifecycle: crate::api::model::PlaybackLifecycle::Active,
+        ..Default::default()
     };
 
     let make_channel = || {
@@ -2856,6 +2945,7 @@ async fn parallel_series_abort_then_seek_reuses_account_without_stale_claim() {
         permission: UserConnectionPermission::Allowed,
         connection_kind: Some(crate::api::model::ConnectionKind::Normal),
         lifecycle: crate::api::model::PlaybackLifecycle::Active,
+        ..Default::default()
     };
 
     let make_channel = || {
@@ -3475,6 +3565,7 @@ async fn catchup_abort_seek_and_window_change_preserve_correct_affinity() {
         permission: UserConnectionPermission::Allowed,
         connection_kind: Some(crate::api::model::ConnectionKind::Normal),
         lifecycle: crate::api::model::PlaybackLifecycle::Active,
+        ..Default::default()
     };
 
     let make_catchup_channel = |window: &str| {
@@ -3999,6 +4090,7 @@ async fn resolve_streaming_strategy_honors_forced_provider_fallback_policy() {
             session_owner: Some("vod-session"),
             playback_kind: crate::model::PlaybackKind::Vod,
             accept_requested_stream_url: false,
+            capacity_wait_timeout: None,
         },
         None,
     )
@@ -4026,6 +4118,7 @@ async fn resolve_streaming_strategy_honors_forced_provider_fallback_policy() {
             session_owner: Some("live-session"),
             playback_kind: crate::model::PlaybackKind::LiveTs,
             accept_requested_stream_url: false,
+            capacity_wait_timeout: None,
         },
         None,
     )
@@ -4076,6 +4169,7 @@ async fn resolve_streaming_strategy_rewrites_url_on_fallback_even_when_accept_re
             session_owner: Some("vod-session"),
             playback_kind: crate::model::PlaybackKind::Vod,
             accept_requested_stream_url: true,
+            capacity_wait_timeout: None,
         },
         None,
     )
@@ -4136,7 +4230,7 @@ async fn create_stream_response_details_preserves_stored_headers_when_fallback_o
     let channel = create_test_live_channel(stream_url);
     let details = create_stream_response_details(
         &app_state,
-        &get_stream_options(&app_state.app_config),
+        &get_stream_options(&app_state.app_config, StreamResponseMode::Stream),
         stream_url,
         &user.username,
         &create_test_fingerprint(reacquire_addr),
@@ -4157,6 +4251,7 @@ async fn create_stream_response_details_preserves_stored_headers_when_fallback_o
         Some(session_token),
         Some(&initial_headers),
         true,
+        None,
         None,
         None,
     )
@@ -4304,6 +4399,7 @@ async fn resolve_streaming_strategy_rewrites_stale_alias_url_to_selected_main_pr
             session_owner: Some("live-session"),
             playback_kind: crate::model::PlaybackKind::LiveTs,
             accept_requested_stream_url: false,
+            capacity_wait_timeout: None,
         },
         None,
     )
@@ -4371,6 +4467,7 @@ async fn resolve_streaming_strategy_rewrites_opaque_m3u_token_after_alias_alloca
             session_owner: Some("live-session"),
             playback_kind: crate::model::PlaybackKind::LiveTs,
             accept_requested_stream_url: false,
+            capacity_wait_timeout: None,
         },
         None,
     )
@@ -4408,6 +4505,7 @@ async fn resolve_streaming_strategy_rejects_unmapped_provider_url() {
             session_owner: Some("live-session"),
             playback_kind: crate::model::PlaybackKind::LiveTs,
             accept_requested_stream_url: false,
+            capacity_wait_timeout: None,
         },
         None,
     )
@@ -4454,6 +4552,7 @@ async fn resolve_streaming_strategy_accepts_stalker_portal_url() {
             session_owner: Some("live-session"),
             playback_kind: crate::model::PlaybackKind::LiveTs,
             accept_requested_stream_url: false,
+            capacity_wait_timeout: None,
         },
         None,
     )
@@ -4507,6 +4606,7 @@ async fn resolve_streaming_strategy_rejects_stalker_url_after_forced_provider_fa
             session_owner: Some("live-session"),
             playback_kind: crate::model::PlaybackKind::LiveTs,
             accept_requested_stream_url: false,
+            capacity_wait_timeout: None,
         },
         None,
     )
@@ -4543,6 +4643,7 @@ async fn resolve_streaming_strategy_accepts_session_requested_stream_url() {
             session_owner: Some("live-session"),
             playback_kind: crate::model::PlaybackKind::LiveTs,
             accept_requested_stream_url: true,
+            capacity_wait_timeout: None,
         },
         None,
     )
@@ -4577,6 +4678,7 @@ fn test_should_allow_exhausted_shared_reconnect_only_for_matching_shared_session
         started_at: 1,
         permission: UserConnectionPermission::Allowed,
         lifecycle: crate::api::model::PlaybackLifecycle::Active,
+        ..Default::default()
     };
 
     assert!(should_allow_exhausted_shared_reconnect(true, Some(&session), 282, "http://provider/live/449924.ts"));
@@ -5344,6 +5446,7 @@ fn create_test_session(
         permission: UserConnectionPermission::Allowed,
         connection_kind: Some(crate::api::model::ConnectionKind::Normal),
         lifecycle,
+        ..Default::default()
     }
 }
 
@@ -8136,7 +8239,7 @@ async fn failed_provider_open_preserves_other_allocation_on_same_socket() -> Res
     let channel = create_test_live_channel(&url);
     let details = create_stream_response_details(
         &app,
-        &get_stream_options(&app.app_config),
+        &get_stream_options(&app.app_config, StreamResponseMode::Stream),
         &url,
         "failing-user",
         &create_test_fingerprint(addr),
@@ -8157,6 +8260,7 @@ async fn failed_provider_open_preserves_other_allocation_on_same_socket() -> Res
         Some("failed-session"),
         None,
         false,
+        None,
         None,
         None,
     )
@@ -8328,7 +8432,7 @@ async fn should_pin_provider_for_session_skips_reservation_on_failure_custom_vid
         provider_name: Some("provider_1".intern()),
         request_url: None,
         session_headers: None,
-        provider_session_headers: HashMap::new(),
+        provider_session_headers: tuliprox_session::ProviderSessionHeaders::default(),
         user_agent_stream_index: None,
         grace_period: GracePeriodOptions::default(),
         provider_grace_active: false,
@@ -8338,6 +8442,8 @@ async fn should_pin_provider_for_session_skips_reservation_on_failure_custom_vid
         content_representation: crate::api::model::ProviderContentRepresentationMode::PreserveOrigin,
         grace_resolution_context: None,
         custom_reason: None,
+        response_mode: tuliprox_session::stream_options::StreamResponseMode::default(),
+        session_registration: None,
     };
     assert!(
         should_pin_provider_for_session(&no_video_details, &app_state, PlaylistItemType::Catchup),
@@ -8351,7 +8457,7 @@ async fn should_pin_provider_for_session_skips_reservation_on_failure_custom_vid
         provider_name: Some("provider_1".intern()),
         request_url: None,
         session_headers: None,
-        provider_session_headers: HashMap::new(),
+        provider_session_headers: tuliprox_session::ProviderSessionHeaders::default(),
         user_agent_stream_index: None,
         grace_period: GracePeriodOptions::default(),
         provider_grace_active: false,
@@ -8361,6 +8467,8 @@ async fn should_pin_provider_for_session_skips_reservation_on_failure_custom_vid
         content_representation: crate::api::model::ProviderContentRepresentationMode::PreserveOrigin,
         grace_resolution_context: None,
         custom_reason: None,
+        response_mode: tuliprox_session::stream_options::StreamResponseMode::default(),
+        session_registration: None,
     };
     assert!(
         should_pin_provider_for_session(&provisioning_details, &app_state, PlaylistItemType::Catchup),
@@ -8381,7 +8489,7 @@ async fn should_pin_provider_for_session_skips_reservation_on_failure_custom_vid
             provider_name: Some("provider_1".intern()),
             request_url: None,
             session_headers: None,
-            provider_session_headers: HashMap::new(),
+            provider_session_headers: tuliprox_session::ProviderSessionHeaders::default(),
             user_agent_stream_index: None,
             grace_period: GracePeriodOptions::default(),
             provider_grace_active: false,
@@ -8391,6 +8499,8 @@ async fn should_pin_provider_for_session_skips_reservation_on_failure_custom_vid
             content_representation: crate::api::model::ProviderContentRepresentationMode::PreserveOrigin,
             grace_resolution_context: None,
             custom_reason: None,
+            response_mode: tuliprox_session::stream_options::StreamResponseMode::default(),
+            session_registration: None,
         };
         assert!(
             !should_pin_provider_for_session(&failure_details, &app_state, PlaylistItemType::Catchup),
@@ -9348,6 +9458,7 @@ fn session_reacquire_cleanup_addrs_excludes_current_and_deduplicates() {
         permission: UserConnectionPermission::Allowed,
         connection_kind: Some(crate::api::model::ConnectionKind::Normal),
         lifecycle: crate::api::model::PlaybackLifecycle::Active,
+        ..Default::default()
     };
 
     assert_eq!(session_reacquire_cleanup_addrs(&session, &seek), vec![primary, overlap]);
@@ -9377,7 +9488,7 @@ async fn intentional_deferred_open_retains_provider_grace_handle() {
 
     let mut details = create_stream_response_details(
         &app_state,
-        &get_stream_options(&app_state.app_config),
+        &get_stream_options(&app_state.app_config, StreamResponseMode::Stream),
         stream_url,
         "deferred-user",
         &fingerprint,
@@ -9399,6 +9510,7 @@ async fn intentional_deferred_open_retains_provider_grace_handle() {
         None,
         false,
         Some(true),
+        None,
         None,
     )
     .await
@@ -9881,7 +9993,7 @@ async fn test_channel_unavailable_fallback_does_not_register_body_owner_or_leak_
     let factory_response = tuliprox_session::ProviderStreamFactoryResponse {
         stream: channel_unavail_stream.unwrap(),
         info,
-        provider_session_headers: std::collections::HashMap::new(),
+        provider_session_headers: tuliprox_session::ProviderSessionHeaders::default(),
         has_upstream_owner: false,
     };
 
@@ -9930,7 +10042,7 @@ async fn test_provider_open_cancelled_during_header_wait_releases_slot_without_l
 
     let url = url::Url::parse(&format!("http://{local_addr}/stream.ts")).unwrap();
     let req_headers = axum::http::HeaderMap::new();
-    let stream_options = get_stream_options(&app_state.app_config);
+    let stream_options = get_stream_options(&app_state.app_config, StreamResponseMode::Stream);
     let mut options =
         crate::api::model::ProviderStreamFactoryOptions::new(&crate::api::model::ProviderStreamFactoryParams {
             addr: client_addr,

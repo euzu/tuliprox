@@ -129,6 +129,104 @@ impl PlaybackLifecycle {
     pub fn is_counted(&self) -> bool { matches!(self, Self::Active | Self::GraceActive) }
 }
 
+static NEXT_SESSION_INCARNATION: AtomicU64 = AtomicU64::new(1);
+
+pub fn next_session_incarnation() -> u64 { NEXT_SESSION_INCARNATION.fetch_add(1, Ordering::Relaxed) }
+
+/// The session object and provider binding a finite resource request was authorized for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SessionIdentity {
+    pub incarnation: u64,
+    pub binding_generation: u64,
+}
+
+/// Notifications collected while the connection write lock is held and delivered after release.
+#[derive(Default)]
+pub(crate) struct DeferredWakes {
+    pending: std::sync::Mutex<Vec<Arc<Notify>>>,
+    has_pending: AtomicBool,
+}
+
+impl DeferredWakes {
+    fn push(&self, notify: Arc<Notify>) {
+        self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(notify);
+        self.has_pending.store(true, Ordering::Release);
+    }
+
+    fn wake(&self) {
+        if !self.has_pending.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        let pending = std::mem::take(&mut *self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+        for notify in pending {
+            notify.notify_waiters();
+        }
+    }
+}
+
+/// Wakes the in-flight requests of one session when it ends or switches accounts.
+///
+/// Only the session stored in the connection table owns the signal: dropping it, by any removal
+/// path, signals the end. Snapshot clones share the notification but never signal on drop.
+pub struct SessionChangeSignal {
+    notify: Arc<Notify>,
+    deferred: Option<Arc<DeferredWakes>>,
+    owner: bool,
+}
+
+impl SessionChangeSignal {
+    fn new(deferred: &Arc<DeferredWakes>) -> Self {
+        Self { notify: Arc::new(Notify::new()), deferred: Some(Arc::clone(deferred)), owner: true }
+    }
+
+    fn signal(&self) {
+        match &self.deferred {
+            Some(deferred) => deferred.push(Arc::clone(&self.notify)),
+            None => self.notify.notify_waiters(),
+        }
+    }
+}
+
+impl Default for SessionChangeSignal {
+    fn default() -> Self { Self { notify: Arc::new(Notify::new()), deferred: None, owner: true } }
+}
+
+impl Clone for SessionChangeSignal {
+    fn clone(&self) -> Self { Self { notify: Arc::clone(&self.notify), deferred: self.deferred.clone(), owner: false } }
+}
+
+impl Drop for SessionChangeSignal {
+    fn drop(&mut self) {
+        if self.owner {
+            self.signal();
+        }
+    }
+}
+
+impl std::fmt::Debug for SessionChangeSignal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionChangeSignal").field("owner", &self.owner).finish_non_exhaustive()
+    }
+}
+
+/// Provider session headers of one playback session for one target URL.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SessionProviderHeaders {
+    /// The session ended, was replaced or switched provider accounts.
+    NoSession,
+    /// The session is valid but has no headers for the target.
+    NoHeaders,
+    Headers(HashMap<String, String>),
+}
+
+impl SessionProviderHeaders {
+    fn for_target(session: &UserSession, target_url: &str) -> Self {
+        session
+            .provider_session_headers_for(target_url)
+            .map_or(Self::NoHeaders, |headers| Self::Headers(headers.into_owned()))
+    }
+}
+
 /// `host:port` of a URL, used to scope provider session cookies.
 fn url_host_key(url: &str) -> Option<String> {
     let url = url::Url::parse(url).ok()?;
@@ -145,6 +243,13 @@ pub struct UserSession {
     pub provider_session_headers: HashMap<String, String>,
     /// Origin (`scheme://host:port`) whose response set `provider_session_headers`; `None` when unknown.
     pub provider_session_headers_host: Option<String>,
+    /// Shared copy-on-write so per-request session snapshots do not copy the cookie jar.
+    pub provider_session_cookies: Arc<crate::ProviderSessionCookieStore>,
+    /// Unique per session object, so a reused token never authorizes requests of an older session.
+    pub incarnation: u64,
+    /// Bumped on every provider account switch; child URLs belong to the account that issued them.
+    pub binding_generation: u64,
+    pub change_signal: SessionChangeSignal,
     /// Shared with the response body so media confirmation survives a released VOD lease.
     pub media_started: Arc<AtomicBool>,
     /// Stable suffix appended to upstream User-Agent headers for this playback session.
@@ -159,16 +264,87 @@ pub struct UserSession {
     pub lifecycle: PlaybackLifecycle,
 }
 
+/// A detached session with a fresh incarnation, for fixtures and struct-update construction.
+/// Sessions in the connection table come from `create_user_session`.
+impl Default for UserSession {
+    fn default() -> Self {
+        Self {
+            token: String::new(),
+            transition_version: 1,
+            virtual_id: 0,
+            provider: Arc::from(""),
+            stream_url: Arc::from(""),
+            provider_session_headers: HashMap::new(),
+            provider_session_headers_host: None,
+            provider_session_cookies: Arc::default(),
+            incarnation: next_session_incarnation(),
+            binding_generation: 0,
+            change_signal: SessionChangeSignal::default(),
+            media_started: Arc::new(AtomicBool::new(false)),
+            user_agent_stream_index: None,
+            addr: SocketAddr::from(([0, 0, 0, 0], 0)),
+            socket_bound: false,
+            active_addrs: Vec::new(),
+            ts: 0,
+            started_at: 0,
+            permission: UserConnectionPermission::Allowed,
+            connection_kind: None,
+            lifecycle: PlaybackLifecycle::default(),
+        }
+    }
+}
+
 impl UserSession {
+    pub const fn identity(&self) -> SessionIdentity {
+        SessionIdentity { incarnation: self.incarnation, binding_generation: self.binding_generation }
+    }
+
+    fn switch_provider(&mut self, provider: Arc<str>) {
+        self.provider = provider;
+        self.binding_generation = self.binding_generation.wrapping_add(1);
+        self.change_signal.signal();
+        self.provider_session_headers.clear();
+        self.provider_session_headers_host = None;
+        self.clear_provider_session_cookies();
+    }
+
+    fn expire(&mut self) {
+        self.lifecycle = PlaybackLifecycle::Expired;
+        self.change_signal.signal();
+    }
+
+    fn set_permission(&mut self, permission: UserConnectionPermission) {
+        let exhausted_now = permission == UserConnectionPermission::Exhausted && self.permission != permission;
+        self.permission = permission;
+        if exhausted_now {
+            self.change_signal.signal();
+        }
+    }
+
+    /// Whether the session may still serve requests: neither expired nor exhausted.
+    fn is_live(&self) -> bool {
+        !matches!(self.lifecycle, PlaybackLifecycle::Expired) && self.permission != UserConnectionPermission::Exhausted
+    }
+
+    fn clear_provider_session_cookies(&mut self) {
+        if !self.provider_session_cookies.is_empty() {
+            self.provider_session_cookies = Arc::default();
+        }
+    }
+
     /// Provider session headers that may be sent to `target_url`: only to the origin (scheme,
     /// host and port) that set them, or unconditionally when that origin is unknown.
-    pub fn provider_session_headers_for(&self, target_url: &str) -> Option<&HashMap<String, String>> {
+    pub fn provider_session_headers_for(&self, target_url: &str) -> Option<Cow<'_, HashMap<String, String>>> {
+        if !self.provider_session_cookies.is_empty() {
+            return self.provider_session_cookies.headers_for(target_url);
+        }
         if self.provider_session_headers.is_empty() {
             return None;
         }
         match self.provider_session_headers_host.as_deref() {
-            Some(host) => (url_host_key(target_url).as_deref() == Some(host)).then_some(&self.provider_session_headers),
-            None => Some(&self.provider_session_headers),
+            Some(host) => (url_host_key(target_url).as_deref() == Some(host))
+                .then_some(Cow::Borrowed(&self.provider_session_headers)),
+            None => Some(Cow::Borrowed(&self.provider_session_headers)),
         }
     }
 }
@@ -551,7 +727,37 @@ impl UserConnections {
         let now = Instant::now();
         self.ended_sessions.retain(|_, expires_at| *expires_at > now);
         let expires_at = now + ENDED_SESSION_RECREATE_BLOCK;
+        let tokens = tokens.into_iter().collect::<Vec<_>>();
+        for session in self.by_key.values().flat_map(|data| data.sessions.iter()) {
+            if tokens.contains(&session.token) {
+                session.change_signal.signal();
+            }
+        }
         self.ended_sessions.extend(tokens.into_iter().map(|token| (token, expires_at)));
+    }
+
+    fn is_token_ended(&self, token: &str) -> bool {
+        self.ended_sessions.get(token).is_some_and(|expiry| *expiry > Instant::now())
+    }
+
+    /// Returns the session while it may still serve requests: not ended, expired or exhausted.
+    fn live_session(&self, username: &str, token: &str) -> Option<(&UserConnectionData, &UserSession)> {
+        if self.is_token_ended(token) {
+            return None;
+        }
+        let data = self.by_key.get(username)?;
+        let session = data.sessions.iter().find(|session| session.token == token && session.is_live())?;
+        Some((data, session))
+    }
+
+    /// Returns the live session only while this exact incarnation and binding may still serve requests.
+    fn current_session(
+        &self,
+        username: &str,
+        token: &str,
+        identity: SessionIdentity,
+    ) -> Option<(&UserConnectionData, &UserSession)> {
+        self.live_session(username, token).filter(|(_, session)| session.identity() == identity)
     }
 }
 
@@ -598,6 +804,14 @@ pub struct ReleasedConnection {
     pub addr_removed: bool,
     pub removed_streams: Vec<StreamInfo>,
     pub disconnected_users: Vec<String>,
+}
+
+/// Identity of the session whose admission authorized a finite resource request.
+#[derive(Clone, Copy, Debug)]
+pub struct PlaybackSessionRegistration {
+    pub identity: SessionIdentity,
+    pub enforce_limits: bool,
+    pub grace_admitted: bool,
 }
 
 pub struct ActiveUserConnectionParams<'a> {
@@ -699,6 +913,7 @@ impl SocketRegistration {
 }
 
 struct UserSessionParams<'a> {
+    change_wakes: &'a Arc<DeferredWakes>,
     session_token: &'a str,
     virtual_id: u32,
     provider: &'a str,
@@ -736,6 +951,38 @@ pub struct ActiveUserManager {
     reentry_suppressed_total: AtomicU64,
     divergence_cache: Mutex<LruCache<String, DivergenceEntry>>,
     divergence_cooldown_secs: u64,
+    // Session change signals raised under the write lock, delivered once it is released.
+    deferred_wakes: Arc<DeferredWakes>,
+}
+
+/// Write access to `UserConnections` that delivers session change signals after release.
+///
+/// Fields drop in declaration order: `guard` releases the write lock before `_wake` notifies
+/// the waiters signalled during this write.
+struct UserConnectionsWriteGuard<'a> {
+    guard: tokio::sync::RwLockWriteGuard<'a, UserConnections>,
+    _wake: WakeDeferred<'a>,
+}
+
+struct WakeDeferred<'a>(&'a DeferredWakes);
+
+impl Drop for WakeDeferred<'_> {
+    fn drop(&mut self) { self.0.wake(); }
+}
+
+impl<'a> UserConnectionsWriteGuard<'a> {
+    fn new(guard: tokio::sync::RwLockWriteGuard<'a, UserConnections>, wakes: &'a DeferredWakes) -> Self {
+        Self { guard, _wake: WakeDeferred(wakes) }
+    }
+}
+
+impl std::ops::Deref for UserConnectionsWriteGuard<'_> {
+    type Target = UserConnections;
+    fn deref(&self) -> &Self::Target { &self.guard }
+}
+
+impl std::ops::DerefMut for UserConnectionsWriteGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.guard }
 }
 
 struct DivergenceEntry {
@@ -769,6 +1016,10 @@ struct DivergenceSnapshot {
 }
 
 impl ActiveUserManager {
+    async fn write_connections(&self) -> UserConnectionsWriteGuard<'_> {
+        UserConnectionsWriteGuard::new(self.connections.write().await, &self.deferred_wakes)
+    }
+
     pub fn shutdown(&self) { self.adaptive_expiry_cancel.cancel(); }
 
     pub fn start_adaptive_expiry_worker(self: &Arc<Self>) {
@@ -836,6 +1087,7 @@ impl ActiveUserManager {
             pending_provider_releases: Mutex::new(HashMap::new()),
             dropped_cleanup_events: AtomicU64::new(0),
             reentry_suppressed_total: AtomicU64::new(0),
+            deferred_wakes: Arc::default(),
             divergence_cache: Mutex::new(LruCache::new(DIVERGENCE_CACHE_CAPACITY)),
             divergence_cooldown_secs: 300,
         }
@@ -932,7 +1184,7 @@ impl ActiveUserManager {
 
     /// Atomically removes all user requests and sessions during terminal shutdown.
     pub async fn drain_for_shutdown(&self) -> Vec<shared::model::StreamInfo> {
-        let connections = std::mem::take(&mut *self.connections.write().await);
+        let connections = std::mem::take(&mut *self.write_connections().await);
         self.adaptive_expiry_queue.lock().await.clear();
         self.adaptive_expiry_index.lock().await.clear();
         self.transition_gates.lock().await.clear();
@@ -993,12 +1245,10 @@ impl ActiveUserManager {
     /// Releases an active stream for the given socket address without removing the
     /// socket registration (`key_by_addr`). This is used when a stream ends while
     /// the underlying HTTP connection may still remain open.
-    #[allow(clippy::too_many_lines)]
     pub async fn release_stream(&self, addr: &SocketAddr) -> Option<StreamInfo> {
         self.release_stream_inner(addr, None).await.into_removed()
     }
 
-    #[allow(clippy::too_many_lines)]
     pub async fn release_stream_by_uid(&self, addr: &SocketAddr, stream_uid: u32) -> Option<StreamInfo> {
         self.release_stream_request_by_uid(addr, stream_uid).await.into_removed()
     }
@@ -1018,7 +1268,7 @@ impl ActiveUserManager {
             promotion,
             divergence_snapshot,
         ) = {
-            let mut user_connections = self.connections.write().await;
+            let mut user_connections = self.write_connections().await;
 
             let username = if let Some(uid) = stream_uid {
                 user_connections.by_key.iter().find_map(|(username, connection_data)| {
@@ -1234,7 +1484,7 @@ impl ActiveUserManager {
             preserved_updates,
             promotions,
         ) = {
-            let mut user_connections = self.connections.write().await;
+            let mut user_connections = self.write_connections().await;
 
             let registration = user_connections.key_by_addr.remove(addr);
             let had_registration = registration.is_some();
@@ -1496,7 +1746,7 @@ impl ActiveUserManager {
         soft_connections: u16,
     ) -> ConnectionAdmission {
         if max_connections > 0 || soft_connections > 0 {
-            if let Some(connection_data) = self.connections.write().await.by_key.get_mut(username) {
+            if let Some(connection_data) = self.write_connections().await.by_key.get_mut(username) {
                 connection_data.max_connections = max_connections;
                 connection_data.soft_connections = soft_connections;
                 return self.check_connection_admission(username, connection_data);
@@ -1525,7 +1775,7 @@ impl ActiveUserManager {
             return ConnectionAdmission::allowed(Some(ConnectionKind::Normal));
         }
 
-        let mut connections = self.connections.write().await;
+        let mut connections = self.write_connections().await;
         let Some(connection_data) = connections.by_key.get_mut(username) else {
             return ConnectionAdmission::allowed(Some(ConnectionKind::Normal));
         };
@@ -1574,7 +1824,7 @@ impl ActiveUserManager {
         }
 
         let (connection_kind, promotions, divergence_snapshot) = {
-            let mut connections = self.connections.write().await;
+            let mut connections = self.write_connections().await;
             let connection_data = connections.by_key.get_mut(username)?;
             connection_data.max_connections = max_connections;
             connection_data.soft_connections = soft_connections;
@@ -1670,7 +1920,7 @@ impl ActiveUserManager {
             debug!("Grace grant denied, grace_period_millis is zero for {username}");
             return false;
         }
-        let mut connections = self.connections.write().await;
+        let mut connections = self.write_connections().await;
         if let Some(connection_data) = connections.by_key.get_mut(username) {
             let now = get_current_timestamp();
             if connection_data.connections < connection_data.max_connections {
@@ -1739,7 +1989,7 @@ impl ActiveUserManager {
     }
 
     pub async fn update_stream_detail_by_uid(&self, uid: u32, video_type: CustomVideoStreamType) -> Option<StreamInfo> {
-        let mut user_connections = self.connections.write().await;
+        let mut user_connections = self.write_connections().await;
         for connection_data in user_connections.by_key.values_mut() {
             for stream in &mut connection_data.streams {
                 if stream.uid == uid {
@@ -1759,7 +2009,7 @@ impl ActiveUserManager {
 
     pub async fn add_connection(&self, addr: &SocketAddr) {
         self.gc();
-        let mut user_connections = self.connections.write().await;
+        let mut user_connections = self.write_connections().await;
         user_connections
             .key_by_addr
             .entry(*addr)
@@ -1767,8 +2017,16 @@ impl ActiveUserManager {
             .or_insert_with(SocketRegistration::anonymous);
     }
 
-    #[allow(clippy::too_many_lines)]
     pub async fn update_connection(&self, update: ActiveUserConnectionParams<'_>) -> Option<StreamInfo> {
+        self.update_connection_with_session_registration(update, None).await
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub async fn update_connection_with_session_registration(
+        &self,
+        update: ActiveUserConnectionParams<'_>,
+        session_registration: Option<&PlaybackSessionRegistration>,
+    ) -> Option<StreamInfo> {
         let ActiveUserConnectionParams {
             uid,
             meter_uid,
@@ -1785,7 +2043,23 @@ impl ActiveUserManager {
             session_token,
         } = update;
         let (stream_info, divergence_snapshot, connection_count_changed) = {
-            let mut user_connections = self.connections.write().await;
+            let mut user_connections = self.write_connections().await;
+            if let Some(requirement) = session_registration {
+                let token = session_token?;
+                let (data, session) = user_connections.current_session(username, token, requirement.identity)?;
+                if requirement.enforce_limits
+                    && !requirement.grace_admitted
+                    && !session.lifecycle.is_counted()
+                    && !Self::session_has_stream(data, token)
+                    && decide_connection_kind(
+                        data.effective_counts_for_admission(Some(token)),
+                        max_connections,
+                        soft_connections,
+                    ) != Some(connection_kind)
+                {
+                    return None;
+                }
+            }
 
             let now = current_time_secs();
             let registration =
@@ -2001,6 +2275,10 @@ impl ActiveUserManager {
             stream_url: params.stream_url.intern(),
             provider_session_headers: HashMap::new(),
             provider_session_headers_host: None,
+            provider_session_cookies: Arc::default(),
+            incarnation: next_session_incarnation(),
+            binding_generation: 0,
+            change_signal: SessionChangeSignal::new(params.change_wakes),
             media_started: Arc::new(AtomicBool::new(false)),
             user_agent_stream_index: None,
             addr: *params.addr,
@@ -2090,7 +2368,7 @@ impl ActiveUserManager {
         permission: UserConnectionPermission,
         kind: Option<ConnectionKind>,
     ) {
-        session.permission = permission;
+        session.set_permission(permission);
         if let Some(kind) = kind {
             session.connection_kind = Some(kind);
         }
@@ -2105,7 +2383,7 @@ impl ActiveUserManager {
             data.wake_source = Some(wake_source);
         }
         Self::bump_session_transition_version(session);
-        session.permission = permission;
+        session.set_permission(permission);
     }
 
     fn session_has_stream(connection_data: &UserConnectionData, session_token: &str) -> bool {
@@ -2125,7 +2403,7 @@ impl ActiveUserManager {
                 // This can happen when the grace window times out while the client
                 // is still connecting but hasn't opened a stream yet.
                 PlaybackLifecycle::GraceActive => {
-                    session.lifecycle = PlaybackLifecycle::Expired;
+                    session.expire();
                 }
                 _ => {}
             }
@@ -2141,7 +2419,7 @@ impl ActiveUserManager {
                 PlaybackLifecycle::GraceActive => {
                     // GraceActive without stream: the grace failed. The stream was already
                     // removed (this function is called after stream removal), so expire the session.
-                    session.lifecycle = PlaybackLifecycle::Expired;
+                    session.expire();
                 }
                 _ => {}
             }
@@ -2178,7 +2456,7 @@ impl ActiveUserManager {
             return ConnectionAdmission::allowed(Some(ConnectionKind::Normal));
         }
 
-        let mut connections = self.connections.write().await;
+        let mut connections = self.write_connections().await;
         let Some(connection_data) = connections.by_key.get_mut(username) else {
             return ConnectionAdmission::allowed(Some(ConnectionKind::Normal));
         };
@@ -2232,7 +2510,7 @@ impl ActiveUserManager {
         self.gc();
 
         let username = user.username.clone();
-        let mut user_connections = self.connections.write().await;
+        let mut user_connections = self.write_connections().await;
         let connection_data = user_connections
             .by_key
             .entry(username.clone())
@@ -2256,6 +2534,7 @@ impl ActiveUserManager {
         }
 
         let session = Self::new_user_session(&UserSessionParams {
+            change_wakes: &self.deferred_wakes,
             session_token,
             virtual_id,
             provider,
@@ -2281,7 +2560,7 @@ impl ActiveUserManager {
         remove_session_if_unbound: bool,
     ) {
         let (connection_changed, user_removed, promotions, divergence_snapshot) = {
-            let mut user_connections = self.connections.write().await;
+            let mut user_connections = self.write_connections().await;
             let (connection_changed, user_removed, promotions, divergence_snapshot) = {
                 let Some(connection_data) = user_connections.by_key.get_mut(username) else {
                     return;
@@ -2308,7 +2587,7 @@ impl ActiveUserManager {
                     let kind =
                         connection_data.sessions[session_index].connection_kind.unwrap_or(ConnectionKind::Normal);
                     connection_data.decrement_kind(kind);
-                    connection_data.sessions[session_index].lifecycle = PlaybackLifecycle::Expired;
+                    connection_data.sessions[session_index].expire();
                     connection_changed = true;
                 }
                 connection_data.sessions[session_index].transition_version =
@@ -2361,7 +2640,7 @@ impl ActiveUserManager {
 
     pub async fn release_session_streams_and_counted_reservation(&self, username: &str, session_token: &str) -> bool {
         let (connection_changed, user_removed, promotions, divergence_snapshot) = {
-            let mut user_connections = self.connections.write().await;
+            let mut user_connections = self.write_connections().await;
             let (connection_changed, user_removed, promotions, divergence_snapshot) = {
                 let Some(connection_data) = user_connections.by_key.get_mut(username) else {
                     return false;
@@ -2424,11 +2703,12 @@ impl ActiveUserManager {
         self.gc();
 
         let username = user.username.clone();
-        let mut user_connections = self.connections.write().await;
+        let mut user_connections = self.write_connections().await;
         let connection_data = user_connections.by_key.entry(username.clone()).or_insert_with(|| {
             debug_if_enabled!("Creating first session for user {username} {}", sanitize_sensitive_info(stream_url));
             let mut data = UserConnectionData::new(0, user.max_connections, user.soft_connections);
             let session = Self::new_user_session(&UserSessionParams {
+                change_wakes: &self.deferred_wakes,
                 session_token,
                 virtual_id,
                 provider,
@@ -2456,8 +2736,7 @@ impl ActiveUserManager {
                     session.stream_url = stream_url.intern();
                 }
                 if &*session.provider != provider {
-                    session.provider = provider.intern();
-                    reset_provider_session_headers = true;
+                    session.switch_provider(provider.intern());
                 }
                 if reset_provider_session_headers {
                     session.provider_session_headers.clear();
@@ -2503,6 +2782,7 @@ impl ActiveUserManager {
             sanitize_sensitive_info(stream_url)
         );
         let session = Self::new_user_session(&UserSessionParams {
+            change_wakes: &self.deferred_wakes,
             session_token,
             virtual_id,
             provider,
@@ -2522,7 +2802,7 @@ impl ActiveUserManager {
 
     pub async fn update_session_addr(&self, username: &str, token: &str, addr: &SocketAddr) {
         let now = current_time_secs();
-        let mut user_connections = self.connections.write().await;
+        let mut user_connections = self.write_connections().await;
         if let Some(connection_data) = user_connections.by_key.get_mut(username) {
             let update_result = if let Some(session) = connection_data.sessions.iter_mut().find(|s| s.token == token) {
                 let previous_addr = session.addr;
@@ -2573,11 +2853,13 @@ impl ActiveUserManager {
         stream_url: Arc<str>,
     ) {
         let now = current_time_secs();
-        let mut user_connections = self.connections.write().await;
+        let mut user_connections = self.write_connections().await;
         if let Some(connection_data) = user_connections.by_key.get_mut(username) {
             if let Some(session) = connection_data.sessions.iter_mut().find(|s| s.token == token) {
                 let previous_provider = session.provider.clone();
-                session.provider = provider.clone();
+                if session.provider != provider {
+                    session.switch_provider(provider.clone());
+                }
                 session.stream_url = stream_url.clone();
                 session.ts = now;
                 Self::bump_session_transition_version(session);
@@ -2598,7 +2880,7 @@ impl ActiveUserManager {
 
     pub async fn clear_unbound_session_addr(&self, username: &str, token: &str, addr: &SocketAddr) {
         let now = current_time_secs();
-        let mut user_connections = self.connections.write().await;
+        let mut user_connections = self.write_connections().await;
         let Some(connection_data) = user_connections.by_key.get_mut(username) else {
             return;
         };
@@ -2644,7 +2926,7 @@ impl ActiveUserManager {
         reason_code: PendingProviderReason,
         deadline: u64,
     ) -> Option<u64> {
-        let mut user_connections = self.connections.write().await;
+        let mut user_connections = self.write_connections().await;
         let connection_data = user_connections.by_key.get_mut(username)?;
         let now = current_time_secs();
         if let Some(session) = connection_data.sessions.iter_mut().find(|session| session.token == token) {
@@ -2680,7 +2962,7 @@ impl ActiveUserManager {
         expected_version: u64,
         wake_source: PendingProviderWakeSource,
     ) {
-        let mut user_connections = self.connections.write().await;
+        let mut user_connections = self.write_connections().await;
         let Some(connection_data) = user_connections.by_key.get_mut(username) else {
             return;
         };
@@ -2720,7 +3002,7 @@ impl ActiveUserManager {
     /// - `activate_grace_active` confirms it (grace window succeeded -> `GraceActive -> Active`)
     /// - `expire_grace_active` expires it (grace window failed -> `GraceActive -> Expired`)
     pub async fn mark_grace_active(&self, username: &str, token: &str) {
-        let mut user_connections = self.connections.write().await;
+        let mut user_connections = self.write_connections().await;
         let Some(connection_data) = user_connections.by_key.get_mut(username) else {
             return;
         };
@@ -2749,7 +3031,7 @@ impl ActiveUserManager {
     /// The session remains counted and the kind counts are already correct from
     /// the `GraceActive` provisional state.
     pub async fn activate_grace_active(&self, username: &str, token: &str, expected_version: u64) {
-        let mut user_connections = self.connections.write().await;
+        let mut user_connections = self.write_connections().await;
         let Some(connection_data) = user_connections.by_key.get_mut(username) else {
             return;
         };
@@ -2772,7 +3054,7 @@ impl ActiveUserManager {
     /// Releases the provisional counted lease.
     pub async fn expire_grace_active(&self, username: &str, token: &str, expected_version: u64) {
         let (connection_changed, removed_count) = {
-            let mut user_connections = self.connections.write().await;
+            let mut user_connections = self.write_connections().await;
             let Some(connection_data) = user_connections.by_key.get_mut(username) else {
                 return;
             };
@@ -2800,8 +3082,8 @@ impl ActiveUserManager {
             }
 
             // Expire the session. Lifecycle change alone handles counted state (Expired is not counted).
-            connection_data.sessions[session_index].lifecycle = PlaybackLifecycle::Expired;
-            connection_data.sessions[session_index].permission = UserConnectionPermission::Exhausted;
+            connection_data.sessions[session_index].expire();
+            connection_data.sessions[session_index].set_permission(UserConnectionPermission::Exhausted);
             Self::bump_session_transition_version(&mut connection_data.sessions[session_index]);
 
             // Collect addresses for stream cleanup.
@@ -2864,7 +3146,7 @@ impl ActiveUserManager {
     /// Returns `true` only when the session existed and was removed by this call.
     pub async fn terminate_session(&self, username: &str, session_token: &str) -> bool {
         let (connection_changed, removed_count, promotions) = {
-            let mut user_connections = self.connections.write().await;
+            let mut user_connections = self.write_connections().await;
             let Some(connection_data) = user_connections.by_key.get_mut(username) else {
                 return false;
             };
@@ -2920,7 +3202,7 @@ impl ActiveUserManager {
     /// Removes all sessions whose `addr` or `active_addrs` contains `kick_addr`.
     pub async fn terminate_sessions_for_addr(&self, username: &str, kick_addr: &SocketAddr) {
         let (connection_changed, removed_count, promotions) = {
-            let mut user_connections = self.connections.write().await;
+            let mut user_connections = self.write_connections().await;
             let Some(connection_data) = user_connections.by_key.get_mut(username) else {
                 return;
             };
@@ -2991,7 +3273,7 @@ impl ActiveUserManager {
         expected_version: u64,
         wake_source: PendingProviderWakeSource,
     ) {
-        let mut user_connections = self.connections.write().await;
+        let mut user_connections = self.write_connections().await;
         let Some(connection_data) = user_connections.by_key.get_mut(username) else {
             return;
         };
@@ -3015,7 +3297,7 @@ impl ActiveUserManager {
         };
         let session = &mut connection_data.sessions[session_index];
         Self::clear_session_pending_with_permission(session, UserConnectionPermission::Exhausted, wake_source);
-        session.lifecycle = PlaybackLifecycle::Expired;
+        session.expire();
         if let Some(kind) = kind_to_release {
             connection_data.decrement_kind(kind);
         }
@@ -3102,7 +3384,7 @@ impl ActiveUserManager {
 
     pub async fn touch_socket_activity(&self, addr: &SocketAddr) {
         let now = current_time_secs();
-        let mut user_connections = self.connections.write().await;
+        let mut user_connections = self.write_connections().await;
         // Transport activity keeps the transport alive, not every playback that
         // has previously used it. Authenticated HTTP activity updates its own user.
         if let Some(registration) = user_connections.key_by_addr.get_mut(addr) {
@@ -3112,7 +3394,7 @@ impl ActiveUserManager {
 
     pub async fn touch_http_activity(&self, username: &str, token: &str, addr: &SocketAddr) {
         let now = current_time_secs();
-        let mut user_connections = self.connections.write().await;
+        let mut user_connections = self.write_connections().await;
 
         let registration = user_connections.key_by_addr.entry(*addr).or_insert_with(SocketRegistration::anonymous);
         registration.add_user(username, now);
@@ -3139,7 +3421,7 @@ impl ActiveUserManager {
     /// Marks a session as ended on purpose (eviction, kick, explicit terminate), so it is not
     /// recreated from a sealed playlist token.
     pub async fn mark_session_ended(&self, token: &str) {
-        self.connections.write().await.mark_sessions_ended([token.to_string()]);
+        self.write_connections().await.mark_sessions_ended([token.to_string()]);
     }
 
     /// True while a session token is blocked from recreation after an eviction, kick or terminate.
@@ -3149,6 +3431,70 @@ impl ActiveUserManager {
 
     pub async fn get_and_update_user_session(&self, username: &str, token: &str) -> Option<UserSession> {
         self.update_user_session(username, token).await
+    }
+
+    /// Checks an in-flight resource against the same session and account binding without touching admission.
+    pub async fn playback_session_is_current(&self, username: &str, token: &str, identity: SessionIdentity) -> bool {
+        self.connections.read().await.current_session(username, token, identity).is_some()
+    }
+
+    /// Resolves once the session ended or switched accounts. Only writes that end this
+    /// session wake the waiter, after the write lock is released.
+    pub async fn wait_for_playback_session_end(&self, username: &str, token: &str, identity: SessionIdentity) {
+        loop {
+            let notify = {
+                let users = self.connections.read().await;
+                let Some((_, session)) = users.current_session(username, token, identity) else {
+                    return;
+                };
+                Arc::clone(&session.change_signal.notify)
+            };
+            let changed = notify.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            // A change between the lookup and `enable` was not observed: re-check before waiting.
+            if !self.playback_session_is_current(username, token, identity).await {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    /// Provider session headers valid for `target_url` now, for the session object and account
+    /// binding of `identity` in any lifecycle state: a manifest refresh may revive an expired
+    /// reservation.
+    pub async fn provider_headers_for_session_identity(
+        &self,
+        username: &str,
+        token: &str,
+        identity: SessionIdentity,
+        target_url: &str,
+    ) -> SessionProviderHeaders {
+        let users = self.connections.read().await;
+        users
+            .by_key
+            .get(username)
+            .and_then(|data| {
+                data.sessions.iter().find(|session| session.token == token && session.identity() == identity)
+            })
+            .map_or(SessionProviderHeaders::NoSession, |session| {
+                SessionProviderHeaders::for_target(session, target_url)
+            })
+    }
+
+    /// Provider session headers currently valid for `target_url`, read at send time so cookies
+    /// rotated or expired while the request waited are honored.
+    pub async fn current_session_provider_headers(
+        &self,
+        username: &str,
+        token: &str,
+        identity: SessionIdentity,
+        target_url: &str,
+    ) -> SessionProviderHeaders {
+        let users = self.connections.read().await;
+        users.current_session(username, token, identity).map_or(SessionProviderHeaders::NoSession, |(_, session)| {
+            SessionProviderHeaders::for_target(session, target_url)
+        })
     }
 
     pub async fn media_started_flag(&self, username: &str, token: &str) -> Option<Arc<AtomicBool>> {
@@ -3197,7 +3543,7 @@ impl ActiveUserManager {
         token: &str,
         provider_session_headers: &HashMap<String, String>,
     ) -> bool {
-        let mut user_connections = self.connections.write().await;
+        let mut user_connections = self.write_connections().await;
         let Some(connection_data) = user_connections.by_key.get_mut(username) else {
             return false;
         };
@@ -3206,35 +3552,72 @@ impl ActiveUserManager {
         };
         session.provider_session_headers.clone_from(provider_session_headers);
         session.provider_session_headers_host = None;
+        session.clear_provider_session_cookies();
         session.ts = current_time_secs();
         true
     }
 
-    /// Stores provider session headers set by the response of `source_url`; they are only sent
-    /// back to that host (see [`UserSession::provider_session_headers_for`]).
-    pub async fn update_session_provider_headers_from(
+    pub async fn update_session_provider_response_headers_from(
         &self,
         username: &str,
         token: &str,
-        provider_session_headers: &HashMap<String, String>,
+        response: &crate::ProviderSessionHeaders,
         source_url: &str,
     ) -> bool {
-        let mut user_connections = self.connections.write().await;
-        let Some(connection_data) = user_connections.by_key.get_mut(username) else {
+        self.store_session_provider_response_headers(username, token, None, response, source_url).await
+    }
+
+    /// Stores response cookies only while the session still has the expected account binding.
+    pub async fn update_current_session_provider_response_headers_from(
+        &self,
+        username: &str,
+        token: &str,
+        identity: SessionIdentity,
+        response: &crate::ProviderSessionHeaders,
+        source_url: &str,
+    ) -> bool {
+        self.store_session_provider_response_headers(username, token, Some(identity), response, source_url).await
+    }
+
+    async fn store_session_provider_response_headers(
+        &self,
+        username: &str,
+        token: &str,
+        expected: Option<SessionIdentity>,
+        response: &crate::ProviderSessionHeaders,
+        source_url: &str,
+    ) -> bool {
+        if response.is_empty() {
+            return false;
+        }
+        let Ok(source) = url::Url::parse(source_url) else {
             return false;
         };
-        let Some(session) = connection_data.sessions.iter_mut().find(|session| session.token == token) else {
+        let mut users = self.write_connections().await;
+        if expected.is_some() && users.is_token_ended(token) {
+            return false;
+        }
+        let Some(session) = users
+            .by_key
+            .get_mut(username)
+            .and_then(|data| data.sessions.iter_mut().find(|session| session.token == token))
+        else {
             return false;
         };
-        session.provider_session_headers.clone_from(provider_session_headers);
-        session.provider_session_headers_host = url_host_key(source_url);
+        if expected.is_some_and(|identity| session.identity() != identity || !session.is_live()) {
+            return false;
+        }
+        Arc::make_mut(&mut session.provider_session_cookies).update(&source, response);
+        // The origin-scoped cookie store is the only source once a provider response was stored.
+        session.provider_session_headers.clear();
+        session.provider_session_headers_host = None;
         session.ts = current_time_secs();
         true
     }
 
     /// Returns the stable User-Agent suffix for a playback session, assigning one on first use.
     pub async fn get_or_assign_user_agent_stream_index(&self, username: &str, token: &str) -> Option<u64> {
-        let mut user_connections = self.connections.write().await;
+        let mut user_connections = self.write_connections().await;
         let session =
             user_connections.by_key.get_mut(username)?.sessions.iter_mut().find(|session| session.token == token)?;
         Some(*session.user_agent_stream_index.get_or_insert_with(|| self.next_user_agent_stream_index()))
@@ -3259,7 +3642,7 @@ impl ActiveUserManager {
 
     /// Persists a previously allocated index without replacing an existing session identity.
     pub async fn set_user_agent_stream_index_if_absent(&self, username: &str, token: &str, index: u64) -> bool {
-        let mut user_connections = self.connections.write().await;
+        let mut user_connections = self.write_connections().await;
         let Some(session) = user_connections
             .by_key
             .get_mut(username)
@@ -3282,7 +3665,7 @@ impl ActiveUserManager {
     }
 
     async fn update_user_session(&self, username: &str, token: &str) -> Option<UserSession> {
-        let mut user_connections = self.connections.write().await;
+        let mut user_connections = self.write_connections().await;
 
         let connection_data = user_connections.by_key.get_mut(username)?;
         let now = current_time_secs();
@@ -3298,7 +3681,7 @@ impl ActiveUserManager {
             && !matches!(connection_data.sessions[session_index].lifecycle, PlaybackLifecycle::PendingProvider { .. })
         {
             let admission = self.check_connection_admission(username, connection_data);
-            connection_data.sessions[session_index].permission = admission.permission();
+            connection_data.sessions[session_index].set_permission(admission.permission());
             if admission.kind().is_some() {
                 connection_data.sessions[session_index].connection_kind = admission.kind();
             }
@@ -3419,7 +3802,7 @@ impl ActiveUserManager {
     pub async fn block_user_for_stream(&self, addr: &SocketAddr, virtual_id: VirtualId, blocked_secs: u64) {
         let block_for_secs = blocked_secs.clamp(0, 86_400); // max 1 day;
         if block_for_secs > 0 {
-            let mut connections = self.connections.write().await;
+            let mut connections = self.write_connections().await;
             let now = current_time_secs();
             connections.kicked.retain(|_, (expires_at, _)| *expires_at > now);
             let candidate_usernames: Vec<String> = connections
@@ -3448,7 +3831,7 @@ impl ActiveUserManager {
         if blocked_secs == 0 {
             return;
         }
-        let mut connections = self.connections.write().await;
+        let mut connections = self.write_connections().await;
         let username = connections
             .by_key
             .iter()
@@ -3464,7 +3847,7 @@ impl ActiveUserManager {
         protected_addr: SocketAddr,
         ttl: Duration,
     ) {
-        let mut connections = self.connections.write().await;
+        let mut connections = self.write_connections().await;
         let now = Instant::now();
         connections.recently_evicted_sessions.retain(|_, protection| protection.expires_at > now);
         connections.recent_socket_reentry_guards.retain(|_, protection| protection.expires_at > now);
@@ -3696,7 +4079,7 @@ impl ActiveUserManager {
         let mut promotions: Vec<(String, PromotionAction)> = Vec::new();
         {
             let mut expiry_index = self.adaptive_expiry_index.lock().await;
-            let mut user_connections = self.connections.write().await;
+            let mut user_connections = self.write_connections().await;
             for entry in &due_entries {
                 let key = AdaptiveExpiryKey {
                     username: entry.username.clone(),
@@ -3822,7 +4205,8 @@ impl ActiveUserManager {
             if now.saturating_sub(ts) > USER_GC_TTL
                 && gc_ts.compare_exchange(ts, now, Ordering::AcqRel, Ordering::Relaxed).is_ok()
             {
-                if let Ok(mut user_connections) = self.connections.try_write() {
+                if let Ok(guard) = self.connections.try_write() {
+                    let mut user_connections = UserConnectionsWriteGuard::new(guard, &self.deferred_wakes);
                     user_connections.kicked.retain(|_, (expires_at, _)| *expires_at > now);
                     let now_instant = Instant::now();
                     user_connections

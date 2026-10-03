@@ -1,13 +1,14 @@
 use super::{
     input_persist_hint_key, input_url_hint_key, ConfigInputFormAction, ConfigInputFormState,
     ConfigInputOptionsDtoFormState, ConfigInputOptionsFormAction, LABEL_CACHE_DURATION, LABEL_DISABLE_HLS_STREAMING,
-    LABEL_ENABLED, LABEL_EXP_DATE, LABEL_FETCH_METHOD, LABEL_HEADERS, LABEL_LIVE, LABEL_LIVE_STREAMS,
-    LABEL_MAX_CONNECTIONS, LABEL_METADATA, LABEL_NAME, LABEL_PASSWORD, LABEL_PERSIST, LABEL_PRIORITY, LABEL_PROBE,
-    LABEL_PROBE_DELAY_SEC, LABEL_PROBE_FILTER, LABEL_PROBE_LIVE, LABEL_PROBE_LIVE_INTERVAL_HOURS, LABEL_PROBE_SERIES,
-    LABEL_PROBE_VOD, LABEL_RESOLVE, LABEL_RESOLVE_BACKGROUND, LABEL_RESOLVE_DELAY_SEC, LABEL_RESOLVE_FILTER,
-    LABEL_RESOLVE_SERIES, LABEL_RESOLVE_TMDB, LABEL_RESOLVE_VOD, LABEL_SEQUENTIAL_GROUP, LABEL_SERIES, LABEL_SKIP,
-    LABEL_UPDATE_QUALITY, LABEL_URL, LABEL_USERNAME, LABEL_USER_AGENT_STREAM_INDEX, LABEL_VOD,
-    LABEL_XTREAM_LIVE_STREAM_USE_PREFIX, LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION,
+    LABEL_ENABLED, LABEL_EXP_DATE, LABEL_FETCH_METHOD, LABEL_FLUSSONIC_HLS_AUDIO_TRACKS, LABEL_HEADERS, LABEL_LIVE,
+    LABEL_LIVE_STREAMS, LABEL_MAX_CONNECTIONS, LABEL_METADATA, LABEL_NAME, LABEL_PASSWORD, LABEL_PERSIST,
+    LABEL_PRIORITY, LABEL_PROBE, LABEL_PROBE_DELAY_SEC, LABEL_PROBE_FILTER, LABEL_PROBE_LIVE,
+    LABEL_PROBE_LIVE_INTERVAL_HOURS, LABEL_PROBE_SERIES, LABEL_PROBE_VOD, LABEL_RESOLVE, LABEL_RESOLVE_BACKGROUND,
+    LABEL_RESOLVE_DELAY_SEC, LABEL_RESOLVE_FILTER, LABEL_RESOLVE_SERIES, LABEL_RESOLVE_TMDB, LABEL_RESOLVE_VOD,
+    LABEL_SEQUENTIAL_GROUP, LABEL_SERIES, LABEL_SKIP, LABEL_UPDATE_QUALITY, LABEL_URL, LABEL_USERNAME,
+    LABEL_USER_AGENT_STREAM_INDEX, LABEL_VOD, LABEL_XTREAM_LIVE_STREAM_USE_PREFIX,
+    LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION,
 };
 use crate::{
     app::components::{
@@ -388,6 +389,11 @@ pub(super) fn InputOptionsForm(props: &InputOptionsFormProps) -> Html {
                         { edit_field_bool!(state, translate.t(LABEL_USER_AGENT_STREAM_INDEX), user_agent_stream_index, ConfigInputOptionsFormAction::UserAgentStreamIndex) }
                     } else {
                         { config_field_bool!(state.form, translate.t(LABEL_USER_AGENT_STREAM_INDEX), user_agent_stream_index) }
+                    }
+                    if props.allow_write {
+                        { edit_field_bool!(state, translate.t(LABEL_FLUSSONIC_HLS_AUDIO_TRACKS), flussonic_hls_audio_tracks, ConfigInputOptionsFormAction::FlussonicHlsAudioTracks) }
+                    } else {
+                        { config_field_bool!(state.form, translate.t(LABEL_FLUSSONIC_HLS_AUDIO_TRACKS), flussonic_hls_audio_tracks) }
                     }
                     <KeyValueEditor entries={(*headers).clone()} readonly={!props.allow_write}
                         key_placeholder={translate.t("LABEL.HEADER_NAME")} value_placeholder={translate.t("LABEL.HEADER_VALUE")}

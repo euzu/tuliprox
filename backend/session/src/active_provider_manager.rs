@@ -226,6 +226,110 @@ struct Connections {
     // ProviderName -> BTreeMap<PriorityKey, PriorityOwner>
     priority_index: HashMap<Arc<str>, BTreeMap<PriorityKey, PriorityOwner>>,
     soft_priority_index: HashMap<Arc<str>, BTreeMap<PriorityKey, PriorityOwner>>,
+    // Providers whose allocations were released since the last drain.
+    released_providers: Vec<Arc<str>>,
+}
+
+/// Tables that record which providers' capacity a write freed.
+trait CapacityReleases {
+    fn take_released_providers(&mut self) -> Vec<Arc<str>>;
+}
+
+impl CapacityReleases for Connections {
+    fn take_released_providers(&mut self) -> Vec<Arc<str>> { std::mem::take(&mut self.released_providers) }
+}
+
+impl CapacityReleases for ProviderLeaseTable {
+    fn take_released_providers(&mut self) -> Vec<Arc<str>> { ProviderLeaseTable::take_released_providers(self) }
+}
+
+/// Wakes only the requests waiting for capacity on a provider whose slot or lease was freed.
+#[derive(Default)]
+pub struct ProviderCapacityNotifier {
+    waiters: std::sync::Mutex<HashMap<Arc<str>, Arc<tokio::sync::Notify>>>,
+    staged: std::sync::Mutex<Vec<Arc<str>>>,
+    has_staged: AtomicBool,
+}
+
+impl ProviderCapacityNotifier {
+    fn lock_waiters(&self) -> std::sync::MutexGuard<'_, HashMap<Arc<str>, Arc<tokio::sync::Notify>>> {
+        self.waiters.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The notification fired whenever `provider` frees capacity. Provider names are bounded by
+    /// the configuration, so entries are kept.
+    pub fn subscribe(&self, provider: &Arc<str>) -> Arc<tokio::sync::Notify> {
+        Arc::clone(self.lock_waiters().entry(Arc::clone(provider)).or_default())
+    }
+
+    fn notify(&self, provider: &str) {
+        if let Some(notify) = self.lock_waiters().get(provider) {
+            notify.notify_waiters();
+        }
+    }
+
+    /// Called while a table lock is held; [`Self::flush`] delivers after it is released.
+    fn stage(&self, released: Vec<Arc<str>>) {
+        if released.is_empty() {
+            return;
+        }
+        self.staged.lock().unwrap_or_else(std::sync::PoisonError::into_inner).extend(released);
+        self.has_staged.store(true, Ordering::Release);
+    }
+
+    fn flush(&self) {
+        if !self.has_staged.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        let mut staged = std::mem::take(&mut *self.staged.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+        staged.sort_unstable();
+        staged.dedup();
+        let waiters = self.lock_waiters();
+        for provider in &staged {
+            if let Some(notify) = waiters.get(provider) {
+                notify.notify_waiters();
+            }
+        }
+    }
+}
+
+/// Write access to a capacity table that wakes the waiters of freed providers after release.
+///
+/// Fields drop in declaration order: `lock` stages the freed providers while it still holds the
+/// lock and then releases it; only afterwards does `_flush` wake the waiters.
+struct CapacityWriteGuard<'a, T: CapacityReleases> {
+    lock: StagingWriteGuard<'a, T>,
+    _flush: FlushCapacityWaiters<'a>,
+}
+
+struct StagingWriteGuard<'a, T: CapacityReleases> {
+    guard: RwLockWriteGuard<'a, T>,
+    notifier: &'a ProviderCapacityNotifier,
+}
+
+impl<T: CapacityReleases> Drop for StagingWriteGuard<'_, T> {
+    fn drop(&mut self) { self.notifier.stage(self.guard.take_released_providers()); }
+}
+
+struct FlushCapacityWaiters<'a>(&'a ProviderCapacityNotifier);
+
+impl Drop for FlushCapacityWaiters<'_> {
+    fn drop(&mut self) { self.0.flush(); }
+}
+
+impl<'a, T: CapacityReleases> CapacityWriteGuard<'a, T> {
+    fn new(guard: RwLockWriteGuard<'a, T>, notifier: &'a ProviderCapacityNotifier) -> Self {
+        Self { lock: StagingWriteGuard { guard, notifier }, _flush: FlushCapacityWaiters(notifier) }
+    }
+}
+
+impl<T: CapacityReleases> std::ops::Deref for CapacityWriteGuard<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target { &self.lock.guard }
+}
+
+impl<T: CapacityReleases> std::ops::DerefMut for CapacityWriteGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.lock.guard }
 }
 
 pub struct ManagedProviderHandle {
@@ -301,9 +405,16 @@ pub struct ActiveProviderManagerCore {
     connections: std::sync::RwLock<Connections>,
     leases: std::sync::RwLock<ProviderLeaseTable>,
     next_allocation_id: AtomicU64,
+    // Wakes the capacity waiters of a provider when one of its slots or leases is freed.
+    capacity: ProviderCapacityNotifier,
 }
 
 impl ActiveProviderManagerCore {
+    /// Notification fired whenever `provider` frees a slot or ends a lease.
+    pub fn provider_capacity_notify(&self, provider: &Arc<str>) -> Arc<tokio::sync::Notify> {
+        self.capacity.subscribe(provider)
+    }
+
     /// Serialises capacity transitions (acquire/release/reclassify) so a reclassify
     /// cannot race an acquire or release.
     ///
@@ -330,31 +441,35 @@ impl ActiveProviderManagerCore {
         }
     }
 
-    fn write_connections(&self) -> RwLockWriteGuard<'_, Connections> {
-        match self.connections.write() {
+    fn write_connections(&self) -> CapacityWriteGuard<'_, Connections> {
+        let guard = match self.connections.write() {
             Ok(guard) => guard,
             Err(poisoned) => {
                 error!("Recovering poisoned active-provider connection lock");
                 poisoned.into_inner()
             }
-        }
+        };
+        CapacityWriteGuard::new(guard, &self.capacity)
     }
 
-    fn write_leases(&self) -> RwLockWriteGuard<'_, ProviderLeaseTable> {
-        match self.leases.write() {
+    fn write_leases(&self) -> CapacityWriteGuard<'_, ProviderLeaseTable> {
+        let guard = match self.leases.write() {
             Ok(guard) => guard,
             Err(poisoned) => {
                 error!("Recovering poisoned provider-lease lock");
                 poisoned.into_inner()
             }
-        }
+        };
+        CapacityWriteGuard::new(guard, &self.capacity)
     }
 
-    #[cfg(test)]
     fn read_leases(&self) -> RwLockReadGuard<'_, ProviderLeaseTable> {
         match self.leases.read() {
             Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
+            Err(poisoned) => {
+                error!("Recovering poisoned provider-lease lock");
+                poisoned.into_inner()
+            }
         }
     }
 
@@ -402,6 +517,9 @@ impl ActiveProviderManagerCore {
             info.lifecycle = ConnectionLifecycle::Closed;
             info.cancel_token.cancel();
             info.allocation.release();
+            if let Some(name) = info.allocation.get_provider_name() {
+                connections.released_providers.push(name);
+            }
             Some(info.allocation)
         } else {
             None
@@ -642,6 +760,7 @@ impl ActiveProviderManager {
                 connections: std::sync::RwLock::new(Connections::default()),
                 leases: std::sync::RwLock::new(ProviderLeaseTable::with_affinity_ttl(Self::get_affinity_ttl(cfg))),
                 next_allocation_id: AtomicU64::new(1),
+                capacity: ProviderCapacityNotifier::default(),
             }),
             shared_stream_manager: OnceLock::new(),
         }
@@ -865,6 +984,10 @@ impl ActiveProviderManager {
     ) -> Option<(usize, usize, usize)> {
         let (current_connections, max_connections) = self.providers.provider_capacity(provider_name)?;
         if max_connections == 0 {
+            return Some((current_connections, max_connections, 0));
+        }
+        // Without any foreign reserving lease the owner analysis cannot change the result.
+        if !self.read_leases().has_foreign_reserved_lease(provider_name, session_owner) {
             return Some((current_connections, max_connections, 0));
         }
         let counted_owners = self.active_reservation_owners(provider_name);
@@ -1894,17 +2017,7 @@ impl ActiveProviderManager {
 
                 match action {
                     ReleaseAction::Wait(victim_id, gen, comp_token) => {
-                        let shutdown_token = self.shutdown_token.clone();
-                        let core = Arc::clone(&self.core);
-                        let reaper_token = comp_token.clone();
-                        tokio::spawn(async move {
-                            tokio::select! {
-                                () = shutdown_token.cancelled() => {},
-                                () = reaper_token.cancelled() => {
-                                    core.complete_release_with_generation(victim_id, Some(gen));
-                                }
-                            }
-                        });
+                        self.spawn_preemption_reaper(victim_id, gen, comp_token.clone());
                         PreemptionOutcome::PendingCompletion(Some((victim_id, gen)), comp_token)
                     }
                     ReleaseAction::None => {
@@ -1917,6 +2030,9 @@ impl ActiveProviderManager {
                                     .get(&victim_alloc_id)
                                     .map(|info| (victim_alloc_id, info.open_generation))
                             };
+                            if let Some((victim_id, gen)) = victim_identity {
+                                self.spawn_preemption_reaper(victim_id, gen, token.clone());
+                            }
                             PreemptionOutcome::PendingCompletion(victim_identity, token)
                         } else {
                             PreemptionOutcome::Exhausted
@@ -2141,6 +2257,59 @@ impl ActiveProviderManager {
         kind: ConnectionKind,
         lease: Option<PlaybackLeaseRef<'_>>,
     ) -> Option<ProviderHandle> {
+        self.acquire_exact_connection_with_lease_for_session_until(
+            provider_name,
+            addr,
+            allow_grace,
+            priority,
+            kind,
+            lease,
+            None,
+        )
+        .await
+    }
+
+    /// Frees a preempted victim's slot once its body completes, or after
+    /// `PREEMPTION_COMPLETION_TIMEOUT` at the latest. It runs independently of the preempting
+    /// request, so a request dropped while waiting (client disconnect, deadline, cancelled
+    /// future) cannot leave the victim's slot occupied.
+    fn spawn_preemption_reaper(&self, victim_id: AllocationId, generation: u64, completion_token: CancellationToken) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let shutdown_token = self.shutdown_token.clone();
+        let core = Arc::clone(&self.core);
+        runtime.spawn(async move {
+            tokio::select! {
+                () = shutdown_token.cancelled() => {}
+                _ = tokio::time::timeout(PREEMPTION_COMPLETION_TIMEOUT, completion_token.cancelled()) => {
+                    core.complete_release_with_generation(victim_id, Some(generation));
+                }
+            }
+        });
+    }
+
+    /// Earliest instant at which a playback lease may expire and free reserved capacity, after
+    /// pruning the ones already expired. Lease expiry is time based and sends no notification.
+    pub fn next_lease_expiry(&self) -> Option<TokioInstant> {
+        let mut leases = self.write_leases();
+        Self::prune_expired_leases(&mut leases);
+        leases.next_expiry()
+    }
+
+    /// Like [`Self::acquire_exact_connection_with_lease_for_session_await`], but never waits past
+    /// `deadline`. A preemption that outlives the deadline is finished by its reaper.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn acquire_exact_connection_with_lease_for_session_until(
+        &self,
+        provider_name: &Arc<str>,
+        addr: &SocketAddr,
+        allow_grace: bool,
+        priority: i8,
+        kind: ConnectionKind,
+        lease: Option<PlaybackLeaseRef<'_>>,
+        deadline: Option<TokioInstant>,
+    ) -> Option<ProviderHandle> {
         let params = AcquireProviderParams { addr, priority, kind, lease };
         let outcome = {
             if self.is_shutting_down.load(Ordering::Acquire) {
@@ -2168,8 +2337,14 @@ impl ActiveProviderManager {
                 Some(self.register_allocation(alloc, &params))
             }
             PreemptionOutcome::PendingCompletion(victim_identity, completion_token) => {
-                let _ = tokio::time::timeout(PREEMPTION_COMPLETION_TIMEOUT, completion_token.cancelled()).await;
+                let completion_deadline = TokioInstant::now() + PREEMPTION_COMPLETION_TIMEOUT;
+                let wait_until = deadline.map_or(completion_deadline, |deadline| deadline.min(completion_deadline));
+                let completed = tokio::time::timeout_at(wait_until, completion_token.cancelled()).await.is_ok();
                 if self.is_shutting_down.load(Ordering::Acquire) {
+                    return None;
+                }
+                if !completed && wait_until < completion_deadline {
+                    // The preemption reaper forces the victim release on time without this caller.
                     return None;
                 }
                 let _transition = self.lock_capacity_transition();
@@ -2329,6 +2504,9 @@ impl ActiveProviderManager {
                 allocation.get_provider_name().unwrap_or_default()
             );
             allocation.release();
+            if let Some(name) = allocation.get_provider_name() {
+                self.capacity.notify(&name);
+            }
         }
     }
 
@@ -2468,6 +2646,9 @@ impl ActiveProviderManager {
         }
         if let Some(allocation) = released.as_ref() {
             allocation.release();
+            if let Some(name) = allocation.get_provider_name() {
+                connections.released_providers.push(name);
+            }
         }
         released
     }
@@ -6001,6 +6182,128 @@ mod tests {
         manager.release_handle(&handle);
         manager.release_connection(&SocketAddr::from(([127, 0, 0, 1], 47_001)));
         assert_eq!(manager.get_provider_connections_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn capacity_release_wakes_only_waiters_of_that_provider() {
+        use futures::FutureExt;
+        let app_cfg = create_test_app_config_with_dual_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+        let provider_1: Arc<str> = "provider_1".intern();
+        let provider_2: Arc<str> = "provider_2".intern();
+        let acquire = |provider: &Arc<str>, port: u16| {
+            manager
+                .acquire_exact_connection_with_lease_for_session(
+                    provider,
+                    &SocketAddr::from(([127, 0, 0, 1], port)),
+                    false,
+                    0,
+                    ConnectionKind::Normal,
+                    None,
+                )
+                .expect("slot available")
+        };
+        let handle_1 = acquire(&provider_1, 48_201);
+        let handle_2 = acquire(&provider_2, 48_202);
+
+        let notify = manager.provider_capacity_notify(&provider_1);
+        let woken = notify.notified();
+        tokio::pin!(woken);
+        woken.as_mut().enable();
+        manager.release_handle(&handle_2);
+        assert!(woken.as_mut().now_or_never().is_none(), "another provider's release must not wake the waiter");
+        manager.release_handle(&handle_1);
+        assert!(woken.as_mut().now_or_never().is_some(), "the waiter's provider release wakes it");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropped_preempting_request_still_frees_the_victim_slot() {
+        let app_cfg = create_test_app_config_single_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
+        let input_name: Arc<str> = "provider_1".intern();
+        let victim = manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &SocketAddr::from(([127, 0, 0, 1], 48_111)),
+                false,
+                10,
+                ConnectionKind::Normal,
+                Some("session-victim"),
+            )
+            .expect("victim allocation succeeds");
+        manager.mark_opening(victim.allocation_id);
+        assert!(manager.register_body_owner(victim.allocation_id));
+
+        // The preempting request waits without deadline and is dropped (client disconnect).
+        let waiting = {
+            let manager = Arc::clone(&manager);
+            let input_name = Arc::clone(&input_name);
+            tokio::spawn(async move {
+                manager
+                    .acquire_exact_connection_with_lease_for_session_await(
+                        &input_name,
+                        &SocketAddr::from(([127, 0, 0, 1], 48_112)),
+                        false,
+                        0,
+                        ConnectionKind::Normal,
+                        None,
+                    )
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(victim.cancel_token.as_ref().is_some_and(tokio_util::sync::CancellationToken::is_cancelled));
+        waiting.abort();
+        assert!(waiting.await.is_err_and(|err| err.is_cancelled()));
+        assert_eq!(manager.get_provider_connections_count(), 1, "the draining victim keeps its slot for now");
+
+        tokio::time::sleep(super::PREEMPTION_COMPLETION_TIMEOUT).await;
+        tokio::task::yield_now().await;
+        assert_eq!(manager.get_provider_connections_count(), 0, "the reaper frees the never-completing victim");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exact_acquire_until_stops_at_deadline_and_still_forces_victim_release() {
+        let app_cfg = create_test_app_config_single_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
+        let input_name: Arc<str> = "provider_1".intern();
+        let victim = manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &SocketAddr::from(([127, 0, 0, 1], 48_101)),
+                false,
+                10,
+                ConnectionKind::Normal,
+                Some("session-victim"),
+            )
+            .expect("victim allocation succeeds");
+        manager.mark_opening(victim.allocation_id);
+        assert!(manager.register_body_owner(victim.allocation_id));
+
+        // The victim never completes its body, so only the deadline can end the wait.
+        let started = tokio::time::Instant::now();
+        let acquired = manager
+            .acquire_exact_connection_with_lease_for_session_until(
+                &input_name,
+                &SocketAddr::from(([127, 0, 0, 1], 48_102)),
+                false,
+                0,
+                ConnectionKind::Normal,
+                None,
+                Some(started + Duration::from_millis(100)),
+            )
+            .await;
+        assert!(acquired.is_none());
+        assert_eq!(started.elapsed(), Duration::from_millis(100), "the caller deadline bounds the wait");
+        assert!(victim.cancel_token.as_ref().is_some_and(tokio_util::sync::CancellationToken::is_cancelled));
+        assert_eq!(manager.get_provider_connections_count(), 1, "the draining victim keeps its slot for now");
+
+        tokio::time::sleep(super::PREEMPTION_COMPLETION_TIMEOUT).await;
+        tokio::task::yield_now().await;
+        assert_eq!(manager.get_provider_connections_count(), 0, "the forced victim release still runs");
     }
 
     #[tokio::test]

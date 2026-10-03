@@ -46,6 +46,7 @@ create_bitset!(
     XtreamLiveStreamWithoutExtension,
     DisableHlsStreaming,
     UserAgentStreamIndex,
+    FlussonicHlsAudioTracks,
     ResolveTmdb,
     ResolveBackground,
     ResolveSeries,
@@ -95,6 +96,7 @@ impl From<&ConfigInputOptionsDto> for ConfigInputOptions {
             (xtream_live_stream_without_extension, XtreamLiveStreamWithoutExtension),
             (disable_hls_streaming, DisableHlsStreaming),
             (user_agent_stream_index, UserAgentStreamIndex),
+            (flussonic_hls_audio_tracks, FlussonicHlsAudioTracks),
             (resolve_tmdb, ResolveTmdb),
             (resolve_background, ResolveBackground),
             (resolve_series, ResolveSeries),
@@ -1224,6 +1226,14 @@ mod tests {
         let options = ConfigInputOptions::from(&dto);
 
         assert!(options.has_flag(ConfigInputFlags::UserAgentStreamIndex));
+    }
+
+    #[test]
+    fn input_options_conversion_sets_flussonic_hls_audio_tracks_flag() {
+        let dto = ConfigInputOptionsDto { flussonic_hls_audio_tracks: true, ..ConfigInputOptionsDto::default() };
+
+        assert!(ConfigInputOptions::from(&dto).has_flag(ConfigInputFlags::FlussonicHlsAudioTracks));
+        assert!(!ConfigInputOptions::defaults().has_flag(ConfigInputFlags::FlussonicHlsAudioTracks));
     }
 
     #[test]

@@ -311,7 +311,6 @@ where
     }
 }
 
-#[allow(clippy::ref_option)]
 fn serialize_episodes<S>(episodes: &Option<Vec<XtreamSeriesInfoEpisode>>, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,

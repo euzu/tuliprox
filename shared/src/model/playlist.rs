@@ -701,7 +701,6 @@ fn append_unified_catchup_type_attributes(
 }
 
 impl M3uPlaylistItem {
-    #[allow(clippy::missing_panics_doc)]
     pub fn to_m3u(&self, target_options: Option<&ConfigTargetOptions>, rewrite_urls: bool) -> String {
         let options = target_options.as_ref();
         let ignore_logo = options.is_some_and(|o| o.ignore_logo);

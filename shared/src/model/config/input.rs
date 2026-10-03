@@ -296,7 +296,6 @@ fn is_default_flussonic_hls_catchup_max_duration_secs(value: &u32) -> bool {
     *value == default_flussonic_hls_catchup_max_duration_secs()
 }
 
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigInputOptionsDto {
@@ -323,6 +322,10 @@ pub struct ConfigInputOptionsDto {
     pub flussonic_hls_catchup_max_duration_secs: u32,
     #[serde(default, skip_serializing_if = "is_false")]
     pub user_agent_stream_index: bool,
+    /// Labels fragmented-MP4 objects below Flussonic `tracks-a<N>` paths as `audio/mp4` when the
+    /// provider sends no specific Content-Type.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub flussonic_hls_audio_tracks: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub resolve_tmdb: bool,
     #[serde(default = "default_resolve_background", skip_serializing_if = "is_true")]
@@ -373,6 +376,7 @@ impl Default for ConfigInputOptionsDto {
             flussonic_hls_catchup: FlussonicHlsCatchup::Native,
             flussonic_hls_catchup_max_duration_secs: default_flussonic_hls_catchup_max_duration_secs(),
             user_agent_stream_index: false,
+            flussonic_hls_audio_tracks: false,
             resolve_tmdb: false,
             resolve_background: default_resolve_background(),
             resolve_series: false,
@@ -404,6 +408,7 @@ impl ConfigInputOptionsDto {
             && FlussonicHlsCatchup::is_native(&self.flussonic_hls_catchup)
             && is_default_flussonic_hls_catchup_max_duration_secs(&self.flussonic_hls_catchup_max_duration_secs)
             && !self.user_agent_stream_index
+            && !self.flussonic_hls_audio_tracks
             && !self.resolve_tmdb
             && self.resolve_background
             && !self.resolve_series
@@ -430,6 +435,7 @@ impl ConfigInputOptionsDto {
         self.flussonic_hls_catchup = FlussonicHlsCatchup::Native;
         self.flussonic_hls_catchup_max_duration_secs = default_flussonic_hls_catchup_max_duration_secs();
         self.user_agent_stream_index = false;
+        self.flussonic_hls_audio_tracks = false;
         self.resolve_tmdb = false;
         self.resolve_background = default_as_true();
         self.resolve_series = false;
@@ -955,7 +961,6 @@ impl ConfigInputDto {
         Ok(())
     }
 
-    #[allow(clippy::cast_possible_truncation)]
     pub fn prepare(
         &mut self,
         index: u16,
@@ -2218,6 +2223,22 @@ mod tests {
         let restored: ConfigInputOptionsDto = serde_json::from_str(&json)?;
 
         assert!(restored.disable_hls_streaming);
+        Ok(())
+    }
+
+    #[test]
+    fn flussonic_hls_audio_tracks_round_trips_defaults_off_and_cleans() -> Result<(), serde_json::Error> {
+        assert!(!ConfigInputOptionsDto::default().flussonic_hls_audio_tracks);
+        let mut options =
+            ConfigInputOptionsDto { flussonic_hls_audio_tracks: true, ..ConfigInputOptionsDto::default() };
+        let json = serde_json::to_string(&options)?;
+        let restored: ConfigInputOptionsDto = serde_json::from_str(&json)?;
+
+        assert!(restored.flussonic_hls_audio_tracks);
+        assert!(!options.is_empty());
+        options.clean();
+        assert!(!options.flussonic_hls_audio_tracks);
+        assert!(options.is_empty());
         Ok(())
     }
 
