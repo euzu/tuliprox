@@ -1739,3 +1739,32 @@ async fn store_cookie_header(
     };
     active_users.update_session_provider_response_headers_from("hls-user", owner, &response, source_url).await
 }
+
+#[tokio::test]
+async fn hls_resource_unfollowed_redirect_answers_bad_gateway() -> Result<(), Box<dyn std::error::Error>> {
+    let handler: OriginHandler = Arc::new(|path| {
+        if path.contains(".m3u8") {
+            (StatusCode::OK, Vec::new(), MEDIA_PLAYLIST.as_bytes().to_vec())
+        } else {
+            // A redirect without Location cannot be followed and must not reach the client as 3xx.
+            (StatusCode::FOUND, Vec::new(), Vec::new())
+        }
+    });
+    // Provider credentials in headers force manual redirects, which hand unfollowed 3xx back.
+    let fixture = owner_token_fixture_with(handler, |input| {
+        input.headers.insert("Authorization".to_string(), "Bearer fixture".to_string());
+    })
+    .await;
+    let device = client("10.0.0.1", 50_891);
+    let (_, _, owner) = wrapped_entry(&fixture, &device).await;
+    let token = fixture.seal(
+        Some(&owner),
+        &format!("{}/tracks-v1/redirected.hls.fmp4", fixture.origin.base_url),
+        HlsResourceKind::Media,
+        Some(fixture.input.name.as_ref()),
+    );
+    let response = fixture.token_request(&device, &token, HeaderMap::new()).await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert!(response_body(response).await.is_empty());
+    Ok(())
+}

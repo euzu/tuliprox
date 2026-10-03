@@ -3460,6 +3460,12 @@ impl ActiveUserManager {
         }
     }
 
+    /// Session object and account binding currently stored for `token`, in any lifecycle state.
+    pub async fn session_identity(&self, username: &str, token: &str) -> Option<SessionIdentity> {
+        let users = self.connections.read().await;
+        users.by_key.get(username)?.sessions.iter().find(|session| session.token == token).map(UserSession::identity)
+    }
+
     /// Provider session headers valid for `target_url` now, for the session object and account
     /// binding of `identity` in any lifecycle state: a manifest refresh may revive an expired
     /// reservation.

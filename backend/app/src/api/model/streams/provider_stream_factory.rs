@@ -1016,6 +1016,10 @@ async fn provider_stream_request(
                     })
                     .filter_map(|(name, value)| value.to_str().ok().map(|value| (name.to_string(), value.to_string())))
                     .collect();
+                // Only upstream errors pass through; an unfollowed redirect or other non-success
+                // status would reach the client without its Location or body.
+                let status =
+                    if status.is_client_error() || status.is_server_error() { status } else { StatusCode::BAD_GATEWAY };
                 return Err(ProviderStreamRequestFailure::HlsStatus { status, headers });
             }
 

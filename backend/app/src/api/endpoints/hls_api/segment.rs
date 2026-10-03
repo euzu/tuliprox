@@ -2600,6 +2600,12 @@ pub(in crate::api) async fn handle_hls_stream_request(
         )
     };
 
+    // The session as created or reserved above; manifest response cookies may only enter this
+    // binding, not one an account switch installed while the playlist downloaded.
+    let session_identity = match session_token.as_deref() {
+        Some(token) => app_state.active_users.session_identity(&user.username, token).await,
+        None => None,
+    };
     let provider_binding_tag = provider_handle.as_ref().and_then(|handle| handle.binding_tag);
     let provider_request_id = provider_handle.as_ref().and_then(|handle| handle.playback_request_id);
     let selected_provider_name = selected_provider_config.as_ref().map(|cfg| Arc::clone(&cfg.name));
@@ -2683,12 +2689,13 @@ pub(in crate::api) async fn handle_hls_stream_request(
             let hls_content = rewrite_hls(user, &rewrite_hls_props);
             if let Some(session_token) = session_token.as_deref() {
                 let session_headers = extract_hls_provider_session_headers(&response_headers);
-                if !session_headers.is_empty() {
+                if let (false, Some(identity)) = (session_headers.is_empty(), session_identity) {
                     app_state
                         .active_users
-                        .update_session_provider_response_headers_from(
+                        .update_current_session_provider_response_headers_from(
                             &user.username,
                             session_token,
+                            identity,
                             &session_headers,
                             &rewrite_hls_props.hls_url,
                         )

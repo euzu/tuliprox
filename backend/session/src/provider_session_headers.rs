@@ -58,6 +58,14 @@ struct OriginHeaders {
     cookies: Vec<StoredCookie>,
 }
 
+impl OriginHeaders {
+    /// Whether the origin still carries anything to send: a provider header or a live cookie.
+    fn has_content(&self, now: i64) -> bool {
+        self.headers.keys().any(|name| name != "cookie")
+            || self.cookies.iter().any(|cookie| cookie.expires_at.is_none_or(|expiry| expiry > now))
+    }
+}
+
 /// Cookies stay within the exact origin that issued them, including scheme and port.
 /// Origins are shared copy-on-write, so updating one origin never copies the others.
 #[derive(Clone, Debug, Default)]
@@ -80,12 +88,16 @@ impl ProviderSessionCookieStore {
         let Some(origin) = origin_key(source) else {
             return;
         };
-        if !self.origins.contains_key(&origin) && self.origins.len() >= MAX_ORIGINS {
-            debug!("Provider session cookie store is full; ignoring headers from a new origin");
-            return;
-        }
         let now = chrono::Utc::now().timestamp();
-        let entry = Arc::make_mut(self.origins.entry(origin).or_default());
+        if !self.origins.contains_key(&origin) && self.origins.len() >= MAX_ORIGINS {
+            // Origins whose cookies all expired must not block new ones.
+            self.origins.retain(|_, entry| entry.has_content(now));
+            if self.origins.len() >= MAX_ORIGINS {
+                debug!("Provider session cookie store is full; ignoring headers from a new origin");
+                return;
+            }
+        }
+        let entry = Arc::make_mut(self.origins.entry(origin.clone()).or_default());
         for (name, value) in response.headers.iter().filter(|(name, _)| !name.eq_ignore_ascii_case("cookie")) {
             if entry.headers.len() < MAX_HEADERS_PER_ORIGIN || entry.headers.contains_key(name) {
                 entry.headers.insert(name.clone(), value.clone());
@@ -137,6 +149,9 @@ impl ProviderSessionCookieStore {
         }
         entry.cookies.sort_by_key(|cookie| std::cmp::Reverse(cookie.path.len()));
         replace_cookie_header(&mut entry.headers, entry.cookies.iter().map(|cookie| &cookie.cookie));
+        if entry.headers.is_empty() && entry.cookies.is_empty() {
+            self.origins.remove(&origin);
+        }
     }
 
     pub fn headers_for(&self, target: &str) -> Option<Cow<'_, HashMap<String, String>>> {
@@ -325,6 +340,29 @@ mod tests {
         let entry =
             store.origins.values().find(|entry| entry.headers.contains_key("cookie")).ok_or("origin missing")?;
         assert!(entry.headers.len() <= MAX_HEADERS_PER_ORIGIN + 1, "header names are capped besides the cookie");
+        Ok(())
+    }
+
+    #[test]
+    fn origins_without_live_content_are_dropped_and_free_their_slot() -> Result<(), Box<dyn std::error::Error>> {
+        let mut store = ProviderSessionCookieStore::default();
+        let source = Url::parse("https://provider.example/index.m3u8")?;
+        store.update(&source, &response(&["sid=1; Path=/"]));
+        store.update(&source, &response(&["sid=1; Path=/; Max-Age=0"]));
+        assert!(store.is_empty(), "deleting the last cookie removes the origin");
+
+        for index in 0..MAX_ORIGINS {
+            store.update(&Url::parse(&format!("https://cdn{index}.example/x.ts"))?, &response(&["sid=1"]));
+        }
+        let expired = origin_key(&Url::parse("https://cdn0.example/x.ts")?).ok_or("origin key")?;
+        for cookie in &mut Arc::make_mut(store.origins.get_mut(&expired).ok_or("origin missing")?).cookies {
+            cookie.expires_at = Some(chrono::Utc::now().timestamp() - 1);
+        }
+        let fresh = Url::parse("https://fresh.example/x.ts")?;
+        store.update(&fresh, &response(&["sid=fresh"]));
+        assert_eq!(cookie_header(&store, fresh.as_str()).as_deref(), Some("sid=fresh"));
+        assert!(!store.origins.contains_key(&expired), "the expired origin gave up its slot");
+        assert_eq!(store.origins.len(), MAX_ORIGINS);
         Ok(())
     }
 
